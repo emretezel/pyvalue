@@ -4,7 +4,7 @@ Author: Emre Tezel
 """
 
 from sqlalchemy import Column, Integer, String
-from pyvalue.data.common import Base
+from pyvalue.data import Base
 from sqlalchemy.orm import relationship
 
 
