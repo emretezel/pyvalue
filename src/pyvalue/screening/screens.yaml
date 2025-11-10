@@ -1,9 +1,12 @@
 screens:
-  - name: positive_working_capital
+  - name: buffet_value
     filters:
       - metric: working_capital
         operator: ">"
         value: 0
+      - metric: eps_streak
+        operator: ">"
+        value: 4
   - name: negative_working_capital
     filters:
       - metric: working_capital

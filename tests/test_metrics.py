@@ -9,10 +9,12 @@ from sqlalchemy.orm import sessionmaker
 from pyvalue.data import Base
 from pyvalue.data.stock import Stock
 from pyvalue.data.balance_sheet import BalanceSheet
+from pyvalue.data.earnings import EarningsReport
 from pyvalue.metrics import (
     DataAccess,
     MetricPrerequisiteMissing,
     WorkingCapital,
+    EpsStreak,
 )
 from pyvalue.metrics.run_metric import calculate_metric_for_symbol, get_metric_class
 from pyvalue.data.metric_value import MetricValue
@@ -84,6 +86,28 @@ def test_working_capital_requires_current_fields(session):
 
     with pytest.raises(MetricPrerequisiteMissing):
         metric.evaluate(data_access, stock.id)
+
+
+def test_eps_streak_counts_consecutive_positive_quarters(session):
+    stock = Stock(symbol="EPS", name="EPS Corp", exchange="NYSE")
+    session.add(stock)
+    session.flush()
+
+    reports = [
+        EarningsReport(stock_id=stock.id, date=date(2023, 12, 31), actual_eps=1.5),
+        EarningsReport(stock_id=stock.id, date=date(2023, 9, 30), actual_eps=0.8),
+        EarningsReport(stock_id=stock.id, date=date(2023, 6, 30), actual_eps=-0.2),
+        EarningsReport(stock_id=stock.id, date=date(2023, 3, 31), actual_eps=1.0),
+    ]
+    session.add_all(reports)
+    session.commit()
+
+    metric = EpsStreak()
+    data_access = DataAccess(session)
+    result = metric.evaluate(data_access, stock.id)[0]
+
+    assert result.value == 2  # only the latest two quarters are positive consecutively
+    assert result.data_from_date == date(2023, 12, 31)
 
 
 def test_calculate_metric_for_symbol_persists_values(session):

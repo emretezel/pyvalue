@@ -11,13 +11,22 @@ from typing import Type
 from pyvalue.data.stock import Stock
 from pyvalue.data.balance_sheet import BalanceSheet
 from pyvalue.data.metric_value import MetricValue
-from pyvalue.metrics import DataAccess, WorkingCapital, Metric, MetricResult
+from pyvalue.metrics import (
+    DataAccess,
+    WorkingCapital,
+    EpsStreak,
+    Metric,
+    MetricResult,
+)
 from pyvalue.ingestion import Session
 
 METRIC_REGISTRY = {
     "workingcapital": WorkingCapital,
     "working_capital": WorkingCapital,
     "WorkingCapital": WorkingCapital,
+    "epsstreak": EpsStreak,
+    "eps_streak": EpsStreak,
+    "EPSStreak": EpsStreak,
 }
 
 
@@ -88,18 +97,21 @@ def calculate_metric_for_symbol(session, symbol: str, metric: Metric):
 
 
 def main():
-    if len(sys.argv) != 3:
-        print("Usage: python -m pyvalue.metrics.run_metric <SYMBOL> <MetricName>")
+    if len(sys.argv) < 3:
+        print(
+            "Usage: python -m pyvalue.metrics.run_metric <SYMBOL> [SYMBOL ...] <MetricName>"
+        )
         sys.exit(1)
 
-    symbol = sys.argv[1]
-    metric_name = sys.argv[2]
+    metric_name = sys.argv[-1]
+    symbols = sys.argv[1:-1]
 
     metric_cls = get_metric_class(metric_name)
     metric = metric_cls()
 
     with Session() as session:
-        calculate_metric_for_symbol(session, symbol, metric)
+        for symbol in symbols:
+            calculate_metric_for_symbol(session, symbol, metric)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ Author: Emre Tezel
 from .base import Metric, MetricResult, MetricPrerequisiteMissing
 from .data_access import DataAccess
 from .working_capital import WorkingCapital
+from .eps_streak import EpsStreak
 
 __all__ = [
     "Metric",
@@ -13,4 +14,5 @@ __all__ = [
     "MetricPrerequisiteMissing",
     "DataAccess",
     "WorkingCapital",
+    "EpsStreak",
 ]

@@ -10,6 +10,7 @@ from typing import Callable, Dict
 from sqlalchemy.orm import Session
 
 from pyvalue.data.balance_sheet import BalanceSheet
+from pyvalue.data.earnings import EarningsReport
 
 
 class DataAccess:
@@ -19,6 +20,7 @@ class DataAccess:
         self.session = session
         self._fetchers: Dict[str, Callable[[int], object]] = {
             "balance_sheet_latest": self._fetch_balance_sheet_latest,
+            "earnings_history": self._fetch_earnings_history,
         }
 
     def register_fetcher(
@@ -40,4 +42,13 @@ class DataAccess:
             .filter_by(stock_id=stock_id)
             .order_by(BalanceSheet.date.desc())
             .first()
+        )
+
+    def _fetch_earnings_history(self, stock_id: int):
+        """Return earnings reports ordered from most recent to oldest."""
+        return (
+            self.session.query(EarningsReport)
+            .filter_by(stock_id=stock_id)
+            .order_by(EarningsReport.date.desc())
+            .all()
         )
