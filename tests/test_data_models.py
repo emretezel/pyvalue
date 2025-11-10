@@ -65,6 +65,24 @@ def test_balance_sheet_relationship(session):
     assert retrieved_sheet.long_term_debt == 10.0
 
 
+def test_balance_sheet_long_term_debt_optional(session):
+    stock = Stock(symbol="NTD", name="No Debt Corp", exchange="NYSE")
+    sheet = BalanceSheet(
+        date=date(2021, 6, 30),
+        total_assets=150.0,
+        total_liabilities=50.0,
+    )
+    stock.balance_sheets.append(sheet)
+
+    session.add(stock)
+    session.commit()
+
+    retrieved_sheet = (
+        session.query(BalanceSheet).filter_by(stock_id=stock.id).one()
+    )
+    assert retrieved_sheet.long_term_debt is None
+
+
 def test_schema_sync_adds_missing_columns():
     engine = create_engine("sqlite:///:memory:")
     with engine.begin() as connection:
