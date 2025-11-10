@@ -16,5 +16,6 @@ class BalanceSheet(Base):
     date = Column(Date, nullable=False)
     total_assets = Column(Float, nullable=False)
     total_liabilities = Column(Float, nullable=False)
+    long_term_debt = Column(Float, nullable=True)
 
     stock = relationship("Stock", back_populates="balance_sheets")
