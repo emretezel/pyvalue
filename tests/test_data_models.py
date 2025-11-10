@@ -8,11 +8,13 @@ from sqlalchemy.orm import sessionmaker
 
 from pyvalue.data import Base
 from pyvalue.data.balance_sheet import BalanceSheet
+from pyvalue.data.earnings import EarningsReport
 from pyvalue.data.stock import Stock
 from pyvalue.ingestion.update_balance_sheet import (
     ensure_balance_sheet_schema,
     upsert_balance_sheet_entry,
 )
+from pyvalue.ingestion.update_earnings import upsert_earnings_report, _normalize_entries
 
 
 @pytest.fixture
@@ -176,3 +178,81 @@ def test_upsert_balance_sheet_inserts_and_updates(session):
     assert updated_sheet.total_current_assets == 130.0
     assert updated_sheet.total_current_liabilities == 42.0
     assert updated_sheet.long_term_debt == 35.0
+
+
+def test_earnings_report_relationship(session):
+    stock = Stock(symbol="ERN", name="Earnings Corp", exchange="NYSE")
+    report = EarningsReport(
+        date=date(2022, 12, 31),
+        actual_eps=2.5,
+    )
+    stock.earnings_reports.append(report)
+
+    session.add(stock)
+    session.commit()
+
+    retrieved = session.query(Stock).filter_by(symbol="ERN").one()
+    assert len(retrieved.earnings_reports) == 1
+    stored = retrieved.earnings_reports[0]
+    assert stored.actual_eps == 2.5
+    assert stored.stock is retrieved
+
+
+def test_upsert_earnings_report(session):
+    stock = Stock(symbol="EPS", name="EPS Inc", exchange="NASDAQ")
+    session.add(stock)
+    session.commit()
+
+    entry = {
+        "date": "2023-03-31",
+        "epsActual": 1.2,
+    }
+
+    upsert_earnings_report(session, stock, entry)
+    session.commit()
+
+    report = session.query(EarningsReport).filter_by(stock_id=stock.id).one()
+    assert report.actual_eps == 1.2
+    assert report.stock is stock
+
+    updated_entry = {
+        "date": "2023-03-31",
+        "eps": 1.25,
+    }
+
+    upsert_earnings_report(session, stock, updated_entry)
+    session.commit()
+
+    updated = session.query(EarningsReport).filter_by(stock_id=stock.id).one()
+    assert updated.actual_eps == 1.25
+    assert updated.actual_eps == 1.25
+
+
+def test_normalize_entries_handles_dict():
+    payload = {
+        "symbol": "ABC",
+        "historical": [
+            {"date": "2023-03-31", "eps": 1.0},
+        ],
+    }
+    entries = _normalize_entries(payload)
+    assert isinstance(entries, list)
+    assert entries[0]["date"] == "2023-03-31"
+
+
+def test_upsert_earnings_skips_when_actual_missing(session):
+    stock = Stock(symbol="MISS", name="Missing EPS", exchange="NYSE")
+    session.add(stock)
+    session.commit()
+
+    entry = {
+        "date": "2024-03-31",
+        "epsActual": None,
+        "actualEPS": None,
+    }
+
+    upsert_earnings_report(session, stock, entry)
+    session.commit()
+
+    count = session.query(EarningsReport).filter_by(stock_id=stock.id).count()
+    assert count == 0
