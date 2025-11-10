@@ -47,6 +47,8 @@ def upsert_balance_sheet_entry(session, stock, balance_sheet_entry) -> None:
     date = datetime.strptime(balance_sheet_entry["date"], "%Y-%m-%d").date()
     total_assets = balance_sheet_entry.get("totalAssets")
     total_liabilities = balance_sheet_entry.get("totalLiabilities")
+    total_current_assets = balance_sheet_entry.get("totalCurrentAssets")
+    total_current_liabilities = balance_sheet_entry.get("totalCurrentLiabilities")
     long_term_debt = balance_sheet_entry.get("longTermDebt")
 
     existing_balance_sheet = (
@@ -61,12 +63,16 @@ def upsert_balance_sheet_entry(session, stock, balance_sheet_entry) -> None:
             date=date,
             total_assets=total_assets,
             total_liabilities=total_liabilities,
+            total_current_assets=total_current_assets,
+            total_current_liabilities=total_current_liabilities,
             long_term_debt=long_term_debt,
         )
         stock.balance_sheets.append(new_balance_sheet)
     else:
         existing_balance_sheet.total_assets = total_assets
         existing_balance_sheet.total_liabilities = total_liabilities
+        existing_balance_sheet.total_current_assets = total_current_assets
+        existing_balance_sheet.total_current_liabilities = total_current_liabilities
         existing_balance_sheet.long_term_debt = long_term_debt
 
 

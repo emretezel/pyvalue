@@ -47,6 +47,8 @@ def test_balance_sheet_relationship(session):
         date=date(2020, 12, 31),
         total_assets=100.0,
         total_liabilities=25.0,
+        total_current_assets=60.0,
+        total_current_liabilities=15.0,
         long_term_debt=10.0,
     )
     stock.balance_sheets.append(sheet)
@@ -62,6 +64,8 @@ def test_balance_sheet_relationship(session):
     assert retrieved_sheet.stock is retrieved_stock
     assert retrieved_sheet.total_assets == 100.0
     assert retrieved_sheet.total_liabilities == 25.0
+    assert retrieved_sheet.total_current_assets == 60.0
+    assert retrieved_sheet.total_current_liabilities == 15.0
     assert retrieved_sheet.long_term_debt == 10.0
 
 
@@ -80,6 +84,8 @@ def test_balance_sheet_long_term_debt_optional(session):
     retrieved_sheet = (
         session.query(BalanceSheet).filter_by(stock_id=stock.id).one()
     )
+    assert retrieved_sheet.total_current_assets is None
+    assert retrieved_sheet.total_current_liabilities is None
     assert retrieved_sheet.long_term_debt is None
 
 
@@ -122,6 +128,8 @@ def test_schema_sync_adds_missing_columns():
             for column in inspector.get_columns("balance_sheets")
         }
         assert "long_term_debt" in column_names
+        assert "total_current_assets" in column_names
+        assert "total_current_liabilities" in column_names
     finally:
         session.close()
 
@@ -135,6 +143,8 @@ def test_upsert_balance_sheet_inserts_and_updates(session):
         "date": "2021-03-31",
         "totalAssets": 200.0,
         "totalLiabilities": 75.0,
+        "totalCurrentAssets": 120.0,
+        "totalCurrentLiabilities": 40.0,
         "longTermDebt": 30.0,
     }
 
@@ -144,12 +154,16 @@ def test_upsert_balance_sheet_inserts_and_updates(session):
     sheet = session.query(BalanceSheet).filter_by(stock_id=stock.id).one()
     assert sheet.total_assets == 200.0
     assert sheet.total_liabilities == 75.0
+    assert sheet.total_current_assets == 120.0
+    assert sheet.total_current_liabilities == 40.0
     assert sheet.long_term_debt == 30.0
 
     updated_entry = {
         "date": "2021-03-31",
         "totalAssets": 250.0,
         "totalLiabilities": 80.0,
+        "totalCurrentAssets": 130.0,
+        "totalCurrentLiabilities": 42.0,
         "longTermDebt": 35.0,
     }
 
@@ -159,4 +173,6 @@ def test_upsert_balance_sheet_inserts_and_updates(session):
     updated_sheet = session.query(BalanceSheet).filter_by(stock_id=stock.id).one()
     assert updated_sheet.total_assets == 250.0
     assert updated_sheet.total_liabilities == 80.0
+    assert updated_sheet.total_current_assets == 130.0
+    assert updated_sheet.total_current_liabilities == 42.0
     assert updated_sheet.long_term_debt == 35.0
