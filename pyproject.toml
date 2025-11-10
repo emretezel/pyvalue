@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyvalue"
+version = "0.1.0"
+description = "Tools for ingesting stock balance sheet data."
+requires-python = ">=3.9"
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [
+    {name = "Emre Tezel"}
+]
+dependencies = [
+    "SQLAlchemy",
+    "certifi",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
