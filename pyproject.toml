@@ -16,6 +16,7 @@ dependencies = [
     "SQLAlchemy",
     "certifi",
     "pytest",
+    "PyYAML",
 ]
 
 [project.optional-dependencies]

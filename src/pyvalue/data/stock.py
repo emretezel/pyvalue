@@ -7,6 +7,9 @@ from sqlalchemy import Column, Integer, String
 from pyvalue.data import Base
 from sqlalchemy.orm import relationship
 
+from pyvalue.data.balance_sheet import BalanceSheet
+from pyvalue.data.metric_value import MetricValue
+
 
 class Stock(Base):
     """

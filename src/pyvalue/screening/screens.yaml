@@ -1,0 +1,11 @@
+screens:
+  - name: positive_working_capital
+    filters:
+      - metric: working_capital
+        operator: ">"
+        value: 0
+  - name: negative_working_capital
+    filters:
+      - metric: working_capital
+        operator: "<"
+        value: 0
