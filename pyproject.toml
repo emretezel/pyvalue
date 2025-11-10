@@ -15,6 +15,12 @@ authors = [
 dependencies = [
     "SQLAlchemy",
     "certifi",
+    "pytest",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
 ]
 
 [tool.setuptools]
