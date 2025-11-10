@@ -19,6 +19,7 @@ class Stock(Base):
     name = Column(String)
     exchange = Column(String)
     balance_sheets = relationship("BalanceSheet", back_populates="stock")
+    metric_values = relationship("MetricValue", back_populates="stock")
 
     def __repr__(self):
         return f"Stock(id={self.id}, symbol='{self.symbol}', name='{self.name}', exchange='{self.exchange}')"
