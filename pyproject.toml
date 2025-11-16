@@ -13,11 +13,11 @@ license = { text = "Proprietary" }
 dependencies = [
     "pandas>=2.1",
     "requests>=2.31",
+    "pytest>=7.4",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.4",
 ]
 
 [project.scripts]

@@ -1,7 +1,7 @@
 # Author: Emre Tezel
 import sqlite3
 
-from pyvalue.storage import UniverseRepository
+from pyvalue.storage import CompanyFactsRepository, UniverseRepository
 from pyvalue.universe import Listing
 
 
@@ -50,3 +50,14 @@ def test_replace_universe_overwrites_previous_data(tmp_path):
         rows = conn.execute("SELECT symbol FROM listings ORDER BY symbol").fetchall()
 
     assert rows == [("CCC",)]
+
+
+def test_company_facts_repository_upserts_payload(tmp_path):
+    repo = CompanyFactsRepository(tmp_path / "facts.db")
+    repo.initialize_schema()
+
+    repo.upsert_company_facts("AAPL", "CIK0000320193", {"foo": 1})
+    repo.upsert_company_facts("AAPL", "CIK0000320193", {"foo": 2})
+
+    stored = repo.fetch_fact("AAPL")
+    assert stored == {"foo": 2}

@@ -36,6 +36,24 @@ ETFs are excluded by default; pass `--include-etfs` to store them as well.
 > You can verify availability manually with
 > `curl "ftp://ftp.nasdaqtrader.com/symboldirectory/nasdaqlisted.txt"`.
 
+## SEC company facts
+
+SEC requires a descriptive `User-Agent` header that includes contact details. Set an
+environment variable such as:
+
+```bash
+export PYVALUE_SEC_USER_AGENT="pyvalue/0.1 (contact: you@example.com)"
+```
+
+Then ingest the latest company facts for a ticker (AAPL shown below):
+
+```bash
+pyvalue ingest-us-facts AAPL --database data/pyvalue.db
+```
+
+This downloads the JSON payload from `https://data.sec.gov/api/xbrl/companyfacts/…` and
+stores it in the `company_facts` table. Pass `--cik` if you already know the exact CIK.
+
 ## Private configuration
 
 Place API keys or region-specific credentials inside the `private/` directory (ignored by git).

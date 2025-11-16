@@ -7,7 +7,8 @@ import argparse
 import logging
 from typing import Optional, Sequence
 
-from pyvalue.storage import UniverseRepository
+from pyvalue.ingestion import SECCompanyFactsClient
+from pyvalue.storage import CompanyFactsRepository, UniverseRepository
 from pyvalue.universe import USUniverseLoader
 
 LOGGER = logging.getLogger(__name__)
@@ -32,6 +33,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--include-etfs",
         action="store_true",
         help="Persist ETFs alongside operating companies.",
+    )
+
+    ingest_facts = subparsers.add_parser(
+        "ingest-us-facts",
+        help="Download SEC company facts for a given ticker and store them locally.",
+    )
+    ingest_facts.add_argument("symbol", help="Ticker symbol, e.g. AAPL")
+    ingest_facts.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
+    )
+    ingest_facts.add_argument(
+        "--user-agent",
+        default=None,
+        help="Custom User-Agent string (falls back to PYVALUE_SEC_USER_AGENT env var).",
+    )
+    ingest_facts.add_argument(
+        "--cik",
+        default=None,
+        help="Optional explicit CIK override (10-digit).",
     )
 
     return parser
@@ -63,6 +85,27 @@ def cmd_load_us_universe(database: str, include_etfs: bool) -> int:
     return 0
 
 
+def cmd_ingest_us_facts(symbol: str, database: str, user_agent: Optional[str], cik: Optional[str]) -> int:
+    """Fetch SEC company facts for a ticker and persist them."""
+
+    client = SECCompanyFactsClient(user_agent=user_agent)
+    if cik:
+        cik_value = cik
+    else:
+        info = client.resolve_company(symbol)
+        cik_value = info.cik
+        symbol = info.symbol
+        LOGGER.info("Resolved %s to CIK %s (%s)", symbol, cik_value, info.name)
+
+    payload = client.fetch_company_facts(cik_value)
+
+    repo = CompanyFactsRepository(database)
+    repo.initialize_schema()
+    repo.upsert_company_facts(symbol=symbol.upper(), cik=cik_value, payload=payload)
+    print(f"Stored SEC company facts for {symbol} ({cik_value}) in {database}")
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Entrypoint used by console_scripts."""
 
@@ -72,6 +115,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.command == "load-us-universe":
         return cmd_load_us_universe(database=args.database, include_etfs=args.include_etfs)
+    if args.command == "ingest-us-facts":
+        return cmd_ingest_us_facts(
+            symbol=args.symbol,
+            database=args.database,
+            user_agent=args.user_agent,
+            cik=args.cik,
+        )
 
     parser.error(f"Unknown command: {args.command}")
     return 2
