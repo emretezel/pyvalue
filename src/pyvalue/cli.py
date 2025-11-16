@@ -8,7 +8,12 @@ import logging
 from typing import Optional, Sequence
 
 from pyvalue.ingestion import SECCompanyFactsClient
-from pyvalue.storage import CompanyFactsRepository, UniverseRepository
+from pyvalue.normalization import SECFactsNormalizer
+from pyvalue.storage import (
+    CompanyFactsRepository,
+    FinancialFactsRepository,
+    UniverseRepository,
+)
 from pyvalue.universe import USUniverseLoader
 
 LOGGER = logging.getLogger(__name__)
@@ -54,6 +59,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--cik",
         default=None,
         help="Optional explicit CIK override (10-digit).",
+    )
+
+    normalize_facts = subparsers.add_parser(
+        "normalize-us-facts",
+        help="Transform stored SEC company facts for a ticker into structured rows.",
+    )
+    normalize_facts.add_argument("symbol", help="Ticker symbol already ingested via SEC API.")
+    normalize_facts.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
     )
 
     return parser
@@ -106,6 +122,26 @@ def cmd_ingest_us_facts(symbol: str, database: str, user_agent: Optional[str], c
     return 0
 
 
+def cmd_normalize_us_facts(symbol: str, database: str) -> int:
+    """Normalize previously ingested SEC facts for downstream metrics."""
+
+    company_repo = CompanyFactsRepository(database)
+    record = company_repo.fetch_fact_record(symbol.upper())
+    if record is None:
+        raise SystemExit(
+            f"No raw SEC payload found for {symbol}. Run ingest-us-facts before normalization."
+        )
+    cik_value, payload = record
+    normalizer = SECFactsNormalizer()
+    records = normalizer.normalize(payload, symbol=symbol.upper(), cik=cik_value)
+
+    fact_repo = FinancialFactsRepository(database)
+    fact_repo.initialize_schema()
+    stored = fact_repo.replace_facts(symbol.upper(), records)
+    print(f"Stored {stored} normalized facts for {symbol.upper()} in {database}")
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Entrypoint used by console_scripts."""
 
@@ -122,6 +158,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             user_agent=args.user_agent,
             cik=args.cik,
         )
+    if args.command == "normalize-us-facts":
+        return cmd_normalize_us_facts(symbol=args.symbol, database=args.database)
 
     parser.error(f"Unknown command: {args.command}")
     return 2

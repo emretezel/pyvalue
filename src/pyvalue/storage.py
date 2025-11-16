@@ -3,11 +3,12 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import json
 import sqlite3
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
 
 from pyvalue.universe import Listing
 
@@ -169,5 +170,103 @@ class CompanyFactsRepository(SQLiteStore):
             return None
         return json.loads(row[0])
 
+    def fetch_fact_record(self, symbol: str) -> Optional[tuple[str, Dict[str, Any]]]:
+        """Return the CIK and payload tuple for ``symbol`` if present."""
 
-__all__ = ["UniverseRepository", "CompanyFactsRepository"]
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT cik, data FROM company_facts
+                WHERE symbol = ?
+                """,
+                (symbol.upper(),),
+            ).fetchone()
+        if row is None:
+            return None
+        return row[0], json.loads(row[1])
+
+
+@dataclass(frozen=True)
+class FactRecord:
+    """Normalized financial fact ready for storage."""
+
+    symbol: str
+    cik: str
+    concept: str
+    fiscal_year: Optional[int]
+    fiscal_period: str
+    end_date: str
+    unit: str
+    value: float
+    accn: Optional[str]
+    filed: Optional[str]
+    frame: Optional[str]
+
+
+class FinancialFactsRepository(SQLiteStore):
+    """Persist normalized financial facts for downstream metrics."""
+
+    def initialize_schema(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS financial_facts (
+                    symbol TEXT NOT NULL,
+                    cik TEXT NOT NULL,
+                    concept TEXT NOT NULL,
+                    fiscal_year INTEGER,
+                    fiscal_period TEXT,
+                    end_date TEXT NOT NULL,
+                    unit TEXT NOT NULL,
+                    value REAL NOT NULL,
+                    accn TEXT,
+                    filed TEXT,
+                    frame TEXT,
+                    PRIMARY KEY (symbol, concept, end_date, unit, accn)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_fin_facts_symbol_concept
+                ON financial_facts(symbol, concept)
+                """
+            )
+
+    def replace_facts(self, symbol: str, records: Iterable[FactRecord]) -> int:
+        """Replace all facts for ``symbol`` with the provided batch."""
+
+        rows = [
+            (
+                record.symbol,
+                record.cik,
+                record.concept,
+                record.fiscal_year,
+                record.fiscal_period,
+                record.end_date,
+                record.unit,
+                record.value,
+                record.accn,
+                record.filed,
+                record.frame,
+            )
+            for record in records
+        ]
+        if not rows:
+            return 0
+
+        with self._connect() as conn:
+            conn.execute("DELETE FROM financial_facts WHERE symbol = ?", (symbol,))
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO financial_facts (
+                    symbol, cik, concept, fiscal_year, fiscal_period,
+                    end_date, unit, value, accn, filed, frame
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+        return len(rows)
+
+
+__all__ = ["UniverseRepository", "CompanyFactsRepository", "FinancialFactsRepository", "FactRecord"]

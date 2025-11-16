@@ -54,6 +54,15 @@ pyvalue ingest-us-facts AAPL --database data/pyvalue.db
 This downloads the JSON payload from `https://data.sec.gov/api/xbrl/companyfacts/…` and
 stores it in the `company_facts` table. Pass `--cik` if you already know the exact CIK.
 
+Normalize the previously ingested payload into structured rows for downstream metrics:
+
+```bash
+pyvalue normalize-us-facts AAPL --database data/pyvalue.db
+```
+
+This populates the `financial_facts` table with the concepts required to compute the
+initial metric set (debt, current assets/liabilities, EPS, dividends, cash flow, etc.).
+
 ## Private configuration
 
 Place API keys or region-specific credentials inside the `private/` directory (ignored by git).

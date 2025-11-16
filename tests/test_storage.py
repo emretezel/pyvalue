@@ -61,3 +61,7 @@ def test_company_facts_repository_upserts_payload(tmp_path):
 
     stored = repo.fetch_fact("AAPL")
     assert stored == {"foo": 2}
+
+    cik, payload = repo.fetch_fact_record("AAPL")
+    assert cik == "CIK0000320193"
+    assert payload == {"foo": 2}
