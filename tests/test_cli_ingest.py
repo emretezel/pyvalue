@@ -2,7 +2,7 @@
 from types import SimpleNamespace
 
 from pyvalue import cli
-from pyvalue.storage import CompanyFactsRepository, FinancialFactsRepository
+from pyvalue.storage import CompanyFactsRepository, FinancialFactsRepository, FactRecord, MetricsRepository
 
 
 def test_cmd_ingest_us_facts(monkeypatch, tmp_path):
@@ -74,3 +74,46 @@ def test_cmd_normalize_us_facts(monkeypatch, tmp_path):
         "SELECT concept, value FROM financial_facts WHERE symbol='AAPL'"
     ).fetchall()
     assert [(row[0], row[1]) for row in rows] == [("NetIncomeLoss", 123.0)]
+
+def test_cmd_compute_metrics(tmp_path):
+    db_path = tmp_path / "facts.db"
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    fact_repo.replace_facts(
+        "AAPL",
+        [
+            FactRecord(
+                symbol="AAPL",
+                cik="CIK",
+                concept="AssetsCurrent",
+                fiscal_year=2023,
+                fiscal_period="FY",
+                end_date="2023-09-30",
+                unit="USD",
+                value=500,
+                accn=None,
+                filed=None,
+                frame=None,
+            ),
+            FactRecord(
+                symbol="AAPL",
+                cik="CIK",
+                concept="LiabilitiesCurrent",
+                fiscal_year=2023,
+                fiscal_period="FY",
+                end_date="2023-09-30",
+                unit="USD",
+                value=200,
+                accn=None,
+                filed=None,
+                frame=None,
+            ),
+        ],
+    )
+    repo = MetricsRepository(db_path)
+    repo.initialize_schema()
+
+    rc = cli.cmd_compute_metrics("AAPL", ["working_capital"], str(db_path))
+    assert rc == 0
+    value = repo.fetch("AAPL", "working_capital")
+    assert value[0] == 300

@@ -268,6 +268,69 @@ class FinancialFactsRepository(SQLiteStore):
             )
         return len(rows)
 
+    def latest_fact(self, symbol: str, concept: str) -> Optional[FactRecord]:
+        """Return the most recent FactRecord for a symbol/concept."""
+
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT symbol, cik, concept, fiscal_year, fiscal_period, end_date, unit,
+                       value, accn, filed, frame
+                FROM financial_facts
+                WHERE symbol = ? AND concept = ?
+                ORDER BY end_date DESC
+                LIMIT 1
+                """,
+                (symbol.upper(), concept),
+            ).fetchone()
+        if row is None:
+            return None
+        return FactRecord(*row)
+
+
+class MetricsRepository(SQLiteStore):
+    """Persist computed metric values."""
+
+    def initialize_schema(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS metrics (
+                    symbol TEXT NOT NULL,
+                    metric_id TEXT NOT NULL,
+                    value REAL NOT NULL,
+                    as_of TEXT NOT NULL,
+                    PRIMARY KEY (symbol, metric_id)
+                )
+                """
+            )
+
+    def upsert(self, symbol: str, metric_id: str, value: float, as_of: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO metrics (symbol, metric_id, value, as_of)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(symbol, metric_id) DO UPDATE SET
+                    value = excluded.value,
+                    as_of = excluded.as_of
+                """,
+                (symbol.upper(), metric_id, value, as_of),
+            )
+
+    def fetch(self, symbol: str, metric_id: str) -> Optional[Tuple[float, str]]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT value, as_of FROM metrics
+                WHERE symbol = ? AND metric_id = ?
+                """,
+                (symbol.upper(), metric_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return row[0], row[1]
+
 
 class MarketDataRepository(SQLiteStore):
     """Persist market data snapshots (prices, volume, market cap)."""

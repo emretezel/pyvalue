@@ -81,6 +81,23 @@ pyvalue update-market-data AAPL
 The market data service currently uses Alpha Vantage's `GLOBAL_QUOTE`, but the design
 allows swapping providers by injecting a different implementation later.
 
+## Metrics and screening
+
+Compute metrics (e.g., working capital, long-term debt) for a ticker:
+
+```bash
+pyvalue compute-metrics AAPL --metrics working_capital long_term_debt
+```
+
+Define screening criteria in YAML (see `screeners/low_debt.yml`) and evaluate them:
+
+```bash
+pyvalue run-screen AAPL screeners/low_debt.yml
+```
+
+The sample screen checks whether long-term debt is less than or equal to 1.75× working
+capital. Metrics are cached in the `metrics` table for reuse.
+
 ## Private configuration
 
 Place API keys or region-specific credentials inside the `private/` directory (ignored by git).

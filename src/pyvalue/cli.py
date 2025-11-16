@@ -9,10 +9,13 @@ from typing import Optional, Sequence
 
 from pyvalue.ingestion import SECCompanyFactsClient
 from pyvalue.marketdata.service import MarketDataService
+from pyvalue.metrics import REGISTRY
 from pyvalue.normalization import SECFactsNormalizer
+from pyvalue.screening import evaluate_criterion, load_screen
 from pyvalue.storage import (
     CompanyFactsRepository,
     FinancialFactsRepository,
+    MetricsRepository,
     UniverseRepository,
 )
 from pyvalue.universe import USUniverseLoader
@@ -82,6 +85,35 @@ def build_parser() -> argparse.ArgumentParser:
         "--database",
         default="data/pyvalue.db",
         help="SQLite database file used for storage (default: %(default)s)",
+    )
+
+    compute_metrics = subparsers.add_parser(
+        "compute-metrics",
+        help="Compute one or more metrics for a ticker and store them.",
+    )
+    compute_metrics.add_argument("symbol", help="Ticker symbol to evaluate")
+    compute_metrics.add_argument(
+        "--metrics",
+        nargs="+",
+        default=["working_capital"],
+        help="Metric identifiers to compute (default: working_capital)",
+    )
+    compute_metrics.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
+    )
+
+    run_screen = subparsers.add_parser(
+        "run-screen",
+        help="Evaluate screening criteria for a ticker.",
+    )
+    run_screen.add_argument("symbol", help="Ticker symbol")
+    run_screen.add_argument("config", help="Path to screening config (YAML)")
+    run_screen.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file (default: %(default)s)",
     )
 
     return parser
@@ -165,6 +197,46 @@ def cmd_update_market_data(symbol: str, database: str) -> int:
     return 0
 
 
+def cmd_compute_metrics(symbol: str, metric_ids: Sequence[str], database: str) -> int:
+    """Compute one or more metrics and store the results."""
+
+    fact_repo = FinancialFactsRepository(database)
+    metrics_repo = MetricsRepository(database)
+    metrics_repo.initialize_schema()
+    computed = 0
+    symbol_upper = symbol.upper()
+    for metric_id in metric_ids:
+        metric_cls = REGISTRY.get(metric_id)
+        if metric_cls is None:
+            raise SystemExit(f"Unknown metric id: {metric_id}")
+        metric = metric_cls()
+        result = metric.compute(symbol_upper, fact_repo)
+        if result is None:
+            LOGGER.warning("Metric %s could not be computed for %s", metric_id, symbol_upper)
+            continue
+        metrics_repo.upsert(result.symbol, result.metric_id, result.value, result.as_of)
+        computed += 1
+    print(f"Computed {computed} metrics for {symbol_upper} in {database}")
+    return 0
+
+
+def cmd_run_screen(symbol: str, config_path: str, database: str) -> int:
+    """Evaluate screening criteria against stored/derived metrics."""
+
+    definition = load_screen(config_path)
+    metrics_repo = MetricsRepository(database)
+    metrics_repo.initialize_schema()
+    fact_repo = FinancialFactsRepository(database)
+    results = []
+    for criterion in definition.criteria:
+        passed = evaluate_criterion(criterion, symbol.upper(), metrics_repo, fact_repo)
+        results.append((criterion.name, passed))
+    passed_all = all(flag for _, flag in results)
+    for name, flag in results:
+        print(f"{name}: {'PASS' if flag else 'FAIL'}")
+    return 0 if passed_all else 1
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Entrypoint used by console_scripts."""
 
@@ -185,6 +257,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return cmd_normalize_us_facts(symbol=args.symbol, database=args.database)
     if args.command == "update-market-data":
         return cmd_update_market_data(symbol=args.symbol, database=args.database)
+    if args.command == "compute-metrics":
+        return cmd_compute_metrics(symbol=args.symbol, metric_ids=args.metrics, database=args.database)
+    if args.command == "run-screen":
+        return cmd_run_screen(symbol=args.symbol, config_path=args.config, database=args.database)
 
     parser.error(f"Unknown command: {args.command}")
     return 2
