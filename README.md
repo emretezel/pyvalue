@@ -63,6 +63,24 @@ pyvalue normalize-us-facts AAPL --database data/pyvalue.db
 This populates the `financial_facts` table with the concepts required to compute the
 initial metric set (debt, current assets/liabilities, EPS, dividends, cash flow, etc.).
 
+## Market data (Alpha Vantage)
+
+Store your Alpha Vantage API key in `private/config.toml`:
+
+```toml
+[alpha_vantage]
+api_key = "YOUR_KEY"
+```
+
+Fetch the latest quote and persist it in `market_data`:
+
+```bash
+pyvalue update-market-data AAPL
+```
+
+The market data service currently uses Alpha Vantage's `GLOBAL_QUOTE`, but the design
+allows swapping providers by injecting a different implementation later.
+
 ## Private configuration
 
 Place API keys or region-specific credentials inside the `private/` directory (ignored by git).

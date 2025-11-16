@@ -8,6 +8,7 @@ import logging
 from typing import Optional, Sequence
 
 from pyvalue.ingestion import SECCompanyFactsClient
+from pyvalue.marketdata.service import MarketDataService
 from pyvalue.normalization import SECFactsNormalizer
 from pyvalue.storage import (
     CompanyFactsRepository,
@@ -67,6 +68,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     normalize_facts.add_argument("symbol", help="Ticker symbol already ingested via SEC API.")
     normalize_facts.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
+    )
+
+    market_data = subparsers.add_parser(
+        "update-market-data",
+        help="Fetch latest market data for a ticker and persist it.",
+    )
+    market_data.add_argument("symbol", help="Ticker symbol, e.g. AAPL")
+    market_data.add_argument(
         "--database",
         default="data/pyvalue.db",
         help="SQLite database file used for storage (default: %(default)s)",
@@ -142,6 +154,17 @@ def cmd_normalize_us_facts(symbol: str, database: str) -> int:
     return 0
 
 
+def cmd_update_market_data(symbol: str, database: str) -> int:
+    """Fetch latest market data for a ticker and store it."""
+
+    service = MarketDataService(db_path=database)
+    data = service.refresh_symbol(symbol)
+    print(
+        f"Stored market data for {data.symbol}: price={data.price} as_of={data.as_of} in {database}"
+    )
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Entrypoint used by console_scripts."""
 
@@ -160,6 +183,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
     if args.command == "normalize-us-facts":
         return cmd_normalize_us_facts(symbol=args.symbol, database=args.database)
+    if args.command == "update-market-data":
+        return cmd_update_market_data(symbol=args.symbol, database=args.database)
 
     parser.error(f"Unknown command: {args.command}")
     return 2

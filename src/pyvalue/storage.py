@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import json
 import sqlite3
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 from pyvalue.universe import Listing
 
@@ -170,7 +170,7 @@ class CompanyFactsRepository(SQLiteStore):
             return None
         return json.loads(row[0])
 
-    def fetch_fact_record(self, symbol: str) -> Optional[tuple[str, Dict[str, Any]]]:
+    def fetch_fact_record(self, symbol: str) -> Optional[Tuple[str, Dict[str, Any]]]:
         """Return the CIK and payload tuple for ``symbol`` if present."""
 
         with self._connect() as conn:
@@ -269,4 +269,68 @@ class FinancialFactsRepository(SQLiteStore):
         return len(rows)
 
 
-__all__ = ["UniverseRepository", "CompanyFactsRepository", "FinancialFactsRepository", "FactRecord"]
+class MarketDataRepository(SQLiteStore):
+    """Persist market data snapshots (prices, volume, market cap)."""
+
+    def initialize_schema(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS market_data (
+                    symbol TEXT NOT NULL,
+                    as_of DATE NOT NULL,
+                    price REAL NOT NULL,
+                    volume INTEGER,
+                    market_cap REAL,
+                    currency TEXT,
+                    PRIMARY KEY (symbol, as_of)
+                )
+                """
+            )
+
+    def upsert_price(
+        self,
+        symbol: str,
+        as_of: str,
+        price: float,
+        volume: Optional[int] = None,
+        market_cap: Optional[float] = None,
+        currency: Optional[str] = None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO market_data (symbol, as_of, price, volume, market_cap, currency)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(symbol, as_of) DO UPDATE SET
+                    price = excluded.price,
+                    volume = excluded.volume,
+                    market_cap = excluded.market_cap,
+                    currency = excluded.currency
+                """,
+                (symbol.upper(), as_of, price, volume, market_cap, currency),
+            )
+
+    def latest_price(self, symbol: str) -> Optional[Tuple[str, float]]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT as_of, price FROM market_data
+                WHERE symbol = ?
+                ORDER BY as_of DESC
+                LIMIT 1
+                """,
+                (symbol.upper(),),
+            ).fetchone()
+        if row is None:
+            return None
+        return row[0], row[1]
+
+
+__all__ = [
+    "UniverseRepository",
+    "CompanyFactsRepository",
+    "FinancialFactsRepository",
+    "MarketDataRepository",
+    "FactRecord",
+]
