@@ -98,6 +98,12 @@ pyvalue run-screen AAPL screeners/low_debt.yml
 The sample screen checks whether long-term debt is less than or equal to 1.75× working
 capital. Metrics are cached in the `metrics` table for reuse.
 
+Additional metrics include:
+
+- `eps_streak`: Counts consecutive positive EPS (diluted) FY values.
+- `graham_eps_10y_cagr_3y_avg`: Graham EPS 10-year CAGR averaged over the latest three
+  periods (using full-year GAAP EPS data).
+
 ## Private configuration
 
 Place API keys or region-specific credentials inside the `private/` directory (ignored by git).

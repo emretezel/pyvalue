@@ -1,6 +1,7 @@
 # Author: Emre Tezel
 from pyvalue.metrics.working_capital import WorkingCapitalMetric
 from pyvalue.metrics.eps_streak import EPSStreakMetric
+from pyvalue.metrics.graham_eps_cagr import GrahamEPSCAGRMetric
 from pyvalue.storage import FactRecord
 
 
@@ -45,3 +46,35 @@ def test_eps_streak_counts_consecutive_positive_years():
     assert result is not None
     assert result.value == 2
     assert result.as_of == "2023-09-30"
+
+def test_graham_eps_cagr_metric(monkeypatch):
+    metric = GrahamEPSCAGRMetric()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "EarningsPerShareDiluted":
+                records = []
+                for year in range(2000, 2015):
+                    value = 1.0 + (year - 2000) * 0.1
+                    records.append(
+                        FactRecord(
+                            symbol,
+                            "CIK",
+                            concept,
+                            year,
+                            "FY",
+                            f"{year}-09-30",
+                            "USD",
+                            value,
+                            None,
+                            None,
+                            "CY" + str(year),
+                        )
+                    )
+                return records
+            return []
+
+    repo = DummyRepo()
+    result = metric.compute("AAPL", repo)
+    assert result is not None
+    assert result.value > 0

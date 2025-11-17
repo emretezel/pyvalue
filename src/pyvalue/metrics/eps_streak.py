@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from pyvalue.metrics.base import Metric, MetricResult
+from pyvalue.metrics.utils import filter_unique_fy
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 FALLBACK_CONCEPTS = [
@@ -30,12 +31,7 @@ class EPSStreakMetric:
         if not records:
             return None
 
-        unique: Dict[str, FactRecord] = {}
-        for record in records:
-            if not self._is_valid_frame(record.frame):
-                continue
-            if record.end_date not in unique:
-                unique[record.end_date] = record
+        unique = filter_unique_fy(records)
 
         streak = 0
         latest_as_of = records[0].end_date
@@ -45,18 +41,3 @@ class EPSStreakMetric:
                 break
             streak += 1
         return MetricResult(symbol=symbol, metric_id=self.id, value=float(streak), as_of=latest_as_of)
-
-    def _is_valid_frame(self, frame: Optional[str]) -> bool:
-        if not frame:
-            return False
-        if not frame.startswith("CY"):
-            return False
-        if len(frame) != 6:
-            return False
-        year = frame[2:]
-        if not year.isdigit():
-            return False
-        # Filter out quarter frames like CY2023Q1
-        if frame.endswith(("Q1", "Q2", "Q3", "Q4")):
-            return False
-        return True
