@@ -92,8 +92,10 @@ class SECFactsNormalizer:
                 entries = self._collect_entries(detail)
                 if not entries:
                     continue
-                fy_records, _ = self._build_fy_records(entries, symbol, cik, concept)
+                fy_records, fy_map = self._build_fy_records(entries, symbol, cik, concept)
+                quarter_records = self._build_quarter_records(entries, fy_map, symbol, cik, concept)
                 records.extend(fy_records)
+                records.extend(quarter_records)
         return records
 
     def _collect_entries(self, detail: Dict) -> List[Dict]:
@@ -116,7 +118,7 @@ class SECFactsNormalizer:
         symbol: str,
         cik: str,
         concept: str,
-    ) -> tuple[List[FactRecord], Dict[int, FactRecord]]:
+    ) -> tuple[List[FactRecord], Dict[str, FactRecord]]:
         filtered = [
             entry
             for entry in entries
@@ -143,15 +145,109 @@ class SECFactsNormalizer:
             by_year.setdefault(year, []).append(entry)
 
         records: List[FactRecord] = []
-        fy_map: Dict[int, FactRecord] = {}
+        fy_map: Dict[str, FactRecord] = {}
         for year, group in by_year.items():
             selected = self._select_fy_entry(group)
             record = self._entry_to_record(selected, symbol, cik, concept, selected["__unit"])
             if record is None:
                 continue
             records.append(record)
-            fy_map[year] = record
+            fy_map[record.end_date] = record
         return records, fy_map
+
+    def _build_quarter_records(
+        self,
+        entries: List[Dict],
+        fy_map: Dict[str, FactRecord],
+        symbol: str,
+        cik: str,
+        concept: str,
+    ) -> List[FactRecord]:
+        filtered = [
+            entry
+            for entry in entries
+            if (entry.get("form") or "").startswith("10-Q") and (entry.get("fp") or "").upper() in {"Q1", "Q2", "Q3"}
+        ]
+        if not filtered:
+            return []
+
+        filtered = self._dedup_quarter_filings(filtered)
+
+        dedup: Dict[tuple, Dict] = {}
+        for entry in filtered:
+            end = entry.get("end")
+            fp = (entry.get("fp") or "").upper()
+            if not end:
+                continue
+            key = (entry["__unit"], end, fp)
+            existing = dedup.get(key)
+            if existing is None or self._filed_key(entry) > self._filed_key(existing):
+                dedup[key] = entry
+
+        entries_sorted = sorted(dedup.values(), key=lambda e: e.get("end") or "")
+        flow_cumulative: Dict[tuple[str, str], float] = {}
+        fy_lookup = self._build_fy_lookup(fy_map)
+        cycle_keys: Dict[str, str] = {}
+        cycle_counters: Dict[str, int] = {}
+        records: List[FactRecord] = []
+
+        for entry in entries_sorted:
+            fp = (entry.get("fp") or "").upper()
+            if fp not in {"Q1", "Q2", "Q3"}:
+                continue
+            value = self._to_float(entry.get("val"))
+            if value is None:
+                continue
+            is_flow = entry.get("start") is not None
+            fy_key = self._resolve_fy_key(entry, fy_lookup, cycle_keys, cycle_counters)
+            if fy_key is None:
+                fy_key = f"{entry['__unit']}-unknown"
+            if is_flow:
+                if fp == "Q1":
+                    incremental = value
+                else:
+                    prev_fp = "Q1" if fp == "Q2" else "Q2"
+                    prev = flow_cumulative.get((fy_key, prev_fp))
+                    if prev is None:
+                        continue
+                    incremental = value - prev
+                flow_cumulative[(fy_key, fp)] = value
+            else:
+                incremental = value
+            new_entry = entry.copy()
+            new_entry["val"] = incremental
+            record = self._entry_to_record(new_entry, symbol, cik, concept, entry["__unit"])
+            if record:
+                records.append(record)
+
+        for fy_key, fy_record in fy_map.items():
+            if fy_record.value is None:
+                continue
+            is_flow = fy_record.start_date is not None
+            if is_flow:
+                q3_cumulative = flow_cumulative.get((fy_key, "Q3"))
+                if q3_cumulative is None:
+                    continue
+                q4_value = fy_record.value - q3_cumulative
+                start = fy_record.start_date
+            else:
+                q4_value = fy_record.value
+                start = None
+            new_entry = {
+                "__unit": fy_record.unit,
+                "val": q4_value,
+                "end": fy_record.end_date,
+                "fp": "Q4",
+                "filed": fy_record.filed,
+                "accn": fy_record.accn,
+                "frame": fy_record.frame,
+                "start": start,
+            }
+            record = self._entry_to_record(new_entry, symbol, cik, concept, fy_record.unit)
+            if record:
+                records.append(record)
+
+        return records
 
     def _select_fy_entry(self, entries: List[Dict]) -> Dict:
         with_start = [entry for entry in entries if entry.get("start")]
@@ -239,6 +335,85 @@ class SECFactsNormalizer:
             frame=entry.get("frame"),
             start_date=entry.get("start"),
         )
+
+    def _build_fy_lookup(self, fy_map: Dict[str, FactRecord]) -> List[tuple[datetime, str]]:
+        lookup: List[tuple[datetime, str]] = []
+        for end_date, record in fy_map.items():
+            dt = self._parse_date(end_date)
+            if dt is None:
+                continue
+            lookup.append((dt, end_date))
+        lookup.sort(key=lambda item: item[0])
+        return lookup
+
+    def _resolve_fy_key(
+        self,
+        entry: Dict,
+        fy_lookup: List[tuple[datetime, str]],
+        cycle_keys: Dict[str, str],
+        cycle_counters: Dict[str, int],
+    ) -> Optional[str]:
+        end = entry.get("end")
+        unit = entry.get("__unit")
+        if not unit:
+            return None
+        dt = self._parse_date(end)
+        if dt is not None:
+            for fy_dt, key in fy_lookup:
+                if dt <= fy_dt:
+                    return key
+        fp = (entry.get("fp") or "").upper()
+        if fp == "Q1" or unit not in cycle_keys:
+            idx = cycle_counters.get(unit, 0)
+            cycle_counters[unit] = idx + 1
+            cycle_key = f"{unit}-cycle-{idx}"
+            cycle_keys[unit] = cycle_key
+            return cycle_key
+        return cycle_keys[unit]
+
+    def _parse_date(self, value: Optional[str]) -> Optional[datetime]:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+
+    def _dedup_quarter_filings(self, entries: List[Dict]) -> List[Dict]:
+        grouped: Dict[tuple, Dict] = {}
+        for entry in entries:
+            fp = (entry.get("fp") or "").upper()
+            unit = entry.get("__unit")
+            if not unit:
+                continue
+            key = (unit, fp, entry.get("accn") or entry.get("filed") or "")
+            existing = grouped.get(key)
+            if existing is None or self._prefer_quarter_entry(entry, existing):
+                grouped[key] = entry
+        return list(grouped.values())
+
+    def _prefer_quarter_entry(self, new_entry: Dict, existing: Dict) -> bool:
+        new_end = self._parse_date(new_entry.get("end"))
+        old_end = self._parse_date(existing.get("end"))
+        if new_end and old_end:
+            if new_end > old_end:
+                return True
+            if new_end < old_end:
+                return False
+        elif new_end or old_end:
+            return new_end is not None
+
+        new_start = self._parse_date(new_entry.get("start"))
+        old_start = self._parse_date(existing.get("start"))
+        if new_start and old_start:
+            if new_start < old_start:
+                return True
+            if new_start > old_start:
+                return False
+        elif new_start or old_start:
+            return old_start is None
+
+        return self._filed_key(new_entry) >= self._filed_key(existing)
 
 
 __all__ = ["SECFactsNormalizer", "TARGET_CONCEPTS"]
