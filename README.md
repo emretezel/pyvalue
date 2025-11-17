@@ -101,6 +101,7 @@ capital. Metrics are cached in the `metrics` table for reuse.
 Additional metrics include:
 
 - `eps_streak`: Counts consecutive positive EPS (diluted) FY values.
+- `current_ratio`: Current assets divided by current liabilities.
 - `graham_eps_10y_cagr_3y_avg`: Graham EPS 10-year CAGR averaged over the latest three
   periods (using full-year GAAP EPS data).
 
