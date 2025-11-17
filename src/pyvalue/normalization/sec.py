@@ -53,6 +53,9 @@ TARGET_CONCEPTS = {
     "PropertyPlantAndEquipmentNet",
     "NetPropertyPlantAndEquipment",
     "GrossPropertyPlantAndEquipment",
+    "Goodwill",
+    "IntangibleAssetsNetExcludingGoodwill",
+    "IntangibleAssetsNet",
 }
 
 

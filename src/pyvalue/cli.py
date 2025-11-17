@@ -15,6 +15,7 @@ from pyvalue.screening import evaluate_criterion, load_screen
 from pyvalue.storage import (
     CompanyFactsRepository,
     FinancialFactsRepository,
+    MarketDataRepository,
     MetricsRepository,
     UniverseRepository,
 )
@@ -205,12 +206,19 @@ def cmd_compute_metrics(symbol: str, metric_ids: Sequence[str], database: str) -
     metrics_repo.initialize_schema()
     computed = 0
     symbol_upper = symbol.upper()
+    market_repo: Optional[MarketDataRepository] = None
     for metric_id in metric_ids:
         metric_cls = REGISTRY.get(metric_id)
         if metric_cls is None:
             raise SystemExit(f"Unknown metric id: {metric_id}")
         metric = metric_cls()
-        result = metric.compute(symbol_upper, fact_repo)
+        if getattr(metric, "uses_market_data", False):
+            if market_repo is None:
+                market_repo = MarketDataRepository(database)
+                market_repo.initialize_schema()
+            result = metric.compute(symbol_upper, fact_repo, market_repo)
+        else:
+            result = metric.compute(symbol_upper, fact_repo)
         if result is None:
             LOGGER.warning("Metric %s could not be computed for %s", metric_id, symbol_upper)
             continue

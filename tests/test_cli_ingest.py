@@ -2,7 +2,13 @@
 from types import SimpleNamespace
 
 from pyvalue import cli
-from pyvalue.storage import CompanyFactsRepository, FinancialFactsRepository, FactRecord, MetricsRepository
+from pyvalue.storage import (
+    CompanyFactsRepository,
+    FinancialFactsRepository,
+    FactRecord,
+    MarketDataRepository,
+    MetricsRepository,
+)
 
 
 def test_cmd_ingest_us_facts(monkeypatch, tmp_path):
@@ -82,38 +88,24 @@ def test_cmd_compute_metrics(tmp_path):
     fact_repo.replace_facts(
         "AAPL",
         [
-            FactRecord(
-                symbol="AAPL",
-                cik="CIK",
-                concept="AssetsCurrent",
-                fiscal_year=2023,
-                fiscal_period="FY",
-                end_date="2023-09-30",
-                unit="USD",
-                value=500,
-                accn=None,
-                filed=None,
-                frame=None,
-            ),
-            FactRecord(
-                symbol="AAPL",
-                cik="CIK",
-                concept="LiabilitiesCurrent",
-                fiscal_year=2023,
-                fiscal_period="FY",
-                end_date="2023-09-30",
-                unit="USD",
-                value=200,
-                accn=None,
-                filed=None,
-                frame=None,
-            ),
+            FactRecord("AAPL", "CIK", "AssetsCurrent", 2023, "FY", "2023-09-30", "USD", 500, None, None, None),
+            FactRecord("AAPL", "CIK", "LiabilitiesCurrent", 2023, "FY", "2023-09-30", "USD", 200, None, None, None),
+            FactRecord("AAPL", "CIK", "EarningsPerShareDiluted", 2023, "FY", "2023-09-30", "USD", 5.0, None, None, "CY2023"),
+            FactRecord("AAPL", "CIK", "StockholdersEquity", 2023, "FY", "2023-09-30", "USD", 1000, None, None, None),
+            FactRecord("AAPL", "CIK", "CommonStockSharesOutstanding", 2023, "FY", "2023-09-30", "USD", 100, None, None, None),
+            FactRecord("AAPL", "CIK", "Goodwill", 2023, "FY", "2023-09-30", "USD", 50, None, None, None),
+            FactRecord("AAPL", "CIK", "IntangibleAssetsNet", 2023, "FY", "2023-09-30", "USD", 25, None, None, None),
         ],
     )
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
+    market_repo = MarketDataRepository(db_path)
+    market_repo.initialize_schema()
+    market_repo.upsert_price("AAPL", "2023-09-30", 150.0)
 
-    rc = cli.cmd_compute_metrics("AAPL", ["working_capital"], str(db_path))
+    rc = cli.cmd_compute_metrics("AAPL", ["working_capital", "graham_multiplier"], str(db_path))
     assert rc == 0
     value = repo.fetch("AAPL", "working_capital")
     assert value[0] == 300
+    graham_value = repo.fetch("AAPL", "graham_multiplier")
+    assert graham_value[0] > 0

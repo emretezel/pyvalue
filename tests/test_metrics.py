@@ -2,6 +2,7 @@
 from pyvalue.metrics.working_capital import WorkingCapitalMetric
 from pyvalue.metrics.eps_streak import EPSStreakMetric
 from pyvalue.metrics.graham_eps_cagr import GrahamEPSCAGRMetric
+from pyvalue.metrics.graham_multiplier import GrahamMultiplierMetric
 from pyvalue.storage import FactRecord
 
 
@@ -76,5 +77,40 @@ def test_graham_eps_cagr_metric(monkeypatch):
 
     repo = DummyRepo()
     result = metric.compute("AAPL", repo)
+    assert result is not None
+    assert result.value > 0
+
+def test_graham_multiplier_metric(monkeypatch):
+    metric = GrahamMultiplierMetric()
+
+    class DummyRepo:
+        def __init__(self):
+            self.values = {
+                "StockholdersEquity": 1000,
+                "CommonStockSharesOutstanding": 100,
+                "Goodwill": 50,
+                "IntangibleAssetsNet": 25,
+            }
+
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "EarningsPerShareDiluted":
+                return [
+                    FactRecord(symbol, "CIK", concept, 2023, "FY", "2023-09-30", "USD", 5.0, None, None, "CY2023")
+                ]
+            return []
+
+        def latest_fact(self, symbol, concept):
+            value = self.values.get(concept)
+            if value is None:
+                return None
+            return FactRecord(symbol, "CIK", concept, 2023, "FY", "2023-09-30", "USD", value, None, None, None)
+
+    class DummyMarketRepo:
+        def latest_price(self, symbol):
+            return ("2023-09-30", 150.0)
+
+    repo = DummyRepo()
+    market_repo = DummyMarketRepo()
+    result = metric.compute("AAPL", repo, market_repo)
     assert result is not None
     assert result.value > 0
