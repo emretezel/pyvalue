@@ -287,6 +287,33 @@ class FinancialFactsRepository(SQLiteStore):
             return None
         return FactRecord(*row)
 
+    def facts_for_concept(
+        self,
+        symbol: str,
+        concept: str,
+        fiscal_period: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> List[FactRecord]:
+        """Return ordered fact records for the symbol/concept."""
+
+        query = [
+            "SELECT symbol, cik, concept, fiscal_year, fiscal_period, end_date, unit, value, accn, filed, frame",
+            "FROM financial_facts",
+            "WHERE symbol = ? AND concept = ?",
+        ]
+        params: List[Any] = [symbol.upper(), concept]
+        if fiscal_period:
+            query.append("AND fiscal_period = ?")
+            params.append(fiscal_period)
+        query.append("ORDER BY end_date DESC, filed DESC")
+        if limit:
+            query.append("LIMIT ?")
+            params.append(limit)
+        sql = " ".join(query)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [FactRecord(*row) for row in rows]
+
 
 class MetricsRepository(SQLiteStore):
     """Persist computed metric values."""
