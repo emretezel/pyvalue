@@ -2,6 +2,7 @@
 from types import SimpleNamespace
 
 from pyvalue import cli
+from pyvalue.metrics import REGISTRY
 from pyvalue.storage import (
     CompanyFactsRepository,
     FinancialFactsRepository,
@@ -103,9 +104,77 @@ def test_cmd_compute_metrics(tmp_path):
     market_repo.initialize_schema()
     market_repo.upsert_price("AAPL", "2023-09-30", 150.0)
 
-    rc = cli.cmd_compute_metrics("AAPL", ["working_capital", "graham_multiplier"], str(db_path))
+    rc = cli.cmd_compute_metrics("AAPL", ["working_capital", "graham_multiplier"], str(db_path), run_all=False)
     assert rc == 0
     value = repo.fetch("AAPL", "working_capital")
     assert value[0] == 300
     graham_value = repo.fetch("AAPL", "graham_multiplier")
     assert graham_value[0] > 0
+
+
+def test_cmd_compute_metrics_all(tmp_path):
+    db_path = tmp_path / "runall.db"
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    records = []
+    for year in range(2010, 2025):
+        frame = f"CY{year}"
+        records.append(
+            FactRecord(
+                symbol="AAPL",
+                cik="CIK",
+                concept="EarningsPerShareDiluted",
+                fiscal_year=year,
+                fiscal_period="FY",
+                end_date=f"{year}-09-30",
+                unit="USD",
+                value=2.0 + 0.1 * (year - 2010),
+                accn=None,
+                filed=None,
+                frame=frame,
+            )
+        )
+    for year in range(2020, 2025):
+        end_date = f"{year}-09-30"
+        records.extend(
+            [
+                FactRecord("AAPL", "CIK", "AssetsCurrent", year, "FY", end_date, "USD", 400 + year, None, None, None),
+                FactRecord("AAPL", "CIK", "LiabilitiesCurrent", year, "FY", end_date, "USD", 200 + year, None, None, None),
+                FactRecord("AAPL", "CIK", "OperatingIncomeLoss", year, "FY", end_date, "USD", 150 + year, None, None, None),
+                FactRecord(
+                    "AAPL",
+                    "CIK",
+                    "PropertyPlantAndEquipmentNet",
+                    year,
+                    "FY",
+                    end_date,
+                    "USD",
+                    500 + year,
+                    None,
+                    None,
+                    None,
+                ),
+            ]
+        )
+    records.extend(
+        [
+            FactRecord("AAPL", "CIK", "StockholdersEquity", 2024, "FY", "2024-09-30", "USD", 2000, None, None, None),
+            FactRecord("AAPL", "CIK", "CommonStockSharesOutstanding", 2024, "FY", "2024-09-30", "USD", 500, None, None, None),
+            FactRecord("AAPL", "CIK", "Goodwill", 2024, "FY", "2024-09-30", "USD", 100, None, None, None),
+            FactRecord("AAPL", "CIK", "IntangibleAssetsNet", 2024, "FY", "2024-09-30", "USD", 50, None, None, None),
+            FactRecord("AAPL", "CIK", "LongTermDebtNoncurrent", 2024, "FY", "2024-09-30", "USD", 300, None, None, None),
+        ]
+    )
+    fact_repo.replace_facts("AAPL", records)
+
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+    market_repo = MarketDataRepository(db_path)
+    market_repo.initialize_schema()
+    market_repo.upsert_price("AAPL", "2024-09-30", 150.0)
+
+    rc = cli.cmd_compute_metrics("AAPL", ["placeholder"], str(db_path), run_all=True)
+    assert rc == 0
+    for metric_id in REGISTRY.keys():
+        row = metrics_repo.fetch("AAPL", metric_id)
+        assert row is not None, f"{metric_id} missing"

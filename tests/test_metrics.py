@@ -4,6 +4,8 @@ from pyvalue.metrics.current_ratio import CurrentRatioMetric
 from pyvalue.metrics.eps_streak import EPSStreakMetric
 from pyvalue.metrics.graham_eps_cagr import GrahamEPSCAGRMetric
 from pyvalue.metrics.graham_multiplier import GrahamMultiplierMetric
+from pyvalue.metrics.earnings_yield import EarningsYieldMetric
+from pyvalue.metrics.roc_greenblatt import ROCGreenblattMetric
 from pyvalue.storage import FactRecord
 
 
@@ -130,5 +132,56 @@ def test_graham_multiplier_metric(monkeypatch):
     repo = DummyRepo()
     market_repo = DummyMarketRepo()
     result = metric.compute("AAPL", repo, market_repo)
+    assert result is not None
+    assert result.value > 0
+
+def test_earnings_yield_metric(monkeypatch):
+    metric = EarningsYieldMetric()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "EarningsPerShareDiluted":
+                return [FactRecord(symbol, "CIK", concept, 2023, "FY", "2023-09-30", "USD", 5.0, None, None, "CY2023")]
+            return []
+
+    class DummyMarketRepo:
+        def latest_price(self, symbol):
+            return ("2023-09-30", 50.0)
+
+    repo = DummyRepo()
+    market_repo = DummyMarketRepo()
+    result = metric.compute("AAPL", repo, market_repo)
+    assert result is not None
+    assert result.value == 0.1
+
+def test_roc_greenblatt_metric(monkeypatch):
+    metric = ROCGreenblattMetric()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "OperatingIncomeLoss":
+                return [
+                    FactRecord(symbol, "CIK", concept, 2023, "FY", "2023-09-30", "USD", 200, None, None, None),
+                    FactRecord(symbol, "CIK", concept, 2022, "FY", "2022-09-30", "USD", 150, None, None, None),
+                ]
+            if concept == "PropertyPlantAndEquipmentNet":
+                return [
+                    FactRecord(symbol, "CIK", concept, 2023, "FY", "2023-09-30", "USD", 500, None, None, None),
+                    FactRecord(symbol, "CIK", concept, 2022, "FY", "2022-09-30", "USD", 450, None, None, None),
+                ]
+            if concept == "AssetsCurrent":
+                return [
+                    FactRecord(symbol, "CIK", concept, 2023, "FY", "2023-09-30", "USD", 400, None, None, None),
+                    FactRecord(symbol, "CIK", concept, 2022, "FY", "2022-09-30", "USD", 350, None, None, None),
+                ]
+            if concept == "LiabilitiesCurrent":
+                return [
+                    FactRecord(symbol, "CIK", concept, 2023, "FY", "2023-09-30", "USD", 300, None, None, None),
+                    FactRecord(symbol, "CIK", concept, 2022, "FY", "2022-09-30", "USD", 250, None, None, None),
+                ]
+            return []
+
+    repo = DummyRepo()
+    result = metric.compute("AAPL", repo)
     assert result is not None
     assert result.value > 0

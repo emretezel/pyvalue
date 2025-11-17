@@ -8,6 +8,8 @@ from .long_term_debt import LongTermDebtMetric
 from .eps_streak import EPSStreakMetric
 from .graham_eps_cagr import GrahamEPSCAGRMetric
 from .graham_multiplier import GrahamMultiplierMetric
+from .earnings_yield import EarningsYieldMetric
+from .roc_greenblatt import ROCGreenblattMetric
 
 REGISTRY = {
     WorkingCapitalMetric.id: WorkingCapitalMetric,
@@ -16,6 +18,8 @@ REGISTRY = {
     EPSStreakMetric.id: EPSStreakMetric,
     GrahamEPSCAGRMetric.id: GrahamEPSCAGRMetric,
     GrahamMultiplierMetric.id: GrahamMultiplierMetric,
+    EarningsYieldMetric.id: EarningsYieldMetric,
+    ROCGreenblattMetric.id: ROCGreenblattMetric,
 }
 
 __all__ = [
@@ -27,5 +31,7 @@ __all__ = [
     "EPSStreakMetric",
     "GrahamEPSCAGRMetric",
     "GrahamMultiplierMetric",
+    "EarningsYieldMetric",
+    "ROCGreenblattMetric",
     "REGISTRY",
 ]

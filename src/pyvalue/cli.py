@@ -100,6 +100,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Metric identifiers to compute (default: working_capital)",
     )
     compute_metrics.add_argument(
+        "--all",
+        action="store_true",
+        help="Compute all registered metrics",
+    )
+    compute_metrics.add_argument(
         "--database",
         default="data/pyvalue.db",
         help="SQLite database file used for storage (default: %(default)s)",
@@ -198,7 +203,7 @@ def cmd_update_market_data(symbol: str, database: str) -> int:
     return 0
 
 
-def cmd_compute_metrics(symbol: str, metric_ids: Sequence[str], database: str) -> int:
+def cmd_compute_metrics(symbol: str, metric_ids: Sequence[str], database: str, run_all: bool) -> int:
     """Compute one or more metrics and store the results."""
 
     fact_repo = FinancialFactsRepository(database)
@@ -207,7 +212,8 @@ def cmd_compute_metrics(symbol: str, metric_ids: Sequence[str], database: str) -
     computed = 0
     symbol_upper = symbol.upper()
     market_repo: Optional[MarketDataRepository] = None
-    for metric_id in metric_ids:
+    ids_to_compute = list(REGISTRY.keys()) if run_all else list(metric_ids)
+    for metric_id in ids_to_compute:
         metric_cls = REGISTRY.get(metric_id)
         if metric_cls is None:
             raise SystemExit(f"Unknown metric id: {metric_id}")
@@ -266,7 +272,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.command == "update-market-data":
         return cmd_update_market_data(symbol=args.symbol, database=args.database)
     if args.command == "compute-metrics":
-        return cmd_compute_metrics(symbol=args.symbol, metric_ids=args.metrics, database=args.database)
+        return cmd_compute_metrics(
+            symbol=args.symbol,
+            metric_ids=args.metrics,
+            database=args.database,
+            run_all=args.all,
+        )
     if args.command == "run-screen":
         return cmd_run_screen(symbol=args.symbol, config_path=args.config, database=args.database)
 

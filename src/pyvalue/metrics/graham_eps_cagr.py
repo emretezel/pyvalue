@@ -39,7 +39,7 @@ class GrahamEPSCAGRMetric:
         if not cagr_values:
             return None
         avg_cagr = sum(cagr_values) / len(cagr_values)
-        return MetricResult(symbol=symbol, metric_id=self.id, value=avg_cagr * 100, as_of=latest_date)
+        return MetricResult(symbol=symbol, metric_id=self.id, value=avg_cagr, as_of=latest_date)
 
     def _compute_cagrs(self, ordered: List[FactRecord]) -> List[float]:
         cagr_values: List[float] = []

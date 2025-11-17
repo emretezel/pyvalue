@@ -24,6 +24,8 @@ TARGET_CONCEPTS = {
     # Income statement
     "NetIncomeLoss",
     "OperatingIncomeLoss",
+    "IncomeFromOperations",
+    "OperatingProfitLoss",
     "IncomeBeforeIncomeTaxes",
     "Revenues",
     "RevenueFromContractWithCustomerExcludingAssessedTax",
