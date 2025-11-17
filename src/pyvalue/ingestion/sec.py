@@ -1,5 +1,7 @@
-# Author: Emre Tezel
-"""SEC company-facts ingestion helpers."""
+"""SEC company-facts ingestion helpers.
+
+Author: Emre Tezel
+"""
 
 from __future__ import annotations
 

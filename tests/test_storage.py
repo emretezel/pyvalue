@@ -1,4 +1,3 @@
-# Author: Emre Tezel
 import sqlite3
 
 from pyvalue.storage import CompanyFactsRepository, UniverseRepository
@@ -6,7 +5,10 @@ from pyvalue.universe import Listing
 
 
 def _listing(symbol: str, is_etf: bool = False) -> Listing:
-    """Helper to instantiate listings in a compact way."""
+    """Helper to instantiate listings in a compact way.
+
+Author: Emre Tezel
+"""
 
     return Listing(
         symbol=symbol,

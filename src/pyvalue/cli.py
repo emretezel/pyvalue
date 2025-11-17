@@ -1,5 +1,7 @@
-# Author: Emre Tezel
-"""Command line utilities for pyvalue."""
+"""Command line utilities for pyvalue.
+
+Author: Emre Tezel
+"""
 
 from __future__ import annotations
 

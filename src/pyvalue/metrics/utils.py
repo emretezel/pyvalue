@@ -1,5 +1,7 @@
-# Author: Emre Tezel
-"""Shared helpers for metrics."""
+"""Shared helpers for metrics.
+
+Author: Emre Tezel
+"""
 
 from __future__ import annotations
 

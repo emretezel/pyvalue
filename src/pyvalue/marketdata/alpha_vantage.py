@@ -1,5 +1,7 @@
-# Author: Emre Tezel
-"""Alpha Vantage implementation of the MarketDataProvider."""
+"""Alpha Vantage implementation of the MarketDataProvider.
+
+Author: Emre Tezel
+"""
 
 from __future__ import annotations
 

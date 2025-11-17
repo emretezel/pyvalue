@@ -1,5 +1,7 @@
-# Author: Emre Tezel
-"""Local persistence helpers for universe data."""
+"""Local persistence helpers for universe data.
+
+Author: Emre Tezel
+"""
 
 from __future__ import annotations
 

@@ -1,5 +1,7 @@
-# Author: Emre Tezel
-"""Current ratio metric implementation."""
+"""Current ratio metric implementation.
+
+Author: Emre Tezel
+"""
 
 from __future__ import annotations
 

@@ -1,5 +1,7 @@
-# Author: Emre Tezel
-"""Metric computation interfaces and implementations."""
+"""Metric computation interfaces and implementations.
+
+Author: Emre Tezel
+"""
 
 from .base import Metric, MetricResult
 from .working_capital import WorkingCapitalMetric

@@ -1,4 +1,7 @@
-# Author: Emre Tezel
+"""Tests for SEC facts normalization helpers.
+
+Author: Emre Tezel
+"""
 from pyvalue.normalization import SECFactsNormalizer
 
 

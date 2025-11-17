@@ -1,5 +1,7 @@
-# Author: Emre Tezel
-"""Graham EPS 10y CAGR% (3y average) metric."""
+"""Graham EPS 10y CAGR% (3y average) metric.
+
+Author: Emre Tezel
+"""
 
 from __future__ import annotations
 

@@ -1,5 +1,7 @@
-# Author: Emre Tezel
-"""Universe loader for US-listed equities across major exchanges."""
+"""Universe loader for US-listed equities across major exchanges.
+
+Author: Emre Tezel
+"""
 
 from __future__ import annotations
 

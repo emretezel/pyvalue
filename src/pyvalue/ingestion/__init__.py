@@ -1,5 +1,7 @@
-# Author: Emre Tezel
-"""Data ingestion helpers for various regulators."""
+"""Data ingestion helpers for various regulators.
+
+Author: Emre Tezel
+"""
 
 from .sec import SECCompanyFactsClient
 

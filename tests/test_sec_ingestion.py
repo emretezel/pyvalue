@@ -1,4 +1,7 @@
-# Author: Emre Tezel
+"""Tests for SEC ingestion client.
+
+Author: Emre Tezel
+"""
 from pyvalue.ingestion.sec import COMPANY_FACTS_URL, COMPANY_TICKERS_URL, SECCompanyFactsClient
 
 

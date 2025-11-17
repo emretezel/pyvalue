@@ -1,4 +1,7 @@
-# Author: Emre Tezel
+"""Tests for market data providers and services.
+
+Author: Emre Tezel
+"""
 from pyvalue.marketdata.alpha_vantage import AlphaVantageProvider
 from pyvalue.marketdata.service import MarketDataService
 from pyvalue.storage import MarketDataRepository

@@ -1,5 +1,7 @@
-# Author: Emre Tezel
-"""Long-term debt metric."""
+"""Long-term debt metric.
+
+Author: Emre Tezel
+"""
 
 from __future__ import annotations
 

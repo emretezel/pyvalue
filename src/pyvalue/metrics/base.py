@@ -1,5 +1,7 @@
-# Author: Emre Tezel
-"""Abstract metric base classes."""
+"""Abstract metric base classes.
+
+Author: Emre Tezel
+"""
 
 from __future__ import annotations
 

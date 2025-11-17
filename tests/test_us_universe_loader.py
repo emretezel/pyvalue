@@ -1,4 +1,8 @@
-# Author: Emre Tezel
+"""Tests for the US universe loader.
+
+Author: Emre Tezel
+"""
+
 import pytest
 
 from pyvalue.universe import USUniverseLoader, Listing

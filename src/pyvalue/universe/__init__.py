@@ -1,5 +1,7 @@
-# Author: Emre Tezel
-"""Universe loaders and models for stock listings."""
+"""Universe loaders and models for stock listings.
+
+Author: Emre Tezel
+"""
 
 from .us import USUniverseLoader, Listing
 

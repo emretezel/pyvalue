@@ -1,4 +1,7 @@
-# Author: Emre Tezel
+"""Tests for CLI ingestion and metric commands.
+
+Author: Emre Tezel
+"""
 from types import SimpleNamespace
 
 from pyvalue import cli

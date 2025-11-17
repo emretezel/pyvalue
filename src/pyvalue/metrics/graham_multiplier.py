@@ -1,5 +1,7 @@
-# Author: Emre Tezel
-"""Graham multiplier metric implementation."""
+"""Graham multiplier metric implementation.
+
+Author: Emre Tezel
+"""
 
 from __future__ import annotations
 

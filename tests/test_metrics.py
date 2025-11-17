@@ -1,4 +1,7 @@
-# Author: Emre Tezel
+"""Tests for metric implementations.
+
+Author: Emre Tezel
+"""
 from pyvalue.metrics.working_capital import WorkingCapitalMetric
 from pyvalue.metrics.current_ratio import CurrentRatioMetric
 from pyvalue.metrics.eps_streak import EPSStreakMetric

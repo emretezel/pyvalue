@@ -1,5 +1,7 @@
-# Author: Emre Tezel
-"""Screening configuration and evaluation."""
+"""Screening configuration and evaluation.
+
+Author: Emre Tezel
+"""
 
 from __future__ import annotations
 

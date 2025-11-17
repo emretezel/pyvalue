@@ -1,5 +1,7 @@
-# Author: Emre Tezel
-"""ROC% Greenblatt 5y average metric."""
+"""ROC% Greenblatt 5y average metric.
+
+Author: Emre Tezel
+"""
 
 from __future__ import annotations
 

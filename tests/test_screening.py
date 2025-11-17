@@ -1,4 +1,7 @@
-# Author: Emre Tezel
+"""Tests for screening configuration evaluation.
+
+Author: Emre Tezel
+"""
 from pathlib import Path
 
 from pyvalue.screening import Criterion, Term, evaluate_criterion

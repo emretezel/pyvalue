@@ -1,5 +1,7 @@
-# Author: Emre Tezel
-"""Earnings per share streak metric."""
+"""Earnings per share streak metric.
+
+Author: Emre Tezel
+"""
 
 from __future__ import annotations
 

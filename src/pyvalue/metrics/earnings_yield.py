@@ -1,5 +1,7 @@
-# Author: Emre Tezel
-"""Earnings yield metric implementation."""
+"""Earnings yield metric implementation.
+
+Author: Emre Tezel
+"""
 
 from __future__ import annotations
 

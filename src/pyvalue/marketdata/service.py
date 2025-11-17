@@ -1,5 +1,7 @@
-# Author: Emre Tezel
-"""Facade for fetching and storing market data."""
+"""Facade for fetching and storing market data.
+
+Author: Emre Tezel
+"""
 
 from __future__ import annotations
 

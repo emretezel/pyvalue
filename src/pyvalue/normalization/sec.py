@@ -1,5 +1,7 @@
-# Author: Emre Tezel
-"""Normalize SEC company facts payloads into relational records."""
+"""Normalize SEC company facts payloads into relational records.
+
+Author: Emre Tezel
+"""
 
 from __future__ import annotations
 

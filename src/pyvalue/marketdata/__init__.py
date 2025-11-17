@@ -1,5 +1,7 @@
-# Author: Emre Tezel
-"""Market data providers and interfaces."""
+"""Market data providers and interfaces.
+
+Author: Emre Tezel
+"""
 
 from .base import PriceData, MarketDataProvider
 from .alpha_vantage import AlphaVantageProvider

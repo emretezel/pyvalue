@@ -1,5 +1,7 @@
-# Author: Emre Tezel
-"""Working capital metric implementation."""
+"""Working capital metric implementation.
+
+Author: Emre Tezel
+"""
 
 from __future__ import annotations
 

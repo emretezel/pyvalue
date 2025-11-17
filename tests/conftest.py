@@ -1,4 +1,7 @@
-# Author: Emre Tezel
+"""Test configuration helpers.
+
+Author: Emre Tezel
+"""
 import sys
 from pathlib import Path
 

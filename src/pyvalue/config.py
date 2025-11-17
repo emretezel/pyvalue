@@ -1,5 +1,7 @@
-# Author: Emre Tezel
-"""Configuration loader for pyvalue."""
+"""Configuration loader for pyvalue.
+
+Author: Emre Tezel
+"""
 
 from __future__ import annotations
 

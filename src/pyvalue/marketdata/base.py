@@ -1,5 +1,7 @@
-# Author: Emre Tezel
-"""Abstract interfaces for market data providers."""
+"""Abstract interfaces for market data providers.
+
+Author: Emre Tezel
+"""
 
 from __future__ import annotations
 
