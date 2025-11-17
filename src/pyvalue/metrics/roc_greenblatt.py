@@ -89,7 +89,6 @@ class ROCGreenblattMetric:
                     symbol=ppe.symbol,
                     cik=ppe.cik,
                     concept="TangibleCapital",
-                    fiscal_year=ppe.fiscal_year,
                     fiscal_period=ppe.fiscal_period,
                     end_date=ppe.end_date,
                     unit=ppe.unit,
@@ -97,6 +96,7 @@ class ROCGreenblattMetric:
                     accn=ppe.accn,
                     filed=ppe.filed,
                     frame=ppe.frame,
+                    start_date=ppe.start_date,
                 )
             )
         return combined

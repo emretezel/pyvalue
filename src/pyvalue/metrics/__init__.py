@@ -12,6 +12,7 @@ from .graham_eps_cagr import GrahamEPSCAGRMetric
 from .graham_multiplier import GrahamMultiplierMetric
 from .earnings_yield import EarningsYieldMetric
 from .roc_greenblatt import ROCGreenblattMetric
+from .roe_greenblatt import ROEGreenblattMetric
 
 REGISTRY = {
     WorkingCapitalMetric.id: WorkingCapitalMetric,
@@ -22,6 +23,7 @@ REGISTRY = {
     GrahamMultiplierMetric.id: GrahamMultiplierMetric,
     EarningsYieldMetric.id: EarningsYieldMetric,
     ROCGreenblattMetric.id: ROCGreenblattMetric,
+    ROEGreenblattMetric.id: ROEGreenblattMetric,
 }
 
 __all__ = [
@@ -35,5 +37,6 @@ __all__ = [
     "GrahamMultiplierMetric",
     "EarningsYieldMetric",
     "ROCGreenblattMetric",
+    "ROEGreenblattMetric",
     "REGISTRY",
 ]

@@ -195,7 +195,6 @@ class FactRecord:
     symbol: str
     cik: str
     concept: str
-    fiscal_year: Optional[int]
     fiscal_period: str
     end_date: str
     unit: str
@@ -203,6 +202,7 @@ class FactRecord:
     accn: Optional[str]
     filed: Optional[str]
     frame: Optional[str]
+    start_date: Optional[str] = None
 
 
 class FinancialFactsRepository(SQLiteStore):
@@ -216,7 +216,6 @@ class FinancialFactsRepository(SQLiteStore):
                     symbol TEXT NOT NULL,
                     cik TEXT NOT NULL,
                     concept TEXT NOT NULL,
-                    fiscal_year INTEGER,
                     fiscal_period TEXT,
                     end_date TEXT NOT NULL,
                     unit TEXT NOT NULL,
@@ -224,7 +223,8 @@ class FinancialFactsRepository(SQLiteStore):
                     accn TEXT,
                     filed TEXT,
                     frame TEXT,
-                    PRIMARY KEY (symbol, concept, end_date, unit, accn)
+                    start_date TEXT,
+                    PRIMARY KEY (symbol, concept, fiscal_period, end_date, unit, accn)
                 )
                 """
             )
@@ -243,7 +243,6 @@ class FinancialFactsRepository(SQLiteStore):
                 record.symbol,
                 record.cik,
                 record.concept,
-                record.fiscal_year,
                 record.fiscal_period,
                 record.end_date,
                 record.unit,
@@ -251,6 +250,7 @@ class FinancialFactsRepository(SQLiteStore):
                 record.accn,
                 record.filed,
                 record.frame,
+                getattr(record, "start_date", None),
             )
             for record in records
         ]
@@ -262,8 +262,8 @@ class FinancialFactsRepository(SQLiteStore):
             conn.executemany(
                 """
                 INSERT OR REPLACE INTO financial_facts (
-                    symbol, cik, concept, fiscal_year, fiscal_period,
-                    end_date, unit, value, accn, filed, frame
+                    symbol, cik, concept, fiscal_period,
+                    end_date, unit, value, accn, filed, frame, start_date
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
@@ -276,8 +276,8 @@ class FinancialFactsRepository(SQLiteStore):
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT symbol, cik, concept, fiscal_year, fiscal_period, end_date, unit,
-                       value, accn, filed, frame
+                SELECT symbol, cik, concept, fiscal_period, end_date, unit,
+                       value, accn, filed, frame, start_date
                 FROM financial_facts
                 WHERE symbol = ? AND concept = ?
                 ORDER BY end_date DESC
@@ -299,7 +299,7 @@ class FinancialFactsRepository(SQLiteStore):
         """Return ordered fact records for the symbol/concept."""
 
         query = [
-            "SELECT symbol, cik, concept, fiscal_year, fiscal_period, end_date, unit, value, accn, filed, frame",
+            "SELECT symbol, cik, concept, fiscal_period, end_date, unit, value, accn, filed, frame, start_date",
             "FROM financial_facts",
             "WHERE symbol = ? AND concept = ?",
         ]

@@ -79,5 +79,8 @@ class GrahamMultiplierMetric:
         for concept in concepts:
             fact = repo.latest_fact(symbol, concept)
             if fact is not None and fact.value is not None:
-                return fact.value
+                try:
+                    return float(fact.value)
+                except (TypeError, ValueError):
+                    continue
         return None

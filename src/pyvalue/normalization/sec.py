@@ -5,6 +5,7 @@ Author: Emre Tezel
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Dict, Iterable, List, Optional
 
 from pyvalue.storage import FactRecord
@@ -23,8 +24,13 @@ TARGET_CONCEPTS = {
     "Liabilities",
     "StockholdersEquity",
     "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+    "CommonStockholdersEquity",
+    "PreferredStock",
     # Income statement
     "NetIncomeLoss",
+    "NetIncomeLossAvailableToCommonStockholdersBasic",
+    "PreferredStockDividendsAndOtherAdjustments",
+    "PreferredStockDividends",
     "OperatingIncomeLoss",
     "IncomeFromOperations",
     "OperatingProfitLoss",
@@ -83,16 +89,121 @@ class SECFactsNormalizer:
             for concept, detail in concept_map.items():
                 if concept not in self.concepts:
                     continue
-                units = detail.get("units", {})
-                for unit, entries in units.items():
-                    if not isinstance(entries, list):
-                        continue
-                    for entry in entries:
-                        maybe_record = self._entry_to_record(entry, symbol, cik, concept, unit)
-                        if maybe_record is None:
-                            continue
-                        records.append(maybe_record)
+                entries = self._collect_entries(detail)
+                if not entries:
+                    continue
+                fy_records, _ = self._build_fy_records(entries, symbol, cik, concept)
+                records.extend(fy_records)
         return records
+
+    def _collect_entries(self, detail: Dict) -> List[Dict]:
+        entries: List[Dict] = []
+        units = detail.get("units", {})
+        for unit, items in units.items():
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                data = item.copy()
+                data["__unit"] = unit
+                entries.append(data)
+        return entries
+
+    def _build_fy_records(
+        self,
+        entries: List[Dict],
+        symbol: str,
+        cik: str,
+        concept: str,
+    ) -> tuple[List[FactRecord], Dict[int, FactRecord]]:
+        filtered = [
+            entry
+            for entry in entries
+            if (entry.get("form") or "").startswith("10-K") and (entry.get("fp") or "").upper() == "FY"
+        ]
+        if not filtered:
+            return [], {}
+
+        by_end: Dict[str, Dict] = {}
+        for entry in filtered:
+            end = entry.get("end")
+            if not end:
+                continue
+            filed_key = self._filed_key(entry)
+            existing = by_end.get(end)
+            if existing is None or filed_key > self._filed_key(existing):
+                by_end[end] = entry
+
+        by_year: Dict[int, List[Dict]] = {}
+        for entry in by_end.values():
+            year = self._year_from_end(entry.get("end"))
+            if year is None:
+                continue
+            by_year.setdefault(year, []).append(entry)
+
+        records: List[FactRecord] = []
+        fy_map: Dict[int, FactRecord] = {}
+        for year, group in by_year.items():
+            selected = self._select_fy_entry(group)
+            record = self._entry_to_record(selected, symbol, cik, concept, selected["__unit"])
+            if record is None:
+                continue
+            records.append(record)
+            fy_map[year] = record
+        return records, fy_map
+
+    def _select_fy_entry(self, entries: List[Dict]) -> Dict:
+        with_start = [entry for entry in entries if entry.get("start")]
+        if with_start:
+            return min(
+                with_start,
+                key=lambda e: (
+                    self._days_from_start(e),
+                    -self._filed_key_value(e),
+                ),
+            )
+        return max(entries, key=self._filed_key)
+
+    def _days_from_start(self, entry: Dict) -> float:
+        start = entry.get("start")
+        end = entry.get("end")
+        if not start or not end:
+            return float("inf")
+        try:
+            start_dt = datetime.fromisoformat(start)
+            end_dt = datetime.fromisoformat(end)
+        except ValueError:
+            return float("inf")
+        return abs((end_dt - start_dt).days - 365)
+
+    def _filed_key(self, entry: Dict) -> datetime:
+        filed = entry.get("filed")
+        try:
+            return datetime.fromisoformat(filed)
+        except (TypeError, ValueError):
+            return datetime.min
+
+    def _filed_key_value(self, entry: Dict) -> float:
+        filed = entry.get("filed")
+        try:
+            return datetime.fromisoformat(filed).timestamp()
+        except (TypeError, ValueError):
+            return float("-inf")
+
+    def _year_from_end(self, end: Optional[str]) -> Optional[int]:
+        if not end:
+            return None
+        try:
+            return int(end[:4])
+        except ValueError:
+            return None
+
+    def _to_float(self, value: Optional[object]) -> Optional[float]:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     def _entry_to_record(
         self,
@@ -110,12 +221,6 @@ class SECFactsNormalizer:
         except (TypeError, ValueError):
             return None
 
-        fiscal_year = entry.get("fy")
-        try:
-            fiscal_year_int = int(fiscal_year) if fiscal_year is not None else None
-        except (TypeError, ValueError):
-            fiscal_year_int = None
-
         fiscal_period = entry.get("fp") or ""
         end_date = entry.get("end")
         if end_date is None:
@@ -125,7 +230,6 @@ class SECFactsNormalizer:
             symbol=symbol,
             cik=cik,
             concept=concept,
-            fiscal_year=fiscal_year_int,
             fiscal_period=fiscal_period,
             end_date=end_date,
             unit=unit,
@@ -133,6 +237,7 @@ class SECFactsNormalizer:
             accn=entry.get("accn"),
             filed=entry.get("filed"),
             frame=entry.get("frame"),
+            start_date=entry.get("start"),
         )
 
 

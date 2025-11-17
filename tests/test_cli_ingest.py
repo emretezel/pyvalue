@@ -15,6 +15,24 @@ from pyvalue.storage import (
 )
 
 
+def make_fact(**kwargs):
+    base = {
+        "symbol": "AAPL",
+        "cik": "CIK",
+        "concept": "",
+        "fiscal_period": "FY",
+        "end_date": "",
+        "unit": "USD",
+        "value": 0.0,
+        "accn": None,
+        "filed": None,
+        "frame": None,
+        "start_date": None,
+    }
+    base.update(kwargs)
+    return FactRecord(**base)
+
+
 def test_cmd_ingest_us_facts(monkeypatch, tmp_path):
     calls = {}
 
@@ -56,18 +74,12 @@ def test_cmd_normalize_us_facts(monkeypatch, tmp_path):
             from pyvalue.storage import FactRecord
 
             return [
-                FactRecord(
+                make_fact(
                     symbol=symbol,
                     cik=cik,
                     concept="NetIncomeLoss",
-                    fiscal_year=2023,
-                    fiscal_period="FY",
                     end_date="2023-09-30",
-                    unit="USD",
                     value=123.0,
-                    accn=None,
-                    filed=None,
-                    frame=None,
                 )
             ]
 
@@ -92,13 +104,13 @@ def test_cmd_compute_metrics(tmp_path):
     fact_repo.replace_facts(
         "AAPL",
         [
-            FactRecord("AAPL", "CIK", "AssetsCurrent", 2023, "FY", "2023-09-30", "USD", 500, None, None, None),
-            FactRecord("AAPL", "CIK", "LiabilitiesCurrent", 2023, "FY", "2023-09-30", "USD", 200, None, None, None),
-            FactRecord("AAPL", "CIK", "EarningsPerShareDiluted", 2023, "FY", "2023-09-30", "USD", 5.0, None, None, "CY2023"),
-            FactRecord("AAPL", "CIK", "StockholdersEquity", 2023, "FY", "2023-09-30", "USD", 1000, None, None, None),
-            FactRecord("AAPL", "CIK", "CommonStockSharesOutstanding", 2023, "FY", "2023-09-30", "USD", 100, None, None, None),
-            FactRecord("AAPL", "CIK", "Goodwill", 2023, "FY", "2023-09-30", "USD", 50, None, None, None),
-            FactRecord("AAPL", "CIK", "IntangibleAssetsNet", 2023, "FY", "2023-09-30", "USD", 25, None, None, None),
+            make_fact(concept="AssetsCurrent", end_date="2023-09-30", value=500),
+            make_fact(concept="LiabilitiesCurrent", end_date="2023-09-30", value=200),
+            make_fact(concept="EarningsPerShareDiluted", end_date="2023-09-30", value=5.0, frame="CY2023"),
+            make_fact(concept="StockholdersEquity", end_date="2023-09-30", value=1000),
+            make_fact(concept="CommonStockSharesOutstanding", end_date="2023-09-30", value=100),
+            make_fact(concept="Goodwill", end_date="2023-09-30", value=50),
+            make_fact(concept="IntangibleAssetsNet", end_date="2023-09-30", value=25),
         ],
     )
     repo = MetricsRepository(db_path)
@@ -123,50 +135,46 @@ def test_cmd_compute_metrics_all(tmp_path):
     for year in range(2010, 2025):
         frame = f"CY{year}"
         records.append(
-            FactRecord(
-                symbol="AAPL",
-                cik="CIK",
+            make_fact(
                 concept="EarningsPerShareDiluted",
-                fiscal_year=year,
-                fiscal_period="FY",
                 end_date=f"{year}-09-30",
-                unit="USD",
                 value=2.0 + 0.1 * (year - 2010),
-                accn=None,
-                filed=None,
                 frame=frame,
             )
         )
-    for year in range(2020, 2025):
+    for year in range(2015, 2025):
         end_date = f"{year}-09-30"
         records.extend(
             [
-                FactRecord("AAPL", "CIK", "AssetsCurrent", year, "FY", end_date, "USD", 400 + year, None, None, None),
-                FactRecord("AAPL", "CIK", "LiabilitiesCurrent", year, "FY", end_date, "USD", 200 + year, None, None, None),
-                FactRecord("AAPL", "CIK", "OperatingIncomeLoss", year, "FY", end_date, "USD", 150 + year, None, None, None),
-                FactRecord(
-                    "AAPL",
-                    "CIK",
-                    "PropertyPlantAndEquipmentNet",
-                    year,
-                    "FY",
-                    end_date,
-                    "USD",
-                    500 + year,
-                    None,
-                    None,
-                    None,
+                make_fact(concept="AssetsCurrent", end_date=end_date, value=400 + year),
+                make_fact(concept="LiabilitiesCurrent", end_date=end_date, value=200 + year),
+                make_fact(concept="OperatingIncomeLoss", end_date=end_date, value=150 + year),
+                make_fact(
+                    concept="PropertyPlantAndEquipmentNet",
+                    end_date=end_date,
+                    value=500 + year,
                 ),
             ]
         )
     records.extend(
-        [
-            FactRecord("AAPL", "CIK", "StockholdersEquity", 2024, "FY", "2024-09-30", "USD", 2000, None, None, None),
-            FactRecord("AAPL", "CIK", "CommonStockSharesOutstanding", 2024, "FY", "2024-09-30", "USD", 500, None, None, None),
-            FactRecord("AAPL", "CIK", "Goodwill", 2024, "FY", "2024-09-30", "USD", 100, None, None, None),
-            FactRecord("AAPL", "CIK", "IntangibleAssetsNet", 2024, "FY", "2024-09-30", "USD", 50, None, None, None),
-            FactRecord("AAPL", "CIK", "LongTermDebtNoncurrent", 2024, "FY", "2024-09-30", "USD", 300, None, None, None),
-        ]
+            [
+                make_fact(concept="StockholdersEquity", end_date="2024-09-30", value=2000),
+                make_fact(concept="StockholdersEquity", end_date="2023-09-30", value=1800),
+                make_fact(concept="StockholdersEquity", end_date="2022-09-30", value=1600),
+                make_fact(concept="StockholdersEquity", end_date="2021-09-30", value=1400),
+                make_fact(concept="StockholdersEquity", end_date="2020-09-30", value=1200),
+                make_fact(concept="StockholdersEquity", end_date="2019-09-30", value=1000),
+                make_fact(concept="NetIncomeLossAvailableToCommonStockholdersBasic", end_date="2024-09-30", value=250),
+                make_fact(concept="NetIncomeLossAvailableToCommonStockholdersBasic", end_date="2023-09-30", value=230),
+                make_fact(concept="NetIncomeLossAvailableToCommonStockholdersBasic", end_date="2022-09-30", value=210),
+                make_fact(concept="NetIncomeLossAvailableToCommonStockholdersBasic", end_date="2021-09-30", value=190),
+                make_fact(concept="NetIncomeLossAvailableToCommonStockholdersBasic", end_date="2020-09-30", value=170),
+                make_fact(concept="PreferredStock", end_date="2024-09-30", value=0),
+                make_fact(concept="CommonStockSharesOutstanding", end_date="2024-09-30", value=500),
+                make_fact(concept="Goodwill", end_date="2024-09-30", value=100),
+                make_fact(concept="IntangibleAssetsNet", end_date="2024-09-30", value=50),
+                make_fact(concept="LongTermDebtNoncurrent", end_date="2024-09-30", value=300),
+            ]
     )
     fact_repo.replace_facts("AAPL", records)
 
@@ -175,6 +183,7 @@ def test_cmd_compute_metrics_all(tmp_path):
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
     market_repo.upsert_price("AAPL", "2024-09-30", 150.0)
+    market_repo.upsert_price("AAPL", "2019-09-30", 100.0)
 
     rc = cli.cmd_compute_metrics("AAPL", ["placeholder"], str(db_path), run_all=True)
     assert rc == 0

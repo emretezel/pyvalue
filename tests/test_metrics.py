@@ -9,7 +9,26 @@ from pyvalue.metrics.graham_eps_cagr import GrahamEPSCAGRMetric
 from pyvalue.metrics.graham_multiplier import GrahamMultiplierMetric
 from pyvalue.metrics.earnings_yield import EarningsYieldMetric
 from pyvalue.metrics.roc_greenblatt import ROCGreenblattMetric
+from pyvalue.metrics.roe_greenblatt import ROEGreenblattMetric
 from pyvalue.storage import FactRecord
+
+
+def fact(**kwargs):
+    base = {
+        "symbol": "AAPL",
+        "cik": "CIK",
+        "concept": "",
+        "fiscal_period": "FY",
+        "end_date": "",
+        "unit": "USD",
+        "value": 0.0,
+        "accn": None,
+        "filed": None,
+        "frame": None,
+        "start_date": None,
+    }
+    base.update(kwargs)
+    return FactRecord(**base)
 
 
 def test_working_capital_metric_computes_difference(monkeypatch):
@@ -21,9 +40,9 @@ def test_working_capital_metric_computes_difference(monkeypatch):
 
         def latest_fact(self, symbol, concept):
             if concept == "AssetsCurrent":
-                return FactRecord(symbol, "CIK", concept, 2023, "FY", "2023-09-30", "USD", 200.0, None, None, None)
+                return fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=200.0)
             if concept == "LiabilitiesCurrent":
-                return FactRecord(symbol, "CIK", concept, 2023, "FY", "2023-09-30", "USD", 50.0, None, None, None)
+                return fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=50.0)
             return None
 
     repo = DummyRepo()
@@ -40,9 +59,9 @@ def test_current_ratio_metric(monkeypatch):
     class DummyRepo:
         def latest_fact(self, symbol, concept):
             if concept == "AssetsCurrent":
-                return FactRecord(symbol, "CIK", concept, 2023, "FY", "2023-09-30", "USD", 400.0, None, None, None)
+                return fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=400.0)
             if concept == "LiabilitiesCurrent":
-                return FactRecord(symbol, "CIK", concept, 2023, "FY", "2023-09-30", "USD", 200.0, None, None, None)
+                return fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=200.0)
             return None
 
     repo = DummyRepo()
@@ -58,10 +77,10 @@ def test_eps_streak_counts_consecutive_positive_years():
         def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
             if concept == "EarningsPerShareDiluted":
                 return [
-                    FactRecord(symbol, "CIK", concept, 2023, "FY", "2023-09-30", "USD", 2.0, None, None, "CY2023"),
-                    FactRecord(symbol, "CIK", concept, 2023, "FY", "2023-09-30", "USD", 2.1, None, None, "CY2023Q4"),
-                    FactRecord(symbol, "CIK", concept, 2022, "FY", "2022-09-30", "USD", 1.5, None, None, "CY2022"),
-                    FactRecord(symbol, "CIK", concept, 2021, "FY", "2021-09-30", "USD", -0.5, None, None, "CY2021"),
+                    fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=2.0, frame="CY2023"),
+                    fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=2.1, frame="CY2023Q4"),
+                    fact(symbol=symbol, concept=concept, end_date="2022-09-30", value=1.5, frame="CY2022"),
+                    fact(symbol=symbol, concept=concept, end_date="2021-09-30", value=-0.5, frame="CY2021"),
                 ]
             return []
 
@@ -81,18 +100,12 @@ def test_graham_eps_cagr_metric(monkeypatch):
                 for year in range(2000, 2015):
                     value = 1.0 + (year - 2000) * 0.1
                     records.append(
-                        FactRecord(
-                            symbol,
-                            "CIK",
-                            concept,
-                            year,
-                            "FY",
-                            f"{year}-09-30",
-                            "USD",
-                            value,
-                            None,
-                            None,
-                            "CY" + str(year),
+                        fact(
+                            symbol=symbol,
+                            concept=concept,
+                            end_date=f"{year}-09-30",
+                            value=value,
+                            frame="CY" + str(year),
                         )
                     )
                 return records
@@ -118,7 +131,7 @@ def test_graham_multiplier_metric(monkeypatch):
         def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
             if concept == "EarningsPerShareDiluted":
                 return [
-                    FactRecord(symbol, "CIK", concept, 2023, "FY", "2023-09-30", "USD", 5.0, None, None, "CY2023")
+                    fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=5.0, frame="CY2023")
                 ]
             return []
 
@@ -126,7 +139,7 @@ def test_graham_multiplier_metric(monkeypatch):
             value = self.values.get(concept)
             if value is None:
                 return None
-            return FactRecord(symbol, "CIK", concept, 2023, "FY", "2023-09-30", "USD", value, None, None, None)
+            return fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=value)
 
     class DummyMarketRepo:
         def latest_price(self, symbol):
@@ -144,7 +157,7 @@ def test_earnings_yield_metric(monkeypatch):
     class DummyRepo:
         def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
             if concept == "EarningsPerShareDiluted":
-                return [FactRecord(symbol, "CIK", concept, 2023, "FY", "2023-09-30", "USD", 5.0, None, None, "CY2023")]
+                return [fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=5.0, frame="CY2023")]
             return []
 
     class DummyMarketRepo:
@@ -164,25 +177,52 @@ def test_roc_greenblatt_metric(monkeypatch):
         def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
             if concept == "OperatingIncomeLoss":
                 return [
-                    FactRecord(symbol, "CIK", concept, 2023, "FY", "2023-09-30", "USD", 200, None, None, None),
-                    FactRecord(symbol, "CIK", concept, 2022, "FY", "2022-09-30", "USD", 150, None, None, None),
+                    fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=200),
+                    fact(symbol=symbol, concept=concept, end_date="2022-09-30", value=150),
                 ]
             if concept == "PropertyPlantAndEquipmentNet":
                 return [
-                    FactRecord(symbol, "CIK", concept, 2023, "FY", "2023-09-30", "USD", 500, None, None, None),
-                    FactRecord(symbol, "CIK", concept, 2022, "FY", "2022-09-30", "USD", 450, None, None, None),
+                    fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=500),
+                    fact(symbol=symbol, concept=concept, end_date="2022-09-30", value=450),
                 ]
             if concept == "AssetsCurrent":
                 return [
-                    FactRecord(symbol, "CIK", concept, 2023, "FY", "2023-09-30", "USD", 400, None, None, None),
-                    FactRecord(symbol, "CIK", concept, 2022, "FY", "2022-09-30", "USD", 350, None, None, None),
+                    fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=400),
+                    fact(symbol=symbol, concept=concept, end_date="2022-09-30", value=350),
                 ]
             if concept == "LiabilitiesCurrent":
                 return [
-                    FactRecord(symbol, "CIK", concept, 2023, "FY", "2023-09-30", "USD", 300, None, None, None),
-                    FactRecord(symbol, "CIK", concept, 2022, "FY", "2022-09-30", "USD", 250, None, None, None),
+                    fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=300),
+                    fact(symbol=symbol, concept=concept, end_date="2022-09-30", value=250),
                 ]
             return []
+
+    repo = DummyRepo()
+    result = metric.compute("AAPL", repo)
+    assert result is not None
+    assert result.value > 0
+
+def test_roe_greenblatt_metric(monkeypatch):
+    metric = ROEGreenblattMetric()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "NetIncomeLossAvailableToCommonStockholdersBasic":
+                return [
+                    fact(symbol=symbol, concept=concept, end_date="2024-09-30", value=200),
+                    fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=180),
+                ]
+            if concept == "CommonStockholdersEquity":
+                return [
+                    fact(symbol=symbol, concept=concept, end_date="2024-09-30", value=1000),
+                    fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=900),
+                ]
+            return []
+
+        def latest_fact(self, symbol, concept):
+            if concept == "PreferredStock":
+                return fact(symbol=symbol, concept=concept, end_date="2024-09-30", value=0)
+            return None
 
     repo = DummyRepo()
     result = metric.compute("AAPL", repo)

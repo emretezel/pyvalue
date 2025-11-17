@@ -8,22 +8,23 @@ from pyvalue.normalization import SECFactsNormalizer
 def test_normalizer_emits_records_for_target_concepts():
     payload = {
         "facts": {
-            "us-gaap": {
-                "NetIncomeLoss": {
-                    "units": {
-                        "USD": [
-                            {
-                                "val": "123.45",
-                                "fy": 2023,
-                                "fp": "FY",
-                                "end": "2023-09-30",
-                                "accn": "000",
-                                "filed": "2023-10-30",
-                                "frame": "CY2023",
-                            }
-                        ]
-                    }
-                },
+                "us-gaap": {
+                    "NetIncomeLoss": {
+                        "units": {
+                            "USD": [
+                                {
+                                    "val": "123.45",
+                                    "fy": 2023,
+                                    "fp": "FY",
+                                    "end": "2023-09-30",
+                                    "accn": "000",
+                                    "filed": "2023-10-30",
+                                    "frame": "CY2023",
+                                    "form": "10-K",
+                                }
+                            ]
+                        }
+                    },
                 "Unused": {
                     "units": {"USD": [{"val": 1, "end": "2023-09-30"}]}
                 },
