@@ -176,14 +176,38 @@ def test_cmd_compute_metrics_all(tmp_path):
                 make_fact(concept="LongTermDebtNoncurrent", end_date="2024-09-30", value=300),
             ]
     )
+    quarterly_cash_flows = [
+        ("2024-12-31", "Q4", 130.0, 40.0),
+        ("2024-09-30", "Q3", 120.0, 35.0),
+        ("2024-06-30", "Q2", 110.0, 30.0),
+        ("2024-03-31", "Q1", 100.0, 25.0),
+        ("2023-12-31", "Q4", 90.0, 20.0),
+    ]
+    for end_date, period, ocf, capex in quarterly_cash_flows:
+        records.append(
+            make_fact(
+                concept="NetCashProvidedByUsedInOperatingActivities",
+                end_date=end_date,
+                fiscal_period=period,
+                value=ocf,
+            )
+        )
+        records.append(
+            make_fact(
+                concept="PaymentsToAcquirePropertyPlantAndEquipment",
+                end_date=end_date,
+                fiscal_period=period,
+                value=capex,
+            )
+        )
     fact_repo.replace_facts("AAPL", records)
 
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    market_repo.upsert_price("AAPL", "2024-09-30", 150.0)
-    market_repo.upsert_price("AAPL", "2019-09-30", 100.0)
+    market_repo.upsert_price("AAPL", "2024-09-30", 150.0, market_cap=50000.0)
+    market_repo.upsert_price("AAPL", "2019-09-30", 100.0, market_cap=30000.0)
 
     rc = cli.cmd_compute_metrics("AAPL", ["placeholder"], str(db_path), run_all=True)
     assert rc == 0

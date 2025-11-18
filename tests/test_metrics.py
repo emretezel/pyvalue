@@ -8,6 +8,7 @@ from pyvalue.metrics.eps_streak import EPSStreakMetric
 from pyvalue.metrics.graham_eps_cagr import GrahamEPSCAGRMetric
 from pyvalue.metrics.graham_multiplier import GrahamMultiplierMetric
 from pyvalue.metrics.earnings_yield import EarningsYieldMetric
+from pyvalue.metrics.price_to_fcf import PriceToFCFMetric
 from pyvalue.metrics.roc_greenblatt import ROCGreenblattMetric
 from pyvalue.metrics.roe_greenblatt import ROEGreenblattMetric
 from pyvalue.storage import FactRecord
@@ -169,6 +170,42 @@ def test_earnings_yield_metric(monkeypatch):
     result = metric.compute("AAPL", repo, market_repo)
     assert result is not None
     assert result.value == 0.1
+
+def test_price_to_fcf_metric():
+    metric = PriceToFCFMetric()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "NetCashProvidedByUsedInOperatingActivities":
+                return [
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q4", end_date="2023-12-31", value=130.0),
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q3", end_date="2023-09-30", value=120.0),
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q2", end_date="2023-06-30", value=110.0),
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q1", end_date="2023-03-31", value=100.0),
+                ]
+            if concept == "PaymentsToAcquirePropertyPlantAndEquipment":
+                return [
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q4", end_date="2023-12-31", value=-30.0),
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q3", end_date="2023-09-30", value=-40.0),
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q2", end_date="2023-06-30", value=-50.0),
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q1", end_date="2023-03-31", value=-60.0),
+                ]
+            return []
+
+    class DummyMarketRepo:
+        def latest_snapshot(self, symbol):
+            class Snapshot:
+                market_cap = 6400.0
+                as_of = "2024-03-31"
+
+            return Snapshot()
+
+    repo = DummyRepo()
+    market_repo = DummyMarketRepo()
+
+    result = metric.compute("AAPL", repo, market_repo)
+    assert result is not None
+    assert result.value == 10.0
 
 def test_roc_greenblatt_metric(monkeypatch):
     metric = ROCGreenblattMetric()

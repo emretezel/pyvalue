@@ -12,6 +12,7 @@ import json
 import sqlite3
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
+from pyvalue.marketdata.base import PriceData
 from pyvalue.universe import Listing
 
 
@@ -403,11 +404,12 @@ class MarketDataRepository(SQLiteStore):
                 (symbol.upper(), as_of, price, volume, market_cap, currency),
             )
 
-    def latest_price(self, symbol: str) -> Optional[Tuple[str, float]]:
+    def latest_snapshot(self, symbol: str) -> Optional[PriceData]:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT as_of, price FROM market_data
+                SELECT symbol, as_of, price, volume, market_cap, currency
+                FROM market_data
                 WHERE symbol = ?
                 ORDER BY as_of DESC
                 LIMIT 1
@@ -416,7 +418,20 @@ class MarketDataRepository(SQLiteStore):
             ).fetchone()
         if row is None:
             return None
-        return row[0], row[1]
+        return PriceData(
+            symbol=row["symbol"],
+            price=row["price"],
+            as_of=row["as_of"],
+            volume=row["volume"],
+            market_cap=row["market_cap"],
+            currency=row["currency"],
+        )
+
+    def latest_price(self, symbol: str) -> Optional[Tuple[str, float]]:
+        snapshot = self.latest_snapshot(symbol)
+        if snapshot is None:
+            return None
+        return snapshot.as_of, snapshot.price
 
 
 __all__ = [
