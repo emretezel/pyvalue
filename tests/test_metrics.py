@@ -8,6 +8,7 @@ from pyvalue.metrics.eps_streak import EPSStreakMetric
 from pyvalue.metrics.graham_eps_cagr import GrahamEPSCAGRMetric
 from pyvalue.metrics.graham_multiplier import GrahamMultiplierMetric
 from pyvalue.metrics.earnings_yield import EarningsYieldMetric
+from pyvalue.metrics.market_capitalization import MarketCapitalizationMetric
 from pyvalue.metrics.price_to_fcf import PriceToFCFMetric
 from pyvalue.metrics.roc_greenblatt import ROCGreenblattMetric
 from pyvalue.metrics.roe_greenblatt import ROEGreenblattMetric
@@ -206,6 +207,28 @@ def test_price_to_fcf_metric():
     result = metric.compute("AAPL", repo, market_repo)
     assert result is not None
     assert result.value == 10.0
+
+def test_market_capitalization_metric():
+    metric = MarketCapitalizationMetric()
+
+    class DummyRepo:
+        pass
+
+    class DummyMarketRepo:
+        def latest_snapshot(self, symbol):
+            class Snapshot:
+                market_cap = 123456789.0
+                as_of = "2024-05-01"
+
+            return Snapshot()
+
+    repo = DummyRepo()
+    market_repo = DummyMarketRepo()
+
+    result = metric.compute("AAPL", repo, market_repo)
+    assert result is not None
+    assert result.value == 123456789.0
+    assert result.as_of == "2024-05-01"
 
 def test_roc_greenblatt_metric(monkeypatch):
     metric = ROCGreenblattMetric()

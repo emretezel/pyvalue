@@ -11,6 +11,7 @@ from .eps_streak import EPSStreakMetric
 from .graham_eps_cagr import GrahamEPSCAGRMetric
 from .graham_multiplier import GrahamMultiplierMetric
 from .earnings_yield import EarningsYieldMetric
+from .market_capitalization import MarketCapitalizationMetric
 from .price_to_fcf import PriceToFCFMetric
 from .roc_greenblatt import ROCGreenblattMetric
 from .roe_greenblatt import ROEGreenblattMetric
@@ -23,6 +24,7 @@ REGISTRY = {
     GrahamEPSCAGRMetric.id: GrahamEPSCAGRMetric,
     GrahamMultiplierMetric.id: GrahamMultiplierMetric,
     EarningsYieldMetric.id: EarningsYieldMetric,
+    MarketCapitalizationMetric.id: MarketCapitalizationMetric,
     PriceToFCFMetric.id: PriceToFCFMetric,
     ROCGreenblattMetric.id: ROCGreenblattMetric,
     ROEGreenblattMetric.id: ROEGreenblattMetric,
@@ -38,6 +40,7 @@ __all__ = [
     "GrahamEPSCAGRMetric",
     "GrahamMultiplierMetric",
     "EarningsYieldMetric",
+    "MarketCapitalizationMetric",
     "PriceToFCFMetric",
     "ROCGreenblattMetric",
     "ROEGreenblattMetric",
