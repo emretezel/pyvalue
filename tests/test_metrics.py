@@ -12,6 +12,8 @@ from pyvalue.metrics.market_capitalization import MarketCapitalizationMetric
 from pyvalue.metrics.price_to_fcf import PriceToFCFMetric
 from pyvalue.metrics.roc_greenblatt import ROCGreenblattMetric
 from pyvalue.metrics.roe_greenblatt import ROEGreenblattMetric
+from pyvalue.metrics.eps_quarterly import EarningsPerShareTTM
+from pyvalue.metrics.eps_average import EPSAverageSixYearMetric
 from pyvalue.storage import FactRecord
 
 
@@ -207,6 +209,55 @@ def test_price_to_fcf_metric():
     result = metric.compute("AAPL", repo, market_repo)
     assert result is not None
     assert result.value == 10.0
+
+def test_eps_ttm_metric():
+    metric = EarningsPerShareTTM()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "EarningsPerShareDiluted":
+                return [
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q4", end_date="2023-12-31", value=2.5),
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q3", end_date="2023-09-30", value=2.0),
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q2", end_date="2023-06-30", value=1.5),
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q1", end_date="2023-03-31", value=1.0),
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q4", end_date="2022-12-31", value=0.5),
+                ]
+            return []
+
+    repo = DummyRepo()
+    result = metric.compute("AAPL", repo)
+    assert result is not None
+    assert result.value == 7.0
+    assert result.as_of == "2023-12-31"
+
+def test_eps_6y_avg_metric():
+    metric = EPSAverageSixYearMetric()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "EarningsPerShareDiluted":
+                records = []
+                for idx, year in enumerate(range(2018, 2025), start=1):
+                    records.append(
+                        fact(
+                            symbol=symbol,
+                            concept=concept,
+                            fiscal_period="FY",
+                            end_date=f"{year}-09-30",
+                            value=float(idx),
+                            frame=f"CY{year}",
+                        )
+                    )
+                return records
+            return []
+
+    repo = DummyRepo()
+    result = metric.compute("AAPL", repo)
+    assert result is not None
+    # last six entries values 2..7 -> avg 4.5
+    assert result.value == sum(range(2, 8)) / 6
+    assert result.as_of == "2024-09-30"
 
 def test_market_capitalization_metric():
     metric = MarketCapitalizationMetric()

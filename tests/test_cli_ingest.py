@@ -140,6 +140,7 @@ def test_cmd_compute_metrics_all(tmp_path):
                 end_date=f"{year}-09-30",
                 value=2.0 + 0.1 * (year - 2010),
                 frame=frame,
+                fiscal_period="FY",
             )
         )
     for year in range(2015, 2025):
@@ -198,6 +199,23 @@ def test_cmd_compute_metrics_all(tmp_path):
                 end_date=end_date,
                 fiscal_period=period,
                 value=capex,
+            )
+        )
+    quarterly_eps = [
+        ("2024-12-31", "Q4", 2.5),
+        ("2024-09-30", "Q3", 2.0),
+        ("2024-06-30", "Q2", 1.5),
+        ("2024-03-31", "Q1", 1.0),
+        ("2023-12-31", "Q4", 0.5),
+    ]
+    for end_date, period, value in quarterly_eps:
+        records.append(
+            make_fact(
+                concept="EarningsPerShareDiluted",
+                end_date=end_date,
+                fiscal_period=period,
+                value=value,
+                frame=f"CY{end_date[:4]}{period}",
             )
         )
     fact_repo.replace_facts("AAPL", records)
