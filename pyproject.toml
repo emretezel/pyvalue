@@ -9,7 +9,7 @@ description = "Fundamental data ingestion and screening toolkit."
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [{ name = "Emre Tezel" }]
-license = { text = "Proprietary" }
+license = { text = "Apache-2.0" }
 dependencies = [
     "pandas>=2.1",
     "requests>=2.31",
