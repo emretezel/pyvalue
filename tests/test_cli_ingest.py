@@ -251,6 +251,50 @@ def test_cmd_recalc_market_cap(tmp_path):
     snapshot_b = market_repo.latest_snapshot("BBB")
     assert snapshot_b.market_cap is None
 
+def test_cmd_run_screen_bulk(tmp_path, capsys):
+    db_path = tmp_path / "screen.db"
+    universe_repo = UniverseRepository(db_path)
+    universe_repo.initialize_schema()
+    universe_repo.replace_universe(
+        [
+            Listing(symbol="AAA", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB", security_name="BBB Inc", exchange="NYSE"),
+        ],
+        region="US",
+    )
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+    metrics_repo.upsert("AAA", "working_capital", 100.0, "2023-12-31")
+    metrics_repo.upsert("BBB", "working_capital", 50.0, "2023-12-31")
+
+    screen_path = tmp_path / "screen.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Working capital minimum"
+    left:
+      metric: working_capital
+    operator: ">="
+    right:
+      value: 75
+"""
+    )
+
+    csv_path = tmp_path / "results.csv"
+
+    rc = cli.cmd_run_screen_bulk(
+        config_path=str(screen_path),
+        database=str(db_path),
+        region="US",
+        output_csv=str(csv_path),
+    )
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "AAA" in output
+    assert "BBB" not in output
+    csv_contents = csv_path.read_text().strip().splitlines()
+    assert csv_contents[0] == "Criterion,AAA"
+
 def test_cmd_compute_metrics(tmp_path):
     db_path = tmp_path / "facts.db"
     fact_repo = FinancialFactsRepository(db_path)
