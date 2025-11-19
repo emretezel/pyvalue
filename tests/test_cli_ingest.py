@@ -316,7 +316,10 @@ def test_cmd_compute_metrics(tmp_path):
         [
             make_fact(concept="AssetsCurrent", end_date="2023-09-30", value=500),
             make_fact(concept="LiabilitiesCurrent", end_date="2023-09-30", value=200),
-            make_fact(concept="EarningsPerShareDiluted", end_date="2023-09-30", value=5.0, frame="CY2023"),
+            make_fact(concept="EarningsPerShareDiluted", end_date="2023-12-31", value=2.5, fiscal_period="Q4"),
+            make_fact(concept="EarningsPerShareDiluted", end_date="2023-09-30", value=2.0, fiscal_period="Q3"),
+            make_fact(concept="EarningsPerShareDiluted", end_date="2023-06-30", value=1.5, fiscal_period="Q2"),
+            make_fact(concept="EarningsPerShareDiluted", end_date="2023-03-31", value=1.0, fiscal_period="Q1"),
             make_fact(concept="StockholdersEquity", end_date="2023-09-30", value=1000),
             make_fact(concept="CommonStockSharesOutstanding", end_date="2023-09-30", value=100),
             make_fact(concept="Goodwill", end_date="2023-09-30", value=50),
