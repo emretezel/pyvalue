@@ -12,7 +12,7 @@ import time
 from typing import Optional, Sequence
 
 from pyvalue.ingestion import SECCompanyFactsClient
-from pyvalue.marketdata.service import MarketDataService
+from pyvalue.marketdata.service import MarketDataService, latest_share_count
 from pyvalue.metrics import REGISTRY
 from pyvalue.normalization import SECFactsNormalizer
 from pyvalue.screening import evaluate_criterion, load_screen
@@ -115,6 +115,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=950.0,
         help="Throttle speed in symbols per minute (default: %(default)s)",
+    )
+
+    recalc_market_cap = subparsers.add_parser(
+        "recalc-market-cap",
+        help="Recompute stored market caps using latest price and share counts.",
+    )
+    recalc_market_cap.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
     )
 
     normalize_facts = subparsers.add_parser(
@@ -486,6 +496,44 @@ def cmd_compute_metrics_bulk(database: str, region: str, metric_ids: Optional[Se
     return 0
 
 
+def cmd_recalc_market_cap(database: str) -> int:
+    """Recompute market cap values for stored market data."""
+
+    market_repo = MarketDataRepository(database)
+    market_repo.initialize_schema()
+    fact_repo = FinancialFactsRepository(database)
+    fact_repo.initialize_schema()
+
+    with market_repo._connect() as conn:
+        symbols = [row[0] for row in conn.execute("SELECT DISTINCT symbol FROM market_data ORDER BY symbol")]
+    if not symbols:
+        print("No market data found to update.")
+        return 0
+
+    total = len(symbols)
+    updated_rows = 0
+    print(f"Recomputing market cap for {total} symbols")
+    try:
+        with market_repo._connect() as conn:
+            for idx, symbol in enumerate(symbols, 1):
+                shares = latest_share_count(symbol, fact_repo)
+                if shares is None or shares <= 0:
+                    LOGGER.warning("Skipping %s due to missing share count", symbol)
+                    continue
+                cursor = conn.execute(
+                    "UPDATE market_data SET market_cap = price * ? WHERE symbol = ?",
+                    (shares, symbol),
+                )
+                updated_rows += cursor.rowcount or 0
+                print(f"[{idx}/{total}] Updated market cap for {symbol}", flush=True)
+    except KeyboardInterrupt:
+        print("\nMarket cap recalculation cancelled by user.")
+        return 1
+
+    print(f"Updated market cap for {updated_rows} rows in {database}")
+    return 0
+
+
 def cmd_run_screen(symbol: str, config_path: str, database: str) -> int:
     """Evaluate screening criteria against stored/derived metrics."""
 
@@ -551,6 +599,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             region=args.region,
             metric_ids=args.metrics,
         )
+    if args.command == "recalc-market-cap":
+        return cmd_recalc_market_cap(database=args.database)
     if args.command == "run-screen":
         return cmd_run_screen(symbol=args.symbol, config_path=args.config, database=args.database)
 
