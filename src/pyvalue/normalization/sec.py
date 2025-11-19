@@ -55,6 +55,7 @@ TARGET_CONCEPTS = {
     "CommonStockDividendsPerShareDeclared",
     # Shares / valuation
     "CommonStockSharesOutstanding",
+    "EntityCommonStockSharesOutstanding",
     "CommonStockDividendsPaid",
     "WeightedAverageNumberOfDilutedSharesOutstanding",
     "WeightedAverageDilutedSharesOutstanding",
