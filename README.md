@@ -27,8 +27,11 @@ The loader downloads Nasdaq Trader symbol directories, filters out test issues, 
 Persist the US universe into a local SQLite database via the CLI:
 
 ```bash
-pyvalue load-us-universe --database data/pyvalue.db
+pyvalue load-us-universe
 ```
+
+Unless noted otherwise, every CLI command accepts `--database` to point at a specific SQLite file;
+if omitted, it defaults to `data/pyvalue.db`.
 
 ETFs are excluded by default; pass `--include-etfs` to store them as well.
 
@@ -48,7 +51,7 @@ export PYVALUE_SEC_USER_AGENT="pyvalue/0.1 (contact: you@example.com)"
 Then ingest the latest company facts for a ticker (AAPL shown below):
 
 ```bash
-pyvalue ingest-us-facts AAPL --database data/pyvalue.db
+pyvalue ingest-us-facts AAPL
 ```
 
 This downloads the JSON payload from `https://data.sec.gov/api/xbrl/companyfacts/…` and
@@ -57,13 +60,13 @@ stores it in the `company_facts` table. Pass `--cik` if you already know the exa
 Normalize the previously ingested payload into structured rows for downstream metrics:
 
 ```bash
-pyvalue normalize-us-facts AAPL --database data/pyvalue.db
+pyvalue normalize-us-facts AAPL
 ```
 
 To normalize every stored SEC payload after a bulk ingest, run:
 
 ```bash
-pyvalue normalize-us-facts-bulk --database data/pyvalue.db
+pyvalue normalize-us-facts-bulk
 ```
 
 This iterates over the `company_facts` table, converts each JSON payload into
@@ -94,7 +97,7 @@ To refresh every stored ticker (using the latest universe in SQLite) with thrott
 respects EODHD limits, run:
 
 ```bash
-pyvalue update-market-data-bulk --database data/pyvalue.db --rate 950
+pyvalue update-market-data-bulk --rate 950
 ```
 
 The bulk command enforces the requested symbols-per-minute rate (950 by default) and can
@@ -103,7 +106,7 @@ be interrupted with Ctrl+C.
 If you ingest raw prices before share counts were available, recompute stored market caps later via:
 
 ```bash
-pyvalue recalc-market-cap --database data/pyvalue.db
+pyvalue recalc-market-cap
 ```
 
 This multiplies each stored price by the latest share count from normalized SEC data.
@@ -125,7 +128,7 @@ pyvalue compute-metrics AAPL --metrics working_capital long_term_debt
 To compute the full metric set for every stored ticker, run:
 
 ```bash
-pyvalue compute-metrics-bulk --database data/pyvalue.db
+pyvalue compute-metrics-bulk
 ```
 
 The bulk command iterates over the stored universe (default US), evaluates each metric,
@@ -143,7 +146,7 @@ valuation). Metrics are cached in the `metrics` table for reuse.
 To evaluate every stored symbol and print a pass-only table, run:
 
 ```bash
-pyvalue run-screen-bulk screeners/value.yml --database data/pyvalue.db
+pyvalue run-screen-bulk screeners/value.yml --output-csv results.csv
 ```
 
 Rows represent criteria and columns show the symbols that satisfied every rule along with the
@@ -161,3 +164,30 @@ Additional metrics include:
 ## Private configuration
 
 Place API keys or region-specific credentials inside the `private/` directory (ignored by git).
+
+## End-to-end workflow
+
+1. Load the latest US universe into SQLite:
+   ```bash
+   pyvalue load-us-universe
+   ```
+2. Ingest SEC facts for every stored ticker (honors API-rate throttling):
+   ```bash
+   pyvalue ingest-us-facts-bulk --user-agent "pyvalue/0.1 (your@email)"
+   ```
+3. Normalize the ingested payloads so metrics can consume them:
+   ```bash
+   pyvalue normalize-us-facts-bulk
+   ```
+4. Fetch market data for every ticker (default EODHD, throttled to 950/min):
+   ```bash
+   pyvalue update-market-data-bulk
+   ```
+5. Compute the entire metric set for all tickers:
+   ```bash
+   pyvalue compute-metrics-bulk
+   ```
+6. Run the value screen across the universe (optional CSV export):
+   ```bash
+   pyvalue run-screen-bulk screeners/value.yml --output-csv results.csv
+   ```
