@@ -6,6 +6,7 @@ Author: Emre Tezel
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import time
 from typing import Optional, Sequence
@@ -126,6 +127,15 @@ def build_parser() -> argparse.ArgumentParser:
         default="data/pyvalue.db",
         help="SQLite database file used for storage (default: %(default)s)",
     )
+    normalize_facts_bulk = subparsers.add_parser(
+        "normalize-us-facts-bulk",
+        help="Normalize SEC facts for all stored tickers.",
+    )
+    normalize_facts_bulk.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
+    )
 
     market_data = subparsers.add_parser(
         "update-market-data",
@@ -158,6 +168,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--database",
         default="data/pyvalue.db",
         help="SQLite database file used for storage (default: %(default)s)",
+    )
+
+    bulk_metrics = subparsers.add_parser(
+        "compute-metrics-bulk",
+        help="Compute metrics for all stored listings.",
+    )
+    bulk_metrics.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
+    )
+    bulk_metrics.add_argument(
+        "--region",
+        default="US",
+        help="Universe region key stored in SQLite (default: %(default)s)",
+    )
+    bulk_metrics.add_argument(
+        "--metrics",
+        nargs="+",
+        default=None,
+        help="Metric identifiers to compute (default: all registered metrics)",
     )
 
     run_screen = subparsers.add_parser(
@@ -297,6 +328,35 @@ def cmd_normalize_us_facts(symbol: str, database: str) -> int:
     return 0
 
 
+def cmd_normalize_us_facts_bulk(database: str) -> int:
+    """Normalize raw SEC facts for every stored ticker."""
+
+    company_repo = CompanyFactsRepository(database)
+    normalization_repo = FinancialFactsRepository(database)
+    normalization_repo.initialize_schema()
+
+    cursor = company_repo._connect().execute("SELECT symbol, cik, data FROM company_facts")
+    rows = cursor.fetchall()
+    if not rows:
+        raise SystemExit("No raw SEC facts found. Run ingest-us-facts or ingest-us-facts-bulk first.")
+
+    normalizer = SECFactsNormalizer()
+    total = len(rows)
+    print(f"Normalizing SEC facts for {total} symbols")
+    try:
+        for idx, (symbol, cik, data_json) in enumerate(rows, 1):
+            payload = json.loads(data_json)
+            records = normalizer.normalize(payload, symbol=symbol, cik=cik)
+            stored = normalization_repo.replace_facts(symbol, records)
+            print(f"[{idx}/{total}] Stored {stored} normalized facts for {symbol}", flush=True)
+    except KeyboardInterrupt:
+        print("\nBulk normalization cancelled by user.")
+        return 1
+
+    print(f"Normalized SEC facts for {total} symbols into {database}")
+    return 0
+
+
 def cmd_update_market_data(symbol: str, database: str) -> int:
     """Fetch latest market data for a ticker and store it."""
 
@@ -373,6 +433,59 @@ def cmd_compute_metrics(symbol: str, metric_ids: Sequence[str], database: str, r
     return 0
 
 
+def cmd_compute_metrics_bulk(database: str, region: str, metric_ids: Optional[Sequence[str]]) -> int:
+    """Compute metrics for all listings stored in the universe."""
+
+    universe_repo = UniverseRepository(database)
+    symbols = universe_repo.fetch_symbols(region)
+    if not symbols:
+        raise SystemExit(f"No universe symbols found for region {region}. Run load-us-universe first.")
+
+    fact_repo = FinancialFactsRepository(database)
+    metrics_repo = MetricsRepository(database)
+    metrics_repo.initialize_schema()
+    market_repo = MarketDataRepository(database)
+    market_repo.initialize_schema()
+
+    ids_to_compute = list(metric_ids) if metric_ids else list(REGISTRY.keys())
+    if not ids_to_compute:
+        raise SystemExit("No metrics specified.")
+
+    total_symbols = len(symbols)
+    print(f"Computing metrics for {total_symbols} symbols ({len(ids_to_compute)} metrics each)")
+
+    try:
+        for idx, symbol in enumerate(symbols, 1):
+            symbol_upper = symbol.upper()
+            computed = 0
+            for metric_id in ids_to_compute:
+                metric_cls = REGISTRY.get(metric_id)
+                if metric_cls is None:
+                    LOGGER.warning("Unknown metric id: %s", metric_id)
+                    continue
+                metric = metric_cls()
+                try:
+                    if getattr(metric, "uses_market_data", False):
+                        result = metric.compute(symbol_upper, fact_repo, market_repo)
+                    else:
+                        result = metric.compute(symbol_upper, fact_repo)
+                except Exception as exc:  # pragma: no cover - metric errors
+                    LOGGER.error("Metric %s failed for %s: %s", metric_id, symbol_upper, exc)
+                    continue
+                if result is None:
+                    LOGGER.warning("Metric %s could not be computed for %s", metric_id, symbol_upper)
+                    continue
+                metrics_repo.upsert(result.symbol, result.metric_id, result.value, result.as_of)
+                computed += 1
+            print(f"[{idx}/{total_symbols}] Computed {computed} metrics for {symbol_upper}", flush=True)
+    except KeyboardInterrupt:
+        print("\nBulk metric computation cancelled by user.")
+        return 1
+
+    print(f"Computed metrics for {total_symbols} symbols in {database}")
+    return 0
+
+
 def cmd_run_screen(symbol: str, config_path: str, database: str) -> int:
     """Evaluate screening criteria against stored/derived metrics."""
 
@@ -415,6 +528,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
     if args.command == "normalize-us-facts":
         return cmd_normalize_us_facts(symbol=args.symbol, database=args.database)
+    if args.command == "normalize-us-facts-bulk":
+        return cmd_normalize_us_facts_bulk(database=args.database)
     if args.command == "update-market-data":
         return cmd_update_market_data(symbol=args.symbol, database=args.database)
     if args.command == "update-market-data-bulk":
@@ -429,6 +544,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             metric_ids=args.metrics,
             database=args.database,
             run_all=args.all,
+        )
+    if args.command == "compute-metrics-bulk":
+        return cmd_compute_metrics_bulk(
+            database=args.database,
+            region=args.region,
+            metric_ids=args.metrics,
         )
     if args.command == "run-screen":
         return cmd_run_screen(symbol=args.symbol, config_path=args.config, database=args.database)

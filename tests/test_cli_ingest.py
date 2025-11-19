@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from pyvalue import cli
 from pyvalue.metrics import REGISTRY
+from pyvalue.metrics.base import MetricResult
 from pyvalue.storage import (
     CompanyFactsRepository,
     FinancialFactsRepository,
@@ -124,6 +125,40 @@ def test_cmd_update_market_data_bulk(monkeypatch, tmp_path):
     assert rc == 0
     assert calls == ["AAA", "BBB"]
 
+def test_cmd_compute_metrics_bulk(monkeypatch, tmp_path):
+    db_path = tmp_path / "metricsbulk.db"
+    universe_repo = UniverseRepository(db_path)
+    universe_repo.initialize_schema()
+    listings = [
+        Listing(symbol="AAA", security_name="AAA Inc", exchange="NYSE"),
+        Listing(symbol="BBB", security_name="BBB Inc", exchange="NYSE"),
+    ]
+    universe_repo.replace_universe(listings, region="US")
+
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    for symbol in ["AAA", "BBB"]:
+        fact_repo.replace_facts(symbol, [])
+
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+
+    class DummyMetric:
+        id = "dummy_metric"
+        required_concepts = ()
+        uses_market_data = False
+
+        def compute(self, symbol, repo):
+            return MetricResult(symbol=symbol, metric_id=self.id, value=len(symbol), as_of="2024-01-01")
+
+    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
+
+    rc = cli.cmd_compute_metrics_bulk(database=str(db_path), region="US", metric_ids=None)
+    assert rc == 0
+
+    assert metrics_repo.fetch("AAA", "dummy_metric")[0] == 3
+    assert metrics_repo.fetch("BBB", "dummy_metric")[0] == 3
+
 def test_cmd_normalize_us_facts(monkeypatch, tmp_path):
     db_path = tmp_path / "facts.db"
     company_repo = CompanyFactsRepository(db_path)
@@ -161,6 +196,33 @@ def test_cmd_normalize_us_facts(monkeypatch, tmp_path):
         "SELECT concept, value FROM financial_facts WHERE symbol='AAPL'"
     ).fetchall()
     assert [(row[0], row[1]) for row in rows] == [("NetIncomeLoss", 123.0)]
+
+def test_cmd_normalize_us_facts_bulk(monkeypatch, tmp_path):
+    db_path = tmp_path / "facts.db"
+    company_repo = CompanyFactsRepository(db_path)
+    company_repo.initialize_schema()
+    company_repo.upsert_company_facts("AAA", "CIK00001", {"facts": {}})
+    company_repo.upsert_company_facts("BBB", "CIK00002", {"facts": {}})
+
+    class DummyNormalizer:
+        def normalize(self, payload, symbol, cik):
+            return [
+                make_fact(symbol=symbol, cik=cik, concept="Dummy", end_date="2023-12-31", value=len(symbol))
+            ]
+
+    normalization_repo = FinancialFactsRepository(db_path)
+    normalization_repo.initialize_schema()
+
+    normalizer = DummyNormalizer()
+    monkeypatch.setattr(cli, "SECFactsNormalizer", lambda: normalizer)
+
+    rc = cli.cmd_normalize_us_facts_bulk(database=str(db_path))
+    assert rc == 0
+    cursor = normalization_repo._connect().execute(
+        "SELECT symbol, value FROM financial_facts ORDER BY symbol"
+    )
+    facts = [(row[0], row[1]) for row in cursor.fetchall()]
+    assert facts == [("AAA", 3.0), ("BBB", 3.0)]
 
 def test_cmd_compute_metrics(tmp_path):
     db_path = tmp_path / "facts.db"

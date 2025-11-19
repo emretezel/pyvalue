@@ -181,3 +181,32 @@ def test_normalizer_drops_beginning_balance_duplicates_for_instant_facts():
     assert by_period["Q2", "2024-03-30"] == 220
     assert by_period["Q3", "2024-06-29"] == 260
     assert by_period["Q4", "2024-09-28"] == 300
+
+
+def test_normalizer_includes_entity_common_shares():
+    payload = {
+        "facts": {
+            "dei": {
+                "EntityCommonStockSharesOutstanding": {
+                    "units": {
+                        "shares": [
+                            {
+                                "val": "1000",
+                                "fy": 2023,
+                                "fp": "FY",
+                                "end": "2023-09-30",
+                                "filed": "2023-10-30",
+                                "frame": "CY2023",
+                                "form": "10-K",
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    normalizer = SECFactsNormalizer()
+
+    records = normalizer.normalize(payload, symbol="AAA", cik="CIK0000")
+    concepts = {rec.concept for rec in records}
+    assert "EntityCommonStockSharesOutstanding" in concepts

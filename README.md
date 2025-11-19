@@ -60,6 +60,15 @@ Normalize the previously ingested payload into structured rows for downstream me
 pyvalue normalize-us-facts AAPL --database data/pyvalue.db
 ```
 
+To normalize every stored SEC payload after a bulk ingest, run:
+
+```bash
+pyvalue normalize-us-facts-bulk --database data/pyvalue.db
+```
+
+This iterates over the `company_facts` table, converts each JSON payload into
+`financial_facts`, reports progress, and can be cancelled with Ctrl+C.
+
 This populates the `financial_facts` table with the concepts required to compute the
 initial metric set (debt, current assets/liabilities, EPS, dividends, cash flow, etc.).
 
@@ -104,6 +113,15 @@ Compute metrics (e.g., working capital, long-term debt) for a ticker:
 ```bash
 pyvalue compute-metrics AAPL --metrics working_capital long_term_debt
 ```
+
+To compute the full metric set for every stored ticker, run:
+
+```bash
+pyvalue compute-metrics-bulk --database data/pyvalue.db
+```
+
+The bulk command iterates over the stored universe (default US), evaluates each metric,
+prints progress, and can be cancelled with Ctrl+C.
 
 Define screening criteria in YAML (see `screeners/low_debt.yml`) and evaluate them:
 
