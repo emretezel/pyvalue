@@ -6,16 +6,17 @@ Author: Emre Tezel
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import time
-from typing import Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 from pyvalue.ingestion import SECCompanyFactsClient
 from pyvalue.marketdata.service import MarketDataService, latest_share_count
 from pyvalue.metrics import REGISTRY
 from pyvalue.normalization import SECFactsNormalizer
-from pyvalue.screening import evaluate_criterion, load_screen
+from pyvalue.screening import Criterion, evaluate_criterion, load_screen, evaluate_criterion_verbose
 from pyvalue.storage import (
     CompanyFactsRepository,
     FinancialFactsRepository,
@@ -211,6 +212,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--database",
         default="data/pyvalue.db",
         help="SQLite database file (default: %(default)s)",
+    )
+
+    run_screen_bulk = subparsers.add_parser(
+        "run-screen-bulk",
+        help="Evaluate screening criteria for all tickers in the stored universe.",
+    )
+    run_screen_bulk.add_argument("config", help="Path to screening config (YAML)")
+    run_screen_bulk.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file (default: %(default)s)",
+    )
+    run_screen_bulk.add_argument(
+        "--region",
+        default="US",
+        help="Universe region key stored in SQLite (default: %(default)s)",
+    )
+    run_screen_bulk.add_argument(
+        "--output-csv",
+        default=None,
+        help="Optional path to write passing results as CSV",
     )
 
     return parser
@@ -541,14 +563,97 @@ def cmd_run_screen(symbol: str, config_path: str, database: str) -> int:
     metrics_repo = MetricsRepository(database)
     metrics_repo.initialize_schema()
     fact_repo = FinancialFactsRepository(database)
+    market_repo = MarketDataRepository(database)
+    market_repo.initialize_schema()
     results = []
     for criterion in definition.criteria:
-        passed = evaluate_criterion(criterion, symbol.upper(), metrics_repo, fact_repo)
+        passed = evaluate_criterion(criterion, symbol.upper(), metrics_repo, fact_repo, market_repo)
         results.append((criterion.name, passed))
     passed_all = all(flag for _, flag in results)
     for name, flag in results:
         print(f"{name}: {'PASS' if flag else 'FAIL'}")
     return 0 if passed_all else 1
+
+
+def cmd_run_screen_bulk(config_path: str, database: str, region: str, output_csv: Optional[str]) -> int:
+    """Evaluate screening criteria for every ticker stored in the universe."""
+
+    definition = load_screen(config_path)
+    universe_repo = UniverseRepository(database)
+    symbols = universe_repo.fetch_symbols(region)
+    if not symbols:
+        raise SystemExit(f"No universe symbols found for region {region}. Run load-us-universe first.")
+
+    metrics_repo = MetricsRepository(database)
+    metrics_repo.initialize_schema()
+    fact_repo = FinancialFactsRepository(database)
+    market_repo = MarketDataRepository(database)
+    market_repo.initialize_schema()
+
+    passed_symbols: List[str] = []
+    criterion_values: Dict[str, Dict[str, float]] = {c.name: {} for c in definition.criteria}
+
+    for symbol in symbols:
+        symbol_upper = symbol.upper()
+        symbol_passed = True
+        per_symbol_values: Dict[str, float] = {}
+        for criterion in definition.criteria:
+            passed, left_value = evaluate_criterion_verbose(
+                criterion, symbol_upper, metrics_repo, fact_repo, market_repo
+            )
+            if not passed or left_value is None:
+                symbol_passed = False
+                break
+            per_symbol_values[criterion.name] = left_value
+        if symbol_passed:
+            passed_symbols.append(symbol_upper)
+            for criterion in definition.criteria:
+                criterion_values[criterion.name][symbol_upper] = per_symbol_values[criterion.name]
+
+    if not passed_symbols:
+        print("No symbols satisfied all criteria.")
+        return 1
+
+    _print_screen_table(definition.criteria, passed_symbols, criterion_values)
+    if output_csv:
+        _write_screen_csv(definition.criteria, passed_symbols, criterion_values, output_csv)
+    return 0
+
+
+def _print_screen_table(criteria: Sequence[Criterion], symbols: Sequence[str], values: Dict[str, Dict[str, float]]) -> None:
+    header = ["Criterion"] + list(symbols)
+    rows: List[List[str]] = [header]
+    for criterion in criteria:
+        row = [criterion.name]
+        for symbol in symbols:
+            value = values.get(criterion.name, {}).get(symbol)
+            row.append(_format_value(value) if value is not None else "N/A")
+        rows.append(row)
+    widths = [max(len(row[i]) for row in rows) for i in range(len(header))]
+    for row in rows:
+        print(" | ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)))
+
+
+def _format_value(value: float) -> str:
+    formatted = f"{value:,.4f}".rstrip("0").rstrip(".")
+    return formatted or "0"
+
+
+def _write_screen_csv(
+    criteria: Sequence[Criterion],
+    symbols: Sequence[str],
+    values: Dict[str, Dict[str, float]],
+    path: str,
+) -> None:
+    with open(path, "w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["Criterion", *symbols])
+        for criterion in criteria:
+            row = [criterion.name]
+            for symbol in symbols:
+                value = values.get(criterion.name, {}).get(symbol)
+                row.append("" if value is None else _format_value(value))
+            writer.writerow(row)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -603,6 +708,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return cmd_recalc_market_cap(database=args.database)
     if args.command == "run-screen":
         return cmd_run_screen(symbol=args.symbol, config_path=args.config, database=args.database)
+    if args.command == "run-screen-bulk":
+        return cmd_run_screen_bulk(
+            config_path=args.config,
+            database=args.database,
+            region=args.region,
+            output_csv=args.output_csv,
+        )
 
     parser.error(f"Unknown command: {args.command}")
     return 2

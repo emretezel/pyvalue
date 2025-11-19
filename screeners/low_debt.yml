@@ -1,8 +1,0 @@
-criteria:
-  - name: "Long term debt vs working capital"
-    left:
-      metric: long_term_debt
-    operator: "<="
-    right:
-      metric: working_capital
-      multiplier: 1.75

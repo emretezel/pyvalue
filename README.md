@@ -131,14 +131,25 @@ pyvalue compute-metrics-bulk --database data/pyvalue.db
 The bulk command iterates over the stored universe (default US), evaluates each metric,
 prints progress, and can be cancelled with Ctrl+C.
 
-Define screening criteria in YAML (see `screeners/low_debt.yml`) and evaluate them:
+Define screening criteria in YAML (see `screeners/value.yml`) and evaluate them:
 
 ```bash
-pyvalue run-screen AAPL screeners/low_debt.yml
+pyvalue run-screen AAPL screeners/value.yml
 ```
 
-The sample screen checks whether long-term debt is less than or equal to 1.75× working
-capital. Metrics are cached in the `metrics` table for reuse.
+The sample screen checks nine value-focused criteria (leverage, profitability, liquidity,
+valuation). Metrics are cached in the `metrics` table for reuse.
+
+To evaluate every stored symbol and print a pass-only table, run:
+
+```bash
+pyvalue run-screen-bulk screeners/value.yml --database data/pyvalue.db
+```
+
+Rows represent criteria and columns show the symbols that satisfied every rule along with the
+left-hand metric values used for comparison.
+
+Pass `--output-csv results.csv` to write the same table to disk in CSV form.
 
 Additional metrics include:
 

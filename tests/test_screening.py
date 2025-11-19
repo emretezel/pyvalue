@@ -25,3 +25,20 @@ def test_evaluate_criterion_uses_metrics_repo(tmp_path):
     )
 
     assert evaluate_criterion(criterion, "AAPL", metrics_repo, fact_repo) is True
+
+def test_evaluate_criterion_supports_constant_terms(tmp_path):
+    db = tmp_path / "test2.db"
+    fact_repo = FinancialFactsRepository(db)
+    fact_repo.initialize_schema()
+    metrics_repo = MetricsRepository(db)
+    metrics_repo.initialize_schema()
+    metrics_repo.upsert("AAPL", "earnings_yield", 0.05, "2023-09-30")
+
+    criterion = Criterion(
+        name="Positive earnings yield",
+        left=Term(metric="earnings_yield"),
+        operator=">",
+        right=Term(value=0.0),
+    )
+
+    assert evaluate_criterion(criterion, "AAPL", metrics_repo, fact_repo) is True

@@ -1,0 +1,86 @@
+criteria:
+  - name: "Long term debt vs working capital"
+    left:
+      metric: long_term_debt
+    operator: "<="
+    right:
+      metric: working_capital
+      multiplier: 1.75
+
+  - name: "EPS streak minimum"
+    left:
+      metric: eps_streak
+    operator: ">"
+    right:
+      value: 4
+
+  - name: "Graham EPS CAGR positive"
+    left:
+      metric: graham_eps_10y_cagr_3y_avg
+    operator: ">"
+    right:
+      value: 0
+
+  - name: "Graham multiplier ceiling"
+    left:
+      metric: graham_multiplier
+    operator: "<="
+    right:
+      value: 75
+
+  - name: "Current ratio floor"
+    left:
+      metric: current_ratio
+    operator: ">="
+    right:
+      value: 1.25
+
+  - name: "Positive earnings yield"
+    left:
+      metric: earnings_yield
+    operator: ">"
+    right:
+      value: 0
+
+  - name: "ROC Greenblatt > 10%"
+    left:
+      metric: roc_greenblatt_5y_avg
+    operator: ">"
+    right:
+      value: 0.10
+
+  - name: "ROE Greenblatt > 10%"
+    left:
+      metric: roe_greenblatt_5y_avg
+    operator: ">"
+    right:
+      value: 0.10
+
+  - name: "Positive P/FCF"
+    left:
+      metric: price_to_fcf
+    operator: ">"
+    right:
+      value: 0
+
+  - name: "P/FCF upper bound"
+    left:
+      metric: price_to_fcf
+    operator: "<"
+    right:
+      value: 30
+
+  - name: "Market cap threshold"
+    left:
+      metric: market_cap
+    operator: ">"
+    right:
+      value: 750000000
+
+  - name: "EPS vs 6y average"
+    left:
+      metric: eps_ttm
+    operator: ">="
+    right:
+      metric: eps_6y_avg
+      multiplier: 0.5
