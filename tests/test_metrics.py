@@ -135,7 +135,10 @@ def test_graham_multiplier_metric(monkeypatch):
         def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
             if concept == "EarningsPerShareDiluted":
                 return [
-                    fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=5.0, frame="CY2023")
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q4", end_date="2023-12-31", value=2.5),
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q3", end_date="2023-09-30", value=2.0),
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q2", end_date="2023-06-30", value=1.5),
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q1", end_date="2023-03-31", value=1.0),
                 ]
             return []
 
@@ -161,7 +164,12 @@ def test_earnings_yield_metric(monkeypatch):
     class DummyRepo:
         def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
             if concept == "EarningsPerShareDiluted":
-                return [fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=5.0, frame="CY2023")]
+                return [
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q4", end_date="2023-12-31", value=2.5),
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q3", end_date="2023-09-30", value=2.0),
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q2", end_date="2023-06-30", value=1.5),
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q1", end_date="2023-03-31", value=1.0),
+                ]
             return []
 
     class DummyMarketRepo:
@@ -172,7 +180,7 @@ def test_earnings_yield_metric(monkeypatch):
     market_repo = DummyMarketRepo()
     result = metric.compute("AAPL", repo, market_repo)
     assert result is not None
-    assert result.value == 0.1
+    assert result.value == (2.5 + 2.0 + 1.5 + 1.0) / 50.0
 
 def test_price_to_fcf_metric():
     metric = PriceToFCFMetric()
