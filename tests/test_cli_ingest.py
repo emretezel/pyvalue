@@ -224,6 +224,33 @@ def test_cmd_normalize_us_facts_bulk(monkeypatch, tmp_path):
     facts = [(row[0], row[1]) for row in cursor.fetchall()]
     assert facts == [("AAA", 3.0), ("BBB", 3.0)]
 
+def test_cmd_recalc_market_cap(tmp_path):
+    db_path = tmp_path / "marketcap.db"
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    fact_repo.replace_facts(
+        "AAA",
+        [
+        make_fact(
+            concept="CommonStockSharesOutstanding",
+            end_date="2023-12-31",
+            value=100,
+            symbol="AAA",
+        )
+        ],
+    )
+    market_repo = MarketDataRepository(db_path)
+    market_repo.initialize_schema()
+    market_repo.upsert_price("AAA", "2024-01-01", price=50.0)
+    market_repo.upsert_price("BBB", "2024-01-01", price=70.0)
+
+    rc = cli.cmd_recalc_market_cap(database=str(db_path))
+    assert rc == 0
+    snapshot = market_repo.latest_snapshot("AAA")
+    assert snapshot.market_cap == 5000.0
+    snapshot_b = market_repo.latest_snapshot("BBB")
+    assert snapshot_b.market_cap is None
+
 def test_cmd_compute_metrics(tmp_path):
     db_path = tmp_path / "facts.db"
     fact_repo = FinancialFactsRepository(db_path)

@@ -25,6 +25,19 @@ SHARE_CONCEPTS = [
     "CommonStockSharesOutstanding",
 ]
 
+
+def latest_share_count(symbol: str, repo: FinancialFactsRepository) -> Optional[float]:
+    for concept in SHARE_CONCEPTS:
+        fact = repo.latest_fact(symbol, concept)
+        if fact is None or fact.value is None:
+            continue
+        try:
+            return float(fact.value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 class MarketDataService:
     """Coordinates provider selection and persistence of price data."""
 
@@ -56,7 +69,7 @@ class MarketDataService:
         data = self.provider.latest_price(symbol)
         market_cap = data.market_cap
         if market_cap is None:
-            shares = self._latest_shares(symbol)
+            shares = latest_share_count(symbol, self.facts_repo)
             if shares is not None and data.price is not None:
                 market_cap = shares * data.price
         self.repo.upsert_price(
@@ -71,16 +84,4 @@ class MarketDataService:
         LOGGER.info("Stored market data for %s at %s", data.symbol, data.as_of)
         return data
 
-    def _latest_shares(self, symbol: str) -> Optional[float]:
-        for concept in SHARE_CONCEPTS:
-            fact = self.facts_repo.latest_fact(symbol, concept)
-            if fact is None or fact.value is None:
-                continue
-            try:
-                return float(fact.value)
-            except (TypeError, ValueError):
-                continue
-        return None
-
-
-__all__ = ["MarketDataService"]
+__all__ = ["MarketDataService", "latest_share_count"]
