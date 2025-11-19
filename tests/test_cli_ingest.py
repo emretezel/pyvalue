@@ -9,6 +9,7 @@ from pyvalue.metrics import REGISTRY
 from pyvalue.metrics.base import MetricResult
 from pyvalue.storage import (
     CompanyFactsRepository,
+    EntityMetadataRepository,
     FinancialFactsRepository,
     FactRecord,
     MarketDataRepository,
@@ -163,7 +164,7 @@ def test_cmd_normalize_us_facts(monkeypatch, tmp_path):
     db_path = tmp_path / "facts.db"
     company_repo = CompanyFactsRepository(db_path)
     company_repo.initialize_schema()
-    company_repo.upsert_company_facts("AAPL", "CIK0000320193", {"facts": {}})
+    company_repo.upsert_company_facts("AAPL", "CIK0000320193", {"entityName": "Apple Inc", "facts": {}})
 
     class FakeNormalizer:
         def __init__(self):
@@ -189,20 +190,22 @@ def test_cmd_normalize_us_facts(monkeypatch, tmp_path):
     rc = cli.cmd_normalize_us_facts("AAPL", str(db_path))
     assert rc == 0
 
-    fact_repo = CompanyFactsRepository(db_path)
     result_repo = FinancialFactsRepository(db_path)
     result_repo.initialize_schema()
     rows = result_repo._connect().execute(
         "SELECT concept, value FROM financial_facts WHERE symbol='AAPL'"
     ).fetchall()
     assert [(row[0], row[1]) for row in rows] == [("NetIncomeLoss", 123.0)]
+    entity_repo = EntityMetadataRepository(db_path)
+    entity_repo.initialize_schema()
+    assert entity_repo.fetch("AAPL") == "Apple Inc"
 
 def test_cmd_normalize_us_facts_bulk(monkeypatch, tmp_path):
     db_path = tmp_path / "facts.db"
     company_repo = CompanyFactsRepository(db_path)
     company_repo.initialize_schema()
-    company_repo.upsert_company_facts("AAA", "CIK00001", {"facts": {}})
-    company_repo.upsert_company_facts("BBB", "CIK00002", {"facts": {}})
+    company_repo.upsert_company_facts("AAA", "CIK00001", {"entityName": "AAA Corp", "facts": {}})
+    company_repo.upsert_company_facts("BBB", "CIK00002", {"entityName": "BBB Corp", "facts": {}})
 
     class DummyNormalizer:
         def normalize(self, payload, symbol, cik):
@@ -223,6 +226,10 @@ def test_cmd_normalize_us_facts_bulk(monkeypatch, tmp_path):
     )
     facts = [(row[0], row[1]) for row in cursor.fetchall()]
     assert facts == [("AAA", 3.0), ("BBB", 3.0)]
+    entity_repo = EntityMetadataRepository(db_path)
+    entity_repo.initialize_schema()
+    assert entity_repo.fetch("AAA") == "AAA Corp"
+    assert entity_repo.fetch("BBB") == "BBB Corp"
 
 def test_cmd_recalc_market_cap(tmp_path):
     db_path = tmp_path / "marketcap.db"
@@ -266,6 +273,10 @@ def test_cmd_run_screen_bulk(tmp_path, capsys):
     metrics_repo.initialize_schema()
     metrics_repo.upsert("AAA", "working_capital", 100.0, "2023-12-31")
     metrics_repo.upsert("BBB", "working_capital", 50.0, "2023-12-31")
+    entity_repo = EntityMetadataRepository(db_path)
+    entity_repo.initialize_schema()
+    entity_repo.upsert("AAA", "AAA Inc")
+    entity_repo.upsert("BBB", "BBB Inc")
 
     screen_path = tmp_path / "screen.yml"
     screen_path.write_text(
@@ -294,6 +305,7 @@ criteria:
     assert "BBB" not in output
     csv_contents = csv_path.read_text().strip().splitlines()
     assert csv_contents[0] == "Criterion,AAA"
+    assert csv_contents[1].startswith("Entity,AAA Inc")
 
 def test_cmd_compute_metrics(tmp_path):
     db_path = tmp_path / "facts.db"

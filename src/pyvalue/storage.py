@@ -434,10 +434,51 @@ class MarketDataRepository(SQLiteStore):
         return snapshot.as_of, snapshot.price
 
 
+class EntityMetadataRepository(SQLiteStore):
+    """Store SEC entity names for quick lookup."""
+
+    def initialize_schema(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS entity_metadata (
+                    symbol TEXT PRIMARY KEY,
+                    entity_name TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+
+    def upsert(self, symbol: str, entity_name: str) -> None:
+        if not entity_name:
+            return
+        updated_at = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO entity_metadata (symbol, entity_name, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    entity_name = excluded.entity_name,
+                    updated_at = excluded.updated_at
+                """,
+                (symbol.upper(), entity_name.strip(), updated_at),
+            )
+
+    def fetch(self, symbol: str) -> Optional[str]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT entity_name FROM entity_metadata WHERE symbol = ?",
+                (symbol.upper(),),
+            ).fetchone()
+        return row[0] if row else None
+
+
 __all__ = [
     "UniverseRepository",
     "CompanyFactsRepository",
     "FinancialFactsRepository",
     "MarketDataRepository",
     "FactRecord",
+    "EntityMetadataRepository",
 ]

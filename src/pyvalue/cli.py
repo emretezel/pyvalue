@@ -19,6 +19,7 @@ from pyvalue.normalization import SECFactsNormalizer
 from pyvalue.screening import Criterion, evaluate_criterion, load_screen, evaluate_criterion_verbose
 from pyvalue.storage import (
     CompanyFactsRepository,
+    EntityMetadataRepository,
     FinancialFactsRepository,
     MarketDataRepository,
     MetricsRepository,
@@ -355,6 +356,11 @@ def cmd_normalize_us_facts(symbol: str, database: str) -> int:
 
     fact_repo = FinancialFactsRepository(database)
     fact_repo.initialize_schema()
+    entity_repo = EntityMetadataRepository(database)
+    entity_repo.initialize_schema()
+    entity_name = payload.get("entityName")
+    if entity_name:
+        entity_repo.upsert(symbol.upper(), entity_name)
     stored = fact_repo.replace_facts(symbol.upper(), records)
     print(f"Stored {stored} normalized facts for {symbol.upper()} in {database}")
     return 0
@@ -366,6 +372,8 @@ def cmd_normalize_us_facts_bulk(database: str) -> int:
     company_repo = CompanyFactsRepository(database)
     normalization_repo = FinancialFactsRepository(database)
     normalization_repo.initialize_schema()
+    entity_repo = EntityMetadataRepository(database)
+    entity_repo.initialize_schema()
 
     cursor = company_repo._connect().execute("SELECT symbol, cik, data FROM company_facts")
     rows = cursor.fetchall()
@@ -379,6 +387,9 @@ def cmd_normalize_us_facts_bulk(database: str) -> int:
         for idx, (symbol, cik, data_json) in enumerate(rows, 1):
             payload = json.loads(data_json)
             records = normalizer.normalize(payload, symbol=symbol, cik=cik)
+            entity_name = payload.get("entityName")
+            if entity_name:
+                entity_repo.upsert(symbol, entity_name)
             stored = normalization_repo.replace_facts(symbol, records)
             print(f"[{idx}/{total}] Stored {stored} normalized facts for {symbol}", flush=True)
     except KeyboardInterrupt:
@@ -589,7 +600,16 @@ def cmd_run_screen_bulk(config_path: str, database: str, region: str, output_csv
     fact_repo = FinancialFactsRepository(database)
     market_repo = MarketDataRepository(database)
     market_repo.initialize_schema()
+    entity_repo = EntityMetadataRepository(database)
+    entity_repo.initialize_schema()
 
+    with universe_repo._connect() as conn:
+        name_rows = conn.execute(
+            "SELECT symbol, security_name FROM listings WHERE region = ?",
+            (region,),
+        ).fetchall()
+    universe_names = {row[0].upper(): (row[1] or row[0].upper()) for row in name_rows}
+    entity_labels: Dict[str, str] = {}
     passed_symbols: List[str] = []
     criterion_values: Dict[str, Dict[str, float]] = {c.name: {} for c in definition.criteria}
 
@@ -597,6 +617,10 @@ def cmd_run_screen_bulk(config_path: str, database: str, region: str, output_csv
         symbol_upper = symbol.upper()
         symbol_passed = True
         per_symbol_values: Dict[str, float] = {}
+        label = entity_labels.get(symbol_upper)
+        if label is None:
+            label = entity_repo.fetch(symbol_upper) or universe_names.get(symbol_upper) or symbol_upper
+            entity_labels[symbol_upper] = label
         for criterion in definition.criteria:
             passed, left_value = evaluate_criterion_verbose(
                 criterion, symbol_upper, metrics_repo, fact_repo, market_repo
@@ -614,15 +638,22 @@ def cmd_run_screen_bulk(config_path: str, database: str, region: str, output_csv
         print("No symbols satisfied all criteria.")
         return 1
 
-    _print_screen_table(definition.criteria, passed_symbols, criterion_values)
+    selected_names = {symbol: entity_labels.get(symbol, symbol) for symbol in passed_symbols}
+    _print_screen_table(definition.criteria, passed_symbols, criterion_values, selected_names)
     if output_csv:
-        _write_screen_csv(definition.criteria, passed_symbols, criterion_values, output_csv)
+        _write_screen_csv(definition.criteria, passed_symbols, criterion_values, selected_names, output_csv)
     return 0
 
 
-def _print_screen_table(criteria: Sequence[Criterion], symbols: Sequence[str], values: Dict[str, Dict[str, float]]) -> None:
+def _print_screen_table(
+    criteria: Sequence[Criterion],
+    symbols: Sequence[str],
+    values: Dict[str, Dict[str, float]],
+    entity_names: Dict[str, str],
+) -> None:
     header = ["Criterion"] + list(symbols)
     rows: List[List[str]] = [header]
+    rows.append(["Entity"] + [entity_names.get(symbol, symbol) for symbol in symbols])
     for criterion in criteria:
         row = [criterion.name]
         for symbol in symbols:
@@ -643,11 +674,13 @@ def _write_screen_csv(
     criteria: Sequence[Criterion],
     symbols: Sequence[str],
     values: Dict[str, Dict[str, float]],
+    entity_names: Dict[str, str],
     path: str,
 ) -> None:
     with open(path, "w", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(["Criterion", *symbols])
+        writer.writerow(["Entity", *[entity_names.get(symbol, symbol) for symbol in symbols]])
         for criterion in criteria:
             row = [criterion.name]
             for symbol in symbols:
