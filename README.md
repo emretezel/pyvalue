@@ -63,11 +63,14 @@ pyvalue normalize-us-facts AAPL --database data/pyvalue.db
 This populates the `financial_facts` table with the concepts required to compute the
 initial metric set (debt, current assets/liabilities, EPS, dividends, cash flow, etc.).
 
-## Market data (Alpha Vantage)
+## Market data (EODHD default, Alpha Vantage fallback)
 
-Store your Alpha Vantage API key in `private/config.toml`:
+Store your EODHD API token in `private/config.toml` (quotes optional; they are stripped automatically):
 
 ```toml
+[eodhd]
+api_key = "YOUR_EOD_TOKEN"
+
 [alpha_vantage]
 api_key = "YOUR_KEY"
 ```
@@ -78,8 +81,11 @@ Fetch the latest quote and persist it in `market_data`:
 pyvalue update-market-data AAPL
 ```
 
-The market data service currently uses Alpha Vantage's `GLOBAL_QUOTE`, but the design
-allows swapping providers by injecting a different implementation later.
+By default the CLI uses EODHD’s `/api/eod/{symbol}.US` endpoint and multiplies the returned
+close price by the latest SEC share count (from `EntityCommonStockSharesOutstanding` or
+`CommonStockSharesOutstanding`) to derive market cap. If no EODHD key is present it falls
+back to Alpha Vantage’s `GLOBAL_QUOTE` + `OVERVIEW`. You can still inject a custom provider
+when instantiating `MarketDataService` in Python if you need a different feed.
 
 ## Metrics and screening
 
