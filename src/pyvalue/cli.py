@@ -578,11 +578,14 @@ def cmd_run_screen(symbol: str, config_path: str, database: str) -> int:
     market_repo.initialize_schema()
     results = []
     for criterion in definition.criteria:
-        passed = evaluate_criterion(criterion, symbol.upper(), metrics_repo, fact_repo, market_repo)
-        results.append((criterion.name, passed))
-    passed_all = all(flag for _, flag in results)
-    for name, flag in results:
-        print(f"{name}: {'PASS' if flag else 'FAIL'}")
+        passed, left_value = evaluate_criterion_verbose(
+            criterion, symbol.upper(), metrics_repo, fact_repo, market_repo
+        )
+        results.append((criterion.name, passed, left_value))
+    passed_all = all(flag for _, _, flag in results)
+    for name, passed, value in results:
+        value_display = _format_value(value) if value is not None else "N/A"
+        print(f"{name}: {'PASS' if passed else 'FAIL'} (value={value_display})")
     return 0 if passed_all else 1
 
 
