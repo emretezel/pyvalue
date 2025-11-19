@@ -22,7 +22,22 @@ class Config:
 
     @property
     def alpha_vantage_api_key(self) -> Optional[str]:
-        return self._parser.get("alpha_vantage", "api_key", fallback=None)
+        return self._get_value("alpha_vantage", "api_key")
+
+    @property
+    def eodhd_api_key(self) -> Optional[str]:
+        return self._get_value("eodhd", "api_key")
+
+    def _get_value(self, section: str, option: str) -> Optional[str]:
+        value = self._parser.get(section, option, fallback=None)
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if cleaned.startswith('"') and cleaned.endswith('"'):
+            cleaned = cleaned[1:-1]
+        if cleaned.startswith("'") and cleaned.endswith("'"):
+            cleaned = cleaned[1:-1]
+        return cleaned
 
 
 __all__ = ["Config"]
