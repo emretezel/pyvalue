@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import time
 from typing import Optional, Sequence
 
 from pyvalue.ingestion import SECCompanyFactsClient
@@ -66,6 +67,32 @@ def build_parser() -> argparse.ArgumentParser:
         "--cik",
         default=None,
         help="Optional explicit CIK override (10-digit).",
+    )
+
+    bulk_ingest = subparsers.add_parser(
+        "ingest-us-facts-bulk",
+        help="Download SEC company facts for all stored US listings.",
+    )
+    bulk_ingest.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
+    )
+    bulk_ingest.add_argument(
+        "--region",
+        default="US",
+        help="Universe region key stored in SQLite (default: %(default)s)",
+    )
+    bulk_ingest.add_argument(
+        "--rate",
+        type=float,
+        default=9.0,
+        help="Maximum SEC API calls per second (default: %(default)s)",
+    )
+    bulk_ingest.add_argument(
+        "--user-agent",
+        default=None,
+        help="Custom User-Agent string (falls back to PYVALUE_SEC_USER_AGENT env var).",
     )
 
     normalize_facts = subparsers.add_parser(
@@ -174,6 +201,61 @@ def cmd_ingest_us_facts(symbol: str, database: str, user_agent: Optional[str], c
     return 0
 
 
+def cmd_ingest_us_facts_bulk(
+    database: str,
+    region: str,
+    rate: float,
+    user_agent: Optional[str],
+) -> int:
+    """Fetch SEC company facts for every symbol in the stored universe."""
+
+    universe_repo = UniverseRepository(database)
+    symbols = universe_repo.fetch_symbols(region)
+    if not symbols:
+        raise SystemExit(f"No universe symbols found for region {region}. Run load-us-universe first.")
+
+    client = SECCompanyFactsClient(user_agent=user_agent)
+    company_repo = CompanyFactsRepository(database)
+    company_repo.initialize_schema()
+
+    min_interval = 1.0 / rate if rate and rate > 0 else 0.0
+    last_fetch = 0.0
+    total = len(symbols)
+    processed = 0
+    print(f"Fetching SEC company facts for {total} symbols at <= {rate:.2f} req/s")
+
+    try:
+        for idx, symbol in enumerate(symbols, 1):
+            try:
+                info = client.resolve_company(symbol)
+            except Exception as exc:  # pragma: no cover - rare network errors
+                LOGGER.error("Failed to resolve CIK for %s: %s", symbol, exc)
+                continue
+
+            if min_interval > 0 and last_fetch:
+                elapsed = time.perf_counter() - last_fetch
+                if elapsed < min_interval:
+                    time.sleep(min_interval - elapsed)
+
+            try:
+                payload = client.fetch_company_facts(info.cik)
+            except Exception as exc:  # pragma: no cover - network errors
+                LOGGER.error("Failed to fetch company facts for %s: %s", info.symbol, exc)
+                last_fetch = time.perf_counter()
+                continue
+
+            last_fetch = time.perf_counter()
+            company_repo.upsert_company_facts(info.symbol, info.cik, payload)
+            processed += 1
+            print(f"[{idx}/{total}] Stored company facts for {info.symbol}", flush=True)
+    except KeyboardInterrupt:
+        print(f"\nCancelled after {processed} of {total} symbols.")
+        return 1
+
+    print(f"Stored company facts for {processed} symbols in {database}")
+    return 0
+
+
 def cmd_normalize_us_facts(symbol: str, database: str) -> int:
     """Normalize previously ingested SEC facts for downstream metrics."""
 
@@ -268,6 +350,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             database=args.database,
             user_agent=args.user_agent,
             cik=args.cik,
+        )
+    if args.command == "ingest-us-facts-bulk":
+        return cmd_ingest_us_facts_bulk(
+            database=args.database,
+            region=args.region,
+            rate=args.rate,
+            user_agent=args.user_agent,
         )
     if args.command == "normalize-us-facts":
         return cmd_normalize_us_facts(symbol=args.symbol, database=args.database)

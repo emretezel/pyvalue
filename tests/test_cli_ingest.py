@@ -12,7 +12,9 @@ from pyvalue.storage import (
     FactRecord,
     MarketDataRepository,
     MetricsRepository,
+    UniverseRepository,
 )
+from pyvalue.universe import Listing
 
 
 def make_fact(**kwargs):
@@ -58,6 +60,44 @@ def test_cmd_ingest_us_facts(monkeypatch, tmp_path):
     repo = CompanyFactsRepository(db_path)
     stored = repo.fetch_fact("AAPL")
     assert stored["cik"] == "CIK0000320193"
+
+def test_cmd_ingest_us_facts_bulk(monkeypatch, tmp_path):
+    db_path = tmp_path / "bulk.db"
+    universe_repo = UniverseRepository(db_path)
+    universe_repo.initialize_schema()
+    listings = [
+        Listing(symbol="AAA", security_name="AAA Inc", exchange="NYSE"),
+        Listing(symbol="BBB", security_name="BBB Inc", exchange="NYSE"),
+    ]
+    universe_repo.replace_universe(listings, region="US")
+
+    company_repo = CompanyFactsRepository(db_path)
+    company_repo.initialize_schema()
+
+    class FakeClient:
+        def __init__(self, user_agent=None):
+            self.user_agent = user_agent
+            self.calls = []
+
+        def resolve_company(self, symbol):
+            return SimpleNamespace(symbol=symbol, cik=f"CIK{symbol}", name=symbol)
+
+        def fetch_company_facts(self, cik):
+            self.calls.append(cik)
+            return {"cik": cik}
+
+    fake_client = FakeClient()
+    monkeypatch.setattr(cli, "SECCompanyFactsClient", lambda user_agent=None: fake_client)
+
+    rc = cli.cmd_ingest_us_facts_bulk(
+        database=str(db_path),
+        region="US",
+        rate=0,
+        user_agent="UA",
+    )
+    assert rc == 0
+    assert fake_client.calls == ["CIKAAA", "CIKBBB"]
+    assert company_repo.fetch_fact("AAA") == {"cik": "CIKAAA"}
 
 def test_cmd_normalize_us_facts(monkeypatch, tmp_path):
     db_path = tmp_path / "facts.db"
