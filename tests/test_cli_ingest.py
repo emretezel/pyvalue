@@ -99,6 +99,31 @@ def test_cmd_ingest_us_facts_bulk(monkeypatch, tmp_path):
     assert fake_client.calls == ["CIKAAA", "CIKBBB"]
     assert company_repo.fetch_fact("AAA") == {"cik": "CIKAAA"}
 
+def test_cmd_update_market_data_bulk(monkeypatch, tmp_path):
+    db_path = tmp_path / "marketbulk.db"
+    universe_repo = UniverseRepository(db_path)
+    universe_repo.initialize_schema()
+    listings = [
+        Listing(symbol="AAA", security_name="AAA Inc", exchange="NYSE"),
+        Listing(symbol="BBB", security_name="BBB Inc", exchange="NYSE"),
+    ]
+    universe_repo.replace_universe(listings, region="US")
+
+    calls = []
+
+    class DummyService:
+        def __init__(self, db_path):
+            self.db_path = db_path
+
+        def refresh_symbol(self, symbol):
+            calls.append(symbol)
+
+    monkeypatch.setattr(cli, "MarketDataService", lambda db_path: DummyService(db_path))
+
+    rc = cli.cmd_update_market_data_bulk(database=str(db_path), region="US", rate=0)
+    assert rc == 0
+    assert calls == ["AAA", "BBB"]
+
 def test_cmd_normalize_us_facts(monkeypatch, tmp_path):
     db_path = tmp_path / "facts.db"
     company_repo = CompanyFactsRepository(db_path)

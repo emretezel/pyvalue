@@ -81,6 +81,16 @@ Fetch the latest quote and persist it in `market_data`:
 pyvalue update-market-data AAPL
 ```
 
+To refresh every stored ticker (using the latest universe in SQLite) with throttling that
+respects EODHD limits, run:
+
+```bash
+pyvalue update-market-data-bulk --database data/pyvalue.db --rate 950
+```
+
+The bulk command enforces the requested symbols-per-minute rate (950 by default) and can
+be interrupted with Ctrl+C.
+
 By default the CLI uses EODHD’s `/api/eod/{symbol}.US` endpoint and multiplies the returned
 close price by the latest SEC share count (from `EntityCommonStockSharesOutstanding` or
 `CommonStockSharesOutstanding`) to derive market cap. If no EODHD key is present it falls

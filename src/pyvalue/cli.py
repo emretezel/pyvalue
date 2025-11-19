@@ -95,6 +95,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Custom User-Agent string (falls back to PYVALUE_SEC_USER_AGENT env var).",
     )
 
+    bulk_market_data = subparsers.add_parser(
+        "update-market-data-bulk",
+        help="Fetch latest market data for all stored US listings.",
+    )
+    bulk_market_data.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
+    )
+    bulk_market_data.add_argument(
+        "--region",
+        default="US",
+        help="Universe region key stored in SQLite (default: %(default)s)",
+    )
+    bulk_market_data.add_argument(
+        "--rate",
+        type=float,
+        default=950.0,
+        help="Throttle speed in symbols per minute (default: %(default)s)",
+    )
+
     normalize_facts = subparsers.add_parser(
         "normalize-us-facts",
         help="Transform stored SEC company facts for a ticker into structured rows.",
@@ -287,6 +308,40 @@ def cmd_update_market_data(symbol: str, database: str) -> int:
     return 0
 
 
+def cmd_update_market_data_bulk(database: str, region: str, rate: float) -> int:
+    """Fetch market data for every stored listing."""
+
+    universe_repo = UniverseRepository(database)
+    symbols = universe_repo.fetch_symbols(region)
+    if not symbols:
+        raise SystemExit(f"No universe symbols found for region {region}. Run load-us-universe first.")
+
+    service = MarketDataService(db_path=database)
+    interval = 60.0 / rate if rate and rate > 0 else 0.0
+    total = len(symbols)
+    processed = 0
+    print(f"Updating market data for {total} symbols at <= {rate:.2f} per minute")
+
+    try:
+        for idx, symbol in enumerate(symbols, 1):
+            start = time.perf_counter()
+            try:
+                service.refresh_symbol(symbol)
+                processed += 1
+                print(f"[{idx}/{total}] Stored market data for {symbol}", flush=True)
+            except Exception as exc:  # pragma: no cover - network failures
+                LOGGER.error("Failed to refresh market data for %s: %s", symbol, exc)
+            elapsed = time.perf_counter() - start
+            if interval > 0 and elapsed < interval:
+                time.sleep(interval - elapsed)
+    except KeyboardInterrupt:
+        print(f"\nCancelled after {processed} of {total} symbols.")
+        return 1
+
+    print(f"Stored market data for {processed} symbols in {database}")
+    return 0
+
+
 def cmd_compute_metrics(symbol: str, metric_ids: Sequence[str], database: str, run_all: bool) -> int:
     """Compute one or more metrics and store the results."""
 
@@ -362,6 +417,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return cmd_normalize_us_facts(symbol=args.symbol, database=args.database)
     if args.command == "update-market-data":
         return cmd_update_market_data(symbol=args.symbol, database=args.database)
+    if args.command == "update-market-data-bulk":
+        return cmd_update_market_data_bulk(
+            database=args.database,
+            region=args.region,
+            rate=args.rate,
+        )
     if args.command == "compute-metrics":
         return cmd_compute_metrics(
             symbol=args.symbol,
