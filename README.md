@@ -161,6 +161,27 @@ Additional metrics include:
 - `graham_eps_10y_cagr_3y_avg`: Graham EPS 10-year CAGR averaged over the latest three
   periods (using full-year GAAP EPS data).
 
+## Metric reference
+
+The built-in value screen relies on the following metrics. Each row outlines how the metric
+is derived from normalized SEC or market data plus the value-investing intuition behind it.
+
+| Metric | How it is calculated | Why value investors care |
+| --- | --- | --- |
+| `working_capital` | Latest `AssetsCurrent - LiabilitiesCurrent`. | Healthy working capital protects downside by ensuring near-term obligations are covered without diluting shareholders. |
+| `long_term_debt` | Latest `LongTermDebtNoncurrent`, falling back to `LongTermDebt`. | Excessive leverage magnifies downside, so keeping long-term debt manageable relative to liquidity (e.g., working capital) preserves margin of safety. |
+| `current_ratio` | Latest `AssetsCurrent / LiabilitiesCurrent`. | A current ratio above ~1 indicates the business can stomach short-term shocks without forced asset sales or equity issuance. |
+| `earnings_yield` | Trailing 12-month EPS (sum of latest four quarterly EPS values) divided by the latest price. | The inverse of P/E highlights how much earnings power you receive per dollar invested; higher yields can indicate cheaper valuations. |
+| `eps_streak` | Number of consecutive fiscal years with positive EPS. | Consistent profitability signals durable business quality and lowers the odds that current earnings are a cyclical mirage. |
+| `graham_eps_10y_cagr_3y_avg` | Computes the 10-year EPS CAGR for up to the last three years and averages the values. | Requires decade-long compounding, favoring firms that can steadily grow earnings instead of relying on one-off rebounds. |
+| `graham_multiplier` | `(Price / TTM EPS) × (Price / TBVPS)`, where TBVPS is tangible book value per share (`(Equity - Goodwill - Intangibles) / Shares`). | Benjamin Graham’s combined PE×PB test guards against paying too much for either earnings or assets, enforcing a strict valuation ceiling. |
+| `roc_greenblatt_5y_avg` | Average over up to five fiscal years of `EBIT / Tangible Capital`, where tangible capital is `Net PPE + AssetsCurrent - LiabilitiesCurrent`. | Joel Greenblatt’s ROC stresses whether management can reinvest incremental capital at high rates—a key quality signal for value investors who want cheap *and* good businesses. |
+| `roe_greenblatt_5y_avg` | Average over up to five fiscal years of net income available to common shareholders divided by the two-year average of common equity (after subtracting preferred equity). | Sustained high ROE shows that the firm generates attractive returns on shareholders’ capital without leverage-driven distortion. |
+| `price_to_fcf` | Latest market cap divided by trailing 12-month free cash flow, with FCF computed as (operating cash flow – capex) across the latest four quarters. | Cash flow–based multiples focus on hard cash instead of accounting earnings, helping avoid value traps with low-quality accrual profits. |
+| `market_cap` | Latest stored market capitalization snapshot. | Screening for a minimum size filters out illiquid micro-caps where information quality and trading costs can erode returns. |
+| `eps_ttm` | Sum of the most recent four quarterly EPS values. | Used to verify that current earnings have not collapsed relative to history, preventing “cheap” valuations caused by deteriorating fundamentals. |
+| `eps_6y_avg` | Average of the latest six fiscal-year EPS values. | Provides a normalized earnings power baseline for comparisons against current EPS streaks or TTM values, smoothing out cyclical peaks and troughs. |
+
 ## Private configuration
 
 Place API keys or region-specific credentials inside the `private/` directory (ignored by git).
