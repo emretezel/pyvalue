@@ -50,6 +50,7 @@ class UniverseRepository(SQLiteStore):
                     status TEXT,
                     round_lot_size INTEGER,
                     source TEXT,
+                    isin TEXT,
                     region TEXT NOT NULL,
                     ingested_at TEXT NOT NULL,
                     PRIMARY KEY (symbol, region)
@@ -83,6 +84,7 @@ class UniverseRepository(SQLiteStore):
                     listing.status,
                     listing.round_lot_size,
                     listing.source,
+                    listing.isin,
                     region,
                     ingested_at,
                 )
@@ -101,9 +103,10 @@ class UniverseRepository(SQLiteStore):
                     status,
                     round_lot_size,
                     source,
+                    isin,
                     region,
                     ingested_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 payload,
             )
@@ -191,6 +194,143 @@ class CompanyFactsRepository(SQLiteStore):
         if row is None:
             return None
         return row[0], json.loads(row[1])
+
+
+class UKCompanyFactsRepository(SQLiteStore):
+    """Store Companies House payloads for UK listings."""
+
+    def initialize_schema(self) -> None:
+        """Create the uk_company_facts table."""
+
+        apply_migrations(self.db_path)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS uk_company_facts (
+                    company_number TEXT PRIMARY KEY,
+                    symbol TEXT,
+                    data TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL
+                )
+                """
+            )
+
+    def upsert_company_facts(self, company_number: str, payload: Dict[str, Any], symbol: Optional[str] = None) -> None:
+        """Persist the Companies House payload for a company."""
+
+        serialized = json.dumps(payload)
+        fetched_at = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO uk_company_facts (company_number, symbol, data, fetched_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(company_number) DO UPDATE SET
+                    symbol = COALESCE(excluded.symbol, uk_company_facts.symbol),
+                    data = excluded.data,
+                    fetched_at = excluded.fetched_at
+                """,
+                (company_number, symbol, serialized, fetched_at),
+            )
+
+    def fetch_fact(self, company_number: str) -> Optional[Dict[str, Any]]:
+        """Return the Companies House payload for ``company_number`` if present."""
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT data FROM uk_company_facts WHERE company_number = ?",
+                (company_number,),
+            ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row[0])
+
+
+class UKSymbolMapRepository(SQLiteStore):
+    """Persist mappings between UK symbols and corporate identifiers."""
+
+    def initialize_schema(self) -> None:
+        apply_migrations(self.db_path)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS uk_symbol_map (
+                    symbol TEXT PRIMARY KEY,
+                    isin TEXT,
+                    lei TEXT,
+                    company_number TEXT,
+                    match_confidence TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_uk_symbol_map_isin
+                ON uk_symbol_map(isin)
+                """
+            )
+
+    def upsert_mapping(
+        self,
+        symbol: str,
+        isin: Optional[str] = None,
+        lei: Optional[str] = None,
+        company_number: Optional[str] = None,
+        match_confidence: Optional[str] = None,
+    ) -> None:
+        updated_at = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO uk_symbol_map (symbol, isin, lei, company_number, match_confidence, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    isin = COALESCE(excluded.isin, uk_symbol_map.isin),
+                    lei = COALESCE(excluded.lei, uk_symbol_map.lei),
+                    company_number = COALESCE(excluded.company_number, uk_symbol_map.company_number),
+                    match_confidence = COALESCE(excluded.match_confidence, uk_symbol_map.match_confidence),
+                    updated_at = excluded.updated_at
+                """,
+                (symbol.upper(), isin, lei, company_number, match_confidence, updated_at),
+            )
+
+    def fetch_company_number(self, symbol: str) -> Optional[str]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT company_number FROM uk_symbol_map WHERE symbol = ?",
+                (symbol.upper(),),
+            ).fetchone()
+        return row[0] if row else None
+
+    def fetch_symbols_with_company_number(self) -> List[str]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT symbol FROM uk_symbol_map WHERE company_number IS NOT NULL ORDER BY symbol"
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    def bulk_upsert(self, rows: Iterable[Tuple[str, str, str, str]]) -> int:
+        updated_at = datetime.now(timezone.utc).isoformat()
+        payload = []
+        for symbol, isin, lei, company_number in rows:
+            payload.append((symbol.upper(), isin, lei, company_number, updated_at))
+        if not payload:
+            return 0
+        with self._connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO uk_symbol_map (symbol, isin, lei, company_number, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    isin = COALESCE(excluded.isin, uk_symbol_map.isin),
+                    lei = COALESCE(excluded.lei, uk_symbol_map.lei),
+                    company_number = COALESCE(excluded.company_number, uk_symbol_map.company_number),
+                    updated_at = excluded.updated_at
+                """,
+                payload,
+            )
+        return len(payload)
 
 
 @dataclass(frozen=True)
@@ -485,6 +625,8 @@ class EntityMetadataRepository(SQLiteStore):
 __all__ = [
     "UniverseRepository",
     "CompanyFactsRepository",
+    "UKCompanyFactsRepository",
+    "UKSymbolMapRepository",
     "FinancialFactsRepository",
     "MarketDataRepository",
     "FactRecord",

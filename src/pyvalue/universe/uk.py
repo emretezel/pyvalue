@@ -96,6 +96,8 @@ class UKUniverseLoader:
         name = (row.get("Name") or "").strip()
         exchange = (row.get("Exchange") or self.exchange_code or "LSE").strip()
 
+        isin = (row.get("ISIN") or row.get("Isin") or row.get("isin") or "").strip() or None
+
         return Listing(
             symbol=symbol,
             security_name=name,
@@ -106,6 +108,7 @@ class UKUniverseLoader:
             status=None,
             round_lot_size=None,
             source="eodhd",
+            isin=isin,
         )
 
 

@@ -32,6 +32,7 @@ class Listing:
     status: Optional[str] = None
     round_lot_size: Optional[int] = None
     source: Optional[str] = None
+    isin: Optional[str] = None
 
 
 class USUniverseLoader:
@@ -139,6 +140,7 @@ class USUniverseLoader:
             status=status,
             round_lot_size=round_lot,
             source=source,
+            isin=None,
         )
 
     def _normalize_exchange(self, row: Mapping[str, str]) -> str:

@@ -143,8 +143,73 @@ def _migration_001_listings_composite_pk(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_listings_region ON listings(region)")
 
 
+def _migration_002_create_uk_company_facts(conn: sqlite3.Connection) -> None:
+    """Create storage for Companies House payloads."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS uk_company_facts (
+            company_number TEXT PRIMARY KEY,
+            symbol TEXT,
+            data TEXT NOT NULL,
+            fetched_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def _migration_003_add_isin_to_listings(conn: sqlite3.Connection) -> None:
+    """Add ISIN column to listings if missing."""
+
+    exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='listings'"
+    ).fetchone()
+    if exists is None:
+        return
+
+    info = conn.execute("PRAGMA table_info(listings)").fetchall()
+    columns = {row[1] for row in info}
+    if "isin" in columns:
+        return
+
+    conn.execute("ALTER TABLE listings ADD COLUMN isin TEXT")
+
+
+def _migration_004_create_uk_symbol_map(conn: sqlite3.Connection) -> None:
+    """Create mapping table from UK symbols to identifiers."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS uk_symbol_map (
+            symbol TEXT PRIMARY KEY,
+            isin TEXT,
+            lei TEXT,
+            company_number TEXT,
+            match_confidence TEXT,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def _migration_005_drop_unique_isin_index(conn: sqlite3.Connection) -> None:
+    """Drop unique constraint on uk_symbol_map.isin to allow duplicate ISINs."""
+
+    conn.execute("DROP INDEX IF EXISTS idx_uk_symbol_map_isin")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_uk_symbol_map_isin
+        ON uk_symbol_map(isin)
+        """
+    )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
+    _migration_002_create_uk_company_facts,
+    _migration_003_add_isin_to_listings,
+    _migration_004_create_uk_symbol_map,
+    _migration_005_drop_unique_isin_index,
 ]
 
 

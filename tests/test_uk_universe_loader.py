@@ -14,7 +14,7 @@ from pyvalue.universe import UKUniverseLoader
 def eodhd_payload():
     return json.dumps(
         [
-            {"Code": "AAA", "Name": "AAA plc", "Exchange": "LSE", "Type": "Common Stock"},
+            {"Code": "AAA", "Name": "AAA plc", "Exchange": "LSE", "Type": "Common Stock", "Isin": "GB000AAA"},
             {"Code": "BBB", "Name": "BBB plc", "Exchange": "LSE", "Type": "Preferred Stock"},
             {"Code": "ETF1", "Name": "ETF", "Exchange": "LSE", "Type": "ETF"},
             {"Code": "WRT", "Name": "Warrant", "Exchange": "LSE", "Type": "Warrant"},
@@ -32,6 +32,9 @@ def test_loader_filters_by_type(eodhd_payload):
 
     etf = next(item for item in listings if item.symbol == "ETF1")
     assert etf.is_etf is True
+
+    aaa = next(item for item in listings if item.symbol == "AAA")
+    assert aaa.isin == "GB000AAA"
 
 
 def test_loader_requires_api_key_without_fetcher():

@@ -28,6 +28,10 @@ class Config:
     def eodhd_api_key(self) -> Optional[str]:
         return self._get_value("eodhd", "api_key")
 
+    @property
+    def companies_house_api_key(self) -> Optional[str]:
+        return self._get_value("companies_house", "api_key")
+
     def _get_value(self, section: str, option: str) -> Optional[str]:
         value = self._parser.get(section, option, fallback=None)
         if value is None:

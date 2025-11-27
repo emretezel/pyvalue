@@ -75,6 +75,21 @@ This iterates over the `company_facts` table, converts each JSON payload into
 This populates the `financial_facts` table with the concepts required to compute the
 initial metric set (debt, current assets/liabilities, EPS, dividends, cash flow, etc.).
 
+## UK company facts (Companies House)
+
+Store your Companies House API key in `private/config.toml`:
+
+```toml
+[companies_house]
+api_key = "YOUR_COMPANIES_HOUSE_KEY"
+```
+
+Then ingest the company profile JSON by company number (optionally associate a ticker):
+
+```bash
+pyvalue ingest-uk-facts 00000000 --symbol VOD
+```
+
 ## Market data (EODHD default, Alpha Vantage fallback)
 
 Store your EODHD API token in `private/config.toml` (quotes optional; they are stripped automatically):

@@ -13,7 +13,7 @@ import time
 from typing import Dict, List, Optional, Sequence
 
 from pyvalue.config import Config
-from pyvalue.ingestion import SECCompanyFactsClient
+from pyvalue.ingestion import CompaniesHouseClient, GLEIFClient, SECCompanyFactsClient
 from pyvalue.marketdata.service import MarketDataService, latest_share_count
 from pyvalue.metrics import REGISTRY
 from pyvalue.normalization import SECFactsNormalizer
@@ -24,6 +24,8 @@ from pyvalue.storage import (
     FinancialFactsRepository,
     MarketDataRepository,
     MetricsRepository,
+    UKCompanyFactsRepository,
+    UKSymbolMapRepository,
     UniverseRepository,
 )
 from pyvalue.universe import UKUniverseLoader, USUniverseLoader
@@ -70,6 +72,52 @@ def build_parser() -> argparse.ArgumentParser:
         "--exchange-code",
         default="LSE",
         help="EODHD exchange code to load (default: %(default)s)",
+    )
+
+    ingest_uk = subparsers.add_parser(
+        "ingest-uk-facts",
+        help="Download Companies House profile for a company number and store it.",
+    )
+    ingest_uk.add_argument("company_number", nargs="?", help="Companies House company number, e.g. 00000000")
+    ingest_uk.add_argument(
+        "--symbol",
+        default=None,
+        help="Optional ticker symbol to associate with this company.",
+    )
+    ingest_uk.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
+    )
+
+    ingest_uk_bulk = subparsers.add_parser(
+        "ingest-uk-facts-bulk",
+        help="Download Companies House profiles for all mapped UK symbols.",
+    )
+    ingest_uk_bulk.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
+    )
+
+    refresh_map = subparsers.add_parser(
+        "refresh-uk-symbol-map",
+        help="Refresh UK symbol -> company number mapping using GLEIF and stored ISINs.",
+    )
+    refresh_map.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
+    )
+    refresh_map.add_argument(
+        "--gleif-url",
+        default=GLEIFClient.DEFAULT_URL,
+        help="GLEIF golden CSV URL (default: %(default)s)",
+    )
+    refresh_map.add_argument(
+        "--isin-date",
+        default=None,
+        help="Date (YYYY-MM-DD) for GLEIF ISIN mapping file (default: today UTC)",
     )
 
     ingest_facts = subparsers.add_parser(
@@ -306,7 +354,83 @@ def cmd_load_uk_universe(database: str, include_etfs: bool, exchange_code: str) 
     repo.initialize_schema()
     inserted = repo.replace_universe(filtered, region="UK")
 
+    # Seed symbol->ISIN mapping if present in the feed.
+    mapper = UKSymbolMapRepository(database)
+    mapper.initialize_schema()
+    rows = [
+        (
+            listing.symbol,
+            listing.isin,
+            None,
+            None,
+        )
+        for listing in filtered
+        if listing.isin
+    ]
+    if rows:
+        mapper.bulk_upsert(rows)
+
     print(f"Stored {inserted} UK listings in {database}")
+    return 0
+
+
+def cmd_ingest_uk_facts(company_number: Optional[str], database: str, symbol: Optional[str]) -> int:
+    """Fetch Companies House profile using company number or mapped symbol and persist it."""
+
+    if not company_number and not symbol:
+        raise SystemExit("Provide a company number or --symbol")
+
+    mapper = UKSymbolMapRepository(database)
+    mapper.initialize_schema()
+    resolved_number = company_number
+    if not resolved_number and symbol:
+        resolved_number = mapper.fetch_company_number(symbol)
+        if not resolved_number:
+            raise SystemExit(f"No company number mapped for symbol {symbol}. Run refresh-uk-symbol-map first.")
+
+    api_key = Config().companies_house_api_key
+    if not api_key:
+        raise SystemExit(
+            "Companies House API key missing. Add [companies_house].api_key to private/config.toml."
+        )
+
+    client = CompaniesHouseClient(api_key=api_key)
+    payload = client.fetch_company_profile(resolved_number)
+
+    repo = UKCompanyFactsRepository(database)
+    repo.initialize_schema()
+    repo.upsert_company_facts(resolved_number, payload, symbol=symbol)
+
+    print(f"Stored Companies House facts for {resolved_number} in {database}")
+    return 0
+
+
+def cmd_ingest_uk_facts_bulk(database: str) -> int:
+    mapper = UKSymbolMapRepository(database)
+    mapper.initialize_schema()
+    company_numbers = mapper.fetch_symbols_with_company_number()
+    if not company_numbers:
+        raise SystemExit("No mapped UK symbols with company numbers. Run refresh-uk-symbol-map first.")
+
+    api_key = Config().companies_house_api_key
+    if not api_key:
+        raise SystemExit(
+            "Companies House API key missing. Add [companies_house].api_key to private/config.toml."
+        )
+
+    client = CompaniesHouseClient(api_key=api_key)
+    repo = UKCompanyFactsRepository(database)
+    repo.initialize_schema()
+
+    for symbol in company_numbers:
+        number = mapper.fetch_company_number(symbol)
+        if not number:
+            continue
+        payload = client.fetch_company_profile(number)
+        repo.upsert_company_facts(number, payload, symbol=symbol)
+        LOGGER.info("Stored Companies House facts for %s (%s)", symbol, number)
+
+    print(f"Stored Companies House facts for {len(company_numbers)} symbols in {database}")
     return 0
 
 
@@ -612,6 +736,48 @@ def cmd_recalc_market_cap(database: str) -> int:
     return 0
 
 
+def cmd_refresh_uk_symbol_map(database: str, gleif_url: str, isin_date: Optional[str]) -> int:
+    """Refresh UK symbol -> company number mapping using GLEIF and stored ISINs."""
+
+    client = GLEIFClient(golden_url=gleif_url)
+    golden_body = client.fetch_golden_csv()
+    isin_body = client.fetch_isin_csv(as_of=isin_date)
+    mapping = client.isin_to_company_number(golden_body, isin_body)
+    if not mapping:
+        golden_count = len(client._parse_golden(golden_body))
+        isin_count = len(client._parse_isin(isin_body))
+        raise SystemExit(f"No GLEIF mappings found (golden rows: {golden_count}, ISIN rows: {isin_count}); aborting.")
+
+    universe_repo = UniverseRepository(database)
+    universe_repo.initialize_schema()
+    symbols = universe_repo.fetch_symbols(region="UK")
+    if not symbols:
+        raise SystemExit("No UK listings stored. Run load-uk-universe first.")
+
+    # Fetch ISINs for UK listings.
+    with universe_repo._connect() as conn:
+        rows = conn.execute(
+            "SELECT symbol, isin FROM listings WHERE region = 'UK' AND isin IS NOT NULL"
+        ).fetchall()
+    isin_rows = [(row[0], row[1]) for row in rows]
+
+    mapper = UKSymbolMapRepository(database)
+    mapper.initialize_schema()
+
+    updates = []
+    for symbol, isin in isin_rows:
+        if not isin:
+            continue
+        entry = mapping.get(isin)
+        if not entry:
+            continue
+        updates.append((symbol, isin, entry.get("lei"), entry.get("company_number")))
+
+    applied = mapper.bulk_upsert(updates)
+    print(f"Updated UK symbol map for {applied} symbols")
+    return 0
+
+
 def cmd_run_screen(symbol: str, config_path: str, database: str) -> int:
     """Evaluate screening criteria against stored/derived metrics."""
 
@@ -751,6 +917,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             database=args.database,
             include_etfs=args.include_etfs,
             exchange_code=args.exchange_code,
+        )
+    if args.command == "ingest-uk-facts":
+        return cmd_ingest_uk_facts(
+            company_number=args.company_number,
+            database=args.database,
+            symbol=args.symbol,
+        )
+    if args.command == "ingest-uk-facts-bulk":
+        return cmd_ingest_uk_facts_bulk(database=args.database)
+    if args.command == "refresh-uk-symbol-map":
+        return cmd_refresh_uk_symbol_map(
+            database=args.database,
+            gleif_url=args.gleif_url,
+            isin_date=args.isin_date,
         )
     if args.command == "ingest-us-facts":
         return cmd_ingest_us_facts(

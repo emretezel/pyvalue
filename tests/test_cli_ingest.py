@@ -14,6 +14,8 @@ from pyvalue.storage import (
     FactRecord,
     MarketDataRepository,
     MetricsRepository,
+    UKCompanyFactsRepository,
+    UKSymbolMapRepository,
     UniverseRepository,
 )
 from pyvalue.universe import Listing
@@ -128,6 +130,56 @@ def test_cmd_load_uk_universe(monkeypatch, tmp_path):
 
     repo = UniverseRepository(db_path)
     assert repo.fetch_symbols("UK") == ["AAA"]
+
+
+def test_cmd_ingest_uk_facts(monkeypatch, tmp_path):
+    calls = {}
+
+    class FakeClient:
+        def __init__(self, api_key=None):
+            calls["api_key"] = api_key
+
+        def fetch_company_profile(self, company_number):
+            calls["company_number"] = company_number
+            return {"company_number": company_number, "name": "Example"}
+
+    monkeypatch.setattr(cli, "CompaniesHouseClient", FakeClient)
+    monkeypatch.setattr(cli, "Config", lambda: SimpleNamespace(companies_house_api_key="KEY"))
+
+    db_path = tmp_path / "ukfacts.db"
+    rc = cli.cmd_ingest_uk_facts("00000000", str(db_path), symbol="AAA")
+
+    assert rc == 0
+    assert calls == {"api_key": "KEY", "company_number": "00000000"}
+
+    repo = UKCompanyFactsRepository(db_path)
+    stored = repo.fetch_fact("00000000")
+    assert stored["company_number"] == "00000000"
+
+
+def test_cmd_ingest_uk_facts_by_symbol(monkeypatch, tmp_path):
+    calls = {}
+
+    class FakeClient:
+        def __init__(self, api_key=None):
+            calls["api_key"] = api_key
+
+        def fetch_company_profile(self, company_number):
+            calls["company_number"] = company_number
+            return {"company_number": company_number, "name": "Example"}
+
+    monkeypatch.setattr(cli, "CompaniesHouseClient", FakeClient)
+    monkeypatch.setattr(cli, "Config", lambda: SimpleNamespace(companies_house_api_key="KEY"))
+
+    db_path = tmp_path / "ukfacts.db"
+    mapper = UKSymbolMapRepository(db_path)
+    mapper.initialize_schema()
+    mapper.upsert_mapping("AAA", company_number="00000000")
+
+    rc = cli.cmd_ingest_uk_facts(None, str(db_path), symbol="AAA")
+
+    assert rc == 0
+    assert calls == {"api_key": "KEY", "company_number": "00000000"}
 
 def test_cmd_update_market_data_bulk(monkeypatch, tmp_path):
     db_path = tmp_path / "marketbulk.db"
