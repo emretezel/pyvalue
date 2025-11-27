@@ -101,6 +101,34 @@ def test_cmd_ingest_us_facts_bulk(monkeypatch, tmp_path):
     assert fake_client.calls == ["CIKAAA", "CIKBBB"]
     assert company_repo.fetch_fact("AAA") == {"cik": "CIKAAA"}
 
+
+def test_cmd_load_uk_universe(monkeypatch, tmp_path):
+    calls = {}
+
+    class FakeLoader:
+        def __init__(self, api_key, exchange_code, fetcher=None, session=None):
+            calls["api_key"] = api_key
+            calls["exchange_code"] = exchange_code
+
+        def load(self):
+            return [
+                Listing(symbol="AAA", security_name="AAA plc", exchange="LSE"),
+                Listing(symbol="ETF1", security_name="ETF", exchange="LSE", is_etf=True),
+            ]
+
+    monkeypatch.setattr(cli, "UKUniverseLoader", FakeLoader)
+    monkeypatch.setattr(cli, "Config", lambda: SimpleNamespace(eodhd_api_key="KEY"))
+
+    db_path = tmp_path / "uk.db"
+    rc = cli.cmd_load_uk_universe(str(db_path), include_etfs=False, exchange_code="LSE")
+
+    assert rc == 0
+    assert calls["api_key"] == "KEY"
+    assert calls["exchange_code"] == "LSE"
+
+    repo = UniverseRepository(db_path)
+    assert repo.fetch_symbols("UK") == ["AAA"]
+
 def test_cmd_update_market_data_bulk(monkeypatch, tmp_path):
     db_path = tmp_path / "marketbulk.db"
     universe_repo = UniverseRepository(db_path)

@@ -12,6 +12,7 @@ import logging
 import time
 from typing import Dict, List, Optional, Sequence
 
+from pyvalue.config import Config
 from pyvalue.ingestion import SECCompanyFactsClient
 from pyvalue.marketdata.service import MarketDataService, latest_share_count
 from pyvalue.metrics import REGISTRY
@@ -25,7 +26,7 @@ from pyvalue.storage import (
     MetricsRepository,
     UniverseRepository,
 )
-from pyvalue.universe import USUniverseLoader
+from pyvalue.universe import UKUniverseLoader, USUniverseLoader
 
 LOGGER = logging.getLogger(__name__)
 
@@ -49,6 +50,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--include-etfs",
         action="store_true",
         help="Persist ETFs alongside operating companies.",
+    )
+
+    load_uk = subparsers.add_parser(
+        "load-uk-universe",
+        help="Download EODHD exchange symbol list and persist the UK equity universe.",
+    )
+    load_uk.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
+    )
+    load_uk.add_argument(
+        "--include-etfs",
+        action="store_true",
+        help="Persist ETFs alongside operating companies.",
+    )
+    load_uk.add_argument(
+        "--exchange-code",
+        default="LSE",
+        help="EODHD exchange code to load (default: %(default)s)",
     )
 
     ingest_facts = subparsers.add_parser(
@@ -262,6 +283,30 @@ def cmd_load_us_universe(database: str, include_etfs: bool) -> int:
     inserted = repo.replace_universe(filtered, region="US")
 
     print(f"Stored {inserted} US listings in {database}")
+    return 0
+
+
+def cmd_load_uk_universe(database: str, include_etfs: bool, exchange_code: str) -> int:
+    """Execute the UK universe load command using EODHD."""
+
+    api_key = Config().eodhd_api_key
+    if not api_key:
+        raise SystemExit(
+            "EODHD API key missing. Add [eodhd].api_key to private/config.toml before loading the UK universe."
+        )
+
+    loader = UKUniverseLoader(api_key=api_key, exchange_code=exchange_code)
+    listings = loader.load()
+    LOGGER.info("Fetched %s UK listings", len(listings))
+
+    filtered = [item for item in listings if _should_keep_listing(include_etfs, item.is_etf)]
+    LOGGER.info("Remaining listings after ETF filter: %s", len(filtered))
+
+    repo = UniverseRepository(database)
+    repo.initialize_schema()
+    inserted = repo.replace_universe(filtered, region="UK")
+
+    print(f"Stored {inserted} UK listings in {database}")
     return 0
 
 
@@ -701,6 +746,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.command == "load-us-universe":
         return cmd_load_us_universe(database=args.database, include_etfs=args.include_etfs)
+    if args.command == "load-uk-universe":
+        return cmd_load_uk_universe(
+            database=args.database,
+            include_etfs=args.include_etfs,
+            exchange_code=args.exchange_code,
+        )
     if args.command == "ingest-us-facts":
         return cmd_ingest_us_facts(
             symbol=args.symbol,

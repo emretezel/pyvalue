@@ -13,6 +13,7 @@ import sqlite3
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 from pyvalue.marketdata.base import PriceData
+from pyvalue.migrations import apply_migrations
 from pyvalue.universe import Listing
 
 
@@ -36,11 +37,12 @@ class UniverseRepository(SQLiteStore):
     def initialize_schema(self) -> None:
         """Create the listings table if it does not exist yet."""
 
+        apply_migrations(self.db_path)
         with self._connect() as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS listings (
-                    symbol TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
                     security_name TEXT NOT NULL,
                     exchange TEXT NOT NULL,
                     market_category TEXT,
@@ -49,7 +51,8 @@ class UniverseRepository(SQLiteStore):
                     round_lot_size INTEGER,
                     source TEXT,
                     region TEXT NOT NULL,
-                    ingested_at TEXT NOT NULL
+                    ingested_at TEXT NOT NULL,
+                    PRIMARY KEY (symbol, region)
                 )
                 """
             )
@@ -122,6 +125,7 @@ class CompanyFactsRepository(SQLiteStore):
     def initialize_schema(self) -> None:
         """Create the company_facts table."""
 
+        apply_migrations(self.db_path)
         with self._connect() as conn:
             conn.execute(
                 """
@@ -210,6 +214,7 @@ class FinancialFactsRepository(SQLiteStore):
     """Persist normalized financial facts for downstream metrics."""
 
     def initialize_schema(self) -> None:
+        apply_migrations(self.db_path)
         with self._connect() as conn:
             conn.execute(
                 """
@@ -322,6 +327,7 @@ class MetricsRepository(SQLiteStore):
     """Persist computed metric values."""
 
     def initialize_schema(self) -> None:
+        apply_migrations(self.db_path)
         with self._connect() as conn:
             conn.execute(
                 """
@@ -366,6 +372,7 @@ class MarketDataRepository(SQLiteStore):
     """Persist market data snapshots (prices, volume, market cap)."""
 
     def initialize_schema(self) -> None:
+        apply_migrations(self.db_path)
         with self._connect() as conn:
             conn.execute(
                 """
@@ -438,6 +445,7 @@ class EntityMetadataRepository(SQLiteStore):
     """Store SEC entity names for quick lookup."""
 
     def initialize_schema(self) -> None:
+        apply_migrations(self.db_path)
         with self._connect() as conn:
             conn.execute(
                 """
