@@ -85,3 +85,4 @@ secret*/
 # Generated artifacts
 *.sqlite3
 *.db
+*.db.bak*
