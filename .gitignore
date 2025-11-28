@@ -78,6 +78,7 @@ private/
 *.env
 .env.*
 secret*/
+data/logs/
 
 # Log files
 *.log

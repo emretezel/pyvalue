@@ -1,6 +1,21 @@
 # pyvalue
 
-Fundamental data ingestion and screening toolkit focusing on value-oriented strategies. Currently supports fetching the US equity universe.
+Fundamental data ingestion and screening toolkit focusing on value-oriented strategies. Supports US (SEC) and global exchanges (EODHD).
+
+## Contents
+- [Quick start](#quick-start)
+- [Symbol format](#symbol-format)
+- [US universe loader](#us-universe-loader)
+- [CLI persistence](#cli-persistence)
+- [Non-US universes and company facts (EODHD)](#non-us-universes-and-company-facts-eodhd)
+- [US company facts](#us-company-facts)
+- [Market data (EODHD)](#market-data-eodhd)
+- [Global fundamentals (EODHD)](#global-fundamentals-eodhd)
+- [Metrics and screening](#metrics-and-screening)
+- [Metric reference](#metric-reference)
+- [Private configuration](#private-configuration)
+- [End-to-end workflow](#end-to-end-workflow)
+- [Example: LSE (non-US exchange)](#example-lse-non-us-exchange)
 
 ## Quick start
 
@@ -44,48 +59,17 @@ ETFs are excluded by default; pass `--include-etfs` to store them as well.
 > You can verify availability manually with
 > `curl "ftp://ftp.nasdaqtrader.com/symboldirectory/nasdaqlisted.txt"`.
 
-## UK universe and company facts
+## Non-US universes and company facts (EODHD)
 
-### Load the UK universe (EODHD)
+**EODHD fundamentals subscription required for non-US exchanges.** US fundamentals use free SEC data, but US market data still comes from EODHD, so an EODHD subscription is required for prices.
+
+### Load an exchange (example: London Stock Exchange, LSE)
 
 ```bash
 pyvalue load-eodhd-universe --exchange-code LSE --database data/pyvalue.db
 ```
 
 This pulls the London Stock Exchange symbol list from EODHD (requires `[eodhd].api_key` in `private/config.toml`), keeps equities by default (ETFs excluded unless `--include-etfs`), and stores ISINs when available.
-
-### Map UK symbols to Companies House
-
-GLEIF provides LEI/company-number data and ISIN→LEI mappings. Refresh the symbol map after loading the UK universe:
-
-```bash
-pyvalue refresh-uk-symbol-map --database data/pyvalue.db --isin-date YYYY-MM-DD
-```
-
-Use a recent `--isin-date` (e.g., yesterday) if today’s ISIN file is not yet published. This joins stored ISINs to Companies House numbers and stores them in `uk_symbol_map`.
-
-### Ingest Companies House profiles
-
-Configure your Companies House API key:
-
-```toml
-[companies_house]
-api_key = "YOUR_COMPANIES_HOUSE_KEY"
-```
-
-Then ingest by symbol (uses the mapping) or by explicit company number:
-
-```bash
-pyvalue ingest-uk-facts --symbol SHEL --database data/pyvalue.db
-# or
-pyvalue ingest-uk-facts 04366849 --database data/pyvalue.db
-```
-
-Bulk ingest all mapped UK symbols:
-
-```bash
-pyvalue ingest-uk-facts-bulk --database data/pyvalue.db
-```
 
 ### US company facts
 
@@ -123,22 +107,7 @@ This iterates over the `company_facts` table, converts each JSON payload into
 This populates the `financial_facts` table with the concepts required to compute the
 initial metric set (debt, current assets/liabilities, EPS, dividends, cash flow, etc.).
 
-## UK company facts (Companies House)
-
-Store your Companies House API key in `private/config.toml`:
-
-```toml
-[companies_house]
-api_key = "YOUR_COMPANIES_HOUSE_KEY"
-```
-
-Then ingest the company profile JSON by company number (optionally associate a ticker):
-
-```bash
-pyvalue ingest-uk-facts 00000000 --symbol VOD
-```
-
-## Market data (EODHD default, Alpha Vantage fallback)
+## Market data (EODHD)
 
 Store your EODHD API token in `private/config.toml` (quotes optional; they are stripped automatically):
 
@@ -174,11 +143,10 @@ pyvalue recalc-market-cap
 
 This multiplies each stored price by the latest share count from normalized SEC data.
 
-By default the CLI uses EODHD’s `/api/eod/{symbol}.US` endpoint and multiplies the returned
-close price by the latest SEC share count (from `EntityCommonStockSharesOutstanding` or
-`CommonStockSharesOutstanding`) to derive market cap. If no EODHD key is present it falls
-back to Alpha Vantage’s `GLOBAL_QUOTE` + `OVERVIEW`. You can still inject a custom provider
-when instantiating `MarketDataService` in Python if you need a different feed.
+By default the CLI uses EODHD’s `/api/eod/{symbol}.EXCH` endpoint and multiplies the returned
+close price by the latest share count (from SEC or EODHD fundamentals) to derive market cap.
+You can still inject a custom provider when instantiating `MarketDataService` in Python if you
+need a different feed.
 
 ## Global fundamentals (EODHD)
 
@@ -187,8 +155,8 @@ fundamentals for a ticker and normalize them into `financial_facts` with provide
 (region is inferred from the exchange’s country code):
 
 ```bash
-pyvalue ingest-eodhd-fundamentals SHEL --exchange-code LSE
-pyvalue normalize-eodhd-fundamentals SHEL
+pyvalue ingest-eodhd-fundamentals SHEL.LSE
+pyvalue normalize-eodhd-fundamentals SHEL.LSE
 ```
 
 To ingest and normalize every listing for an exchange directly from EODHD (example: London
@@ -196,7 +164,7 @@ Stock Exchange, code LSE):
 
 ```bash
 pyvalue ingest-eodhd-fundamentals-bulk --exchange-code LSE
-pyvalue normalize-eodhd-fundamentals-bulk
+pyvalue normalize-eodhd-fundamentals-bulk --region UK
 ```
 
 Metrics and screening look up normalized facts by provider priority (SEC first, then
@@ -296,4 +264,27 @@ Place API keys or region-specific credentials inside the `private/` directory (i
 6. Run the value screen across the universe (optional CSV export):
    ```bash
    pyvalue run-screen-bulk screeners/value.yml --output-csv results.csv
+   ```
+
+### Example: LSE (non-US exchange)
+
+1. Load the LSE universe:
+   ```bash
+   pyvalue load-eodhd-universe --exchange-code LSE
+   ```
+2. Ingest EODHD fundamentals for all LSE tickers:
+   ```bash
+   pyvalue ingest-eodhd-fundamentals-bulk --exchange-code LSE
+   ```
+3. Normalize the ingested payloads:
+   ```bash
+   pyvalue normalize-eodhd-fundamentals-bulk --region UK
+   ```
+4. Fetch market data for all LSE tickers:
+   ```bash
+   pyvalue update-market-data-bulk --region UK
+   ```
+5. Compute metrics for all LSE tickers:
+   ```bash
+   pyvalue compute-metrics-bulk --region UK
    ```

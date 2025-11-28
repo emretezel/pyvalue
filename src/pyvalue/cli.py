@@ -18,6 +18,7 @@ from pyvalue.marketdata.service import MarketDataService, latest_share_count
 from pyvalue.metrics import REGISTRY
 from pyvalue.normalization import EODHDFactsNormalizer, SECFactsNormalizer
 from pyvalue.screening import Criterion, evaluate_criterion, load_screen, evaluate_criterion_verbose
+from pyvalue.logging_utils import setup_logging
 from pyvalue.storage import (
     CompanyFactsRepository,
     EntityMetadataRepository,
@@ -1319,7 +1320,7 @@ def _write_screen_csv(
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Entrypoint used by console_scripts."""
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    setup_logging()
     parser = build_parser()
     args = parser.parse_args(argv)
 
