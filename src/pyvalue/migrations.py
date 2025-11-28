@@ -225,6 +225,155 @@ def _migration_006_create_uk_filing_documents(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_007_fundamentals_provider_columns(conn: sqlite3.Connection) -> None:
+    """Add provider-aware storage for fundamentals and normalized facts."""
+
+    # Create raw fundamentals storage if missing.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fundamentals_raw (
+            provider TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            region TEXT,
+            currency TEXT,
+            data TEXT NOT NULL,
+            fetched_at TEXT NOT NULL,
+            PRIMARY KEY (provider, symbol)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fundamentals_region
+        ON fundamentals_raw(region)
+        """
+    )
+
+    # Rebuild financial_facts to include provider/accounting_standard.
+    exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='financial_facts'"
+    ).fetchone()
+    if exists is None:
+        return
+
+    info = conn.execute("PRAGMA table_info(financial_facts)").fetchall()
+    columns = {row[1] for row in info}
+    needs_provider = "provider" not in columns
+    needs_accounting = "accounting_standard" not in columns
+    needs_currency = "currency" not in columns
+    if not (needs_provider or needs_accounting or needs_currency):
+        return
+
+    conn.execute("ALTER TABLE financial_facts RENAME TO financial_facts_old")
+    conn.execute(
+        """
+        CREATE TABLE financial_facts (
+            symbol TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            cik TEXT,
+            concept TEXT NOT NULL,
+            fiscal_period TEXT,
+            end_date TEXT NOT NULL,
+            unit TEXT NOT NULL,
+            value REAL NOT NULL,
+            accn TEXT,
+            filed TEXT,
+            frame TEXT,
+            start_date TEXT,
+            accounting_standard TEXT,
+            currency TEXT,
+            PRIMARY KEY (symbol, provider, concept, fiscal_period, end_date, unit, accn)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO financial_facts (
+            symbol, provider, cik, concept, fiscal_period, end_date, unit,
+            value, accn, filed, frame, start_date, accounting_standard, currency
+        )
+        SELECT
+            symbol,
+            'SEC' AS provider,
+            cik,
+            concept,
+            fiscal_period,
+            end_date,
+            unit,
+            value,
+            accn,
+            filed,
+            frame,
+            start_date,
+            NULL AS accounting_standard,
+            NULL AS currency
+        FROM financial_facts_old
+        """
+    )
+    conn.execute("DROP TABLE financial_facts_old")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fin_facts_symbol_concept
+        ON financial_facts(symbol, concept, provider)
+        """
+    )
+
+
+def _migration_008_create_exchange_metadata(conn: sqlite3.Connection) -> None:
+    """Store EODHD exchange metadata for region lookups."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS exchange_metadata (
+            code TEXT PRIMARY KEY,
+            name TEXT,
+            country TEXT,
+            currency TEXT,
+            operating_mic TEXT,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def _migration_009_add_exchange_to_fundamentals(conn: sqlite3.Connection) -> None:
+    """Track exchange code on fundamentals_raw."""
+
+    exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='fundamentals_raw'"
+    ).fetchone()
+    if exists is None:
+        return
+
+    info = conn.execute("PRAGMA table_info(fundamentals_raw)").fetchall()
+    columns = {row[1] for row in info}
+    if "exchange" in columns:
+        return
+
+    conn.execute("ALTER TABLE fundamentals_raw ADD COLUMN exchange TEXT")
+
+
+def _migration_010_qualify_listings_symbols(conn: sqlite3.Connection) -> None:
+    """Suffix listing symbols with exchange or region code when missing."""
+
+    exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='listings'"
+    ).fetchone()
+    if exists is None:
+        return
+
+    rows = conn.execute(
+        "SELECT symbol, exchange, region FROM listings WHERE symbol NOT LIKE '%.%'"
+    ).fetchall()
+    for symbol, exchange, region in rows:
+        exch_code = (exchange or region or "US").upper().replace(" ", "")
+        qualified = f"{symbol}.{exch_code}"
+        conn.execute(
+            "UPDATE listings SET symbol = ? WHERE symbol = ? AND region = ?",
+            (qualified, symbol, region),
+        )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -232,6 +381,10 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_004_create_uk_symbol_map,
     _migration_005_drop_unique_isin_index,
     _migration_006_create_uk_filing_documents,
+    _migration_007_fundamentals_provider_columns,
+    _migration_008_create_exchange_metadata,
+    _migration_009_add_exchange_to_fundamentals,
+    _migration_010_qualify_listings_symbols,
 ]
 
 

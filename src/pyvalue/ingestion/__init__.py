@@ -4,7 +4,8 @@ Author: Emre Tezel
 """
 
 from .sec import SECCompanyFactsClient
+from .eodhd import EODHDFundamentalsClient
 from .companies_house import CompaniesHouseClient
 from .gleif import GLEIFClient
 
-__all__ = ["SECCompanyFactsClient", "CompaniesHouseClient", "GLEIFClient"]
+__all__ = ["SECCompanyFactsClient", "EODHDFundamentalsClient", "CompaniesHouseClient", "GLEIFClient"]

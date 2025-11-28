@@ -42,8 +42,8 @@ def test_migration_updates_listings_primary_key(tmp_path):
         rows = conn.execute("SELECT symbol, region FROM listings").fetchall()
         version = conn.execute("SELECT version FROM schema_migrations").fetchone()[0]
 
-    assert pk_cols == ["symbol", "region"]
-    assert rows == [("ABC", "US")]
+        assert pk_cols == ["symbol", "region"]
+        assert rows == [("ABC.NYSE", "US")]
     assert version == len(MIGRATIONS)
 
 

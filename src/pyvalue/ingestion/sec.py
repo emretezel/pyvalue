@@ -13,6 +13,8 @@ from typing import Dict, Optional
 
 import requests
 
+from pyvalue.config import Config
+
 LOGGER = logging.getLogger(__name__)
 
 COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
@@ -47,10 +49,12 @@ class SECCompanyFactsClient:
         user_agent: Optional[str] = None,
         session: Optional[requests.Session] = None,
     ) -> None:
-        ua = user_agent or os.environ.get("PYVALUE_SEC_USER_AGENT")
+        cfg = Config()
+        ua = user_agent or cfg.sec_user_agent or os.environ.get("PYVALUE_SEC_USER_AGENT")
         if not ua:
             raise ValueError(
-                "SEC user agent is required. Provide --user-agent or set PYVALUE_SEC_USER_AGENT."
+                "SEC user agent is required. Provide --user-agent, set [sec].user_agent in config, "
+                "or set PYVALUE_SEC_USER_AGENT."
             )
         self.session = session or requests.Session()
         self.session.headers.update({"User-Agent": ua, "Accept": "application/json"})

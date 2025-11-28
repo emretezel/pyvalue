@@ -121,6 +121,15 @@ class UniverseRepository(SQLiteStore):
             ).fetchall()
         return [row[0] for row in rows]
 
+    def fetch_symbol_exchanges(self, region: str) -> List[Tuple[str, Optional[str]]]:
+        """Return (symbol, exchange) pairs for a region."""
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT symbol, exchange FROM listings WHERE region = ? ORDER BY symbol", (region,)
+            ).fetchall()
+        return [(row[0], row[1]) for row in rows]
+
 
 class CompanyFactsRepository(SQLiteStore):
     """Store SEC company facts payloads for later metric calculations."""
@@ -194,6 +203,157 @@ class CompanyFactsRepository(SQLiteStore):
         if row is None:
             return None
         return row[0], json.loads(row[1])
+
+
+class FundamentalsRepository(SQLiteStore):
+    """Persist raw fundamentals payloads by provider."""
+
+    def initialize_schema(self) -> None:
+        apply_migrations(self.db_path)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS fundamentals_raw (
+                    provider TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    region TEXT,
+                    currency TEXT,
+                    exchange TEXT,
+                    data TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL,
+                    PRIMARY KEY (provider, symbol)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_fundamentals_region
+                ON fundamentals_raw(region)
+                """
+            )
+
+    def upsert(
+        self,
+        provider: str,
+        symbol: str,
+        payload: Dict[str, Any],
+        region: Optional[str] = None,
+        currency: Optional[str] = None,
+        exchange: Optional[str] = None,
+    ) -> None:
+        serialized = json.dumps(payload)
+        fetched_at = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO fundamentals_raw (provider, symbol, region, currency, exchange, data, fetched_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(provider, symbol) DO UPDATE SET
+                    region = COALESCE(excluded.region, fundamentals_raw.region),
+                    currency = COALESCE(excluded.currency, fundamentals_raw.currency),
+                    exchange = COALESCE(excluded.exchange, fundamentals_raw.exchange),
+                    data = excluded.data,
+                    fetched_at = excluded.fetched_at
+                """,
+                (provider.upper(), symbol.upper(), region, currency, exchange, serialized, fetched_at),
+            )
+
+    def fetch(self, provider: str, symbol: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT data FROM fundamentals_raw
+                WHERE provider = ? AND symbol = ?
+                """,
+                (provider.upper(), symbol.upper()),
+            ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row[0])
+
+    def fetch_record(self, provider: str, symbol: str) -> Optional[Tuple[str, Optional[str], Dict[str, Any]]]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT symbol, region, data FROM fundamentals_raw
+                WHERE provider = ? AND symbol = ?
+                """,
+                (provider.upper(), symbol.upper()),
+            ).fetchone()
+        if row is None:
+            return None
+        return row[0], row[1], json.loads(row[2])
+
+    def symbols(self, provider: str, region: Optional[str] = None) -> List[str]:
+        query = ["SELECT symbol FROM fundamentals_raw WHERE provider = ?"]
+        params: List[Any] = [provider.upper()]
+        if region:
+            query.append("AND region = ?")
+            params.append(region)
+        query.append("ORDER BY symbol")
+        sql = " ".join(query)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [row[0] for row in rows]
+
+    def symbol_exchanges(self, provider: str, region: Optional[str] = None) -> List[Tuple[str, Optional[str]]]:
+        query = ["SELECT symbol, exchange FROM fundamentals_raw WHERE provider = ?"]
+        params: List[Any] = [provider.upper()]
+        if region:
+            query.append("AND region = ?")
+            params.append(region)
+        query.append("ORDER BY symbol")
+        sql = " ".join(query)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [(row[0], row[1]) for row in rows]
+
+
+class ExchangeMetadataRepository(SQLiteStore):
+    """Persist exchange metadata (code, country, currency)."""
+
+    def initialize_schema(self) -> None:
+        apply_migrations(self.db_path)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS exchange_metadata (
+                    code TEXT PRIMARY KEY,
+                    name TEXT,
+                    country TEXT,
+                    currency TEXT,
+                    operating_mic TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+
+    def upsert(self, code: str, name: Optional[str], country: Optional[str], currency: Optional[str], operating_mic: Optional[str]) -> None:
+        updated_at = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO exchange_metadata (code, name, country, currency, operating_mic, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(code) DO UPDATE SET
+                    name = COALESCE(excluded.name, exchange_metadata.name),
+                    country = COALESCE(excluded.country, exchange_metadata.country),
+                    currency = COALESCE(excluded.currency, exchange_metadata.currency),
+                    operating_mic = COALESCE(excluded.operating_mic, exchange_metadata.operating_mic),
+                    updated_at = excluded.updated_at
+                """,
+                (code.upper(), name, country, currency, operating_mic, updated_at),
+            )
+
+    def fetch(self, code: str) -> Optional[Dict[str, str]]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT code, name, country, currency, operating_mic FROM exchange_metadata WHERE code = ?",
+                (code.upper(),),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"code": row[0], "name": row[1], "country": row[2], "currency": row[3], "operating_mic": row[4]}
 
 
 class UKCompanyFactsRepository(SQLiteStore):
@@ -423,16 +583,19 @@ class FactRecord:
     """Normalized financial fact ready for storage."""
 
     symbol: str
-    cik: str
-    concept: str
-    fiscal_period: str
-    end_date: str
-    unit: str
-    value: float
-    accn: Optional[str]
-    filed: Optional[str]
-    frame: Optional[str]
+    provider: str = "SEC"
+    cik: Optional[str] = None
+    concept: str = ""
+    fiscal_period: str = ""
+    end_date: str = ""
+    unit: str = ""
+    value: float = 0.0
+    accn: Optional[str] = None
+    filed: Optional[str] = None
+    frame: Optional[str] = None
     start_date: Optional[str] = None
+    accounting_standard: Optional[str] = None
+    currency: Optional[str] = None
 
 
 class FinancialFactsRepository(SQLiteStore):
@@ -445,7 +608,8 @@ class FinancialFactsRepository(SQLiteStore):
                 """
                 CREATE TABLE IF NOT EXISTS financial_facts (
                     symbol TEXT NOT NULL,
-                    cik TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    cik TEXT,
                     concept TEXT NOT NULL,
                     fiscal_period TEXT,
                     end_date TEXT NOT NULL,
@@ -455,23 +619,32 @@ class FinancialFactsRepository(SQLiteStore):
                     filed TEXT,
                     frame TEXT,
                     start_date TEXT,
-                    PRIMARY KEY (symbol, concept, fiscal_period, end_date, unit, accn)
+                    accounting_standard TEXT,
+                    currency TEXT,
+                    PRIMARY KEY (symbol, provider, concept, fiscal_period, end_date, unit, accn)
                 )
                 """
             )
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_fin_facts_symbol_concept
-                ON financial_facts(symbol, concept)
+                ON financial_facts(symbol, concept, provider)
                 """
             )
 
-    def replace_facts(self, symbol: str, records: Iterable[FactRecord]) -> int:
+    def replace_facts(
+        self,
+        symbol: str,
+        records: Iterable[FactRecord],
+        provider: Optional[str] = None,
+    ) -> int:
         """Replace all facts for ``symbol`` with the provided batch."""
 
+        target_symbol = symbol.upper()
         rows = [
             (
-                record.symbol,
+                target_symbol,
+                (record.provider or "SEC").upper(),
                 record.cik,
                 record.concept,
                 record.fiscal_period,
@@ -482,39 +655,59 @@ class FinancialFactsRepository(SQLiteStore):
                 record.filed,
                 record.frame,
                 getattr(record, "start_date", None),
+                getattr(record, "accounting_standard", None),
+                getattr(record, "currency", None),
             )
             for record in records
         ]
         if not rows:
             return 0
 
+        target_provider = (provider or rows[0][1] or "SEC").upper()
         with self._connect() as conn:
-            conn.execute("DELETE FROM financial_facts WHERE symbol = ?", (symbol,))
+            conn.execute(
+                "DELETE FROM financial_facts WHERE symbol = ? AND provider = ?",
+                (target_symbol, target_provider),
+            )
             conn.executemany(
                 """
                 INSERT OR REPLACE INTO financial_facts (
-                    symbol, cik, concept, fiscal_period,
-                    end_date, unit, value, accn, filed, frame, start_date
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    symbol, provider, cik, concept, fiscal_period,
+                    end_date, unit, value, accn, filed, frame, start_date,
+                    accounting_standard, currency
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
         return len(rows)
 
-    def latest_fact(self, symbol: str, concept: str) -> Optional[FactRecord]:
+    def latest_fact(
+        self,
+        symbol: str,
+        concept: str,
+        providers: Optional[Sequence[str]] = None,
+    ) -> Optional[FactRecord]:
         """Return the most recent FactRecord for a symbol/concept."""
 
+        provider_priority = [p.upper() for p in (providers or ("SEC", "EODHD"))]
+        order_case = " ".join(
+            f"WHEN ? THEN {idx}" for idx, _ in enumerate(provider_priority)
+        )
+        params: List[Any] = [symbol.upper(), concept, *provider_priority]
+        order_sql = f"CASE provider {order_case} ELSE {len(provider_priority)} END"
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT symbol, cik, concept, fiscal_period, end_date, unit,
-                       value, accn, filed, frame, start_date
+                SELECT symbol, provider, cik, concept, fiscal_period, end_date, unit,
+                       value, accn, filed, frame, start_date, accounting_standard, currency
                 FROM financial_facts
                 WHERE symbol = ? AND concept = ?
-                ORDER BY end_date DESC
+                ORDER BY {order_sql}, end_date DESC, filed DESC
                 LIMIT 1
-                """,
-                (symbol.upper(), concept),
+                """.format(
+                    order_sql=order_sql
+                ),
+                params,
             ).fetchone()
         if row is None:
             return None
@@ -526,11 +719,18 @@ class FinancialFactsRepository(SQLiteStore):
         concept: str,
         fiscal_period: Optional[str] = None,
         limit: Optional[int] = None,
+        providers: Optional[Sequence[str]] = None,
     ) -> List[FactRecord]:
         """Return ordered fact records for the symbol/concept."""
 
+        provider_priority = [p.upper() for p in (providers or ("SEC", "EODHD"))]
+        order_case = " ".join(
+            f"WHEN ? THEN {idx}" for idx, _ in enumerate(provider_priority)
+        )
+        order_sql = f"CASE provider {order_case} ELSE {len(provider_priority)} END"
+
         query = [
-            "SELECT symbol, cik, concept, fiscal_period, end_date, unit, value, accn, filed, frame, start_date",
+            "SELECT symbol, provider, cik, concept, fiscal_period, end_date, unit, value, accn, filed, frame, start_date, accounting_standard, currency",
             "FROM financial_facts",
             "WHERE symbol = ? AND concept = ?",
         ]
@@ -538,7 +738,8 @@ class FinancialFactsRepository(SQLiteStore):
         if fiscal_period:
             query.append("AND fiscal_period = ?")
             params.append(fiscal_period)
-        query.append("ORDER BY end_date DESC, filed DESC")
+        params.extend(provider_priority)
+        query.append(f"ORDER BY {order_sql}, end_date DESC, filed DESC")
         if limit:
             query.append("LIMIT ?")
             params.append(limit)
@@ -710,6 +911,8 @@ class EntityMetadataRepository(SQLiteStore):
 __all__ = [
     "UniverseRepository",
     "CompanyFactsRepository",
+    "FundamentalsRepository",
+    "ExchangeMetadataRepository",
     "UKCompanyFactsRepository",
     "UKSymbolMapRepository",
     "UKFilingRepository",

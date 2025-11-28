@@ -325,6 +325,7 @@ class SECFactsNormalizer:
 
         return FactRecord(
             symbol=symbol,
+            provider="SEC",
             cik=cik,
             concept=concept,
             fiscal_period=fiscal_period,
@@ -335,6 +336,7 @@ class SECFactsNormalizer:
             filed=entry.get("filed"),
             frame=entry.get("frame"),
             start_date=entry.get("start"),
+            accounting_standard="US-GAAP",
         )
 
     def _build_fy_lookup(self, fy_map: Dict[str, FactRecord]) -> List[tuple[datetime, str]]:

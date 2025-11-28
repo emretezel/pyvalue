@@ -98,8 +98,10 @@ class UKUniverseLoader:
 
         isin = (row.get("ISIN") or row.get("Isin") or row.get("isin") or "").strip() or None
 
+        qualified = symbol if "." in symbol else f"{symbol}.{self.exchange_code.upper()}"
+
         return Listing(
-            symbol=symbol,
+            symbol=qualified,
             security_name=name,
             exchange=exchange,
             market_category=exchange,

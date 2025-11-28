@@ -19,7 +19,7 @@ from pyvalue.storage import FactRecord
 
 def fact(**kwargs):
     base = {
-        "symbol": "AAPL",
+        "symbol": "AAPL.US",
         "cik": "CIK",
         "concept": "",
         "fiscal_period": "FY",
@@ -50,7 +50,7 @@ def test_working_capital_metric_computes_difference(monkeypatch):
             return None
 
     repo = DummyRepo()
-    result = metric.compute("AAPL", repo)
+    result = metric.compute("AAPL.US", repo)
 
     assert result is not None
     assert result.value == 150.0
@@ -69,7 +69,7 @@ def test_current_ratio_metric(monkeypatch):
             return None
 
     repo = DummyRepo()
-    result = metric.compute("AAPL", repo)
+    result = metric.compute("AAPL.US", repo)
     assert result is not None
     assert result.value == 2.0
 
@@ -89,7 +89,7 @@ def test_eps_streak_counts_consecutive_positive_years():
             return []
 
     repo = DummyRepo()
-    result = metric.compute("AAPL", repo)
+    result = metric.compute("AAPL.US", repo)
     assert result is not None
     assert result.value == 2
     assert result.as_of == "2023-09-30"
@@ -116,7 +116,7 @@ def test_graham_eps_cagr_metric(monkeypatch):
             return []
 
     repo = DummyRepo()
-    result = metric.compute("AAPL", repo)
+    result = metric.compute("AAPL.US", repo)
     assert result is not None
     assert result.value > 0
 
@@ -154,7 +154,7 @@ def test_graham_multiplier_metric(monkeypatch):
 
     repo = DummyRepo()
     market_repo = DummyMarketRepo()
-    result = metric.compute("AAPL", repo, market_repo)
+    result = metric.compute("AAPL.US", repo, market_repo)
     assert result is not None
     assert result.value > 0
 
@@ -178,7 +178,7 @@ def test_earnings_yield_metric(monkeypatch):
 
     repo = DummyRepo()
     market_repo = DummyMarketRepo()
-    result = metric.compute("AAPL", repo, market_repo)
+    result = metric.compute("AAPL.US", repo, market_repo)
     assert result is not None
     assert result.value == (2.5 + 2.0 + 1.5 + 1.0) / 50.0
 
@@ -214,7 +214,7 @@ def test_price_to_fcf_metric():
     repo = DummyRepo()
     market_repo = DummyMarketRepo()
 
-    result = metric.compute("AAPL", repo, market_repo)
+    result = metric.compute("AAPL.US", repo, market_repo)
     assert result is not None
     assert result.value == 10.0
 
@@ -234,7 +234,7 @@ def test_eps_ttm_metric():
             return []
 
     repo = DummyRepo()
-    result = metric.compute("AAPL", repo)
+    result = metric.compute("AAPL.US", repo)
     assert result is not None
     assert result.value == 7.0
     assert result.as_of == "2023-12-31"
@@ -261,7 +261,7 @@ def test_eps_6y_avg_metric():
             return []
 
     repo = DummyRepo()
-    result = metric.compute("AAPL", repo)
+    result = metric.compute("AAPL.US", repo)
     assert result is not None
     # last six entries values 2..7 -> avg 4.5
     assert result.value == sum(range(2, 8)) / 6
@@ -284,7 +284,7 @@ def test_market_capitalization_metric():
     repo = DummyRepo()
     market_repo = DummyMarketRepo()
 
-    result = metric.compute("AAPL", repo, market_repo)
+    result = metric.compute("AAPL.US", repo, market_repo)
     assert result is not None
     assert result.value == 123456789.0
     assert result.as_of == "2024-05-01"
@@ -317,7 +317,7 @@ def test_roc_greenblatt_metric(monkeypatch):
             return []
 
     repo = DummyRepo()
-    result = metric.compute("AAPL", repo)
+    result = metric.compute("AAPL.US", repo)
     assert result is not None
     assert result.value > 0
 
@@ -344,6 +344,6 @@ def test_roe_greenblatt_metric(monkeypatch):
             return None
 
     repo = DummyRepo()
-    result = metric.compute("AAPL", repo)
+    result = metric.compute("AAPL.US", repo)
     assert result is not None
     assert result.value > 0

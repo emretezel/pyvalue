@@ -33,7 +33,7 @@ def test_normalizer_emits_records_for_target_concepts():
     }
     normalizer = SECFactsNormalizer(concepts=["NetIncomeLoss"])
 
-    records = normalizer.normalize(payload, symbol="AAPL", cik="CIK0000320193")
+    records = normalizer.normalize(payload, symbol="AAPL.US", cik="CIK0000320193")
 
     assert len(records) == 1
     rec = records[0]

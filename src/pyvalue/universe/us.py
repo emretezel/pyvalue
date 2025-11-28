@@ -130,8 +130,12 @@ class USUniverseLoader:
         is_etf = (row.get("ETF") or row.get("ETF?" ) or "N").strip().upper() == "Y"
         market_category = row.get("Market Category") or row.get("Tier") or None
 
+        qualified = symbol.upper()
+        if not qualified.endswith(".US"):
+            qualified = f"{qualified}.US"
+
         return Listing(
-            symbol=symbol,
+            symbol=qualified,
             security_name=(row.get("Security Name") or row.get("Company Name") or "").strip(),
             exchange=exchange,
             market_category=market_category,

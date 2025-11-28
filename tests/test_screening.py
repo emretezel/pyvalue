@@ -14,8 +14,8 @@ def test_evaluate_criterion_uses_metrics_repo(tmp_path):
     fact_repo.initialize_schema()
     metrics_repo = MetricsRepository(db)
     metrics_repo.initialize_schema()
-    metrics_repo.upsert("AAPL", "working_capital", 100.0, "2023-09-30")
-    metrics_repo.upsert("AAPL", "long_term_debt", 150.0, "2023-09-30")
+    metrics_repo.upsert("AAPL.US", "working_capital", 100.0, "2023-09-30")
+    metrics_repo.upsert("AAPL.US", "long_term_debt", 150.0, "2023-09-30")
 
     criterion = Criterion(
         name="Debt vs WC",
@@ -24,7 +24,7 @@ def test_evaluate_criterion_uses_metrics_repo(tmp_path):
         right=Term(metric="working_capital", multiplier=1.75),
     )
 
-    assert evaluate_criterion(criterion, "AAPL", metrics_repo, fact_repo) is True
+    assert evaluate_criterion(criterion, "AAPL.US", metrics_repo, fact_repo) is True
 
 def test_evaluate_criterion_supports_constant_terms(tmp_path):
     db = tmp_path / "test2.db"
@@ -32,7 +32,7 @@ def test_evaluate_criterion_supports_constant_terms(tmp_path):
     fact_repo.initialize_schema()
     metrics_repo = MetricsRepository(db)
     metrics_repo.initialize_schema()
-    metrics_repo.upsert("AAPL", "earnings_yield", 0.05, "2023-09-30")
+    metrics_repo.upsert("AAPL.US", "earnings_yield", 0.05, "2023-09-30")
 
     criterion = Criterion(
         name="Positive earnings yield",
@@ -41,4 +41,4 @@ def test_evaluate_criterion_supports_constant_terms(tmp_path):
         right=Term(value=0.0),
     )
 
-    assert evaluate_criterion(criterion, "AAPL", metrics_repo, fact_repo) is True
+    assert evaluate_criterion(criterion, "AAPL.US", metrics_repo, fact_repo) is True

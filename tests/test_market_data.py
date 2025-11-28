@@ -7,7 +7,7 @@ from pyvalue.marketdata.alpha_vantage import AlphaVantageProvider
 from pyvalue.marketdata.eodhd import EODHDProvider
 from pyvalue.marketdata.base import PriceData
 from pyvalue.marketdata.service import MarketDataService
-from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
+from pyvalue.storage import FactRecord, FinancialFactsRepository, FundamentalsRepository, MarketDataRepository
 
 
 class DummyAlphaSession:
@@ -72,12 +72,12 @@ def test_alpha_vantage_provider_parses_response():
     session = DummyAlphaSession(payloads)
     provider = AlphaVantageProvider(api_key="demo", session=session)  # type: ignore[arg-type]
 
-    data = provider.latest_price("AAPL")
+    data = provider.latest_price("AAPL.US")
 
     assert data.price == 177.90
     assert data.as_of == "2024-03-01"
     assert data.volume == 1000
-    assert data.symbol == "AAPL"
+    assert data.symbol == "AAPL.US"
     assert data.market_cap == 300000000000.0
 
 
@@ -89,12 +89,12 @@ def test_eodhd_provider_parses_response():
     session = DummyEODSession(payload)
     provider = EODHDProvider(api_key="demo", session=session)  # type: ignore[arg-type]
 
-    data = provider.latest_price("mcd")
+    data = provider.latest_price("mcd.us")
 
     assert data.price == 205.75
     assert data.as_of == "2024-03-04"
     assert data.volume == 9000
-    assert data.symbol == "MCD"
+    assert data.symbol == "MCD.US"
 
 
 def test_market_data_service_persists_prices(monkeypatch, tmp_path):
@@ -125,18 +125,18 @@ def test_market_data_service_persists_prices(monkeypatch, tmp_path):
     provider = AlphaVantageProvider(api_key="demo", session=session)  # type: ignore[arg-type]
     service = MarketDataService(db_path=tmp_path / "data.db", provider=provider, config=DummyConfig("demo"))
 
-    result = service.refresh_symbol("AAPL")
+    result = service.refresh_symbol("AAPL.US")
 
     assert result.price == 150.0
     assert result.market_cap == 2500000000.0
 
     repo = MarketDataRepository(tmp_path / "data.db")
-    latest_snapshot = repo.latest_snapshot("AAPL")
+    latest_snapshot = repo.latest_snapshot("AAPL.US")
     assert latest_snapshot is not None
     assert latest_snapshot.as_of == "2024-03-02"
     assert latest_snapshot.price == 150.0
     assert latest_snapshot.market_cap == 2500000000.0
-    latest = repo.latest_price("AAPL")
+    latest = repo.latest_price("AAPL.US")
     assert latest[0] == "2024-03-02"
     assert latest[1] == 150.0
 
@@ -154,10 +154,10 @@ def test_market_data_service_derives_market_cap_from_shares(tmp_path):
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
     fact_repo.replace_facts(
-        "AAPL",
+        "AAPL.US",
         [
             FactRecord(
-                symbol="AAPL",
+                symbol="AAPL.US",
                 cik="CIK0000320193",
                 concept="CommonStockSharesOutstanding",
                 fiscal_period="FY",
@@ -173,9 +173,38 @@ def test_market_data_service_derives_market_cap_from_shares(tmp_path):
     )
 
     service = MarketDataService(db_path=db_path, provider=DummyProvider(), config=DummyConfig())
-    service.refresh_symbol("AAPL")
+    service.refresh_symbol("AAPL.US")
 
     repo = MarketDataRepository(db_path)
-    snapshot = repo.latest_snapshot("AAPL")
+    snapshot = repo.latest_snapshot("AAPL.US")
     assert snapshot is not None
     assert snapshot.market_cap == 50000.0
+
+
+def test_market_data_service_uses_fundamentals_shares(tmp_path):
+    class DummyProvider:
+        def latest_price(self, symbol):
+            return PriceData(symbol=symbol, price=20.0, as_of="2024-01-02", volume=None, currency=None)
+
+    class DummyConfig:
+        eodhd_api_key = None
+        alpha_vantage_api_key = None
+
+    db_path = tmp_path / "sharesfund.db"
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD",
+        "SHEL.LSE",
+        {"SharesStats": {"SharesOutstanding": 50}},
+        region="UK",
+        exchange="LSE",
+    )
+
+    service = MarketDataService(db_path=db_path, provider=DummyProvider(), config=DummyConfig())
+    service.refresh_symbol("SHEL.LSE")
+
+    repo = MarketDataRepository(db_path)
+    snapshot = repo.latest_snapshot("SHEL.LSE")
+    assert snapshot is not None
+    assert snapshot.market_cap == 1000.0

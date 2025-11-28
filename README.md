@@ -9,6 +9,11 @@ python -m pip install -e .[dev]
 pytest
 ```
 
+## Symbol format
+
+All tickers are stored and referenced with an exchange suffix using EODHD codes
+(e.g., `AAPL.US`, `SHEL.LSE`). US symbols always use `.US`.
+
 ## US universe loader
 
 ```python
@@ -44,7 +49,7 @@ ETFs are excluded by default; pass `--include-etfs` to store them as well.
 ### Load the UK universe (EODHD)
 
 ```bash
-pyvalue load-uk-universe --database data/pyvalue.db
+pyvalue load-eodhd-universe --exchange-code LSE --database data/pyvalue.db
 ```
 
 This pulls the London Stock Exchange symbol list from EODHD (requires `[eodhd].api_key` in `private/config.toml`), keeps equities by default (ETFs excluded unless `--include-etfs`), and stores ISINs when available.
@@ -84,8 +89,8 @@ pyvalue ingest-uk-facts-bulk --database data/pyvalue.db
 
 ### US company facts
 
-SEC requires a descriptive `User-Agent` header that includes contact details. Set an
-environment variable such as:
+SEC requires a descriptive `User-Agent` header that includes contact details. Set
+`[sec].user_agent` in `private/config.toml` or an environment variable such as:
 
 ```bash
 export PYVALUE_SEC_USER_AGENT="pyvalue/0.1 (contact: you@example.com)"
@@ -148,7 +153,7 @@ api_key = "YOUR_KEY"
 Fetch the latest quote and persist it in `market_data`:
 
 ```bash
-pyvalue update-market-data AAPL
+pyvalue update-market-data AAPL.US
 ```
 
 To refresh every stored ticker (using the latest universe in SQLite) with throttling that
@@ -175,12 +180,34 @@ close price by the latest SEC share count (from `EntityCommonStockSharesOutstand
 back to Alpha Vantage’s `GLOBAL_QUOTE` + `OVERVIEW`. You can still inject a custom provider
 when instantiating `MarketDataService` in Python if you need a different feed.
 
+## Global fundamentals (EODHD)
+
+Store your EODHD API token in `private/config.toml` (see Market data section above). Pull
+fundamentals for a ticker and normalize them into `financial_facts` with provider `EODHD`
+(region is inferred from the exchange’s country code):
+
+```bash
+pyvalue ingest-eodhd-fundamentals SHEL --exchange-code LSE
+pyvalue normalize-eodhd-fundamentals SHEL
+```
+
+To ingest and normalize every listing for an exchange directly from EODHD (example: London
+Stock Exchange, code LSE):
+
+```bash
+pyvalue ingest-eodhd-fundamentals-bulk --exchange-code LSE
+pyvalue normalize-eodhd-fundamentals-bulk
+```
+
+Metrics and screening look up normalized facts by provider priority (SEC first, then
+EODHD), so US tickers still rely on SEC data while non‑US symbols use EODHD.
+
 ## Metrics and screening
 
 Compute metrics (e.g., working capital, long-term debt) for a ticker:
 
 ```bash
-pyvalue compute-metrics AAPL --metrics working_capital long_term_debt
+pyvalue compute-metrics AAPL.US --metrics working_capital long_term_debt
 ```
 
 To compute the full metric set for every stored ticker, run:
@@ -195,7 +222,7 @@ prints progress, and can be cancelled with Ctrl+C.
 Define screening criteria in YAML (see `screeners/value.yml`) and evaluate them:
 
 ```bash
-pyvalue run-screen AAPL screeners/value.yml
+pyvalue run-screen AAPL.US screeners/value.yml
 ```
 
 The sample screen checks nine value-focused criteria (leverage, profitability, liquidity,

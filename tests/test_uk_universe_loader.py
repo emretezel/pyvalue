@@ -28,12 +28,12 @@ def test_loader_filters_by_type(eodhd_payload):
     listings = loader.load()
 
     symbols = [l.symbol for l in listings]
-    assert symbols == ["AAA", "BBB", "ETF1"]
+    assert symbols == ["AAA.LSE", "BBB.LSE", "ETF1.LSE"]
 
-    etf = next(item for item in listings if item.symbol == "ETF1")
+    etf = next(item for item in listings if item.symbol == "ETF1.LSE")
     assert etf.is_etf is True
 
-    aaa = next(item for item in listings if item.symbol == "AAA")
+    aaa = next(item for item in listings if item.symbol == "AAA.LSE")
     assert aaa.isin == "GB000AAA"
 
 

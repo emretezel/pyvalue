@@ -4,5 +4,6 @@ Author: Emre Tezel
 """
 
 from .sec import SECFactsNormalizer, TARGET_CONCEPTS
+from .eodhd import EODHDFactsNormalizer
 
-__all__ = ["SECFactsNormalizer", "TARGET_CONCEPTS"]
+__all__ = ["SECFactsNormalizer", "EODHDFactsNormalizer", "TARGET_CONCEPTS"]

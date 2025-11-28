@@ -42,14 +42,14 @@ def test_loader_combines_files(nasdaq_payload, other_payload, monkeypatch):
 
     listings = loader.load()
 
-    assert [listing.symbol for listing in listings] == ["AAPL", "BRK.A", "IVV", "MSFT"]
+    assert [listing.symbol for listing in listings] == ["AAPL.US", "BRK.A.US", "IVV.US", "MSFT.US"]
 
-    berkshire = next(item for item in listings if item.symbol == "BRK.A")
+    berkshire = next(item for item in listings if item.symbol == "BRK.A.US")
     assert berkshire.exchange == "NYSE"
     assert berkshire.round_lot_size == 1
     assert berkshire.is_etf is False
 
-    ivv = next(item for item in listings if item.symbol == "IVV")
+    ivv = next(item for item in listings if item.symbol == "IVV.US")
     assert ivv.is_etf is True
 
 

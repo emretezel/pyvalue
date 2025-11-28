@@ -11,7 +11,7 @@ Author: Emre Tezel
 """
 
     return Listing(
-        symbol=symbol,
+        symbol=f"{symbol}.US" if "." not in symbol else symbol,
         security_name=f"Company {symbol}",
         exchange="NYSE",
         market_category="N",
@@ -37,7 +37,7 @@ def test_replace_universe_persists_rows(tmp_path):
             "SELECT symbol, region, is_etf FROM listings ORDER BY symbol"
         ).fetchall()
 
-    assert rows == [("AAA", "US", 0), ("BBB", "US", 1)]
+    assert rows == [("AAA.US", "US", 0), ("BBB.US", "US", 1)]
 
 
 def test_replace_universe_overwrites_previous_data(tmp_path):
@@ -51,19 +51,19 @@ def test_replace_universe_overwrites_previous_data(tmp_path):
     with sqlite3.connect(tmp_path / "universe.db") as conn:
         rows = conn.execute("SELECT symbol FROM listings ORDER BY symbol").fetchall()
 
-    assert rows == [("CCC",)]
+    assert rows == [("CCC.US",)]
 
 
 def test_company_facts_repository_upserts_payload(tmp_path):
     repo = CompanyFactsRepository(tmp_path / "facts.db")
     repo.initialize_schema()
 
-    repo.upsert_company_facts("AAPL", "CIK0000320193", {"foo": 1})
-    repo.upsert_company_facts("AAPL", "CIK0000320193", {"foo": 2})
+    repo.upsert_company_facts("AAPL.US", "CIK0000320193", {"foo": 1})
+    repo.upsert_company_facts("AAPL.US", "CIK0000320193", {"foo": 2})
 
-    stored = repo.fetch_fact("AAPL")
+    stored = repo.fetch_fact("AAPL.US")
     assert stored == {"foo": 2}
 
-    cik, payload = repo.fetch_fact_record("AAPL")
+    cik, payload = repo.fetch_fact_record("AAPL.US")
     assert cik == "CIK0000320193"
     assert payload == {"foo": 2}

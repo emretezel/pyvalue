@@ -16,7 +16,7 @@ from pyvalue.marketdata import (
     MarketDataProvider,
     PriceData,
 )
-from pyvalue.storage import FinancialFactsRepository, MarketDataRepository
+from pyvalue.storage import FinancialFactsRepository, FundamentalsRepository, MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
 
@@ -52,6 +52,8 @@ class MarketDataService:
         self.repo.initialize_schema()
         self.facts_repo = FinancialFactsRepository(db_path)
         self.facts_repo.initialize_schema()
+        self.fund_repo = FundamentalsRepository(db_path)
+        self.fund_repo.initialize_schema()
         self.provider = provider or self._default_provider()
 
     def _default_provider(self) -> MarketDataProvider:
@@ -65,11 +67,36 @@ class MarketDataService:
             "No market data API key configured. Set eodhd.api_key or alpha_vantage.api_key in private/config.toml."
         )
 
-    def refresh_symbol(self, symbol: str) -> PriceData:
-        data = self.provider.latest_price(symbol)
+    def _shares_from_fundamentals(self, symbol: str) -> Optional[float]:
+        record = self.fund_repo.fetch("EODHD", symbol.upper())
+        if not record:
+            return None
+        stats = record.get("SharesStats") or {}
+        general = record.get("General") or {}
+        for candidate in (
+            stats.get("SharesOutstanding"),
+            stats.get("SharesFloat"),
+            general.get("SharesOutstanding"),
+        ):
+            if candidate is None:
+                continue
+            try:
+                value = float(candidate)
+                if value > 0:
+                    return value
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def refresh_symbol(self, symbol: str, fetch_symbol: Optional[str] = None) -> PriceData:
+        fetch = fetch_symbol or symbol
+        data = self.provider.latest_price(fetch)
+        data.symbol = symbol.upper()
         market_cap = data.market_cap
         if market_cap is None:
             shares = latest_share_count(symbol, self.facts_repo)
+            if shares is None:
+                shares = self._shares_from_fundamentals(symbol)
             if shares is not None and data.price is not None:
                 market_cap = shares * data.price
         self.repo.upsert_price(

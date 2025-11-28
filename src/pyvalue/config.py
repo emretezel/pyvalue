@@ -32,6 +32,10 @@ class Config:
     def companies_house_api_key(self) -> Optional[str]:
         return self._get_value("companies_house", "api_key")
 
+    @property
+    def sec_user_agent(self) -> Optional[str]:
+        return self._get_value("sec", "user_agent")
+
     def _get_value(self, section: str, option: str) -> Optional[str]:
         value = self._parser.get(section, option, fallback=None)
         if value is None:
