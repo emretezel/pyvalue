@@ -181,6 +181,32 @@ def test_market_data_service_derives_market_cap_from_shares(tmp_path):
     assert snapshot.market_cap == 50000.0
 
 
+def test_eodhd_provider_converts_gbx_to_gbp():
+    payload = [
+        {"date": "2024-03-01", "Close": "99.0", "Volume": "1000", "currency": "GBX"},
+    ]
+    session = DummyEODSession(payload)
+    provider = EODHDProvider(api_key="demo", session=session)  # type: ignore[arg-type]
+
+    data = provider.latest_price("SHEL.LSE")
+
+    assert data.price == 0.99
+    assert data.currency == "GBP"
+
+
+def test_eodhd_provider_converts_gbx_by_suffix_when_currency_missing():
+    payload = [
+        {"date": "2024-03-01", "Close": "2783.5", "Volume": "1000"},
+    ]
+    session = DummyEODSession(payload)
+    provider = EODHDProvider(api_key="demo", session=session)  # type: ignore[arg-type]
+
+    data = provider.latest_price("SHEL.LSE")
+
+    assert data.price == 27.835
+    assert data.currency == "GBP"
+
+
 def test_market_data_service_uses_fundamentals_shares(tmp_path):
     class DummyProvider:
         def latest_price(self, symbol):

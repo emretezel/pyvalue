@@ -16,7 +16,7 @@ from pyvalue.marketdata import (
     MarketDataProvider,
     PriceData,
 )
-from pyvalue.storage import FinancialFactsRepository, FundamentalsRepository, MarketDataRepository
+from pyvalue.storage import FinancialFactsRepository, FundamentalsRepository, MarketDataRepository, UniverseRepository
 
 LOGGER = logging.getLogger(__name__)
 
@@ -54,6 +54,8 @@ class MarketDataService:
         self.facts_repo.initialize_schema()
         self.fund_repo = FundamentalsRepository(db_path)
         self.fund_repo.initialize_schema()
+        self.universe_repo = UniverseRepository(db_path)
+        self.universe_repo.initialize_schema()
         self.provider = provider or self._default_provider()
 
     def _default_provider(self) -> MarketDataProvider:
@@ -92,22 +94,29 @@ class MarketDataService:
         fetch = fetch_symbol or symbol
         data = self.provider.latest_price(fetch)
         data.symbol = symbol.upper()
+        currency_hint = data.currency or self.universe_repo.fetch_currency(symbol)
+        price = data.price
+        if currency_hint and currency_hint.upper() in {"GBX", "GBP0.01"} and price is not None:
+            price = price / 100.0
+            currency_hint = "GBP"
         market_cap = data.market_cap
-        if market_cap is None:
+        if market_cap is None and price is not None:
             shares = latest_share_count(symbol, self.facts_repo)
             if shares is None:
                 shares = self._shares_from_fundamentals(symbol)
-            if shares is not None and data.price is not None:
-                market_cap = shares * data.price
+            if shares is not None:
+                market_cap = shares * price
         self.repo.upsert_price(
             symbol=data.symbol,
             as_of=data.as_of,
-            price=data.price,
+            price=price,
             volume=data.volume,
-            currency=data.currency,
+            currency=currency_hint or data.currency,
             market_cap=market_cap,
         )
         data.market_cap = market_cap
+        data.price = price
+        data.currency = currency_hint or data.currency
         LOGGER.info("Stored market data for %s at %s", data.symbol, data.as_of)
         return data
 

@@ -21,7 +21,7 @@ OTHER_LISTED_PATH = "symboldirectory/otherlisted.txt"
 
 @dataclass(frozen=True)
 class Listing:
-    """Represents a security listing on a US exchange."""
+    """Represents a security listing on an exchange."""
 
     symbol: str
     security_name: str
@@ -33,6 +33,7 @@ class Listing:
     round_lot_size: Optional[int] = None
     source: Optional[str] = None
     isin: Optional[str] = None
+    currency: Optional[str] = None
 
 
 class USUniverseLoader:
@@ -145,6 +146,7 @@ class USUniverseLoader:
             round_lot_size=round_lot,
             source=source,
             isin=None,
+            currency=None,
         )
 
     def _normalize_exchange(self, row: Mapping[str, str]) -> str:

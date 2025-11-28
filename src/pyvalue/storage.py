@@ -51,6 +51,7 @@ class UniverseRepository(SQLiteStore):
                     round_lot_size INTEGER,
                     source TEXT,
                     isin TEXT,
+                    currency TEXT,
                     region TEXT NOT NULL,
                     ingested_at TEXT NOT NULL,
                     PRIMARY KEY (symbol, region)
@@ -85,6 +86,7 @@ class UniverseRepository(SQLiteStore):
                     listing.round_lot_size,
                     listing.source,
                     listing.isin,
+                    listing.currency,
                     region,
                     ingested_at,
                 )
@@ -104,9 +106,10 @@ class UniverseRepository(SQLiteStore):
                     round_lot_size,
                     source,
                     isin,
+                    currency,
                     region,
                     ingested_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 payload,
             )
@@ -129,6 +132,18 @@ class UniverseRepository(SQLiteStore):
                 "SELECT symbol, exchange FROM listings WHERE region = ? ORDER BY symbol", (region,)
             ).fetchall()
         return [(row[0], row[1]) for row in rows]
+
+    def fetch_currency(self, symbol: str, region: Optional[str] = None) -> Optional[str]:
+        query = ["SELECT currency FROM listings WHERE symbol = ?"]
+        params: List[Any] = [symbol.upper()]
+        if region:
+            query.append("AND region = ?")
+            params.append(region)
+        query.append("LIMIT 1")
+        sql = " ".join(query)
+        with self._connect() as conn:
+            row = conn.execute(sql, params).fetchone()
+        return row[0] if row else None
 
 
 class CompanyFactsRepository(SQLiteStore):

@@ -100,6 +100,8 @@ class UKUniverseLoader:
 
         qualified = symbol if "." in symbol else f"{symbol}.{self.exchange_code.upper()}"
 
+        currency = (row.get("Currency") or row.get("currency") or "").strip() or None
+
         return Listing(
             symbol=qualified,
             security_name=name,
@@ -111,6 +113,7 @@ class UKUniverseLoader:
             round_lot_size=None,
             source="eodhd",
             isin=isin,
+            currency=currency,
         )
 
 

@@ -196,8 +196,8 @@ def test_cmd_load_eodhd_universe(monkeypatch, tmp_path):
 
         def load(self):
             return [
-                Listing(symbol="AAA.LSE", security_name="AAA plc", exchange="LSE"),
-                Listing(symbol="ETF1.LSE", security_name="ETF", exchange="LSE", is_etf=True),
+                Listing(symbol="AAA.LSE", security_name="AAA plc", exchange="LSE", currency="GBX"),
+                Listing(symbol="ETF1.LSE", security_name="ETF", exchange="LSE", is_etf=True, currency="GBX"),
             ]
 
     monkeypatch.setattr(cli, "UKUniverseLoader", FakeLoader)

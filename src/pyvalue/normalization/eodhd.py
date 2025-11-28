@@ -29,16 +29,38 @@ class EODHDFactsNormalizer:
             "Assets": ["totalAssets"],
             "Liabilities": ["totalLiabilities", "totalLiab"],
             "StockholdersEquity": ["totalStockholderEquity", "totalShareholderEquity"],
-            "PreferredStock": ["preferredStock"],
+            "PreferredStock": ["preferredStock", "capitalStock"],
             "Goodwill": ["goodWill", "goodwill"],
             "IntangibleAssetsNet": ["intangibleAssets"],
+            "LongTermDebtNoncurrent": [
+                "longTermDebt",
+                "longTermDebtNoncurrent",
+                "longTermDebtTotal",
+                "shortLongTermDebtTotal",
+                "totalNonCurrentLiabilitiesNetMinorityInterest",
+            ],
+            "LongTermDebt": [
+                "longTermDebt",
+                "longTermDebtNoncurrent",
+                "longTermDebtTotal",
+                "shortLongTermDebtTotal",
+                "totalNonCurrentLiabilitiesNetMinorityInterest",
+            ],
+            "CommonStockSharesOutstanding": [
+                "shareIssued",
+                "commonStockSharesOutstanding",
+            ],
+            "EntityCommonStockSharesOutstanding": [
+                "shareIssued",
+                "commonStockSharesOutstanding",
+            ],
         },
         "Income_Statement": {
             "NetIncomeLoss": ["netIncome"],
             "OperatingIncomeLoss": ["operatingIncome"],
             "IncomeBeforeIncomeTaxes": ["incomeBeforeTax"],
             "Revenues": ["totalRevenue", "revenue"],
-            "EarningsPerShareDiluted": ["epsDiluted", "epsdiluted"],
+            "EarningsPerShareDiluted": ["epsDiluted", "epsdiluted", "epsDilluted"],
             "EarningsPerShareBasic": ["eps", "epsBasic"],
             "WeightedAverageNumberOfDilutedSharesOutstanding": ["weightedAverageShsOutDil", "weightedAverageShsOutDiluted"],
             "WeightedAverageNumberOfSharesOutstandingBasic": ["weightedAverageShsOut", "weightedAverageShsOutBasic"],
@@ -83,6 +105,7 @@ class EODHDFactsNormalizer:
             )
 
         records.extend(self._normalize_share_counts(payload, symbol, accounting_standard, currency_code))
+        records.extend(self._normalize_earnings_eps(payload, symbol, accounting_standard))
         return records
 
     def _normalize_statement(
@@ -102,10 +125,18 @@ class EODHDFactsNormalizer:
                     continue
                 currency = entry.get("currency_symbol") or default_currency or entry.get("CurrencyCode")
                 period_code = fiscal_period or self._infer_quarter(entry)
+                frame = self._build_frame(end_date, period_code)
+                total_liab = self._extract_value(entry, ["totalLiabilities", "totalLiab"])
+                current_liab = self._extract_value(entry, ["totalCurrentLiabilities"])
+                derived_debt = None
+                if total_liab is not None and current_liab is not None:
+                    derived_debt = total_liab - current_liab
                 for concept, keys in field_map.items():
                     if concept not in self.concepts:
                         continue
                     value = self._extract_value(entry, keys)
+                    if value is None and concept in {"LongTermDebt", "LongTermDebtNoncurrent"}:
+                        value = derived_debt
                     if value is None:
                         continue
                     records.append(
@@ -119,7 +150,7 @@ class EODHDFactsNormalizer:
                             value=value,
                             accn=None,
                             filed=entry.get("filing_date"),
-                            frame=None,
+                            frame=frame,
                             start_date=None,
                             accounting_standard=accounting_standard,
                             currency=currency,
@@ -163,14 +194,74 @@ class EODHDFactsNormalizer:
         )
         return [record] if record else []
 
-    def _extract_value(self, entry: Dict, keys: List[str]) -> Optional[float]:
-        for key in keys:
-            if key not in entry:
+    def _normalize_earnings_eps(
+        self,
+        payload: Dict,
+        symbol: str,
+        accounting_standard: Optional[str],
+    ) -> List[FactRecord]:
+        earnings = payload.get("Earnings") or {}
+        history = earnings.get("History") or {}
+        annual = earnings.get("Annual") or {}
+        records: List[FactRecord] = []
+
+        def add_record(date_str: str, value: float, period: str) -> None:
+            records.append(
+                FactRecord(
+                    symbol=symbol.upper(),
+                    provider="EODHD",
+                    concept="EarningsPerShareDiluted",
+                    fiscal_period=period,
+                    end_date=date_str,
+                    unit="EPS",
+                    value=value,
+                    accn=None,
+                    filed=None,
+                    frame=self._build_frame(date_str, period or "FY"),
+                    start_date=None,
+                    accounting_standard=accounting_standard,
+                    currency=None,
+                )
+            )
+
+        for date_str, entry in history.items():
+            val = _to_float(entry.get("epsActual"))
+            if val is None:
                 continue
-            value = _to_float(entry.get(key))
+            period = self._infer_quarter({"date": date_str}) or ""
+            add_record(date_str[:10], val, period)
+
+        for date_str, entry in annual.items():
+            val = _to_float(entry.get("epsActual"))
+            if val is None:
+                continue
+            add_record(date_str[:10], val, "FY")
+
+        return records
+
+    def _extract_value(self, entry: Dict, keys: List[str]) -> Optional[float]:
+        lowered = {k.lower(): entry[k] for k in entry.keys() if isinstance(k, str)}
+        for key in keys:
+            if key in entry:
+                value = _to_float(entry.get(key))
+            elif key.lower() in lowered:
+                value = _to_float(lowered[key.lower()])
+            else:
+                value = None
             if value is not None:
                 return value
         return None
+
+    def _build_frame(self, end_date: Optional[str], period: Optional[str]) -> Optional[str]:
+        if not end_date:
+            return None
+        year = end_date[:4]
+        if not year.isdigit():
+            return None
+        period = (period or "").upper()
+        if period in {"Q1", "Q2", "Q3", "Q4"}:
+            return f"CY{year}{period}"
+        return f"CY{year}"
 
     def _extract_date(self, entry: Dict) -> Optional[str]:
         date = entry.get("date") or entry.get("Date") or entry.get("period")

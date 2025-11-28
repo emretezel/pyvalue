@@ -374,6 +374,23 @@ def _migration_010_qualify_listings_symbols(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migration_011_add_currency_to_listings(conn: sqlite3.Connection) -> None:
+    """Add currency column to listings."""
+
+    exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='listings'"
+    ).fetchone()
+    if exists is None:
+        return
+
+    info = conn.execute("PRAGMA table_info(listings)").fetchall()
+    columns = {row[1] for row in info}
+    if "currency" in columns:
+        return
+
+    conn.execute("ALTER TABLE listings ADD COLUMN currency TEXT")
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -385,6 +402,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_008_create_exchange_metadata,
     _migration_009_add_exchange_to_fundamentals,
     _migration_010_qualify_listings_symbols,
+    _migration_011_add_currency_to_listings,
 ]
 
 

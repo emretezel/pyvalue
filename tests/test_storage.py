@@ -20,6 +20,8 @@ Author: Emre Tezel
         status="N",
         round_lot_size=100,
         source="test",
+        isin=None,
+        currency=None,
     )
 
 
