@@ -15,6 +15,7 @@ from pyvalue.storage import (
     MarketDataRepository,
     MetricsRepository,
     UKCompanyFactsRepository,
+    UKFilingRepository,
     UKSymbolMapRepository,
     UniverseRepository,
 )
@@ -180,6 +181,52 @@ def test_cmd_ingest_uk_facts_by_symbol(monkeypatch, tmp_path):
 
     assert rc == 0
     assert calls == {"api_key": "KEY", "company_number": "00000000"}
+
+
+def test_cmd_ingest_uk_filings(monkeypatch, tmp_path):
+    calls = {}
+
+    class FakeClient:
+        def __init__(self, api_key=None):
+            calls["api_key"] = api_key
+
+        def fetch_filing_history(self, company_number, category="accounts", items=100):
+            calls["company_number"] = company_number
+            return {
+                "items": [
+                    {
+                        "transaction_id": "tx1",
+                        "links": {"document_metadata": "http://meta"},
+                    }
+                ]
+            }
+
+        def fetch_document_metadata(self, url):
+            calls["meta_url"] = url
+            return {"resources": {"application/xhtml+xml": {"url": "http://doc"}}}
+
+        def fetch_document(self, url):
+            calls["doc_url"] = url
+            return b"<html>ixbrl</html>"
+
+    monkeypatch.setattr(cli, "CompaniesHouseClient", FakeClient)
+    monkeypatch.setattr(cli, "Config", lambda: SimpleNamespace(companies_house_api_key="KEY"))
+
+    db_path = tmp_path / "ukfiling.db"
+    mapper = UKSymbolMapRepository(db_path)
+    mapper.initialize_schema()
+    mapper.upsert_mapping("AAA", company_number="00000000")
+
+    rc = cli.cmd_ingest_uk_filings("AAA", str(db_path))
+    assert rc == 0
+
+    assert calls["company_number"] == "00000000"
+    assert calls["doc_url"] == "http://doc"
+
+    repo = UKFilingRepository(db_path)
+    repo.initialize_schema()
+    latest = repo.latest_for_company("00000000")
+    assert latest == b"<html>ixbrl</html>"
 
 def test_cmd_update_market_data_bulk(monkeypatch, tmp_path):
     db_path = tmp_path / "marketbulk.db"

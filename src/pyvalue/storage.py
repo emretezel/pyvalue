@@ -333,6 +333,91 @@ class UKSymbolMapRepository(SQLiteStore):
         return len(payload)
 
 
+class UKFilingRepository(SQLiteStore):
+    """Store Companies House filing documents (iXBRL)."""
+
+    def initialize_schema(self) -> None:
+        apply_migrations(self.db_path)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS uk_filing_documents (
+                    company_number TEXT NOT NULL,
+                    symbol TEXT,
+                    filing_id TEXT NOT NULL,
+                    period_start TEXT,
+                    period_end TEXT,
+                    doc_type TEXT,
+                    is_ixbrl INTEGER NOT NULL,
+                    fetched_at TEXT NOT NULL,
+                    content BLOB NOT NULL,
+                    PRIMARY KEY (company_number, filing_id)
+                )
+                """
+            )
+
+    def upsert_document(
+        self,
+        company_number: str,
+        filing_id: str,
+        content: bytes,
+        symbol: Optional[str] = None,
+        period_start: Optional[str] = None,
+        period_end: Optional[str] = None,
+        doc_type: Optional[str] = None,
+        is_ixbrl: bool = True,
+    ) -> None:
+        fetched_at = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO uk_filing_documents (
+                    company_number,
+                    symbol,
+                    filing_id,
+                    period_start,
+                    period_end,
+                    doc_type,
+                    is_ixbrl,
+                    fetched_at,
+                    content
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(company_number, filing_id) DO UPDATE SET
+                    symbol = COALESCE(excluded.symbol, uk_filing_documents.symbol),
+                    period_start = COALESCE(excluded.period_start, uk_filing_documents.period_start),
+                    period_end = COALESCE(excluded.period_end, uk_filing_documents.period_end),
+                    doc_type = COALESCE(excluded.doc_type, uk_filing_documents.doc_type),
+                    is_ixbrl = excluded.is_ixbrl,
+                    fetched_at = excluded.fetched_at,
+                    content = excluded.content
+                """,
+                (
+                    company_number,
+                    symbol,
+                    filing_id,
+                    period_start,
+                    period_end,
+                    doc_type,
+                    int(is_ixbrl),
+                    fetched_at,
+                    content,
+                ),
+            )
+
+    def latest_for_company(self, company_number: str) -> Optional[bytes]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT content FROM uk_filing_documents
+                WHERE company_number = ?
+                ORDER BY fetched_at DESC
+                LIMIT 1
+                """,
+                (company_number,),
+            ).fetchone()
+        return row[0] if row else None
+
+
 @dataclass(frozen=True)
 class FactRecord:
     """Normalized financial fact ready for storage."""
@@ -627,6 +712,7 @@ __all__ = [
     "CompanyFactsRepository",
     "UKCompanyFactsRepository",
     "UKSymbolMapRepository",
+    "UKFilingRepository",
     "FinancialFactsRepository",
     "MarketDataRepository",
     "FactRecord",

@@ -55,6 +55,37 @@ class CompaniesHouseClient:
         response.raise_for_status()
         return response.json()
 
+    def fetch_filing_history(
+        self, company_number: str, category: str = "accounts", items: int = 100, timeout: int = DEFAULT_TIMEOUT
+    ) -> Dict:
+        """Return filing history JSON for the company."""
+
+        normalized = company_number.strip()
+        url = f"{self.base_url}/company/{normalized}/filing-history"
+        params = {"category": category, "items_per_page": items}
+        LOGGER.info("Downloading filing history for %s", normalized)
+        resp = self.session.get(url, params=params, timeout=timeout)
+        resp.raise_for_status()
+        return resp.json()
+
+    def fetch_document_metadata(self, metadata_url: str, timeout: int = DEFAULT_TIMEOUT) -> Dict:
+        """Fetch document metadata to locate the XHTML resource link."""
+
+        resp = self.session.get(metadata_url, timeout=timeout)
+        resp.raise_for_status()
+        return resp.json()
+
+    def fetch_document(self, url: str, timeout: int = DEFAULT_TIMEOUT) -> bytes:
+        """Download a Companies House document, preferring XHTML/iXBRL."""
+
+        headers = {"Accept": "application/xhtml+xml, text/html;q=0.9"}
+        resp = self.session.get(url, headers=headers, timeout=timeout)
+        resp.raise_for_status()
+        ctype = resp.headers.get("Content-Type", "").lower()
+        if "xhtml" not in ctype and "html" not in ctype:
+            raise RuntimeError(f"Document is not XHTML/iXBRL (content-type: {ctype})")
+        return resp.content
+
     @staticmethod
     def _parse_json(raw: str) -> Dict:
         try:

@@ -25,6 +25,7 @@ from pyvalue.storage import (
     MarketDataRepository,
     MetricsRepository,
     UKCompanyFactsRepository,
+    UKFilingRepository,
     UKSymbolMapRepository,
     UniverseRepository,
 )
@@ -95,6 +96,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Download Companies House profiles for all mapped UK symbols.",
     )
     ingest_uk_bulk.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
+    )
+
+    ingest_uk_filings = subparsers.add_parser(
+        "ingest-uk-filings",
+        help="Download latest iXBRL Companies House filing for a UK symbol.",
+    )
+    ingest_uk_filings.add_argument(
+        "symbol",
+        help="Ticker symbol mapped to a Companies House number",
+    )
+    ingest_uk_filings.add_argument(
         "--database",
         default="data/pyvalue.db",
         help="SQLite database file used for storage (default: %(default)s)",
@@ -431,6 +446,72 @@ def cmd_ingest_uk_facts_bulk(database: str) -> int:
         LOGGER.info("Stored Companies House facts for %s (%s)", symbol, number)
 
     print(f"Stored Companies House facts for {len(company_numbers)} symbols in {database}")
+    return 0
+
+
+def _resolve_company_number(symbol: str, mapper: UKSymbolMapRepository) -> str:
+    number = mapper.fetch_company_number(symbol)
+    if not number:
+        raise SystemExit(f"No company number mapped for symbol {symbol}. Run refresh-uk-symbol-map first.")
+    return number
+
+
+def _pick_latest_ixbrl_filing(filing_history: Dict) -> Optional[Dict]:
+    items = filing_history.get("items") or []
+    for item in items:
+        links = item.get("links") or {}
+        meta = links.get("document_metadata")
+        if not meta:
+            continue
+        # Prefer items whose description indicates accounts; category already filtered.
+        return {"filing_id": item.get("transaction_id"), "metadata_url": meta, "item": item}
+    return None
+
+
+def cmd_ingest_uk_filings(symbol: str, database: str) -> int:
+    mapper = UKSymbolMapRepository(database)
+    mapper.initialize_schema()
+    company_number = _resolve_company_number(symbol, mapper)
+
+    api_key = Config().companies_house_api_key
+    if not api_key:
+        raise SystemExit("Companies House API key missing. Add [companies_house].api_key to private/config.toml.")
+
+    client = CompaniesHouseClient(api_key=api_key)
+    history = client.fetch_filing_history(company_number, category="accounts", items=100)
+    target = _pick_latest_ixbrl_filing(history)
+    if target is None:
+        raise SystemExit(f"No accounts filings with document metadata found for {symbol} ({company_number})")
+
+    meta = client.fetch_document_metadata(target["metadata_url"])
+    doc_url = None
+    resources = meta.get("resources") or {}
+    xhtml = resources.get("application/xhtml+xml") or resources.get("text/html")
+    if isinstance(xhtml, dict):
+        # Prefer explicit content link if present.
+        doc_url = (xhtml.get("links") or {}).get("content") or xhtml.get("url")
+    if not doc_url:
+        links = meta.get("links") or {}
+        doc_url = links.get("document")
+    if not doc_url:
+        raise SystemExit("No XHTML document link found in Companies House metadata.")
+
+    content = client.fetch_document(doc_url)
+
+    repo = UKFilingRepository(database)
+    repo.initialize_schema()
+    repo.upsert_document(
+        company_number=company_number,
+        filing_id=target["filing_id"] or doc_url,
+        content=content,
+        symbol=symbol,
+        period_start=None,
+        period_end=None,
+        doc_type="application/xhtml+xml",
+        is_ixbrl=True,
+    )
+
+    print(f"Stored iXBRL filing for {symbol} ({company_number})")
     return 0
 
 
@@ -926,6 +1007,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
     if args.command == "ingest-uk-facts-bulk":
         return cmd_ingest_uk_facts_bulk(database=args.database)
+    if args.command == "ingest-uk-filings":
+        return cmd_ingest_uk_filings(symbol=args.symbol, database=args.database)
     if args.command == "refresh-uk-symbol-map":
         return cmd_refresh_uk_symbol_map(
             database=args.database,

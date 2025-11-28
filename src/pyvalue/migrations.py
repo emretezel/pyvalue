@@ -204,12 +204,34 @@ def _migration_005_drop_unique_isin_index(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_006_create_uk_filing_documents(conn: sqlite3.Connection) -> None:
+    """Create storage for Companies House filing documents (iXBRL only)."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS uk_filing_documents (
+            company_number TEXT NOT NULL,
+            symbol TEXT,
+            filing_id TEXT NOT NULL,
+            period_start TEXT,
+            period_end TEXT,
+            doc_type TEXT,
+            is_ixbrl INTEGER NOT NULL,
+            fetched_at TEXT NOT NULL,
+            content BLOB NOT NULL,
+            PRIMARY KEY (company_number, filing_id)
+        )
+        """
+    )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
     _migration_003_add_isin_to_listings,
     _migration_004_create_uk_symbol_map,
     _migration_005_drop_unique_isin_index,
+    _migration_006_create_uk_filing_documents,
 ]
 
 

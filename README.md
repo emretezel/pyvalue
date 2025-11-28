@@ -39,7 +39,50 @@ ETFs are excluded by default; pass `--include-etfs` to store them as well.
 > You can verify availability manually with
 > `curl "ftp://ftp.nasdaqtrader.com/symboldirectory/nasdaqlisted.txt"`.
 
-## SEC company facts
+## UK universe and company facts
+
+### Load the UK universe (EODHD)
+
+```bash
+pyvalue load-uk-universe --database data/pyvalue.db
+```
+
+This pulls the London Stock Exchange symbol list from EODHD (requires `[eodhd].api_key` in `private/config.toml`), keeps equities by default (ETFs excluded unless `--include-etfs`), and stores ISINs when available.
+
+### Map UK symbols to Companies House
+
+GLEIF provides LEI/company-number data and ISIN→LEI mappings. Refresh the symbol map after loading the UK universe:
+
+```bash
+pyvalue refresh-uk-symbol-map --database data/pyvalue.db --isin-date YYYY-MM-DD
+```
+
+Use a recent `--isin-date` (e.g., yesterday) if today’s ISIN file is not yet published. This joins stored ISINs to Companies House numbers and stores them in `uk_symbol_map`.
+
+### Ingest Companies House profiles
+
+Configure your Companies House API key:
+
+```toml
+[companies_house]
+api_key = "YOUR_COMPANIES_HOUSE_KEY"
+```
+
+Then ingest by symbol (uses the mapping) or by explicit company number:
+
+```bash
+pyvalue ingest-uk-facts --symbol SHEL --database data/pyvalue.db
+# or
+pyvalue ingest-uk-facts 04366849 --database data/pyvalue.db
+```
+
+Bulk ingest all mapped UK symbols:
+
+```bash
+pyvalue ingest-uk-facts-bulk --database data/pyvalue.db
+```
+
+### US company facts
 
 SEC requires a descriptive `User-Agent` header that includes contact details. Set an
 environment variable such as:
