@@ -46,6 +46,12 @@ class EODHDFactsNormalizer:
                 "shortLongTermDebtTotal",
                 "totalNonCurrentLiabilitiesNetMinorityInterest",
             ],
+            "PropertyPlantAndEquipmentNet": [
+                "propertyPlantAndEquipmentNet",
+                "propertyPlantAndEquipment",
+                "netPropertyPlantAndEquipment",
+                "propertyPlantEquipment",
+            ],
             "CommonStockSharesOutstanding": [
                 "shareIssued",
                 "commonStockSharesOutstanding",

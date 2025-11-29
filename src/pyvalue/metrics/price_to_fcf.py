@@ -16,6 +16,7 @@ OPERATING_CASH_FLOW_CONCEPTS = [
     "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
 ]
 CAPEX_CONCEPTS = [
+    "CapitalExpenditures",
     "PaymentsToAcquirePropertyPlantAndEquipment",
     "PurchaseOfPropertyPlantAndEquipment",
     "PropertyPlantAndEquipmentAdditions",
