@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Iterable, Optional, Sequence
 
 from pyvalue.metrics.base import Metric, MetricResult
+from pyvalue.metrics.utils import is_recent_fact
 from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
 
 OPERATING_CASH_FLOW_CONCEPTS = [
@@ -80,6 +81,8 @@ class PriceToFCFMetric:
             if len(quarterly) < 4:
                 continue
             values = quarterly[:4]
+            if not is_recent_fact(values[0]):
+                continue
             total = sum(record.value for record in values)
             return _TTMResult(total=total, as_of=values[0].end_date)
         return None

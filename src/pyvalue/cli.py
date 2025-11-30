@@ -10,6 +10,7 @@ import csv
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 from pyvalue.config import Config
@@ -35,6 +36,19 @@ from pyvalue.storage import (
 from pyvalue.universe import UKUniverseLoader, USUniverseLoader
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _resolve_database_path(database: str) -> Path:
+    """Resolve database path, falling back to repo data dir when using default name."""
+
+    db_path = Path(database)
+    if db_path.exists():
+        return db_path
+    if not db_path.is_absolute() and db_path.name == "pyvalue.db":
+        repo_path = Path(__file__).resolve().parents[2] / "data" / db_path.name
+        if repo_path.exists():
+            return repo_path
+    return db_path
 
 
 def _qualify_symbol(symbol: str, exchange: Optional[str] = None, region: Optional[str] = None) -> str:
@@ -1022,8 +1036,9 @@ def cmd_update_market_data_bulk(database: str, region: str, rate: float) -> int:
 def cmd_compute_metrics(symbol: str, metric_ids: Sequence[str], database: str, run_all: bool) -> int:
     """Compute one or more metrics and store the results."""
 
-    fact_repo = FinancialFactsRepository(database)
-    metrics_repo = MetricsRepository(database)
+    db_path = _resolve_database_path(database)
+    fact_repo = FinancialFactsRepository(db_path)
+    metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
     computed = 0
     symbol_upper = symbol.upper()
@@ -1036,7 +1051,7 @@ def cmd_compute_metrics(symbol: str, metric_ids: Sequence[str], database: str, r
         metric = metric_cls()
         if getattr(metric, "uses_market_data", False):
             if market_repo is None:
-                market_repo = MarketDataRepository(database)
+                market_repo = MarketDataRepository(db_path)
                 market_repo.initialize_schema()
             result = metric.compute(symbol_upper, fact_repo, market_repo)
         else:
@@ -1053,19 +1068,28 @@ def cmd_compute_metrics(symbol: str, metric_ids: Sequence[str], database: str, r
 def cmd_compute_metrics_bulk(database: str, region: str, metric_ids: Optional[Sequence[str]]) -> int:
     """Compute metrics for all listings stored in the universe."""
 
-    universe_repo = UniverseRepository(database)
-    symbols = universe_repo.fetch_symbols(region)
+    region_label = region.upper()
+    db_path = _resolve_database_path(database)
+    universe_repo = UniverseRepository(db_path)
+    universe_repo.initialize_schema()
+    symbols = universe_repo.fetch_symbols(region_label)
     if not symbols:
-        fund_repo = FundamentalsRepository(database)
+        fund_repo = FundamentalsRepository(db_path)
         fund_repo.initialize_schema()
-        symbols = fund_repo.symbols("EODHD", region=region)
+        symbols = fund_repo.symbols("EODHD", region=region_label)
     if not symbols:
-        raise SystemExit(f"No symbols found for region {region}. Load a universe or ingest fundamentals first.")
+        with universe_repo._connect() as conn:
+            available_regions = [row[0] for row in conn.execute("SELECT DISTINCT region FROM listings").fetchall()]
+        raise SystemExit(
+            f"No symbols found for region {region_label}. Load a universe or ingest fundamentals first. "
+            f"Available regions: {', '.join(available_regions) if available_regions else 'none'}. "
+            f"Database: {db_path}"
+        )
 
-    fact_repo = FinancialFactsRepository(database)
-    metrics_repo = MetricsRepository(database)
+    fact_repo = FinancialFactsRepository(db_path)
+    metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
-    market_repo = MarketDataRepository(database)
+    market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
 
     ids_to_compute = list(metric_ids) if metric_ids else list(REGISTRY.keys())

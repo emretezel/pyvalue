@@ -71,6 +71,7 @@ class UniverseRepository(SQLiteStore):
         if not listings:
             return 0
 
+        region_norm = region.upper()
         ingested_at = datetime.now(timezone.utc).isoformat()
         payload: List[tuple] = []
         for listing in listings:
@@ -87,13 +88,13 @@ class UniverseRepository(SQLiteStore):
                     listing.source,
                     listing.isin,
                     listing.currency,
-                    region,
+                    region_norm,
                     ingested_at,
                 )
             )
 
         with self._connect() as conn:
-            conn.execute("DELETE FROM listings WHERE region = ?", (region,))
+            conn.execute("DELETE FROM listings WHERE region = ?", (region_norm,))
             conn.executemany(
                 """
                 INSERT OR REPLACE INTO listings (
@@ -118,18 +119,22 @@ class UniverseRepository(SQLiteStore):
     def fetch_symbols(self, region: str) -> List[str]:
         """Return the list of symbols currently stored for a region."""
 
+        region_norm = region.upper()
+        self.initialize_schema()
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT symbol FROM listings WHERE region = ? ORDER BY symbol", (region,)
+                "SELECT symbol FROM listings WHERE region = ? ORDER BY symbol", (region_norm,)
             ).fetchall()
         return [row[0] for row in rows]
 
     def fetch_symbol_exchanges(self, region: str) -> List[Tuple[str, Optional[str]]]:
         """Return (symbol, exchange) pairs for a region."""
 
+        region_norm = region.upper()
+        self.initialize_schema()
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT symbol, exchange FROM listings WHERE region = ? ORDER BY symbol", (region,)
+                "SELECT symbol, exchange FROM listings WHERE region = ? ORDER BY symbol", (region_norm,)
             ).fetchall()
         return [(row[0], row[1]) for row in rows]
 
@@ -138,9 +143,10 @@ class UniverseRepository(SQLiteStore):
         params: List[Any] = [symbol.upper()]
         if region:
             query.append("AND region = ?")
-            params.append(region)
+            params.append(region.upper())
         query.append("LIMIT 1")
         sql = " ".join(query)
+        self.initialize_schema()
         with self._connect() as conn:
             row = conn.execute(sql, params).fetchone()
         return row[0] if row else None
@@ -270,7 +276,7 @@ class FundamentalsRepository(SQLiteStore):
                     data = excluded.data,
                     fetched_at = excluded.fetched_at
                 """,
-                (provider.upper(), symbol.upper(), region, currency, exchange, serialized, fetched_at),
+                (provider.upper(), symbol.upper(), region.upper() if region else None, currency, exchange, serialized, fetched_at),
             )
 
     def fetch(self, provider: str, symbol: str) -> Optional[Dict[str, Any]]:
@@ -304,7 +310,7 @@ class FundamentalsRepository(SQLiteStore):
         params: List[Any] = [provider.upper()]
         if region:
             query.append("AND region = ?")
-            params.append(region)
+            params.append(region.upper())
         query.append("ORDER BY symbol")
         sql = " ".join(query)
         with self._connect() as conn:
@@ -316,7 +322,7 @@ class FundamentalsRepository(SQLiteStore):
         params: List[Any] = [provider.upper()]
         if region:
             query.append("AND region = ?")
-            params.append(region)
+            params.append(region.upper())
         query.append("ORDER BY symbol")
         sql = " ".join(query)
         with self._connect() as conn:

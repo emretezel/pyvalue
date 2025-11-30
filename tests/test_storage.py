@@ -1,6 +1,6 @@
 import sqlite3
 
-from pyvalue.storage import CompanyFactsRepository, UniverseRepository
+from pyvalue.storage import CompanyFactsRepository, FactRecord, FundamentalsRepository, UniverseRepository
 from pyvalue.universe import Listing
 
 
@@ -69,3 +69,39 @@ def test_company_facts_repository_upserts_payload(tmp_path):
     cik, payload = repo.fetch_fact_record("AAPL.US")
     assert cik == "CIK0000320193"
     assert payload == {"foo": 2}
+
+
+def test_universe_repository_fetch_symbols_initializes_schema(tmp_path):
+    repo = UniverseRepository(tmp_path / "universe.db")
+
+    assert repo.fetch_symbols("US") == []
+
+
+def test_universe_repository_normalizes_region(tmp_path):
+    repo = UniverseRepository(tmp_path / "universe.db")
+    repo.initialize_schema()
+    listing = Listing(
+        symbol="FOO.LSE",
+        security_name="Foo PLC",
+        exchange="LSE",
+        market_category="",
+        is_etf=False,
+        status="Active",
+        round_lot_size=0,
+        source="test",
+        isin="GB00TEST",
+        currency="GBP",
+    )
+    repo.replace_universe([listing], region="uk")
+
+    assert repo.fetch_symbols("UK") == ["FOO.LSE"]
+    assert repo.fetch_symbols("uk") == ["FOO.LSE"]
+
+
+def test_fundamentals_repository_normalizes_region(tmp_path):
+    repo = FundamentalsRepository(tmp_path / "funds.db")
+    repo.initialize_schema()
+    repo.upsert("eodhd", "FOO.LSE", payload={"bar": 1}, region="uk")
+
+    assert repo.symbols("EODHD", region="UK") == ["FOO.LSE"]
+    assert repo.symbols("EODHD", region="uk") == ["FOO.LSE"]

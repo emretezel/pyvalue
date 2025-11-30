@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from pyvalue.metrics.base import Metric, MetricResult
-from pyvalue.metrics.utils import latest_quarterly_records
+from pyvalue.metrics.utils import is_recent_fact, latest_quarterly_records
 from pyvalue.storage import FinancialFactsRepository, MarketDataRepository
 
 
@@ -71,7 +71,9 @@ class GrahamMultiplierMetric:
     def _latest_value(self, symbol: str, repo: FinancialFactsRepository, concepts: list[str]) -> Optional[float]:
         for concept in concepts:
             fact = repo.latest_fact(symbol, concept)
-            if fact is not None and fact.value is not None:
+            if fact is None or not is_recent_fact(fact):
+                continue
+            if fact.value is not None:
                 try:
                     return float(fact.value)
                 except (TypeError, ValueError):

@@ -2,6 +2,7 @@
 
 Author: Emre Tezel
 """
+from datetime import date, timedelta
 from types import SimpleNamespace
 
 from pyvalue import cli
@@ -605,26 +606,30 @@ def test_cmd_compute_metrics(tmp_path):
     db_path = tmp_path / "facts.db"
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
+    recent = (date.today() - timedelta(days=15)).isoformat()
+    q3 = (date.today() - timedelta(days=105)).isoformat()
+    q2 = (date.today() - timedelta(days=195)).isoformat()
+    q1 = (date.today() - timedelta(days=285)).isoformat()
     fact_repo.replace_facts(
         "AAPL.US",
         [
-            make_fact(concept="AssetsCurrent", end_date="2023-09-30", value=500),
-            make_fact(concept="LiabilitiesCurrent", end_date="2023-09-30", value=200),
-            make_fact(concept="EarningsPerShareDiluted", end_date="2023-12-31", value=2.5, fiscal_period="Q4"),
-            make_fact(concept="EarningsPerShareDiluted", end_date="2023-09-30", value=2.0, fiscal_period="Q3"),
-            make_fact(concept="EarningsPerShareDiluted", end_date="2023-06-30", value=1.5, fiscal_period="Q2"),
-            make_fact(concept="EarningsPerShareDiluted", end_date="2023-03-31", value=1.0, fiscal_period="Q1"),
-            make_fact(concept="StockholdersEquity", end_date="2023-09-30", value=1000),
-            make_fact(concept="CommonStockSharesOutstanding", end_date="2023-09-30", value=100),
-            make_fact(concept="Goodwill", end_date="2023-09-30", value=50),
-            make_fact(concept="IntangibleAssetsNet", end_date="2023-09-30", value=25),
+            make_fact(concept="AssetsCurrent", end_date=recent, value=500),
+            make_fact(concept="LiabilitiesCurrent", end_date=recent, value=200),
+            make_fact(concept="EarningsPerShareDiluted", end_date=recent, value=2.5, fiscal_period="Q4"),
+            make_fact(concept="EarningsPerShareDiluted", end_date=q3, value=2.0, fiscal_period="Q3"),
+            make_fact(concept="EarningsPerShareDiluted", end_date=q2, value=1.5, fiscal_period="Q2"),
+            make_fact(concept="EarningsPerShareDiluted", end_date=q1, value=1.0, fiscal_period="Q1"),
+            make_fact(concept="StockholdersEquity", end_date=recent, value=1000),
+            make_fact(concept="CommonStockSharesOutstanding", end_date=recent, value=100),
+            make_fact(concept="Goodwill", end_date=recent, value=50),
+            make_fact(concept="IntangibleAssetsNet", end_date=recent, value=25),
         ],
     )
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    market_repo.upsert_price("AAPL.US", "2023-09-30", 150.0)
+    market_repo.upsert_price("AAPL.US", recent, 150.0)
 
     rc = cli.cmd_compute_metrics("AAPL.US", ["working_capital", "graham_multiplier"], str(db_path), run_all=False)
     assert rc == 0
@@ -639,7 +644,9 @@ def test_cmd_compute_metrics_all(tmp_path):
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
     records = []
-    for year in range(2010, 2025):
+    current_year = date.today().year
+    start_year = current_year - 14
+    for year in range(start_year, current_year + 1):
         frame = f"CY{year}"
         records.append(
             make_fact(
@@ -650,7 +657,7 @@ def test_cmd_compute_metrics_all(tmp_path):
                 fiscal_period="FY",
             )
         )
-    for year in range(2015, 2025):
+    for year in range(current_year - 9, current_year + 1):
         end_date = f"{year}-09-30"
         records.extend(
             [
@@ -666,30 +673,35 @@ def test_cmd_compute_metrics_all(tmp_path):
         )
     records.extend(
             [
-                make_fact(concept="StockholdersEquity", end_date="2024-09-30", value=2000),
-                make_fact(concept="StockholdersEquity", end_date="2023-09-30", value=1800),
-                make_fact(concept="StockholdersEquity", end_date="2022-09-30", value=1600),
-                make_fact(concept="StockholdersEquity", end_date="2021-09-30", value=1400),
-                make_fact(concept="StockholdersEquity", end_date="2020-09-30", value=1200),
-                make_fact(concept="StockholdersEquity", end_date="2019-09-30", value=1000),
-                make_fact(concept="NetIncomeLossAvailableToCommonStockholdersBasic", end_date="2024-09-30", value=250),
-                make_fact(concept="NetIncomeLossAvailableToCommonStockholdersBasic", end_date="2023-09-30", value=230),
-                make_fact(concept="NetIncomeLossAvailableToCommonStockholdersBasic", end_date="2022-09-30", value=210),
-                make_fact(concept="NetIncomeLossAvailableToCommonStockholdersBasic", end_date="2021-09-30", value=190),
-                make_fact(concept="NetIncomeLossAvailableToCommonStockholdersBasic", end_date="2020-09-30", value=170),
-                make_fact(concept="PreferredStock", end_date="2024-09-30", value=0),
-                make_fact(concept="CommonStockSharesOutstanding", end_date="2024-09-30", value=500),
-                make_fact(concept="Goodwill", end_date="2024-09-30", value=100),
-                make_fact(concept="IntangibleAssetsNet", end_date="2024-09-30", value=50),
-                make_fact(concept="LongTermDebtNoncurrent", end_date="2024-09-30", value=300),
+                make_fact(concept="StockholdersEquity", end_date=f"{current_year}-09-30", value=2000),
+                make_fact(concept="StockholdersEquity", end_date=f"{current_year-1}-09-30", value=1800),
+                make_fact(concept="StockholdersEquity", end_date=f"{current_year-2}-09-30", value=1600),
+                make_fact(concept="StockholdersEquity", end_date=f"{current_year-3}-09-30", value=1400),
+                make_fact(concept="StockholdersEquity", end_date=f"{current_year-4}-09-30", value=1200),
+                make_fact(concept="StockholdersEquity", end_date=f"{current_year-5}-09-30", value=1000),
+                make_fact(concept="NetIncomeLossAvailableToCommonStockholdersBasic", end_date=f"{current_year}-09-30", value=250),
+                make_fact(concept="NetIncomeLossAvailableToCommonStockholdersBasic", end_date=f"{current_year-1}-09-30", value=230),
+                make_fact(concept="NetIncomeLossAvailableToCommonStockholdersBasic", end_date=f"{current_year-2}-09-30", value=210),
+                make_fact(concept="NetIncomeLossAvailableToCommonStockholdersBasic", end_date=f"{current_year-3}-09-30", value=190),
+                make_fact(concept="NetIncomeLossAvailableToCommonStockholdersBasic", end_date=f"{current_year-4}-09-30", value=170),
+                make_fact(concept="PreferredStock", end_date=f"{current_year}-09-30", value=0),
+                make_fact(concept="CommonStockSharesOutstanding", end_date=f"{current_year}-09-30", value=500),
+                make_fact(concept="Goodwill", end_date=f"{current_year}-09-30", value=100),
+                make_fact(concept="IntangibleAssetsNet", end_date=f"{current_year}-09-30", value=50),
+                make_fact(concept="LongTermDebtNoncurrent", end_date=f"{current_year}-09-30", value=300),
             ]
     )
+    q4 = (date.today() - timedelta(days=20)).isoformat()
+    q3 = (date.today() - timedelta(days=110)).isoformat()
+    q2 = (date.today() - timedelta(days=200)).isoformat()
+    q1 = (date.today() - timedelta(days=290)).isoformat()
+    q4_prev = (date.today() - timedelta(days=380)).isoformat()
     quarterly_cash_flows = [
-        ("2024-12-31", "Q4", 130.0, 40.0),
-        ("2024-09-30", "Q3", 120.0, 35.0),
-        ("2024-06-30", "Q2", 110.0, 30.0),
-        ("2024-03-31", "Q1", 100.0, 25.0),
-        ("2023-12-31", "Q4", 90.0, 20.0),
+        (q4, "Q4", 130.0, 40.0),
+        (q3, "Q3", 120.0, 35.0),
+        (q2, "Q2", 110.0, 30.0),
+        (q1, "Q1", 100.0, 25.0),
+        (q4_prev, "Q4", 90.0, 20.0),
     ]
     for end_date, period, ocf, capex in quarterly_cash_flows:
         records.append(
@@ -709,11 +721,11 @@ def test_cmd_compute_metrics_all(tmp_path):
             )
         )
     quarterly_eps = [
-        ("2024-12-31", "Q4", 2.5),
-        ("2024-09-30", "Q3", 2.0),
-        ("2024-06-30", "Q2", 1.5),
-        ("2024-03-31", "Q1", 1.0),
-        ("2023-12-31", "Q4", 0.5),
+        (q4, "Q4", 2.5),
+        (q3, "Q3", 2.0),
+        (q2, "Q2", 1.5),
+        (q1, "Q1", 1.0),
+        (q4_prev, "Q4", 0.5),
     ]
     for end_date, period, value in quarterly_eps:
         records.append(
@@ -731,8 +743,8 @@ def test_cmd_compute_metrics_all(tmp_path):
     metrics_repo.initialize_schema()
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    market_repo.upsert_price("AAPL.US", "2024-09-30", 150.0, market_cap=50000.0)
-    market_repo.upsert_price("AAPL.US", "2019-09-30", 100.0, market_cap=30000.0)
+    market_repo.upsert_price("AAPL.US", q3, 150.0, market_cap=50000.0)
+    market_repo.upsert_price("AAPL.US", f"{current_year-5}-09-30", 100.0, market_cap=30000.0)
 
     rc = cli.cmd_compute_metrics("AAPL.US", ["placeholder"], str(db_path), run_all=True)
     assert rc == 0

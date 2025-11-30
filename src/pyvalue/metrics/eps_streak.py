@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from pyvalue.metrics.base import Metric, MetricResult
-from pyvalue.metrics.utils import filter_unique_fy
+from pyvalue.metrics.utils import MAX_FY_FACT_AGE_DAYS, filter_unique_fy, has_recent_fact
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 FALLBACK_CONCEPTS = [
@@ -31,6 +31,8 @@ class EPSStreakMetric:
             if records:
                 break
         if not records:
+            return None
+        if not has_recent_fact(repo, symbol, FALLBACK_CONCEPTS, max_age_days=MAX_FY_FACT_AGE_DAYS):
             return None
 
         unique = filter_unique_fy(records)

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from pyvalue.metrics.base import Metric, MetricResult
+from pyvalue.metrics.utils import MAX_FY_FACT_AGE_DAYS, has_recent_fact, is_recent_fact
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 NET_INCOME_CONCEPTS = [
@@ -34,8 +35,12 @@ class ROEGreenblattMetric:
         income_records = self._net_income_history(symbol, repo)
         if len(income_records) < 2:
             return None
+        if not has_recent_fact(repo, symbol, NET_INCOME_CONCEPTS, max_age_days=MAX_FY_FACT_AGE_DAYS):
+            return None
         equity_records = self._equity_history(symbol, repo)
         if len(equity_records) < 2:
+            return None
+        if not has_recent_fact(repo, symbol, EQUITY_CONCEPTS, max_age_days=MAX_FY_FACT_AGE_DAYS):
             return None
         equity_map = {}
         for rec in equity_records:
@@ -101,7 +106,7 @@ class ROEGreenblattMetric:
     def _preferred_dividends(self, symbol: str, repo: FinancialFactsRepository) -> Optional[float]:
         for concept in PREFERRED_DIVIDEND_CONCEPTS:
             fact = repo.latest_fact(symbol, concept)
-            if fact is not None and fact.value is not None:
+            if fact is not None and fact.value is not None and is_recent_fact(fact):
                 return fact.value
         return None
 
@@ -112,7 +117,7 @@ class ROEGreenblattMetric:
         if not records:
             return []
         preferred = repo.latest_fact(symbol, "PreferredStock")
-        if preferred is not None and preferred.value is not None:
+        if preferred is not None and preferred.value is not None and is_recent_fact(preferred):
             adjusted = []
             for record in records:
                 value = (record.value or 0) - preferred.value

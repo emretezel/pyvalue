@@ -26,6 +26,23 @@ def test_evaluate_criterion_uses_metrics_repo(tmp_path):
 
     assert evaluate_criterion(criterion, "AAPL.US", metrics_repo, fact_repo) is True
 
+
+def test_evaluate_criterion_filters_when_metric_missing(tmp_path):
+    db = tmp_path / "missing_metric.db"
+    fact_repo = FinancialFactsRepository(db)
+    fact_repo.initialize_schema()
+    metrics_repo = MetricsRepository(db)
+    metrics_repo.initialize_schema()
+
+    criterion = Criterion(
+        name="requires metric",
+        left=Term(metric="working_capital"),
+        operator=">",
+        right=Term(value=0.0),
+    )
+
+    assert evaluate_criterion(criterion, "AAPL.US", metrics_repo, fact_repo) is False
+
 def test_evaluate_criterion_supports_constant_terms(tmp_path):
     db = tmp_path / "test2.db"
     fact_repo = FinancialFactsRepository(db)

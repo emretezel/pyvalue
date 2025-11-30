@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from pyvalue.metrics.base import Metric, MetricResult
-from pyvalue.metrics.utils import filter_unique_fy
+from pyvalue.metrics.utils import MAX_FY_FACT_AGE_DAYS, filter_unique_fy, has_recent_fact
 from pyvalue.storage import FinancialFactsRepository
 
 EPS_CONCEPTS = ["EarningsPerShareDiluted", "EarningsPerShareBasic"]
@@ -28,6 +28,8 @@ class EPSAverageSixYearMetric:
     ) -> Optional[MetricResult]:
         history = self._fetch_history(symbol, repo)
         if len(history) < 6:
+            return None
+        if not has_recent_fact(repo, symbol, EPS_CONCEPTS, max_age_days=MAX_FY_FACT_AGE_DAYS):
             return None
         latest_records = history[:6]
         avg = sum(record.value for record in latest_records) / 6

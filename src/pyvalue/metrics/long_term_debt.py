@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from pyvalue.metrics.base import Metric, MetricResult
+from pyvalue.metrics.utils import is_recent_fact
 from pyvalue.storage import FinancialFactsRepository
 
 
@@ -20,7 +21,7 @@ class LongTermDebtMetric:
     def compute(self, symbol: str, repo: FinancialFactsRepository) -> Optional[MetricResult]:
         for concept in self.required_concepts:
             fact = repo.latest_fact(symbol, concept)
-            if fact is not None:
+            if fact is not None and is_recent_fact(fact):
                 return MetricResult(
                     symbol=symbol,
                     metric_id=self.id,

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from pyvalue.metrics.base import Metric, MetricResult
+from pyvalue.metrics.utils import MAX_FY_FACT_AGE_DAYS, has_recent_fact, is_recent_fact
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 EBIT_CONCEPTS = [
@@ -35,9 +36,23 @@ class ROCGreenblattMetric:
         ebit_records = self._fetch_ebit_history(symbol, repo)
         if not ebit_records:
             return None
+        if not has_recent_fact(repo, symbol, EBIT_CONCEPTS, max_age_days=MAX_FY_FACT_AGE_DAYS):
+            return None
 
         tangible_capital_records = self._fetch_tangible_capital_history(symbol, repo)
         if not tangible_capital_records:
+            return None
+        if not has_recent_fact(
+            repo,
+            symbol,
+            [
+                "PropertyPlantAndEquipmentNet",
+                "NetPropertyPlantAndEquipment",
+                "AssetsCurrent",
+                "LiabilitiesCurrent",
+            ],
+            max_age_days=MAX_FY_FACT_AGE_DAYS,
+        ):
             return None
 
         # merge by end_date
