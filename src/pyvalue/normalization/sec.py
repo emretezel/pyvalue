@@ -323,6 +323,8 @@ class SECFactsNormalizer:
         if end_date is None:
             return None
 
+        currency = self._currency_from_unit(unit)
+
         return FactRecord(
             symbol=symbol,
             provider="SEC",
@@ -337,6 +339,7 @@ class SECFactsNormalizer:
             frame=entry.get("frame"),
             start_date=entry.get("start"),
             accounting_standard="US-GAAP",
+            currency=currency,
         )
 
     def _build_fy_lookup(self, fy_map: Dict[str, FactRecord]) -> List[tuple[datetime, str]]:
@@ -417,6 +420,16 @@ class SECFactsNormalizer:
             return old_start is None
 
         return self._filed_key(new_entry) >= self._filed_key(existing)
+
+    def _currency_from_unit(self, unit: str) -> Optional[str]:
+        """Extract currency code from a unit string (e.g., USD)."""
+
+        if not unit:
+            return None
+        cleaned = unit.strip().upper()
+        if len(cleaned) == 3 and cleaned.isalpha():
+            return cleaned
+        return None
 
 
 __all__ = ["SECFactsNormalizer", "TARGET_CONCEPTS"]

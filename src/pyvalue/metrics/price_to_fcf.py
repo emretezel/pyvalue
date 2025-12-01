@@ -8,8 +8,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Optional, Sequence
 
+import logging
+
 from pyvalue.metrics.base import Metric, MetricResult
 from pyvalue.metrics.utils import is_recent_fact
+from pyvalue.fx import FXRateStore
 from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
 
 OPERATING_CASH_FLOW_CONCEPTS = [
@@ -25,11 +28,14 @@ CAPEX_CONCEPTS = [
 ]
 QUARTERLY_PERIODS = {"Q1", "Q2", "Q3", "Q4"}
 
+LOGGER = logging.getLogger(__name__)
+
 
 @dataclass
 class _TTMResult:
     total: float
     as_of: str
+    currency: Optional[str]
 
 
 @dataclass
@@ -46,14 +52,30 @@ class PriceToFCFMetric:
     ) -> Optional[MetricResult]:
         fcf_result = self._compute_ttm_fcf(symbol, repo)
         if fcf_result is None:
+            LOGGER.warning("price_to_fcf: missing TTM FCF for %s", symbol)
             return None
         if fcf_result.total <= 0:
+            LOGGER.warning("price_to_fcf: non-positive TTM FCF for %s", symbol)
             return None
         snapshot = market_repo.latest_snapshot(symbol)
         if snapshot is None or snapshot.market_cap is None or snapshot.market_cap <= 0:
+            LOGGER.warning("price_to_fcf: missing market cap for %s", symbol)
             return None
 
-        ratio = snapshot.market_cap / fcf_result.total
+        market_cap = snapshot.market_cap
+        if fcf_result.currency and getattr(snapshot, "currency", None):
+            converted = FXRateStore().convert(market_cap, snapshot.currency, fcf_result.currency, snapshot.as_of)
+            if converted is None:
+                LOGGER.warning(
+                    "price_to_fcf: FX conversion failed %s -> %s for %s",
+                    snapshot.currency,
+                    fcf_result.currency,
+                    symbol,
+                )
+                return None
+            market_cap = converted
+
+        ratio = market_cap / fcf_result.total
         return MetricResult(symbol=symbol, metric_id=self.id, value=ratio, as_of=fcf_result.as_of)
 
     def _compute_ttm_fcf(
@@ -67,7 +89,8 @@ class PriceToFCFMetric:
             return None
         fcf_total = operating.total - capex.total
         as_of = operating.as_of if operating.as_of >= capex.as_of else capex.as_of
-        return _TTMResult(total=fcf_total, as_of=as_of)
+        currency = operating.currency or capex.currency
+        return _TTMResult(total=fcf_total, as_of=as_of, currency=currency)
 
     def _ttm_sum(
         self,
@@ -83,8 +106,11 @@ class PriceToFCFMetric:
             values = quarterly[:4]
             if not is_recent_fact(values[0]):
                 continue
+            currency = self._select_currency(values)
+            if currency is False:
+                continue
             total = sum(record.value for record in values)
-            return _TTMResult(total=total, as_of=values[0].end_date)
+            return _TTMResult(total=total, as_of=values[0].end_date, currency=currency or None)
         return None
 
     def _filter_quarterly(self, records: Iterable[FactRecord]) -> list[FactRecord]:
@@ -101,6 +127,20 @@ class PriceToFCFMetric:
             filtered.append(record)
             seen_end_dates.add(record.end_date)
         return filtered
+
+    def _select_currency(self, records: Iterable[FactRecord]) -> Optional[str] | bool:
+        """Return shared currency or False if conflicting codes exist."""
+
+        currency = None
+        for record in records:
+            code = getattr(record, "currency", None)
+            if code is None:
+                continue
+            if currency is None:
+                currency = code
+            elif code != currency:
+                return False
+        return currency
 
 
 __all__ = ["PriceToFCFMetric"]

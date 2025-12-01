@@ -19,6 +19,16 @@ def _to_float(value: object) -> Optional[float]:
         return None
 
 
+def _normalize_currency_code(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    try:
+        code = str(value).strip()
+    except Exception:
+        return None
+    return code.upper() or None
+
+
 class EODHDFactsNormalizer:
     """Flatten EODHD fundamentals payloads into FactRecord entries."""
 
@@ -129,7 +139,11 @@ class EODHDFactsNormalizer:
                 end_date = self._extract_date(entry)
                 if not end_date:
                     continue
-                currency = entry.get("currency_symbol") or default_currency or entry.get("CurrencyCode")
+                currency = (
+                    _normalize_currency_code(entry.get("currency_symbol"))
+                    or _normalize_currency_code(default_currency)
+                    or _normalize_currency_code(entry.get("CurrencyCode"))
+                )
                 period_code = fiscal_period or self._infer_quarter(entry)
                 frame = self._build_frame(end_date, period_code)
                 total_liab = self._extract_value(entry, ["totalLiabilities", "totalLiab"])
@@ -182,7 +196,7 @@ class EODHDFactsNormalizer:
         end_date = general.get("LatestQuarter") or general.get("LatestReportDate")
         if not end_date:
             return []
-        currency = stats.get("CurrencyCode") or default_currency
+        currency = _normalize_currency_code(stats.get("CurrencyCode") or default_currency)
         record = FactRecord(
             symbol=symbol.upper(),
             provider="EODHD",
@@ -209,9 +223,11 @@ class EODHDFactsNormalizer:
         earnings = payload.get("Earnings") or {}
         history = earnings.get("History") or {}
         annual = earnings.get("Annual") or {}
+        earnings_currency = self._latest_earnings_currency(history, annual)
         records: List[FactRecord] = []
 
-        def add_record(date_str: str, value: float, period: str) -> None:
+        def add_record(date_str: str, value: float, period: str, currency_hint: Optional[str]) -> None:
+            currency = _normalize_currency_code(currency_hint) or earnings_currency
             records.append(
                 FactRecord(
                     symbol=symbol.upper(),
@@ -226,7 +242,7 @@ class EODHDFactsNormalizer:
                     frame=self._build_frame(date_str, period or "FY"),
                     start_date=None,
                     accounting_standard=accounting_standard,
-                    currency=None,
+                    currency=currency,
                 )
             )
 
@@ -235,13 +251,13 @@ class EODHDFactsNormalizer:
             if val is None:
                 continue
             period = self._infer_quarter({"date": date_str}) or ""
-            add_record(date_str[:10], val, period)
+            add_record(date_str[:10], val, period, entry.get("currency"))
 
         for date_str, entry in annual.items():
             val = _to_float(entry.get("epsActual"))
             if val is None:
                 continue
-            add_record(date_str[:10], val, "FY")
+            add_record(date_str[:10], val, "FY", entry.get("currency"))
 
         return records
 
@@ -297,6 +313,21 @@ class EODHDFactsNormalizer:
         if month <= 9:
             return "Q3"
         return "Q4"
+
+    def _latest_earnings_currency(self, history: Dict, annual: Dict) -> Optional[str]:
+        """Return the most recent non-null earnings currency."""
+
+        candidates: List[tuple[str, str]] = []
+        for date_str, entry in {**history, **annual}.items():
+            currency = _normalize_currency_code((entry or {}).get("currency"))
+            if not currency:
+                continue
+            normalized_date = self._extract_date({"date": date_str}) or date_str
+            candidates.append((normalized_date, currency))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
 
     def _iter_entries(self, container) -> Iterable[Dict]:
         if container is None:
