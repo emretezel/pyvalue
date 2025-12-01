@@ -8,11 +8,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
+import logging
+
 from pyvalue.metrics.base import Metric, MetricResult
 from pyvalue.metrics.utils import is_recent_fact
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 EPS_CONCEPTS = ["EarningsPerShareDiluted", "EarningsPerShareBasic"]
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -28,8 +32,10 @@ class EarningsPerShareTTM:
     ) -> Optional[MetricResult]:
         latest_records = self._fetch_quarters(symbol, repo)
         if len(latest_records) < 4:
+            LOGGER.warning("eps_ttm: missing EPS quarters for %s", symbol)
             return None
         if not is_recent_fact(latest_records[0]):
+            LOGGER.warning("eps_ttm: latest EPS quarter too old for %s (%s)", symbol, latest_records[0].end_date)
             return None
         ttm_value = sum(record.value for record in latest_records[:4])
         as_of = latest_records[0].end_date

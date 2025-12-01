@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional
 
+import logging
+
 from pyvalue.metrics.base import Metric, MetricResult
 from pyvalue.metrics.utils import MAX_FY_FACT_AGE_DAYS, has_recent_fact, is_recent_fact
 from pyvalue.storage import FactRecord, FinancialFactsRepository
@@ -25,6 +27,8 @@ EQUITY_CONCEPTS = [
     "StockholdersEquity",
 ]
 
+LOGGER = logging.getLogger(__name__)
+
 
 @dataclass
 class ROEGreenblattMetric:
@@ -34,13 +38,17 @@ class ROEGreenblattMetric:
     def compute(self, symbol: str, repo: FinancialFactsRepository) -> Optional[MetricResult]:
         income_records = self._net_income_history(symbol, repo)
         if len(income_records) < 2:
+            LOGGER.warning("roe_greenblatt: need >=2 FY income records for %s", symbol)
             return None
         if not has_recent_fact(repo, symbol, NET_INCOME_CONCEPTS, max_age_days=MAX_FY_FACT_AGE_DAYS):
+            LOGGER.warning("roe_greenblatt: no recent FY income fact for %s", symbol)
             return None
         equity_records = self._equity_history(symbol, repo)
         if len(equity_records) < 2:
+            LOGGER.warning("roe_greenblatt: need >=2 FY equity records for %s", symbol)
             return None
         if not has_recent_fact(repo, symbol, EQUITY_CONCEPTS, max_age_days=MAX_FY_FACT_AGE_DAYS):
+            LOGGER.warning("roe_greenblatt: no recent FY equity fact for %s", symbol)
             return None
         equity_map = {}
         for rec in equity_records:
@@ -71,6 +79,7 @@ class ROEGreenblattMetric:
             if len(roe_values) == 5:
                 break
         if not roe_values:
+            LOGGER.warning("roe_greenblatt: insufficient overlapping years for %s", symbol)
             return None
         avg_roe = sum(roe_values) / len(roe_values)
         latest = income_records[0].end_date

@@ -102,15 +102,23 @@ class PriceToFCFMetric:
             records = repo.facts_for_concept(symbol, concept)
             quarterly = self._filter_quarterly(records)
             if len(quarterly) < 4:
+                LOGGER.warning("price_to_fcf: need 4 quarterly %s records for %s, found %s", concept, symbol, len(quarterly))
                 continue
             values = quarterly[:4]
             if not is_recent_fact(values[0]):
+                LOGGER.warning(
+                    "price_to_fcf: latest %s (%s) too old for %s",
+                    concept,
+                    values[0].end_date,
+                    symbol,
+                )
                 continue
-            currency = self._select_currency(values)
-            if currency is False:
+            normalized, currency = self._normalize_quarterly(values)
+            if normalized is None:
+                LOGGER.warning("price_to_fcf: currency conflict in %s quarterly values for %s", concept, symbol)
                 continue
-            total = sum(record.value for record in values)
-            return _TTMResult(total=total, as_of=values[0].end_date, currency=currency or None)
+            total = sum(record.value for record in normalized)
+            return _TTMResult(total=total, as_of=normalized[0].end_date, currency=currency or None)
         return None
 
     def _filter_quarterly(self, records: Iterable[FactRecord]) -> list[FactRecord]:
@@ -128,19 +136,42 @@ class PriceToFCFMetric:
             seen_end_dates.add(record.end_date)
         return filtered
 
-    def _select_currency(self, records: Iterable[FactRecord]) -> Optional[str] | bool:
-        """Return shared currency or False if conflicting codes exist."""
+    def _normalize_quarterly(self, records: list[FactRecord]) -> tuple[Optional[list[FactRecord]], Optional[str]]:
+        """Normalize GBX/GBP0.01 records to GBP and ensure consistent currency."""
 
         currency = None
+        normalized: list[FactRecord] = []
         for record in records:
             code = getattr(record, "currency", None)
-            if code is None:
+            value = record.value
+            if code in {"GBX", "GBP0.01"}:
+                code = "GBP"
+                value = value / 100.0 if value is not None else None
+            if value is None:
                 continue
-            if currency is None:
+            if currency is None and code:
                 currency = code
-            elif code != currency:
-                return False
-        return currency
+            elif code and currency and code != currency:
+                return None, None
+            normalized.append(
+                FactRecord(
+                    symbol=record.symbol,
+                    provider=record.provider,
+                    cik=record.cik,
+                    concept=record.concept,
+                    fiscal_period=record.fiscal_period,
+                    end_date=record.end_date,
+                    unit=record.unit,
+                    value=value,
+                    accn=record.accn,
+                    filed=record.filed,
+                    frame=record.frame,
+                    start_date=getattr(record, "start_date", None),
+                    accounting_standard=getattr(record, "accounting_standard", None),
+                    currency=code,
+                )
+            )
+        return (normalized, currency)
 
 
 __all__ = ["PriceToFCFMetric"]

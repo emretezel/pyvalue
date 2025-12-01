@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional
 
+import logging
+
 from pyvalue.metrics.base import Metric, MetricResult
 from pyvalue.metrics.utils import MAX_FY_FACT_AGE_DAYS, has_recent_fact, is_recent_fact
 from pyvalue.storage import FactRecord, FinancialFactsRepository
@@ -17,6 +19,8 @@ EBIT_CONCEPTS = [
     "IncomeFromOperations",
     "OperatingProfitLoss",
 ]
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -35,12 +39,15 @@ class ROCGreenblattMetric:
     def compute(self, symbol: str, repo: FinancialFactsRepository) -> Optional[MetricResult]:
         ebit_records = self._fetch_ebit_history(symbol, repo)
         if not ebit_records:
+            LOGGER.warning("roc_greenblatt: no FY EBIT records for %s", symbol)
             return None
         if not has_recent_fact(repo, symbol, EBIT_CONCEPTS, max_age_days=MAX_FY_FACT_AGE_DAYS):
+            LOGGER.warning("roc_greenblatt: no recent FY EBIT fact for %s", symbol)
             return None
 
         tangible_capital_records = self._fetch_tangible_capital_history(symbol, repo)
         if not tangible_capital_records:
+            LOGGER.warning("roc_greenblatt: missing tangible capital components for %s", symbol)
             return None
         if not has_recent_fact(
             repo,
@@ -53,6 +60,7 @@ class ROCGreenblattMetric:
             ],
             max_age_days=MAX_FY_FACT_AGE_DAYS,
         ):
+            LOGGER.warning("roc_greenblatt: tangible capital too old for %s", symbol)
             return None
 
         # merge by end_date
@@ -70,6 +78,7 @@ class ROCGreenblattMetric:
             if years_considered == 5:
                 break
         if not values:
+            LOGGER.warning("roc_greenblatt: insufficient overlapping years for %s", symbol)
             return None
         avg = sum(values) / len(values)
         latest = ebit_records[0].end_date

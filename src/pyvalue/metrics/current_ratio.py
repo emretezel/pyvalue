@@ -8,9 +8,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+import logging
+
 from pyvalue.metrics.base import Metric, MetricResult
 from pyvalue.metrics.utils import is_recent_fact
 from pyvalue.storage import FinancialFactsRepository
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -22,11 +26,14 @@ class CurrentRatioMetric:
         assets = repo.latest_fact(symbol, "AssetsCurrent")
         liabilities = repo.latest_fact(symbol, "LiabilitiesCurrent")
         if assets is None or liabilities is None:
+            LOGGER.warning("current_ratio: missing assets/liabilities for %s", symbol)
             return None
         if liabilities.value is None or liabilities.value == 0:
+            LOGGER.warning("current_ratio: liabilities missing/zero for %s", symbol)
             return None
         as_of_record = assets if assets.end_date >= liabilities.end_date else liabilities
         if not is_recent_fact(as_of_record):
+            LOGGER.warning("current_ratio: latest assets/liabilities too old for %s (%s)", symbol, as_of_record.end_date)
             return None
         ratio = assets.value / liabilities.value
         as_of = as_of_record.end_date

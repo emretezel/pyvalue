@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
+import logging
+
 from pyvalue.metrics.base import Metric, MetricResult
 from pyvalue.metrics.utils import MAX_FY_FACT_AGE_DAYS, filter_unique_fy, has_recent_fact
 from pyvalue.storage import FactRecord, FinancialFactsRepository
@@ -17,6 +19,9 @@ EPS_CONCEPTS = ["EarningsPerShareDiluted", "EarningsPerShareBasic"]
 
 def _sorted_records(records: Dict[str, FactRecord]) -> List[FactRecord]:
     return [records[end_date] for end_date in sorted(records.keys())]
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -31,16 +36,24 @@ class GrahamEPSCAGRMetric:
             if records:
                 break
         if len(records) < 12:
+            LOGGER.warning("graham_eps_cagr: need >=12 FY EPS records for %s, found %s", symbol, len(records))
             return None
         if not has_recent_fact(repo, symbol, EPS_CONCEPTS, max_age_days=MAX_FY_FACT_AGE_DAYS):
+            LOGGER.warning("graham_eps_cagr: no recent FY EPS fact for %s", symbol)
             return None
         latest_date = records[0].end_date
         filtered = filter_unique_fy(records)
         ordered = sorted(filtered.values(), key=lambda r: r.end_date)
         if len(ordered) < 12:
+            LOGGER.warning(
+                "graham_eps_cagr: need >=12 unique FY EPS records for %s after filtering, found %s",
+                symbol,
+                len(ordered),
+            )
             return None
         cagr_values = self._compute_cagrs(ordered)
         if not cagr_values:
+            LOGGER.warning("graham_eps_cagr: could not derive CAGR values for %s", symbol)
             return None
         avg_cagr = sum(cagr_values) / len(cagr_values)
         return MetricResult(symbol=symbol, metric_id=self.id, value=avg_cagr, as_of=latest_date)

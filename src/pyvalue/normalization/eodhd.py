@@ -116,7 +116,7 @@ class EODHDFactsNormalizer:
                     field_map,
                     symbol=symbol,
                     accounting_standard=accounting_standard,
-                    default_currency=currency_code,
+                    default_currency=self._normalize_statement_currency(statement_payload, currency_code),
                 )
             )
 
@@ -151,6 +151,7 @@ class EODHDFactsNormalizer:
                 derived_debt = None
                 if total_liab is not None and current_liab is not None:
                     derived_debt = total_liab - current_liab
+                derived_debt, currency = self._normalize_value_currency(derived_debt, currency)
                 for concept, keys in field_map.items():
                     if concept not in self.concepts:
                         continue
@@ -159,6 +160,7 @@ class EODHDFactsNormalizer:
                         value = derived_debt
                     if value is None:
                         continue
+                    value, normalized_currency = self._normalize_value_currency(value, currency)
                     records.append(
                         FactRecord(
                             symbol=symbol.upper(),
@@ -173,7 +175,7 @@ class EODHDFactsNormalizer:
                             frame=frame,
                             start_date=None,
                             accounting_standard=accounting_standard,
-                            currency=currency,
+                            currency=normalized_currency,
                         )
                     )
         return records
@@ -313,6 +315,26 @@ class EODHDFactsNormalizer:
         if month <= 9:
             return "Q3"
         return "Q4"
+
+    def _normalize_value_currency(
+        self, value: Optional[float], currency: Optional[str]
+    ) -> tuple[Optional[float], Optional[str]]:
+        """Normalize GBX/GBP0.01 to GBP and scale values accordingly."""
+
+        if currency in {"GBX", "GBP0.01"}:
+            return (value / 100.0) if value is not None else None, "GBP"
+        return value, currency
+
+    def _normalize_statement_currency(self, statement_payload: Dict, default: Optional[str]) -> Optional[str]:
+        """Prefer an explicit currency_symbol in the statement over General currency."""
+
+        for key in ("yearly", "quarterly"):
+            entries = self._iter_entries(statement_payload.get(key))
+            for entry in entries:
+                code = _normalize_currency_code(entry.get("currency_symbol"))
+                if code:
+                    return code
+        return _normalize_currency_code(default)
 
     def _latest_earnings_currency(self, history: Dict, annual: Dict) -> Optional[str]:
         """Return the most recent non-null earnings currency."""

@@ -8,9 +8,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+import logging
+
 from pyvalue.metrics.base import Metric, MetricResult
 from pyvalue.metrics.utils import is_recent_fact
 from pyvalue.storage import FinancialFactsRepository
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -28,4 +32,5 @@ class LongTermDebtMetric:
                     value=fact.value,
                     as_of=fact.end_date,
                 )
+        LOGGER.warning("long_term_debt: no recent long-term debt fact for %s", symbol)
         return None

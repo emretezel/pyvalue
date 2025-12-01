@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
+import logging
+
 from pyvalue.metrics.base import Metric, MetricResult
 from pyvalue.metrics.utils import MAX_FY_FACT_AGE_DAYS, filter_unique_fy, has_recent_fact
 from pyvalue.storage import FactRecord, FinancialFactsRepository
@@ -17,6 +19,8 @@ FALLBACK_CONCEPTS = [
     "EarningsPerShareBasicAndDiluted",
     "EarningsPerShareBasic",
 ]
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -31,8 +35,10 @@ class EPSStreakMetric:
             if records:
                 break
         if not records:
+            LOGGER.warning("eps_streak: no FY EPS records for %s", symbol)
             return None
         if not has_recent_fact(repo, symbol, FALLBACK_CONCEPTS, max_age_days=MAX_FY_FACT_AGE_DAYS):
+            LOGGER.warning("eps_streak: no recent FY EPS fact for %s", symbol)
             return None
 
         unique = filter_unique_fy(records)

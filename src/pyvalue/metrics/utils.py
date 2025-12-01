@@ -10,7 +10,9 @@ from typing import Dict, Iterable, List, Sequence
 
 from pyvalue.storage import FactRecord
 
-MAX_FACT_AGE_DAYS = 183
+# Default freshness windows (days)
+MAX_FACT_AGE_DAYS = 365
+EODHD_FACT_AGE_DAYS = 365
 MAX_FY_FACT_AGE_DAYS = 366
 
 
@@ -29,7 +31,10 @@ def is_recent_fact(
     except ValueError:
         return False
     today = reference_date or date.today()
-    cutoff = today - timedelta(days=max_age_days)
+    effective_age = max_age_days
+    if getattr(record, "provider", None) == "EODHD":
+        effective_age = max(max_age_days, EODHD_FACT_AGE_DAYS)
+    cutoff = today - timedelta(days=effective_age)
     return end_date >= cutoff
 
 
