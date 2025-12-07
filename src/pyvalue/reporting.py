@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Sequence, Tuple, Type
 
-from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS, is_recent_fact
+from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS, is_recent_fact, resolve_assets_current, resolve_liabilities_current
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 
@@ -75,6 +75,14 @@ def compute_fact_coverage(
                 if key not in fact_cache:
                     record = fact_repo.latest_fact(symbol, concept)
                     fact_cache[key] = record
+
+                if concept in {"AssetsCurrent", "LiabilitiesCurrent"} and (record is None or not is_recent_fact(record, max_age_days=max_age_days)):
+                    resolver = resolve_assets_current if concept == "AssetsCurrent" else resolve_liabilities_current
+                    derived = resolver(fact_repo, symbol, max_age_days=max_age_days)
+                    if derived:
+                        record = derived
+                        fact_cache[key] = derived
+
                 if record is None:
                     concept_counts[concept]["missing"] += 1
                     symbol_has_all = False

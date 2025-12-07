@@ -86,3 +86,48 @@ def test_cmd_report_fact_freshness_outputs_counts(tmp_path, capsys):
     assert "AssetsCurrent" in output
     assert "stale=1" in output
     assert "missing=1" in output
+
+
+def test_fact_report_counts_assets_current_from_components(tmp_path):
+    db_path = tmp_path / "components.db"
+    _seed_universe(db_path)
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    today = date.today().isoformat()
+    fact_repo.replace_facts(
+        "AAA.US",
+        [
+            FactRecord(symbol="AAA.US", concept="CashAndCashEquivalents", fiscal_period="Q1", end_date=today, unit="USD", value=10.0),
+            FactRecord(symbol="AAA.US", concept="LiabilitiesCurrent", fiscal_period="Q1", end_date=today, unit="USD", value=5.0),
+        ],
+    )
+
+    report = compute_fact_coverage(fact_repo, ["AAA.US"], [WorkingCapitalMetric], max_age_days=365)
+    entry = report[0]
+    coverage = {c.concept: c for c in entry.concepts}
+    assert coverage["AssetsCurrent"].missing == 0
+    assert coverage["AssetsCurrent"].stale == 0
+    assert entry.fully_covered == 1
+
+
+def test_fact_report_counts_liabilities_current_from_components(tmp_path):
+    db_path = tmp_path / "components2.db"
+    _seed_universe(db_path)
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    today = date.today().isoformat()
+    fact_repo.replace_facts(
+        "AAA.US",
+        [
+            FactRecord(symbol="AAA.US", concept="AssetsCurrent", fiscal_period="Q1", end_date=today, unit="USD", value=50.0),
+            FactRecord(symbol="AAA.US", concept="AccountsPayableCurrent", fiscal_period="Q1", end_date=today, unit="USD", value=10.0),
+            FactRecord(symbol="AAA.US", concept="AccruedLiabilitiesCurrent", fiscal_period="Q1", end_date=today, unit="USD", value=5.0),
+        ],
+    )
+
+    report = compute_fact_coverage(fact_repo, ["AAA.US"], [WorkingCapitalMetric], max_age_days=365)
+    entry = report[0]
+    coverage = {c.concept: c for c in entry.concepts}
+    assert coverage["LiabilitiesCurrent"].missing == 0
+    assert coverage["LiabilitiesCurrent"].stale == 0
+    assert entry.fully_covered == 1

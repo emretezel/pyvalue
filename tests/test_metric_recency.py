@@ -15,7 +15,7 @@ from pyvalue.storage import FactRecord, FinancialFactsRepository
 def test_metric_skips_when_latest_fact_is_stale(tmp_path):
     repo = FinancialFactsRepository(tmp_path / "facts.db")
     repo.initialize_schema()
-    stale_date = (date.today() - timedelta(days=200)).isoformat()
+    stale_date = (date.today() - timedelta(days=400)).isoformat()
     repo.replace_facts(
         "AAPL.US",
         [
@@ -65,7 +65,7 @@ def test_ttm_metric_skips_when_latest_quarter_is_stale(tmp_path):
     repo.initialize_schema()
     today = date.today()
     records = []
-    for idx, months_ago in enumerate((7, 9, 10, 11), start=1):
+    for idx, months_ago in enumerate((13, 15, 16, 17), start=1):
         records.append(
             FactRecord(
                 symbol="AAPL.US",
@@ -86,7 +86,7 @@ def test_ttm_metric_skips_when_latest_quarter_is_stale(tmp_path):
 def test_fy_metric_accepts_when_recent_quarter_exists(tmp_path):
     repo = FinancialFactsRepository(tmp_path / "epsavg.db")
     repo.initialize_schema()
-    # Six FY records older than 6 months.
+    # Six FY records older than a year.
     fy_records = []
     for year in range(2018, 2024):
         fy_records.append(
@@ -122,14 +122,15 @@ def test_fy_metric_accepts_when_recent_quarter_exists(tmp_path):
 def test_roc_metric_uses_recent_concept_even_if_fy_old(tmp_path):
     repo = FinancialFactsRepository(tmp_path / "roc.db")
     repo.initialize_schema()
-    # FY data older than 6 months.
+    # FY data older than a year.
+    fy_old = (date.today() - timedelta(days=500)).isoformat()
     repo.replace_facts(
         "TEST.US",
         [
-            FactRecord(symbol="TEST.US", concept="OperatingIncomeLoss", fiscal_period="FY", end_date="2023-12-31", unit="USD", value=200.0),
-            FactRecord(symbol="TEST.US", concept="PropertyPlantAndEquipmentNet", fiscal_period="FY", end_date="2023-12-31", unit="USD", value=100.0),
-            FactRecord(symbol="TEST.US", concept="AssetsCurrent", fiscal_period="FY", end_date="2023-12-31", unit="USD", value=50.0),
-            FactRecord(symbol="TEST.US", concept="LiabilitiesCurrent", fiscal_period="FY", end_date="2023-12-31", unit="USD", value=25.0),
+            FactRecord(symbol="TEST.US", concept="OperatingIncomeLoss", fiscal_period="FY", end_date=fy_old, unit="USD", value=200.0),
+            FactRecord(symbol="TEST.US", concept="PropertyPlantAndEquipmentNet", fiscal_period="FY", end_date=fy_old, unit="USD", value=100.0),
+            FactRecord(symbol="TEST.US", concept="AssetsCurrent", fiscal_period="FY", end_date=fy_old, unit="USD", value=50.0),
+            FactRecord(symbol="TEST.US", concept="LiabilitiesCurrent", fiscal_period="FY", end_date=fy_old, unit="USD", value=25.0),
         ],
     )
     # Recent quarterly facts to satisfy freshness.

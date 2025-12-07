@@ -484,6 +484,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show concepts even when all symbols are fresh.",
     )
 
+    metric_report = subparsers.add_parser(
+        "report-metric-coverage",
+        help="Count how many symbols can compute all requested metrics for a region without writing results.",
+    )
+    metric_report.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
+    )
+    metric_report.add_argument(
+        "--region",
+        default="US",
+        help="Universe region key stored in SQLite (default: %(default)s)",
+    )
+    metric_report.add_argument(
+        "--metrics",
+        nargs="+",
+        default=None,
+        help="Metric identifiers to include (default: all registered metrics)",
+    )
+
     run_screen = subparsers.add_parser(
         "run-screen",
         help="Evaluate screening criteria for a ticker.",
@@ -1259,6 +1280,55 @@ def cmd_report_fact_freshness(
     return 0
 
 
+def cmd_report_metric_coverage(
+    database: str,
+    region: str,
+    metric_ids: Optional[Sequence[str]],
+) -> int:
+    """Count symbols that can compute all requested metrics (without persisting results)."""
+
+    db_path = _resolve_database_path(database)
+    region_label = region.upper()
+    symbols = _symbols_for_region_or_raise(db_path, region_label)
+    if not symbols:
+        raise SystemExit(f"No symbols found for region {region_label}.")
+
+    metric_classes = _select_metric_classes(metric_ids)
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    market_repo = MarketDataRepository(db_path)
+    market_repo.initialize_schema()
+
+    per_metric_success: Dict[str, int] = {getattr(cls, "id", cls.__name__): 0 for cls in metric_classes}
+    all_success = 0
+
+    for symbol in symbols:
+        symbol_ok = True
+        for metric_cls in metric_classes:
+            metric = metric_cls()
+            try:
+                if getattr(metric, "uses_market_data", False):
+                    result = metric.compute(symbol, fact_repo, market_repo)
+                else:
+                    result = metric.compute(symbol, fact_repo)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                LOGGER.error("Metric %s failed for %s: %s", getattr(metric_cls, "id", metric_cls.__name__), symbol, exc)
+                result = None
+            if result is None:
+                symbol_ok = False
+                continue
+            per_metric_success[getattr(metric_cls, "id", metric_cls.__name__)] += 1
+        if symbol_ok and metric_classes:
+            all_success += 1
+
+    total_symbols = len(symbols)
+    print(f"Metric coverage for region {region_label} (symbols={total_symbols}, metrics={len(metric_classes)})")
+    print(f"Symbols where all metrics computed: {all_success}/{total_symbols}")
+    for metric_id, count in per_metric_success.items():
+        print(f"- {metric_id}: {count}/{total_symbols} symbols")
+    return 0
+
+
 def cmd_recalc_market_cap(database: str) -> int:
     """Recompute market cap values for stored market data."""
 
@@ -1589,6 +1659,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             max_age_days=args.max_age_days,
             output_csv=args.output_csv,
             show_all=args.show_all,
+        )
+    if args.command == "report-metric-coverage":
+        return cmd_report_metric_coverage(
+            database=args.database,
+            region=args.region,
+            metric_ids=args.metrics,
         )
     if args.command == "recalc-market-cap":
         return cmd_recalc_market_cap(database=args.database)

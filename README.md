@@ -189,7 +189,7 @@ prints progress, and can be cancelled with Ctrl+C.
 
 ### Fact coverage report
 
-List missing or stale (older than ~6 months by default) financial facts required by the metrics for a region:
+List missing or stale (older than one year by default) financial facts required by the metrics for a region:
 
 ```bash
 pyvalue report-fact-freshness --region US --metrics working_capital eps_ttm
