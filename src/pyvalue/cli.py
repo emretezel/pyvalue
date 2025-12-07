@@ -17,7 +17,9 @@ from pyvalue.config import Config
 from pyvalue.ingestion import CompaniesHouseClient, EODHDFundamentalsClient, GLEIFClient, SECCompanyFactsClient
 from pyvalue.marketdata.service import MarketDataService, latest_share_count
 from pyvalue.metrics import REGISTRY
+from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS
 from pyvalue.normalization import EODHDFactsNormalizer, SECFactsNormalizer
+from pyvalue.reporting import MetricCoverage, compute_fact_coverage
 from pyvalue.screening import Criterion, evaluate_criterion, load_screen, evaluate_criterion_verbose
 from pyvalue.logging_utils import setup_logging
 from pyvalue.storage import (
@@ -77,6 +79,51 @@ def _format_market_symbol(symbol: str, exchange: Optional[str], region: Optional
     if region and region.upper() == "US":
         return f"{normalized}.US"
     return normalized
+
+
+def _symbols_for_region_or_raise(db_path: Path, region: str) -> List[str]:
+    """Return symbols for region from listings or fundamentals, or raise with guidance."""
+
+    region_label = region.upper()
+    universe_repo = UniverseRepository(db_path)
+    universe_repo.initialize_schema()
+    symbols = universe_repo.fetch_symbols(region_label)
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    if not symbols:
+        symbols = fund_repo.symbols("EODHD", region=region_label)
+    if symbols:
+        return symbols
+
+    listing_regions: List[str] = []
+    fund_regions: List[str] = []
+    with universe_repo._connect() as conn:
+        listing_regions = [row[0] for row in conn.execute("SELECT DISTINCT region FROM listings").fetchall()]
+    with fund_repo._connect() as conn:
+        fund_regions = [
+            row[0] for row in conn.execute(
+                "SELECT DISTINCT region FROM fundamentals_raw WHERE provider = 'EODHD' AND region IS NOT NULL"
+            ).fetchall()
+        ]
+    available_regions = sorted({*listing_regions, *fund_regions})
+    raise SystemExit(
+        f"No symbols found for region {region_label}. Load a universe or ingest fundamentals first. "
+        f"Available regions: {', '.join(available_regions) if available_regions else 'none'}. "
+        f"Database: {db_path}"
+    )
+
+
+def _select_metric_classes(metric_ids: Optional[Sequence[str]]) -> List[type]:
+    """Return metric classes for requested ids, raising on unknown identifiers."""
+
+    ids = list(metric_ids) if metric_ids else list(REGISTRY.keys())
+    metric_classes: List[type] = []
+    for metric_id in ids:
+        metric_cls = REGISTRY.get(metric_id)
+        if metric_cls is None:
+            raise SystemExit(f"Unknown metric id: {metric_id}")
+        metric_classes.append(metric_cls)
+    return metric_classes
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -398,6 +445,43 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         default=None,
         help="Metric identifiers to compute (default: all registered metrics)",
+    )
+
+    fact_report = subparsers.add_parser(
+        "report-fact-freshness",
+        help="List missing or stale financial facts required by metrics for a region.",
+    )
+    fact_report.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
+    )
+    fact_report.add_argument(
+        "--region",
+        default="US",
+        help="Universe region key stored in SQLite (default: %(default)s)",
+    )
+    fact_report.add_argument(
+        "--metrics",
+        nargs="+",
+        default=None,
+        help="Metric identifiers to include (default: all registered metrics)",
+    )
+    fact_report.add_argument(
+        "--max-age-days",
+        type=int,
+        default=MAX_FACT_AGE_DAYS,
+        help="Fact freshness window in days (default: %(default)s)",
+    )
+    fact_report.add_argument(
+        "--output-csv",
+        default=None,
+        help="Optional CSV path for detailed concept coverage.",
+    )
+    fact_report.add_argument(
+        "--show-all",
+        action="store_true",
+        help="Show concepts even when all symbols are fresh.",
     )
 
     run_screen = subparsers.add_parser(
@@ -1131,6 +1215,50 @@ def cmd_compute_metrics_bulk(database: str, region: str, metric_ids: Optional[Se
     return 0
 
 
+def cmd_report_fact_freshness(
+    database: str,
+    region: str,
+    metric_ids: Optional[Sequence[str]],
+    max_age_days: int,
+    output_csv: Optional[str],
+    show_all: bool,
+) -> int:
+    """Report missing or stale financial facts needed by metrics for a region."""
+
+    db_path = _resolve_database_path(database)
+    region_label = region.upper()
+    symbols = _symbols_for_region_or_raise(db_path, region_label)
+    if not symbols:
+        raise SystemExit(f"No symbols found for region {region_label}.")
+
+    metric_classes = _select_metric_classes(metric_ids)
+    fact_repo = FinancialFactsRepository(db_path)
+    coverage = compute_fact_coverage(
+        fact_repo,
+        symbols,
+        metric_classes,
+        max_age_days=max_age_days,
+    )
+
+    print(f"Fact coverage for region {region_label} ({len(symbols)} symbols, max_age_days={max_age_days})")
+    for entry in coverage:
+        missing_total = sum(c.missing for c in entry.concepts)
+        stale_total = sum(c.stale for c in entry.concepts)
+        print(
+            f"- {entry.metric_id}: fully_fresh={entry.fully_covered}/{entry.total_symbols}, "
+            f"missing={missing_total}, stale={stale_total}"
+        )
+        for concept in entry.concepts:
+            if not show_all and concept.missing == 0 and concept.stale == 0:
+                continue
+            fresh = max(entry.total_symbols - concept.missing - concept.stale, 0)
+            print(f"    {concept.concept}: fresh={fresh}, stale={concept.stale}, missing={concept.missing}")
+    if output_csv:
+        _write_fact_report_csv(coverage, output_csv)
+        print(f"Wrote concept-level coverage to {output_csv}")
+    return 0
+
+
 def cmd_recalc_market_cap(database: str) -> int:
     """Recompute market cap values for stored market data."""
 
@@ -1341,6 +1469,31 @@ def _write_screen_csv(
             writer.writerow(row)
 
 
+def _write_fact_report_csv(report: Sequence[MetricCoverage], path: str) -> None:
+    with open(path, "w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["metric_id", "concept", "missing", "stale", "fresh", "fully_covered", "total_symbols"])
+        for entry in report:
+            if not entry.concepts:
+                writer.writerow(
+                    [entry.metric_id, "", 0, 0, entry.total_symbols, entry.fully_covered, entry.total_symbols]
+                )
+                continue
+            for concept in entry.concepts:
+                fresh = max(entry.total_symbols - concept.missing - concept.stale, 0)
+                writer.writerow(
+                    [
+                        entry.metric_id,
+                        concept.concept,
+                        concept.missing,
+                        concept.stale,
+                        fresh,
+                        entry.fully_covered,
+                        entry.total_symbols,
+                    ]
+                )
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Entrypoint used by console_scripts."""
 
@@ -1427,6 +1580,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             database=args.database,
             region=args.region,
             metric_ids=args.metrics,
+        )
+    if args.command == "report-fact-freshness":
+        return cmd_report_fact_freshness(
+            database=args.database,
+            region=args.region,
+            metric_ids=args.metrics,
+            max_age_days=args.max_age_days,
+            output_csv=args.output_csv,
+            show_all=args.show_all,
         )
     if args.command == "recalc-market-cap":
         return cmd_recalc_market_cap(database=args.database)

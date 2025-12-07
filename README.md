@@ -187,6 +187,16 @@ pyvalue compute-metrics-bulk
 The bulk command iterates over the stored universe (default US), evaluates each metric,
 prints progress, and can be cancelled with Ctrl+C.
 
+### Fact coverage report
+
+List missing or stale (older than ~6 months by default) financial facts required by the metrics for a region:
+
+```bash
+pyvalue report-fact-freshness --region US --metrics working_capital eps_ttm
+```
+
+Add `--output-csv fact_report.csv` for concept-level details that can be inspected in a spreadsheet.
+
 Define screening criteria in YAML (see `screeners/value.yml`) and evaluate them:
 
 ```bash

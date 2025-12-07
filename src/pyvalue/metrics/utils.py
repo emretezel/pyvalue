@@ -11,7 +11,7 @@ from typing import Dict, Iterable, List, Sequence
 from pyvalue.storage import FactRecord
 
 # Default freshness windows (days)
-MAX_FACT_AGE_DAYS = 365
+MAX_FACT_AGE_DAYS = 183
 EODHD_FACT_AGE_DAYS = 365
 MAX_FY_FACT_AGE_DAYS = 366
 
