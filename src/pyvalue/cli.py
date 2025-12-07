@@ -505,6 +505,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Metric identifiers to include (default: all registered metrics)",
     )
 
+    purge_nonfilers = subparsers.add_parser(
+        "purge-us-nonfilers",
+        help="Remove US listings that have no 10-K/10-Q filings in stored SEC company facts.",
+    )
+    purge_nonfilers.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
+    )
+    purge_nonfilers.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply deletions instead of just printing the symbols to be removed.",
+    )
+
     run_screen = subparsers.add_parser(
         "run-screen",
         help="Evaluate screening criteria for a ticker.",
@@ -1329,6 +1344,66 @@ def cmd_report_metric_coverage(
     return 0
 
 
+def _eligible_sec_filers(db_path: Path) -> List[str]:
+    """Return symbols that have at least one 10-K/10-Q filing in company_facts."""
+
+    repo = CompanyFactsRepository(db_path)
+    repo.initialize_schema()
+    allowed = {"10-K", "10-K/A", "10-Q", "10-Q/A"}
+    eligible: set[str] = set()
+    with repo._connect() as conn:
+        rows = conn.execute("SELECT symbol, data FROM company_facts").fetchall()
+    for symbol, payload_json in rows:
+        try:
+            data = json.loads(payload_json)
+        except Exception:
+            continue
+        facts = data.get("facts", {}).get("us-gaap", {}) or {}
+        for detail in facts.values():
+            units = detail.get("units", {}) if isinstance(detail, dict) else {}
+            for entries in units.values():
+                if not isinstance(entries, list):
+                    continue
+                for item in entries:
+                    form = item.get("form")
+                    if form in allowed:
+                        eligible.add(symbol.upper())
+                        break
+                if symbol.upper() in eligible:
+                    break
+            if symbol.upper() in eligible:
+                break
+    return sorted(eligible)
+
+
+def cmd_purge_us_nonfilers(database: str, apply: bool) -> int:
+    """Remove US listings with no 10-K/10-Q filings stored in SEC facts."""
+
+    db_path = _resolve_database_path(database)
+    universe_repo = UniverseRepository(db_path)
+    universe_repo.initialize_schema()
+    with universe_repo._connect() as conn:
+        us_symbols = [row[0] for row in conn.execute("SELECT symbol FROM listings WHERE region = 'US'")]
+
+    eligible = set(_eligible_sec_filers(db_path))
+    to_remove = sorted([sym for sym in us_symbols if sym.upper() not in eligible])
+    if not to_remove:
+        print("No US non-filers found to purge.")
+        return 0
+
+    print(f"Found {len(to_remove)} US listings without 10-K/10-Q filings.")
+    for sym in to_remove:
+        print(f"- {sym}")
+    if not apply:
+        print("Dry run only. Re-run with --apply to delete from listings.")
+        return 0
+
+    with universe_repo._connect() as conn:
+        conn.executemany("DELETE FROM listings WHERE symbol = ? AND region = 'US'", [(sym,) for sym in to_remove])
+    print(f"Deleted {len(to_remove)} US listings from listings table.")
+    return 0
+
+
 def cmd_recalc_market_cap(database: str) -> int:
     """Recompute market cap values for stored market data."""
 
@@ -1677,6 +1752,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             region=args.region,
             output_csv=args.output_csv,
         )
+    if args.command == "purge-us-nonfilers":
+        return cmd_purge_us_nonfilers(database=args.database, apply=args.apply)
 
     parser.error(f"Unknown command: {args.command}")
     return 2
