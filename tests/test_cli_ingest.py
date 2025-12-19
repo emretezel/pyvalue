@@ -601,6 +601,26 @@ criteria:
     assert csv_contents[0] == "Criterion,AAA.US"
     assert csv_contents[1].startswith("Entity,AAA Inc")
 
+
+def test_cmd_report_metric_failures_uses_highest_market_cap_example(tmp_path, capsys):
+    db_path = tmp_path / "failures.db"
+    market_repo = MarketDataRepository(db_path)
+    market_repo.initialize_schema()
+    market_repo.upsert_price("AAA.US", "2024-01-01", price=10.0, market_cap=100.0)
+    market_repo.upsert_price("BBB.US", "2024-01-01", price=10.0, market_cap=200.0)
+
+    rc = cli.cmd_report_metric_failures(
+        database=str(db_path),
+        region="US",
+        metric_ids=["working_capital"],
+        symbols=["AAA.US", "BBB.US"],
+        output_csv=None,
+    )
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "working_capital" in output
+    assert "example=BBB.US" in output
+
 def test_cmd_compute_metrics(tmp_path):
     db_path = tmp_path / "facts.db"
     fact_repo = FinancialFactsRepository(db_path)

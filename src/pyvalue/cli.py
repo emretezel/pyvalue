@@ -1430,19 +1430,33 @@ def _format_failure_reason(records: Sequence[logging.LogRecord], symbol: str) ->
 
 def _write_metric_failure_report_csv(
     failures: Dict[str, Counter],
+    examples: Dict[str, Dict[str, tuple[str, Optional[float]]]],
     total_symbols: int,
     path: str,
 ) -> None:
     with open(path, "w", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["metric_id", "reason", "count", "total_symbols", "failure_rate"])
+        writer.writerow(
+            [
+                "metric_id",
+                "reason",
+                "count",
+                "total_symbols",
+                "failure_rate",
+                "example_symbol",
+                "example_market_cap",
+            ]
+        )
         for metric_id, counter in failures.items():
             if not counter:
-                writer.writerow([metric_id, "", 0, total_symbols, 0.0])
+                writer.writerow([metric_id, "", 0, total_symbols, 0.0, "", ""])
                 continue
             for reason, count in counter.most_common():
                 rate = (count / total_symbols) if total_symbols else 0.0
-                writer.writerow([metric_id, reason, count, total_symbols, rate])
+                example = examples.get(metric_id, {}).get(reason)
+                example_symbol = example[0] if example else ""
+                example_cap = example[1] if example else None
+                writer.writerow([metric_id, reason, count, total_symbols, rate, example_symbol, example_cap or ""])
 
 
 def cmd_report_metric_failures(
@@ -1479,6 +1493,10 @@ def cmd_report_metric_failures(
 
     failures: Dict[str, Counter] = {getattr(cls, "id", cls.__name__): Counter() for cls in metric_classes}
     totals: Dict[str, int] = {getattr(cls, "id", cls.__name__): 0 for cls in metric_classes}
+    examples: Dict[str, Dict[str, tuple[str, Optional[float]]]] = {
+        getattr(cls, "id", cls.__name__): {} for cls in metric_classes
+    }
+    market_caps: Dict[str, Optional[float]] = {}
     handler = _MetricWarningCollector()
     root_logger = logging.getLogger()
     root_logger.addHandler(handler)
@@ -1504,6 +1522,18 @@ def cmd_report_metric_failures(
                     reason = _format_failure_reason(handler.records, symbol_upper)
                     failures[metric_id][reason] += 1
                     totals[metric_id] += 1
+                    cap = market_caps.get(symbol_upper)
+                    if symbol_upper not in market_caps:
+                        snapshot = market_repo.latest_snapshot(symbol_upper)
+                        cap = snapshot.market_cap if snapshot else None
+                        market_caps[symbol_upper] = cap
+                    current = examples[metric_id].get(reason)
+                    if current is None:
+                        examples[metric_id][reason] = (symbol_upper, cap)
+                    else:
+                        current_cap = current[1]
+                        if cap is not None and (current_cap is None or cap > current_cap):
+                            examples[metric_id][reason] = (symbol_upper, cap)
     finally:
         root_logger.removeHandler(handler)
 
@@ -1516,10 +1546,16 @@ def cmd_report_metric_failures(
         if not counter:
             continue
         for reason, count in counter.most_common():
-            print(f"    {reason}: {count}")
+            example = examples.get(metric_id, {}).get(reason)
+            if example:
+                example_symbol, example_cap = example
+                cap_display = _format_value(example_cap) if example_cap is not None else "N/A"
+                print(f"    {reason}: {count} (example={example_symbol}, market_cap={cap_display})")
+            else:
+                print(f"    {reason}: {count}")
 
     if output_csv:
-        _write_metric_failure_report_csv(failures, total_symbols, output_csv)
+        _write_metric_failure_report_csv(failures, examples, total_symbols, output_csv)
         print(f"Wrote metric failure reasons to {output_csv}")
     return 0
 
