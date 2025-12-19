@@ -232,7 +232,7 @@ is derived from normalized SEC or market data plus the value-investing intuition
 | Metric | How it is calculated | Why value investors care |
 | --- | --- | --- |
 | `working_capital` | Latest `AssetsCurrent - LiabilitiesCurrent`. | Healthy working capital protects downside by ensuring near-term obligations are covered without diluting shareholders. |
-| `long_term_debt` | Latest `LongTermDebtNoncurrent`, falling back to `LongTermDebt`. | Excessive leverage magnifies downside, so keeping long-term debt manageable relative to liquidity (e.g., working capital) preserves margin of safety. |
+| `long_term_debt` | US SEC: `LongTermDebtNoncurrent + LongTermDebtCurrent`; else sum noncurrent components + current, falling back to notes payable or debt+lease rollups. | Excessive leverage magnifies downside, so keeping long-term debt manageable relative to liquidity (e.g., working capital) preserves margin of safety. |
 | `current_ratio` | Latest `AssetsCurrent / LiabilitiesCurrent`. | A current ratio above ~1 indicates the business can stomach short-term shocks without forced asset sales or equity issuance. |
 | `earnings_yield` | Trailing 12-month EPS (sum of latest four quarterly EPS values) divided by the latest price. | The inverse of P/E highlights how much earnings power you receive per dollar invested; higher yields can indicate cheaper valuations. |
 | `eps_streak` | Number of consecutive fiscal years with positive EPS. | Consistent profitability signals durable business quality and lowers the odds that current earnings are a cyclical mirage. |

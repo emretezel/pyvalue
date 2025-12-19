@@ -66,6 +66,29 @@ LIABILITIES_CURRENT_COMPONENTS: Tuple[str, ...] = (
     "OtherCurrentNonfinancialLiabilities",
 )
 
+LONG_TERM_DEBT_NONCURRENT_COMPONENTS: Tuple[str, ...] = (
+    "LongTermLineOfCredit",
+    "CommercialPaperNoncurrent",
+    "ConstructionLoanNoncurrent",
+    "SecuredLongTermDebt",
+    "UnsecuredLongTermDebt",
+    "SubordinatedLongTermDebt",
+    "ConvertibleDebtNoncurrent",
+    "ConvertibleSubordinatedDebtNoncurrent",
+    "LongTermNotesAndLoans",
+    "LongtermFederalHomeLoanBankAdvancesNoncurrent",
+    "OtherLongTermDebtNoncurrent",
+)
+
+LONG_TERM_DEBT_NOTES_FALLBACK: Tuple[str, ...] = (
+    "LongTermNotesPayable",
+    "NotesPayable",
+)
+
+LONG_TERM_DEBT_LEASE_COMPONENTS: Tuple[str, ...] = (
+    "LongTermDebtAndCapitalLeaseObligations",
+    "LongTermDebtAndCapitalLeaseObligationsNoncurrent",
+)
 
 def is_recent_fact(
     record: FactRecord | None,
@@ -229,6 +252,28 @@ def resolve_liabilities_current(
     return None
 
 
+def resolve_long_term_debt(
+    repo,
+    symbol: str,
+    *,
+    end_date: Optional[str] = None,
+    fiscal_period: Optional[str] = None,
+    max_age_days: int = MAX_FACT_AGE_DAYS,
+) -> Optional[FactRecord]:
+    """Return a fresh long-term debt fact or derived fallback sum for US SEC data."""
+
+    symbol_upper = symbol.upper()
+    if symbol_upper.endswith(".US"):
+        return _resolve_us_long_term_debt(
+            repo,
+            symbol_upper,
+            end_date=end_date,
+            fiscal_period=fiscal_period,
+            max_age_days=max_age_days,
+        )
+    return _resolve_basic_long_term_debt(repo, symbol_upper, max_age_days=max_age_days)
+
+
 def _derive_assets_current(
     repo,
     symbol: str,
@@ -257,6 +302,7 @@ def _derive_current_sum(
     end_date: Optional[str],
     fiscal_period: Optional[str],
     max_age_days: int,
+    providers: Optional[Sequence[str]] = None,
 ) -> Optional[FactRecord]:
     fetcher = repo.facts_for_concept if hasattr(repo, "facts_for_concept") else None
     if fetcher is None:
@@ -264,7 +310,7 @@ def _derive_current_sum(
 
     grouped: Dict[str, List[FactRecord]] = {}
     for component in components:
-        records = fetcher(symbol, component)
+        records = fetcher(symbol, component, providers=providers)
         selected = _select_fresh_record(records, end_date=end_date, max_age_days=max_age_days)
         if selected is None:
             continue
@@ -302,6 +348,188 @@ def _derive_current_sum(
     )
 
 
+def _resolve_basic_long_term_debt(
+    repo,
+    symbol: str,
+    *,
+    max_age_days: int,
+) -> Optional[FactRecord]:
+    if not hasattr(repo, "latest_fact"):
+        return None
+    for concept in ("LongTermDebtNoncurrent", "LongTermDebt"):
+        record = repo.latest_fact(symbol, concept)
+        if record and is_recent_fact(record, max_age_days=max_age_days):
+            return record
+    return None
+
+
+def _resolve_us_long_term_debt(
+    repo,
+    symbol: str,
+    *,
+    end_date: Optional[str],
+    fiscal_period: Optional[str],
+    max_age_days: int,
+) -> Optional[FactRecord]:
+    providers = ("SEC",)
+    base = _select_fresh_concept(
+        repo,
+        symbol,
+        "LongTermDebtNoncurrent",
+        end_date=end_date,
+        max_age_days=max_age_days,
+        providers=providers,
+    )
+    if base:
+        return _with_current_maturities(
+            repo,
+            symbol,
+            base,
+            current_concept="LongTermDebtCurrent",
+            max_age_days=max_age_days,
+            providers=providers,
+        )
+
+    base = _derive_current_sum(
+        repo,
+        symbol,
+        components=LONG_TERM_DEBT_NONCURRENT_COMPONENTS,
+        concept="LongTermDebtNoncurrent",
+        end_date=end_date,
+        fiscal_period=fiscal_period,
+        max_age_days=max_age_days,
+        providers=providers,
+    )
+    if base:
+        return _with_current_maturities(
+            repo,
+            symbol,
+            base,
+            current_concept="LongTermDebtCurrent",
+            max_age_days=max_age_days,
+            providers=providers,
+        )
+
+    notes = _select_first_available(
+        repo,
+        symbol,
+        LONG_TERM_DEBT_NOTES_FALLBACK,
+        end_date=end_date,
+        max_age_days=max_age_days,
+        providers=providers,
+    )
+    if notes:
+        return _build_long_term_debt_record(notes, notes.value)
+
+    leases = _select_first_available(
+        repo,
+        symbol,
+        LONG_TERM_DEBT_LEASE_COMPONENTS,
+        end_date=end_date,
+        max_age_days=max_age_days,
+        providers=providers,
+    )
+    if leases:
+        return _with_current_maturities(
+            repo,
+            symbol,
+            leases,
+            current_concept="LongTermDebtAndCapitalLeaseObligationsCurrent",
+            max_age_days=max_age_days,
+            providers=providers,
+        )
+    return None
+
+
+def _select_fresh_concept(
+    repo,
+    symbol: str,
+    concept: str,
+    *,
+    end_date: Optional[str],
+    max_age_days: int,
+    providers: Optional[Sequence[str]] = None,
+) -> Optional[FactRecord]:
+    if hasattr(repo, "facts_for_concept"):
+        records = repo.facts_for_concept(symbol, concept, providers=providers)
+        return _select_fresh_record(records, end_date=end_date, max_age_days=max_age_days)
+    if hasattr(repo, "latest_fact"):
+        record = repo.latest_fact(symbol, concept, providers=providers)
+        if record is None:
+            return None
+        if end_date is not None and record.end_date != end_date:
+            return None
+        if not is_recent_fact(record, max_age_days=max_age_days):
+            return None
+        return record
+    return None
+
+
+def _select_first_available(
+    repo,
+    symbol: str,
+    concepts: Sequence[str],
+    *,
+    end_date: Optional[str],
+    max_age_days: int,
+    providers: Optional[Sequence[str]] = None,
+) -> Optional[FactRecord]:
+    for concept in concepts:
+        record = _select_fresh_concept(
+            repo,
+            symbol,
+            concept,
+            end_date=end_date,
+            max_age_days=max_age_days,
+            providers=providers,
+        )
+        if record:
+            return record
+    return None
+
+
+def _with_current_maturities(
+    repo,
+    symbol: str,
+    base: FactRecord,
+    *,
+    current_concept: str,
+    max_age_days: int,
+    providers: Optional[Sequence[str]] = None,
+) -> FactRecord:
+    total = base.value
+    current = _select_fresh_concept(
+        repo,
+        symbol,
+        current_concept,
+        end_date=base.end_date,
+        max_age_days=max_age_days,
+        providers=providers,
+    )
+    if current:
+        total += current.value
+    return _build_long_term_debt_record(base, total)
+
+
+def _build_long_term_debt_record(base: FactRecord, value: float) -> FactRecord:
+    return FactRecord(
+        symbol=base.symbol.upper(),
+        provider="DERIVED",
+        cik=base.cik,
+        concept="LongTermDebt",
+        fiscal_period=base.fiscal_period,
+        end_date=base.end_date,
+        unit=base.unit,
+        value=value,
+        accn=None,
+        filed=base.filed,
+        frame=base.frame,
+        start_date=None,
+        accounting_standard=base.accounting_standard,
+        currency=base.currency,
+    )
+
+
 def _select_fresh_record(records: Iterable[FactRecord], *, end_date: Optional[str], max_age_days: int) -> Optional[FactRecord]:
     for record in records:
         if record.value is None:
@@ -324,6 +552,10 @@ __all__ = [
     "has_recent_fact",
     "ASSETS_CURRENT_COMPONENTS",
     "LIABILITIES_CURRENT_COMPONENTS",
+    "LONG_TERM_DEBT_NONCURRENT_COMPONENTS",
+    "LONG_TERM_DEBT_NOTES_FALLBACK",
+    "LONG_TERM_DEBT_LEASE_COMPONENTS",
     "resolve_assets_current",
     "resolve_liabilities_current",
+    "resolve_long_term_debt",
 ]
