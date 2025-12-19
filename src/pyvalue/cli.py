@@ -529,6 +529,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Metric identifiers to include (default: all registered metrics)",
     )
     failure_report.add_argument(
+        "--symbols",
+        nargs="+",
+        default=None,
+        help="Optional list of symbols (space or comma separated) to evaluate instead of the full region universe",
+    )
+    failure_report.add_argument(
         "--output-csv",
         default=None,
         help="Optional CSV path for metric failure reasons.",
@@ -1443,15 +1449,26 @@ def cmd_report_metric_failures(
     database: str,
     region: str,
     metric_ids: Optional[Sequence[str]],
+    symbols: Optional[Sequence[str]],
     output_csv: Optional[str],
 ) -> int:
     """Summarize warning reasons for metric computation failures."""
 
     db_path = _resolve_database_path(database)
     region_label = region.upper()
-    symbols = _symbols_for_region_or_raise(db_path, region_label)
-    if not symbols:
-        raise SystemExit(f"No symbols found for region {region_label}.")
+    if symbols:
+        selected: List[str] = []
+        for entry in symbols:
+            for symbol in entry.split(","):
+                symbol = symbol.strip()
+                if not symbol:
+                    continue
+                selected.append(_qualify_symbol(symbol, region=region_label))
+        symbols = list(dict.fromkeys(selected))
+    else:
+        symbols = _symbols_for_region_or_raise(db_path, region_label)
+        if not symbols:
+            raise SystemExit(f"No symbols found for region {region_label}.")
 
     metric_classes = _select_metric_classes(metric_ids)
     base_fact_repo = FinancialFactsRepository(db_path)
@@ -1917,6 +1934,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             database=args.database,
             region=args.region,
             metric_ids=args.metrics,
+            symbols=args.symbols,
             output_csv=args.output_csv,
         )
     if args.command == "recalc-market-cap":

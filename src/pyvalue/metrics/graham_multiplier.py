@@ -87,6 +87,7 @@ class GrahamMultiplierMetric:
 
         tbvps = (equity - goodwill - intangibles) / shares
         if tbvps <= 0:
+            LOGGER.warning("graham_multiplier: non-positive TBVPS for %s", symbol)
             return None
 
         multiplier = (price / ttm_eps) * (price / tbvps)

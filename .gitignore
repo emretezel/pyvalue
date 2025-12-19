@@ -79,6 +79,7 @@ private/
 .env.*
 secret*/
 data/logs/
+data/screen_results.csv
 
 # Log files
 *.log
