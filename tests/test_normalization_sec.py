@@ -2,10 +2,17 @@
 
 Author: Emre Tezel
 """
+from datetime import date, timedelta
+
 from pyvalue.normalization import SECFactsNormalizer
 
 
+def _recent_date(days: int = 10) -> str:
+    return (date.today() - timedelta(days=days)).isoformat()
+
+
 def test_normalizer_emits_records_for_target_concepts():
+    recent = _recent_date()
     payload = {
         "facts": {
                 "us-gaap": {
@@ -16,17 +23,17 @@ def test_normalizer_emits_records_for_target_concepts():
                                     "val": "123.45",
                                     "fy": 2023,
                                     "fp": "FY",
-                                    "end": "2023-09-30",
+                                    "end": recent,
                                     "accn": "000",
-                                    "filed": "2023-10-30",
-                                    "frame": "CY2023",
+                                    "filed": recent,
+                                    "frame": f"CY{recent[:4]}",
                                     "form": "10-K",
                                 }
                             ]
                         }
                     },
                 "Unused": {
-                    "units": {"USD": [{"val": 1, "end": "2023-09-30"}]}
+                    "units": {"USD": [{"val": 1, "end": recent}]}
                 },
             }
         }
@@ -40,9 +47,9 @@ def test_normalizer_emits_records_for_target_concepts():
     net_income = next(rec for rec in records if rec.concept == "NetIncomeLoss")
     derived = next(rec for rec in records if rec.concept == "NetIncomeLossAvailableToCommonStockholdersBasic")
     assert net_income.value == 123.45
-    assert net_income.end_date == "2023-09-30"
+    assert net_income.end_date == recent
     assert derived.value == 123.45
-    assert derived.end_date == "2023-09-30"
+    assert derived.end_date == recent
 
 
 def test_normalizer_handles_quarters_that_cross_calendar_years():
@@ -216,6 +223,7 @@ def test_normalizer_includes_entity_common_shares():
 
 
 def test_normalizer_derives_long_term_debt_from_noncurrent_and_current():
+    recent = (date.today() - timedelta(days=10)).isoformat()
     payload = {
         "facts": {
             "us-gaap": {
@@ -225,9 +233,9 @@ def test_normalizer_derives_long_term_debt_from_noncurrent_and_current():
                             {
                                 "val": 100,
                                 "fp": "Q1",
-                                "end": "2024-03-31",
+                                "end": recent,
                                 "form": "10-Q",
-                                "filed": "2024-05-01",
+                                "filed": recent,
                             }
                         ]
                     }
@@ -238,9 +246,9 @@ def test_normalizer_derives_long_term_debt_from_noncurrent_and_current():
                             {
                                 "val": 20,
                                 "fp": "Q1",
-                                "end": "2024-03-31",
+                                "end": recent,
                                 "form": "10-Q",
-                                "filed": "2024-05-01",
+                                "filed": recent,
                             }
                         ]
                     }
@@ -255,13 +263,14 @@ def test_normalizer_derives_long_term_debt_from_noncurrent_and_current():
     derived = [
         rec
         for rec in records
-        if rec.concept == "LongTermDebt" and rec.end_date == "2024-03-31" and rec.fiscal_period == "Q1"
+        if rec.concept == "LongTermDebt" and rec.end_date == recent and rec.fiscal_period == "Q1"
     ]
     assert len(derived) == 1
     assert derived[0].value == 120
 
 
 def test_normalizer_derives_earnings_per_share_from_diluted():
+    recent = _recent_date()
     payload = {
         "facts": {
             "us-gaap": {
@@ -271,9 +280,9 @@ def test_normalizer_derives_earnings_per_share_from_diluted():
                             {
                                 "val": 2.0,
                                 "fp": "Q1",
-                                "end": "2024-03-31",
+                                "end": recent,
                                 "form": "10-Q",
-                                "filed": "2024-05-01",
+                                "filed": recent,
                             }
                         ]
                     }
@@ -284,9 +293,9 @@ def test_normalizer_derives_earnings_per_share_from_diluted():
                             {
                                 "val": 1.5,
                                 "fp": "Q1",
-                                "end": "2024-03-31",
+                                "end": recent,
                                 "form": "10-Q",
-                                "filed": "2024-05-01",
+                                "filed": recent,
                             }
                         ]
                     }
@@ -301,13 +310,48 @@ def test_normalizer_derives_earnings_per_share_from_diluted():
     derived = [
         rec
         for rec in records
-        if rec.concept == "EarningsPerShare" and rec.end_date == "2024-03-31" and rec.fiscal_period == "Q1"
+        if rec.concept == "EarningsPerShare" and rec.end_date == recent and rec.fiscal_period == "Q1"
     ]
     assert len(derived) == 1
     assert derived[0].value == 2.0
 
 
+def test_normalizer_derives_earnings_per_share_from_stale_fallback():
+    stale = (date.today() - timedelta(days=400)).isoformat()
+    payload = {
+        "facts": {
+            "us-gaap": {
+                "EarningsPerShareDiluted": {
+                    "units": {
+                        "USD": [
+                            {
+                                "val": 3.2,
+                                "fp": "FY",
+                                "end": stale,
+                                "form": "10-K",
+                                "filed": stale,
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    normalizer = SECFactsNormalizer(concepts=["EarningsPerShareDiluted"])
+
+    records = normalizer.normalize(payload, symbol="TEST", cik="CIK0000")
+
+    derived = [
+        rec
+        for rec in records
+        if rec.concept == "EarningsPerShare" and rec.end_date == stale and rec.fiscal_period == "FY"
+    ]
+    assert len(derived) == 1
+    assert derived[0].value == 3.2
+
+
 def test_normalizer_derives_intangibles_excluding_goodwill_from_net():
+    recent = _recent_date()
     payload = {
         "facts": {
             "us-gaap": {
@@ -317,9 +361,9 @@ def test_normalizer_derives_intangibles_excluding_goodwill_from_net():
                             {
                                 "val": 45.0,
                                 "fp": "FY",
-                                "end": "2023-12-31",
+                                "end": recent,
                                 "form": "10-K",
-                                "filed": "2024-02-01",
+                                "filed": recent,
                             }
                         ]
                     }
@@ -335,7 +379,7 @@ def test_normalizer_derives_intangibles_excluding_goodwill_from_net():
         rec
         for rec in records
         if rec.concept == "IntangibleAssetsNetExcludingGoodwill"
-        and rec.end_date == "2023-12-31"
+        and rec.end_date == recent
         and rec.fiscal_period == "FY"
     ]
     assert len(derived) == 1
@@ -343,6 +387,7 @@ def test_normalizer_derives_intangibles_excluding_goodwill_from_net():
 
 
 def test_normalizer_derives_stockholders_equity_from_equity_including_noncontrolling():
+    recent = _recent_date()
     payload = {
         "facts": {
             "us-gaap": {
@@ -352,9 +397,9 @@ def test_normalizer_derives_stockholders_equity_from_equity_including_noncontrol
                             {
                                 "val": 500.0,
                                 "fp": "FY",
-                                "end": "2023-12-31",
+                                "end": recent,
                                 "form": "10-K",
-                                "filed": "2024-02-01",
+                                "filed": recent,
                             }
                         ]
                     }
@@ -370,7 +415,7 @@ def test_normalizer_derives_stockholders_equity_from_equity_including_noncontrol
         rec
         for rec in records
         if rec.concept == "StockholdersEquity"
-        and rec.end_date == "2023-12-31"
+        and rec.end_date == recent
         and rec.fiscal_period == "FY"
     ]
     assert len(derived) == 1
@@ -378,6 +423,7 @@ def test_normalizer_derives_stockholders_equity_from_equity_including_noncontrol
 
 
 def test_normalizer_derives_common_shares_from_entity_shares():
+    recent = _recent_date()
     payload = {
         "facts": {
             "dei": {
@@ -387,9 +433,9 @@ def test_normalizer_derives_common_shares_from_entity_shares():
                             {
                                 "val": 1200,
                                 "fp": "FY",
-                                "end": "2023-12-31",
+                                "end": recent,
                                 "form": "10-K",
-                                "filed": "2024-02-01",
+                                "filed": recent,
                             }
                         ]
                     }
@@ -405,7 +451,7 @@ def test_normalizer_derives_common_shares_from_entity_shares():
         rec
         for rec in records
         if rec.concept == "CommonStockSharesOutstanding"
-        and rec.end_date == "2023-12-31"
+        and rec.end_date == recent
         and rec.fiscal_period == "FY"
     ]
     assert len(derived) == 1
@@ -413,6 +459,7 @@ def test_normalizer_derives_common_shares_from_entity_shares():
 
 
 def test_normalizer_derives_operating_cash_flow_from_continuing_operations():
+    recent = _recent_date()
     payload = {
         "facts": {
             "us-gaap": {
@@ -422,9 +469,9 @@ def test_normalizer_derives_operating_cash_flow_from_continuing_operations():
                             {
                                 "val": 250.0,
                                 "fp": "Q1",
-                                "end": "2024-03-31",
+                                "end": recent,
                                 "form": "10-Q",
-                                "filed": "2024-05-01",
+                                "filed": recent,
                             }
                         ]
                     }
@@ -440,7 +487,7 @@ def test_normalizer_derives_operating_cash_flow_from_continuing_operations():
         rec
         for rec in records
         if rec.concept == "NetCashProvidedByUsedInOperatingActivities"
-        and rec.end_date == "2024-03-31"
+        and rec.end_date == recent
         and rec.fiscal_period == "Q1"
     ]
     assert len(derived) == 1
@@ -448,6 +495,7 @@ def test_normalizer_derives_operating_cash_flow_from_continuing_operations():
 
 
 def test_normalizer_derives_capex_from_payments_to_acquire_ppe():
+    recent = _recent_date()
     payload = {
         "facts": {
             "us-gaap": {
@@ -457,9 +505,9 @@ def test_normalizer_derives_capex_from_payments_to_acquire_ppe():
                             {
                                 "val": -60.0,
                                 "fp": "Q1",
-                                "end": "2024-03-31",
+                                "end": recent,
                                 "form": "10-Q",
-                                "filed": "2024-05-01",
+                                "filed": recent,
                             }
                         ]
                     }
@@ -475,7 +523,7 @@ def test_normalizer_derives_capex_from_payments_to_acquire_ppe():
         rec
         for rec in records
         if rec.concept == "CapitalExpenditures"
-        and rec.end_date == "2024-03-31"
+        and rec.end_date == recent
         and rec.fiscal_period == "Q1"
     ]
     assert len(derived) == 1
@@ -483,6 +531,7 @@ def test_normalizer_derives_capex_from_payments_to_acquire_ppe():
 
 
 def test_normalizer_derives_operating_income_from_income_from_operations():
+    recent = _recent_date()
     payload = {
         "facts": {
             "us-gaap": {
@@ -492,9 +541,9 @@ def test_normalizer_derives_operating_income_from_income_from_operations():
                             {
                                 "val": 180.0,
                                 "fp": "FY",
-                                "end": "2023-12-31",
+                                "end": recent,
                                 "form": "10-K",
-                                "filed": "2024-02-01",
+                                "filed": recent,
                             }
                         ]
                     }
@@ -510,7 +559,7 @@ def test_normalizer_derives_operating_income_from_income_from_operations():
         rec
         for rec in records
         if rec.concept == "OperatingIncomeLoss"
-        and rec.end_date == "2023-12-31"
+        and rec.end_date == recent
         and rec.fiscal_period == "FY"
     ]
     assert len(derived) == 1
@@ -518,6 +567,7 @@ def test_normalizer_derives_operating_income_from_income_from_operations():
 
 
 def test_normalizer_derives_ppe_from_net_property_plant_and_equipment():
+    recent = _recent_date()
     payload = {
         "facts": {
             "us-gaap": {
@@ -527,9 +577,9 @@ def test_normalizer_derives_ppe_from_net_property_plant_and_equipment():
                             {
                                 "val": 750.0,
                                 "fp": "FY",
-                                "end": "2023-12-31",
+                                "end": recent,
                                 "form": "10-K",
-                                "filed": "2024-02-01",
+                                "filed": recent,
                             }
                         ]
                     }
@@ -545,7 +595,7 @@ def test_normalizer_derives_ppe_from_net_property_plant_and_equipment():
         rec
         for rec in records
         if rec.concept == "PropertyPlantAndEquipmentNet"
-        and rec.end_date == "2023-12-31"
+        and rec.end_date == recent
         and rec.fiscal_period == "FY"
     ]
     assert len(derived) == 1
@@ -553,6 +603,7 @@ def test_normalizer_derives_ppe_from_net_property_plant_and_equipment():
 
 
 def test_normalizer_derives_net_income_available_to_common_from_net_income():
+    recent = _recent_date()
     payload = {
         "facts": {
             "us-gaap": {
@@ -562,9 +613,9 @@ def test_normalizer_derives_net_income_available_to_common_from_net_income():
                             {
                                 "val": 300.0,
                                 "fp": "FY",
-                                "end": "2023-12-31",
+                                "end": recent,
                                 "form": "10-K",
-                                "filed": "2024-02-01",
+                                "filed": recent,
                             }
                         ]
                     }
@@ -580,7 +631,7 @@ def test_normalizer_derives_net_income_available_to_common_from_net_income():
         rec
         for rec in records
         if rec.concept == "NetIncomeLossAvailableToCommonStockholdersBasic"
-        and rec.end_date == "2023-12-31"
+        and rec.end_date == recent
         and rec.fiscal_period == "FY"
     ]
     assert len(derived) == 1
@@ -588,6 +639,7 @@ def test_normalizer_derives_net_income_available_to_common_from_net_income():
 
 
 def test_normalizer_derives_common_stockholders_equity_from_stockholders_equity():
+    recent = _recent_date()
     payload = {
         "facts": {
             "us-gaap": {
@@ -597,9 +649,9 @@ def test_normalizer_derives_common_stockholders_equity_from_stockholders_equity(
                             {
                                 "val": 900.0,
                                 "fp": "FY",
-                                "end": "2023-12-31",
+                                "end": recent,
                                 "form": "10-K",
-                                "filed": "2024-02-01",
+                                "filed": recent,
                             }
                         ]
                     }
@@ -615,7 +667,7 @@ def test_normalizer_derives_common_stockholders_equity_from_stockholders_equity(
         rec
         for rec in records
         if rec.concept == "CommonStockholdersEquity"
-        and rec.end_date == "2023-12-31"
+        and rec.end_date == recent
         and rec.fiscal_period == "FY"
     ]
     assert len(derived) == 1
@@ -623,6 +675,7 @@ def test_normalizer_derives_common_stockholders_equity_from_stockholders_equity(
 
 
 def test_normalizer_derives_intangibles_excluding_goodwill_from_components():
+    recent = _recent_date()
     payload = {
         "facts": {
             "us-gaap": {
@@ -632,9 +685,9 @@ def test_normalizer_derives_intangibles_excluding_goodwill_from_components():
                             {
                                 "val": 30.0,
                                 "fp": "FY",
-                                "end": "2023-12-31",
+                                "end": recent,
                                 "form": "10-K",
-                                "filed": "2024-02-01",
+                                "filed": recent,
                             }
                         ]
                     }
@@ -645,9 +698,9 @@ def test_normalizer_derives_intangibles_excluding_goodwill_from_components():
                             {
                                 "val": 15.0,
                                 "fp": "FY",
-                                "end": "2023-12-31",
+                                "end": recent,
                                 "form": "10-K",
-                                "filed": "2024-02-01",
+                                "filed": recent,
                             }
                         ]
                     }
@@ -668,7 +721,7 @@ def test_normalizer_derives_intangibles_excluding_goodwill_from_components():
         rec
         for rec in records
         if rec.concept == "IntangibleAssetsNetExcludingGoodwill"
-        and rec.end_date == "2023-12-31"
+        and rec.end_date == recent
         and rec.fiscal_period == "FY"
     ]
     assert len(derived) == 1
@@ -676,6 +729,7 @@ def test_normalizer_derives_intangibles_excluding_goodwill_from_components():
 
 
 def test_normalizer_derives_net_income_available_to_common_from_diluted():
+    recent = _recent_date()
     payload = {
         "facts": {
             "us-gaap": {
@@ -685,9 +739,9 @@ def test_normalizer_derives_net_income_available_to_common_from_diluted():
                             {
                                 "val": 120.0,
                                 "fp": "FY",
-                                "end": "2023-12-31",
+                                "end": recent,
                                 "form": "10-K",
-                                "filed": "2024-02-01",
+                                "filed": recent,
                             }
                         ]
                     }
@@ -698,9 +752,9 @@ def test_normalizer_derives_net_income_available_to_common_from_diluted():
                             {
                                 "val": 15.0,
                                 "fp": "FY",
-                                "end": "2023-12-31",
+                                "end": recent,
                                 "form": "10-K",
-                                "filed": "2024-02-01",
+                                "filed": recent,
                             }
                         ]
                     }
@@ -721,7 +775,7 @@ def test_normalizer_derives_net_income_available_to_common_from_diluted():
         rec
         for rec in records
         if rec.concept == "NetIncomeLossAvailableToCommonStockholdersBasic"
-        and rec.end_date == "2023-12-31"
+        and rec.end_date == recent
         and rec.fiscal_period == "FY"
     ]
     assert len(derived) == 1
@@ -729,6 +783,7 @@ def test_normalizer_derives_net_income_available_to_common_from_diluted():
 
 
 def test_normalizer_derives_capex_from_low_priority_tag():
+    recent = _recent_date()
     payload = {
         "facts": {
             "us-gaap": {
@@ -738,9 +793,9 @@ def test_normalizer_derives_capex_from_low_priority_tag():
                             {
                                 "val": -12.0,
                                 "fp": "Q1",
-                                "end": "2024-03-31",
+                                "end": recent,
                                 "form": "10-Q",
-                                "filed": "2024-05-01",
+                                "filed": recent,
                             }
                         ]
                     }
@@ -756,7 +811,7 @@ def test_normalizer_derives_capex_from_low_priority_tag():
         rec
         for rec in records
         if rec.concept == "CapitalExpenditures"
-        and rec.end_date == "2024-03-31"
+        and rec.end_date == recent
         and rec.fiscal_period == "Q1"
     ]
     assert len(derived) == 1
@@ -764,6 +819,7 @@ def test_normalizer_derives_capex_from_low_priority_tag():
 
 
 def test_normalizer_derives_ppe_from_lease_and_ppe_rollup():
+    recent = _recent_date()
     payload = {
         "facts": {
             "us-gaap": {
@@ -773,9 +829,9 @@ def test_normalizer_derives_ppe_from_lease_and_ppe_rollup():
                             {
                                 "val": 520.0,
                                 "fp": "FY",
-                                "end": "2023-12-31",
+                                "end": recent,
                                 "form": "10-K",
-                                "filed": "2024-02-01",
+                                "filed": recent,
                             }
                         ]
                     }
@@ -795,7 +851,7 @@ def test_normalizer_derives_ppe_from_lease_and_ppe_rollup():
         rec
         for rec in records
         if rec.concept == "PropertyPlantAndEquipmentNet"
-        and rec.end_date == "2023-12-31"
+        and rec.end_date == recent
         and rec.fiscal_period == "FY"
     ]
     assert len(derived) == 1
@@ -803,6 +859,7 @@ def test_normalizer_derives_ppe_from_lease_and_ppe_rollup():
 
 
 def test_normalizer_derives_common_shares_from_shares_outstanding():
+    recent = _recent_date()
     payload = {
         "facts": {
             "dei": {
@@ -812,9 +869,9 @@ def test_normalizer_derives_common_shares_from_shares_outstanding():
                             {
                                 "val": 750,
                                 "fp": "FY",
-                                "end": "2023-12-31",
+                                "end": recent,
                                 "form": "10-K",
-                                "filed": "2024-02-01",
+                                "filed": recent,
                             }
                         ]
                     }
@@ -830,7 +887,7 @@ def test_normalizer_derives_common_shares_from_shares_outstanding():
         rec
         for rec in records
         if rec.concept == "CommonStockSharesOutstanding"
-        and rec.end_date == "2023-12-31"
+        and rec.end_date == recent
         and rec.fiscal_period == "FY"
     ]
     assert len(derived) == 1
@@ -838,6 +895,7 @@ def test_normalizer_derives_common_shares_from_shares_outstanding():
 
 
 def test_normalizer_derives_stockholders_equity_from_common_equity():
+    recent = _recent_date()
     payload = {
         "facts": {
             "us-gaap": {
@@ -847,9 +905,9 @@ def test_normalizer_derives_stockholders_equity_from_common_equity():
                             {
                                 "val": 410.0,
                                 "fp": "FY",
-                                "end": "2023-12-31",
+                                "end": recent,
                                 "form": "10-K",
-                                "filed": "2024-02-01",
+                                "filed": recent,
                             }
                         ]
                     }
@@ -865,7 +923,7 @@ def test_normalizer_derives_stockholders_equity_from_common_equity():
         rec
         for rec in records
         if rec.concept == "StockholdersEquity"
-        and rec.end_date == "2023-12-31"
+        and rec.end_date == recent
         and rec.fiscal_period == "FY"
     ]
     assert len(derived) == 1
@@ -873,6 +931,7 @@ def test_normalizer_derives_stockholders_equity_from_common_equity():
 
 
 def test_normalizer_derives_long_term_debt_from_other_long_term_debt():
+    recent = (date.today() - timedelta(days=10)).isoformat()
     payload = {
         "facts": {
             "us-gaap": {
@@ -882,9 +941,9 @@ def test_normalizer_derives_long_term_debt_from_other_long_term_debt():
                             {
                                 "val": 300.0,
                                 "fp": "FY",
-                                "end": "2023-12-31",
+                                "end": recent,
                                 "form": "10-K",
-                                "filed": "2024-02-01",
+                                "filed": recent,
                             }
                         ]
                     }
@@ -895,9 +954,9 @@ def test_normalizer_derives_long_term_debt_from_other_long_term_debt():
                             {
                                 "val": 40.0,
                                 "fp": "FY",
-                                "end": "2023-12-31",
+                                "end": recent,
                                 "form": "10-K",
-                                "filed": "2024-02-01",
+                                "filed": recent,
                             }
                         ]
                     }
@@ -913,7 +972,7 @@ def test_normalizer_derives_long_term_debt_from_other_long_term_debt():
         rec
         for rec in records
         if rec.concept == "LongTermDebt"
-        and rec.end_date == "2023-12-31"
+        and rec.end_date == recent
         and rec.fiscal_period == "FY"
     ]
     assert len(derived) == 1
@@ -921,6 +980,7 @@ def test_normalizer_derives_long_term_debt_from_other_long_term_debt():
 
 
 def test_normalizer_derives_long_term_debt_from_lease_including_current():
+    recent = (date.today() - timedelta(days=10)).isoformat()
     payload = {
         "facts": {
             "us-gaap": {
@@ -930,9 +990,9 @@ def test_normalizer_derives_long_term_debt_from_lease_including_current():
                             {
                                 "val": 510.0,
                                 "fp": "FY",
-                                "end": "2023-12-31",
+                                "end": recent,
                                 "form": "10-K",
-                                "filed": "2024-02-01",
+                                "filed": recent,
                             }
                         ]
                     }
@@ -950,8 +1010,133 @@ def test_normalizer_derives_long_term_debt_from_lease_including_current():
         rec
         for rec in records
         if rec.concept == "LongTermDebt"
-        and rec.end_date == "2023-12-31"
+        and rec.end_date == recent
         and rec.fiscal_period == "FY"
     ]
     assert len(derived) == 1
     assert derived[0].value == 510.0
+
+
+def test_normalizer_derives_long_term_debt_from_other_liabilities_noncurrent():
+    recent = (date.today() - timedelta(days=10)).isoformat()
+    payload = {
+        "facts": {
+            "us-gaap": {
+                "OtherLiabilitiesNoncurrent": {
+                    "units": {
+                        "USD": [
+                            {
+                                "val": 75.0,
+                                "fp": "Q3",
+                                "end": recent,
+                                "form": "10-Q",
+                                "filed": recent,
+                            }
+                        ]
+                    }
+                },
+                "LongTermDebtCurrent": {
+                    "units": {
+                        "USD": [
+                            {
+                                "val": 5.0,
+                                "fp": "Q3",
+                                "end": recent,
+                                "form": "10-Q",
+                                "filed": recent,
+                            }
+                        ]
+                    }
+                },
+            }
+        }
+    }
+    normalizer = SECFactsNormalizer(concepts=["OtherLiabilitiesNoncurrent", "LongTermDebtCurrent"])
+
+    records = normalizer.normalize(payload, symbol="TEST", cik="CIK0000")
+
+    derived = [
+        rec
+        for rec in records
+        if rec.concept == "LongTermDebt" and rec.end_date == recent and rec.fiscal_period == "Q3"
+    ]
+    assert len(derived) == 1
+    assert derived[0].value == 80.0
+
+
+def test_normalizer_derives_long_term_debt_from_operating_lease_liability_noncurrent():
+    recent = (date.today() - timedelta(days=10)).isoformat()
+    payload = {
+        "facts": {
+            "us-gaap": {
+                "OperatingLeaseLiabilityNoncurrent": {
+                    "units": {
+                        "USD": [
+                            {
+                                "val": 60.0,
+                                "fp": "Q2",
+                                "end": recent,
+                                "form": "10-Q",
+                                "filed": recent,
+                            }
+                        ]
+                    }
+                },
+                "LongTermDebtCurrent": {
+                    "units": {
+                        "USD": [
+                            {
+                                "val": 4.0,
+                                "fp": "Q2",
+                                "end": recent,
+                                "form": "10-Q",
+                                "filed": recent,
+                            }
+                        ]
+                    }
+                },
+            }
+        }
+    }
+    normalizer = SECFactsNormalizer(
+        concepts=["OperatingLeaseLiabilityNoncurrent", "LongTermDebtCurrent"]
+    )
+
+    records = normalizer.normalize(payload, symbol="TEST", cik="CIK0000")
+
+    derived = [
+        rec
+        for rec in records
+        if rec.concept == "LongTermDebt" and rec.end_date == recent and rec.fiscal_period == "Q2"
+    ]
+    assert len(derived) == 1
+    assert derived[0].value == 64.0
+
+
+def test_normalizer_skips_stale_long_term_debt_records():
+    stale = (date.today() - timedelta(days=400)).isoformat()
+    payload = {
+        "facts": {
+            "us-gaap": {
+                "LongTermDebtNoncurrent": {
+                    "units": {
+                        "USD": [
+                            {
+                                "val": 100.0,
+                                "fp": "FY",
+                                "end": stale,
+                                "form": "10-K",
+                                "filed": stale,
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    normalizer = SECFactsNormalizer(concepts=["LongTermDebtNoncurrent"])
+
+    records = normalizer.normalize(payload, symbol="TEST", cik="CIK0000")
+
+    derived = [rec for rec in records if rec.concept == "LongTermDebt" and rec.end_date == stale]
+    assert not derived

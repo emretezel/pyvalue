@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Dict, Iterable, List, Optional
 
+from pyvalue.metrics.utils import is_recent_fact
 from pyvalue.storage import FactRecord
 
 # Concepts needed to compute the initial set of metrics. Include the most common
@@ -36,6 +37,7 @@ TARGET_CONCEPTS = {
     "LongTermDebtAndCapitalLeaseObligationsCurrent",
     "LongTermDebtAndCapitalLeaseObligationsNoncurrent",
     "LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities",
+    "OtherLiabilitiesNoncurrent",
     "AssetsCurrent",
     "AccountsPayableCurrent",
     "AccruedLiabilitiesCurrent",
@@ -47,6 +49,7 @@ TARGET_CONCEPTS = {
     "CommercialPaper",
     "FinanceLeaseLiabilityCurrent",
     "OperatingLeaseLiabilityCurrent",
+    "OperatingLeaseLiabilityNoncurrent",
     "OtherLiabilitiesCurrent",
     "TradeAndOtherCurrentPayables",
     "CurrentTradePayables",
@@ -519,13 +522,11 @@ class SECFactsNormalizer:
 
         derived: List[FactRecord] = []
         for key in candidate_keys:
-            if key in existing:
+            if existing.get(key):
                 continue
-            component_records = [
-                indexed[component][key]
-                for component in components
-                if key in indexed.get(component, {})
-            ]
+            component_records = self._prefer_recent_records(
+                indexed.get(component, {}).get(key) for component in components
+            )
             if not component_records:
                 continue
             total = sum(record.value for record in component_records if record.value is not None)
@@ -550,65 +551,116 @@ class SECFactsNormalizer:
             *LONG_TERM_DEBT_LEASE_COMPONENTS,
             "LongTermDebtAndCapitalLeaseObligationsCurrent",
             "LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities",
+            "OtherLiabilitiesNoncurrent",
+            "OperatingLeaseLiabilityNoncurrent",
         ):
             candidate_keys.update(indexed.get(concept, {}).keys())
 
         derived: List[FactRecord] = []
         for key in candidate_keys:
-            noncurrent = indexed.get("LongTermDebtNoncurrent", {}).get(key)
+            noncurrent = self._recent_record(indexed.get("LongTermDebtNoncurrent", {}).get(key))
             if noncurrent and noncurrent.value is not None:
                 total = noncurrent.value
-                current = indexed.get("LongTermDebtCurrent", {}).get(key)
+                current = self._recent_record(indexed.get("LongTermDebtCurrent", {}).get(key))
                 if current and current.value is not None:
                     total += current.value
                 derived.append(self._build_derived_record(noncurrent, "LongTermDebt", total, symbol, cik))
                 continue
 
-            components = [
-                indexed[component][key]
-                for component in LONG_TERM_DEBT_NONCURRENT_COMPONENTS
-                if key in indexed.get(component, {})
-            ]
+            components = []
+            for component in LONG_TERM_DEBT_NONCURRENT_COMPONENTS:
+                record = self._recent_record(indexed.get(component, {}).get(key))
+                if record and record.value is not None:
+                    components.append(record)
             if components:
                 total = sum(record.value for record in components if record.value is not None)
                 base = components[0]
-                current = indexed.get("LongTermDebtCurrent", {}).get(key)
+                current = self._recent_record(indexed.get("LongTermDebtCurrent", {}).get(key))
                 if current and current.value is not None:
                     total += current.value
                 derived.append(self._build_derived_record(base, "LongTermDebt", total, symbol, cik))
                 continue
 
-            other_debt = indexed.get("OtherLongTermDebt", {}).get(key)
+            other_debt = self._recent_record(indexed.get("OtherLongTermDebt", {}).get(key))
             if other_debt and other_debt.value is not None:
                 total = other_debt.value
-                current = indexed.get("LongTermDebtCurrent", {}).get(key)
+                current = self._recent_record(indexed.get("LongTermDebtCurrent", {}).get(key))
                 if current and current.value is not None:
                     total += current.value
                 derived.append(self._build_derived_record(other_debt, "LongTermDebt", total, symbol, cik))
                 continue
 
-            notes = indexed.get("LongTermNotesPayable", {}).get(key)
+            notes = self._recent_record(indexed.get("LongTermNotesPayable", {}).get(key))
             if notes is None:
-                notes = indexed.get("NotesPayable", {}).get(key)
+                notes = self._recent_record(indexed.get("NotesPayable", {}).get(key))
             if notes and notes.value is not None:
                 derived.append(self._build_derived_record(notes, "LongTermDebt", notes.value, symbol, cik))
                 continue
 
-            lease_base = indexed.get("LongTermDebtAndCapitalLeaseObligations", {}).get(key)
+            lease_base = self._recent_record(indexed.get("LongTermDebtAndCapitalLeaseObligations", {}).get(key))
             if lease_base is None:
-                lease_base = indexed.get("LongTermDebtAndCapitalLeaseObligationsNoncurrent", {}).get(key)
+                lease_base = self._recent_record(
+                    indexed.get("LongTermDebtAndCapitalLeaseObligationsNoncurrent", {}).get(key)
+                )
             if lease_base and lease_base.value is not None:
                 total = lease_base.value
-                lease_current = indexed.get("LongTermDebtAndCapitalLeaseObligationsCurrent", {}).get(key)
+                lease_current = self._recent_record(
+                    indexed.get("LongTermDebtAndCapitalLeaseObligationsCurrent", {}).get(key)
+                )
                 if lease_current and lease_current.value is not None:
                     total += lease_current.value
                 derived.append(self._build_derived_record(lease_base, "LongTermDebt", total, symbol, cik))
                 continue
 
-            lease_total = indexed.get("LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities", {}).get(key)
+            lease_total = self._recent_record(
+                indexed.get("LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities", {}).get(key)
+            )
             if lease_total and lease_total.value is not None:
                 derived.append(self._build_derived_record(lease_total, "LongTermDebt", lease_total.value, symbol, cik))
+                continue
+
+            operating_lease = self._recent_record(indexed.get("OperatingLeaseLiabilityNoncurrent", {}).get(key))
+            if operating_lease and operating_lease.value is not None:
+                total = operating_lease.value
+                current = self._recent_record(indexed.get("LongTermDebtCurrent", {}).get(key))
+                if current and current.value is not None:
+                    total += current.value
+                derived.append(self._build_derived_record(operating_lease, "LongTermDebt", total, symbol, cik))
+                continue
+
+            other_liabilities = self._recent_record(indexed.get("OtherLiabilitiesNoncurrent", {}).get(key))
+            if other_liabilities and other_liabilities.value is not None:
+                total = other_liabilities.value
+                current = self._recent_record(indexed.get("LongTermDebtCurrent", {}).get(key))
+                if current and current.value is not None:
+                    total += current.value
+                derived.append(self._build_derived_record(other_liabilities, "LongTermDebt", total, symbol, cik))
         return derived
+
+    def _recent_record(self, record: Optional[FactRecord]) -> Optional[FactRecord]:
+        if record is None or record.value is None:
+            return None
+        if not is_recent_fact(record):
+            return None
+        return record
+
+    def _prefer_recent_records(self, records: Iterable[Optional[FactRecord]]) -> List[FactRecord]:
+        return [record for record in records if record is not None and record.value is not None]
+
+    def _pick_preferred_record(self, records: Iterable[Optional[FactRecord]]) -> Optional[FactRecord]:
+        for record in records:
+            if record is not None and record.value is not None:
+                return record
+        return None
+
+    def _pick_preferred_concept(
+        self,
+        records: Iterable[tuple[str, Optional[FactRecord]]],
+    ) -> tuple[Optional[str], Optional[FactRecord]]:
+        for concept, record in records:
+            if record is not None and record.value is not None:
+                return concept, record
+        return None, None
 
     def _derive_eps(
         self,
@@ -624,14 +676,12 @@ class SECFactsNormalizer:
 
         derived: List[FactRecord] = []
         for key in candidate_keys:
-            if key in existing:
+            if existing.get(key):
                 continue
-            base = None
-            for concept in EPS_PREFERRED_CONCEPTS:
-                base = indexed.get(concept, {}).get(key)
-                if base and base.value is not None:
-                    break
-            if base is None or base.value is None:
+            base = self._pick_preferred_record(
+                indexed.get(concept, {}).get(key) for concept in EPS_PREFERRED_CONCEPTS
+            )
+            if base is None:
                 continue
             derived.append(self._build_derived_record(base, "EarningsPerShare", base.value, symbol, cik))
         return derived
@@ -652,14 +702,11 @@ class SECFactsNormalizer:
 
         derived: List[FactRecord] = []
         for key in candidate_keys:
-            if key in existing:
+            if existing.get(key):
                 continue
-            component_records = [
-                indexed[concept][key]
-                for concept in INTANGIBLE_EXCL_GOODWILL_COMPONENTS
-                if key in indexed.get(concept, {})
-            ]
-            component_records = [record for record in component_records if record.value is not None]
+            component_records = self._prefer_recent_records(
+                indexed.get(concept, {}).get(key) for concept in INTANGIBLE_EXCL_GOODWILL_COMPONENTS
+            )
             if component_records:
                 total = sum(record.value for record in component_records if record.value is not None)
                 base = component_records[0]
@@ -670,12 +717,10 @@ class SECFactsNormalizer:
                 )
                 continue
 
-            base = None
-            for concept in INTANGIBLE_EXCL_GOODWILL_FALLBACK:
-                base = indexed.get(concept, {}).get(key)
-                if base and base.value is not None:
-                    break
-            if base is None or base.value is None:
+            base = self._pick_preferred_record(
+                indexed.get(concept, {}).get(key) for concept in INTANGIBLE_EXCL_GOODWILL_FALLBACK
+            )
+            if base is None:
                 continue
             derived.append(self._build_derived_record(base, "IntangibleAssetsNetExcludingGoodwill", base.value, symbol, cik))
         return derived
@@ -694,14 +739,12 @@ class SECFactsNormalizer:
 
         derived: List[FactRecord] = []
         for key in candidate_keys:
-            if key in existing:
+            if existing.get(key):
                 continue
-            base = None
-            for concept in EQUITY_FALLBACK_CONCEPTS:
-                base = indexed.get(concept, {}).get(key)
-                if base and base.value is not None:
-                    break
-            if base is None or base.value is None:
+            base = self._pick_preferred_record(
+                indexed.get(concept, {}).get(key) for concept in EQUITY_FALLBACK_CONCEPTS
+            )
+            if base is None:
                 continue
             derived.append(self._build_derived_record(base, "StockholdersEquity", base.value, symbol, cik))
         return derived
@@ -720,14 +763,12 @@ class SECFactsNormalizer:
 
         derived: List[FactRecord] = []
         for key in candidate_keys:
-            if key in existing:
+            if existing.get(key):
                 continue
-            base = None
-            for concept in SHARES_FALLBACK_CONCEPTS:
-                base = indexed.get(concept, {}).get(key)
-                if base and base.value is not None:
-                    break
-            if base is None or base.value is None:
+            base = self._pick_preferred_record(
+                indexed.get(concept, {}).get(key) for concept in SHARES_FALLBACK_CONCEPTS
+            )
+            if base is None:
                 continue
             derived.append(self._build_derived_record(base, "CommonStockSharesOutstanding", base.value, symbol, cik))
         return derived
@@ -746,14 +787,12 @@ class SECFactsNormalizer:
 
         derived: List[FactRecord] = []
         for key in candidate_keys:
-            if key in existing:
+            if existing.get(key):
                 continue
-            base = None
-            for concept in OPERATING_CASH_FLOW_FALLBACK:
-                base = indexed.get(concept, {}).get(key)
-                if base and base.value is not None:
-                    break
-            if base is None or base.value is None:
+            base = self._pick_preferred_record(
+                indexed.get(concept, {}).get(key) for concept in OPERATING_CASH_FLOW_FALLBACK
+            )
+            if base is None:
                 continue
             derived.append(
                 self._build_derived_record(
@@ -776,14 +815,12 @@ class SECFactsNormalizer:
 
         derived: List[FactRecord] = []
         for key in candidate_keys:
-            if key in existing:
+            if existing.get(key):
                 continue
-            base = None
-            for concept in CAPEX_FALLBACK_CONCEPTS:
-                base = indexed.get(concept, {}).get(key)
-                if base and base.value is not None:
-                    break
-            if base is None or base.value is None:
+            base = self._pick_preferred_record(
+                indexed.get(concept, {}).get(key) for concept in CAPEX_FALLBACK_CONCEPTS
+            )
+            if base is None:
                 continue
             derived.append(self._build_derived_record(base, "CapitalExpenditures", base.value, symbol, cik))
         return derived
@@ -802,14 +839,12 @@ class SECFactsNormalizer:
 
         derived: List[FactRecord] = []
         for key in candidate_keys:
-            if key in existing:
+            if existing.get(key):
                 continue
-            base = None
-            for concept in EBIT_FALLBACK_CONCEPTS:
-                base = indexed.get(concept, {}).get(key)
-                if base and base.value is not None:
-                    break
-            if base is None or base.value is None:
+            base = self._pick_preferred_record(
+                indexed.get(concept, {}).get(key) for concept in EBIT_FALLBACK_CONCEPTS
+            )
+            if base is None:
                 continue
             derived.append(self._build_derived_record(base, "OperatingIncomeLoss", base.value, symbol, cik))
         return derived
@@ -828,14 +863,12 @@ class SECFactsNormalizer:
 
         derived: List[FactRecord] = []
         for key in candidate_keys:
-            if key in existing:
+            if existing.get(key):
                 continue
-            base = None
-            for concept in PPE_FALLBACK_CONCEPTS:
-                base = indexed.get(concept, {}).get(key)
-                if base and base.value is not None:
-                    break
-            if base is None or base.value is None:
+            base = self._pick_preferred_record(
+                indexed.get(concept, {}).get(key) for concept in PPE_FALLBACK_CONCEPTS
+            )
+            if base is None:
                 continue
             derived.append(self._build_derived_record(base, "PropertyPlantAndEquipmentNet", base.value, symbol, cik))
         return derived
@@ -854,22 +887,19 @@ class SECFactsNormalizer:
 
         derived: List[FactRecord] = []
         for key in candidate_keys:
-            if key in existing:
+            if existing.get(key):
                 continue
-            base = None
-            base_concept = None
-            for concept in INCOME_AVAILABLE_TO_COMMON_FALLBACK:
-                base = indexed.get(concept, {}).get(key)
-                if base and base.value is not None:
-                    base_concept = concept
-                    break
-            if base is None or base.value is None:
+            base_concept, base = self._pick_preferred_concept(
+                (concept, indexed.get(concept, {}).get(key))
+                for concept in INCOME_AVAILABLE_TO_COMMON_FALLBACK
+            )
+            if base is None:
                 continue
             if base_concept == "NetIncomeLoss":
                 preferred_value = None
                 for concept in PREFERRED_DIVIDEND_FALLBACK:
-                    pref = indexed.get(concept, {}).get(key)
-                    if pref and pref.value is not None:
+                    pref = self._pick_preferred_record([indexed.get(concept, {}).get(key)])
+                    if pref:
                         preferred_value = pref.value
                         break
                 adjusted = base.value - (preferred_value or 0.0)
@@ -900,17 +930,15 @@ class SECFactsNormalizer:
 
         derived: List[FactRecord] = []
         for key in candidate_keys:
-            if key in existing:
+            if existing.get(key):
                 continue
-            base = None
-            for concept in COMMON_EQUITY_FALLBACK:
-                base = indexed.get(concept, {}).get(key)
-                if base and base.value is not None:
-                    break
-            if base is None or base.value is None:
+            base = self._pick_preferred_record(
+                indexed.get(concept, {}).get(key) for concept in COMMON_EQUITY_FALLBACK
+            )
+            if base is None:
                 continue
-            preferred = indexed.get("PreferredStock", {}).get(key)
-            preferred_value = preferred.value if preferred and preferred.value is not None else 0.0
+            preferred = self._pick_preferred_record([indexed.get("PreferredStock", {}).get(key)])
+            preferred_value = preferred.value if preferred else 0.0
             adjusted = base.value - preferred_value
             derived.append(self._build_derived_record(base, "CommonStockholdersEquity", adjusted, symbol, cik))
         return derived

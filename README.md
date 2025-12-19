@@ -209,13 +209,13 @@ valuation). Metrics are cached in the `metrics` table for reuse.
 To evaluate every stored symbol and print a pass-only table, run:
 
 ```bash
-pyvalue run-screen-bulk screeners/value.yml --output-csv results.csv
+pyvalue run-screen-bulk screeners/value.yml
 ```
 
 Rows represent criteria and columns show the symbols that satisfied every rule along with the
 left-hand metric values used for comparison.
 
-Pass `--output-csv results.csv` to write the same table to disk in CSV form.
+By default the CSV is written to `data/screen_results.csv`. Pass `--output-csv results.csv` to override.
 
 Additional metrics include:
 
@@ -271,9 +271,9 @@ Place API keys or region-specific credentials inside the `private/` directory (i
    ```bash
    pyvalue compute-metrics-bulk
    ```
-6. Run the value screen across the universe (optional CSV export):
+6. Run the value screen across the universe (CSV export defaults to `data/screen_results.csv`):
    ```bash
-   pyvalue run-screen-bulk screeners/value.yml --output-csv results.csv
+   pyvalue run-screen-bulk screeners/value.yml
    ```
 
 ### Example: LSE (non-US exchange)

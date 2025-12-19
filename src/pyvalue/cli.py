@@ -9,7 +9,9 @@ import argparse
 import csv
 import json
 import logging
+import re
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
@@ -38,6 +40,7 @@ from pyvalue.storage import (
 from pyvalue.universe import UKUniverseLoader, USUniverseLoader
 
 LOGGER = logging.getLogger(__name__)
+DEFAULT_SCREEN_RESULTS_CSV = "data/screen_results.csv"
 
 
 def _resolve_database_path(database: str) -> Path:
@@ -505,6 +508,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Metric identifiers to include (default: all registered metrics)",
     )
 
+    failure_report = subparsers.add_parser(
+        "report-metric-failures",
+        help="Summarize warning reasons for metric computation failures in a region.",
+    )
+    failure_report.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
+    )
+    failure_report.add_argument(
+        "--region",
+        default="US",
+        help="Universe region key stored in SQLite (default: %(default)s)",
+    )
+    failure_report.add_argument(
+        "--metrics",
+        nargs="+",
+        default=None,
+        help="Metric identifiers to include (default: all registered metrics)",
+    )
+    failure_report.add_argument(
+        "--output-csv",
+        default=None,
+        help="Optional CSV path for metric failure reasons.",
+    )
+
     purge_nonfilers = subparsers.add_parser(
         "purge-us-nonfilers",
         help="Remove US listings that have no 10-K/10-Q filings in stored SEC company facts.",
@@ -549,8 +578,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_screen_bulk.add_argument(
         "--output-csv",
-        default=None,
-        help="Optional path to write passing results as CSV",
+        default=DEFAULT_SCREEN_RESULTS_CSV,
+        help="Path to write passing results as CSV (default: %(default)s)",
     )
 
     return parser
@@ -1344,6 +1373,140 @@ def cmd_report_metric_coverage(
     return 0
 
 
+class _MetricWarningCollector(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.records: List[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.levelno >= logging.WARNING:
+            self.records.append(record)
+
+    def clear(self) -> None:
+        self.records.clear()
+
+
+_DATE_PATTERN = re.compile(r"^\\d{4}-\\d{2}-\\d{2}$")
+
+
+def _format_failure_reason(records: Sequence[logging.LogRecord], symbol: str) -> str:
+    if not records:
+        return "no warning emitted"
+
+    record = records[0]
+    msg = record.msg if isinstance(record.msg, str) else str(record.msg)
+    args = record.args
+    if not args:
+        return msg
+
+    def transform(arg: object) -> object:
+        if isinstance(arg, str):
+            if arg.upper() == symbol.upper():
+                return "<symbol>"
+            if _DATE_PATTERN.match(arg):
+                return "<date>"
+            return arg
+        if isinstance(arg, (int, float)):
+            return "<n>"
+        return arg
+
+    try:
+        if isinstance(args, dict):
+            transformed = {key: transform(value) for key, value in args.items()}
+            return msg % transformed
+        if not isinstance(args, tuple):
+            args = (args,)
+        transformed = tuple(transform(value) for value in args)
+        return msg % transformed
+    except Exception:
+        return record.getMessage()
+
+
+def _write_metric_failure_report_csv(
+    failures: Dict[str, Counter],
+    total_symbols: int,
+    path: str,
+) -> None:
+    with open(path, "w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["metric_id", "reason", "count", "total_symbols", "failure_rate"])
+        for metric_id, counter in failures.items():
+            if not counter:
+                writer.writerow([metric_id, "", 0, total_symbols, 0.0])
+                continue
+            for reason, count in counter.most_common():
+                rate = (count / total_symbols) if total_symbols else 0.0
+                writer.writerow([metric_id, reason, count, total_symbols, rate])
+
+
+def cmd_report_metric_failures(
+    database: str,
+    region: str,
+    metric_ids: Optional[Sequence[str]],
+    output_csv: Optional[str],
+) -> int:
+    """Summarize warning reasons for metric computation failures."""
+
+    db_path = _resolve_database_path(database)
+    region_label = region.upper()
+    symbols = _symbols_for_region_or_raise(db_path, region_label)
+    if not symbols:
+        raise SystemExit(f"No symbols found for region {region_label}.")
+
+    metric_classes = _select_metric_classes(metric_ids)
+    base_fact_repo = FinancialFactsRepository(db_path)
+    base_fact_repo.initialize_schema()
+    fact_repo = RegionFactsRepository(base_fact_repo)
+    market_repo = MarketDataRepository(db_path)
+    market_repo.initialize_schema()
+
+    failures: Dict[str, Counter] = {getattr(cls, "id", cls.__name__): Counter() for cls in metric_classes}
+    totals: Dict[str, int] = {getattr(cls, "id", cls.__name__): 0 for cls in metric_classes}
+    handler = _MetricWarningCollector()
+    root_logger = logging.getLogger()
+    root_logger.addHandler(handler)
+
+    try:
+        for symbol in symbols:
+            symbol_upper = symbol.upper()
+            for metric_cls in metric_classes:
+                metric_id = getattr(metric_cls, "id", metric_cls.__name__)
+                handler.clear()
+                metric = metric_cls()
+                try:
+                    if getattr(metric, "uses_market_data", False):
+                        result = metric.compute(symbol_upper, fact_repo, market_repo)
+                    else:
+                        result = metric.compute(symbol_upper, fact_repo)
+                except Exception as exc:  # pragma: no cover - defensive
+                    reason = f"exception: {exc.__class__.__name__}"
+                    failures[metric_id][reason] += 1
+                    totals[metric_id] += 1
+                    continue
+                if result is None:
+                    reason = _format_failure_reason(handler.records, symbol_upper)
+                    failures[metric_id][reason] += 1
+                    totals[metric_id] += 1
+    finally:
+        root_logger.removeHandler(handler)
+
+    total_symbols = len(symbols)
+    print(f"Metric failure reasons for region {region_label} (symbols={total_symbols}, metrics={len(metric_classes)})")
+    for metric_id in [getattr(cls, "id", cls.__name__) for cls in metric_classes]:
+        total_failures = totals.get(metric_id, 0)
+        print(f"- {metric_id}: failures={total_failures}/{total_symbols}")
+        counter = failures.get(metric_id)
+        if not counter:
+            continue
+        for reason, count in counter.most_common():
+            print(f"    {reason}: {count}")
+
+    if output_csv:
+        _write_metric_failure_report_csv(failures, total_symbols, output_csv)
+        print(f"Wrote metric failure reasons to {output_csv}")
+    return 0
+
+
 def _eligible_sec_filers(db_path: Path) -> List[str]:
     """Return symbols that have at least one 10-K/10-Q filing in SEC raw facts."""
 
@@ -1515,6 +1678,7 @@ def cmd_run_screen_bulk(config_path: str, database: str, region: str, output_csv
     """Evaluate screening criteria for every ticker stored in the universe."""
 
     definition = load_screen(config_path)
+    output_csv = output_csv or DEFAULT_SCREEN_RESULTS_CSV
     universe_repo = UniverseRepository(database)
     symbols = universe_repo.fetch_symbols(region)
     if not symbols:
@@ -1566,6 +1730,8 @@ def cmd_run_screen_bulk(config_path: str, database: str, region: str, output_csv
 
     if not passed_symbols:
         print("No symbols satisfied all criteria.")
+        if output_csv:
+            _write_screen_csv(definition.criteria, [], {}, {}, output_csv)
         return 1
 
     selected_names = {symbol: entity_labels.get(symbol, symbol) for symbol in passed_symbols}
@@ -1745,6 +1911,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             database=args.database,
             region=args.region,
             metric_ids=args.metrics,
+        )
+    if args.command == "report-metric-failures":
+        return cmd_report_metric_failures(
+            database=args.database,
+            region=args.region,
+            metric_ids=args.metrics,
+            output_csv=args.output_csv,
         )
     if args.command == "recalc-market-cap":
         return cmd_recalc_market_cap(database=args.database)
