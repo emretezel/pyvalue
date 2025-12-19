@@ -14,7 +14,7 @@ from pyvalue.metrics.base import Metric, MetricResult
 from pyvalue.metrics.utils import is_recent_fact
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
-EPS_CONCEPTS = ["EarningsPerShareDiluted", "EarningsPerShareBasic"]
+EPS_CONCEPTS = ["EarningsPerShare"]
 
 LOGGER = logging.getLogger(__name__)
 

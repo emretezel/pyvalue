@@ -11,7 +11,7 @@ from typing import Optional
 import logging
 
 from pyvalue.metrics.base import Metric, MetricResult
-from pyvalue.metrics.utils import is_recent_fact, resolve_assets_current, resolve_liabilities_current
+from pyvalue.metrics.utils import is_recent_fact
 from pyvalue.storage import FinancialFactsRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -23,8 +23,8 @@ class CurrentRatioMetric:
     required_concepts = ("AssetsCurrent", "LiabilitiesCurrent")
 
     def compute(self, symbol: str, repo: FinancialFactsRepository) -> Optional[MetricResult]:
-        assets = resolve_assets_current(repo, symbol)
-        liabilities = resolve_liabilities_current(repo, symbol)
+        assets = repo.latest_fact(symbol, "AssetsCurrent")
+        liabilities = repo.latest_fact(symbol, "LiabilitiesCurrent")
         if assets is None or liabilities is None:
             LOGGER.warning("current_ratio: missing assets/liabilities for %s", symbol)
             return None

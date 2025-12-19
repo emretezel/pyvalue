@@ -14,11 +14,7 @@ from pyvalue.metrics.base import Metric, MetricResult
 from pyvalue.metrics.utils import MAX_FY_FACT_AGE_DAYS, filter_unique_fy, has_recent_fact
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
-FALLBACK_CONCEPTS = [
-    "EarningsPerShareDiluted",
-    "EarningsPerShareBasicAndDiluted",
-    "EarningsPerShareBasic",
-]
+EPS_CONCEPTS = ["EarningsPerShare"]
 
 LOGGER = logging.getLogger(__name__)
 
@@ -26,18 +22,18 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class EPSStreakMetric:
     id: str = "eps_streak"
-    required_concepts = tuple(FALLBACK_CONCEPTS)
+    required_concepts = tuple(EPS_CONCEPTS)
 
     def compute(self, symbol: str, repo: FinancialFactsRepository) -> Optional[MetricResult]:
         records: List[FactRecord] = []
-        for concept in FALLBACK_CONCEPTS:
+        for concept in EPS_CONCEPTS:
             records = repo.facts_for_concept(symbol, concept, fiscal_period="FY")
             if records:
                 break
         if not records:
             LOGGER.warning("eps_streak: no FY EPS records for %s", symbol)
             return None
-        if not has_recent_fact(repo, symbol, FALLBACK_CONCEPTS, max_age_days=MAX_FY_FACT_AGE_DAYS):
+        if not has_recent_fact(repo, symbol, EPS_CONCEPTS, max_age_days=MAX_FY_FACT_AGE_DAYS):
             LOGGER.warning("eps_streak: no recent FY EPS fact for %s", symbol)
             return None
 

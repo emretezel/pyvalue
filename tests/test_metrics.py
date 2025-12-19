@@ -81,7 +81,7 @@ def test_eps_streak_counts_consecutive_positive_years():
 
     class DummyRepo:
         def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
-            if concept == "EarningsPerShareDiluted":
+            if concept == "EarningsPerShare":
                 return [
                     fact(symbol=symbol, concept=concept, end_date=recent, value=2.0, frame=f"CY{date.today().year}"),
                     fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=2.1, frame="CY2023"),
@@ -106,7 +106,7 @@ def test_graham_eps_cagr_metric():
 
     class DummyRepo:
         def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
-            if concept == "EarningsPerShareDiluted":
+            if concept == "EarningsPerShare":
                 records = [
                     fact(symbol=symbol, concept=concept, end_date=recent, value=2.0, frame="CYRECENT"),
                 ]
@@ -136,11 +136,49 @@ def test_graham_multiplier_metric():
                 "StockholdersEquity": 1000,
                 "CommonStockSharesOutstanding": 100,
                 "Goodwill": 50,
-                "IntangibleAssetsNet": 25,
+                "IntangibleAssetsNetExcludingGoodwill": 25,
             }
 
         def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
-            if concept == "EarningsPerShareDiluted":
+            if concept == "EarningsPerShare":
+                return [
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q4", end_date=recent, value=2.5),
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q3", end_date="2024-09-30", value=2.0),
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q2", end_date="2024-06-30", value=1.5),
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q1", end_date="2024-03-31", value=1.0),
+                ]
+            return []
+
+        def latest_fact(self, symbol, concept):
+            value = self.values.get(concept)
+            if value is None:
+                return None
+            return fact(symbol=symbol, concept=concept, end_date=recent, value=value)
+
+    class DummyMarketRepo:
+        def latest_price(self, symbol):
+            return (recent, 150.0)
+
+    repo = DummyRepo()
+    market_repo = DummyMarketRepo()
+    result = metric.compute("AAPL.US", repo, market_repo)
+    assert result is not None
+    assert result.value > 0
+
+
+def test_graham_multiplier_uses_zero_when_optional_values_missing():
+    metric = GrahamMultiplierMetric()
+    recent = (date.today() - timedelta(days=20)).isoformat()
+
+    class DummyRepo:
+        def __init__(self):
+            self.values = {
+                "StockholdersEquity": 1000,
+                "CommonStockSharesOutstanding": 100,
+            }
+
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "EarningsPerShare":
                 return [
                     fact(symbol=symbol, concept=concept, fiscal_period="Q4", end_date=recent, value=2.5),
                     fact(symbol=symbol, concept=concept, fiscal_period="Q3", end_date="2024-09-30", value=2.0),
@@ -173,7 +211,7 @@ def test_earnings_yield_metric():
 
     class DummyRepo:
         def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
-            if concept == "EarningsPerShareDiluted":
+            if concept == "EarningsPerShare":
                 return [
                     fact(symbol=symbol, concept=concept, fiscal_period="Q4", end_date=recent, value=2.5),
                     fact(symbol=symbol, concept=concept, fiscal_period="Q3", end_date=older, value=2.0),
@@ -194,44 +232,6 @@ def test_earnings_yield_metric():
 
 
 def test_price_to_fcf_metric():
-    metric = PriceToFCFMetric()
-    recent = (date.today() - timedelta(days=15)).isoformat()
-    older = (date.today() - timedelta(days=90)).isoformat()
-
-    class DummyRepo:
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
-            if concept == "NetCashProvidedByUsedInOperatingActivities":
-                return [
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q4", end_date=recent, value=130.0),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q3", end_date=older, value=120.0),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q2", end_date="2024-06-30", value=110.0),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q1", end_date="2024-03-31", value=100.0),
-                ]
-            if concept == "PaymentsToAcquirePropertyPlantAndEquipment":
-                return [
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q4", end_date=recent, value=-30.0),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q3", end_date=older, value=-40.0),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q2", end_date="2024-06-30", value=-50.0),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q1", end_date="2024-03-31", value=-60.0),
-                ]
-            return []
-
-    class DummyMarketRepo:
-        def latest_snapshot(self, symbol):
-            class Snapshot:
-                market_cap = 6400.0
-                as_of = (date.today() - timedelta(days=10)).isoformat()
-
-            return Snapshot()
-
-    repo = DummyRepo()
-    market_repo = DummyMarketRepo()
-    result = metric.compute("AAPL.US", repo, market_repo)
-    assert result is not None
-    assert result.value == 10.0
-
-
-def test_price_to_fcf_metric_accepts_capital_expenditures():
     metric = PriceToFCFMetric()
     recent = (date.today() - timedelta(days=15)).isoformat()
     older = (date.today() - timedelta(days=90)).isoformat()
@@ -269,6 +269,37 @@ def test_price_to_fcf_metric_accepts_capital_expenditures():
     assert result.value == 10.0
 
 
+def test_price_to_fcf_metric_uses_zero_capex_when_missing():
+    metric = PriceToFCFMetric()
+    recent = (date.today() - timedelta(days=15)).isoformat()
+    older = (date.today() - timedelta(days=90)).isoformat()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "NetCashProvidedByUsedInOperatingActivities":
+                return [
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q4", end_date=recent, value=130.0),
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q3", end_date=older, value=120.0),
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q2", end_date="2024-06-30", value=110.0),
+                    fact(symbol=symbol, concept=concept, fiscal_period="Q1", end_date="2024-03-31", value=100.0),
+                ]
+            return []
+
+    class DummyMarketRepo:
+        def latest_snapshot(self, symbol):
+            class Snapshot:
+                market_cap = 6400.0
+                as_of = (date.today() - timedelta(days=10)).isoformat()
+
+            return Snapshot()
+
+    repo = DummyRepo()
+    market_repo = DummyMarketRepo()
+    result = metric.compute("AAPL.US", repo, market_repo)
+    assert result is not None
+    assert result.value == 6400.0 / 460.0
+
+
 def test_eps_ttm_metric():
     metric = EarningsPerShareTTM()
     recent = (date.today() - timedelta(days=30)).isoformat()
@@ -276,7 +307,7 @@ def test_eps_ttm_metric():
 
     class DummyRepo:
         def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
-            if concept == "EarningsPerShareDiluted":
+            if concept == "EarningsPerShare":
                 return [
                     fact(symbol=symbol, concept=concept, fiscal_period="Q4", end_date=recent, value=2.5),
                     fact(symbol=symbol, concept=concept, fiscal_period="Q3", end_date=older, value=2.0),
@@ -299,7 +330,7 @@ def test_eps_6y_avg_metric():
 
     class DummyRepo:
         def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
-            if concept == "EarningsPerShareDiluted":
+            if concept == "EarningsPerShare":
                 records = [
                     fact(
                         symbol=symbol,
@@ -418,8 +449,6 @@ def test_roe_greenblatt_metric():
             return []
 
         def latest_fact(self, symbol, concept):
-            if concept == "PreferredStock":
-                return fact(symbol=symbol, concept=concept, end_date=recent, value=0)
             return None
 
     repo = DummyRepo()

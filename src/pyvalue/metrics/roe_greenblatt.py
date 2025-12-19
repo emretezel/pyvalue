@@ -11,21 +11,11 @@ from typing import List, Optional
 import logging
 
 from pyvalue.metrics.base import Metric, MetricResult
-from pyvalue.metrics.utils import MAX_FY_FACT_AGE_DAYS, has_recent_fact, is_recent_fact
+from pyvalue.metrics.utils import MAX_FY_FACT_AGE_DAYS, has_recent_fact
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
-NET_INCOME_CONCEPTS = [
-    "NetIncomeLossAvailableToCommonStockholdersBasic",
-    "NetIncomeLoss",
-]
-PREFERRED_DIVIDEND_CONCEPTS = [
-    "PreferredStockDividendsAndOtherAdjustments",
-    "PreferredStockDividends",
-]
-EQUITY_CONCEPTS = [
-    "CommonStockholdersEquity",
-    "StockholdersEquity",
-]
+NET_INCOME_CONCEPTS = ["NetIncomeLossAvailableToCommonStockholdersBasic"]
+EQUITY_CONCEPTS = ["CommonStockholdersEquity"]
 
 LOGGER = logging.getLogger(__name__)
 
@@ -33,7 +23,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class ROEGreenblattMetric:
     id: str = "roe_greenblatt_5y_avg"
-    required_concepts = tuple(NET_INCOME_CONCEPTS + PREFERRED_DIVIDEND_CONCEPTS + EQUITY_CONCEPTS + ["PreferredStock"])
+    required_concepts = tuple(NET_INCOME_CONCEPTS + EQUITY_CONCEPTS)
 
     def compute(self, symbol: str, repo: FinancialFactsRepository) -> Optional[MetricResult]:
         income_records = self._net_income_history(symbol, repo)
@@ -86,66 +76,10 @@ class ROEGreenblattMetric:
         return MetricResult(symbol=symbol, metric_id=self.id, value=avg_roe, as_of=latest)
 
     def _net_income_history(self, symbol: str, repo: FinancialFactsRepository) -> List[FactRecord]:
-        for concept in NET_INCOME_CONCEPTS:
-            records = repo.facts_for_concept(symbol, concept, fiscal_period="FY")
-            if records:
-                if concept == "NetIncomeLoss":
-                    pref = self._preferred_dividends(symbol, repo)
-                    if pref is not None:
-                        adjusted = []
-                        for record in records:
-                            adjusted.append(
-                                FactRecord(
-                                    symbol=record.symbol,
-                                    cik=record.cik,
-                                    concept=record.concept,
-                                    fiscal_period=record.fiscal_period,
-                                    end_date=record.end_date,
-                                    unit=record.unit,
-                                    value=(record.value or 0) - pref,
-                                    accn=record.accn,
-                                    filed=record.filed,
-                                    frame=record.frame,
-                                )
-                            )
-                        return adjusted
-                return records
-        return []
-
-    def _preferred_dividends(self, symbol: str, repo: FinancialFactsRepository) -> Optional[float]:
-        for concept in PREFERRED_DIVIDEND_CONCEPTS:
-            fact = repo.latest_fact(symbol, concept)
-            if fact is not None and fact.value is not None and is_recent_fact(fact):
-                return fact.value
-        return None
+        return repo.facts_for_concept(symbol, "NetIncomeLossAvailableToCommonStockholdersBasic", fiscal_period="FY")
 
     def _equity_history(self, symbol: str, repo: FinancialFactsRepository) -> List[FactRecord]:
-        records = repo.facts_for_concept(symbol, "CommonStockholdersEquity", fiscal_period="FY")
-        if not records:
-            records = repo.facts_for_concept(symbol, "StockholdersEquity", fiscal_period="FY")
-        if not records:
-            return []
-        preferred = repo.latest_fact(symbol, "PreferredStock")
-        if preferred is not None and preferred.value is not None and is_recent_fact(preferred):
-            adjusted = []
-            for record in records:
-                value = (record.value or 0) - preferred.value
-                adjusted.append(
-                    FactRecord(
-                        symbol=record.symbol,
-                        cik=record.cik,
-                        concept=record.concept,
-                        fiscal_period=record.fiscal_period,
-                        end_date=record.end_date,
-                        unit=record.unit,
-                        value=value,
-                        accn=record.accn,
-                        filed=record.filed,
-                        frame=record.frame,
-                    )
-                )
-            return adjusted
-        return records
+        return repo.facts_for_concept(symbol, "CommonStockholdersEquity", fiscal_period="FY")
 
     def _year_from_record(self, record: FactRecord) -> Optional[int]:
         try:

@@ -17,14 +17,11 @@ from pyvalue.marketdata.base import PriceData
 from pyvalue.storage import FinancialFactsRepository, MarketDataRepository
 
 
-EPS_CONCEPTS = ["EarningsPerShareDiluted", "EarningsPerShareBasic"]
-EQUITY_CONCEPTS = [
-    "StockholdersEquity",
-    "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
-]
-SHARE_CONCEPTS = ["CommonStockSharesOutstanding", "EntityCommonStockSharesOutstanding"]
+EPS_CONCEPTS = ["EarningsPerShare"]
+EQUITY_CONCEPTS = ["StockholdersEquity"]
+SHARE_CONCEPTS = ["CommonStockSharesOutstanding"]
 GOODWILL_CONCEPTS = ["Goodwill"]
-INTANGIBLE_CONCEPTS = ["IntangibleAssetsNetExcludingGoodwill", "IntangibleAssetsNet"]
+INTANGIBLE_CONCEPTS = ["IntangibleAssetsNetExcludingGoodwill"]
 
 LOGGER = logging.getLogger(__name__)
 
@@ -57,10 +54,8 @@ class GrahamMultiplierMetric:
             LOGGER.warning("graham_multiplier: equity/shares missing for %s", symbol)
             return None
 
-        goodwill, goodwill_currency = self._latest_value(symbol, repo, GOODWILL_CONCEPTS)
-        intangibles, intangibles_currency = self._latest_value(symbol, repo, INTANGIBLE_CONCEPTS)
-        goodwill = goodwill or 0.0
-        intangibles = intangibles or 0.0
+        goodwill, goodwill_currency = self._latest_optional_value(symbol, repo, GOODWILL_CONCEPTS)
+        intangibles, intangibles_currency = self._latest_optional_value(symbol, repo, INTANGIBLE_CONCEPTS)
 
         price_data = self._latest_snapshot(market_repo, symbol)
         if price_data is None or price_data.price is None:
@@ -113,6 +108,14 @@ class GrahamMultiplierMetric:
                 except (TypeError, ValueError):
                     continue
         return None, None
+
+    def _latest_optional_value(
+        self, symbol: str, repo: FinancialFactsRepository, concepts: list[str]
+    ) -> Tuple[float, Optional[str]]:
+        value, currency = self._latest_value(symbol, repo, concepts)
+        if value is None:
+            return 0.0, None
+        return value, currency
 
     def _latest_snapshot(self, market_repo: MarketDataRepository, symbol: str) -> Optional[PriceData]:
         if hasattr(market_repo, "latest_snapshot"):

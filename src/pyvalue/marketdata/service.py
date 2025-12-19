@@ -16,6 +16,7 @@ from pyvalue.marketdata import (
     MarketDataProvider,
     PriceData,
 )
+from pyvalue.facts import RegionFactsRepository
 from pyvalue.storage import FinancialFactsRepository, FundamentalsRepository, MarketDataRepository, UniverseRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -50,8 +51,9 @@ class MarketDataService:
         self.config = config or Config()
         self.repo = MarketDataRepository(db_path)
         self.repo.initialize_schema()
-        self.facts_repo = FinancialFactsRepository(db_path)
-        self.facts_repo.initialize_schema()
+        base_facts_repo = FinancialFactsRepository(db_path)
+        base_facts_repo.initialize_schema()
+        self.facts_repo = RegionFactsRepository(base_facts_repo)
         self.fund_repo = FundamentalsRepository(db_path)
         self.fund_repo.initialize_schema()
         self.universe_repo = UniverseRepository(db_path)

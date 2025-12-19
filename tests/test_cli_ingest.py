@@ -9,7 +9,6 @@ from pyvalue import cli
 from pyvalue.metrics import REGISTRY
 from pyvalue.metrics.base import MetricResult
 from pyvalue.storage import (
-    CompanyFactsRepository,
     EntityMetadataRepository,
     FundamentalsRepository,
     FinancialFactsRepository,
@@ -64,8 +63,9 @@ def test_cmd_ingest_us_facts(monkeypatch, tmp_path):
     assert calls["ua"] == "UA"
     assert calls["cik"] == "CIK0000320193"
 
-    repo = CompanyFactsRepository(db_path)
-    stored = repo.fetch_fact("AAPL.US")
+    repo = FundamentalsRepository(db_path)
+    repo.initialize_schema()
+    stored = repo.fetch("SEC", "AAPL.US")
     assert stored["cik"] == "CIK0000320193"
 
 
@@ -158,9 +158,6 @@ def test_cmd_ingest_us_facts_bulk(monkeypatch, tmp_path):
     ]
     universe_repo.replace_universe(listings, region="US")
 
-    company_repo = CompanyFactsRepository(db_path)
-    company_repo.initialize_schema()
-
     class FakeClient:
         def __init__(self, user_agent=None):
             self.user_agent = user_agent
@@ -184,7 +181,9 @@ def test_cmd_ingest_us_facts_bulk(monkeypatch, tmp_path):
     )
     assert rc == 0
     assert fake_client.calls == ["CIKAAA", "CIKBBB"]
-    assert company_repo.fetch_fact("AAA.US") == {"cik": "CIKAAA"}
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    assert fund_repo.fetch("SEC", "AAA.US") == {"cik": "CIKAAA"}
 
 
 def test_cmd_load_eodhd_universe(monkeypatch, tmp_path):
@@ -418,15 +417,15 @@ def test_cmd_compute_metrics_bulk_fallback_to_fundamentals(monkeypatch, tmp_path
 
 def test_cmd_normalize_us_facts(monkeypatch, tmp_path):
     db_path = tmp_path / "facts.db"
-    company_repo = CompanyFactsRepository(db_path)
-    company_repo.initialize_schema()
-    company_repo.upsert_company_facts("AAPL.US", "CIK0000320193", {"entityName": "Apple Inc", "facts": {}})
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert("SEC", "AAPL.US", {"entityName": "Apple Inc", "facts": {}}, region="US")
 
     class FakeNormalizer:
         def __init__(self):
             self.calls = []
 
-        def normalize(self, payload, symbol, cik):
+        def normalize(self, payload, symbol, cik=None):
             self.calls.append((payload, symbol, cik))
             from pyvalue.storage import FactRecord
 
@@ -458,13 +457,13 @@ def test_cmd_normalize_us_facts(monkeypatch, tmp_path):
 
 def test_cmd_normalize_us_facts_bulk(monkeypatch, tmp_path):
     db_path = tmp_path / "facts.db"
-    company_repo = CompanyFactsRepository(db_path)
-    company_repo.initialize_schema()
-    company_repo.upsert_company_facts("AAA.US", "CIK00001", {"entityName": "AAA Corp", "facts": {}})
-    company_repo.upsert_company_facts("BBB.US", "CIK00002", {"entityName": "BBB Corp", "facts": {}})
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert("SEC", "AAA.US", {"entityName": "AAA Corp", "facts": {}}, region="US")
+    fund_repo.upsert("SEC", "BBB.US", {"entityName": "BBB Corp", "facts": {}}, region="US")
 
     class DummyNormalizer:
-        def normalize(self, payload, symbol, cik):
+        def normalize(self, payload, symbol, cik=None):
             return [
                 make_fact(symbol=symbol, cik=cik, concept="Dummy", end_date="2023-12-31", value=len(symbol))
             ]
@@ -615,14 +614,14 @@ def test_cmd_compute_metrics(tmp_path):
         [
             make_fact(concept="AssetsCurrent", end_date=recent, value=500),
             make_fact(concept="LiabilitiesCurrent", end_date=recent, value=200),
-            make_fact(concept="EarningsPerShareDiluted", end_date=recent, value=2.5, fiscal_period="Q4"),
-            make_fact(concept="EarningsPerShareDiluted", end_date=q3, value=2.0, fiscal_period="Q3"),
-            make_fact(concept="EarningsPerShareDiluted", end_date=q2, value=1.5, fiscal_period="Q2"),
-            make_fact(concept="EarningsPerShareDiluted", end_date=q1, value=1.0, fiscal_period="Q1"),
+            make_fact(concept="EarningsPerShare", end_date=recent, value=2.5, fiscal_period="Q4"),
+            make_fact(concept="EarningsPerShare", end_date=q3, value=2.0, fiscal_period="Q3"),
+            make_fact(concept="EarningsPerShare", end_date=q2, value=1.5, fiscal_period="Q2"),
+            make_fact(concept="EarningsPerShare", end_date=q1, value=1.0, fiscal_period="Q1"),
             make_fact(concept="StockholdersEquity", end_date=recent, value=1000),
             make_fact(concept="CommonStockSharesOutstanding", end_date=recent, value=100),
             make_fact(concept="Goodwill", end_date=recent, value=50),
-            make_fact(concept="IntangibleAssetsNet", end_date=recent, value=25),
+            make_fact(concept="IntangibleAssetsNetExcludingGoodwill", end_date=recent, value=25),
         ],
     )
     repo = MetricsRepository(db_path)
@@ -650,7 +649,7 @@ def test_cmd_compute_metrics_all(tmp_path):
         frame = f"CY{year}"
         records.append(
             make_fact(
-                concept="EarningsPerShareDiluted",
+                concept="EarningsPerShare",
                 end_date=f"{year}-09-30",
                 value=2.0 + 0.1 * (year - 2010),
                 frame=frame,
@@ -671,14 +670,20 @@ def test_cmd_compute_metrics_all(tmp_path):
                 ),
             ]
         )
-    records.extend(
-            [
-                make_fact(concept="StockholdersEquity", end_date=f"{current_year}-09-30", value=2000),
-                make_fact(concept="StockholdersEquity", end_date=f"{current_year-1}-09-30", value=1800),
-                make_fact(concept="StockholdersEquity", end_date=f"{current_year-2}-09-30", value=1600),
+        records.extend(
+                [
+                    make_fact(concept="StockholdersEquity", end_date=f"{current_year}-09-30", value=2000),
+                    make_fact(concept="StockholdersEquity", end_date=f"{current_year-1}-09-30", value=1800),
+                    make_fact(concept="StockholdersEquity", end_date=f"{current_year-2}-09-30", value=1600),
                 make_fact(concept="StockholdersEquity", end_date=f"{current_year-3}-09-30", value=1400),
                 make_fact(concept="StockholdersEquity", end_date=f"{current_year-4}-09-30", value=1200),
                 make_fact(concept="StockholdersEquity", end_date=f"{current_year-5}-09-30", value=1000),
+                make_fact(concept="CommonStockholdersEquity", end_date=f"{current_year}-09-30", value=2000),
+                make_fact(concept="CommonStockholdersEquity", end_date=f"{current_year-1}-09-30", value=1800),
+                make_fact(concept="CommonStockholdersEquity", end_date=f"{current_year-2}-09-30", value=1600),
+                make_fact(concept="CommonStockholdersEquity", end_date=f"{current_year-3}-09-30", value=1400),
+                make_fact(concept="CommonStockholdersEquity", end_date=f"{current_year-4}-09-30", value=1200),
+                make_fact(concept="CommonStockholdersEquity", end_date=f"{current_year-5}-09-30", value=1000),
                 make_fact(concept="NetIncomeLossAvailableToCommonStockholdersBasic", end_date=f"{current_year}-09-30", value=250),
                 make_fact(concept="NetIncomeLossAvailableToCommonStockholdersBasic", end_date=f"{current_year-1}-09-30", value=230),
                 make_fact(concept="NetIncomeLossAvailableToCommonStockholdersBasic", end_date=f"{current_year-2}-09-30", value=210),
@@ -686,11 +691,11 @@ def test_cmd_compute_metrics_all(tmp_path):
                 make_fact(concept="NetIncomeLossAvailableToCommonStockholdersBasic", end_date=f"{current_year-4}-09-30", value=170),
                 make_fact(concept="PreferredStock", end_date=f"{current_year}-09-30", value=0),
                 make_fact(concept="CommonStockSharesOutstanding", end_date=f"{current_year}-09-30", value=500),
-                make_fact(concept="Goodwill", end_date=f"{current_year}-09-30", value=100),
-                make_fact(concept="IntangibleAssetsNet", end_date=f"{current_year}-09-30", value=50),
-                make_fact(concept="LongTermDebtNoncurrent", end_date=f"{current_year}-09-30", value=300),
-            ]
-    )
+                    make_fact(concept="Goodwill", end_date=f"{current_year}-09-30", value=100),
+                    make_fact(concept="IntangibleAssetsNetExcludingGoodwill", end_date=f"{current_year}-09-30", value=50),
+                    make_fact(concept="LongTermDebt", end_date=f"{current_year}-09-30", value=300),
+                ]
+        )
     q4 = (date.today() - timedelta(days=20)).isoformat()
     q3 = (date.today() - timedelta(days=110)).isoformat()
     q2 = (date.today() - timedelta(days=200)).isoformat()
@@ -714,7 +719,7 @@ def test_cmd_compute_metrics_all(tmp_path):
         )
         records.append(
             make_fact(
-                concept="PaymentsToAcquirePropertyPlantAndEquipment",
+                concept="CapitalExpenditures",
                 end_date=end_date,
                 fiscal_period=period,
                 value=capex,
@@ -730,7 +735,7 @@ def test_cmd_compute_metrics_all(tmp_path):
     for end_date, period, value in quarterly_eps:
         records.append(
             make_fact(
-                concept="EarningsPerShareDiluted",
+                concept="EarningsPerShare",
                 end_date=end_date,
                 fiscal_period=period,
                 value=value,

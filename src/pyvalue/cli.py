@@ -22,8 +22,8 @@ from pyvalue.normalization import EODHDFactsNormalizer, SECFactsNormalizer
 from pyvalue.reporting import MetricCoverage, compute_fact_coverage
 from pyvalue.screening import Criterion, evaluate_criterion, load_screen, evaluate_criterion_verbose
 from pyvalue.logging_utils import setup_logging
+from pyvalue.facts import RegionFactsRepository
 from pyvalue.storage import (
-    CompanyFactsRepository,
     EntityMetadataRepository,
     FundamentalsRepository,
     ExchangeMetadataRepository,
@@ -777,9 +777,6 @@ def cmd_ingest_us_facts(symbol: str, database: str, user_agent: Optional[str], c
 
     payload = client.fetch_company_facts(cik_value)
 
-    repo = CompanyFactsRepository(database)
-    repo.initialize_schema()
-    repo.upsert_company_facts(symbol=symbol.upper(), cik=cik_value, payload=payload)
     fundamentals_repo = FundamentalsRepository(database)
     fundamentals_repo.initialize_schema()
     fundamentals_repo.upsert("SEC", symbol.upper(), payload, region="US", exchange="US")
@@ -796,8 +793,6 @@ def cmd_ingest_us_facts_bulk(
     """Fetch SEC company facts for every symbol in the stored universe."""
 
     client = SECCompanyFactsClient(user_agent=user_agent)
-    company_repo = CompanyFactsRepository(database)
-    company_repo.initialize_schema()
     fundamentals_repo = FundamentalsRepository(database)
     fundamentals_repo.initialize_schema()
 
@@ -834,7 +829,6 @@ def cmd_ingest_us_facts_bulk(
 
             last_fetch = time.perf_counter()
             qualified = _qualify_symbol(info.symbol, exchange="US", region="US")
-            company_repo.upsert_company_facts(qualified, info.cik, payload)
             fundamentals_repo.upsert("SEC", qualified, payload, region=region, exchange="US")
             processed += 1
             print(f"[{idx}/{total}] Stored company facts for {qualified}", flush=True)
@@ -983,15 +977,15 @@ def cmd_normalize_us_facts(symbol: str, database: str) -> int:
     """Normalize previously ingested SEC facts for downstream metrics."""
 
     symbol = _qualify_symbol(symbol, exchange="US", region="US")
-    company_repo = CompanyFactsRepository(database)
-    record = company_repo.fetch_fact_record(symbol.upper())
-    if record is None:
+    fund_repo = FundamentalsRepository(database)
+    fund_repo.initialize_schema()
+    payload = fund_repo.fetch("SEC", symbol.upper())
+    if payload is None:
         raise SystemExit(
             f"No raw SEC payload found for {symbol}. Run ingest-us-facts before normalization."
         )
-    cik_value, payload = record
     normalizer = SECFactsNormalizer()
-    records = normalizer.normalize(payload, symbol=symbol.upper(), cik=cik_value)
+    records = normalizer.normalize(payload, symbol=symbol.upper())
 
     fact_repo = FinancialFactsRepository(database)
     fact_repo.initialize_schema()
@@ -1008,24 +1002,26 @@ def cmd_normalize_us_facts(symbol: str, database: str) -> int:
 def cmd_normalize_us_facts_bulk(database: str) -> int:
     """Normalize raw SEC facts for every stored ticker."""
 
-    company_repo = CompanyFactsRepository(database)
+    fund_repo = FundamentalsRepository(database)
+    fund_repo.initialize_schema()
     normalization_repo = FinancialFactsRepository(database)
     normalization_repo.initialize_schema()
     entity_repo = EntityMetadataRepository(database)
     entity_repo.initialize_schema()
 
-    cursor = company_repo._connect().execute("SELECT symbol, cik, data FROM company_facts")
-    rows = cursor.fetchall()
-    if not rows:
+    symbols = fund_repo.symbols("SEC", region="US")
+    if not symbols:
         raise SystemExit("No raw SEC facts found. Run ingest-us-facts or ingest-us-facts-bulk first.")
 
     normalizer = SECFactsNormalizer()
-    total = len(rows)
+    total = len(symbols)
     print(f"Normalizing SEC facts for {total} symbols")
     try:
-        for idx, (symbol, cik, data_json) in enumerate(rows, 1):
-            payload = json.loads(data_json)
-            records = normalizer.normalize(payload, symbol=symbol, cik=cik)
+        for idx, symbol in enumerate(symbols, 1):
+            payload = fund_repo.fetch("SEC", symbol)
+            if payload is None:
+                continue
+            records = normalizer.normalize(payload, symbol=symbol)
             entity_name = payload.get("entityName")
             if entity_name:
                 entity_repo.upsert(symbol, entity_name)
@@ -1157,7 +1153,8 @@ def cmd_compute_metrics(symbol: str, metric_ids: Sequence[str], database: str, r
     """Compute one or more metrics and store the results."""
 
     db_path = _resolve_database_path(database)
-    fact_repo = FinancialFactsRepository(db_path)
+    base_fact_repo = FinancialFactsRepository(db_path)
+    fact_repo = RegionFactsRepository(base_fact_repo)
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
     computed = 0
@@ -1206,7 +1203,8 @@ def cmd_compute_metrics_bulk(database: str, region: str, metric_ids: Optional[Se
             f"Database: {db_path}"
         )
 
-    fact_repo = FinancialFactsRepository(db_path)
+    base_fact_repo = FinancialFactsRepository(db_path)
+    fact_repo = RegionFactsRepository(base_fact_repo)
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
     market_repo = MarketDataRepository(db_path)
@@ -1268,7 +1266,8 @@ def cmd_report_fact_freshness(
         raise SystemExit(f"No symbols found for region {region_label}.")
 
     metric_classes = _select_metric_classes(metric_ids)
-    fact_repo = FinancialFactsRepository(db_path)
+    base_fact_repo = FinancialFactsRepository(db_path)
+    fact_repo = RegionFactsRepository(base_fact_repo)
     coverage = compute_fact_coverage(
         fact_repo,
         symbols,
@@ -1309,8 +1308,9 @@ def cmd_report_metric_coverage(
         raise SystemExit(f"No symbols found for region {region_label}.")
 
     metric_classes = _select_metric_classes(metric_ids)
-    fact_repo = FinancialFactsRepository(db_path)
-    fact_repo.initialize_schema()
+    base_fact_repo = FinancialFactsRepository(db_path)
+    base_fact_repo.initialize_schema()
+    fact_repo = RegionFactsRepository(base_fact_repo)
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
 
@@ -1345,14 +1345,16 @@ def cmd_report_metric_coverage(
 
 
 def _eligible_sec_filers(db_path: Path) -> List[str]:
-    """Return symbols that have at least one 10-K/10-Q filing in company_facts."""
+    """Return symbols that have at least one 10-K/10-Q filing in SEC raw facts."""
 
-    repo = CompanyFactsRepository(db_path)
+    repo = FundamentalsRepository(db_path)
     repo.initialize_schema()
     allowed = {"10-K", "10-K/A", "10-Q", "10-Q/A"}
     eligible: set[str] = set()
     with repo._connect() as conn:
-        rows = conn.execute("SELECT symbol, data FROM company_facts").fetchall()
+        rows = conn.execute(
+            "SELECT symbol, data FROM fundamentals_raw WHERE provider = 'SEC'"
+        ).fetchall()
     for symbol, payload_json in rows:
         try:
             data = json.loads(payload_json)
@@ -1409,8 +1411,9 @@ def cmd_recalc_market_cap(database: str) -> int:
 
     market_repo = MarketDataRepository(database)
     market_repo.initialize_schema()
-    fact_repo = FinancialFactsRepository(database)
-    fact_repo.initialize_schema()
+    base_fact_repo = FinancialFactsRepository(database)
+    base_fact_repo.initialize_schema()
+    fact_repo = RegionFactsRepository(base_fact_repo)
 
     with market_repo._connect() as conn:
         symbols = [row[0] for row in conn.execute("SELECT DISTINCT symbol FROM market_data ORDER BY symbol")]
@@ -1491,7 +1494,8 @@ def cmd_run_screen(symbol: str, config_path: str, database: str) -> int:
     definition = load_screen(config_path)
     metrics_repo = MetricsRepository(database)
     metrics_repo.initialize_schema()
-    fact_repo = FinancialFactsRepository(database)
+    base_fact_repo = FinancialFactsRepository(database)
+    fact_repo = RegionFactsRepository(base_fact_repo)
     market_repo = MarketDataRepository(database)
     market_repo.initialize_schema()
     results = []
@@ -1522,7 +1526,8 @@ def cmd_run_screen_bulk(config_path: str, database: str, region: str, output_csv
 
     metrics_repo = MetricsRepository(database)
     metrics_repo.initialize_schema()
-    fact_repo = FinancialFactsRepository(database)
+    base_fact_repo = FinancialFactsRepository(database)
+    fact_repo = RegionFactsRepository(base_fact_repo)
     market_repo = MarketDataRepository(database)
     market_repo.initialize_schema()
     entity_repo = EntityMetadataRepository(database)

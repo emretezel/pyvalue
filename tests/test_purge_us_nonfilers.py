@@ -3,7 +3,7 @@
 import json
 
 from pyvalue.cli import cmd_purge_us_nonfilers
-from pyvalue.storage import CompanyFactsRepository, UniverseRepository
+from pyvalue.storage import FundamentalsRepository, UniverseRepository
 from pyvalue.universe import Listing
 
 
@@ -20,7 +20,7 @@ def _seed_universe(db_path):
 
 
 def _seed_company_facts(db_path):
-    repo = CompanyFactsRepository(db_path)
+    repo = FundamentalsRepository(db_path)
     repo.initialize_schema()
     payload = {
         "facts": {
@@ -35,7 +35,7 @@ def _seed_company_facts(db_path):
             }
         }
     }
-    repo.upsert_company_facts("FILER.US", "CIK0000001", payload)
+    repo.upsert("SEC", "FILER.US", payload, region="US")
 
 
 def test_purge_us_nonfilers_dry_run(tmp_path, capsys):

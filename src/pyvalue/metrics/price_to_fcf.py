@@ -15,17 +15,8 @@ from pyvalue.metrics.utils import is_recent_fact
 from pyvalue.fx import FXRateStore
 from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
 
-OPERATING_CASH_FLOW_CONCEPTS = [
-    "NetCashProvidedByUsedInOperatingActivities",
-    "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
-]
-CAPEX_CONCEPTS = [
-    "CapitalExpenditures",
-    "PaymentsToAcquirePropertyPlantAndEquipment",
-    "PurchaseOfPropertyPlantAndEquipment",
-    "PropertyPlantAndEquipmentAdditions",
-    "PaymentsToAcquireProductiveAssets",
-]
+OPERATING_CASH_FLOW_CONCEPTS = ["NetCashProvidedByUsedInOperatingActivities"]
+CAPEX_CONCEPTS = ["CapitalExpenditures"]
 QUARTERLY_PERIODS = {"Q1", "Q2", "Q3", "Q4"}
 
 LOGGER = logging.getLogger(__name__)
@@ -85,11 +76,20 @@ class PriceToFCFMetric:
     ) -> Optional[_TTMResult]:
         operating = self._ttm_sum(symbol, repo, OPERATING_CASH_FLOW_CONCEPTS)
         capex = self._ttm_sum(symbol, repo, CAPEX_CONCEPTS)
-        if operating is None or capex is None:
+        if operating is None:
             return None
-        fcf_total = operating.total - capex.total
-        as_of = operating.as_of if operating.as_of >= capex.as_of else capex.as_of
-        currency = operating.currency or capex.currency
+        if capex is None:
+            LOGGER.warning("price_to_fcf: missing/stale capex for %s; assuming zero", symbol)
+            capex_total = 0.0
+            capex_as_of = operating.as_of
+            capex_currency = None
+        else:
+            capex_total = capex.total
+            capex_as_of = capex.as_of
+            capex_currency = capex.currency
+        fcf_total = operating.total - capex_total
+        as_of = operating.as_of if operating.as_of >= capex_as_of else capex_as_of
+        currency = operating.currency or capex_currency
         return _TTMResult(total=fcf_total, as_of=as_of, currency=currency)
 
     def _ttm_sum(

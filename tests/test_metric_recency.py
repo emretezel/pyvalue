@@ -44,7 +44,7 @@ def test_ttm_metric_requires_recent_quarters(tmp_path):
         records.append(
             FactRecord(
                 symbol="AAPL.US",
-                concept="EarningsPerShareBasic",
+                concept="EarningsPerShare",
                 fiscal_period=f"Q{idx}",
                 end_date=(today - timedelta(days=months_ago * 30)).isoformat(),
                 unit="USD",
@@ -69,7 +69,7 @@ def test_ttm_metric_skips_when_latest_quarter_is_stale(tmp_path):
         records.append(
             FactRecord(
                 symbol="AAPL.US",
-                concept="EarningsPerShareBasic",
+                concept="EarningsPerShare",
                 fiscal_period=f"Q{idx}",
                 end_date=(today - timedelta(days=months_ago * 30)).isoformat(),
                 unit="USD",
@@ -92,7 +92,7 @@ def test_fy_metric_accepts_when_recent_quarter_exists(tmp_path):
         fy_records.append(
             FactRecord(
                 symbol="AAPL.US",
-                concept="EarningsPerShareBasic",
+                concept="EarningsPerShare",
                 fiscal_period="FY",
                 end_date=f"{year}-12-31",
                 unit="USD",
@@ -104,7 +104,7 @@ def test_fy_metric_accepts_when_recent_quarter_exists(tmp_path):
     fy_records.append(
         FactRecord(
             symbol="AAPL.US",
-            concept="EarningsPerShareBasic",
+            concept="EarningsPerShare",
             fiscal_period="Q3",
             end_date=(date.today() - timedelta(days=60)).isoformat(),
             unit="USD",

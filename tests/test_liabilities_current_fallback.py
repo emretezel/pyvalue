@@ -1,57 +1,58 @@
-"""LiabilitiesCurrent fallback derivation."""
+"""LiabilitiesCurrent derivation via SEC normalization."""
 
-from datetime import date, timedelta
-
-from pyvalue.metrics.current_ratio import CurrentRatioMetric
-from pyvalue.metrics.working_capital import WorkingCapitalMetric
-from pyvalue.storage import FactRecord, FinancialFactsRepository
+from pyvalue.normalization import SECFactsNormalizer
 
 
-def _fact(symbol: str, concept: str, days_ago: int, value: float, fiscal_period: str = "Q1") -> FactRecord:
-    return FactRecord(
-        symbol=symbol,
-        concept=concept,
-        fiscal_period=fiscal_period,
-        end_date=(date.today() - timedelta(days=days_ago)).isoformat(),
-        unit="USD",
-        value=value,
-    )
+def _quarter_entry(value: float) -> dict:
+    return {
+        "val": value,
+        "fp": "Q1",
+        "end": "2024-03-31",
+        "form": "10-Q",
+        "filed": "2024-05-01",
+    }
 
 
-def test_working_capital_derives_liabilities_current_when_missing(tmp_path):
-    repo = FinancialFactsRepository(tmp_path / "facts.db")
-    repo.initialize_schema()
-    symbol = "TEST.US"
-    records = [
-        _fact(symbol, "AssetsCurrent", 10, 75.0),
-        _fact(symbol, "AccountsPayableCurrent", 10, 15.0),
-        _fact(symbol, "AccruedLiabilitiesCurrent", 10, 5.0),
+def test_normalizer_derives_liabilities_current_from_components():
+    payload = {
+        "facts": {
+            "us-gaap": {
+                "AccountsPayableCurrent": {"units": {"USD": [_quarter_entry(15.0)]}},
+                "AccruedLiabilitiesCurrent": {"units": {"USD": [_quarter_entry(5.0)]}},
+            }
+        }
+    }
+    normalizer = SECFactsNormalizer()
+
+    records = normalizer.normalize(payload, symbol="TEST.US", cik="CIK0000")
+
+    derived = [
+        rec
+        for rec in records
+        if rec.concept == "LiabilitiesCurrent" and rec.end_date == "2024-03-31" and rec.fiscal_period == "Q1"
     ]
-    repo.replace_facts(symbol, records)
-
-    metric = WorkingCapitalMetric()
-    result = metric.compute(symbol, repo)
-
-    assert result is not None
-    assert result.value == 75.0 - (15.0 + 5.0)
+    assert len(derived) == 1
+    assert derived[0].value == 20.0
 
 
-def test_current_ratio_ignores_stale_liabilities_current_when_components_fresh(tmp_path):
-    repo = FinancialFactsRepository(tmp_path / "facts_stale.db")
-    repo.initialize_schema()
-    symbol = "TEST2.US"
-    stale_days = 400
-    fresh_days = 5
-    records = [
-        _fact(symbol, "AssetsCurrent", fresh_days, 60.0),
-        _fact(symbol, "LiabilitiesCurrent", stale_days, 50.0),
-        _fact(symbol, "DeferredRevenueCurrent", fresh_days, 20.0),
-        _fact(symbol, "ShortTermBorrowings", fresh_days, 10.0),
+def test_normalizer_skips_liabilities_current_derivation_when_total_present():
+    payload = {
+        "facts": {
+            "us-gaap": {
+                "LiabilitiesCurrent": {"units": {"USD": [_quarter_entry(40.0)]}},
+                "AccountsPayableCurrent": {"units": {"USD": [_quarter_entry(15.0)]}},
+                "AccruedLiabilitiesCurrent": {"units": {"USD": [_quarter_entry(5.0)]}},
+            }
+        }
+    }
+    normalizer = SECFactsNormalizer()
+
+    records = normalizer.normalize(payload, symbol="TEST.US", cik="CIK0000")
+
+    liabilities = [
+        rec
+        for rec in records
+        if rec.concept == "LiabilitiesCurrent" and rec.end_date == "2024-03-31" and rec.fiscal_period == "Q1"
     ]
-    repo.replace_facts(symbol, records)
-
-    metric = CurrentRatioMetric()
-    result = metric.compute(symbol, repo)
-
-    assert result is not None
-    assert result.value == 60.0 / (20.0 + 10.0)
+    assert len(liabilities) == 1
+    assert liabilities[0].value == 40.0

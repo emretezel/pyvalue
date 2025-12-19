@@ -16,7 +16,7 @@ from pyvalue.fx import FXRateStore
 from pyvalue.marketdata.base import PriceData
 from pyvalue.storage import FinancialFactsRepository, MarketDataRepository
 
-EPS_CONCEPTS = ["EarningsPerShareDiluted", "EarningsPerShareBasic"]
+EPS_CONCEPTS = ["EarningsPerShare"]
 
 LOGGER = logging.getLogger(__name__)
 

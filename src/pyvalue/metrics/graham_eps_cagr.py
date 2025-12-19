@@ -14,7 +14,7 @@ from pyvalue.metrics.base import Metric, MetricResult
 from pyvalue.metrics.utils import MAX_FY_FACT_AGE_DAYS, filter_unique_fy, has_recent_fact
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
-EPS_CONCEPTS = ["EarningsPerShareDiluted", "EarningsPerShareBasic"]
+EPS_CONCEPTS = ["EarningsPerShare"]
 
 
 def _sorted_records(records: Dict[str, FactRecord]) -> List[FactRecord]:

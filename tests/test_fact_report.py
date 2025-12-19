@@ -105,9 +105,9 @@ def test_fact_report_counts_assets_current_from_components(tmp_path):
     report = compute_fact_coverage(fact_repo, ["AAA.US"], [WorkingCapitalMetric], max_age_days=365)
     entry = report[0]
     coverage = {c.concept: c for c in entry.concepts}
-    assert coverage["AssetsCurrent"].missing == 0
+    assert coverage["AssetsCurrent"].missing == 1
     assert coverage["AssetsCurrent"].stale == 0
-    assert entry.fully_covered == 1
+    assert entry.fully_covered == 0
 
 
 def test_fact_report_counts_liabilities_current_from_components(tmp_path):
@@ -128,6 +128,6 @@ def test_fact_report_counts_liabilities_current_from_components(tmp_path):
     report = compute_fact_coverage(fact_repo, ["AAA.US"], [WorkingCapitalMetric], max_age_days=365)
     entry = report[0]
     coverage = {c.concept: c for c in entry.concepts}
-    assert coverage["LiabilitiesCurrent"].missing == 0
+    assert coverage["LiabilitiesCurrent"].missing == 1
     assert coverage["LiabilitiesCurrent"].stale == 0
-    assert entry.fully_covered == 1
+    assert entry.fully_covered == 0

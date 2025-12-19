@@ -9,7 +9,82 @@ from datetime import datetime
 from typing import Dict, Iterable, List, Optional
 
 from pyvalue.storage import FactRecord
-from .sec import TARGET_CONCEPTS
+
+EPS_PREFERRED_CONCEPTS = (
+    "EarningsPerShareDiluted",
+    "EarningsPerShareBasic",
+)
+INTANGIBLE_EXCL_GOODWILL_FALLBACK = ("IntangibleAssetsNet",)
+EQUITY_FALLBACK_CONCEPTS = ("CommonStockholdersEquity",)
+SHARES_FALLBACK_CONCEPTS = ("EntityCommonStockSharesOutstanding",)
+OPERATING_CASH_FLOW_FALLBACK: tuple[str, ...] = ()
+CAPEX_FALLBACK_CONCEPTS: tuple[str, ...] = ()
+EBIT_FALLBACK_CONCEPTS: tuple[str, ...] = ()
+PPE_FALLBACK_CONCEPTS: tuple[str, ...] = ()
+INCOME_AVAILABLE_TO_COMMON_FALLBACK = ("NetIncomeLoss",)
+PREFERRED_DIVIDEND_FALLBACK = ("PreferredStockDividendsAndOtherAdjustments",)
+COMMON_EQUITY_FALLBACK = ("StockholdersEquity",)
+
+EODHD_STATEMENT_FIELDS = {
+    "Balance_Sheet": {
+        "AssetsCurrent": ["totalCurrentAssets"],
+        "LiabilitiesCurrent": ["totalCurrentLiabilities"],
+        "Assets": ["totalAssets"],
+        "Liabilities": ["totalLiabilities", "totalLiab"],
+        "StockholdersEquity": ["totalStockholderEquity", "totalShareholderEquity"],
+        "CommonStockholdersEquity": ["commonStockTotalEquity"],
+        "PreferredStock": ["preferredStockTotalEquity", "preferredStockRedeemable", "preferredStock", "capitalStock"],
+        "Goodwill": ["goodWill", "goodwill"],
+        "IntangibleAssetsNet": ["intangibleAssets"],
+        "LongTermDebtNoncurrent": [
+            "longTermDebt",
+            "longTermDebtNoncurrent",
+            "longTermDebtTotal",
+        ],
+        "LongTermDebt": [
+            "shortLongTermDebtTotal",
+            "longTermDebtTotal",
+            "longTermDebt",
+            "shortLongTermDebt",
+        ],
+        "PropertyPlantAndEquipmentNet": [
+            "propertyPlantAndEquipmentNet",
+            "propertyPlantEquipment",
+            "netPropertyPlantAndEquipment",
+            "propertyPlantAndEquipment",
+        ],
+        "CommonStockSharesOutstanding": [
+            "shareIssued",
+            "commonStockSharesOutstanding",
+        ],
+        "EntityCommonStockSharesOutstanding": [
+            "shareIssued",
+            "commonStockSharesOutstanding",
+        ],
+    },
+    "Income_Statement": {
+        "NetIncomeLoss": ["netIncome", "netIncomeFromContinuingOps"],
+        "NetIncomeLossAvailableToCommonStockholdersBasic": ["netIncomeApplicableToCommonShares"],
+        "PreferredStockDividendsAndOtherAdjustments": ["preferredStockAndOtherAdjustments"],
+        "OperatingIncomeLoss": ["operatingIncome", "ebit"],
+        "IncomeBeforeIncomeTaxes": ["incomeBeforeTax"],
+        "Revenues": ["totalRevenue", "revenue"],
+        "EarningsPerShareDiluted": ["epsDiluted", "epsdiluted", "epsDilluted"],
+        "EarningsPerShareBasic": ["eps", "epsBasic"],
+        "WeightedAverageNumberOfDilutedSharesOutstanding": ["weightedAverageShsOutDil", "weightedAverageShsOutDiluted"],
+        "WeightedAverageNumberOfSharesOutstandingBasic": ["weightedAverageShsOut", "weightedAverageShsOutBasic"],
+    },
+    "Cash_Flow": {
+        "NetCashProvidedByUsedInOperatingActivities": [
+            "totalCashFromOperatingActivities",
+        ],
+        "CapitalExpenditures": ["capitalExpenditures", "capex"],
+    },
+}
+
+EODHD_TARGET_CONCEPTS = {
+    concept for statement in EODHD_STATEMENT_FIELDS.values() for concept in statement
+}
 
 
 def _to_float(value: object) -> Optional[float]:
@@ -32,66 +107,10 @@ def _normalize_currency_code(value: object) -> Optional[str]:
 class EODHDFactsNormalizer:
     """Flatten EODHD fundamentals payloads into FactRecord entries."""
 
-    STATEMENT_FIELDS = {
-        "Balance_Sheet": {
-            "AssetsCurrent": ["totalCurrentAssets"],
-            "LiabilitiesCurrent": ["totalCurrentLiabilities"],
-            "Assets": ["totalAssets"],
-            "Liabilities": ["totalLiabilities", "totalLiab"],
-            "StockholdersEquity": ["totalStockholderEquity", "totalShareholderEquity"],
-            "PreferredStock": ["preferredStock", "capitalStock"],
-            "Goodwill": ["goodWill", "goodwill"],
-            "IntangibleAssetsNet": ["intangibleAssets"],
-            "LongTermDebtNoncurrent": [
-                "longTermDebt",
-                "longTermDebtNoncurrent",
-                "longTermDebtTotal",
-                "shortLongTermDebtTotal",
-                "totalNonCurrentLiabilitiesNetMinorityInterest",
-            ],
-            "LongTermDebt": [
-                "longTermDebt",
-                "longTermDebtNoncurrent",
-                "longTermDebtTotal",
-                "shortLongTermDebtTotal",
-                "totalNonCurrentLiabilitiesNetMinorityInterest",
-            ],
-            "PropertyPlantAndEquipmentNet": [
-                "propertyPlantAndEquipmentNet",
-                "propertyPlantAndEquipment",
-                "netPropertyPlantAndEquipment",
-                "propertyPlantEquipment",
-            ],
-            "CommonStockSharesOutstanding": [
-                "shareIssued",
-                "commonStockSharesOutstanding",
-            ],
-            "EntityCommonStockSharesOutstanding": [
-                "shareIssued",
-                "commonStockSharesOutstanding",
-            ],
-        },
-        "Income_Statement": {
-            "NetIncomeLoss": ["netIncome"],
-            "OperatingIncomeLoss": ["operatingIncome"],
-            "IncomeBeforeIncomeTaxes": ["incomeBeforeTax"],
-            "Revenues": ["totalRevenue", "revenue"],
-            "EarningsPerShareDiluted": ["epsDiluted", "epsdiluted", "epsDilluted"],
-            "EarningsPerShareBasic": ["eps", "epsBasic"],
-            "WeightedAverageNumberOfDilutedSharesOutstanding": ["weightedAverageShsOutDil", "weightedAverageShsOutDiluted"],
-            "WeightedAverageNumberOfSharesOutstandingBasic": ["weightedAverageShsOut", "weightedAverageShsOutBasic"],
-        },
-        "Cash_Flow": {
-            "NetCashProvidedByUsedInOperatingActivities": [
-                "totalCashFromOperatingActivities",
-                "netCashProvidedByOperatingActivities",
-            ],
-            "CapitalExpenditures": ["capitalExpenditures", "capex"],
-        },
-    }
+    STATEMENT_FIELDS = EODHD_STATEMENT_FIELDS
 
     def __init__(self, concepts: Optional[Iterable[str]] = None) -> None:
-        self.concepts = set(concepts or TARGET_CONCEPTS)
+        self.concepts = set(concepts or EODHD_TARGET_CONCEPTS)
 
     def normalize(
         self,
@@ -122,6 +141,16 @@ class EODHDFactsNormalizer:
 
         records.extend(self._normalize_share_counts(payload, symbol, accounting_standard, currency_code))
         records.extend(self._normalize_earnings_eps(payload, symbol, accounting_standard))
+        records.extend(self._derive_eps_alias(records))
+        records.extend(self._derive_intangibles_excluding_goodwill(records))
+        records.extend(self._derive_equity_alias(records))
+        records.extend(self._derive_shares_alias(records))
+        records.extend(self._derive_operating_cash_flow_alias(records))
+        records.extend(self._derive_capex_alias(records))
+        records.extend(self._derive_ebit_alias(records))
+        records.extend(self._derive_ppe_alias(records))
+        records.extend(self._derive_net_income_available_to_common(records))
+        records.extend(self._derive_common_stockholders_equity(records))
         return records
 
     def _normalize_statement(
@@ -263,6 +292,287 @@ class EODHDFactsNormalizer:
 
         return records
 
+    def _index_records(self, records: List[FactRecord]) -> Dict[str, Dict[tuple[str, str, str], FactRecord]]:
+        indexed: Dict[str, Dict[tuple[str, str, str], FactRecord]] = {}
+        for record in records:
+            key = (record.end_date, record.fiscal_period or "", record.unit)
+            bucket = indexed.setdefault(record.concept, {})
+            if key not in bucket:
+                bucket[key] = record
+        return indexed
+
+    def _derive_eps_alias(self, records: List[FactRecord]) -> List[FactRecord]:
+        indexed = self._index_records(records)
+        existing = indexed.get("EarningsPerShare", {})
+        candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
+        for concept in EPS_PREFERRED_CONCEPTS:
+            candidate_keys.update(indexed.get(concept, {}).keys())
+
+        derived: List[FactRecord] = []
+        for key in candidate_keys:
+            if key in existing:
+                continue
+            base = None
+            for concept in EPS_PREFERRED_CONCEPTS:
+                base = indexed.get(concept, {}).get(key)
+                if base and base.value is not None:
+                    break
+            if base is None or base.value is None:
+                continue
+            derived.append(self._alias_record(base, "EarningsPerShare"))
+        return derived
+
+    def _derive_intangibles_excluding_goodwill(self, records: List[FactRecord]) -> List[FactRecord]:
+        indexed = self._index_records(records)
+        existing = indexed.get("IntangibleAssetsNetExcludingGoodwill", {})
+        candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
+        for concept in INTANGIBLE_EXCL_GOODWILL_FALLBACK:
+            candidate_keys.update(indexed.get(concept, {}).keys())
+
+        derived: List[FactRecord] = []
+        for key in candidate_keys:
+            if key in existing:
+                continue
+            base = None
+            for concept in INTANGIBLE_EXCL_GOODWILL_FALLBACK:
+                base = indexed.get(concept, {}).get(key)
+                if base and base.value is not None:
+                    break
+            if base is None or base.value is None:
+                continue
+            derived.append(self._alias_record(base, "IntangibleAssetsNetExcludingGoodwill"))
+        return derived
+
+    def _derive_equity_alias(self, records: List[FactRecord]) -> List[FactRecord]:
+        indexed = self._index_records(records)
+        existing = indexed.get("StockholdersEquity", {})
+        candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
+        for concept in EQUITY_FALLBACK_CONCEPTS:
+            candidate_keys.update(indexed.get(concept, {}).keys())
+
+        derived: List[FactRecord] = []
+        for key in candidate_keys:
+            if key in existing:
+                continue
+            base = None
+            for concept in EQUITY_FALLBACK_CONCEPTS:
+                base = indexed.get(concept, {}).get(key)
+                if base and base.value is not None:
+                    break
+            if base is None or base.value is None:
+                continue
+            derived.append(self._alias_record(base, "StockholdersEquity"))
+        return derived
+
+    def _derive_shares_alias(self, records: List[FactRecord]) -> List[FactRecord]:
+        indexed = self._index_records(records)
+        existing = indexed.get("CommonStockSharesOutstanding", {})
+        candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
+        for concept in SHARES_FALLBACK_CONCEPTS:
+            candidate_keys.update(indexed.get(concept, {}).keys())
+
+        derived: List[FactRecord] = []
+        for key in candidate_keys:
+            if key in existing:
+                continue
+            base = None
+            for concept in SHARES_FALLBACK_CONCEPTS:
+                base = indexed.get(concept, {}).get(key)
+                if base and base.value is not None:
+                    break
+            if base is None or base.value is None:
+                continue
+            derived.append(self._alias_record(base, "CommonStockSharesOutstanding"))
+        return derived
+
+    def _derive_operating_cash_flow_alias(self, records: List[FactRecord]) -> List[FactRecord]:
+        indexed = self._index_records(records)
+        existing = indexed.get("NetCashProvidedByUsedInOperatingActivities", {})
+        candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
+        for concept in OPERATING_CASH_FLOW_FALLBACK:
+            candidate_keys.update(indexed.get(concept, {}).keys())
+
+        derived: List[FactRecord] = []
+        for key in candidate_keys:
+            if key in existing:
+                continue
+            base = None
+            for concept in OPERATING_CASH_FLOW_FALLBACK:
+                base = indexed.get(concept, {}).get(key)
+                if base and base.value is not None:
+                    break
+            if base is None or base.value is None:
+                continue
+            derived.append(self._alias_record(base, "NetCashProvidedByUsedInOperatingActivities"))
+        return derived
+
+    def _derive_capex_alias(self, records: List[FactRecord]) -> List[FactRecord]:
+        indexed = self._index_records(records)
+        existing = indexed.get("CapitalExpenditures", {})
+        candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
+        for concept in CAPEX_FALLBACK_CONCEPTS:
+            candidate_keys.update(indexed.get(concept, {}).keys())
+
+        derived: List[FactRecord] = []
+        for key in candidate_keys:
+            if key in existing:
+                continue
+            base = None
+            for concept in CAPEX_FALLBACK_CONCEPTS:
+                base = indexed.get(concept, {}).get(key)
+                if base and base.value is not None:
+                    break
+            if base is None or base.value is None:
+                continue
+            derived.append(self._alias_record(base, "CapitalExpenditures"))
+        return derived
+
+    def _derive_ebit_alias(self, records: List[FactRecord]) -> List[FactRecord]:
+        indexed = self._index_records(records)
+        existing = indexed.get("OperatingIncomeLoss", {})
+        candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
+        for concept in EBIT_FALLBACK_CONCEPTS:
+            candidate_keys.update(indexed.get(concept, {}).keys())
+
+        derived: List[FactRecord] = []
+        for key in candidate_keys:
+            if key in existing:
+                continue
+            base = None
+            for concept in EBIT_FALLBACK_CONCEPTS:
+                base = indexed.get(concept, {}).get(key)
+                if base and base.value is not None:
+                    break
+            if base is None or base.value is None:
+                continue
+            derived.append(self._alias_record(base, "OperatingIncomeLoss"))
+        return derived
+
+    def _derive_ppe_alias(self, records: List[FactRecord]) -> List[FactRecord]:
+        indexed = self._index_records(records)
+        existing = indexed.get("PropertyPlantAndEquipmentNet", {})
+        candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
+        for concept in PPE_FALLBACK_CONCEPTS:
+            candidate_keys.update(indexed.get(concept, {}).keys())
+
+        derived: List[FactRecord] = []
+        for key in candidate_keys:
+            if key in existing:
+                continue
+            base = None
+            for concept in PPE_FALLBACK_CONCEPTS:
+                base = indexed.get(concept, {}).get(key)
+                if base and base.value is not None:
+                    break
+            if base is None or base.value is None:
+                continue
+            derived.append(self._alias_record(base, "PropertyPlantAndEquipmentNet"))
+        return derived
+
+    def _derive_net_income_available_to_common(self, records: List[FactRecord]) -> List[FactRecord]:
+        indexed = self._index_records(records)
+        existing = indexed.get("NetIncomeLossAvailableToCommonStockholdersBasic", {})
+        candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
+        for concept in INCOME_AVAILABLE_TO_COMMON_FALLBACK:
+            candidate_keys.update(indexed.get(concept, {}).keys())
+
+        derived: List[FactRecord] = []
+        for key in candidate_keys:
+            if key in existing:
+                continue
+            base = None
+            for concept in INCOME_AVAILABLE_TO_COMMON_FALLBACK:
+                base = indexed.get(concept, {}).get(key)
+                if base and base.value is not None:
+                    break
+            if base is None or base.value is None:
+                continue
+            preferred_value = None
+            for concept in PREFERRED_DIVIDEND_FALLBACK:
+                pref = indexed.get(concept, {}).get(key)
+                if pref and pref.value is not None:
+                    preferred_value = pref.value
+                    break
+            adjusted = base.value - (preferred_value or 0.0)
+            derived.append(
+                FactRecord(
+                    symbol=base.symbol,
+                    provider=base.provider,
+                    cik=base.cik,
+                    concept="NetIncomeLossAvailableToCommonStockholdersBasic",
+                    fiscal_period=base.fiscal_period,
+                    end_date=base.end_date,
+                    unit=base.unit,
+                    value=adjusted,
+                    accn=base.accn,
+                    filed=base.filed,
+                    frame=base.frame,
+                    start_date=base.start_date,
+                    accounting_standard=base.accounting_standard,
+                    currency=base.currency,
+                )
+            )
+        return derived
+
+    def _derive_common_stockholders_equity(self, records: List[FactRecord]) -> List[FactRecord]:
+        indexed = self._index_records(records)
+        existing = indexed.get("CommonStockholdersEquity", {})
+        candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
+        for concept in COMMON_EQUITY_FALLBACK:
+            candidate_keys.update(indexed.get(concept, {}).keys())
+
+        derived: List[FactRecord] = []
+        for key in candidate_keys:
+            if key in existing:
+                continue
+            base = None
+            for concept in COMMON_EQUITY_FALLBACK:
+                base = indexed.get(concept, {}).get(key)
+                if base and base.value is not None:
+                    break
+            if base is None or base.value is None:
+                continue
+            preferred = indexed.get("PreferredStock", {}).get(key)
+            preferred_value = preferred.value if preferred and preferred.value is not None else 0.0
+            adjusted = base.value - preferred_value
+            derived.append(
+                FactRecord(
+                symbol=base.symbol,
+                provider=base.provider,
+                cik=base.cik,
+                concept="CommonStockholdersEquity",
+                fiscal_period=base.fiscal_period,
+                end_date=base.end_date,
+                unit=base.unit,
+                value=adjusted,
+                accn=base.accn,
+                filed=base.filed,
+                frame=base.frame,
+                start_date=base.start_date,
+                accounting_standard=base.accounting_standard,
+                currency=base.currency,
+                )
+            )
+        return derived
+
+    def _alias_record(self, base: FactRecord, concept: str) -> FactRecord:
+        return FactRecord(
+            symbol=base.symbol,
+            provider=base.provider,
+            cik=base.cik,
+            concept=concept,
+            fiscal_period=base.fiscal_period,
+            end_date=base.end_date,
+            unit=base.unit,
+            value=base.value,
+            accn=base.accn,
+            filed=base.filed,
+            frame=base.frame,
+            start_date=base.start_date,
+            accounting_standard=base.accounting_standard,
+            currency=base.currency,
+        )
+
     def _extract_value(self, entry: Dict, keys: List[str]) -> Optional[float]:
         lowered = {k.lower(): entry[k] for k in entry.keys() if isinstance(k, str)}
         for key in keys:
@@ -363,4 +673,4 @@ class EODHDFactsNormalizer:
         return [entry for entry in values if isinstance(entry, dict)]
 
 
-__all__ = ["EODHDFactsNormalizer"]
+__all__ = ["EODHDFactsNormalizer", "EODHD_TARGET_CONCEPTS"]
