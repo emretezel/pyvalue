@@ -269,6 +269,68 @@ def test_normalizer_derives_long_term_debt_from_noncurrent_and_current():
     assert derived[0].value == 120
 
 
+def test_normalizer_prefers_long_term_debt_tag_over_fallbacks():
+    recent = _recent_date()
+    payload = {
+        "facts": {
+            "us-gaap": {
+                "LongTermDebt": {
+                    "units": {
+                        "USD": [
+                            {
+                                "val": 200,
+                                "fp": "Q1",
+                                "end": recent,
+                                "form": "10-Q",
+                                "filed": recent,
+                            }
+                        ]
+                    }
+                },
+                "LongTermDebtNoncurrent": {
+                    "units": {
+                        "USD": [
+                            {
+                                "val": 180,
+                                "fp": "Q1",
+                                "end": recent,
+                                "form": "10-Q",
+                                "filed": recent,
+                            }
+                        ]
+                    }
+                },
+                "LongTermDebtCurrent": {
+                    "units": {
+                        "USD": [
+                            {
+                                "val": 30,
+                                "fp": "Q1",
+                                "end": recent,
+                                "form": "10-Q",
+                                "filed": recent,
+                            }
+                        ]
+                    }
+                },
+            }
+        }
+    }
+    normalizer = SECFactsNormalizer(
+        concepts=["LongTermDebt", "LongTermDebtNoncurrent", "LongTermDebtCurrent"]
+    )
+
+    records = normalizer.normalize(payload, symbol="TEST", cik="CIK0000")
+
+    derived = [
+        rec
+        for rec in records
+        if rec.concept == "LongTermDebt" and rec.end_date == recent and rec.fiscal_period == "Q1"
+    ]
+    assert len(derived) == 1
+    assert derived[0].value == 200
+
+
 def test_normalizer_derives_earnings_per_share_from_diluted():
     recent = _recent_date()
     payload = {

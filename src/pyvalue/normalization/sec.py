@@ -46,6 +46,18 @@ TARGET_CONCEPTS = {
     "InterestPayableCurrent",
     "DeferredRevenueCurrent",
     "ShortTermBorrowings",
+    "FederalFundsPurchasedAndSecuritiesSoldUnderAgreementsToRepurchase",
+    "SecuritiesSoldUnderAgreementsToRepurchase",
+    "Deposits",
+    "DepositsDomestic",
+    "DepositsInForeignOffices",
+    "InterestBearingDepositLiabilities",
+    "NoninterestBearingDepositLiabilities",
+    "BrokeredDeposits",
+    "ShortTermDebt",
+    "ShortTermDebtCurrent",
+    "OtherShortTermBorrowings",
+    "TimeDeposits",
     "CommercialPaper",
     "FinanceLeaseLiabilityCurrent",
     "OperatingLeaseLiabilityCurrent",
@@ -63,12 +75,30 @@ TARGET_CONCEPTS = {
     "OtherCurrentNonfinancialLiabilities",
     "CashAndCashEquivalentsAtCarryingValue",
     "CashAndCashEquivalents",
+    "CashAndDueFromBanks",
+    "InterestBearingDepositsInBanks",
+    "FederalFundsSoldAndSecuritiesPurchasedUnderAgreementsToResell",
     "ShortTermInvestments",
     "MarketableSecuritiesCurrent",
     "AvailableForSaleSecuritiesDebtSecuritiesCurrent",
     "HeldToMaturitySecuritiesCurrent",
+    "TradingSecuritiesDebt",
+    "TradingSecuritiesEquity",
+    "TradingSecurities",
+    "TradingAssets",
+    "TradingAccountAssets",
+    "FairValueAssetsMeasuredOnRecurringBasisTradingAccountAssets",
+    "AvailableForSaleSecurities",
+    "EquitySecuritiesFvNi",
     "AccountsReceivableNetCurrent",
     "LoansAndLeasesReceivableNetCurrent",
+    "LoansHeldForSaleMortgages",
+    "LoansHeldForSale",
+    "LoansHeldForSaleOther",
+    "LoansReceivableHeldForSale",
+    "LoansReceivableHeldForSaleNet",
+    "LoansReceivableHeldForSaleNetNotPartOfDisposalGroup",
+    "LoansReceivableHeldForSaleNetNotPartOfDisposalGroupMortgage",
     "InventoryNet",
     "Inventories",
     "PrepaidExpenseAndOtherAssetsCurrent",
@@ -152,12 +182,30 @@ TARGET_CONCEPTS = {
 ASSETS_CURRENT_COMPONENTS = (
     "CashAndCashEquivalentsAtCarryingValue",
     "CashAndCashEquivalents",
+    "CashAndDueFromBanks",
+    "InterestBearingDepositsInBanks",
+    "FederalFundsSoldAndSecuritiesPurchasedUnderAgreementsToResell",
     "ShortTermInvestments",
     "MarketableSecuritiesCurrent",
     "AvailableForSaleSecuritiesDebtSecuritiesCurrent",
     "HeldToMaturitySecuritiesCurrent",
+    "TradingSecuritiesDebt",
+    "TradingSecuritiesEquity",
+    "TradingSecurities",
+    "TradingAssets",
+    "TradingAccountAssets",
+    "FairValueAssetsMeasuredOnRecurringBasisTradingAccountAssets",
+    "AvailableForSaleSecurities",
+    "EquitySecuritiesFvNi",
     "AccountsReceivableNetCurrent",
     "LoansAndLeasesReceivableNetCurrent",
+    "LoansHeldForSaleMortgages",
+    "LoansHeldForSale",
+    "LoansHeldForSaleOther",
+    "LoansReceivableHeldForSale",
+    "LoansReceivableHeldForSaleNet",
+    "LoansReceivableHeldForSaleNetNotPartOfDisposalGroup",
+    "LoansReceivableHeldForSaleNetNotPartOfDisposalGroupMortgage",
     "InventoryNet",
     "Inventories",
     "PrepaidExpenseAndOtherAssetsCurrent",
@@ -171,6 +219,11 @@ ASSETS_CURRENT_COMPONENTS = (
     "OtherCurrentReceivables",
     "CurrentTaxAssets",
     "OtherCurrentNonfinancialAssets",
+    "LeveragedLeasesBalanceSheetInvestmentInLeveragedLeasesNet",
+    "SecuritiesBorrowed",
+    "SecuritiesBorrowedFairValueOfCollateral",
+    "FederalFundsSold",
+    "InterestBearingDepositsInOtherBanks",
 )
 
 LIABILITIES_CURRENT_COMPONENTS = (
@@ -181,6 +234,18 @@ LIABILITIES_CURRENT_COMPONENTS = (
     "InterestPayableCurrent",
     "DeferredRevenueCurrent",
     "ShortTermBorrowings",
+    "FederalFundsPurchasedAndSecuritiesSoldUnderAgreementsToRepurchase",
+    "SecuritiesSoldUnderAgreementsToRepurchase",
+    "Deposits",
+    "DepositsDomestic",
+    "DepositsInForeignOffices",
+    "InterestBearingDepositLiabilities",
+    "NoninterestBearingDepositLiabilities",
+    "BrokeredDeposits",
+    "ShortTermDebt",
+    "ShortTermDebtCurrent",
+    "OtherShortTermBorrowings",
+    "TimeDeposits",
     "CommercialPaper",
     "LongTermDebtCurrent",
     "FinanceLeaseLiabilityCurrent",
@@ -301,7 +366,6 @@ class SECFactsNormalizer:
                 records.extend(fy_records)
                 records.extend(quarter_records)
 
-        records = [record for record in records if record.concept != "LongTermDebt"]
         records.extend(self._derive_current_totals(records, symbol, cik_value))
         records.extend(self._derive_long_term_debt(records, symbol, cik_value))
         records.extend(self._derive_eps(records, symbol, cik_value))
@@ -541,8 +605,11 @@ class SECFactsNormalizer:
         cik: Optional[str],
     ) -> List[FactRecord]:
         indexed = self._index_records(records)
+        existing = indexed.get("LongTermDebt", {})
         candidate_keys: set[tuple[str, str, str]] = set()
+        candidate_keys.update(existing.keys())
         for concept in (
+            "LongTermDebt",
             "LongTermDebtNoncurrent",
             "LongTermDebtCurrent",
             *LONG_TERM_DEBT_NONCURRENT_COMPONENTS,
@@ -558,6 +625,8 @@ class SECFactsNormalizer:
 
         derived: List[FactRecord] = []
         for key in candidate_keys:
+            if self._recent_record(existing.get(key)):
+                continue
             noncurrent = self._recent_record(indexed.get("LongTermDebtNoncurrent", {}).get(key))
             if noncurrent and noncurrent.value is not None:
                 total = noncurrent.value
