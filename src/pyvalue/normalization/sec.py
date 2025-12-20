@@ -130,6 +130,8 @@ TARGET_CONCEPTS = {
     "OperatingIncomeLoss",
     "IncomeFromOperations",
     "OperatingProfitLoss",
+    "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+    "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
     "IncomeBeforeIncomeTaxes",
     "Revenues",
     "RevenueFromContractWithCustomerExcludingAssessedTax",
@@ -319,7 +321,12 @@ CAPEX_FALLBACK_CONCEPTS = (
     "PaymentsToAcquireAndDevelopRealEstate",
     "PaymentsToAcquireMachineryAndEquipment",
 )
-EBIT_FALLBACK_CONCEPTS = ("IncomeFromOperations", "OperatingProfitLoss")
+EBIT_FALLBACK_CONCEPTS = (
+    "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+    "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
+    "IncomeFromOperations",
+    "OperatingProfitLoss",
+)
 PPE_FALLBACK_CONCEPTS = (
     "NetPropertyPlantAndEquipment",
     "PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetAfterAccumulatedDepreciationAndAmortization",

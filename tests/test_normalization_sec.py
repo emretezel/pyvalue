@@ -592,12 +592,12 @@ def test_normalizer_derives_capex_from_payments_to_acquire_ppe():
     assert derived[0].value == -60.0
 
 
-def test_normalizer_derives_operating_income_from_income_from_operations():
+def test_normalizer_derives_operating_income_from_income_before_taxes():
     recent = _recent_date()
     payload = {
         "facts": {
             "us-gaap": {
-                "IncomeFromOperations": {
+                "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest": {
                     "units": {
                         "USD": [
                             {
@@ -613,7 +613,9 @@ def test_normalizer_derives_operating_income_from_income_from_operations():
             }
         }
     }
-    normalizer = SECFactsNormalizer(concepts=["IncomeFromOperations"])
+    normalizer = SECFactsNormalizer(
+        concepts=["IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest"]
+    )
 
     records = normalizer.normalize(payload, symbol="TEST", cik="CIK0000")
 
