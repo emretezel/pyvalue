@@ -196,6 +196,16 @@ def _select_exchange_listings_for_provider(
     return [(row[0], row[1]) for row in rows]
 
 
+def _select_listing_symbols_by_exchange(
+    database: str,
+    exchange_code: str,
+    region: Optional[str],
+) -> List[str]:
+    universe_repo = UniverseRepository(database)
+    pairs = universe_repo.fetch_symbol_regions_by_exchange(exchange_code, region=region)
+    return [symbol for symbol, _ in pairs]
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Configure the root parser with subcommands."""
 
@@ -627,6 +637,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional region filter (defaults to US for SEC).",
     )
+    normalize_fundamentals_bulk.add_argument(
+        "--exchange-code",
+        default=None,
+        help="Optional exchange code to select symbols from listings (e.g., US, LSE).",
+    )
 
     market_data = subparsers.add_parser(
         "update-market-data",
@@ -672,8 +687,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bulk_metrics.add_argument(
         "--region",
-        default="US",
-        help="Universe region key stored in SQLite (default: %(default)s)",
+        default=None,
+        help="Universe region key stored in SQLite (default: US when no exchange-code).",
+    )
+    bulk_metrics.add_argument(
+        "--exchange-code",
+        default=None,
+        help="Optional exchange code to select symbols from listings (e.g., US, LSE, NYSE).",
     )
     bulk_metrics.add_argument(
         "--metrics",
@@ -1401,7 +1421,9 @@ def cmd_normalize_us_facts(symbol: str, database: str) -> int:
     return 0
 
 
-def cmd_normalize_us_facts_bulk(database: str, region: str = "US") -> int:
+def cmd_normalize_us_facts_bulk(
+    database: str, region: str = "US", symbols: Optional[Sequence[str]] = None
+) -> int:
     """Normalize raw SEC facts for every stored ticker."""
 
     fund_repo = FundamentalsRepository(database)
@@ -1412,9 +1434,16 @@ def cmd_normalize_us_facts_bulk(database: str, region: str = "US") -> int:
     entity_repo.initialize_schema()
 
     region_label = region.upper()
-    symbols = fund_repo.symbols("SEC", region=region_label)
-    if not symbols:
-        raise SystemExit("No raw SEC facts found. Run ingest-us-facts or ingest-us-facts-bulk first.")
+    if symbols is None:
+        symbols = fund_repo.symbols("SEC", region=region_label)
+        if not symbols:
+            raise SystemExit(
+                "No raw SEC facts found. Run ingest-us-facts or ingest-us-facts-bulk first."
+            )
+    else:
+        symbols = [symbol.upper() for symbol in symbols]
+        if not symbols:
+            raise SystemExit("No symbols provided for SEC normalization.")
 
     normalizer = SECFactsNormalizer()
     total = len(symbols)
@@ -1467,13 +1496,22 @@ def cmd_normalize_eodhd_fundamentals(symbol: str, database: str) -> int:
     return 0
 
 
-def cmd_normalize_eodhd_fundamentals_bulk(database: str, region: Optional[str]) -> int:
+def cmd_normalize_eodhd_fundamentals_bulk(
+    database: str, region: Optional[str], symbols: Optional[Sequence[str]] = None
+) -> int:
     """Normalize all stored EODHD fundamentals."""
 
     fund_repo = FundamentalsRepository(database)
-    symbols = fund_repo.symbols("EODHD", region=region)
-    if not symbols:
-        raise SystemExit("No EODHD fundamentals found. Run ingest-eodhd-fundamentals(-bulk) first.")
+    if symbols is None:
+        symbols = fund_repo.symbols("EODHD", region=region)
+        if not symbols:
+            raise SystemExit(
+                "No EODHD fundamentals found. Run ingest-eodhd-fundamentals(-bulk) first."
+            )
+    else:
+        symbols = [symbol.upper() for symbol in symbols]
+        if not symbols:
+            raise SystemExit("No symbols provided for EODHD normalization.")
 
     normalizer = EODHDFactsNormalizer()
     fact_repo = FinancialFactsRepository(database)
@@ -1513,10 +1551,39 @@ def cmd_normalize_fundamentals(provider: str, symbol: str, database: str) -> int
     raise SystemExit(f"Unsupported provider: {provider}")
 
 
-def cmd_normalize_fundamentals_bulk(provider: str, database: str, region: Optional[str]) -> int:
+def cmd_normalize_fundamentals_bulk(
+    provider: str, database: str, region: Optional[str], exchange_code: Optional[str]
+) -> int:
     """Normalize stored fundamentals in bulk for the specified provider."""
 
     provider_norm = _normalize_provider(provider)
+    if exchange_code:
+        exchange_norm = exchange_code.upper()
+        listings = _select_listing_symbols_by_exchange(
+            database=database, exchange_code=exchange_norm, region=region
+        )
+        if not listings:
+            raise SystemExit(
+                f"No listings found for exchange {exchange_norm}. "
+                "Run load-eodhd-universe or load-us-universe first."
+            )
+        fund_repo = FundamentalsRepository(database)
+        fund_repo.initialize_schema()
+        raw_symbols = set(fund_repo.symbols(provider_norm, region=region))
+        symbols = [symbol for symbol in listings if symbol in raw_symbols]
+        if not symbols:
+            raise SystemExit(
+                f"No {provider_norm} fundamentals found for exchange {exchange_norm}. "
+                "Run ingest-fundamentals-bulk first."
+            )
+        if provider_norm == "SEC":
+            region_label = (region or "US").upper()
+            return cmd_normalize_us_facts_bulk(database=database, region=region_label, symbols=symbols)
+        if provider_norm == "EODHD":
+            return cmd_normalize_eodhd_fundamentals_bulk(
+                database=database, region=region, symbols=symbols
+            )
+        raise SystemExit(f"Unsupported provider: {provider}")
     if provider_norm == "SEC":
         region_label = (region or "US").upper()
         return cmd_normalize_us_facts_bulk(database=database, region=region_label)
@@ -1615,28 +1682,43 @@ def cmd_compute_metrics(
 
 def cmd_compute_metrics_bulk(
     database: str,
-    region: str,
+    region: Optional[str],
     metric_ids: Optional[Sequence[str]],
+    exchange_code: Optional[str] = None,
 ) -> int:
     """Compute metrics for all listings stored in the universe."""
 
-    region_label = region.upper()
     db_path = _resolve_database_path(database)
     universe_repo = UniverseRepository(db_path)
     universe_repo.initialize_schema()
-    symbols = universe_repo.fetch_symbols(region_label)
-    if not symbols:
-        fund_repo = FundamentalsRepository(db_path)
-        fund_repo.initialize_schema()
-        symbols = fund_repo.symbols("EODHD", region=region_label)
-    if not symbols:
-        with universe_repo._connect() as conn:
-            available_regions = [row[0] for row in conn.execute("SELECT DISTINCT region FROM listings").fetchall()]
-        raise SystemExit(
-            f"No symbols found for region {region_label}. Load a universe or ingest fundamentals first. "
-            f"Available regions: {', '.join(available_regions) if available_regions else 'none'}. "
-            f"Database: {db_path}"
-        )
+    symbols: List[str] = []
+    if exchange_code:
+        exchange_norm = exchange_code.upper()
+        region_label = region.upper() if region else None
+        pairs = universe_repo.fetch_symbol_regions_by_exchange(exchange_norm, region=region_label)
+        symbols = [symbol for symbol, _ in pairs]
+        if not symbols:
+            raise SystemExit(
+                f"No listings found for exchange {exchange_norm}. "
+                "Run load-eodhd-universe or load-us-universe first."
+            )
+    else:
+        region_label = (region or "US").upper()
+        symbols = universe_repo.fetch_symbols(region_label)
+        if not symbols:
+            fund_repo = FundamentalsRepository(db_path)
+            fund_repo.initialize_schema()
+            symbols = fund_repo.symbols("EODHD", region=region_label)
+        if not symbols:
+            with universe_repo._connect() as conn:
+                available_regions = [
+                    row[0] for row in conn.execute("SELECT DISTINCT region FROM listings").fetchall()
+                ]
+            raise SystemExit(
+                f"No symbols found for region {region_label}. Load a universe or ingest fundamentals first. "
+                f"Available regions: {', '.join(available_regions) if available_regions else 'none'}. "
+                f"Database: {db_path}"
+            )
 
     base_fact_repo = FinancialFactsRepository(db_path)
     fact_repo = RegionFactsRepository(base_fact_repo)
@@ -2396,6 +2478,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             provider=args.provider,
             database=args.database,
             region=args.region,
+            exchange_code=args.exchange_code,
         )
     if args.command == "update-market-data":
         return cmd_update_market_data(symbol=args.symbol, database=args.database)
@@ -2423,6 +2506,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             database=args.database,
             region=args.region,
             metric_ids=args.metrics,
+            exchange_code=args.exchange_code,
         )
     if args.command == "report-fact-freshness":
         return cmd_report_fact_freshness(

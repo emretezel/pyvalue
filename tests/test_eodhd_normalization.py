@@ -168,7 +168,7 @@ def test_eodhd_normalizes_common_equity_from_common_stock_total_equity():
     assert equity[0].value == 500.0
 
 
-def test_eodhd_normalizes_long_term_debt_from_short_long_term_debt_total():
+def test_eodhd_does_not_normalize_long_term_debt_from_short_long_term_debt_total():
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -187,5 +187,4 @@ def test_eodhd_normalizes_long_term_debt_from_short_long_term_debt_total():
 
     records = normalizer.normalize(payload, symbol="TEST.LSE")
     derived = [r for r in records if r.concept == "LongTermDebt"]
-    assert derived, "LongTermDebt should map from shortLongTermDebtTotal"
-    assert derived[0].value == 250.0
+    assert not derived, "LongTermDebt should not map from shortLongTermDebtTotal"

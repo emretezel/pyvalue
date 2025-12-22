@@ -541,6 +541,48 @@ def test_cmd_compute_metrics_bulk(monkeypatch, tmp_path):
     assert metrics_repo.fetch("BBB.US", "dummy_metric")[0] == len("BBB.US")
 
 
+def test_cmd_compute_metrics_bulk_with_exchange(monkeypatch, tmp_path):
+    db_path = tmp_path / "metrics_exchange.db"
+    universe_repo = UniverseRepository(db_path)
+    universe_repo.initialize_schema()
+    universe_repo.replace_universe(
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="US"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="US"),
+        ],
+        region="US",
+    )
+    universe_repo.replace_universe(
+        [Listing(symbol="CCC.LSE", security_name="CCC PLC", exchange="LSE")],
+        region="UK",
+    )
+
+    class DummyMetric:
+        id = "dummy_metric"
+        required_concepts = ()
+        uses_market_data = False
+
+        def compute(self, symbol, repo):
+            return MetricResult(symbol=symbol, metric_id=self.id, value=1.0, as_of="2024-01-01")
+
+    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
+
+    rc = cli.cmd_compute_metrics_bulk(
+        database=str(db_path),
+        region=None,
+        metric_ids=None,
+        exchange_code="LSE",
+    )
+    assert rc == 0
+
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+    rows = metrics_repo._connect().execute(
+        "SELECT symbol FROM metrics ORDER BY symbol"
+    ).fetchall()
+    assert [row[0] for row in rows] == ["CCC.LSE"]
+
+
 def test_cmd_compute_metrics_bulk_fallback_to_fundamentals(monkeypatch, tmp_path):
     db_path = tmp_path / "fundmetrics.db"
     universe_repo = UniverseRepository(db_path)
@@ -646,6 +688,52 @@ def test_cmd_normalize_us_facts_bulk(monkeypatch, tmp_path):
     entity_repo.initialize_schema()
     assert entity_repo.fetch("AAA.US") == "AAA Corp"
     assert entity_repo.fetch("BBB.US") == "BBB Corp"
+
+
+def test_cmd_normalize_fundamentals_bulk_with_exchange(monkeypatch, tmp_path):
+    db_path = tmp_path / "fundamentals_exchange.db"
+    universe_repo = UniverseRepository(db_path)
+    universe_repo.initialize_schema()
+    universe_repo.replace_universe(
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="US"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="US"),
+            Listing(symbol="CCC.US", security_name="CCC Inc", exchange="US"),
+        ],
+        region="US",
+    )
+    universe_repo.replace_universe(
+        [Listing(symbol="DDD.LSE", security_name="DDD PLC", exchange="LSE")],
+        region="UK",
+    )
+
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert("SEC", "AAA.US", {"entityName": "AAA Corp", "facts": {}}, region="US")
+    fund_repo.upsert("SEC", "BBB.US", {"entityName": "BBB Corp", "facts": {}}, region="US")
+
+    class DummyNormalizer:
+        def normalize(self, payload, symbol, cik=None):
+            return [
+                make_fact(symbol=symbol, concept="Dummy", end_date="2023-12-31", value=1.0)
+            ]
+
+    monkeypatch.setattr(cli, "SECFactsNormalizer", lambda: DummyNormalizer())
+
+    rc = cli.cmd_normalize_fundamentals_bulk(
+        provider="SEC",
+        database=str(db_path),
+        region=None,
+        exchange_code="US",
+    )
+    assert rc == 0
+
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    rows = fact_repo._connect().execute(
+        "SELECT symbol FROM financial_facts ORDER BY symbol"
+    ).fetchall()
+    assert [row[0] for row in rows] == ["AAA.US", "BBB.US"]
 
 
 def test_cmd_normalize_eodhd_fundamentals(monkeypatch, tmp_path):
