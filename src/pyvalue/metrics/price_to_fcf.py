@@ -156,7 +156,6 @@ class PriceToFCFMetric:
             normalized.append(
                 FactRecord(
                     symbol=record.symbol,
-                    provider=record.provider,
                     cik=record.cik,
                     concept=record.concept,
                     fiscal_period=record.fiscal_period,

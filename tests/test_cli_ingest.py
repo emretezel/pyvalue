@@ -11,6 +11,7 @@ from pyvalue.metrics.base import MetricResult
 from pyvalue.storage import (
     EntityMetadataRepository,
     FundamentalsRepository,
+    FundamentalsFetchStateRepository,
     FinancialFactsRepository,
     FactRecord,
     MarketDataRepository,
@@ -148,6 +149,41 @@ def test_cmd_ingest_eodhd_fundamentals_bulk_with_exchange(monkeypatch, tmp_path)
     assert repo.fetch("EODHD", "AAA.LSE")["General"]["Name"] == "AAA.LSE"
     assert repo.fetch("EODHD", "CCC.LSE")["General"]["Name"] == "CCC.LSE"
 
+
+def test_cmd_ingest_eodhd_fundamentals_bulk_with_region(monkeypatch, tmp_path):
+    db_path = tmp_path / "bulkfunds_region.db"
+    universe_repo = UniverseRepository(db_path)
+    universe_repo.initialize_schema()
+    listings = [
+        Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+        Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NASDAQ"),
+    ]
+    universe_repo.replace_universe(listings, region="US")
+
+    calls = {"fetched": []}
+
+    class FakeClient:
+        def __init__(self, api_key):
+            calls["api_key"] = api_key
+
+        def fetch_fundamentals(self, symbol, exchange_code=None):
+            calls["fetched"].append((symbol, exchange_code))
+            return {"General": {"CurrencyCode": "USD", "Name": symbol}}
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+
+    rc = cli.cmd_ingest_eodhd_fundamentals_bulk(
+        database=str(db_path), rate=0, exchange_code=None, region="US"
+    )
+    assert rc == 0
+    assert set(calls["fetched"]) == {("AAA.US", None), ("BBB.US", None)}
+
+    repo = FundamentalsRepository(db_path)
+    repo.initialize_schema()
+    assert repo.fetch("EODHD", "AAA.US")["General"]["Name"] == "AAA.US"
+    assert repo.fetch("EODHD", "BBB.US")["General"]["Name"] == "BBB.US"
+
 def test_cmd_ingest_us_facts_bulk(monkeypatch, tmp_path):
     db_path = tmp_path / "bulk.db"
     universe_repo = UniverseRepository(db_path)
@@ -190,9 +226,11 @@ def test_cmd_load_eodhd_universe(monkeypatch, tmp_path):
     calls = {}
 
     class FakeLoader:
-        def __init__(self, api_key, exchange_code, fetcher=None, session=None):
+        def __init__(self, api_key, exchange_code, include_etfs=False, allowed_currencies=None, fetcher=None, session=None):
             calls["api_key"] = api_key
             calls["exchange_code"] = exchange_code
+            calls["include_etfs"] = include_etfs
+            calls["allowed_currencies"] = allowed_currencies
 
         def load(self):
             return [
@@ -214,15 +252,139 @@ def test_cmd_load_eodhd_universe(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
 
     db_path = tmp_path / "uk.db"
-    rc = cli.cmd_load_eodhd_universe(str(db_path), include_etfs=False, exchange_code="LSE")
+    rc = cli.cmd_load_eodhd_universe(
+        str(db_path),
+        include_etfs=False,
+        exchange_code="LSE",
+        currencies=["GBP"],
+    )
 
     assert rc == 0
     assert calls["api_key"] == "KEY"
     assert calls["exchange_code"] == "LSE"
+    assert calls["include_etfs"] is False
+    assert calls["allowed_currencies"] == {"GBP"}
 
-    repo = UniverseRepository(db_path)
-    assert repo.fetch_symbols("UK") == ["AAA.LSE"]
 
+def test_cmd_ingest_fundamentals_bulk_uses_exchange_listings(monkeypatch, tmp_path):
+    calls = {"fetched": []}
+
+    class FakeClient:
+        def __init__(self, api_key):
+            calls["api_key"] = api_key
+
+        def fetch_fundamentals(self, symbol, exchange_code=None):
+            calls["fetched"].append((symbol, exchange_code))
+            return {"General": {"CurrencyCode": "USD"}}
+
+        def list_symbols(self, exchange_code):
+            raise AssertionError("Should not call list_symbols for exchange listings path")
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+
+    db_path = tmp_path / "eodhd-exchange.db"
+    universe_repo = UniverseRepository(db_path)
+    universe_repo.initialize_schema()
+    universe_repo.replace_universe(
+        [Listing(symbol="AAA.US", security_name="AAA", exchange="US")],
+        region="US",
+    )
+    universe_repo.replace_universe(
+        [Listing(symbol="BBB.LSE", security_name="BBB", exchange="LSE")],
+        region="UK",
+    )
+
+    rc = cli.cmd_ingest_fundamentals_bulk(
+        provider="EODHD",
+        database=str(db_path),
+        region=None,
+        rate=0,
+        exchange_code="US",
+        user_agent=None,
+        max_symbols=None,
+        max_age_days=30,
+        resume=False,
+    )
+
+    assert rc == 0
+    assert calls["api_key"] == "TOKEN"
+    assert calls["fetched"] == [("AAA.US", None)]
+
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    assert fund_repo.fetch("EODHD", "AAA.US") is not None
+    with fund_repo._connect() as conn:
+        row = conn.execute(
+            "SELECT region, exchange FROM fundamentals_raw WHERE provider='EODHD' AND symbol='AAA.US'"
+        ).fetchone()
+    assert row[0] == "US"
+    assert row[1] == "US"
+
+
+def test_cmd_ingest_fundamentals_bulk_skips_fresh_and_backoff(monkeypatch, tmp_path):
+    calls = {"fetched": []}
+
+    class FakeClient:
+        def __init__(self, api_key):
+            calls["api_key"] = api_key
+
+        def fetch_fundamentals(self, symbol, exchange_code=None):
+            calls["fetched"].append((symbol, exchange_code))
+            return {"General": {"CurrencyCode": "USD"}}
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+
+    db_path = tmp_path / "eodhd-resume.db"
+    universe_repo = UniverseRepository(db_path)
+    universe_repo.initialize_schema()
+    universe_repo.replace_universe(
+        [
+            Listing(symbol="AAA.US", security_name="AAA", exchange="US"),
+            Listing(symbol="BBB.US", security_name="BBB", exchange="US"),
+        ],
+        region="US",
+    )
+
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert("EODHD", "AAA.US", {"General": {"CurrencyCode": "USD"}}, region="US", exchange="US")
+
+    state_repo = FundamentalsFetchStateRepository(db_path)
+    state_repo.initialize_schema()
+    state_repo.mark_failure("EODHD", "BBB.US", "boom", base_backoff_seconds=3600)
+
+    rc = cli.cmd_ingest_fundamentals_bulk(
+        provider="EODHD",
+        database=str(db_path),
+        region=None,
+        rate=0,
+        exchange_code="US",
+        user_agent=None,
+        max_symbols=None,
+        max_age_days=30,
+        resume=True,
+    )
+
+    assert rc == 0
+    assert calls["fetched"] == []
+
+    calls["fetched"].clear()
+    rc = cli.cmd_ingest_fundamentals_bulk(
+        provider="EODHD",
+        database=str(db_path),
+        region=None,
+        rate=0,
+        exchange_code="US",
+        user_agent=None,
+        max_symbols=None,
+        max_age_days=30,
+        resume=False,
+    )
+
+    assert rc == 0
+    assert calls["fetched"] == [("BBB.US", None)]
 
 def test_cmd_ingest_uk_facts(monkeypatch, tmp_path):
     calls = {}
@@ -393,9 +555,8 @@ def test_cmd_compute_metrics_bulk_fallback_to_fundamentals(monkeypatch, tmp_path
     fact_repo.replace_facts(
         "AAA.LSE",
         [
-            make_fact(symbol="AAA.LSE", concept="NetIncomeLoss", end_date="2023-12-31", value=10.0, provider="EODHD")
+            make_fact(symbol="AAA.LSE", concept="NetIncomeLoss", end_date="2023-12-31", value=10.0)
         ],
-        provider="EODHD",
     )
 
     metrics_repo = MetricsRepository(db_path)
@@ -506,7 +667,6 @@ def test_cmd_normalize_eodhd_fundamentals(monkeypatch, tmp_path):
                     concept="NetIncomeLoss",
                     end_date="2023-12-31",
                     value=10.0,
-                    provider="EODHD",
                 )
             ]
 
@@ -518,9 +678,9 @@ def test_cmd_normalize_eodhd_fundamentals(monkeypatch, tmp_path):
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
     rows = fact_repo._connect().execute(
-        "SELECT provider, concept, value FROM financial_facts WHERE symbol='SHEL'"
+        "SELECT concept, value FROM financial_facts WHERE symbol='SHEL'"
     ).fetchall()
-    assert [(row[0], row[1], row[2]) for row in rows] == [("EODHD", "NetIncomeLoss", 10.0)]
+    assert [(row[0], row[1]) for row in rows] == [("NetIncomeLoss", 10.0)]
     entity_repo = EntityMetadataRepository(db_path)
     entity_repo.initialize_schema()
     assert entity_repo.fetch("SHEL") == "Shell PLC"

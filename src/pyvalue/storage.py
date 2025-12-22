@@ -6,7 +6,7 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
 import sqlite3
@@ -136,6 +136,24 @@ class UniverseRepository(SQLiteStore):
             rows = conn.execute(
                 "SELECT symbol, exchange FROM listings WHERE region = ? ORDER BY symbol", (region_norm,)
             ).fetchall()
+        return [(row[0], row[1]) for row in rows]
+
+    def fetch_symbol_regions_by_exchange(
+        self, exchange: str, region: Optional[str] = None
+    ) -> List[Tuple[str, str]]:
+        """Return (symbol, region) pairs for an exchange code."""
+
+        exchange_norm = exchange.upper()
+        query = ["SELECT symbol, region FROM listings WHERE UPPER(exchange) = ?"]
+        params: List[Any] = [exchange_norm]
+        if region:
+            query.append("AND region = ?")
+            params.append(region.upper())
+        query.append("ORDER BY symbol")
+        sql = " ".join(query)
+        self.initialize_schema()
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
         return [(row[0], row[1]) for row in rows]
 
     def fetch_currency(self, symbol: str, region: Optional[str] = None) -> Optional[str]:
@@ -377,6 +395,130 @@ class ExchangeMetadataRepository(SQLiteStore):
         return {"code": row[0], "name": row[1], "country": row[2], "currency": row[3], "operating_mic": row[4]}
 
 
+class FundamentalsFetchStateRepository(SQLiteStore):
+    """Track fundamentals fetch status for resumable ingestion."""
+
+    def initialize_schema(self) -> None:
+        apply_migrations(self.db_path)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS fundamentals_fetch_state (
+                    provider TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    last_fetched_at TEXT,
+                    last_status TEXT,
+                    last_error TEXT,
+                    next_eligible_at TEXT,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (provider, symbol)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_fundamentals_fetch_next
+                ON fundamentals_fetch_state(provider, next_eligible_at)
+                """
+            )
+
+    def fetch(self, provider: str, symbol: str) -> Optional[Dict[str, Optional[str]]]:
+        self.initialize_schema()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT last_fetched_at, last_status, last_error, next_eligible_at, attempts
+                FROM fundamentals_fetch_state
+                WHERE provider = ? AND symbol = ?
+                """,
+                (provider.upper(), symbol.upper()),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "last_fetched_at": row[0],
+            "last_status": row[1],
+            "last_error": row[2],
+            "next_eligible_at": row[3],
+            "attempts": row[4],
+        }
+
+    def mark_success(
+        self,
+        provider: str,
+        symbol: str,
+        fetched_at: Optional[str] = None,
+    ) -> None:
+        timestamp = fetched_at or datetime.now(timezone.utc).isoformat()
+        self.initialize_schema()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO fundamentals_fetch_state (
+                    provider,
+                    symbol,
+                    last_fetched_at,
+                    last_status,
+                    last_error,
+                    next_eligible_at,
+                    attempts
+                ) VALUES (?, ?, ?, 'ok', NULL, NULL, 0)
+                ON CONFLICT(provider, symbol) DO UPDATE SET
+                    last_fetched_at = excluded.last_fetched_at,
+                    last_status = 'ok',
+                    last_error = NULL,
+                    next_eligible_at = NULL,
+                    attempts = 0
+                """,
+                (provider.upper(), symbol.upper(), timestamp),
+            )
+
+    def mark_failure(
+        self,
+        provider: str,
+        symbol: str,
+        error: str,
+        base_backoff_seconds: int = 3600,
+        max_backoff_seconds: int = 86400,
+    ) -> None:
+        self.initialize_schema()
+        state = self.fetch(provider, symbol)
+        attempts = (state.get("attempts") if state else 0) or 0
+        attempts += 1
+        backoff = min(base_backoff_seconds * (2 ** (attempts - 1)), max_backoff_seconds)
+        now = datetime.now(timezone.utc)
+        next_eligible_at = (now + timedelta(seconds=backoff)).isoformat()
+        last_fetched_at = state.get("last_fetched_at") if state else None
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO fundamentals_fetch_state (
+                    provider,
+                    symbol,
+                    last_fetched_at,
+                    last_status,
+                    last_error,
+                    next_eligible_at,
+                    attempts
+                ) VALUES (?, ?, ?, 'error', ?, ?, ?)
+                ON CONFLICT(provider, symbol) DO UPDATE SET
+                    last_fetched_at = COALESCE(excluded.last_fetched_at, fundamentals_fetch_state.last_fetched_at),
+                    last_status = 'error',
+                    last_error = excluded.last_error,
+                    next_eligible_at = excluded.next_eligible_at,
+                    attempts = excluded.attempts
+                """,
+                (
+                    provider.upper(),
+                    symbol.upper(),
+                    last_fetched_at,
+                    error,
+                    next_eligible_at,
+                    attempts,
+                ),
+            )
+
+
 class UKCompanyFactsRepository(SQLiteStore):
     """Store Companies House payloads for UK listings."""
 
@@ -604,7 +746,6 @@ class FactRecord:
     """Normalized financial fact ready for storage."""
 
     symbol: str
-    provider: str = "SEC"
     cik: Optional[str] = None
     concept: str = ""
     fiscal_period: str = ""
@@ -629,7 +770,6 @@ class FinancialFactsRepository(SQLiteStore):
                 """
                 CREATE TABLE IF NOT EXISTS financial_facts (
                     symbol TEXT NOT NULL,
-                    provider TEXT NOT NULL,
                     cik TEXT,
                     concept TEXT NOT NULL,
                     fiscal_period TEXT,
@@ -642,14 +782,14 @@ class FinancialFactsRepository(SQLiteStore):
                     start_date TEXT,
                     accounting_standard TEXT,
                     currency TEXT,
-                    PRIMARY KEY (symbol, provider, concept, fiscal_period, end_date, unit, accn)
+                    PRIMARY KEY (symbol, concept, fiscal_period, end_date, unit, accn)
                 )
                 """
             )
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_fin_facts_symbol_concept
-                ON financial_facts(symbol, concept, provider)
+                ON financial_facts(symbol, concept)
                 """
             )
 
@@ -657,15 +797,16 @@ class FinancialFactsRepository(SQLiteStore):
         self,
         symbol: str,
         records: Iterable[FactRecord],
-        provider: Optional[str] = None,
     ) -> int:
-        """Replace all facts for ``symbol`` with the provided batch."""
+        """Replace all facts for ``symbol`` with the provided batch.
+
+        Existing facts are removed even if the batch is empty.
+        """
 
         target_symbol = symbol.upper()
         rows = [
             (
                 target_symbol,
-                (record.provider or "SEC").upper(),
                 record.cik,
                 record.concept,
                 record.fiscal_period,
@@ -681,22 +822,18 @@ class FinancialFactsRepository(SQLiteStore):
             )
             for record in records
         ]
-        if not rows:
-            return 0
-
-        target_provider = (provider or rows[0][1] or "SEC").upper()
         with self._connect() as conn:
             conn.execute(
-                "DELETE FROM financial_facts WHERE symbol = ? AND provider = ?",
-                (target_symbol, target_provider),
+                "DELETE FROM financial_facts WHERE symbol = ?",
+                (target_symbol,),
             )
             conn.executemany(
                 """
                 INSERT OR REPLACE INTO financial_facts (
-                    symbol, provider, cik, concept, fiscal_period,
+                    symbol, cik, concept, fiscal_period,
                     end_date, unit, value, accn, filed, frame, start_date,
                     accounting_standard, currency
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -706,29 +843,20 @@ class FinancialFactsRepository(SQLiteStore):
         self,
         symbol: str,
         concept: str,
-        providers: Optional[Sequence[str]] = None,
     ) -> Optional[FactRecord]:
         """Return the most recent FactRecord for a symbol/concept."""
 
-        provider_priority = [p.upper() for p in (providers or ("SEC", "EODHD"))]
-        order_case = " ".join(
-            f"WHEN ? THEN {idx}" for idx, _ in enumerate(provider_priority)
-        )
-        params: List[Any] = [symbol.upper(), concept, *provider_priority]
-        order_sql = f"CASE provider {order_case} ELSE {len(provider_priority)} END"
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT symbol, provider, cik, concept, fiscal_period, end_date, unit,
+                SELECT symbol, cik, concept, fiscal_period, end_date, unit,
                        value, accn, filed, frame, start_date, accounting_standard, currency
                 FROM financial_facts
                 WHERE symbol = ? AND concept = ?
-                ORDER BY {order_sql}, end_date DESC, filed DESC
+                ORDER BY end_date DESC, filed DESC
                 LIMIT 1
-                """.format(
-                    order_sql=order_sql
-                ),
-                params,
+                """,
+                [symbol.upper(), concept],
             ).fetchone()
         if row is None:
             return None
@@ -740,18 +868,11 @@ class FinancialFactsRepository(SQLiteStore):
         concept: str,
         fiscal_period: Optional[str] = None,
         limit: Optional[int] = None,
-        providers: Optional[Sequence[str]] = None,
     ) -> List[FactRecord]:
         """Return ordered fact records for the symbol/concept."""
 
-        provider_priority = [p.upper() for p in (providers or ("SEC", "EODHD"))]
-        order_case = " ".join(
-            f"WHEN ? THEN {idx}" for idx, _ in enumerate(provider_priority)
-        )
-        order_sql = f"CASE provider {order_case} ELSE {len(provider_priority)} END"
-
         query = [
-            "SELECT symbol, provider, cik, concept, fiscal_period, end_date, unit, value, accn, filed, frame, start_date, accounting_standard, currency",
+            "SELECT symbol, cik, concept, fiscal_period, end_date, unit, value, accn, filed, frame, start_date, accounting_standard, currency",
             "FROM financial_facts",
             "WHERE symbol = ? AND concept = ?",
         ]
@@ -759,8 +880,7 @@ class FinancialFactsRepository(SQLiteStore):
         if fiscal_period:
             query.append("AND fiscal_period = ?")
             params.append(fiscal_period)
-        params.extend(provider_priority)
-        query.append(f"ORDER BY {order_sql}, end_date DESC, filed DESC")
+        query.append("ORDER BY end_date DESC, filed DESC")
         if limit:
             query.append("LIMIT ?")
             params.append(limit)
@@ -933,6 +1053,7 @@ __all__ = [
     "UniverseRepository",
     "CompanyFactsRepository",
     "FundamentalsRepository",
+    "FundamentalsFetchStateRepository",
     "ExchangeMetadataRepository",
     "UKCompanyFactsRepository",
     "UKSymbolMapRepository",

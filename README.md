@@ -107,6 +107,23 @@ This iterates over the `company_facts` table, converts each JSON payload into
 This populates the `financial_facts` table with the concepts required to compute the
 initial metric set (debt, current assets/liabilities, EPS, dividends, cash flow, etc.).
 
+Provider-agnostic commands can target specific sources:
+
+```bash
+pyvalue ingest-fundamentals --provider SEC AAPL
+pyvalue normalize-fundamentals --provider SEC AAPL
+```
+
+To ingest and normalize US fundamentals from EODHD as well:
+
+```bash
+pyvalue ingest-fundamentals --provider EODHD AAPL.US
+pyvalue normalize-fundamentals --provider EODHD AAPL.US
+```
+
+Normalized facts are provider-agnostic. Re-normalizing a symbol replaces any
+previous facts for that symbol regardless of provider.
+
 ## Market data (EODHD)
 
 Store your EODHD API token in `private/config.toml` (quotes optional; they are stripped automatically):
@@ -151,7 +168,7 @@ need a different feed.
 ## Global fundamentals (EODHD)
 
 Store your EODHD API token in `private/config.toml` (see Market data section above). Pull
-fundamentals for a ticker and normalize them into `financial_facts` with provider `EODHD`
+fundamentals for a ticker and normalize them into `financial_facts` using the EODHD ruleset
 (region is inferred from the exchange’s country code):
 
 ```bash
@@ -167,8 +184,13 @@ pyvalue ingest-eodhd-fundamentals-bulk --exchange-code LSE
 pyvalue normalize-eodhd-fundamentals-bulk --region UK
 ```
 
-Metrics and screening look up normalized facts by provider priority (SEC first, then
-EODHD), so US tickers still rely on SEC data while non‑US symbols use EODHD.
+You can also ingest via the provider-agnostic bulk command:
+
+```bash
+pyvalue ingest-fundamentals-bulk --provider EODHD --exchange-code LSE
+pyvalue normalize-fundamentals-bulk --provider EODHD --region UK
+```
+Metrics and screening read only `financial_facts`. They do not track provider.
 
 ## Metrics and screening
 

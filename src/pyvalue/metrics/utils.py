@@ -12,7 +12,6 @@ from pyvalue.storage import FactRecord
 
 # Default freshness windows (days)
 MAX_FACT_AGE_DAYS = 365
-EODHD_FACT_AGE_DAYS = 365
 MAX_FY_FACT_AGE_DAYS = 366
 
 
@@ -31,10 +30,7 @@ def is_recent_fact(
     except ValueError:
         return False
     today = reference_date or date.today()
-    effective_age = max_age_days
-    if getattr(record, "provider", None) == "EODHD":
-        effective_age = max(max_age_days, EODHD_FACT_AGE_DAYS)
-    cutoff = today - timedelta(days=effective_age)
+    cutoff = today - timedelta(days=max_age_days)
     return end_date >= cutoff
 
 

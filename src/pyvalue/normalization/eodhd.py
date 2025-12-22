@@ -36,16 +36,17 @@ EODHD_STATEMENT_FIELDS = {
         "PreferredStock": ["preferredStockTotalEquity", "preferredStockRedeemable", "preferredStock", "capitalStock"],
         "Goodwill": ["goodWill", "goodwill"],
         "IntangibleAssetsNet": ["intangibleAssets"],
+        "NetTangibleAssets": ["netTangibleAssets"],
+        "NoncontrollingInterestInConsolidatedEntity": ["noncontrollingInterestInConsolidatedEntity"],
         "LongTermDebtNoncurrent": [
-            "longTermDebt",
             "longTermDebtNoncurrent",
             "longTermDebtTotal",
+            "longTermDebt",
         ],
         "LongTermDebt": [
-            "shortLongTermDebtTotal",
             "longTermDebtTotal",
             "longTermDebt",
-            "shortLongTermDebt",
+            "longTermDebtNoncurrent",
         ],
         "PropertyPlantAndEquipmentNet": [
             "propertyPlantAndEquipmentNet",
@@ -140,6 +141,7 @@ class EODHDFactsNormalizer:
             )
 
         records.extend(self._normalize_share_counts(payload, symbol, accounting_standard, currency_code))
+        records.extend(self._normalize_outstanding_shares(payload, symbol, accounting_standard, currency_code))
         records.extend(self._normalize_earnings_eps(payload, symbol, accounting_standard))
         records.extend(self._derive_eps_alias(records))
         records.extend(self._derive_intangibles_excluding_goodwill(records))
@@ -179,21 +181,121 @@ class EODHDFactsNormalizer:
                 current_liab = self._extract_value(entry, ["totalCurrentLiabilities"])
                 derived_debt = None
                 if total_liab is not None and current_liab is not None:
-                    derived_debt = total_liab - current_liab
-                derived_debt, currency = self._normalize_value_currency(derived_debt, currency)
+                    candidate = total_liab - current_liab
+                    if candidate >= 0:
+                        derived_debt = candidate
+
+                derived_current_assets = None
+                if "AssetsCurrent" in field_map:
+                    total_assets = self._extract_value(entry, ["totalAssets"])
+                    noncurrent_assets = self._extract_value(entry, ["nonCurrentAssetsTotal"])
+                    if total_assets is not None and noncurrent_assets is not None:
+                        candidate = total_assets - noncurrent_assets
+                        if candidate >= 0:
+                            derived_current_assets = candidate
+                    if derived_current_assets is None:
+                        cash_bucket = self._extract_value(entry, ["cashAndShortTermInvestments"])
+                        short_term_investments = None
+                        if cash_bucket is None:
+                            short_term_investments = self._extract_value(entry, ["shortTermInvestments"])
+                            cash_bucket = self._extract_value(entry, ["cashAndEquivalents", "cash"])
+                        receivables = self._extract_value(entry, ["netReceivables"])
+                        inventory = self._extract_value(entry, ["inventory"])
+                        other_current = self._extract_value(entry, ["otherCurrentAssets"])
+                        components = [
+                            cash_bucket,
+                            short_term_investments,
+                            receivables,
+                            inventory,
+                            other_current,
+                        ]
+                        if any(item is not None for item in components):
+                            derived_current_assets = sum(item or 0.0 for item in components)
+
+                derived_current_liab = None
+                if "LiabilitiesCurrent" in field_map:
+                    noncurrent_liab = self._extract_value(entry, ["nonCurrentLiabilitiesTotal"])
+                    if total_liab is not None and noncurrent_liab is not None:
+                        candidate = total_liab - noncurrent_liab
+                        if candidate >= 0:
+                            derived_current_liab = candidate
+                    if derived_current_liab is None:
+                        accounts_payable = self._extract_value(entry, ["accountsPayable"])
+                        other_current = self._extract_value(entry, ["otherCurrentLiab"])
+                        deferred_revenue = self._extract_value(entry, ["currentDeferredRevenue"])
+                        short_term_debt = self._extract_value(entry, ["shortTermDebt"])
+                        short_long_term_debt = None
+                        if short_term_debt is None:
+                            short_long_term_debt = self._extract_value(entry, ["shortLongTermDebt"])
+                        components = [
+                            accounts_payable,
+                            other_current,
+                            deferred_revenue,
+                            short_term_debt,
+                            short_long_term_debt,
+                        ]
+                        if any(item is not None for item in components):
+                            derived_current_liab = sum(item or 0.0 for item in components)
+
+                derived_ppe = None
+                if "PropertyPlantAndEquipmentNet" in field_map:
+                    gross = self._extract_value(entry, ["propertyPlantAndEquipmentGross"])
+                    accumulated = self._extract_value(entry, ["accumulatedDepreciation"])
+                    if gross is not None and accumulated is not None:
+                        candidate = gross - accumulated
+                        if candidate >= 0:
+                            derived_ppe = candidate
+
+                derived_operating_income = None
+                if "OperatingIncomeLoss" in field_map:
+                    income_before_tax = self._extract_value(entry, ["incomeBeforeTax"])
+                    interest_expense = self._extract_value(entry, ["interestExpense"])
+                    interest_income = self._extract_value(entry, ["interestIncome"])
+                    if income_before_tax is not None and interest_expense is not None:
+                        derived_operating_income = income_before_tax + interest_expense - (interest_income or 0.0)
+                    if derived_operating_income is None:
+                        total_revenue = self._extract_value(entry, ["totalRevenue"])
+                        total_operating_expenses = self._extract_value(entry, ["totalOperatingExpenses"])
+                        if total_revenue is not None and total_operating_expenses is not None:
+                            derived_operating_income = total_revenue - total_operating_expenses
+
+                derived_capex = None
+                if "CapitalExpenditures" in field_map:
+                    operating_cash = self._extract_value(entry, ["totalCashFromOperatingActivities"])
+                    free_cash_flow = self._extract_value(entry, ["freeCashFlow"])
+                    if operating_cash is not None and free_cash_flow is not None:
+                        derived_capex = operating_cash - free_cash_flow
+
+                derived_operating_cash = None
+                if "NetCashProvidedByUsedInOperatingActivities" in field_map:
+                    free_cash_flow = self._extract_value(entry, ["freeCashFlow"])
+                    capex_value = self._extract_value(entry, ["capitalExpenditures", "capex"])
+                    if free_cash_flow is not None and capex_value is not None:
+                        derived_operating_cash = free_cash_flow + capex_value
                 for concept, keys in field_map.items():
                     if concept not in self.concepts:
                         continue
                     value = self._extract_value(entry, keys)
-                    if value is None and concept in {"LongTermDebt", "LongTermDebtNoncurrent"}:
+                    if value is None and concept == "AssetsCurrent":
+                        value = derived_current_assets
+                    if value is None and concept == "LiabilitiesCurrent":
+                        value = derived_current_liab
+                    if value is None and concept == "LongTermDebt":
                         value = derived_debt
+                    if value is None and concept == "PropertyPlantAndEquipmentNet":
+                        value = derived_ppe
+                    if value is None and concept == "OperatingIncomeLoss":
+                        value = derived_operating_income
+                    if value is None and concept == "CapitalExpenditures":
+                        value = derived_capex
+                    if value is None and concept == "NetCashProvidedByUsedInOperatingActivities":
+                        value = derived_operating_cash
                     if value is None:
                         continue
                     value, normalized_currency = self._normalize_value_currency(value, currency)
                     records.append(
                         FactRecord(
                             symbol=symbol.upper(),
-                            provider="EODHD",
                             concept=concept,
                             fiscal_period=period_code or "",
                             end_date=end_date,
@@ -230,7 +332,6 @@ class EODHDFactsNormalizer:
         currency = _normalize_currency_code(stats.get("CurrencyCode") or default_currency)
         record = FactRecord(
             symbol=symbol.upper(),
-            provider="EODHD",
             concept="CommonStockSharesOutstanding",
             fiscal_period="",
             end_date=end_date,
@@ -244,6 +345,55 @@ class EODHDFactsNormalizer:
             currency=currency,
         )
         return [record] if record else []
+
+    def _normalize_outstanding_shares(
+        self,
+        payload: Dict,
+        symbol: str,
+        accounting_standard: Optional[str],
+        default_currency: Optional[str],
+    ) -> List[FactRecord]:
+        shares_payload = payload.get("outstandingShares") or {}
+        if not shares_payload:
+            return []
+
+        currency = _normalize_currency_code(default_currency)
+        records: List[FactRecord] = []
+        for bucket, fiscal_period in (("annual", "FY"), ("quarterly", None)):
+            entries = self._iter_entries(shares_payload.get(bucket))
+            for entry in entries:
+                date_value = entry.get("dateFormatted") or entry.get("date")
+                end_date = self._extract_date({"date": date_value}) if date_value else None
+                if not end_date and isinstance(date_value, str) and date_value.isdigit() and len(date_value) == 4:
+                    end_date = f"{date_value}-12-31"
+                if not end_date:
+                    continue
+                shares = _to_float(entry.get("shares"))
+                if shares is None:
+                    shares_mln = _to_float(entry.get("sharesMln"))
+                    if shares_mln is not None:
+                        shares = shares_mln * 1_000_000
+                if shares is None:
+                    continue
+                period = fiscal_period or self._infer_quarter({"date": end_date}) or ""
+                frame = self._build_frame(end_date, period or "FY")
+                records.append(
+                    FactRecord(
+                        symbol=symbol.upper(),
+                        concept="CommonStockSharesOutstanding",
+                        fiscal_period=period,
+                        end_date=end_date,
+                        unit=currency or "",
+                        value=shares,
+                        accn=None,
+                        filed=None,
+                        frame=frame,
+                        start_date=None,
+                        accounting_standard=accounting_standard,
+                        currency=currency,
+                    )
+                )
+        return records
 
     def _normalize_earnings_eps(
         self,
@@ -262,7 +412,6 @@ class EODHDFactsNormalizer:
             records.append(
                 FactRecord(
                     symbol=symbol.upper(),
-                    provider="EODHD",
                     concept="EarningsPerShareDiluted",
                     fiscal_period=period,
                     end_date=date_str,
@@ -328,6 +477,11 @@ class EODHDFactsNormalizer:
         candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
         for concept in INTANGIBLE_EXCL_GOODWILL_FALLBACK:
             candidate_keys.update(indexed.get(concept, {}).keys())
+        net_tangible = indexed.get("NetTangibleAssets", {})
+        assets = indexed.get("Assets", {})
+        liabilities = indexed.get("Liabilities", {})
+        goodwill = indexed.get("Goodwill", {})
+        candidate_keys.update(net_tangible.keys())
 
         derived: List[FactRecord] = []
         for key in candidate_keys:
@@ -338,22 +492,84 @@ class EODHDFactsNormalizer:
                 base = indexed.get(concept, {}).get(key)
                 if base and base.value is not None:
                     break
-            if base is None or base.value is None:
+            if base is not None and base.value is not None:
+                derived.append(self._alias_record(base, "IntangibleAssetsNetExcludingGoodwill"))
                 continue
-            derived.append(self._alias_record(base, "IntangibleAssetsNetExcludingGoodwill"))
+            net_tangible_rec = net_tangible.get(key)
+            assets_rec = assets.get(key)
+            liabilities_rec = liabilities.get(key)
+            if (
+                net_tangible_rec
+                and assets_rec
+                and liabilities_rec
+                and net_tangible_rec.value is not None
+                and assets_rec.value is not None
+                and liabilities_rec.value is not None
+            ):
+                goodwill_rec = goodwill.get(key)
+                goodwill_value = goodwill_rec.value if goodwill_rec and goodwill_rec.value is not None else 0.0
+                equity_value = assets_rec.value - liabilities_rec.value
+                candidate = equity_value - net_tangible_rec.value - goodwill_value
+                if candidate >= 0:
+                    derived.append(
+                        FactRecord(
+                            symbol=net_tangible_rec.symbol,
+                            cik=net_tangible_rec.cik,
+                            concept="IntangibleAssetsNetExcludingGoodwill",
+                            fiscal_period=net_tangible_rec.fiscal_period,
+                            end_date=net_tangible_rec.end_date,
+                            unit=net_tangible_rec.unit,
+                            value=candidate,
+                            accn=net_tangible_rec.accn,
+                            filed=net_tangible_rec.filed,
+                            frame=net_tangible_rec.frame,
+                            start_date=net_tangible_rec.start_date,
+                            accounting_standard=net_tangible_rec.accounting_standard,
+                            currency=net_tangible_rec.currency,
+                        )
+                    )
         return derived
 
     def _derive_equity_alias(self, records: List[FactRecord]) -> List[FactRecord]:
         indexed = self._index_records(records)
         existing = indexed.get("StockholdersEquity", {})
         candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
+        assets = indexed.get("Assets", {})
+        liabilities = indexed.get("Liabilities", {})
+        candidate_keys.update(assets.keys())
+        candidate_keys.update(liabilities.keys())
         for concept in EQUITY_FALLBACK_CONCEPTS:
             candidate_keys.update(indexed.get(concept, {}).keys())
 
         derived: List[FactRecord] = []
+        derived_keys = set(existing.keys())
         for key in candidate_keys:
-            if key in existing:
+            if key in derived_keys:
                 continue
+            assets_rec = assets.get(key)
+            liabilities_rec = liabilities.get(key)
+            if assets_rec and liabilities_rec and assets_rec.value is not None and liabilities_rec.value is not None:
+                value = assets_rec.value - liabilities_rec.value
+                if value >= 0:
+                    derived.append(
+                        FactRecord(
+                            symbol=assets_rec.symbol,
+                            cik=assets_rec.cik,
+                            concept="StockholdersEquity",
+                            fiscal_period=assets_rec.fiscal_period,
+                            end_date=assets_rec.end_date,
+                            unit=assets_rec.unit,
+                            value=value,
+                            accn=assets_rec.accn,
+                            filed=assets_rec.filed,
+                            frame=assets_rec.frame,
+                            start_date=assets_rec.start_date,
+                            accounting_standard=assets_rec.accounting_standard,
+                            currency=assets_rec.currency,
+                        )
+                    )
+                    derived_keys.add(key)
+                    continue
             base = None
             for concept in EQUITY_FALLBACK_CONCEPTS:
                 base = indexed.get(concept, {}).get(key)
@@ -362,6 +578,7 @@ class EODHDFactsNormalizer:
             if base is None or base.value is None:
                 continue
             derived.append(self._alias_record(base, "StockholdersEquity"))
+            derived_keys.add(key)
         return derived
 
     def _derive_shares_alias(self, records: List[FactRecord]) -> List[FactRecord]:
@@ -497,7 +714,6 @@ class EODHDFactsNormalizer:
             derived.append(
                 FactRecord(
                     symbol=base.symbol,
-                    provider=base.provider,
                     cik=base.cik,
                     concept="NetIncomeLossAvailableToCommonStockholdersBasic",
                     fiscal_period=base.fiscal_period,
@@ -520,6 +736,7 @@ class EODHDFactsNormalizer:
         candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
         for concept in COMMON_EQUITY_FALLBACK:
             candidate_keys.update(indexed.get(concept, {}).keys())
+        noncontrolling = indexed.get("NoncontrollingInterestInConsolidatedEntity", {})
 
         derived: List[FactRecord] = []
         for key in candidate_keys:
@@ -534,23 +751,26 @@ class EODHDFactsNormalizer:
                 continue
             preferred = indexed.get("PreferredStock", {}).get(key)
             preferred_value = preferred.value if preferred and preferred.value is not None else 0.0
-            adjusted = base.value - preferred_value
+            noncontrolling_rec = noncontrolling.get(key)
+            noncontrolling_value = (
+                noncontrolling_rec.value if noncontrolling_rec and noncontrolling_rec.value is not None else 0.0
+            )
+            adjusted = base.value - preferred_value - noncontrolling_value
             derived.append(
                 FactRecord(
-                symbol=base.symbol,
-                provider=base.provider,
-                cik=base.cik,
-                concept="CommonStockholdersEquity",
-                fiscal_period=base.fiscal_period,
-                end_date=base.end_date,
-                unit=base.unit,
-                value=adjusted,
-                accn=base.accn,
-                filed=base.filed,
-                frame=base.frame,
-                start_date=base.start_date,
-                accounting_standard=base.accounting_standard,
-                currency=base.currency,
+                    symbol=base.symbol,
+                    cik=base.cik,
+                    concept="CommonStockholdersEquity",
+                    fiscal_period=base.fiscal_period,
+                    end_date=base.end_date,
+                    unit=base.unit,
+                    value=adjusted,
+                    accn=base.accn,
+                    filed=base.filed,
+                    frame=base.frame,
+                    start_date=base.start_date,
+                    accounting_standard=base.accounting_standard,
+                    currency=base.currency,
                 )
             )
         return derived
@@ -558,7 +778,6 @@ class EODHDFactsNormalizer:
     def _alias_record(self, base: FactRecord, concept: str) -> FactRecord:
         return FactRecord(
             symbol=base.symbol,
-            provider=base.provider,
             cik=base.cik,
             concept=concept,
             fiscal_period=base.fiscal_period,

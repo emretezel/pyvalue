@@ -391,6 +391,124 @@ def _migration_011_add_currency_to_listings(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE listings ADD COLUMN currency TEXT")
 
 
+def _migration_012_drop_provider_from_financial_facts(conn: sqlite3.Connection) -> None:
+    """Remove provider column from financial_facts and dedupe by fact key."""
+
+    exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='financial_facts'"
+    ).fetchone()
+    if exists is None:
+        return
+
+    info = conn.execute("PRAGMA table_info(financial_facts)").fetchall()
+    columns = {row[1] for row in info}
+    if "provider" not in columns:
+        return
+
+    conn.execute("ALTER TABLE financial_facts RENAME TO financial_facts_old")
+    conn.execute(
+        """
+        CREATE TABLE financial_facts (
+            symbol TEXT NOT NULL,
+            cik TEXT,
+            concept TEXT NOT NULL,
+            fiscal_period TEXT,
+            end_date TEXT NOT NULL,
+            unit TEXT NOT NULL,
+            value REAL NOT NULL,
+            accn TEXT,
+            filed TEXT,
+            frame TEXT,
+            start_date TEXT,
+            accounting_standard TEXT,
+            currency TEXT,
+            PRIMARY KEY (symbol, concept, fiscal_period, end_date, unit, accn)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO financial_facts (
+            symbol,
+            cik,
+            concept,
+            fiscal_period,
+            end_date,
+            unit,
+            value,
+            accn,
+            filed,
+            frame,
+            start_date,
+            accounting_standard,
+            currency
+        )
+        SELECT
+            symbol,
+            cik,
+            concept,
+            fiscal_period,
+            end_date,
+            unit,
+            value,
+            accn,
+            filed,
+            frame,
+            start_date,
+            accounting_standard,
+            currency
+        FROM (
+            SELECT
+                *,
+                ROW_NUMBER() OVER (
+                    PARTITION BY symbol, concept, fiscal_period, end_date, unit, accn
+                    ORDER BY
+                        CASE provider
+                            WHEN 'SEC' THEN 0
+                            WHEN 'EODHD' THEN 1
+                            ELSE 2
+                        END,
+                        filed DESC
+                ) AS rn
+            FROM financial_facts_old
+        )
+        WHERE rn = 1
+        """
+    )
+    conn.execute("DROP TABLE financial_facts_old")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fin_facts_symbol_concept
+        ON financial_facts(symbol, concept)
+        """
+    )
+
+
+def _migration_013_create_fundamentals_fetch_state(conn: sqlite3.Connection) -> None:
+    """Track per-symbol fundamentals fetch status for resumable ingestion."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fundamentals_fetch_state (
+            provider TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            last_fetched_at TEXT,
+            last_status TEXT,
+            last_error TEXT,
+            next_eligible_at TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (provider, symbol)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fundamentals_fetch_next
+        ON fundamentals_fetch_state(provider, next_eligible_at)
+        """
+    )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -403,6 +521,8 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_009_add_exchange_to_fundamentals,
     _migration_010_qualify_listings_symbols,
     _migration_011_add_currency_to_listings,
+    _migration_012_drop_provider_from_financial_facts,
+    _migration_013_create_fundamentals_fetch_state,
 ]
 
 

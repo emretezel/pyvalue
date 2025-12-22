@@ -55,7 +55,12 @@ class EODHDFundamentalsClient:
     def list_symbols(self, exchange_code: str, timeout: int = DEFAULT_TIMEOUT) -> List[Dict]:
         code = exchange_code.upper()
         url = f"{BASE_URL}/exchange-symbol-list/{code}"
-        params = {"api_token": self.api_key, "fmt": "json"}
+        params = {
+            "api_token": self.api_key,
+            "fmt": "json",
+            "delisted": "0",
+            "type": "stock",
+        }
         response = self.session.get(url, params=params, timeout=timeout)
         response.raise_for_status()
         payload = response.json()

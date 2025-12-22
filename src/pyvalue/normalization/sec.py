@@ -1180,7 +1180,6 @@ class SECFactsNormalizer:
     ) -> FactRecord:
         return FactRecord(
             symbol=symbol.upper(),
-            provider=base.provider,
             cik=base.cik or cik,
             concept=concept,
             fiscal_period=base.fiscal_period,
@@ -1272,7 +1271,6 @@ class SECFactsNormalizer:
 
         return FactRecord(
             symbol=symbol,
-            provider="SEC",
             cik=cik,
             concept=concept,
             fiscal_period=fiscal_period,

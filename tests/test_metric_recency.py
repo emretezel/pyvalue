@@ -142,7 +142,6 @@ def test_roc_metric_uses_recent_concept_even_if_fy_old(tmp_path):
             FactRecord(symbol="TEST.US", concept="AssetsCurrent", fiscal_period="Q3", end_date=(date.today() - timedelta(days=45)).isoformat(), unit="USD", value=40.0),
             FactRecord(symbol="TEST.US", concept="LiabilitiesCurrent", fiscal_period="Q3", end_date=(date.today() - timedelta(days=45)).isoformat(), unit="USD", value=20.0),
         ],
-        provider="EODHD",
     )
 
     metric = ROCGreenblattMetric()

@@ -17,15 +17,18 @@ LOGGER = logging.getLogger(__name__)
 
 
 class UKUniverseLoader:
-    """Download and normalize the UK equity universe from EODHD."""
+    """Download and normalize an equity universe from EODHD."""
 
     #: Equity security types we keep by default (ETFs handled separately).
-    ALLOWED_TYPES = {"Common Stock", "Preferred Stock"}
+    DEFAULT_ALLOWED_TYPES = {"Common Stock"}
 
     def __init__(
         self,
         api_key: Optional[str],
         exchange_code: str = "LSE",
+        include_etfs: bool = False,
+        allowed_currencies: Optional[Sequence[str]] = None,
+        allowed_types: Optional[Sequence[str]] = None,
         fetcher: Optional[Callable[[str], str]] = None,
         session: Optional[requests.Session] = None,
     ) -> None:
@@ -34,6 +37,11 @@ class UKUniverseLoader:
 
         self.api_key = api_key
         self.exchange_code = exchange_code
+        self.include_etfs = include_etfs
+        self.allowed_types = set(allowed_types or self.DEFAULT_ALLOWED_TYPES)
+        self.allowed_currencies = (
+            {code.upper() for code in allowed_currencies} if allowed_currencies else None
+        )
         self._custom_fetcher = fetcher
         self.session = session or requests.Session()
 
@@ -75,7 +83,12 @@ class UKUniverseLoader:
             return self._custom_fetcher(self.exchange_code)
 
         url = f"https://eodhd.com/api/exchange-symbol-list/{self.exchange_code}"
-        params = {"api_token": self.api_key, "fmt": "json"}
+        params = {
+            "api_token": self.api_key,
+            "fmt": "json",
+            "delisted": "0",
+            "type": "stock",
+        }
         response = self.session.get(url, params=params, timeout=30)
         try:
             response.raise_for_status()
@@ -89,18 +102,31 @@ class UKUniverseLoader:
             return None
 
         sec_type = (row.get("Type") or "").strip()
-        is_etf = sec_type.upper() == "ETF"
-        if not is_etf and sec_type not in self.ALLOWED_TYPES:
+        sec_type_upper = sec_type.upper()
+        is_etf = sec_type_upper == "ETF"
+        if is_etf:
+            if not self.include_etfs:
+                return None
+        elif sec_type not in self.allowed_types:
             return None
 
         name = (row.get("Name") or "").strip()
-        exchange = (row.get("Exchange") or self.exchange_code or "LSE").strip()
+        exchange = (self.exchange_code or "").strip().upper()
+        if not exchange:
+            exchange = (row.get("Exchange") or "").strip().upper()
+        if not exchange:
+            exchange = "LSE"
 
         isin = (row.get("ISIN") or row.get("Isin") or row.get("isin") or "").strip() or None
 
         qualified = symbol if "." in symbol else f"{symbol}.{self.exchange_code.upper()}"
 
         currency = (row.get("Currency") or row.get("currency") or "").strip() or None
+        if currency:
+            currency = currency.upper()
+        if self.allowed_currencies is not None:
+            if not currency or currency not in self.allowed_currencies:
+                return None
 
         return Listing(
             symbol=qualified,
