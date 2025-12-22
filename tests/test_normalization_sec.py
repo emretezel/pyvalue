@@ -666,6 +666,114 @@ def test_normalizer_derives_ppe_from_net_property_plant_and_equipment():
     assert derived[0].value == 750.0
 
 
+def test_normalizer_derives_ppe_from_gross_minus_accumulated():
+    recent = _recent_date()
+    payload = {
+        "facts": {
+            "us-gaap": {
+                "PropertyPlantAndEquipmentGross": {
+                    "units": {
+                        "USD": [
+                            {
+                                "val": 1200.0,
+                                "fp": "FY",
+                                "end": recent,
+                                "form": "10-K",
+                                "filed": recent,
+                            }
+                        ]
+                    }
+                },
+                "AccumulatedDepreciationDepletionAndAmortizationPropertyPlantAndEquipment": {
+                    "units": {
+                        "USD": [
+                            {
+                                "val": 300.0,
+                                "fp": "FY",
+                                "end": recent,
+                                "form": "10-K",
+                                "filed": recent,
+                            }
+                        ]
+                    }
+                },
+            }
+        }
+    }
+    normalizer = SECFactsNormalizer(
+        concepts=[
+            "PropertyPlantAndEquipmentGross",
+            "AccumulatedDepreciationDepletionAndAmortizationPropertyPlantAndEquipment",
+        ]
+    )
+
+    records = normalizer.normalize(payload, symbol="TEST", cik="CIK0000")
+
+    derived = [
+        rec
+        for rec in records
+        if rec.concept == "PropertyPlantAndEquipmentNet"
+        and rec.end_date == recent
+        and rec.fiscal_period == "FY"
+    ]
+    assert len(derived) == 1
+    assert derived[0].value == 900.0
+
+
+def test_normalizer_derives_ppe_from_finance_lease_before_and_accumulated():
+    recent = _recent_date()
+    payload = {
+        "facts": {
+            "us-gaap": {
+                "PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetBeforeAccumulatedDepreciationAndAmortization": {
+                    "units": {
+                        "USD": [
+                            {
+                                "val": 1500.0,
+                                "fp": "FY",
+                                "end": recent,
+                                "form": "10-K",
+                                "filed": recent,
+                            }
+                        ]
+                    }
+                },
+                "PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetAccumulatedDepreciationAndAmortization": {
+                    "units": {
+                        "USD": [
+                            {
+                                "val": 400.0,
+                                "fp": "FY",
+                                "end": recent,
+                                "form": "10-K",
+                                "filed": recent,
+                            }
+                        ]
+                    }
+                },
+            }
+        }
+    }
+    normalizer = SECFactsNormalizer(
+        concepts=[
+            "PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetBeforeAccumulatedDepreciationAndAmortization",
+            "PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetAccumulatedDepreciationAndAmortization",
+        ]
+    )
+
+    records = normalizer.normalize(payload, symbol="TEST", cik="CIK0000")
+
+    derived = [
+        rec
+        for rec in records
+        if rec.concept == "PropertyPlantAndEquipmentNet"
+        and rec.end_date == recent
+        and rec.fiscal_period == "FY"
+    ]
+    assert len(derived) == 1
+    assert derived[0].value == 1100.0
+
+
 def test_normalizer_derives_net_income_available_to_common_from_net_income():
     recent = _recent_date()
     payload = {

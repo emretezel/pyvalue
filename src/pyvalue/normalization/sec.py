@@ -40,11 +40,17 @@ TARGET_CONCEPTS = {
     "OtherLiabilitiesNoncurrent",
     "AssetsCurrent",
     "AccountsPayableCurrent",
+    "AccountsPayableAndAccruedLiabilitiesCurrent",
+    "AccountsPayableAndAccruedLiabilitiesCurrentAndNoncurrent",
     "AccruedLiabilitiesCurrent",
+    "OtherAccruedLiabilitiesCurrent",
     "EmployeeRelatedLiabilitiesCurrent",
+    "EmployeeRelatedLiabilitiesCurrentAndNoncurrent",
     "TaxesPayableCurrent",
+    "AccruedIncomeTaxesCurrent",
     "InterestPayableCurrent",
     "DeferredRevenueCurrent",
+    "ContractWithCustomerLiabilityCurrent",
     "ShortTermBorrowings",
     "FederalFundsPurchasedAndSecuritiesSoldUnderAgreementsToRepurchase",
     "SecuritiesSoldUnderAgreementsToRepurchase",
@@ -56,9 +62,11 @@ TARGET_CONCEPTS = {
     "BrokeredDeposits",
     "ShortTermDebt",
     "ShortTermDebtCurrent",
+    "DebtCurrent",
     "OtherShortTermBorrowings",
     "TimeDeposits",
     "CommercialPaper",
+    "CapitalLeaseObligationsCurrent",
     "FinanceLeaseLiabilityCurrent",
     "OperatingLeaseLiabilityCurrent",
     "OperatingLeaseLiabilityNoncurrent",
@@ -73,6 +81,11 @@ TARGET_CONCEPTS = {
     "CurrentPortionOfNoncurrentBorrowings",
     "OtherCurrentFinancialLiabilities",
     "OtherCurrentNonfinancialLiabilities",
+    "DividendsPayableCurrent",
+    "DerivativeLiabilitiesCurrent",
+    "RestructuringReserveCurrent",
+    "DeferredTaxLiabilitiesCurrent",
+    "SeparateAccountsLiability",
     "CashAndCashEquivalentsAtCarryingValue",
     "CashAndCashEquivalents",
     "CashAndDueFromBanks",
@@ -172,8 +185,14 @@ TARGET_CONCEPTS = {
     # Operating assets
     "PropertyPlantAndEquipmentNet",
     "NetPropertyPlantAndEquipment",
-    "GrossPropertyPlantAndEquipment",
     "PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetAfterAccumulatedDepreciationAndAmortization",
+    "PropertyPlantAndEquipmentGross",
+    "GrossPropertyPlantAndEquipment",
+    "AccumulatedDepreciationDepletionAndAmortizationPropertyPlantAndEquipment",
+    "PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetBeforeAccumulatedDepreciationAndAmortization",
+    "PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetAccumulatedDepreciationAndAmortization",
+    "PublicUtilitiesPropertyPlantAndEquipmentNet",
+    "PropertyPlantAndEquipmentOtherNet",
     "Goodwill",
     "IntangibleAssetsNetExcludingGoodwill",
     "IntangibleAssetsNet",
@@ -230,11 +249,17 @@ ASSETS_CURRENT_COMPONENTS = (
 
 LIABILITIES_CURRENT_COMPONENTS = (
     "AccountsPayableCurrent",
+    "AccountsPayableAndAccruedLiabilitiesCurrent",
+    "AccountsPayableAndAccruedLiabilitiesCurrentAndNoncurrent",
     "AccruedLiabilitiesCurrent",
+    "OtherAccruedLiabilitiesCurrent",
     "EmployeeRelatedLiabilitiesCurrent",
+    "EmployeeRelatedLiabilitiesCurrentAndNoncurrent",
     "TaxesPayableCurrent",
+    "AccruedIncomeTaxesCurrent",
     "InterestPayableCurrent",
     "DeferredRevenueCurrent",
+    "ContractWithCustomerLiabilityCurrent",
     "ShortTermBorrowings",
     "FederalFundsPurchasedAndSecuritiesSoldUnderAgreementsToRepurchase",
     "SecuritiesSoldUnderAgreementsToRepurchase",
@@ -246,10 +271,12 @@ LIABILITIES_CURRENT_COMPONENTS = (
     "BrokeredDeposits",
     "ShortTermDebt",
     "ShortTermDebtCurrent",
+    "DebtCurrent",
     "OtherShortTermBorrowings",
     "TimeDeposits",
     "CommercialPaper",
     "LongTermDebtCurrent",
+    "CapitalLeaseObligationsCurrent",
     "FinanceLeaseLiabilityCurrent",
     "OperatingLeaseLiabilityCurrent",
     "OtherLiabilitiesCurrent",
@@ -263,7 +290,21 @@ LIABILITIES_CURRENT_COMPONENTS = (
     "CurrentPortionOfNoncurrentBorrowings",
     "OtherCurrentFinancialLiabilities",
     "OtherCurrentNonfinancialLiabilities",
+    "DividendsPayableCurrent",
+    "DerivativeLiabilitiesCurrent",
+    "RestructuringReserveCurrent",
+    "DeferredTaxLiabilitiesCurrent",
+    "SeparateAccountsLiability",
 )
+
+LIABILITIES_CURRENT_AP_ACCRUED_COMPONENTS = (
+    "AccountsPayableCurrent",
+    "AccruedLiabilitiesCurrent",
+)
+LIABILITIES_CURRENT_AP_ACCRUED_COMBINED = "AccountsPayableAndAccruedLiabilitiesCurrent"
+LIABILITIES_CURRENT_AP_ACCRUED_FALLBACK = "AccountsPayableAndAccruedLiabilitiesCurrentAndNoncurrent"
+LIABILITIES_CURRENT_EMPLOYEE_COMPONENT = "EmployeeRelatedLiabilitiesCurrent"
+LIABILITIES_CURRENT_EMPLOYEE_FALLBACK = "EmployeeRelatedLiabilitiesCurrentAndNoncurrent"
 
 LONG_TERM_DEBT_NONCURRENT_COMPONENTS = (
     "LongTermLineOfCredit",
@@ -330,7 +371,20 @@ EBIT_FALLBACK_CONCEPTS = (
 PPE_FALLBACK_CONCEPTS = (
     "NetPropertyPlantAndEquipment",
     "PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetAfterAccumulatedDepreciationAndAmortization",
+    "PublicUtilitiesPropertyPlantAndEquipmentNet",
 )
+PPE_GROSS_CONCEPTS = (
+    "PropertyPlantAndEquipmentGross",
+    "GrossPropertyPlantAndEquipment",
+)
+PPE_GROSS_ACCUM_CONCEPT = "AccumulatedDepreciationDepletionAndAmortizationPropertyPlantAndEquipment"
+PPE_FINANCE_LEASE_BEFORE = (
+    "PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetBeforeAccumulatedDepreciationAndAmortization"
+)
+PPE_FINANCE_LEASE_ACCUM = (
+    "PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetAccumulatedDepreciationAndAmortization"
+)
+PPE_OTHER_NET_CONCEPT = "PropertyPlantAndEquipmentOtherNet"
 INCOME_AVAILABLE_TO_COMMON_FALLBACK = (
     "NetIncomeLossAvailableToCommonStockholdersDiluted",
     "NetIncomeLoss",
@@ -575,7 +629,7 @@ class SECFactsNormalizer:
         indexed = self._index_records(records)
         derived: List[FactRecord] = []
         derived.extend(self._derive_sum(indexed, symbol, cik, "AssetsCurrent", ASSETS_CURRENT_COMPONENTS))
-        derived.extend(self._derive_sum(indexed, symbol, cik, "LiabilitiesCurrent", LIABILITIES_CURRENT_COMPONENTS))
+        derived.extend(self._derive_liabilities_current(indexed, symbol, cik))
         return derived
 
     def _derive_sum(
@@ -603,6 +657,74 @@ class SECFactsNormalizer:
             total = sum(record.value for record in component_records if record.value is not None)
             base = component_records[0]
             derived.append(self._build_derived_record(base, concept, total, symbol, cik))
+        return derived
+
+    def _derive_liabilities_current(
+        self,
+        indexed: Dict[str, Dict[tuple[str, str, str], FactRecord]],
+        symbol: str,
+        cik: Optional[str],
+    ) -> List[FactRecord]:
+        existing = indexed.get("LiabilitiesCurrent", {})
+        candidate_keys: set[tuple[str, str, str]] = set()
+        for component in LIABILITIES_CURRENT_COMPONENTS:
+            candidate_keys.update(indexed.get(component, {}).keys())
+
+        grouped_tags = {
+            *LIABILITIES_CURRENT_AP_ACCRUED_COMPONENTS,
+            LIABILITIES_CURRENT_AP_ACCRUED_COMBINED,
+            LIABILITIES_CURRENT_AP_ACCRUED_FALLBACK,
+            LIABILITIES_CURRENT_EMPLOYEE_COMPONENT,
+            LIABILITIES_CURRENT_EMPLOYEE_FALLBACK,
+        }
+
+        derived: List[FactRecord] = []
+        for key in candidate_keys:
+            if existing.get(key):
+                continue
+            component_records: List[FactRecord] = []
+
+            ap_record = indexed.get("AccountsPayableCurrent", {}).get(key)
+            accrued_record = indexed.get("AccruedLiabilitiesCurrent", {}).get(key)
+            has_ap = ap_record is not None and ap_record.value is not None
+            has_accrued = accrued_record is not None and accrued_record.value is not None
+            if has_ap and has_accrued:
+                component_records.extend([ap_record, accrued_record])
+            else:
+                combined_current = indexed.get(LIABILITIES_CURRENT_AP_ACCRUED_COMBINED, {}).get(key)
+                if combined_current and combined_current.value is not None:
+                    component_records.append(combined_current)
+                else:
+                    if has_ap:
+                        component_records.append(ap_record)
+                    if has_accrued:
+                        component_records.append(accrued_record)
+                    if not (has_ap or has_accrued):
+                        combined_fallback = indexed.get(LIABILITIES_CURRENT_AP_ACCRUED_FALLBACK, {}).get(key)
+                        if combined_fallback and combined_fallback.value is not None:
+                            component_records.append(combined_fallback)
+
+            employee_record = indexed.get(LIABILITIES_CURRENT_EMPLOYEE_COMPONENT, {}).get(key)
+            if employee_record and employee_record.value is not None:
+                component_records.append(employee_record)
+            else:
+                employee_fallback = indexed.get(LIABILITIES_CURRENT_EMPLOYEE_FALLBACK, {}).get(key)
+                if employee_fallback and employee_fallback.value is not None:
+                    component_records.append(employee_fallback)
+
+            for component in LIABILITIES_CURRENT_COMPONENTS:
+                if component in grouped_tags:
+                    continue
+                record = indexed.get(component, {}).get(key)
+                if record and record.value is not None:
+                    component_records.append(record)
+
+            if not component_records:
+                continue
+            total = sum(record.value for record in component_records if record.value is not None)
+            base = component_records[0]
+            derived.append(self._build_derived_record(base, "LiabilitiesCurrent", total, symbol, cik))
+
         return derived
 
     def _derive_long_term_debt(
@@ -936,6 +1058,12 @@ class SECFactsNormalizer:
         candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
         for concept in PPE_FALLBACK_CONCEPTS:
             candidate_keys.update(indexed.get(concept, {}).keys())
+        for concept in PPE_GROSS_CONCEPTS:
+            candidate_keys.update(indexed.get(concept, {}).keys())
+        candidate_keys.update(indexed.get(PPE_GROSS_ACCUM_CONCEPT, {}).keys())
+        candidate_keys.update(indexed.get(PPE_FINANCE_LEASE_BEFORE, {}).keys())
+        candidate_keys.update(indexed.get(PPE_FINANCE_LEASE_ACCUM, {}).keys())
+        candidate_keys.update(indexed.get(PPE_OTHER_NET_CONCEPT, {}).keys())
 
         derived: List[FactRecord] = []
         for key in candidate_keys:
@@ -945,6 +1073,29 @@ class SECFactsNormalizer:
                 indexed.get(concept, {}).get(key) for concept in PPE_FALLBACK_CONCEPTS
             )
             if base is None:
+                gross = self._pick_preferred_record(
+                    indexed.get(concept, {}).get(key) for concept in PPE_GROSS_CONCEPTS
+                )
+                accum = indexed.get(PPE_GROSS_ACCUM_CONCEPT, {}).get(key)
+                if gross and gross.value is not None and accum and accum.value is not None:
+                    value = gross.value - accum.value
+                    derived.append(self._build_derived_record(gross, "PropertyPlantAndEquipmentNet", value, symbol, cik))
+                    continue
+
+                before = indexed.get(PPE_FINANCE_LEASE_BEFORE, {}).get(key)
+                accum_fl = indexed.get(PPE_FINANCE_LEASE_ACCUM, {}).get(key)
+                if before and before.value is not None and accum_fl and accum_fl.value is not None:
+                    value = before.value - accum_fl.value
+                    derived.append(
+                        self._build_derived_record(before, "PropertyPlantAndEquipmentNet", value, symbol, cik)
+                    )
+                    continue
+
+                other_net = indexed.get(PPE_OTHER_NET_CONCEPT, {}).get(key)
+                if other_net and other_net.value is not None:
+                    derived.append(
+                        self._build_derived_record(other_net, "PropertyPlantAndEquipmentNet", other_net.value, symbol, cik)
+                    )
                 continue
             derived.append(self._build_derived_record(base, "PropertyPlantAndEquipmentNet", base.value, symbol, cik))
         return derived
