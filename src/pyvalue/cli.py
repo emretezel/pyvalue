@@ -846,8 +846,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_screen_bulk.add_argument(
         "--region",
-        default="US",
-        help="Universe region key stored in SQLite (default: %(default)s)",
+        default=None,
+        help="Universe region key stored in SQLite (default: US when no exchange-code).",
+    )
+    run_screen_bulk.add_argument(
+        "--exchange-code",
+        default=None,
+        help="Optional exchange code to select symbols from listings (e.g., US, LSE, NYSE).",
     )
     run_screen_bulk.add_argument(
         "--output-csv",
@@ -2299,19 +2304,49 @@ def cmd_run_screen(symbol: str, config_path: str, database: str) -> int:
     return 0 if passed_all else 1
 
 
-def cmd_run_screen_bulk(config_path: str, database: str, region: str, output_csv: Optional[str]) -> int:
+def cmd_run_screen_bulk(
+    config_path: str,
+    database: str,
+    region: Optional[str],
+    output_csv: Optional[str],
+    exchange_code: Optional[str] = None,
+) -> int:
     """Evaluate screening criteria for every ticker stored in the universe."""
 
     definition = load_screen(config_path)
     output_csv = output_csv or DEFAULT_SCREEN_RESULTS_CSV
     universe_repo = UniverseRepository(database)
-    symbols = universe_repo.fetch_symbols(region)
-    if not symbols:
-        fund_repo = FundamentalsRepository(database)
-        fund_repo.initialize_schema()
-        symbols = fund_repo.symbols("EODHD", region=region)
-    if not symbols:
-        raise SystemExit(f"No symbols found for region {region}. Load universe or ingest fundamentals first.")
+    universe_repo.initialize_schema()
+    symbols: List[str] = []
+    region_label = region.upper() if region else None
+    if exchange_code:
+        exchange_norm = exchange_code.upper()
+        pairs = universe_repo.fetch_symbol_regions_by_exchange(exchange_norm, region=region_label)
+        symbols = [symbol for symbol, _ in pairs]
+        if not symbols:
+            fund_repo = FundamentalsRepository(database)
+            fund_repo.initialize_schema()
+            raw_pairs = fund_repo.symbol_exchanges("EODHD", region=region_label)
+            symbols = [
+                symbol
+                for symbol, exchange in raw_pairs
+                if exchange and exchange.upper() == exchange_norm
+            ]
+        if not symbols:
+            raise SystemExit(
+                f"No symbols found for exchange {exchange_norm}. Load universe or ingest fundamentals first."
+            )
+    else:
+        region_label = (region or "US").upper()
+        symbols = universe_repo.fetch_symbols(region_label)
+        if not symbols:
+            fund_repo = FundamentalsRepository(database)
+            fund_repo.initialize_schema()
+            symbols = fund_repo.symbols("EODHD", region=region_label)
+        if not symbols:
+            raise SystemExit(
+                f"No symbols found for region {region_label}. Load universe or ingest fundamentals first."
+            )
 
     metrics_repo = MetricsRepository(database)
     metrics_repo.initialize_schema()
@@ -2323,10 +2358,19 @@ def cmd_run_screen_bulk(config_path: str, database: str, region: str, output_csv
     entity_repo.initialize_schema()
 
     with universe_repo._connect() as conn:
-        name_rows = conn.execute(
-            "SELECT symbol, security_name FROM listings WHERE region = ?",
-            (region,),
-        ).fetchall()
+        if exchange_code:
+            query = ["SELECT symbol, security_name FROM listings WHERE UPPER(exchange) = ?"]
+            params: List[str] = [exchange_norm]
+            if region_label:
+                query.append("AND region = ?")
+                params.append(region_label)
+            sql = " ".join(query)
+            name_rows = conn.execute(sql, params).fetchall()
+        else:
+            name_rows = conn.execute(
+                "SELECT symbol, security_name FROM listings WHERE region = ?",
+                (region_label,),
+            ).fetchall()
     universe_names = {row[0].upper(): (row[1] or row[0].upper()) for row in name_rows}
     entity_labels: Dict[str, str] = {}
     passed_symbols: List[str] = []
@@ -2601,6 +2645,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             database=args.database,
             region=args.region,
             output_csv=args.output_csv,
+            exchange_code=args.exchange_code,
         )
     if args.command == "purge-us-nonfilers":
         return cmd_purge_us_nonfilers(database=args.database, apply=args.apply)

@@ -897,6 +897,60 @@ criteria:
     assert csv_contents[1].startswith("Entity,AAA Inc")
 
 
+def test_cmd_run_screen_bulk_with_exchange(tmp_path, capsys):
+    db_path = tmp_path / "screen_exchange.db"
+    universe_repo = UniverseRepository(db_path)
+    universe_repo.initialize_schema()
+    universe_repo.replace_universe(
+        [Listing(symbol="AAA.LSE", security_name="AAA PLC", exchange="LSE")],
+        region="UK",
+    )
+    universe_repo.replace_universe(
+        [Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE")],
+        region="US",
+    )
+
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+    metrics_repo.upsert("AAA.LSE", "working_capital", 100.0, "2023-12-31")
+    metrics_repo.upsert("BBB.US", "working_capital", 100.0, "2023-12-31")
+
+    entity_repo = EntityMetadataRepository(db_path)
+    entity_repo.initialize_schema()
+    entity_repo.upsert("AAA.LSE", "AAA PLC")
+    entity_repo.upsert("BBB.US", "BBB Inc")
+
+    screen_path = tmp_path / "screen.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Working capital minimum"
+    left:
+      metric: working_capital
+    operator: ">="
+    right:
+      value: 75
+"""
+    )
+
+    csv_path = tmp_path / "results.csv"
+
+    rc = cli.cmd_run_screen_bulk(
+        config_path=str(screen_path),
+        database=str(db_path),
+        region=None,
+        output_csv=str(csv_path),
+        exchange_code="LSE",
+    )
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "AAA.LSE" in output
+    assert "BBB.US" not in output
+    csv_contents = csv_path.read_text().strip().splitlines()
+    assert csv_contents[0] == "Criterion,AAA.LSE"
+    assert csv_contents[1].startswith("Entity,AAA PLC")
+
+
 def test_cmd_report_metric_failures_uses_highest_market_cap_example(tmp_path, capsys):
     db_path = tmp_path / "failures.db"
     market_repo = MarketDataRepository(db_path)
