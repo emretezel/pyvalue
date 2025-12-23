@@ -970,6 +970,34 @@ def test_cmd_report_metric_failures_uses_highest_market_cap_example(tmp_path, ca
     assert "working_capital" in output
     assert "example=BBB.US" in output
 
+
+def test_cmd_report_metric_failures_with_exchange(tmp_path, capsys):
+    db_path = tmp_path / "failures_exchange.db"
+    universe_repo = UniverseRepository(db_path)
+    universe_repo.initialize_schema()
+    universe_repo.replace_universe(
+        [Listing(symbol="AAA.LSE", security_name="AAA PLC", exchange="LSE")],
+        region="UK",
+    )
+    universe_repo.replace_universe(
+        [Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE")],
+        region="US",
+    )
+
+    rc = cli.cmd_report_metric_failures(
+        database=str(db_path),
+        region=None,
+        metric_ids=["working_capital"],
+        symbols=None,
+        output_csv=None,
+        exchange_code="LSE",
+    )
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "symbols=1" in output
+    assert "example=AAA.LSE" in output
+    assert "BBB.US" not in output
+
 def test_cmd_compute_metrics(tmp_path):
     db_path = tmp_path / "facts.db"
     fact_repo = FinancialFactsRepository(db_path)

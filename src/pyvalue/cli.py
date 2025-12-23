@@ -786,8 +786,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     failure_report.add_argument(
         "--region",
-        default="US",
-        help="Universe region key stored in SQLite (default: %(default)s)",
+        default=None,
+        help="Universe region key stored in SQLite (default: US when no exchange-code).",
+    )
+    failure_report.add_argument(
+        "--exchange-code",
+        default=None,
+        help="Optional exchange code to select symbols from listings (e.g., US, LSE, NYSE).",
     )
     failure_report.add_argument(
         "--metrics",
@@ -1994,15 +1999,16 @@ def _write_metric_failure_report_csv(
 
 def cmd_report_metric_failures(
     database: str,
-    region: str,
+    region: Optional[str],
     metric_ids: Optional[Sequence[str]],
     symbols: Optional[Sequence[str]],
     output_csv: Optional[str],
+    exchange_code: Optional[str] = None,
 ) -> int:
     """Summarize warning reasons for metric computation failures."""
 
     db_path = _resolve_database_path(database)
-    region_label = region.upper()
+    region_label = (region or "US").upper()
     if symbols:
         selected: List[str] = []
         for entry in symbols:
@@ -2013,9 +2019,35 @@ def cmd_report_metric_failures(
                 selected.append(_qualify_symbol(symbol, region=region_label))
         symbols = list(dict.fromkeys(selected))
     else:
-        symbols = _symbols_for_region_or_raise(db_path, region_label)
-        if not symbols:
-            raise SystemExit(f"No symbols found for region {region_label}.")
+        if exchange_code:
+            exchange_norm = exchange_code.upper()
+            universe_repo = UniverseRepository(db_path)
+            universe_repo.initialize_schema()
+            region_filter = region.upper() if region else None
+            pairs = universe_repo.fetch_symbol_regions_by_exchange(exchange_norm, region=region_filter)
+            symbols = [symbol for symbol, _ in pairs]
+            if not symbols:
+                fund_repo = FundamentalsRepository(db_path)
+                fund_repo.initialize_schema()
+                query = ["SELECT DISTINCT symbol FROM fundamentals_raw WHERE UPPER(exchange) = ?"]
+                params: List[str] = [exchange_norm]
+                if region_filter:
+                    query.append("AND region = ?")
+                    params.append(region_filter)
+                query.append("ORDER BY symbol")
+                sql = " ".join(query)
+                with fund_repo._connect() as conn:
+                    rows = conn.execute(sql, params).fetchall()
+                symbols = [row[0] for row in rows]
+            if not symbols:
+                raise SystemExit(
+                    f"No symbols found for exchange {exchange_norm}. "
+                    "Load a universe or ingest fundamentals first."
+                )
+        else:
+            symbols = _symbols_for_region_or_raise(db_path, region_label)
+            if not symbols:
+                raise SystemExit(f"No symbols found for region {region_label}.")
 
     metric_classes = _select_metric_classes(metric_ids)
     base_fact_repo = FinancialFactsRepository(db_path)
@@ -2071,7 +2103,13 @@ def cmd_report_metric_failures(
         root_logger.removeHandler(handler)
 
     total_symbols = len(symbols)
-    print(f"Metric failure reasons for region {region_label} (symbols={total_symbols}, metrics={len(metric_classes)})")
+    if exchange_code:
+        scope_label = f"exchange {exchange_code.upper()}"
+        if region:
+            scope_label = f"{scope_label} (region {region_label})"
+    else:
+        scope_label = f"region {region_label}"
+    print(f"Metric failure reasons for {scope_label} (symbols={total_symbols}, metrics={len(metric_classes)})")
     for metric_id in [getattr(cls, "id", cls.__name__) for cls in metric_classes]:
         total_failures = totals.get(metric_id, 0)
         print(f"- {metric_id}: failures={total_failures}/{total_symbols}")
@@ -2634,6 +2672,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             metric_ids=args.metrics,
             symbols=args.symbols,
             output_csv=args.output_csv,
+            exchange_code=args.exchange_code,
         )
     if args.command == "recalc-market-cap":
         return cmd_recalc_market_cap(database=args.database)
