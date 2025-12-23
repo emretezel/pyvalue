@@ -416,6 +416,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="SQLite database file used for storage (default: %(default)s)",
     )
 
+    clear_fundamentals_raw = subparsers.add_parser(
+        "clear-fundamentals-raw",
+        help="Delete all stored raw fundamentals.",
+    )
+    clear_fundamentals_raw.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
+    )
+
     clear_metrics = subparsers.add_parser(
         "clear-metrics",
         help="Delete all computed metrics.",
@@ -2165,6 +2175,17 @@ def cmd_clear_financial_facts(database: str) -> int:
     return 0
 
 
+def cmd_clear_fundamentals_raw(database: str) -> int:
+    """Delete all stored raw fundamentals."""
+
+    repo = FundamentalsRepository(database)
+    with repo._connect() as conn:
+        conn.execute("DROP TABLE IF EXISTS fundamentals_raw")
+    repo.initialize_schema()
+    print(f"Cleared fundamentals_raw table in {database}")
+    return 0
+
+
 def cmd_clear_metrics(database: str) -> int:
     """Delete all computed metrics."""
 
@@ -2492,6 +2513,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return cmd_clear_listings(database=args.database)
     if args.command == "clear-financial-facts":
         return cmd_clear_financial_facts(database=args.database)
+    if args.command == "clear-fundamentals-raw":
+        return cmd_clear_fundamentals_raw(database=args.database)
     if args.command == "clear-metrics":
         return cmd_clear_metrics(database=args.database)
     if args.command == "compute-metrics":

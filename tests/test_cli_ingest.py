@@ -618,6 +618,22 @@ def test_cmd_compute_metrics_bulk_fallback_to_fundamentals(monkeypatch, tmp_path
     assert rc == 0
     assert metrics_repo.fetch("AAA.LSE", "dummy_metric")[0] == 7  # len("AAA.LSE")
 
+
+def test_cmd_clear_fundamentals_raw(tmp_path):
+    db_path = tmp_path / "clearfunds.db"
+    repo = FundamentalsRepository(db_path)
+    repo.initialize_schema()
+    repo.upsert("SEC", "AAA.US", {"facts": {}}, region="US")
+
+    with repo._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM fundamentals_raw").fetchone()[0] == 1
+
+    rc = cli.cmd_clear_fundamentals_raw(str(db_path))
+    assert rc == 0
+
+    with repo._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM fundamentals_raw").fetchone()[0] == 0
+
 def test_cmd_normalize_us_facts(monkeypatch, tmp_path):
     db_path = tmp_path / "facts.db"
     fund_repo = FundamentalsRepository(db_path)
