@@ -376,8 +376,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bulk_market_data.add_argument(
         "--region",
-        default="US",
-        help="Universe region key stored in SQLite (default: %(default)s)",
+        default=None,
+        help="Universe region key stored in SQLite (default: US when no exchange-code).",
+    )
+    bulk_market_data.add_argument(
+        "--exchange-code",
+        default=None,
+        help="Optional exchange code to select symbols from listings (e.g., US, LSE, NYSE).",
     )
     bulk_market_data.add_argument(
         "--rate",
@@ -1613,17 +1618,48 @@ def cmd_update_market_data(symbol: str, database: str) -> int:
     return 0
 
 
-def cmd_update_market_data_bulk(database: str, region: str, rate: float) -> int:
+def cmd_update_market_data_bulk(
+    database: str, region: Optional[str], rate: float, exchange_code: Optional[str] = None
+) -> int:
     """Fetch market data for every stored listing."""
 
     universe_repo = UniverseRepository(database)
-    pairs = universe_repo.fetch_symbol_exchanges(region)
-    if not pairs:
-        fund_repo = FundamentalsRepository(database)
-        fund_repo.initialize_schema()
-        pairs = fund_repo.symbol_exchanges("EODHD", region=region)
-    if not pairs:
-        raise SystemExit(f"No symbols found for region {region}. Load universe or ingest fundamentals first.")
+    universe_repo.initialize_schema()
+    pairs: List[tuple[str, Optional[str], Optional[str]]] = []
+    if exchange_code:
+        exchange_norm = exchange_code.upper()
+        region_label = region.upper() if region else None
+        listing_rows = universe_repo.fetch_symbol_regions_by_exchange(exchange_norm, region=region_label)
+        if listing_rows:
+            pairs = [(symbol, exchange_norm, row_region) for symbol, row_region in listing_rows]
+        else:
+            fund_repo = FundamentalsRepository(database)
+            fund_repo.initialize_schema()
+            raw_pairs = fund_repo.symbol_exchanges("EODHD", region=region_label)
+            pairs = [
+                (symbol, exchange_norm, region_label)
+                for symbol, exchange in raw_pairs
+                if exchange and exchange.upper() == exchange_norm
+            ]
+        if not pairs:
+            raise SystemExit(
+                f"No symbols found for exchange {exchange_norm}. "
+                "Load a universe or ingest fundamentals first."
+            )
+        effective_region = region_label
+    else:
+        region_label = (region or "US").upper()
+        listing_pairs = universe_repo.fetch_symbol_exchanges(region_label)
+        if not listing_pairs:
+            fund_repo = FundamentalsRepository(database)
+            fund_repo.initialize_schema()
+            listing_pairs = fund_repo.symbol_exchanges("EODHD", region=region_label)
+        if not listing_pairs:
+            raise SystemExit(
+                f"No symbols found for region {region_label}. Load universe or ingest fundamentals first."
+            )
+        pairs = [(symbol, exchange, region_label) for symbol, exchange in listing_pairs]
+        effective_region = region_label
 
     service = MarketDataService(db_path=database)
     interval = 60.0 / rate if rate and rate > 0 else 0.0
@@ -1632,10 +1668,10 @@ def cmd_update_market_data_bulk(database: str, region: str, rate: float) -> int:
     print(f"Updating market data for {total} symbols at <= {rate:.2f} per minute")
 
     try:
-        for idx, (symbol, exchange) in enumerate(pairs, 1):
+        for idx, (symbol, exchange, row_region) in enumerate(pairs, 1):
             start = time.perf_counter()
             try:
-                fetch_symbol = _format_market_symbol(symbol, exchange, region)
+                fetch_symbol = _format_market_symbol(symbol, exchange, row_region or effective_region)
                 service.refresh_symbol(symbol, fetch_symbol=fetch_symbol)
                 processed += 1
                 print(f"[{idx}/{total}] Stored market data for {symbol}", flush=True)
@@ -2508,6 +2544,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             database=args.database,
             region=args.region,
             rate=args.rate,
+            exchange_code=args.exchange_code,
         )
     if args.command == "clear-listings":
         return cmd_clear_listings(database=args.database)

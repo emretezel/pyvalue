@@ -506,6 +506,37 @@ def test_cmd_update_market_data_bulk(monkeypatch, tmp_path):
     assert rc == 0
     assert calls == ["AAA.US", "BBB.US"]
 
+
+def test_cmd_update_market_data_bulk_with_exchange(monkeypatch, tmp_path):
+    db_path = tmp_path / "marketbulk_exchange.db"
+    universe_repo = UniverseRepository(db_path)
+    universe_repo.initialize_schema()
+    universe_repo.replace_universe(
+        [Listing(symbol="AAA", security_name="AAA PLC", exchange="LSE")],
+        region="UK",
+    )
+    universe_repo.replace_universe(
+        [Listing(symbol="BBB", security_name="BBB Inc", exchange="NYSE")],
+        region="US",
+    )
+
+    calls = []
+
+    class DummyService:
+        def __init__(self, db_path):
+            self.db_path = db_path
+
+        def refresh_symbol(self, symbol, fetch_symbol=None):
+            calls.append((symbol, fetch_symbol))
+
+    monkeypatch.setattr(cli, "MarketDataService", lambda db_path: DummyService(db_path))
+
+    rc = cli.cmd_update_market_data_bulk(
+        database=str(db_path), region=None, rate=0, exchange_code="LSE"
+    )
+    assert rc == 0
+    assert calls == [("AAA", "AAA.LSE")]
+
 def test_cmd_compute_metrics_bulk(monkeypatch, tmp_path):
     db_path = tmp_path / "metricsbulk.db"
     universe_repo = UniverseRepository(db_path)
