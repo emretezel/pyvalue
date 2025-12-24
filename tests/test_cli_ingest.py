@@ -826,8 +826,8 @@ def test_cmd_run_screen_bulk(tmp_path, capsys):
     metrics_repo.upsert("BBB.US", "working_capital", 50.0, "2023-12-31")
     entity_repo = EntityMetadataRepository(db_path)
     entity_repo.initialize_schema()
-    entity_repo.upsert("AAA.US", "AAA Inc")
-    entity_repo.upsert("BBB.US", "BBB Inc")
+    entity_repo.upsert("AAA.US", "AAA Inc", description="AAA description")
+    entity_repo.upsert("BBB.US", "BBB Inc", description="BBB description")
 
     screen_path = tmp_path / "screen.yml"
     screen_path.write_text(
@@ -857,6 +857,8 @@ criteria:
     csv_contents = csv_path.read_text().strip().splitlines()
     assert csv_contents[0] == "Criterion,AAA.US"
     assert csv_contents[1].startswith("Entity,AAA Inc")
+    assert csv_contents[2].startswith("Description,AAA description")
+    assert csv_contents[3] == "Price,N/A"
 
 
 def test_cmd_run_screen_bulk_with_exchange(tmp_path, capsys):
@@ -877,8 +879,8 @@ def test_cmd_run_screen_bulk_with_exchange(tmp_path, capsys):
 
     entity_repo = EntityMetadataRepository(db_path)
     entity_repo.initialize_schema()
-    entity_repo.upsert("AAA.LSE", "AAA PLC")
-    entity_repo.upsert("BBB.US", "BBB Inc")
+    entity_repo.upsert("AAA.LSE", "AAA PLC", description="AAA description")
+    entity_repo.upsert("BBB.US", "BBB Inc", description="BBB description")
 
     screen_path = tmp_path / "screen.yml"
     screen_path.write_text(
@@ -908,6 +910,8 @@ criteria:
     csv_contents = csv_path.read_text().strip().splitlines()
     assert csv_contents[0] == "Criterion,AAA.LSE"
     assert csv_contents[1].startswith("Entity,AAA PLC")
+    assert csv_contents[2].startswith("Description,AAA description")
+    assert csv_contents[3] == "Price,N/A"
 
 
 def test_cmd_report_metric_failures_uses_highest_market_cap_example(tmp_path, capsys):

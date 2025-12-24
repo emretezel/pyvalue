@@ -1077,6 +1077,11 @@ def _extract_entity_name_from_eodhd(payload: Dict) -> Optional[str]:
     return general.get("Name") or general.get("Code")
 
 
+def _extract_entity_description_from_eodhd(payload: Dict) -> Optional[str]:
+    general = payload.get("General") or {}
+    return general.get("Description")
+
+
 def cmd_normalize_eodhd_fundamentals(symbol: str, database: str) -> int:
     """Normalize stored EODHD fundamentals for downstream metrics."""
 
@@ -1095,8 +1100,9 @@ def cmd_normalize_eodhd_fundamentals(symbol: str, database: str) -> int:
     entity_repo = EntityMetadataRepository(database)
     entity_repo.initialize_schema()
     entity_name = _extract_entity_name_from_eodhd(payload)
-    if entity_name:
-        entity_repo.upsert(symbol.upper(), entity_name)
+    entity_description = _extract_entity_description_from_eodhd(payload)
+    if entity_name or entity_description:
+        entity_repo.upsert(symbol.upper(), entity_name, description=entity_description)
 
     stored = fact_repo.replace_facts(symbol.upper(), records)
     print(f"Stored {stored} normalized facts for {symbol.upper()} in {database}")
@@ -1135,8 +1141,9 @@ def cmd_normalize_eodhd_fundamentals_bulk(
                 continue
             records = normalizer.normalize(payload, symbol=symbol)
             entity_name = _extract_entity_name_from_eodhd(payload)
-            if entity_name:
-                entity_repo.upsert(symbol, entity_name)
+            entity_description = _extract_entity_description_from_eodhd(payload)
+            if entity_name or entity_description:
+                entity_repo.upsert(symbol, entity_name, description=entity_description)
             stored = fact_repo.replace_facts(symbol, records)
             print(f"[{idx}/{total}] Stored {stored} normalized facts for {symbol}", flush=True)
     except KeyboardInterrupt:
@@ -1802,10 +1809,20 @@ def cmd_run_screen(symbol: str, config_path: str, database: str) -> int:
     fact_repo = RegionFactsRepository(base_fact_repo)
     market_repo = MarketDataRepository(database)
     market_repo.initialize_schema()
+    entity_repo = EntityMetadataRepository(database)
+    entity_repo.initialize_schema()
+    symbol_upper = symbol.upper()
+    entity_name = entity_repo.fetch(symbol_upper) or symbol_upper
+    description = entity_repo.fetch_description(symbol_upper) or "N/A"
+    snapshot = market_repo.latest_snapshot(symbol_upper)
+    price_label = _format_value(snapshot.price) if snapshot else "N/A"
+    print(f"Entity: {entity_name}")
+    print(f"Description: {description}")
+    print(f"Price: {price_label}")
     results = []
     for criterion in definition.criteria:
         passed, left_value = evaluate_criterion_verbose(
-            criterion, symbol.upper(), metrics_repo, fact_repo, market_repo
+            criterion, symbol_upper, metrics_repo, fact_repo, market_repo
         )
         results.append((criterion.name, passed, left_value))
     passed_all = all(flag for _, _, flag in results)
@@ -1879,13 +1896,35 @@ def cmd_run_screen_bulk(
     if not passed_symbols:
         print("No symbols satisfied all criteria.")
         if output_csv:
-            _write_screen_csv(definition.criteria, [], {}, {}, output_csv)
+            _write_screen_csv(definition.criteria, [], {}, {}, {}, {}, output_csv)
         return 1
 
     selected_names = {symbol: entity_labels.get(symbol, symbol) for symbol in passed_symbols}
-    _print_screen_table(definition.criteria, passed_symbols, criterion_values, selected_names)
+    selected_descriptions: Dict[str, str] = {}
+    selected_prices: Dict[str, str] = {}
+    for symbol in passed_symbols:
+        description = entity_repo.fetch_description(symbol)
+        selected_descriptions[symbol] = description if description else "N/A"
+        snapshot = market_repo.latest_snapshot(symbol)
+        selected_prices[symbol] = _format_value(snapshot.price) if snapshot else "N/A"
+    _print_screen_table(
+        definition.criteria,
+        passed_symbols,
+        criterion_values,
+        selected_names,
+        selected_descriptions,
+        selected_prices,
+    )
     if output_csv:
-        _write_screen_csv(definition.criteria, passed_symbols, criterion_values, selected_names, output_csv)
+        _write_screen_csv(
+            definition.criteria,
+            passed_symbols,
+            criterion_values,
+            selected_names,
+            selected_descriptions,
+            selected_prices,
+            output_csv,
+        )
     return 0
 
 
@@ -1894,10 +1933,14 @@ def _print_screen_table(
     symbols: Sequence[str],
     values: Dict[str, Dict[str, float]],
     entity_names: Dict[str, str],
+    descriptions: Dict[str, str],
+    prices: Dict[str, str],
 ) -> None:
     header = ["Criterion"] + list(symbols)
     rows: List[List[str]] = [header]
     rows.append(["Entity"] + [entity_names.get(symbol, symbol) for symbol in symbols])
+    rows.append(["Description"] + [descriptions.get(symbol, "N/A") for symbol in symbols])
+    rows.append(["Price"] + [prices.get(symbol, "N/A") for symbol in symbols])
     for criterion in criteria:
         row = [criterion.name]
         for symbol in symbols:
@@ -1919,12 +1962,16 @@ def _write_screen_csv(
     symbols: Sequence[str],
     values: Dict[str, Dict[str, float]],
     entity_names: Dict[str, str],
+    descriptions: Dict[str, str],
+    prices: Dict[str, str],
     path: str,
 ) -> None:
     with open(path, "w", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(["Criterion", *symbols])
         writer.writerow(["Entity", *[entity_names.get(symbol, symbol) for symbol in symbols]])
+        writer.writerow(["Description", *[descriptions.get(symbol, "N/A") for symbol in symbols]])
+        writer.writerow(["Price", *[prices.get(symbol, "N/A") for symbol in symbols]])
         for criterion in criteria:
             row = [criterion.name]
             for symbol in symbols:

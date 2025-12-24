@@ -612,6 +612,23 @@ def _migration_016_drop_exchange_metadata_and_company_facts(conn: sqlite3.Connec
     conn.execute("DROP TABLE IF EXISTS company_facts")
 
 
+def _migration_017_add_description_to_entity_metadata(conn: sqlite3.Connection) -> None:
+    """Add description column to entity_metadata."""
+
+    exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='entity_metadata'"
+    ).fetchone()
+    if exists is None:
+        return
+
+    info = conn.execute("PRAGMA table_info(entity_metadata)").fetchall()
+    columns = {row[1] for row in info}
+    if "description" in columns:
+        return
+
+    conn.execute("ALTER TABLE entity_metadata ADD COLUMN description TEXT")
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -629,6 +646,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_014_drop_uk_tables,
     _migration_015_drop_region_columns,
     _migration_016_drop_exchange_metadata_and_company_facts,
+    _migration_017_add_description_to_entity_metadata,
 ]
 
 
