@@ -28,6 +28,7 @@ class UKUniverseLoader:
         exchange_code: str = "LSE",
         include_etfs: bool = False,
         allowed_currencies: Optional[Sequence[str]] = None,
+        include_exchanges: Optional[Sequence[str]] = None,
         allowed_types: Optional[Sequence[str]] = None,
         fetcher: Optional[Callable[[str], str]] = None,
         session: Optional[requests.Session] = None,
@@ -41,6 +42,9 @@ class UKUniverseLoader:
         self.allowed_types = set(allowed_types or self.DEFAULT_ALLOWED_TYPES)
         self.allowed_currencies = (
             {code.upper() for code in allowed_currencies} if allowed_currencies else None
+        )
+        self.include_exchanges = (
+            {code.upper() for code in include_exchanges} if include_exchanges else None
         )
         self._custom_fetcher = fetcher
         self.session = session or requests.Session()
@@ -100,6 +104,11 @@ class UKUniverseLoader:
         symbol = (row.get("Code") or "").strip()
         if not symbol:
             return None
+
+        if self.include_exchanges is not None:
+            row_exchange = (row.get("Exchange") or row.get("exchange") or "").strip().upper()
+            if not row_exchange or row_exchange not in self.include_exchanges:
+                return None
 
         sec_type = (row.get("Type") or "").strip()
         sec_type_upper = sec_type.upper()

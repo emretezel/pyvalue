@@ -153,6 +153,20 @@ def _parse_currency_codes(values: Optional[Sequence[str]]) -> Optional[set[str]]
     return codes or None
 
 
+def _parse_exchange_filters(values: Optional[Sequence[str]]) -> Optional[set[str]]:
+    if not values:
+        return None
+    filters: set[str] = set()
+    for item in values:
+        if not item:
+            continue
+        for part in item.split(","):
+            part = part.strip()
+            if part:
+                filters.add(part.upper())
+    return filters or None
+
+
 def _select_exchange_listings_for_provider(
     database: str,
     provider: str,
@@ -251,6 +265,12 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         default=None,
         help="Limit to these currency codes (space or comma separated).",
+    )
+    load_intl.add_argument(
+        "--include-exchanges",
+        nargs="+",
+        default=None,
+        help="Only include listings whose Exchange field matches these values.",
     )
 
     ingest_uk = subparsers.add_parser(
@@ -899,6 +919,7 @@ def cmd_load_eodhd_universe(
     include_etfs: bool,
     exchange_code: str,
     currencies: Optional[Sequence[str]] = None,
+    include_exchanges: Optional[Sequence[str]] = None,
 ) -> int:
     """Execute the EODHD exchange universe load command."""
 
@@ -923,11 +944,13 @@ def cmd_load_eodhd_universe(
     )
 
     allowed_currencies = _parse_currency_codes(currencies)
+    allowed_exchanges = _parse_exchange_filters(include_exchanges)
     loader = UKUniverseLoader(
         api_key=api_key,
         exchange_code=exchange_code,
         include_etfs=include_etfs,
         allowed_currencies=allowed_currencies,
+        include_exchanges=allowed_exchanges,
     )
     listings = loader.load()
     LOGGER.info("Fetched %s listings for exchange %s", len(listings), exchange_code)
@@ -2532,6 +2555,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             include_etfs=args.include_etfs,
             exchange_code=args.exchange_code,
             currencies=args.currencies,
+            include_exchanges=args.include_exchanges,
         )
     if args.command == "ingest-uk-facts":
         return cmd_ingest_uk_facts(

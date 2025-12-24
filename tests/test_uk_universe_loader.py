@@ -73,6 +73,38 @@ def test_loader_filters_by_currency(eodhd_payload):
     assert symbols == ["AAA.LSE"]
 
 
+def test_loader_filters_by_exchange_field():
+    payload = json.dumps(
+        [
+            {
+                "Code": "AAA",
+                "Name": "AAA Inc",
+                "Exchange": "NYSE",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
+            {
+                "Code": "BBB",
+                "Name": "BBB Inc",
+                "Exchange": "NASDAQ",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
+        ]
+    )
+    loader = UKUniverseLoader(
+        api_key="dummy",
+        exchange_code="US",
+        fetcher=lambda _: payload,
+        include_exchanges=["NYSE"],
+    )
+
+    listings = loader.load()
+
+    symbols = [l.symbol for l in listings]
+    assert symbols == ["AAA.US"]
+
+
 def test_loader_uses_exchange_code_for_exchange_field():
     payload = json.dumps(
         [

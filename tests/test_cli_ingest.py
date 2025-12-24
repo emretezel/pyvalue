@@ -226,11 +226,21 @@ def test_cmd_load_eodhd_universe(monkeypatch, tmp_path):
     calls = {}
 
     class FakeLoader:
-        def __init__(self, api_key, exchange_code, include_etfs=False, allowed_currencies=None, fetcher=None, session=None):
+        def __init__(
+            self,
+            api_key,
+            exchange_code,
+            include_etfs=False,
+            allowed_currencies=None,
+            include_exchanges=None,
+            fetcher=None,
+            session=None,
+        ):
             calls["api_key"] = api_key
             calls["exchange_code"] = exchange_code
             calls["include_etfs"] = include_etfs
             calls["allowed_currencies"] = allowed_currencies
+            calls["include_exchanges"] = include_exchanges
 
         def load(self):
             return [
@@ -257,6 +267,7 @@ def test_cmd_load_eodhd_universe(monkeypatch, tmp_path):
         include_etfs=False,
         exchange_code="LSE",
         currencies=["GBP"],
+        include_exchanges=["LSE"],
     )
 
     assert rc == 0
@@ -264,6 +275,7 @@ def test_cmd_load_eodhd_universe(monkeypatch, tmp_path):
     assert calls["exchange_code"] == "LSE"
     assert calls["include_etfs"] is False
     assert calls["allowed_currencies"] == {"GBP"}
+    assert calls["include_exchanges"] == {"LSE"}
 
 
 def test_cmd_ingest_fundamentals_bulk_uses_exchange_listings(monkeypatch, tmp_path):
