@@ -5,6 +5,8 @@ Author: Emre Tezel
 from datetime import date, timedelta
 from types import SimpleNamespace
 
+import pytest
+
 from pyvalue import cli
 from pyvalue.metrics import REGISTRY
 from pyvalue.metrics.base import MetricResult
@@ -16,9 +18,6 @@ from pyvalue.storage import (
     FactRecord,
     MarketDataRepository,
     MetricsRepository,
-    UKCompanyFactsRepository,
-    UKFilingRepository,
-    UKSymbolMapRepository,
     UniverseRepository,
 )
 from pyvalue.universe import Listing
@@ -42,7 +41,7 @@ def make_fact(**kwargs):
     return FactRecord(**base)
 
 
-def test_cmd_ingest_us_facts(monkeypatch, tmp_path):
+def test_cmd_ingest_fundamentals_sec(monkeypatch, tmp_path):
     calls = {}
 
     class FakeClient:
@@ -59,7 +58,14 @@ def test_cmd_ingest_us_facts(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "SECCompanyFactsClient", FakeClient)
 
     db_path = tmp_path / "facts.db"
-    rc = cli.cmd_ingest_us_facts("AAPL", str(db_path), user_agent="UA", cik=None)
+    rc = cli.cmd_ingest_fundamentals(
+        provider="SEC",
+        symbol="AAPL",
+        database=str(db_path),
+        exchange_code=None,
+        user_agent="UA",
+        cik=None,
+    )
     assert rc == 0
     assert calls["ua"] == "UA"
     assert calls["cik"] == "CIK0000320193"
@@ -70,7 +76,7 @@ def test_cmd_ingest_us_facts(monkeypatch, tmp_path):
     assert stored["cik"] == "CIK0000320193"
 
 
-def test_cmd_ingest_eodhd_fundamentals(monkeypatch, tmp_path):
+def test_cmd_ingest_fundamentals_eodhd(monkeypatch, tmp_path):
     db_path = tmp_path / "funds.db"
     calls = {}
 
@@ -92,8 +98,13 @@ def test_cmd_ingest_eodhd_fundamentals(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
     monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
 
-    rc = cli.cmd_ingest_eodhd_fundamentals(
-        symbol="SHEL.LSE", database=str(db_path), exchange_code=None
+    rc = cli.cmd_ingest_fundamentals(
+        provider="EODHD",
+        symbol="SHEL.LSE",
+        database=str(db_path),
+        exchange_code="LSE",
+        user_agent=None,
+        cik=None,
     )
     assert rc == 0
     assert calls == {"api_key": "TOKEN", "symbol": "SHEL.LSE", "exchange_code": None}
@@ -104,15 +115,24 @@ def test_cmd_ingest_eodhd_fundamentals(monkeypatch, tmp_path):
     assert payload["General"]["CurrencyCode"] == "USD"
     with repo._connect() as conn:
         row = conn.execute(
-            "SELECT region, exchange FROM fundamentals_raw WHERE provider='EODHD' AND symbol='SHEL.LSE'"
+            "SELECT currency, exchange FROM fundamentals_raw WHERE provider='EODHD' AND symbol='SHEL.LSE'"
         ).fetchone()
-    assert row[0] == "UK"
+    assert row[0] == "USD"
     assert row[1] == "LSE"
 
 
-def test_cmd_ingest_eodhd_fundamentals_bulk_with_exchange(monkeypatch, tmp_path):
+def test_cmd_ingest_fundamentals_bulk_eodhd_with_exchange(monkeypatch, tmp_path):
     db_path = tmp_path / "bulkfunds.db"
     calls = {"listed": False, "fetched": []}
+
+    universe_repo = UniverseRepository(db_path)
+    universe_repo.initialize_schema()
+    universe_repo.replace_universe(
+        [
+            Listing(symbol="AAA.LSE", security_name="AAA plc", exchange="LSE"),
+            Listing(symbol="CCC.LSE", security_name="CCC plc", exchange="LSE"),
+        ]
+    )
 
     class FakeClient:
         def __init__(self, api_key):
@@ -136,12 +156,17 @@ def test_cmd_ingest_eodhd_fundamentals_bulk_with_exchange(monkeypatch, tmp_path)
     monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
     monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
 
-    rc = cli.cmd_ingest_eodhd_fundamentals_bulk(
-        database=str(db_path), rate=0, exchange_code="LSE"
+    rc = cli.cmd_ingest_fundamentals_bulk(
+        provider="EODHD",
+        database=str(db_path),
+        rate=0,
+        exchange_code="LSE",
+        user_agent=None,
+        max_symbols=None,
+        max_age_days=None,
+        resume=False,
     )
     assert rc == 0
-    assert calls["listed"] == "LSE"
-    # ETF filtered out; only AAA and CCC stored
     assert set(calls["fetched"]) == {("AAA.LSE", None), ("CCC.LSE", None)}
 
     repo = FundamentalsRepository(db_path)
@@ -150,15 +175,15 @@ def test_cmd_ingest_eodhd_fundamentals_bulk_with_exchange(monkeypatch, tmp_path)
     assert repo.fetch("EODHD", "CCC.LSE")["General"]["Name"] == "CCC.LSE"
 
 
-def test_cmd_ingest_eodhd_fundamentals_bulk_with_region(monkeypatch, tmp_path):
+def test_cmd_ingest_fundamentals_bulk_eodhd_with_exchange_symbols(monkeypatch, tmp_path):
     db_path = tmp_path / "bulkfunds_region.db"
     universe_repo = UniverseRepository(db_path)
     universe_repo.initialize_schema()
     listings = [
-        Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
-        Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NASDAQ"),
+        Listing(symbol="AAA.US", security_name="AAA Inc", exchange="US"),
+        Listing(symbol="BBB.US", security_name="BBB Inc", exchange="US"),
     ]
-    universe_repo.replace_universe(listings, region="US")
+    universe_repo.replace_universe(listings)
 
     calls = {"fetched": []}
 
@@ -173,8 +198,15 @@ def test_cmd_ingest_eodhd_fundamentals_bulk_with_region(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
     monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
 
-    rc = cli.cmd_ingest_eodhd_fundamentals_bulk(
-        database=str(db_path), rate=0, exchange_code=None, region="US"
+    rc = cli.cmd_ingest_fundamentals_bulk(
+        provider="EODHD",
+        database=str(db_path),
+        rate=0,
+        exchange_code="US",
+        user_agent=None,
+        max_symbols=None,
+        max_age_days=None,
+        resume=False,
     )
     assert rc == 0
     assert set(calls["fetched"]) == {("AAA.US", None), ("BBB.US", None)}
@@ -184,7 +216,7 @@ def test_cmd_ingest_eodhd_fundamentals_bulk_with_region(monkeypatch, tmp_path):
     assert repo.fetch("EODHD", "AAA.US")["General"]["Name"] == "AAA.US"
     assert repo.fetch("EODHD", "BBB.US")["General"]["Name"] == "BBB.US"
 
-def test_cmd_ingest_us_facts_bulk(monkeypatch, tmp_path):
+def test_cmd_ingest_fundamentals_bulk_sec(monkeypatch, tmp_path):
     db_path = tmp_path / "bulk.db"
     universe_repo = UniverseRepository(db_path)
     universe_repo.initialize_schema()
@@ -192,7 +224,7 @@ def test_cmd_ingest_us_facts_bulk(monkeypatch, tmp_path):
         Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
         Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
     ]
-    universe_repo.replace_universe(listings, region="US")
+    universe_repo.replace_universe(listings)
 
     class FakeClient:
         def __init__(self, user_agent=None):
@@ -209,11 +241,15 @@ def test_cmd_ingest_us_facts_bulk(monkeypatch, tmp_path):
     fake_client = FakeClient()
     monkeypatch.setattr(cli, "SECCompanyFactsClient", lambda user_agent=None: fake_client)
 
-    rc = cli.cmd_ingest_us_facts_bulk(
+    rc = cli.cmd_ingest_fundamentals_bulk(
+        provider="SEC",
         database=str(db_path),
-        region="US",
         rate=0,
+        exchange_code="NYSE",
         user_agent="UA",
+        max_symbols=None,
+        max_age_days=None,
+        resume=False,
     )
     assert rc == 0
     assert fake_client.calls == ["CIKAAA", "CIKBBB"]
@@ -222,7 +258,7 @@ def test_cmd_ingest_us_facts_bulk(monkeypatch, tmp_path):
     assert fund_repo.fetch("SEC", "AAA.US") == {"cik": "CIKAAA"}
 
 
-def test_cmd_load_eodhd_universe(monkeypatch, tmp_path):
+def test_cmd_load_universe_eodhd(monkeypatch, tmp_path):
     calls = {}
 
     class FakeLoader:
@@ -262,8 +298,9 @@ def test_cmd_load_eodhd_universe(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
 
     db_path = tmp_path / "uk.db"
-    rc = cli.cmd_load_eodhd_universe(
-        str(db_path),
+    rc = cli.cmd_load_universe(
+        provider="EODHD",
+        database=str(db_path),
         include_etfs=False,
         exchange_code="LSE",
         currencies=["GBP"],
@@ -299,18 +336,15 @@ def test_cmd_ingest_fundamentals_bulk_uses_exchange_listings(monkeypatch, tmp_pa
     universe_repo = UniverseRepository(db_path)
     universe_repo.initialize_schema()
     universe_repo.replace_universe(
-        [Listing(symbol="AAA.US", security_name="AAA", exchange="US")],
-        region="US",
+        [Listing(symbol="AAA.US", security_name="AAA", exchange="US")]
     )
     universe_repo.replace_universe(
-        [Listing(symbol="BBB.LSE", security_name="BBB", exchange="LSE")],
-        region="UK",
+        [Listing(symbol="BBB.LSE", security_name="BBB", exchange="LSE")]
     )
 
     rc = cli.cmd_ingest_fundamentals_bulk(
         provider="EODHD",
         database=str(db_path),
-        region=None,
         rate=0,
         exchange_code="US",
         user_agent=None,
@@ -328,9 +362,9 @@ def test_cmd_ingest_fundamentals_bulk_uses_exchange_listings(monkeypatch, tmp_pa
     assert fund_repo.fetch("EODHD", "AAA.US") is not None
     with fund_repo._connect() as conn:
         row = conn.execute(
-            "SELECT region, exchange FROM fundamentals_raw WHERE provider='EODHD' AND symbol='AAA.US'"
+            "SELECT currency, exchange FROM fundamentals_raw WHERE provider='EODHD' AND symbol='AAA.US'"
         ).fetchone()
-    assert row[0] == "US"
+    assert row[0] == "USD"
     assert row[1] == "US"
 
 
@@ -355,13 +389,12 @@ def test_cmd_ingest_fundamentals_bulk_skips_fresh_and_backoff(monkeypatch, tmp_p
         [
             Listing(symbol="AAA.US", security_name="AAA", exchange="US"),
             Listing(symbol="BBB.US", security_name="BBB", exchange="US"),
-        ],
-        region="US",
+        ]
     )
 
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert("EODHD", "AAA.US", {"General": {"CurrencyCode": "USD"}}, region="US", exchange="US")
+    fund_repo.upsert("EODHD", "AAA.US", {"General": {"CurrencyCode": "USD"}}, exchange="US")
 
     state_repo = FundamentalsFetchStateRepository(db_path)
     state_repo.initialize_schema()
@@ -370,7 +403,6 @@ def test_cmd_ingest_fundamentals_bulk_skips_fresh_and_backoff(monkeypatch, tmp_p
     rc = cli.cmd_ingest_fundamentals_bulk(
         provider="EODHD",
         database=str(db_path),
-        region=None,
         rate=0,
         exchange_code="US",
         user_agent=None,
@@ -386,7 +418,6 @@ def test_cmd_ingest_fundamentals_bulk_skips_fresh_and_backoff(monkeypatch, tmp_p
     rc = cli.cmd_ingest_fundamentals_bulk(
         provider="EODHD",
         database=str(db_path),
-        region=None,
         rate=0,
         exchange_code="US",
         user_agent=None,
@@ -398,101 +429,6 @@ def test_cmd_ingest_fundamentals_bulk_skips_fresh_and_backoff(monkeypatch, tmp_p
     assert rc == 0
     assert calls["fetched"] == [("BBB.US", None)]
 
-def test_cmd_ingest_uk_facts(monkeypatch, tmp_path):
-    calls = {}
-
-    class FakeClient:
-        def __init__(self, api_key=None):
-            calls["api_key"] = api_key
-
-        def fetch_company_profile(self, company_number):
-            calls["company_number"] = company_number
-            return {"company_number": company_number, "name": "Example"}
-
-    monkeypatch.setattr(cli, "CompaniesHouseClient", FakeClient)
-    monkeypatch.setattr(cli, "Config", lambda: SimpleNamespace(companies_house_api_key="KEY"))
-
-    db_path = tmp_path / "ukfacts.db"
-    rc = cli.cmd_ingest_uk_facts("00000000", str(db_path), symbol="AAA.LSE")
-
-    assert rc == 0
-    assert calls == {"api_key": "KEY", "company_number": "00000000"}
-
-    repo = UKCompanyFactsRepository(db_path)
-    stored = repo.fetch_fact("00000000")
-    assert stored["company_number"] == "00000000"
-
-
-def test_cmd_ingest_uk_facts_by_symbol(monkeypatch, tmp_path):
-    calls = {}
-
-    class FakeClient:
-        def __init__(self, api_key=None):
-            calls["api_key"] = api_key
-
-        def fetch_company_profile(self, company_number):
-            calls["company_number"] = company_number
-            return {"company_number": company_number, "name": "Example"}
-
-    monkeypatch.setattr(cli, "CompaniesHouseClient", FakeClient)
-    monkeypatch.setattr(cli, "Config", lambda: SimpleNamespace(companies_house_api_key="KEY"))
-
-    db_path = tmp_path / "ukfacts.db"
-    mapper = UKSymbolMapRepository(db_path)
-    mapper.initialize_schema()
-    mapper.upsert_mapping("AAA.LSE", company_number="00000000")
-
-    rc = cli.cmd_ingest_uk_facts(None, str(db_path), symbol="AAA.LSE")
-
-    assert rc == 0
-    assert calls == {"api_key": "KEY", "company_number": "00000000"}
-
-
-def test_cmd_ingest_uk_filings(monkeypatch, tmp_path):
-    calls = {}
-
-    class FakeClient:
-        def __init__(self, api_key=None):
-            calls["api_key"] = api_key
-
-        def fetch_filing_history(self, company_number, category="accounts", items=100):
-            calls["company_number"] = company_number
-            return {
-                "items": [
-                    {
-                        "transaction_id": "tx1",
-                        "links": {"document_metadata": "http://meta"},
-                    }
-                ]
-            }
-
-        def fetch_document_metadata(self, url):
-            calls["meta_url"] = url
-            return {"resources": {"application/xhtml+xml": {"url": "http://doc"}}}
-
-        def fetch_document(self, url):
-            calls["doc_url"] = url
-            return b"<html>ixbrl</html>"
-
-    monkeypatch.setattr(cli, "CompaniesHouseClient", FakeClient)
-    monkeypatch.setattr(cli, "Config", lambda: SimpleNamespace(companies_house_api_key="KEY"))
-
-    db_path = tmp_path / "ukfiling.db"
-    mapper = UKSymbolMapRepository(db_path)
-    mapper.initialize_schema()
-    mapper.upsert_mapping("AAA.LSE", company_number="00000000")
-
-    rc = cli.cmd_ingest_uk_filings("AAA.LSE", str(db_path))
-    assert rc == 0
-
-    assert calls["company_number"] == "00000000"
-    assert calls["doc_url"] == "http://doc"
-
-    repo = UKFilingRepository(db_path)
-    repo.initialize_schema()
-    latest = repo.latest_for_company("00000000")
-    assert latest == b"<html>ixbrl</html>"
-
 def test_cmd_update_market_data_bulk(monkeypatch, tmp_path):
     db_path = tmp_path / "marketbulk.db"
     universe_repo = UniverseRepository(db_path)
@@ -501,7 +437,7 @@ def test_cmd_update_market_data_bulk(monkeypatch, tmp_path):
         Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
         Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
     ]
-    universe_repo.replace_universe(listings, region="US")
+    universe_repo.replace_universe(listings)
 
     calls = []
 
@@ -514,7 +450,11 @@ def test_cmd_update_market_data_bulk(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cli, "MarketDataService", lambda db_path: DummyService(db_path))
 
-    rc = cli.cmd_update_market_data_bulk(database=str(db_path), region="US", rate=0)
+    rc = cli.cmd_update_market_data_bulk(
+        database=str(db_path),
+        rate=0,
+        exchange_code="NYSE",
+    )
     assert rc == 0
     assert calls == ["AAA.US", "BBB.US"]
 
@@ -524,12 +464,10 @@ def test_cmd_update_market_data_bulk_with_exchange(monkeypatch, tmp_path):
     universe_repo = UniverseRepository(db_path)
     universe_repo.initialize_schema()
     universe_repo.replace_universe(
-        [Listing(symbol="AAA", security_name="AAA PLC", exchange="LSE")],
-        region="UK",
+        [Listing(symbol="AAA", security_name="AAA PLC", exchange="LSE")]
     )
     universe_repo.replace_universe(
-        [Listing(symbol="BBB", security_name="BBB Inc", exchange="NYSE")],
-        region="US",
+        [Listing(symbol="BBB", security_name="BBB Inc", exchange="NYSE")]
     )
 
     calls = []
@@ -544,7 +482,9 @@ def test_cmd_update_market_data_bulk_with_exchange(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "MarketDataService", lambda db_path: DummyService(db_path))
 
     rc = cli.cmd_update_market_data_bulk(
-        database=str(db_path), region=None, rate=0, exchange_code="LSE"
+        database=str(db_path),
+        rate=0,
+        exchange_code="LSE",
     )
     assert rc == 0
     assert calls == [("AAA", "AAA.LSE")]
@@ -557,7 +497,7 @@ def test_cmd_compute_metrics_bulk(monkeypatch, tmp_path):
         Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
         Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
     ]
-    universe_repo.replace_universe(listings, region="US")
+    universe_repo.replace_universe(listings)
 
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
@@ -577,7 +517,11 @@ def test_cmd_compute_metrics_bulk(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
 
-    rc = cli.cmd_compute_metrics_bulk(database=str(db_path), region="US", metric_ids=None)
+    rc = cli.cmd_compute_metrics_bulk(
+        database=str(db_path),
+        metric_ids=None,
+        exchange_code="NYSE",
+    )
     assert rc == 0
 
     assert metrics_repo.fetch("AAA.US", "dummy_metric")[0] == len("AAA.US")
@@ -592,12 +536,10 @@ def test_cmd_compute_metrics_bulk_with_exchange(monkeypatch, tmp_path):
         [
             Listing(symbol="AAA.US", security_name="AAA Inc", exchange="US"),
             Listing(symbol="BBB.US", security_name="BBB Inc", exchange="US"),
-        ],
-        region="US",
+        ]
     )
     universe_repo.replace_universe(
-        [Listing(symbol="CCC.LSE", security_name="CCC PLC", exchange="LSE")],
-        region="UK",
+        [Listing(symbol="CCC.LSE", security_name="CCC PLC", exchange="LSE")]
     )
 
     class DummyMetric:
@@ -612,7 +554,6 @@ def test_cmd_compute_metrics_bulk_with_exchange(monkeypatch, tmp_path):
 
     rc = cli.cmd_compute_metrics_bulk(
         database=str(db_path),
-        region=None,
         metric_ids=None,
         exchange_code="LSE",
     )
@@ -626,14 +567,12 @@ def test_cmd_compute_metrics_bulk_with_exchange(monkeypatch, tmp_path):
     assert [row[0] for row in rows] == ["CCC.LSE"]
 
 
-def test_cmd_compute_metrics_bulk_fallback_to_fundamentals(monkeypatch, tmp_path):
+def test_cmd_compute_metrics_bulk_requires_listings(monkeypatch, tmp_path):
     db_path = tmp_path / "fundmetrics.db"
-    universe_repo = UniverseRepository(db_path)
-    universe_repo.initialize_schema()
-    # No listings stored; only fundamentals with region
+    # No listings stored; only fundamentals exist.
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert("EODHD", "AAA.LSE", {"dummy": True}, region="UK")
+    fund_repo.upsert("EODHD", "AAA.LSE", {"dummy": True})
 
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
@@ -657,16 +596,20 @@ def test_cmd_compute_metrics_bulk_fallback_to_fundamentals(monkeypatch, tmp_path
 
     monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
 
-    rc = cli.cmd_compute_metrics_bulk(database=str(db_path), region="UK", metric_ids=None)
-    assert rc == 0
-    assert metrics_repo.fetch("AAA.LSE", "dummy_metric")[0] == 7  # len("AAA.LSE")
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_compute_metrics_bulk(
+            database=str(db_path),
+            metric_ids=None,
+            exchange_code="LSE",
+        )
+    assert "No listings found for exchange LSE" in str(exc.value)
 
 
 def test_cmd_clear_fundamentals_raw(tmp_path):
     db_path = tmp_path / "clearfunds.db"
     repo = FundamentalsRepository(db_path)
     repo.initialize_schema()
-    repo.upsert("SEC", "AAA.US", {"facts": {}}, region="US")
+    repo.upsert("SEC", "AAA.US", {"facts": {}})
 
     with repo._connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM fundamentals_raw").fetchone()[0] == 1
@@ -677,11 +620,11 @@ def test_cmd_clear_fundamentals_raw(tmp_path):
     with repo._connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM fundamentals_raw").fetchone()[0] == 0
 
-def test_cmd_normalize_us_facts(monkeypatch, tmp_path):
+def test_cmd_normalize_fundamentals_sec(monkeypatch, tmp_path):
     db_path = tmp_path / "facts.db"
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert("SEC", "AAPL.US", {"entityName": "Apple Inc", "facts": {}}, region="US")
+    fund_repo.upsert("SEC", "AAPL.US", {"entityName": "Apple Inc", "facts": {}})
 
     class FakeNormalizer:
         def __init__(self):
@@ -704,7 +647,7 @@ def test_cmd_normalize_us_facts(monkeypatch, tmp_path):
     fake_normalizer = FakeNormalizer()
     monkeypatch.setattr(cli, "SECFactsNormalizer", lambda: fake_normalizer)
 
-    rc = cli.cmd_normalize_us_facts("AAPL", str(db_path))
+    rc = cli.cmd_normalize_fundamentals(provider="SEC", symbol="AAPL", database=str(db_path))
     assert rc == 0
 
     result_repo = FinancialFactsRepository(db_path)
@@ -717,12 +660,20 @@ def test_cmd_normalize_us_facts(monkeypatch, tmp_path):
     entity_repo.initialize_schema()
     assert entity_repo.fetch("AAPL.US") == "Apple Inc"
 
-def test_cmd_normalize_us_facts_bulk(monkeypatch, tmp_path):
+def test_cmd_normalize_fundamentals_bulk_sec(monkeypatch, tmp_path):
     db_path = tmp_path / "facts.db"
+    universe_repo = UniverseRepository(db_path)
+    universe_repo.initialize_schema()
+    universe_repo.replace_universe(
+        [
+            Listing(symbol="AAA.US", security_name="AAA Corp", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Corp", exchange="NYSE"),
+        ]
+    )
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert("SEC", "AAA.US", {"entityName": "AAA Corp", "facts": {}}, region="US")
-    fund_repo.upsert("SEC", "BBB.US", {"entityName": "BBB Corp", "facts": {}}, region="US")
+    fund_repo.upsert("SEC", "AAA.US", {"entityName": "AAA Corp", "facts": {}})
+    fund_repo.upsert("SEC", "BBB.US", {"entityName": "BBB Corp", "facts": {}})
 
     class DummyNormalizer:
         def normalize(self, payload, symbol, cik=None):
@@ -736,7 +687,11 @@ def test_cmd_normalize_us_facts_bulk(monkeypatch, tmp_path):
     normalizer = DummyNormalizer()
     monkeypatch.setattr(cli, "SECFactsNormalizer", lambda: normalizer)
 
-    rc = cli.cmd_normalize_us_facts_bulk(database=str(db_path))
+    rc = cli.cmd_normalize_fundamentals_bulk(
+        provider="SEC",
+        database=str(db_path),
+        exchange_code="NYSE",
+    )
     assert rc == 0
     cursor = normalization_repo._connect().execute(
         "SELECT symbol, value FROM financial_facts ORDER BY symbol"
@@ -758,18 +713,16 @@ def test_cmd_normalize_fundamentals_bulk_with_exchange(monkeypatch, tmp_path):
             Listing(symbol="AAA.US", security_name="AAA Inc", exchange="US"),
             Listing(symbol="BBB.US", security_name="BBB Inc", exchange="US"),
             Listing(symbol="CCC.US", security_name="CCC Inc", exchange="US"),
-        ],
-        region="US",
+        ]
     )
     universe_repo.replace_universe(
-        [Listing(symbol="DDD.LSE", security_name="DDD PLC", exchange="LSE")],
-        region="UK",
+        [Listing(symbol="DDD.LSE", security_name="DDD PLC", exchange="LSE")]
     )
 
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert("SEC", "AAA.US", {"entityName": "AAA Corp", "facts": {}}, region="US")
-    fund_repo.upsert("SEC", "BBB.US", {"entityName": "BBB Corp", "facts": {}}, region="US")
+    fund_repo.upsert("SEC", "AAA.US", {"entityName": "AAA Corp", "facts": {}})
+    fund_repo.upsert("SEC", "BBB.US", {"entityName": "BBB Corp", "facts": {}})
 
     class DummyNormalizer:
         def normalize(self, payload, symbol, cik=None):
@@ -782,7 +735,6 @@ def test_cmd_normalize_fundamentals_bulk_with_exchange(monkeypatch, tmp_path):
     rc = cli.cmd_normalize_fundamentals_bulk(
         provider="SEC",
         database=str(db_path),
-        region=None,
         exchange_code="US",
     )
     assert rc == 0
@@ -795,7 +747,7 @@ def test_cmd_normalize_fundamentals_bulk_with_exchange(monkeypatch, tmp_path):
     assert [row[0] for row in rows] == ["AAA.US", "BBB.US"]
 
 
-def test_cmd_normalize_eodhd_fundamentals(monkeypatch, tmp_path):
+def test_cmd_normalize_fundamentals_eodhd(monkeypatch, tmp_path):
     db_path = tmp_path / "funds.db"
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
@@ -803,7 +755,6 @@ def test_cmd_normalize_eodhd_fundamentals(monkeypatch, tmp_path):
         "EODHD",
         "SHEL",
         {"General": {"Name": "Shell PLC"}, "Financials": {}},
-        region="UK",
     )
 
     class FakeNormalizer:
@@ -819,7 +770,7 @@ def test_cmd_normalize_eodhd_fundamentals(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cli, "EODHDFactsNormalizer", lambda: FakeNormalizer())
 
-    rc = cli.cmd_normalize_eodhd_fundamentals("SHEL", str(db_path))
+    rc = cli.cmd_normalize_fundamentals(provider="EODHD", symbol="SHEL", database=str(db_path))
     assert rc == 0
 
     fact_repo = FinancialFactsRepository(db_path)
@@ -867,8 +818,7 @@ def test_cmd_run_screen_bulk(tmp_path, capsys):
         [
             Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
             Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
-        ],
-        region="US",
+        ]
     )
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
@@ -897,8 +847,8 @@ criteria:
     rc = cli.cmd_run_screen_bulk(
         config_path=str(screen_path),
         database=str(db_path),
-        region="US",
         output_csv=str(csv_path),
+        exchange_code="NYSE",
     )
     assert rc == 0
     output = capsys.readouterr().out
@@ -914,12 +864,10 @@ def test_cmd_run_screen_bulk_with_exchange(tmp_path, capsys):
     universe_repo = UniverseRepository(db_path)
     universe_repo.initialize_schema()
     universe_repo.replace_universe(
-        [Listing(symbol="AAA.LSE", security_name="AAA PLC", exchange="LSE")],
-        region="UK",
+        [Listing(symbol="AAA.LSE", security_name="AAA PLC", exchange="LSE")]
     )
     universe_repo.replace_universe(
-        [Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE")],
-        region="US",
+        [Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE")]
     )
 
     metrics_repo = MetricsRepository(db_path)
@@ -950,7 +898,6 @@ criteria:
     rc = cli.cmd_run_screen_bulk(
         config_path=str(screen_path),
         database=str(db_path),
-        region=None,
         output_csv=str(csv_path),
         exchange_code="LSE",
     )
@@ -965,6 +912,14 @@ criteria:
 
 def test_cmd_report_metric_failures_uses_highest_market_cap_example(tmp_path, capsys):
     db_path = tmp_path / "failures.db"
+    universe_repo = UniverseRepository(db_path)
+    universe_repo.initialize_schema()
+    universe_repo.replace_universe(
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+        ]
+    )
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
     market_repo.upsert_price("AAA.US", "2024-01-01", price=10.0, market_cap=100.0)
@@ -972,10 +927,10 @@ def test_cmd_report_metric_failures_uses_highest_market_cap_example(tmp_path, ca
 
     rc = cli.cmd_report_metric_failures(
         database=str(db_path),
-        region="US",
         metric_ids=["working_capital"],
         symbols=["AAA.US", "BBB.US"],
         output_csv=None,
+        exchange_code="NYSE",
     )
     assert rc == 0
     output = capsys.readouterr().out
@@ -988,17 +943,14 @@ def test_cmd_report_metric_failures_with_exchange(tmp_path, capsys):
     universe_repo = UniverseRepository(db_path)
     universe_repo.initialize_schema()
     universe_repo.replace_universe(
-        [Listing(symbol="AAA.LSE", security_name="AAA PLC", exchange="LSE")],
-        region="UK",
+        [Listing(symbol="AAA.LSE", security_name="AAA PLC", exchange="LSE")]
     )
     universe_repo.replace_universe(
-        [Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE")],
-        region="US",
+        [Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE")]
     )
 
     rc = cli.cmd_report_metric_failures(
         database=str(db_path),
-        region=None,
         metric_ids=["working_capital"],
         symbols=None,
         output_csv=None,

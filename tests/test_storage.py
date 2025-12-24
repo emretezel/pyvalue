@@ -1,6 +1,6 @@
 import sqlite3
 
-from pyvalue.storage import CompanyFactsRepository, FactRecord, FundamentalsRepository, UniverseRepository
+from pyvalue.storage import FactRecord, FundamentalsRepository, UniverseRepository
 from pyvalue.universe import Listing
 
 
@@ -30,16 +30,16 @@ def test_replace_universe_persists_rows(tmp_path):
     repo = UniverseRepository(tmp_path / "universe.db")
     repo.initialize_schema()
 
-    inserted = repo.replace_universe([_listing("AAA"), _listing("BBB", is_etf=True)], region="US")
+    inserted = repo.replace_universe([_listing("AAA"), _listing("BBB", is_etf=True)])
 
     assert inserted == 2
 
     with sqlite3.connect(tmp_path / "universe.db") as conn:
         rows = conn.execute(
-            "SELECT symbol, region, is_etf FROM listings ORDER BY symbol"
+            "SELECT symbol, exchange, is_etf FROM listings ORDER BY symbol"
         ).fetchall()
 
-    assert rows == [("AAA.US", "US", 0), ("BBB.US", "US", 1)]
+    assert rows == [("AAA.US", "NYSE", 0), ("BBB.US", "NYSE", 1)]
 
 
 def test_replace_universe_overwrites_previous_data(tmp_path):
@@ -47,8 +47,8 @@ def test_replace_universe_overwrites_previous_data(tmp_path):
     repo = UniverseRepository(tmp_path / "universe.db")
     repo.initialize_schema()
 
-    repo.replace_universe([_listing("AAA")], region="US")
-    repo.replace_universe([_listing("CCC")], region="US")
+    repo.replace_universe([_listing("AAA")])
+    repo.replace_universe([_listing("CCC")])
 
     with sqlite3.connect(tmp_path / "universe.db") as conn:
         rows = conn.execute("SELECT symbol FROM listings ORDER BY symbol").fetchall()
@@ -56,28 +56,13 @@ def test_replace_universe_overwrites_previous_data(tmp_path):
     assert rows == [("CCC.US",)]
 
 
-def test_company_facts_repository_upserts_payload(tmp_path):
-    repo = CompanyFactsRepository(tmp_path / "facts.db")
-    repo.initialize_schema()
-
-    repo.upsert_company_facts("AAPL.US", "CIK0000320193", {"foo": 1})
-    repo.upsert_company_facts("AAPL.US", "CIK0000320193", {"foo": 2})
-
-    stored = repo.fetch_fact("AAPL.US")
-    assert stored == {"foo": 2}
-
-    cik, payload = repo.fetch_fact_record("AAPL.US")
-    assert cik == "CIK0000320193"
-    assert payload == {"foo": 2}
-
-
 def test_universe_repository_fetch_symbols_initializes_schema(tmp_path):
     repo = UniverseRepository(tmp_path / "universe.db")
 
-    assert repo.fetch_symbols("US") == []
+    assert repo.fetch_symbols_by_exchange("NYSE") == []
 
 
-def test_universe_repository_normalizes_region(tmp_path):
+def test_universe_repository_normalizes_exchange(tmp_path):
     repo = UniverseRepository(tmp_path / "universe.db")
     repo.initialize_schema()
     listing = Listing(
@@ -92,16 +77,16 @@ def test_universe_repository_normalizes_region(tmp_path):
         isin="GB00TEST",
         currency="GBP",
     )
-    repo.replace_universe([listing], region="uk")
+    repo.replace_universe([listing])
 
-    assert repo.fetch_symbols("UK") == ["FOO.LSE"]
-    assert repo.fetch_symbols("uk") == ["FOO.LSE"]
+    assert repo.fetch_symbols_by_exchange("LSE") == ["FOO.LSE"]
+    assert repo.fetch_symbols_by_exchange("lse") == ["FOO.LSE"]
 
 
-def test_fundamentals_repository_normalizes_region(tmp_path):
+def test_fundamentals_repository_normalizes_provider(tmp_path):
     repo = FundamentalsRepository(tmp_path / "funds.db")
     repo.initialize_schema()
-    repo.upsert("eodhd", "FOO.LSE", payload={"bar": 1}, region="uk")
+    repo.upsert("eodhd", "FOO.LSE", payload={"bar": 1})
 
-    assert repo.symbols("EODHD", region="UK") == ["FOO.LSE"]
-    assert repo.symbols("EODHD", region="uk") == ["FOO.LSE"]
+    assert repo.symbols("EODHD") == ["FOO.LSE"]
+    assert repo.symbols("eodhd") == ["FOO.LSE"]

@@ -144,18 +144,9 @@ def _migration_001_listings_composite_pk(conn: sqlite3.Connection) -> None:
 
 
 def _migration_002_create_uk_company_facts(conn: sqlite3.Connection) -> None:
-    """Create storage for Companies House payloads."""
+    """No-op legacy migration (UK tables removed)."""
 
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS uk_company_facts (
-            company_number TEXT PRIMARY KEY,
-            symbol TEXT,
-            data TEXT NOT NULL,
-            fetched_at TEXT NOT NULL
-        )
-        """
-    )
+    return
 
 
 def _migration_003_add_isin_to_listings(conn: sqlite3.Connection) -> None:
@@ -176,53 +167,21 @@ def _migration_003_add_isin_to_listings(conn: sqlite3.Connection) -> None:
 
 
 def _migration_004_create_uk_symbol_map(conn: sqlite3.Connection) -> None:
-    """Create mapping table from UK symbols to identifiers."""
+    """No-op legacy migration (UK tables removed)."""
 
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS uk_symbol_map (
-            symbol TEXT PRIMARY KEY,
-            isin TEXT,
-            lei TEXT,
-            company_number TEXT,
-            match_confidence TEXT,
-            updated_at TEXT NOT NULL
-        )
-        """
-    )
+    return
 
 
 def _migration_005_drop_unique_isin_index(conn: sqlite3.Connection) -> None:
-    """Drop unique constraint on uk_symbol_map.isin to allow duplicate ISINs."""
+    """No-op legacy migration (UK tables removed)."""
 
-    conn.execute("DROP INDEX IF EXISTS idx_uk_symbol_map_isin")
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_uk_symbol_map_isin
-        ON uk_symbol_map(isin)
-        """
-    )
+    return
 
 
 def _migration_006_create_uk_filing_documents(conn: sqlite3.Connection) -> None:
-    """Create storage for Companies House filing documents (iXBRL only)."""
+    """No-op legacy migration (UK tables removed)."""
 
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS uk_filing_documents (
-            company_number TEXT NOT NULL,
-            symbol TEXT,
-            filing_id TEXT NOT NULL,
-            period_start TEXT,
-            period_end TEXT,
-            doc_type TEXT,
-            is_ixbrl INTEGER NOT NULL,
-            fetched_at TEXT NOT NULL,
-            content BLOB NOT NULL,
-            PRIMARY KEY (company_number, filing_id)
-        )
-        """
-    )
+    return
 
 
 def _migration_007_fundamentals_provider_columns(conn: sqlite3.Connection) -> None:
@@ -509,6 +468,150 @@ def _migration_013_create_fundamentals_fetch_state(conn: sqlite3.Connection) -> 
     )
 
 
+def _migration_014_drop_uk_tables(conn: sqlite3.Connection) -> None:
+    """Drop legacy UK ingestion tables."""
+
+    conn.execute("DROP TABLE IF EXISTS uk_filing_documents")
+    conn.execute("DROP TABLE IF EXISTS uk_symbol_map")
+    conn.execute("DROP TABLE IF EXISTS uk_company_facts")
+    conn.execute("DROP INDEX IF EXISTS idx_uk_symbol_map_isin")
+
+
+def _migration_015_drop_region_columns(conn: sqlite3.Connection) -> None:
+    """Remove region columns from listings and fundamentals_raw."""
+
+    listings_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='listings'"
+    ).fetchone()
+    if listings_exists is not None:
+        info = conn.execute("PRAGMA table_info(listings)").fetchall()
+        columns = {row[1] for row in info}
+        if "region" in columns:
+            conn.execute("ALTER TABLE listings RENAME TO listings_old")
+            conn.execute(
+                """
+                CREATE TABLE listings (
+                    symbol TEXT NOT NULL,
+                    security_name TEXT NOT NULL,
+                    exchange TEXT NOT NULL,
+                    market_category TEXT,
+                    is_etf INTEGER NOT NULL,
+                    status TEXT,
+                    round_lot_size INTEGER,
+                    source TEXT,
+                    isin TEXT,
+                    currency TEXT,
+                    ingested_at TEXT NOT NULL,
+                    PRIMARY KEY (symbol)
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO listings (
+                    symbol,
+                    security_name,
+                    exchange,
+                    market_category,
+                    is_etf,
+                    status,
+                    round_lot_size,
+                    source,
+                    isin,
+                    currency,
+                    ingested_at
+                )
+                SELECT
+                    symbol,
+                    security_name,
+                    exchange,
+                    market_category,
+                    is_etf,
+                    status,
+                    round_lot_size,
+                    source,
+                    isin,
+                    currency,
+                    ingested_at
+                FROM (
+                    SELECT *,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY symbol
+                               ORDER BY ingested_at DESC
+                           ) AS rn
+                    FROM listings_old
+                )
+                WHERE rn = 1
+                """
+            )
+            conn.execute("DROP TABLE listings_old")
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_listings_exchange
+                ON listings(exchange)
+                """
+            )
+
+    fundamentals_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='fundamentals_raw'"
+    ).fetchone()
+    if fundamentals_exists is None:
+        return
+
+    info = conn.execute("PRAGMA table_info(fundamentals_raw)").fetchall()
+    columns = {row[1] for row in info}
+    if "region" not in columns:
+        return
+
+    conn.execute("ALTER TABLE fundamentals_raw RENAME TO fundamentals_raw_old")
+    conn.execute(
+        """
+        CREATE TABLE fundamentals_raw (
+            provider TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            currency TEXT,
+            exchange TEXT,
+            data TEXT NOT NULL,
+            fetched_at TEXT NOT NULL,
+            PRIMARY KEY (provider, symbol)
+        )
+        """
+    )
+    if "exchange" in columns:
+        exchange_select = "exchange"
+    else:
+        exchange_select = "NULL AS exchange"
+    conn.execute(
+        f"""
+        INSERT INTO fundamentals_raw (
+            provider,
+            symbol,
+            currency,
+            exchange,
+            data,
+            fetched_at
+        )
+        SELECT
+            provider,
+            symbol,
+            currency,
+            {exchange_select},
+            data,
+            fetched_at
+        FROM fundamentals_raw_old
+        """
+    )
+    conn.execute("DROP TABLE fundamentals_raw_old")
+
+
+def _migration_016_drop_exchange_metadata_and_company_facts(conn: sqlite3.Connection) -> None:
+    """Drop unused exchange metadata and company facts tables."""
+
+    conn.execute("DROP TABLE IF EXISTS exchange_metadata")
+    conn.execute("DROP INDEX IF EXISTS idx_company_facts_symbol")
+    conn.execute("DROP TABLE IF EXISTS company_facts")
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -523,6 +626,9 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_011_add_currency_to_listings,
     _migration_012_drop_provider_from_financial_facts,
     _migration_013_create_fundamentals_fetch_state,
+    _migration_014_drop_uk_tables,
+    _migration_015_drop_region_columns,
+    _migration_016_drop_exchange_metadata_and_company_facts,
 ]
 
 

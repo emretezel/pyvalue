@@ -19,8 +19,7 @@ def _seed_universe(db_path):
         [
             Listing(symbol="AAA.US", security_name="AAA", exchange="NYSE"),
             Listing(symbol="BBB.US", security_name="BBB", exchange="NYSE"),
-        ],
-        region="US",
+        ]
     )
 
 
@@ -73,7 +72,7 @@ def test_cmd_report_fact_freshness_outputs_counts(tmp_path, capsys):
 
     exit_code = cmd_report_fact_freshness(
         database=str(db_path),
-        region="US",
+        exchange_code="NYSE",
         metric_ids=["working_capital"],
         max_age_days=365,
         output_csv=None,

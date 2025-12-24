@@ -38,12 +38,15 @@ def test_migration_updates_listings_primary_key(tmp_path):
     assert applied >= 1
 
     with sqlite3.connect(db_path) as conn:
-        pk_cols = [row[1] for row in conn.execute("PRAGMA table_info(listings)").fetchall() if row[5]]
-        rows = conn.execute("SELECT symbol, region FROM listings").fetchall()
+        info = conn.execute("PRAGMA table_info(listings)").fetchall()
+        pk_cols = [row[1] for row in info if row[5]]
+        columns = {row[1] for row in info}
+        rows = conn.execute("SELECT symbol FROM listings").fetchall()
         version = conn.execute("SELECT version FROM schema_migrations").fetchone()[0]
 
-        assert pk_cols == ["symbol", "region"]
-        assert rows == [("ABC.NYSE", "US")]
+        assert pk_cols == ["symbol"]
+        assert "region" not in columns
+        assert rows == [("ABC.NYSE",)]
     assert version == len(MIGRATIONS)
 
 

@@ -223,7 +223,6 @@ def test_market_data_service_uses_fundamentals_shares(tmp_path):
         "EODHD",
         "SHEL.LSE",
         {"SharesStats": {"SharesOutstanding": 50}},
-        region="UK",
         exchange="LSE",
     )
 

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 from pyvalue.config import Config
-from pyvalue.ingestion import CompaniesHouseClient, EODHDFundamentalsClient, GLEIFClient, SECCompanyFactsClient
+from pyvalue.ingestion import EODHDFundamentalsClient, SECCompanyFactsClient
 from pyvalue.marketdata.service import MarketDataService, latest_share_count
 from pyvalue.metrics import REGISTRY
 from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS
@@ -30,13 +30,9 @@ from pyvalue.storage import (
     EntityMetadataRepository,
     FundamentalsRepository,
     FundamentalsFetchStateRepository,
-    ExchangeMetadataRepository,
     FinancialFactsRepository,
     MarketDataRepository,
     MetricsRepository,
-    UKCompanyFactsRepository,
-    UKFilingRepository,
-    UKSymbolMapRepository,
     UniverseRepository,
 )
 from pyvalue.universe import UKUniverseLoader, USUniverseLoader
@@ -58,18 +54,16 @@ def _resolve_database_path(database: str) -> Path:
     return db_path
 
 
-def _qualify_symbol(symbol: str, exchange: Optional[str] = None, region: Optional[str] = None) -> str:
+def _qualify_symbol(symbol: str, exchange: Optional[str] = None) -> str:
     base = symbol.strip().upper()
     if "." in base:
         return base
     if exchange:
         return f"{base}.{exchange.upper()}"
-    if region:
-        return f"{base}.{region.upper()}"
     return base
 
 
-def _format_market_symbol(symbol: str, exchange: Optional[str], region: Optional[str]) -> str:
+def _format_market_symbol(symbol: str, exchange: Optional[str]) -> str:
     """Format a symbol for market data providers (EODHD)."""
 
     normalized = symbol.upper()
@@ -81,8 +75,6 @@ def _format_market_symbol(symbol: str, exchange: Optional[str], region: Optional
         if exch in {"US", "NYSE", "NASDAQ", "NYSE ARCA", "NYSE MKT", "CBOE BZX"}:
             return f"{normalized}.US"
         return f"{normalized}.{exch}"
-    if region and region.upper() == "US":
-        return f"{normalized}.US"
     return normalized
 
 
@@ -95,34 +87,23 @@ def _normalize_provider(provider: Optional[str]) -> str:
     return normalized
 
 
-def _symbols_for_region_or_raise(db_path: Path, region: str) -> List[str]:
-    """Return symbols for region from listings or fundamentals, or raise with guidance."""
+def _symbols_for_exchange_or_raise(db_path: Path, exchange_code: str) -> List[str]:
+    """Return symbols for an exchange from listings, or raise with guidance."""
 
-    region_label = region.upper()
+    exchange_norm = exchange_code.upper()
     universe_repo = UniverseRepository(db_path)
     universe_repo.initialize_schema()
-    symbols = universe_repo.fetch_symbols(region_label)
-    fund_repo = FundamentalsRepository(db_path)
-    fund_repo.initialize_schema()
-    if not symbols:
-        symbols = fund_repo.symbols("EODHD", region=region_label)
+    symbols = universe_repo.fetch_symbols_by_exchange(exchange_norm)
     if symbols:
         return symbols
 
-    listing_regions: List[str] = []
-    fund_regions: List[str] = []
     with universe_repo._connect() as conn:
-        listing_regions = [row[0] for row in conn.execute("SELECT DISTINCT region FROM listings").fetchall()]
-    with fund_repo._connect() as conn:
-        fund_regions = [
-            row[0] for row in conn.execute(
-                "SELECT DISTINCT region FROM fundamentals_raw WHERE provider = 'EODHD' AND region IS NOT NULL"
-            ).fetchall()
+        available_exchanges = [
+            row[0] for row in conn.execute("SELECT DISTINCT exchange FROM listings").fetchall()
         ]
-    available_regions = sorted({*listing_regions, *fund_regions})
     raise SystemExit(
-        f"No symbols found for region {region_label}. Load a universe or ingest fundamentals first. "
-        f"Available regions: {', '.join(available_regions) if available_regions else 'none'}. "
+        f"No symbols found for exchange {exchange_norm}. Load a universe first. "
+        f"Available exchanges: {', '.join(available_exchanges) if available_exchanges else 'none'}. "
         f"Database: {db_path}"
     )
 
@@ -171,26 +152,22 @@ def _select_exchange_listings_for_provider(
     database: str,
     provider: str,
     exchange_code: str,
-    region: Optional[str],
     max_age_days: Optional[int],
     max_symbols: Optional[int],
     resume: bool,
-) -> List[tuple[str, str]]:
+) -> List[str]:
     universe_repo = UniverseRepository(database)
     universe_repo.initialize_schema()
 
     now = datetime.now(timezone.utc)
     params: List[str] = [provider.upper(), provider.upper(), exchange_code.upper()]
     query = [
-        "SELECT l.symbol, l.region, fr.fetched_at, fs.next_eligible_at",
+        "SELECT l.symbol, fr.fetched_at, fs.next_eligible_at",
         "FROM listings l",
         "LEFT JOIN fundamentals_raw fr ON fr.symbol = l.symbol AND fr.provider = ?",
         "LEFT JOIN fundamentals_fetch_state fs ON fs.symbol = l.symbol AND fs.provider = ?",
         "WHERE UPPER(l.exchange) = ?",
     ]
-    if region:
-        query.append("AND l.region = ?")
-        params.append(region.upper())
     if max_age_days is not None:
         cutoff = (now - timedelta(days=max_age_days)).isoformat()
         query.append("AND (fr.fetched_at IS NULL OR fr.fetched_at <= ?)")
@@ -207,17 +184,15 @@ def _select_exchange_listings_for_provider(
     sql = " ".join(query)
     with universe_repo._connect() as conn:
         rows = conn.execute(sql, params).fetchall()
-    return [(row[0], row[1]) for row in rows]
+    return [row[0] for row in rows]
 
 
 def _select_listing_symbols_by_exchange(
     database: str,
     exchange_code: str,
-    region: Optional[str],
 ) -> List[str]:
     universe_repo = UniverseRepository(database)
-    pairs = universe_repo.fetch_symbol_regions_by_exchange(exchange_code, region=region)
-    return [symbol for symbol, _ in pairs]
+    return universe_repo.fetch_symbols_by_exchange(exchange_code)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -226,168 +201,47 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="pyvalue data utilities")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    load_us = subparsers.add_parser(
-        "load-us-universe",
-        help="Download Nasdaq Trader files and persist the US equity universe.",
+    load_universe = subparsers.add_parser(
+        "load-universe",
+        help="Download and persist an equity universe for the chosen provider.",
     )
-    load_us.add_argument(
+    load_universe.add_argument(
+        "--provider",
+        default="EODHD",
+        choices=["SEC", "EODHD"],
+        help="Universe provider to use (default: %(default)s).",
+    )
+    load_universe.add_argument(
         "--database",
         default="data/pyvalue.db",
         help="SQLite database file used for storage (default: %(default)s)",
     )
-    load_us.add_argument(
+    load_universe.add_argument(
         "--include-etfs",
         action="store_true",
         help="Persist ETFs alongside operating companies.",
     )
-
-    load_intl = subparsers.add_parser(
-        "load-eodhd-universe",
-        help="Download an EODHD exchange symbol list and persist it (non-US).",
-    )
-    load_intl.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file used for storage (default: %(default)s)",
-    )
-    load_intl.add_argument(
-        "--include-etfs",
-        action="store_true",
-        help="Persist ETFs alongside operating companies.",
-    )
-    load_intl.add_argument(
+    load_universe.add_argument(
         "--exchange-code",
-        default="LSE",
-        help="EODHD exchange code to load (default: %(default)s)",
+        default=None,
+        help="EODHD exchange code to load (required for provider=EODHD).",
     )
-    load_intl.add_argument(
+    load_universe.add_argument(
         "--currencies",
         nargs="+",
         default=None,
-        help="Limit to these currency codes (space or comma separated).",
+        help="Limit to these currency codes (space or comma separated, EODHD only).",
     )
-    load_intl.add_argument(
+    load_universe.add_argument(
         "--include-exchanges",
         nargs="+",
         default=None,
-        help="Only include listings whose Exchange field matches these values.",
-    )
-
-    ingest_uk = subparsers.add_parser(
-        "ingest-uk-facts",
-        help="Download Companies House profile for a company number and store it.",
-    )
-    ingest_uk.add_argument("company_number", nargs="?", help="Companies House company number, e.g. 00000000")
-    ingest_uk.add_argument(
-        "--symbol",
-        default=None,
-        help="Optional ticker symbol to associate with this company.",
-    )
-    ingest_uk.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file used for storage (default: %(default)s)",
-    )
-
-    ingest_uk_bulk = subparsers.add_parser(
-        "ingest-uk-facts-bulk",
-        help="Download Companies House profiles for all mapped UK symbols.",
-    )
-    ingest_uk_bulk.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file used for storage (default: %(default)s)",
-    )
-
-    ingest_uk_filings = subparsers.add_parser(
-        "ingest-uk-filings",
-        help="Download latest iXBRL Companies House filing for a UK symbol.",
-    )
-    ingest_uk_filings.add_argument(
-        "symbol",
-        help="Ticker symbol mapped to a Companies House number",
-    )
-    ingest_uk_filings.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file used for storage (default: %(default)s)",
-    )
-
-    refresh_map = subparsers.add_parser(
-        "refresh-uk-symbol-map",
-        help="Refresh UK symbol -> company number mapping using GLEIF and stored ISINs.",
-    )
-    refresh_map.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file used for storage (default: %(default)s)",
-    )
-    refresh_map.add_argument(
-        "--gleif-url",
-        default=GLEIFClient.DEFAULT_URL,
-        help="GLEIF golden CSV URL (default: %(default)s)",
-    )
-    refresh_map.add_argument(
-        "--isin-date",
-        default=None,
-        help="Date (YYYY-MM-DD) for GLEIF ISIN mapping file (default: today UTC)",
-    )
-    refresh_map.add_argument(
-        "--region",
-        default="UK",
-        help="Region tag used when loading the EODHD universe for mapping (default: %(default)s)",
-    )
-
-    ingest_facts = subparsers.add_parser(
-        "ingest-us-facts",
-        help="Download SEC company facts for a given ticker and store them locally.",
-    )
-    ingest_facts.add_argument("symbol", help="Ticker symbol, e.g. AAPL")
-    ingest_facts.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file used for storage (default: %(default)s)",
-    )
-    ingest_facts.add_argument(
-        "--user-agent",
-        default=None,
-        help="Custom User-Agent string (falls back to PYVALUE_SEC_USER_AGENT env var).",
-    )
-    ingest_facts.add_argument(
-        "--cik",
-        default=None,
-        help="Optional explicit CIK override (10-digit).",
-    )
-
-    bulk_ingest = subparsers.add_parser(
-        "ingest-us-facts-bulk",
-        help="Download SEC company facts for all stored US listings.",
-    )
-    bulk_ingest.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file used for storage (default: %(default)s)",
-    )
-    bulk_ingest.add_argument(
-        "--region",
-        default="US",
-        help="Universe region key stored in SQLite (default: %(default)s)",
-    )
-    bulk_ingest.add_argument(
-        "--rate",
-        type=float,
-        default=9.0,
-        help="Maximum SEC API calls per second (default: %(default)s)",
-    )
-    bulk_ingest.add_argument(
-        "--user-agent",
-        default=None,
-        help="Custom User-Agent string (falls back to PYVALUE_SEC_USER_AGENT env var).",
+        help="Only include listings whose Exchange field matches these values (EODHD only).",
     )
 
     bulk_market_data = subparsers.add_parser(
         "update-market-data-bulk",
-        help="Fetch latest market data for all stored US listings.",
+        help="Fetch latest market data for all stored listings on an exchange.",
     )
     bulk_market_data.add_argument(
         "--database",
@@ -395,14 +249,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="SQLite database file used for storage (default: %(default)s)",
     )
     bulk_market_data.add_argument(
-        "--region",
-        default=None,
-        help="Universe region key stored in SQLite (default: US when no exchange-code).",
-    )
-    bulk_market_data.add_argument(
         "--exchange-code",
-        default=None,
-        help="Optional exchange code to select symbols from listings (e.g., US, LSE, NYSE).",
+        required=True,
+        help="Exchange code to select symbols from listings (e.g., US, LSE, NYSE).",
     )
     bulk_market_data.add_argument(
         "--rate",
@@ -461,68 +310,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="SQLite database file used for storage (default: %(default)s)",
     )
 
-    normalize_facts = subparsers.add_parser(
-        "normalize-us-facts",
-        help="Transform stored SEC company facts for a ticker into structured rows.",
-    )
-    normalize_facts.add_argument("symbol", help="Ticker symbol already ingested via SEC API.")
-    normalize_facts.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file used for storage (default: %(default)s)",
-    )
-    normalize_facts_bulk = subparsers.add_parser(
-        "normalize-us-facts-bulk",
-        help="Normalize SEC facts for all stored tickers.",
-    )
-    normalize_facts_bulk.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file used for storage (default: %(default)s)",
-    )
-
-    ingest_eodhd = subparsers.add_parser(
-        "ingest-eodhd-fundamentals",
-        help="Download EODHD fundamentals for a ticker and store them locally.",
-    )
-    ingest_eodhd.add_argument("symbol", help="Ticker symbol, e.g. SHEL")
-    ingest_eodhd.add_argument(
-        "--exchange-code",
-        default=None,
-        help="Exchange code to append if symbol lacks a suffix (e.g., LSE).",
-    )
-    ingest_eodhd.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file used for storage (default: %(default)s)",
-    )
-
-    ingest_eodhd_bulk = subparsers.add_parser(
-        "ingest-eodhd-fundamentals-bulk",
-        help="Download EODHD fundamentals for all listings in an exchange or stored universe.",
-    )
-    ingest_eodhd_bulk.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file used for storage (default: %(default)s)",
-    )
-    ingest_eodhd_bulk.add_argument(
-        "--rate",
-        type=float,
-        default=600.0,
-        help="Throttle speed in symbols per minute (default: %(default)s)",
-    )
-    ingest_eodhd_bulk.add_argument(
-        "--exchange-code",
-        default=None,
-        help="If set, pull symbols directly from EODHD exchange list (e.g., LSE) instead of stored universe.",
-    )
-    ingest_eodhd_bulk.add_argument(
-        "--region",
-        default=None,
-        help="Region key to pull symbols from the stored universe when --exchange-code is omitted.",
-    )
-
     ingest_fundamentals = subparsers.add_parser(
         "ingest-fundamentals",
         help="Download fundamentals for a ticker from a chosen provider.",
@@ -537,7 +324,7 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_fundamentals.add_argument(
         "--exchange-code",
         default=None,
-        help="EODHD exchange code when symbol lacks a suffix (e.g., LSE).",
+        help="EODHD exchange code to use (required for provider=EODHD).",
     )
     ingest_fundamentals.add_argument(
         "--user-agent",
@@ -571,11 +358,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="SQLite database file used for storage (default: %(default)s)",
     )
     ingest_fundamentals_bulk.add_argument(
-        "--region",
-        default=None,
-        help="Region key for universe lookup (defaults to US for SEC).",
-    )
-    ingest_fundamentals_bulk.add_argument(
         "--rate",
         type=float,
         default=None,
@@ -583,8 +365,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ingest_fundamentals_bulk.add_argument(
         "--exchange-code",
-        default=None,
-        help="Exchange code to filter stored listings (e.g., LSE, US).",
+        required=True,
+        help="Exchange code to filter stored listings.",
     )
     ingest_fundamentals_bulk.add_argument(
         "--max-symbols",
@@ -607,32 +389,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--user-agent",
         default=None,
         help="Custom User-Agent for SEC (falls back to PYVALUE_SEC_USER_AGENT).",
-    )
-
-    normalize_eodhd = subparsers.add_parser(
-        "normalize-eodhd-fundamentals",
-        help="Normalize stored EODHD fundamentals for a single ticker.",
-    )
-    normalize_eodhd.add_argument("symbol", help="Ticker symbol already ingested via EODHD.")
-    normalize_eodhd.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file used for storage (default: %(default)s)",
-    )
-
-    normalize_eodhd_bulk = subparsers.add_parser(
-        "normalize-eodhd-fundamentals-bulk",
-        help="Normalize stored EODHD fundamentals for all ingested tickers.",
-    )
-    normalize_eodhd_bulk.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file used for storage (default: %(default)s)",
-    )
-    normalize_eodhd_bulk.add_argument(
-        "--region",
-        default=None,
-        help="Optional region filter matching fundamentals_raw.region",
     )
 
     normalize_fundamentals = subparsers.add_parser(
@@ -668,14 +424,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="SQLite database file used for storage (default: %(default)s)",
     )
     normalize_fundamentals_bulk.add_argument(
-        "--region",
-        default=None,
-        help="Optional region filter (defaults to US for SEC).",
-    )
-    normalize_fundamentals_bulk.add_argument(
         "--exchange-code",
-        default=None,
-        help="Optional exchange code to select symbols from listings (e.g., US, LSE).",
+        required=True,
+        help="Exchange code to select symbols from listings.",
     )
 
     market_data = subparsers.add_parser(
@@ -721,14 +472,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="SQLite database file used for storage (default: %(default)s)",
     )
     bulk_metrics.add_argument(
-        "--region",
-        default=None,
-        help="Universe region key stored in SQLite (default: US when no exchange-code).",
-    )
-    bulk_metrics.add_argument(
         "--exchange-code",
-        default=None,
-        help="Optional exchange code to select symbols from listings (e.g., US, LSE, NYSE).",
+        required=True,
+        help="Exchange code to select symbols from listings (e.g., US, LSE, NYSE).",
     )
     bulk_metrics.add_argument(
         "--metrics",
@@ -739,7 +485,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     fact_report = subparsers.add_parser(
         "report-fact-freshness",
-        help="List missing or stale financial facts required by metrics for a region.",
+        help="List missing or stale financial facts required by metrics for an exchange.",
     )
     fact_report.add_argument(
         "--database",
@@ -747,9 +493,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="SQLite database file used for storage (default: %(default)s)",
     )
     fact_report.add_argument(
-        "--region",
-        default="US",
-        help="Universe region key stored in SQLite (default: %(default)s)",
+        "--exchange-code",
+        required=True,
+        help="Exchange code to select symbols from listings (e.g., US, LSE, NYSE).",
     )
     fact_report.add_argument(
         "--metrics",
@@ -776,7 +522,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     metric_report = subparsers.add_parser(
         "report-metric-coverage",
-        help="Count how many symbols can compute all requested metrics for a region without writing results.",
+        help="Count how many symbols can compute all requested metrics for an exchange without writing results.",
     )
     metric_report.add_argument(
         "--database",
@@ -784,9 +530,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="SQLite database file used for storage (default: %(default)s)",
     )
     metric_report.add_argument(
-        "--region",
-        default="US",
-        help="Universe region key stored in SQLite (default: %(default)s)",
+        "--exchange-code",
+        required=True,
+        help="Exchange code to select symbols from listings (e.g., US, LSE, NYSE).",
     )
     metric_report.add_argument(
         "--metrics",
@@ -797,7 +543,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     failure_report = subparsers.add_parser(
         "report-metric-failures",
-        help="Summarize warning reasons for metric computation failures in a region.",
+        help="Summarize warning reasons for metric computation failures on an exchange.",
     )
     failure_report.add_argument(
         "--database",
@@ -805,14 +551,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="SQLite database file used for storage (default: %(default)s)",
     )
     failure_report.add_argument(
-        "--region",
-        default=None,
-        help="Universe region key stored in SQLite (default: US when no exchange-code).",
-    )
-    failure_report.add_argument(
         "--exchange-code",
-        default=None,
-        help="Optional exchange code to select symbols from listings (e.g., US, LSE, NYSE).",
+        required=True,
+        help="Exchange code to select symbols from listings (e.g., US, LSE, NYSE).",
     )
     failure_report.add_argument(
         "--metrics",
@@ -824,7 +565,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--symbols",
         nargs="+",
         default=None,
-        help="Optional list of symbols (space or comma separated) to evaluate instead of the full region universe",
+        help="Optional list of symbols (space or comma separated) to evaluate instead of the full exchange list",
     )
     failure_report.add_argument(
         "--output-csv",
@@ -870,14 +611,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="SQLite database file (default: %(default)s)",
     )
     run_screen_bulk.add_argument(
-        "--region",
-        default=None,
-        help="Universe region key stored in SQLite (default: US when no exchange-code).",
-    )
-    run_screen_bulk.add_argument(
         "--exchange-code",
-        default=None,
-        help="Optional exchange code to select symbols from listings (e.g., US, LSE, NYSE).",
+        required=True,
+        help="Exchange code to select symbols from listings (e.g., US, LSE, NYSE).",
     )
     run_screen_bulk.add_argument(
         "--output-csv",
@@ -894,6 +630,36 @@ def _should_keep_listing(include_etfs: bool, listing_is_etf: bool) -> bool:
     return include_etfs or not listing_is_etf
 
 
+def cmd_load_universe(
+    provider: str,
+    database: str,
+    include_etfs: bool,
+    exchange_code: Optional[str],
+    currencies: Optional[Sequence[str]] = None,
+    include_exchanges: Optional[Sequence[str]] = None,
+) -> int:
+    """Load listings from the chosen provider into the universe table."""
+
+    provider_norm = _normalize_provider(provider)
+    if provider_norm == "SEC":
+        if exchange_code or currencies or include_exchanges:
+            raise SystemExit(
+                "Flags --exchange-code, --currencies, and --include-exchanges are only valid with provider=EODHD."
+            )
+        return cmd_load_us_universe(database=database, include_etfs=include_etfs)
+
+    if not exchange_code:
+        raise SystemExit("--exchange-code is required when provider=EODHD.")
+    exchange = exchange_code
+    return cmd_load_eodhd_universe(
+        database=database,
+        include_etfs=include_etfs,
+        exchange_code=exchange,
+        currencies=currencies,
+        include_exchanges=include_exchanges,
+    )
+
+
 def cmd_load_us_universe(database: str, include_etfs: bool) -> int:
     """Execute the US universe load command."""
 
@@ -908,7 +674,7 @@ def cmd_load_us_universe(database: str, include_etfs: bool) -> int:
     # Persist the normalized listings to SQLite storage.
     repo = UniverseRepository(database)
     repo.initialize_schema()
-    inserted = repo.replace_universe(filtered, region="US")
+    inserted = repo.replace_universe(filtered)
 
     print(f"Stored {inserted} US listings in {database}")
     return 0
@@ -933,16 +699,6 @@ def cmd_load_eodhd_universe(
     meta = client.exchange_metadata(exchange_code) or {}
     region_label = (meta.get("Country") or exchange_code or "INTL").upper()
 
-    exchange_repo = ExchangeMetadataRepository(database)
-    exchange_repo.initialize_schema()
-    exchange_repo.upsert(
-        code=exchange_code,
-        name=meta.get("Name"),
-        country=meta.get("Country"),
-        currency=meta.get("Currency"),
-        operating_mic=meta.get("OperatingMIC") or meta.get("OperatingMic"),
-    )
-
     allowed_currencies = _parse_currency_codes(currencies)
     allowed_exchanges = _parse_exchange_filters(include_exchanges)
     loader = UKUniverseLoader(
@@ -960,229 +716,9 @@ def cmd_load_eodhd_universe(
 
     repo = UniverseRepository(database)
     repo.initialize_schema()
-    inserted = repo.replace_universe(filtered, region=region_label)
-
-    # Seed symbol->ISIN mapping if present in the feed.
-    mapper = UKSymbolMapRepository(database)
-    mapper.initialize_schema()
-    rows = [
-        (
-            listing.symbol,
-            listing.isin,
-            None,
-            None,
-        )
-        for listing in filtered
-        if listing.isin
-    ]
-    if rows:
-        mapper.bulk_upsert(rows)
+    inserted = repo.replace_universe(filtered)
 
     print(f"Stored {inserted} listings for {region_label} in {database}")
-    return 0
-
-
-def cmd_ingest_uk_facts(company_number: Optional[str], database: str, symbol: Optional[str]) -> int:
-    """Fetch Companies House profile using company number or mapped symbol and persist it."""
-
-    if not company_number and not symbol:
-        raise SystemExit("Provide a company number or --symbol")
-
-    mapper = UKSymbolMapRepository(database)
-    mapper.initialize_schema()
-    resolved_number = company_number
-    if not resolved_number and symbol:
-        resolved_number = mapper.fetch_company_number(symbol)
-        if not resolved_number:
-            raise SystemExit(f"No company number mapped for symbol {symbol}. Run refresh-uk-symbol-map first.")
-
-    api_key = Config().companies_house_api_key
-    if not api_key:
-        raise SystemExit(
-            "Companies House API key missing. Add [companies_house].api_key to private/config.toml."
-        )
-
-    client = CompaniesHouseClient(api_key=api_key)
-    payload = client.fetch_company_profile(resolved_number)
-
-    repo = UKCompanyFactsRepository(database)
-    repo.initialize_schema()
-    repo.upsert_company_facts(resolved_number, payload, symbol=symbol)
-
-    print(f"Stored Companies House facts for {resolved_number} in {database}")
-    return 0
-
-
-def cmd_ingest_uk_facts_bulk(database: str) -> int:
-    mapper = UKSymbolMapRepository(database)
-    mapper.initialize_schema()
-    company_numbers = mapper.fetch_symbols_with_company_number()
-    if not company_numbers:
-        raise SystemExit("No mapped UK symbols with company numbers. Run refresh-uk-symbol-map first.")
-
-    api_key = Config().companies_house_api_key
-    if not api_key:
-        raise SystemExit(
-            "Companies House API key missing. Add [companies_house].api_key to private/config.toml."
-        )
-
-    client = CompaniesHouseClient(api_key=api_key)
-    repo = UKCompanyFactsRepository(database)
-    repo.initialize_schema()
-
-    for symbol in company_numbers:
-        number = mapper.fetch_company_number(symbol)
-        if not number:
-            continue
-        payload = client.fetch_company_profile(number)
-        repo.upsert_company_facts(number, payload, symbol=symbol)
-        LOGGER.info("Stored Companies House facts for %s (%s)", symbol, number)
-
-    print(f"Stored Companies House facts for {len(company_numbers)} symbols in {database}")
-    return 0
-
-
-def _resolve_company_number(symbol: str, mapper: UKSymbolMapRepository) -> str:
-    number = mapper.fetch_company_number(symbol)
-    if not number:
-        raise SystemExit(f"No company number mapped for symbol {symbol}. Run refresh-uk-symbol-map first.")
-    return number
-
-
-def _pick_latest_ixbrl_filing(filing_history: Dict) -> Optional[Dict]:
-    items = filing_history.get("items") or []
-    for item in items:
-        links = item.get("links") or {}
-        meta = links.get("document_metadata")
-        if not meta:
-            continue
-        # Prefer items whose description indicates accounts; category already filtered.
-        return {"filing_id": item.get("transaction_id"), "metadata_url": meta, "item": item}
-    return None
-
-
-def cmd_ingest_uk_filings(symbol: str, database: str) -> int:
-    mapper = UKSymbolMapRepository(database)
-    mapper.initialize_schema()
-    company_number = _resolve_company_number(symbol, mapper)
-
-    api_key = Config().companies_house_api_key
-    if not api_key:
-        raise SystemExit("Companies House API key missing. Add [companies_house].api_key to private/config.toml.")
-
-    client = CompaniesHouseClient(api_key=api_key)
-    history = client.fetch_filing_history(company_number, category="accounts", items=100)
-    target = _pick_latest_ixbrl_filing(history)
-    if target is None:
-        raise SystemExit(f"No accounts filings with document metadata found for {symbol} ({company_number})")
-
-    meta = client.fetch_document_metadata(target["metadata_url"])
-    doc_url = None
-    resources = meta.get("resources") or {}
-    xhtml = resources.get("application/xhtml+xml") or resources.get("text/html")
-    if isinstance(xhtml, dict):
-        # Prefer explicit content link if present.
-        doc_url = (xhtml.get("links") or {}).get("content") or xhtml.get("url")
-    if not doc_url:
-        links = meta.get("links") or {}
-        doc_url = links.get("document")
-    if not doc_url:
-        raise SystemExit("No XHTML document link found in Companies House metadata.")
-
-    content = client.fetch_document(doc_url)
-
-    repo = UKFilingRepository(database)
-    repo.initialize_schema()
-    repo.upsert_document(
-        company_number=company_number,
-        filing_id=target["filing_id"] or doc_url,
-        content=content,
-        symbol=symbol,
-        period_start=None,
-        period_end=None,
-        doc_type="application/xhtml+xml",
-        is_ixbrl=True,
-    )
-
-    print(f"Stored iXBRL filing for {symbol} ({company_number})")
-    return 0
-
-
-def cmd_ingest_us_facts(symbol: str, database: str, user_agent: Optional[str], cik: Optional[str]) -> int:
-    """Fetch SEC company facts for a ticker and persist them."""
-
-    client = SECCompanyFactsClient(user_agent=user_agent)
-    symbol = _qualify_symbol(symbol, exchange="US", region="US")
-    if cik:
-        cik_value = cik
-    else:
-        info = client.resolve_company(symbol.split(".")[0])
-        cik_value = info.cik
-        symbol = _qualify_symbol(info.symbol, exchange="US", region="US")
-        LOGGER.info("Resolved %s to CIK %s (%s)", symbol, cik_value, info.name)
-
-    payload = client.fetch_company_facts(cik_value)
-
-    fundamentals_repo = FundamentalsRepository(database)
-    fundamentals_repo.initialize_schema()
-    fundamentals_repo.upsert("SEC", symbol.upper(), payload, region="US", exchange="US")
-    print(f"Stored SEC company facts for {symbol} ({cik_value}) in {database}")
-    return 0
-
-
-def cmd_ingest_us_facts_bulk(
-    database: str,
-    region: str,
-    rate: float,
-    user_agent: Optional[str],
-) -> int:
-    """Fetch SEC company facts for every symbol in the stored universe."""
-
-    client = SECCompanyFactsClient(user_agent=user_agent)
-    fundamentals_repo = FundamentalsRepository(database)
-    fundamentals_repo.initialize_schema()
-
-    universe_repo = UniverseRepository(database)
-    symbols = universe_repo.fetch_symbols(region)
-    if not symbols:
-        raise SystemExit(f"No universe symbols found for region {region}. Run load-us-universe first.")
-
-    min_interval = 1.0 / rate if rate and rate > 0 else 0.0
-    last_fetch = 0.0
-    total = len(symbols)
-    processed = 0
-    print(f"Fetching SEC company facts for {total} symbols at <= {rate:.2f} req/s")
-
-    try:
-        for idx, symbol in enumerate(symbols, 1):
-            try:
-                info = client.resolve_company(symbol.split(".")[0])
-            except Exception as exc:  # pragma: no cover - rare network errors
-                LOGGER.error("Failed to resolve CIK for %s: %s", symbol, exc)
-                continue
-
-            if min_interval > 0 and last_fetch:
-                elapsed = time.perf_counter() - last_fetch
-                if elapsed < min_interval:
-                    time.sleep(min_interval - elapsed)
-
-            try:
-                payload = client.fetch_company_facts(info.cik)
-            except Exception as exc:  # pragma: no cover - network errors
-                LOGGER.error("Failed to fetch company facts for %s: %s", info.symbol, exc)
-                last_fetch = time.perf_counter()
-                continue
-
-            last_fetch = time.perf_counter()
-            qualified = _qualify_symbol(info.symbol, exchange="US", region="US")
-            fundamentals_repo.upsert("SEC", qualified, payload, region=region, exchange="US")
-            processed += 1
-            print(f"[{idx}/{total}] Stored company facts for {qualified}", flush=True)
-    except KeyboardInterrupt:
-        print(f"\nCancelled after {processed} of {total} symbols.")
-        return 1
-
-    print(f"Stored company facts for {processed} symbols in {database}")
     return 0
 
 
@@ -1200,10 +736,10 @@ def cmd_ingest_eodhd_fundamentals(
 ) -> int:
     """Fetch EODHD fundamentals for a ticker and store raw payload."""
 
+    if not exchange_code:
+        raise SystemExit("--exchange-code is required when provider=EODHD.")
     api_key = _require_eodhd_key()
     client = EODHDFundamentalsClient(api_key=api_key)
-    exchange_meta_repo = ExchangeMetadataRepository(database)
-    exchange_meta_repo.initialize_schema()
     base_symbol = symbol.upper()
     inferred_exchange = None
     if "." in base_symbol:
@@ -1211,19 +747,9 @@ def cmd_ingest_eodhd_fundamentals(
         base_symbol = base
         inferred_exchange = suffix
     exch_code = (exchange_code or inferred_exchange or "").upper() or None
-    meta = client.exchange_metadata(exch_code) if exch_code else None
-    region = (meta.get("Country") if meta else None) or exch_code or "INTL"
-    qualified_symbol = _qualify_symbol(base_symbol, exch_code, region)
+    qualified_symbol = _qualify_symbol(base_symbol, exch_code)
     fetch_symbol = qualified_symbol
     payload = client.fetch_fundamentals(fetch_symbol, exchange_code=None)
-    if exch_code:
-        exchange_meta_repo.upsert(
-            exch_code,
-            meta.get("Name") if meta else None,
-            meta.get("Country") if meta else None,
-            meta.get("Currency") if meta else None,
-            (meta.get("OperatingMIC") or meta.get("OperatingMic")) if meta else None,
-        )
     storage_symbol = qualified_symbol
     repo = FundamentalsRepository(database)
     repo.initialize_schema()
@@ -1232,7 +758,6 @@ def cmd_ingest_eodhd_fundamentals(
         "EODHD",
         storage_symbol,
         payload,
-        region=region,
         currency=general.get("CurrencyCode"),
         exchange=exch_code,
     )
@@ -1244,32 +769,21 @@ def cmd_ingest_eodhd_fundamentals_bulk(
     database: str,
     rate: float,
     exchange_code: Optional[str],
-    region: Optional[str] = None,
 ) -> int:
-    """Fetch EODHD fundamentals for an exchange or stored universe."""
+    """Fetch EODHD fundamentals for an exchange."""
 
+    if not exchange_code:
+        raise SystemExit("--exchange-code is required when provider=EODHD.")
     api_key = _require_eodhd_key()
     client = EODHDFundamentalsClient(api_key=api_key)
     repo = FundamentalsRepository(database)
     repo.initialize_schema()
-    exchange_meta_repo = ExchangeMetadataRepository(database)
-    exchange_meta_repo.initialize_schema()
-
     listings: List[Tuple[str, Optional[str]]] = []
-    region_label = None
     exch_code = (exchange_code or "").upper() or None
     if exch_code:
         meta = client.exchange_metadata(exch_code)
         if meta is None:
             raise SystemExit(f"Exchange {exchange_code} not found in EODHD exchange list.")
-        exchange_meta_repo.upsert(
-            exch_code,
-            meta.get("Name"),
-            meta.get("Country"),
-            meta.get("Currency"),
-            meta.get("OperatingMIC") or meta.get("OperatingMic"),
-        )
-        region_label = (meta.get("Country") or exch_code or "INTL").upper()
         rows = client.list_symbols(exch_code)
         for row in rows:
             code = (row.get("Code") or "").strip()
@@ -1278,23 +792,10 @@ def cmd_ingest_eodhd_fundamentals_bulk(
             sec_type = (row.get("Type") or "").upper()
             if sec_type == "ETF":
                 continue
-            qualified = _qualify_symbol(code, exch_code, region_label)
+            qualified = _qualify_symbol(code, exch_code)
             listings.append((qualified, exch_code))
         if not listings:
             raise SystemExit(f"No symbols found for exchange {exchange_code} from EODHD.")
-    else:
-        if not region:
-            raise SystemExit(
-                "Provide --exchange-code (e.g., LSE) or --region to ingest EODHD fundamentals."
-            )
-        region_label = region.upper()
-        universe_repo = UniverseRepository(database)
-        universe_repo.initialize_schema()
-        listings = universe_repo.fetch_symbol_exchanges(region_label)
-        if not listings:
-            raise SystemExit(
-                f"No listings found for region {region_label}. Run load-eodhd-universe or load-us-universe first."
-            )
 
     interval = 60.0 / rate if rate and rate > 0 else 0.0
     total = len(listings)
@@ -1311,7 +812,6 @@ def cmd_ingest_eodhd_fundamentals_bulk(
                     "EODHD",
                     symbol,
                     payload,
-                    region=region_label,
                     currency=general.get("CurrencyCode"),
                     exchange=exchange or exch_code,
                 )
@@ -1343,8 +843,25 @@ def cmd_ingest_fundamentals(
 
     provider_norm = _normalize_provider(provider)
     if provider_norm == "SEC":
-        return cmd_ingest_us_facts(symbol=symbol, database=database, user_agent=user_agent, cik=cik)
+        client = SECCompanyFactsClient(user_agent=user_agent)
+        symbol_qualified = _qualify_symbol(symbol, exchange="US")
+        if cik:
+            cik_value = cik
+        else:
+            info = client.resolve_company(symbol_qualified.split(".")[0])
+            cik_value = info.cik
+            symbol_qualified = _qualify_symbol(info.symbol, exchange="US")
+            LOGGER.info("Resolved %s to CIK %s (%s)", symbol_qualified, cik_value, info.name)
+
+        payload = client.fetch_company_facts(cik_value)
+        fundamentals_repo = FundamentalsRepository(database)
+        fundamentals_repo.initialize_schema()
+        fundamentals_repo.upsert("SEC", symbol_qualified.upper(), payload, exchange="US")
+        print(f"Stored SEC company facts for {symbol_qualified} ({cik_value}) in {database}")
+        return 0
     if provider_norm == "EODHD":
+        if not exchange_code:
+            raise SystemExit("--exchange-code is required when provider=EODHD.")
         return cmd_ingest_eodhd_fundamentals(symbol=symbol, database=database, exchange_code=exchange_code)
     raise SystemExit(f"Unsupported provider: {provider}")
 
@@ -1352,7 +869,6 @@ def cmd_ingest_fundamentals(
 def cmd_ingest_fundamentals_bulk(
     provider: str,
     database: str,
-    region: Optional[str],
     rate: Optional[float],
     exchange_code: Optional[str],
     user_agent: Optional[str],
@@ -1363,96 +879,140 @@ def cmd_ingest_fundamentals_bulk(
     """Fetch fundamentals in bulk for the specified provider."""
 
     provider_norm = _normalize_provider(provider)
+    if not exchange_code:
+        raise SystemExit("--exchange-code is required for bulk fundamentals ingestion.")
     if provider_norm == "SEC":
-        region_label = (region or "US").upper()
+        exchange_norm = exchange_code.upper()
         rate_value = rate if rate is not None else 9.0
-        return cmd_ingest_us_facts_bulk(
-            database=database,
-            region=region_label,
-            rate=rate_value,
-            user_agent=user_agent,
+        client = SECCompanyFactsClient(user_agent=user_agent)
+        fundamentals_repo = FundamentalsRepository(database)
+        fundamentals_repo.initialize_schema()
+
+        universe_repo = UniverseRepository(database)
+        symbols = universe_repo.fetch_symbols_by_exchange(exchange_norm)
+        if not symbols:
+            raise SystemExit(
+                f"No universe symbols found for exchange {exchange_norm}. "
+                "Run load-universe first."
+            )
+
+        min_interval = 1.0 / rate_value if rate_value and rate_value > 0 else 0.0
+        last_fetch = 0.0
+        total = len(symbols)
+        processed = 0
+        print(
+            f"Fetching SEC company facts for {total} symbols on {exchange_norm} "
+            f"at <= {rate_value:.2f} req/s"
         )
+
+        try:
+            for idx, symbol in enumerate(symbols, 1):
+                try:
+                    info = client.resolve_company(symbol.split(".")[0])
+                except Exception as exc:  # pragma: no cover - rare network errors
+                    LOGGER.error("Failed to resolve CIK for %s: %s", symbol, exc)
+                    continue
+
+                if min_interval > 0 and last_fetch:
+                    elapsed = time.perf_counter() - last_fetch
+                    if elapsed < min_interval:
+                        time.sleep(min_interval - elapsed)
+
+                try:
+                    payload = client.fetch_company_facts(info.cik)
+                except Exception as exc:  # pragma: no cover - network errors
+                    LOGGER.error("Failed to fetch company facts for %s: %s", info.symbol, exc)
+                    last_fetch = time.perf_counter()
+                    continue
+
+                last_fetch = time.perf_counter()
+                qualified = _qualify_symbol(info.symbol, exchange="US")
+                fundamentals_repo.upsert(
+                    "SEC",
+                    qualified,
+                    payload,
+                    exchange=exchange_norm,
+                )
+                processed += 1
+                print(f"[{idx}/{total}] Stored company facts for {qualified}", flush=True)
+        except KeyboardInterrupt:
+            print(f"\\nCancelled after {processed} of {total} symbols.")
+            return 1
+
+        print(f"Stored company facts for {processed} symbols in {database}")
+        return 0
     if provider_norm == "EODHD":
         rate_value = rate if rate is not None else 600.0
-        if exchange_code:
-            exchange_norm = exchange_code.upper()
-            symbols = _select_exchange_listings_for_provider(
-                database=database,
-                provider=provider_norm,
-                exchange_code=exchange_norm,
-                region=region,
-                max_age_days=max_age_days,
-                max_symbols=max_symbols,
-                resume=resume,
-            )
-            if not symbols:
-                print(f"No eligible listings found for exchange {exchange_norm}.")
-                return 0
-
-            api_key = _require_eodhd_key()
-            client = EODHDFundamentalsClient(api_key=api_key)
-            repo = FundamentalsRepository(database)
-            repo.initialize_schema()
-            state_repo = FundamentalsFetchStateRepository(database)
-            state_repo.initialize_schema()
-
-            interval = 60.0 / rate_value if rate_value and rate_value > 0 else 0.0
-            total = len(symbols)
-            processed = 0
-            print(
-                f"Fetching EODHD fundamentals for {total} symbols on {exchange_norm} "
-                f"at <= {rate_value:.2f} per minute"
-            )
-
-            try:
-                for idx, (symbol, region_label) in enumerate(symbols, 1):
-                    start = time.perf_counter()
-                    try:
-                        payload = client.fetch_fundamentals(symbol, exchange_code=None)
-                        general = payload.get("General") or {}
-                        repo.upsert(
-                            "EODHD",
-                            symbol,
-                            payload,
-                            region=region_label,
-                            currency=general.get("CurrencyCode"),
-                            exchange=exchange_norm,
-                        )
-                        state_repo.mark_success("EODHD", symbol)
-                        processed += 1
-                        print(f"[{idx}/{total}] Stored fundamentals for {symbol.upper()}", flush=True)
-                    except Exception as exc:  # pragma: no cover - network errors
-                        LOGGER.error("Failed to fetch fundamentals for %s: %s", symbol, exc)
-                        state_repo.mark_failure("EODHD", symbol, str(exc))
-
-                    elapsed = time.perf_counter() - start
-                    if interval > 0 and elapsed < interval:
-                        time.sleep(interval - elapsed)
-            except KeyboardInterrupt:
-                print(f"\nCancelled after {processed} of {total} symbols.")
-                return 1
-
-            print(f"Stored fundamentals for {processed} symbols in {database}")
-            return 0
-        return cmd_ingest_eodhd_fundamentals_bulk(
+        exchange_norm = exchange_code.upper()
+        symbols = _select_exchange_listings_for_provider(
             database=database,
-            rate=rate_value,
-            exchange_code=exchange_code,
-            region=region,
+            provider=provider_norm,
+            exchange_code=exchange_norm,
+            max_age_days=max_age_days,
+            max_symbols=max_symbols,
+            resume=resume,
         )
+        if not symbols:
+            print(f"No eligible listings found for exchange {exchange_norm}.")
+            return 0
+
+        api_key = _require_eodhd_key()
+        client = EODHDFundamentalsClient(api_key=api_key)
+        repo = FundamentalsRepository(database)
+        repo.initialize_schema()
+        state_repo = FundamentalsFetchStateRepository(database)
+        state_repo.initialize_schema()
+
+        interval = 60.0 / rate_value if rate_value and rate_value > 0 else 0.0
+        total = len(symbols)
+        processed = 0
+        print(
+            f"Fetching EODHD fundamentals for {total} symbols on {exchange_norm} "
+            f"at <= {rate_value:.2f} per minute"
+        )
+
+        try:
+            for idx, symbol in enumerate(symbols, 1):
+                start = time.perf_counter()
+                try:
+                    payload = client.fetch_fundamentals(symbol, exchange_code=None)
+                    general = payload.get("General") or {}
+                    repo.upsert(
+                        "EODHD",
+                        symbol,
+                        payload,
+                        currency=general.get("CurrencyCode"),
+                        exchange=exchange_norm,
+                    )
+                    state_repo.mark_success("EODHD", symbol)
+                    processed += 1
+                    print(f"[{idx}/{total}] Stored fundamentals for {symbol.upper()}", flush=True)
+                except Exception as exc:  # pragma: no cover - network errors
+                    LOGGER.error("Failed to fetch fundamentals for %s: %s", symbol, exc)
+                    state_repo.mark_failure("EODHD", symbol, str(exc))
+
+                elapsed = time.perf_counter() - start
+                if interval > 0 and elapsed < interval:
+                    time.sleep(interval - elapsed)
+        except KeyboardInterrupt:
+            print(f"\nCancelled after {processed} of {total} symbols.")
+            return 1
+
+        print(f"Stored fundamentals for {processed} symbols in {database}")
+        return 0
     raise SystemExit(f"Unsupported provider: {provider}")
 
 
 def cmd_normalize_us_facts(symbol: str, database: str) -> int:
     """Normalize previously ingested SEC facts for downstream metrics."""
 
-    symbol = _qualify_symbol(symbol, exchange="US", region="US")
+    symbol = _qualify_symbol(symbol, exchange="US")
     fund_repo = FundamentalsRepository(database)
     fund_repo.initialize_schema()
     payload = fund_repo.fetch("SEC", symbol.upper())
     if payload is None:
         raise SystemExit(
-            f"No raw SEC payload found for {symbol}. Run ingest-us-facts before normalization."
+            f"No raw SEC payload found for {symbol}. Run ingest-fundamentals --provider SEC before normalization."
         )
     normalizer = SECFactsNormalizer()
     records = normalizer.normalize(payload, symbol=symbol.upper())
@@ -1469,9 +1029,7 @@ def cmd_normalize_us_facts(symbol: str, database: str) -> int:
     return 0
 
 
-def cmd_normalize_us_facts_bulk(
-    database: str, region: str = "US", symbols: Optional[Sequence[str]] = None
-) -> int:
+def cmd_normalize_us_facts_bulk(database: str, symbols: Optional[Sequence[str]] = None) -> int:
     """Normalize raw SEC facts for every stored ticker."""
 
     fund_repo = FundamentalsRepository(database)
@@ -1481,12 +1039,11 @@ def cmd_normalize_us_facts_bulk(
     entity_repo = EntityMetadataRepository(database)
     entity_repo.initialize_schema()
 
-    region_label = region.upper()
     if symbols is None:
-        symbols = fund_repo.symbols("SEC", region=region_label)
+        symbols = fund_repo.symbols("SEC")
         if not symbols:
             raise SystemExit(
-                "No raw SEC facts found. Run ingest-us-facts or ingest-us-facts-bulk first."
+                "No raw SEC facts found. Run ingest-fundamentals --provider SEC first."
             )
     else:
         symbols = [symbol.upper() for symbol in symbols]
@@ -1526,7 +1083,9 @@ def cmd_normalize_eodhd_fundamentals(symbol: str, database: str) -> int:
     fund_repo = FundamentalsRepository(database)
     payload = fund_repo.fetch("EODHD", symbol.upper())
     if payload is None:
-        raise SystemExit(f"No EODHD fundamentals found for {symbol}. Run ingest-eodhd-fundamentals first.")
+        raise SystemExit(
+            f"No EODHD fundamentals found for {symbol}. Run ingest-fundamentals --provider EODHD first."
+        )
 
     normalizer = EODHDFactsNormalizer()
     records = normalizer.normalize(payload, symbol=symbol.upper())
@@ -1545,16 +1104,16 @@ def cmd_normalize_eodhd_fundamentals(symbol: str, database: str) -> int:
 
 
 def cmd_normalize_eodhd_fundamentals_bulk(
-    database: str, region: Optional[str], symbols: Optional[Sequence[str]] = None
+    database: str, symbols: Optional[Sequence[str]] = None
 ) -> int:
     """Normalize all stored EODHD fundamentals."""
 
     fund_repo = FundamentalsRepository(database)
     if symbols is None:
-        symbols = fund_repo.symbols("EODHD", region=region)
+        symbols = fund_repo.symbols("EODHD")
         if not symbols:
             raise SystemExit(
-                "No EODHD fundamentals found. Run ingest-eodhd-fundamentals(-bulk) first."
+                "No EODHD fundamentals found. Run ingest-fundamentals --provider EODHD first."
             )
     else:
         symbols = [symbol.upper() for symbol in symbols]
@@ -1600,43 +1159,33 @@ def cmd_normalize_fundamentals(provider: str, symbol: str, database: str) -> int
 
 
 def cmd_normalize_fundamentals_bulk(
-    provider: str, database: str, region: Optional[str], exchange_code: Optional[str]
+    provider: str, database: str, exchange_code: Optional[str]
 ) -> int:
     """Normalize stored fundamentals in bulk for the specified provider."""
 
     provider_norm = _normalize_provider(provider)
-    if exchange_code:
-        exchange_norm = exchange_code.upper()
-        listings = _select_listing_symbols_by_exchange(
-            database=database, exchange_code=exchange_norm, region=region
+    if not exchange_code:
+        raise SystemExit("--exchange-code is required for bulk fundamentals normalization.")
+    exchange_norm = exchange_code.upper()
+    listings = _select_listing_symbols_by_exchange(database=database, exchange_code=exchange_norm)
+    if not listings:
+        raise SystemExit(
+            f"No listings found for exchange {exchange_norm}. "
+            "Run load-universe first."
         )
-        if not listings:
-            raise SystemExit(
-                f"No listings found for exchange {exchange_norm}. "
-                "Run load-eodhd-universe or load-us-universe first."
-            )
-        fund_repo = FundamentalsRepository(database)
-        fund_repo.initialize_schema()
-        raw_symbols = set(fund_repo.symbols(provider_norm, region=region))
-        symbols = [symbol for symbol in listings if symbol in raw_symbols]
-        if not symbols:
-            raise SystemExit(
-                f"No {provider_norm} fundamentals found for exchange {exchange_norm}. "
-                "Run ingest-fundamentals-bulk first."
-            )
-        if provider_norm == "SEC":
-            region_label = (region or "US").upper()
-            return cmd_normalize_us_facts_bulk(database=database, region=region_label, symbols=symbols)
-        if provider_norm == "EODHD":
-            return cmd_normalize_eodhd_fundamentals_bulk(
-                database=database, region=region, symbols=symbols
-            )
-        raise SystemExit(f"Unsupported provider: {provider}")
+    fund_repo = FundamentalsRepository(database)
+    fund_repo.initialize_schema()
+    raw_symbols = set(fund_repo.symbols(provider_norm))
+    symbols = [symbol for symbol in listings if symbol in raw_symbols]
+    if not symbols:
+        raise SystemExit(
+            f"No {provider_norm} fundamentals found for exchange {exchange_norm}. "
+            "Run ingest-fundamentals-bulk first."
+        )
     if provider_norm == "SEC":
-        region_label = (region or "US").upper()
-        return cmd_normalize_us_facts_bulk(database=database, region=region_label)
+        return cmd_normalize_us_facts_bulk(database=database, symbols=symbols)
     if provider_norm == "EODHD":
-        return cmd_normalize_eodhd_fundamentals_bulk(database=database, region=region)
+        return cmd_normalize_eodhd_fundamentals_bulk(database=database, symbols=symbols)
     raise SystemExit(f"Unsupported provider: {provider}")
 
 
@@ -1652,47 +1201,22 @@ def cmd_update_market_data(symbol: str, database: str) -> int:
 
 
 def cmd_update_market_data_bulk(
-    database: str, region: Optional[str], rate: float, exchange_code: Optional[str] = None
+    database: str, rate: float, exchange_code: Optional[str]
 ) -> int:
     """Fetch market data for every stored listing."""
 
+    if not exchange_code:
+        raise SystemExit("--exchange-code is required for bulk market data updates.")
+
     universe_repo = UniverseRepository(database)
     universe_repo.initialize_schema()
-    pairs: List[tuple[str, Optional[str], Optional[str]]] = []
-    if exchange_code:
-        exchange_norm = exchange_code.upper()
-        region_label = region.upper() if region else None
-        listing_rows = universe_repo.fetch_symbol_regions_by_exchange(exchange_norm, region=region_label)
-        if listing_rows:
-            pairs = [(symbol, exchange_norm, row_region) for symbol, row_region in listing_rows]
-        else:
-            fund_repo = FundamentalsRepository(database)
-            fund_repo.initialize_schema()
-            raw_pairs = fund_repo.symbol_exchanges("EODHD", region=region_label)
-            pairs = [
-                (symbol, exchange_norm, region_label)
-                for symbol, exchange in raw_pairs
-                if exchange and exchange.upper() == exchange_norm
-            ]
-        if not pairs:
-            raise SystemExit(
-                f"No symbols found for exchange {exchange_norm}. "
-                "Load a universe or ingest fundamentals first."
-            )
-        effective_region = region_label
-    else:
-        region_label = (region or "US").upper()
-        listing_pairs = universe_repo.fetch_symbol_exchanges(region_label)
-        if not listing_pairs:
-            fund_repo = FundamentalsRepository(database)
-            fund_repo.initialize_schema()
-            listing_pairs = fund_repo.symbol_exchanges("EODHD", region=region_label)
-        if not listing_pairs:
-            raise SystemExit(
-                f"No symbols found for region {region_label}. Load universe or ingest fundamentals first."
-            )
-        pairs = [(symbol, exchange, region_label) for symbol, exchange in listing_pairs]
-        effective_region = region_label
+    exchange_norm = exchange_code.upper()
+    listing_rows = universe_repo.fetch_symbols_by_exchange(exchange_norm)
+    if not listing_rows:
+        raise SystemExit(
+            f"No symbols found for exchange {exchange_norm}. Load a universe first."
+        )
+    pairs = [(symbol, exchange_norm) for symbol in listing_rows]
 
     service = MarketDataService(db_path=database)
     interval = 60.0 / rate if rate and rate > 0 else 0.0
@@ -1701,10 +1225,10 @@ def cmd_update_market_data_bulk(
     print(f"Updating market data for {total} symbols at <= {rate:.2f} per minute")
 
     try:
-        for idx, (symbol, exchange, row_region) in enumerate(pairs, 1):
+        for idx, (symbol, exchange) in enumerate(pairs, 1):
             start = time.perf_counter()
             try:
-                fetch_symbol = _format_market_symbol(symbol, exchange, row_region or effective_region)
+                fetch_symbol = _format_market_symbol(symbol, exchange)
                 service.refresh_symbol(symbol, fetch_symbol=fetch_symbol)
                 processed += 1
                 print(f"[{idx}/{total}] Stored market data for {symbol}", flush=True)
@@ -1761,43 +1285,24 @@ def cmd_compute_metrics(
 
 def cmd_compute_metrics_bulk(
     database: str,
-    region: Optional[str],
     metric_ids: Optional[Sequence[str]],
-    exchange_code: Optional[str] = None,
+    exchange_code: Optional[str],
 ) -> int:
     """Compute metrics for all listings stored in the universe."""
 
     db_path = _resolve_database_path(database)
     universe_repo = UniverseRepository(db_path)
     universe_repo.initialize_schema()
-    symbols: List[str] = []
-    if exchange_code:
-        exchange_norm = exchange_code.upper()
-        region_label = region.upper() if region else None
-        pairs = universe_repo.fetch_symbol_regions_by_exchange(exchange_norm, region=region_label)
-        symbols = [symbol for symbol, _ in pairs]
-        if not symbols:
-            raise SystemExit(
-                f"No listings found for exchange {exchange_norm}. "
-                "Run load-eodhd-universe or load-us-universe first."
-            )
-    else:
-        region_label = (region or "US").upper()
-        symbols = universe_repo.fetch_symbols(region_label)
-        if not symbols:
-            fund_repo = FundamentalsRepository(db_path)
-            fund_repo.initialize_schema()
-            symbols = fund_repo.symbols("EODHD", region=region_label)
-        if not symbols:
-            with universe_repo._connect() as conn:
-                available_regions = [
-                    row[0] for row in conn.execute("SELECT DISTINCT region FROM listings").fetchall()
-                ]
-            raise SystemExit(
-                f"No symbols found for region {region_label}. Load a universe or ingest fundamentals first. "
-                f"Available regions: {', '.join(available_regions) if available_regions else 'none'}. "
-                f"Database: {db_path}"
-            )
+    if not exchange_code:
+        raise SystemExit("--exchange-code is required for bulk metric computation.")
+
+    exchange_norm = exchange_code.upper()
+    symbols = universe_repo.fetch_symbols_by_exchange(exchange_norm)
+    if not symbols:
+        raise SystemExit(
+            f"No listings found for exchange {exchange_norm}. "
+            "Run load-universe first."
+        )
 
     base_fact_repo = FinancialFactsRepository(db_path)
     fact_repo = RegionFactsRepository(base_fact_repo)
@@ -1847,19 +1352,19 @@ def cmd_compute_metrics_bulk(
 
 def cmd_report_fact_freshness(
     database: str,
-    region: str,
+    exchange_code: str,
     metric_ids: Optional[Sequence[str]],
     max_age_days: int,
     output_csv: Optional[str],
     show_all: bool,
 ) -> int:
-    """Report missing or stale financial facts needed by metrics for a region."""
+    """Report missing or stale financial facts needed by metrics for an exchange."""
 
     db_path = _resolve_database_path(database)
-    region_label = region.upper()
-    symbols = _symbols_for_region_or_raise(db_path, region_label)
+    exchange_norm = exchange_code.upper()
+    symbols = _symbols_for_exchange_or_raise(db_path, exchange_norm)
     if not symbols:
-        raise SystemExit(f"No symbols found for region {region_label}.")
+        raise SystemExit(f"No symbols found for exchange {exchange_norm}.")
 
     metric_classes = _select_metric_classes(metric_ids)
     base_fact_repo = FinancialFactsRepository(db_path)
@@ -1871,7 +1376,9 @@ def cmd_report_fact_freshness(
         max_age_days=max_age_days,
     )
 
-    print(f"Fact coverage for region {region_label} ({len(symbols)} symbols, max_age_days={max_age_days})")
+    print(
+        f"Fact coverage for exchange {exchange_norm} ({len(symbols)} symbols, max_age_days={max_age_days})"
+    )
     for entry in coverage:
         missing_total = sum(c.missing for c in entry.concepts)
         stale_total = sum(c.stale for c in entry.concepts)
@@ -1892,16 +1399,16 @@ def cmd_report_fact_freshness(
 
 def cmd_report_metric_coverage(
     database: str,
-    region: str,
+    exchange_code: str,
     metric_ids: Optional[Sequence[str]],
 ) -> int:
     """Count symbols that can compute all requested metrics (without persisting results)."""
 
     db_path = _resolve_database_path(database)
-    region_label = region.upper()
-    symbols = _symbols_for_region_or_raise(db_path, region_label)
+    exchange_norm = exchange_code.upper()
+    symbols = _symbols_for_exchange_or_raise(db_path, exchange_norm)
     if not symbols:
-        raise SystemExit(f"No symbols found for region {region_label}.")
+        raise SystemExit(f"No symbols found for exchange {exchange_norm}.")
 
     metric_classes = _select_metric_classes(metric_ids)
     base_fact_repo = FinancialFactsRepository(db_path)
@@ -1933,7 +1440,9 @@ def cmd_report_metric_coverage(
             all_success += 1
 
     total_symbols = len(symbols)
-    print(f"Metric coverage for region {region_label} (symbols={total_symbols}, metrics={len(metric_classes)})")
+    print(
+        f"Metric coverage for exchange {exchange_norm} (symbols={total_symbols}, metrics={len(metric_classes)})"
+    )
     print(f"Symbols where all metrics computed: {all_success}/{total_symbols}")
     for metric_id, count in per_metric_success.items():
         print(f"- {metric_id}: {count}/{total_symbols} symbols")
@@ -2022,58 +1531,41 @@ def _write_metric_failure_report_csv(
 
 def cmd_report_metric_failures(
     database: str,
-    region: Optional[str],
     metric_ids: Optional[Sequence[str]],
     symbols: Optional[Sequence[str]],
     output_csv: Optional[str],
-    exchange_code: Optional[str] = None,
+    exchange_code: Optional[str],
 ) -> int:
     """Summarize warning reasons for metric computation failures."""
 
     db_path = _resolve_database_path(database)
-    region_label = (region or "US").upper()
-    exchange_norm = exchange_code.upper() if exchange_code else None
-    if exchange_norm:
-        universe_repo = UniverseRepository(db_path)
-        universe_repo.initialize_schema()
-        region_filter = region.upper() if region else None
-        pairs = universe_repo.fetch_symbol_regions_by_exchange(exchange_norm, region=region_filter)
-        listing_symbols = [symbol for symbol, _ in pairs]
-        if not listing_symbols:
+    if not exchange_code:
+        raise SystemExit("--exchange-code is required for metric failure reports.")
+    exchange_norm = exchange_code.upper()
+    universe_repo = UniverseRepository(db_path)
+    universe_repo.initialize_schema()
+    listing_symbols = universe_repo.fetch_symbols_by_exchange(exchange_norm)
+    if not listing_symbols:
+        raise SystemExit(
+            f"No symbols found for exchange {exchange_norm}. "
+            "Load a universe first."
+        )
+    if symbols:
+        selected: List[str] = []
+        for entry in symbols:
+            for symbol in entry.split(","):
+                symbol = symbol.strip()
+                if not symbol:
+                    continue
+                selected.append(_format_market_symbol(symbol, exchange_norm))
+        requested = list(dict.fromkeys(selected))
+        symbols = [symbol for symbol in listing_symbols if symbol in requested]
+        if not symbols:
             raise SystemExit(
-                f"No symbols found for exchange {exchange_norm}. "
-                "Load a universe first."
+                f"No symbols found for exchange {exchange_norm} matching the provided list."
             )
-        if symbols:
-            selected: List[str] = []
-            for entry in symbols:
-                for symbol in entry.split(","):
-                    symbol = symbol.strip()
-                    if not symbol:
-                        continue
-                    selected.append(_qualify_symbol(symbol, exchange=exchange_norm))
-            requested = list(dict.fromkeys(selected))
-            symbols = [symbol for symbol in listing_symbols if symbol in requested]
-            if not symbols:
-                raise SystemExit(
-                    f"No symbols found for exchange {exchange_norm} matching the provided list."
-                )
-        else:
-            symbols = listing_symbols
     else:
-        if symbols:
-            selected = []
-            for entry in symbols:
-                for symbol in entry.split(","):
-                    symbol = symbol.strip()
-                    if not symbol:
-                        continue
-                    selected.append(_qualify_symbol(symbol, region=region_label))
-            symbols = list(dict.fromkeys(selected))
-        else:
-            symbols = _symbols_for_region_or_raise(db_path, region_label)
-            if not symbols:
-                raise SystemExit(f"No symbols found for region {region_label}.")
+        symbols = listing_symbols
 
     metric_classes = _select_metric_classes(metric_ids)
     base_fact_repo = FinancialFactsRepository(db_path)
@@ -2129,12 +1621,7 @@ def cmd_report_metric_failures(
         root_logger.removeHandler(handler)
 
     total_symbols = len(symbols)
-    if exchange_code:
-        scope_label = f"exchange {exchange_code.upper()}"
-        if region:
-            scope_label = f"{scope_label} (region {region_label})"
-    else:
-        scope_label = f"region {region_label}"
+    scope_label = f"exchange {exchange_code.upper()}"
     print(f"Metric failure reasons for {scope_label} (symbols={total_symbols}, metrics={len(metric_classes)})")
     for metric_id in [getattr(cls, "id", cls.__name__) for cls in metric_classes]:
         total_failures = totals.get(metric_id, 0)
@@ -2198,7 +1685,10 @@ def cmd_purge_us_nonfilers(database: str, apply: bool) -> int:
     universe_repo = UniverseRepository(db_path)
     universe_repo.initialize_schema()
     with universe_repo._connect() as conn:
-        us_symbols = [row[0] for row in conn.execute("SELECT symbol FROM listings WHERE region = 'US'")]
+        us_symbols = [
+            row[0]
+            for row in conn.execute("SELECT symbol FROM listings WHERE symbol LIKE '%.US'").fetchall()
+        ]
 
     eligible = set(_eligible_sec_filers(db_path))
     to_remove = sorted([sym for sym in us_symbols if sym.upper() not in eligible])
@@ -2214,7 +1704,7 @@ def cmd_purge_us_nonfilers(database: str, apply: bool) -> int:
         return 0
 
     with universe_repo._connect() as conn:
-        conn.executemany("DELETE FROM listings WHERE symbol = ? AND region = 'US'", [(sym,) for sym in to_remove])
+        conn.executemany("DELETE FROM listings WHERE symbol = ?", [(sym,) for sym in to_remove])
     print(f"Deleted {len(to_remove)} US listings from listings table.")
     return 0
 
@@ -2302,49 +1792,6 @@ def cmd_clear_metrics(database: str) -> int:
     return 0
 
 
-def cmd_refresh_uk_symbol_map(database: str, gleif_url: str, isin_date: Optional[str], region: str) -> int:
-    """Refresh UK symbol -> company number mapping using GLEIF and stored ISINs."""
-
-    client = GLEIFClient(golden_url=gleif_url)
-    golden_body = client.fetch_golden_csv()
-    isin_body = client.fetch_isin_csv(as_of=isin_date)
-    mapping = client.isin_to_company_number(golden_body, isin_body)
-    if not mapping:
-        golden_count = len(client._parse_golden(golden_body))
-        isin_count = len(client._parse_isin(isin_body))
-        raise SystemExit(f"No GLEIF mappings found (golden rows: {golden_count}, ISIN rows: {isin_count}); aborting.")
-
-    universe_repo = UniverseRepository(database)
-    universe_repo.initialize_schema()
-    symbols = universe_repo.fetch_symbols(region=region)
-    if not symbols:
-        raise SystemExit(f"No listings stored for region {region}. Run load-eodhd-universe first.")
-
-    # Fetch ISINs for UK listings.
-    with universe_repo._connect() as conn:
-        rows = conn.execute(
-            "SELECT symbol, isin FROM listings WHERE region = ? AND isin IS NOT NULL",
-            (region,),
-        ).fetchall()
-    isin_rows = [(row[0], row[1]) for row in rows]
-
-    mapper = UKSymbolMapRepository(database)
-    mapper.initialize_schema()
-
-    updates = []
-    for symbol, isin in isin_rows:
-        if not isin:
-            continue
-        entry = mapping.get(isin)
-        if not entry:
-            continue
-        updates.append((symbol, isin, entry.get("lei"), entry.get("company_number")))
-
-    applied = mapper.bulk_upsert(updates)
-    print(f"Updated UK symbol map for {applied} symbols")
-    return 0
-
-
 def cmd_run_screen(symbol: str, config_path: str, database: str) -> int:
     """Evaluate screening criteria against stored/derived metrics."""
 
@@ -2371,9 +1818,8 @@ def cmd_run_screen(symbol: str, config_path: str, database: str) -> int:
 def cmd_run_screen_bulk(
     config_path: str,
     database: str,
-    region: Optional[str],
     output_csv: Optional[str],
-    exchange_code: Optional[str] = None,
+    exchange_code: Optional[str],
 ) -> int:
     """Evaluate screening criteria for every ticker stored in the universe."""
 
@@ -2381,36 +1827,14 @@ def cmd_run_screen_bulk(
     output_csv = output_csv or DEFAULT_SCREEN_RESULTS_CSV
     universe_repo = UniverseRepository(database)
     universe_repo.initialize_schema()
-    symbols: List[str] = []
-    region_label = region.upper() if region else None
-    if exchange_code:
-        exchange_norm = exchange_code.upper()
-        pairs = universe_repo.fetch_symbol_regions_by_exchange(exchange_norm, region=region_label)
-        symbols = [symbol for symbol, _ in pairs]
-        if not symbols:
-            fund_repo = FundamentalsRepository(database)
-            fund_repo.initialize_schema()
-            raw_pairs = fund_repo.symbol_exchanges("EODHD", region=region_label)
-            symbols = [
-                symbol
-                for symbol, exchange in raw_pairs
-                if exchange and exchange.upper() == exchange_norm
-            ]
-        if not symbols:
-            raise SystemExit(
-                f"No symbols found for exchange {exchange_norm}. Load universe or ingest fundamentals first."
-            )
-    else:
-        region_label = (region or "US").upper()
-        symbols = universe_repo.fetch_symbols(region_label)
-        if not symbols:
-            fund_repo = FundamentalsRepository(database)
-            fund_repo.initialize_schema()
-            symbols = fund_repo.symbols("EODHD", region=region_label)
-        if not symbols:
-            raise SystemExit(
-                f"No symbols found for region {region_label}. Load universe or ingest fundamentals first."
-            )
+    if not exchange_code:
+        raise SystemExit("--exchange-code is required for bulk screening.")
+    exchange_norm = exchange_code.upper()
+    symbols = universe_repo.fetch_symbols_by_exchange(exchange_norm)
+    if not symbols:
+        raise SystemExit(
+            f"No symbols found for exchange {exchange_norm}. Load a universe first."
+        )
 
     metrics_repo = MetricsRepository(database)
     metrics_repo.initialize_schema()
@@ -2422,19 +1846,10 @@ def cmd_run_screen_bulk(
     entity_repo.initialize_schema()
 
     with universe_repo._connect() as conn:
-        if exchange_code:
-            query = ["SELECT symbol, security_name FROM listings WHERE UPPER(exchange) = ?"]
-            params: List[str] = [exchange_norm]
-            if region_label:
-                query.append("AND region = ?")
-                params.append(region_label)
-            sql = " ".join(query)
-            name_rows = conn.execute(sql, params).fetchall()
-        else:
-            name_rows = conn.execute(
-                "SELECT symbol, security_name FROM listings WHERE region = ?",
-                (region_label,),
-            ).fetchall()
+        query = ["SELECT symbol, security_name FROM listings WHERE UPPER(exchange) = ?"]
+        params: List[str] = [exchange_norm]
+        sql = " ".join(query)
+        name_rows = conn.execute(sql, params).fetchall()
     universe_names = {row[0].upper(): (row[1] or row[0].upper()) for row in name_rows}
     entity_labels: Dict[str, str] = {}
     passed_symbols: List[str] = []
@@ -2550,63 +1965,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.command == "load-us-universe":
-        return cmd_load_us_universe(database=args.database, include_etfs=args.include_etfs)
-    if args.command == "load-eodhd-universe":
-        return cmd_load_eodhd_universe(
+    if args.command == "load-universe":
+        return cmd_load_universe(
+            provider=args.provider,
             database=args.database,
             include_etfs=args.include_etfs,
             exchange_code=args.exchange_code,
             currencies=args.currencies,
             include_exchanges=args.include_exchanges,
-        )
-    if args.command == "ingest-uk-facts":
-        return cmd_ingest_uk_facts(
-            company_number=args.company_number,
-            database=args.database,
-            symbol=args.symbol,
-        )
-    if args.command == "ingest-uk-facts-bulk":
-        return cmd_ingest_uk_facts_bulk(database=args.database)
-    if args.command == "ingest-uk-filings":
-        return cmd_ingest_uk_filings(symbol=args.symbol, database=args.database)
-    if args.command == "refresh-uk-symbol-map":
-        return cmd_refresh_uk_symbol_map(
-            database=args.database,
-            gleif_url=args.gleif_url,
-            isin_date=args.isin_date,
-            region=args.region,
-        )
-    if args.command == "ingest-us-facts":
-        return cmd_ingest_us_facts(
-            symbol=args.symbol,
-            database=args.database,
-            user_agent=args.user_agent,
-            cik=args.cik,
-        )
-    if args.command == "ingest-us-facts-bulk":
-        return cmd_ingest_us_facts_bulk(
-            database=args.database,
-            region=args.region,
-            rate=args.rate,
-            user_agent=args.user_agent,
-        )
-    if args.command == "normalize-us-facts":
-        return cmd_normalize_us_facts(symbol=args.symbol, database=args.database)
-    if args.command == "normalize-us-facts-bulk":
-        return cmd_normalize_us_facts_bulk(database=args.database)
-    if args.command == "ingest-eodhd-fundamentals":
-        return cmd_ingest_eodhd_fundamentals(
-            symbol=args.symbol,
-            database=args.database,
-            exchange_code=args.exchange_code,
-        )
-    if args.command == "ingest-eodhd-fundamentals-bulk":
-        return cmd_ingest_eodhd_fundamentals_bulk(
-            database=args.database,
-            rate=args.rate,
-            exchange_code=args.exchange_code,
-            region=args.region,
         )
     if args.command == "ingest-fundamentals":
         return cmd_ingest_fundamentals(
@@ -2621,7 +1987,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return cmd_ingest_fundamentals_bulk(
             provider=args.provider,
             database=args.database,
-            region=args.region,
             rate=args.rate,
             exchange_code=args.exchange_code,
             user_agent=args.user_agent,
@@ -2629,10 +1994,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             max_age_days=args.max_age_days,
             resume=args.resume,
         )
-    if args.command == "normalize-eodhd-fundamentals":
-        return cmd_normalize_eodhd_fundamentals(symbol=args.symbol, database=args.database)
-    if args.command == "normalize-eodhd-fundamentals-bulk":
-        return cmd_normalize_eodhd_fundamentals_bulk(database=args.database, region=args.region)
     if args.command == "normalize-fundamentals":
         return cmd_normalize_fundamentals(
             provider=args.provider,
@@ -2643,7 +2004,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return cmd_normalize_fundamentals_bulk(
             provider=args.provider,
             database=args.database,
-            region=args.region,
             exchange_code=args.exchange_code,
         )
     if args.command == "update-market-data":
@@ -2651,7 +2011,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.command == "update-market-data-bulk":
         return cmd_update_market_data_bulk(
             database=args.database,
-            region=args.region,
             rate=args.rate,
             exchange_code=args.exchange_code,
         )
@@ -2673,14 +2032,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.command == "compute-metrics-bulk":
         return cmd_compute_metrics_bulk(
             database=args.database,
-            region=args.region,
             metric_ids=args.metrics,
             exchange_code=args.exchange_code,
         )
     if args.command == "report-fact-freshness":
         return cmd_report_fact_freshness(
             database=args.database,
-            region=args.region,
+            exchange_code=args.exchange_code,
             metric_ids=args.metrics,
             max_age_days=args.max_age_days,
             output_csv=args.output_csv,
@@ -2689,13 +2047,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.command == "report-metric-coverage":
         return cmd_report_metric_coverage(
             database=args.database,
-            region=args.region,
+            exchange_code=args.exchange_code,
             metric_ids=args.metrics,
         )
     if args.command == "report-metric-failures":
         return cmd_report_metric_failures(
             database=args.database,
-            region=args.region,
             metric_ids=args.metrics,
             symbols=args.symbols,
             output_csv=args.output_csv,
@@ -2709,7 +2066,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return cmd_run_screen_bulk(
             config_path=args.config,
             database=args.database,
-            region=args.region,
             output_csv=args.output_csv,
             exchange_code=args.exchange_code,
         )

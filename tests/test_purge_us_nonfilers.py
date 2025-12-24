@@ -14,8 +14,7 @@ def _seed_universe(db_path):
         [
             Listing(symbol="FILER.US", security_name="Filer", exchange="NASDAQ"),
             Listing(symbol="NONFILER.US", security_name="NonFiler", exchange="NYSE"),
-        ],
-        region="US",
+        ]
     )
 
 
@@ -35,7 +34,7 @@ def _seed_company_facts(db_path):
             }
         }
     }
-    repo.upsert("SEC", "FILER.US", payload, region="US")
+    repo.upsert("SEC", "FILER.US", payload)
 
 
 def test_purge_us_nonfilers_dry_run(tmp_path, capsys):
@@ -51,7 +50,7 @@ def test_purge_us_nonfilers_dry_run(tmp_path, capsys):
     # Ensure listings intact
     universe = UniverseRepository(db_path)
     with universe._connect() as conn:
-        count = conn.execute("SELECT COUNT(*) FROM listings WHERE region='US'").fetchone()[0]
+        count = conn.execute("SELECT COUNT(*) FROM listings WHERE symbol LIKE '%.US'").fetchone()[0]
     assert count == 2
 
 
@@ -65,5 +64,5 @@ def test_purge_us_nonfilers_apply(tmp_path):
     assert exit_code == 0
     universe = UniverseRepository(db_path)
     with universe._connect() as conn:
-        symbols = [row[0] for row in conn.execute("SELECT symbol FROM listings WHERE region='US'")]
+        symbols = [row[0] for row in conn.execute("SELECT symbol FROM listings WHERE symbol LIKE '%.US'")]
     assert symbols == ["FILER.US"]

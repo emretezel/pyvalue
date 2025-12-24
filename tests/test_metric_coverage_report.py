@@ -14,8 +14,7 @@ def _seed_universe(db_path):
         [
             Listing(symbol="AAA.US", security_name="AAA", exchange="NYSE"),
             Listing(symbol="BBB.US", security_name="BBB", exchange="NYSE"),
-        ],
-        region="US",
+        ]
     )
 
 
@@ -41,7 +40,7 @@ def test_metric_coverage_counts_symbols(tmp_path, capsys):
 
     exit_code = cmd_report_metric_coverage(
         database=str(db_path),
-        region="US",
+        exchange_code="NYSE",
         metric_ids=[WorkingCapitalMetric.id, CurrentRatioMetric.id],
     )
 
