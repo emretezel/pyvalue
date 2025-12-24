@@ -112,7 +112,7 @@ To ingest and normalize US fundamentals from EODHD as well:
 
 ```bash
 pyvalue ingest-fundamentals --provider EODHD --exchange-code US AAPL.US
-pyvalue normalize-fundamentals --provider EODHD AAPL.US
+pyvalue normalize-fundamentals --provider EODHD --exchange-code US AAPL.US
 ```
 
 Normalized facts are provider-agnostic. Re-normalizing a symbol replaces any
@@ -127,15 +127,18 @@ Store your EODHD API token in `private/config.toml` (quotes optional; they are s
 ```toml
 [eodhd]
 api_key = "YOUR_EOD_TOKEN"
-
-[alpha_vantage]
-api_key = "YOUR_KEY"
 ```
 
 Fetch the latest quote and persist it in `market_data`:
 
 ```bash
 pyvalue update-market-data AAPL.US
+```
+
+If the symbol does not include an exchange suffix, pass `--exchange-code`:
+
+```bash
+pyvalue update-market-data AAPL --exchange-code US
 ```
 
 To refresh every stored ticker on an exchange (using the latest universe in SQLite) with throttling
@@ -151,7 +154,7 @@ be interrupted with Ctrl+C.
 If you ingest raw prices before share counts were available, recompute stored market caps later via:
 
 ```bash
-pyvalue recalc-market-cap
+pyvalue recalc-market-cap --exchange-code NYSE
 ```
 
 This multiplies each stored price by the latest share count from normalized SEC data.
@@ -169,7 +172,7 @@ fundamentals for a ticker and normalize them into `financial_facts` using the EO
 
 ```bash
 pyvalue ingest-fundamentals --provider EODHD --exchange-code LSE SHEL.LSE
-pyvalue normalize-fundamentals --provider EODHD SHEL.LSE
+pyvalue normalize-fundamentals --provider EODHD --exchange-code LSE SHEL.LSE
 ```
 
 To ingest and normalize every listing for an exchange directly from EODHD (example: London

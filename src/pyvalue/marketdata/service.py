@@ -10,12 +10,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 from pyvalue.config import Config
-from pyvalue.marketdata import (
-    AlphaVantageProvider,
-    EODHDProvider,
-    MarketDataProvider,
-    PriceData,
-)
+from pyvalue.marketdata import EODHDProvider, MarketDataProvider, PriceData
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.storage import FinancialFactsRepository, FundamentalsRepository, MarketDataRepository, UniverseRepository
 
@@ -64,11 +59,8 @@ class MarketDataService:
         api_key = self.config.eodhd_api_key
         if api_key:
             return EODHDProvider(api_key=api_key)
-        alpha_key = self.config.alpha_vantage_api_key
-        if alpha_key:
-            return AlphaVantageProvider(api_key=alpha_key)
         raise RuntimeError(
-            "No market data API key configured. Set eodhd.api_key or alpha_vantage.api_key in private/config.toml."
+            "No market data API key configured. Set eodhd.api_key in private/config.toml."
         )
 
     def _shares_from_fundamentals(self, symbol: str) -> Optional[float]:

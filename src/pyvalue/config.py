@@ -21,10 +21,6 @@ class Config:
             self._parser.read(base)
 
     @property
-    def alpha_vantage_api_key(self) -> Optional[str]:
-        return self._get_value("alpha_vantage", "api_key")
-
-    @property
     def eodhd_api_key(self) -> Optional[str]:
         return self._get_value("eodhd", "api_key")
 

@@ -192,7 +192,15 @@ def _select_listing_symbols_by_exchange(
     exchange_code: str,
 ) -> List[str]:
     universe_repo = UniverseRepository(database)
-    return universe_repo.fetch_symbols_by_exchange(exchange_code)
+    exchange_norm = exchange_code.upper()
+    if exchange_norm == "US":
+        universe_repo.initialize_schema()
+        with universe_repo._connect() as conn:
+            rows = conn.execute(
+                "SELECT symbol FROM listings WHERE symbol LIKE '%.US' ORDER BY symbol"
+            ).fetchall()
+        return [row[0] for row in rows]
+    return universe_repo.fetch_symbols_by_exchange(exchange_norm)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -263,6 +271,11 @@ def build_parser() -> argparse.ArgumentParser:
     recalc_market_cap = subparsers.add_parser(
         "recalc-market-cap",
         help="Recompute stored market caps using latest price and share counts.",
+    )
+    recalc_market_cap.add_argument(
+        "--exchange-code",
+        required=True,
+        help="Exchange code to select symbols from listings (e.g., US, LSE, NYSE).",
     )
     recalc_market_cap.add_argument(
         "--database",
@@ -403,6 +416,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     normalize_fundamentals.add_argument("symbol", help="Ticker symbol already ingested for the provider.")
     normalize_fundamentals.add_argument(
+        "--exchange-code",
+        help="Exchange code required for EODHD normalization (e.g., US, LSE).",
+    )
+    normalize_fundamentals.add_argument(
         "--database",
         default="data/pyvalue.db",
         help="SQLite database file used for storage (default: %(default)s)",
@@ -434,6 +451,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fetch latest market data for a ticker and persist it.",
     )
     market_data.add_argument("symbol", help="Ticker symbol, e.g. AAPL")
+    market_data.add_argument(
+        "--exchange-code",
+        help="Exchange code to qualify un-suffixed symbols (e.g., US, LSE).",
+    )
     market_data.add_argument(
         "--database",
         default="data/pyvalue.db",
@@ -1154,13 +1175,20 @@ def cmd_normalize_eodhd_fundamentals_bulk(
     return 0
 
 
-def cmd_normalize_fundamentals(provider: str, symbol: str, database: str) -> int:
+def cmd_normalize_fundamentals(
+    provider: str,
+    symbol: str,
+    database: str,
+    exchange_code: Optional[str],
+) -> int:
     """Normalize stored fundamentals for a ticker using the provider-specific ruleset."""
 
     provider_norm = _normalize_provider(provider)
     if provider_norm == "SEC":
         return cmd_normalize_us_facts(symbol=symbol, database=database)
     if provider_norm == "EODHD":
+        if not exchange_code:
+            raise SystemExit("--exchange-code is required for EODHD normalization.")
         return cmd_normalize_eodhd_fundamentals(symbol=symbol, database=database)
     raise SystemExit(f"Unsupported provider: {provider}")
 
@@ -1174,6 +1202,8 @@ def cmd_normalize_fundamentals_bulk(
     if not exchange_code:
         raise SystemExit("--exchange-code is required for bulk fundamentals normalization.")
     exchange_norm = exchange_code.upper()
+    if provider_norm == "SEC" and exchange_norm != "US":
+        raise SystemExit("SEC normalization only supports --exchange-code US.")
     listings = _select_listing_symbols_by_exchange(database=database, exchange_code=exchange_norm)
     if not listings:
         raise SystemExit(
@@ -1196,11 +1226,19 @@ def cmd_normalize_fundamentals_bulk(
     raise SystemExit(f"Unsupported provider: {provider}")
 
 
-def cmd_update_market_data(symbol: str, database: str) -> int:
+def cmd_update_market_data(symbol: str, database: str, exchange_code: Optional[str]) -> int:
     """Fetch latest market data for a ticker and store it."""
 
+    symbol_clean = symbol.strip().upper()
+    if "." not in symbol_clean:
+        if not exchange_code:
+            raise SystemExit(
+                "--exchange-code is required when symbol has no exchange suffix (e.g., AAPL.US)."
+            )
+        symbol_clean = _format_market_symbol(symbol_clean, exchange_code)
+
     service = MarketDataService(db_path=database)
-    data = service.refresh_symbol(symbol)
+    data = service.refresh_symbol(symbol_clean)
     print(
         f"Stored market data for {data.symbol}: price={data.price} as_of={data.as_of} in {database}"
     )
@@ -1716,24 +1754,45 @@ def cmd_purge_us_nonfilers(database: str, apply: bool) -> int:
     return 0
 
 
-def cmd_recalc_market_cap(database: str) -> int:
+def cmd_recalc_market_cap(database: str, exchange_code: Optional[str]) -> int:
     """Recompute market cap values for stored market data."""
 
+    if not exchange_code:
+        raise SystemExit("--exchange-code is required to recalc market cap.")
+    exchange_norm = exchange_code.upper()
     market_repo = MarketDataRepository(database)
     market_repo.initialize_schema()
     base_fact_repo = FinancialFactsRepository(database)
     base_fact_repo.initialize_schema()
     fact_repo = RegionFactsRepository(base_fact_repo)
+    universe_repo = UniverseRepository(database)
+    universe_repo.initialize_schema()
+
+    listing_symbols = universe_repo.fetch_symbols_by_exchange(exchange_norm)
+    if not listing_symbols:
+        raise SystemExit(
+            f"No symbols found for exchange {exchange_norm}. Load a universe first."
+        )
 
     with market_repo._connect() as conn:
-        symbols = [row[0] for row in conn.execute("SELECT DISTINCT symbol FROM market_data ORDER BY symbol")]
+        rows = conn.execute(
+            """
+            SELECT md.symbol
+            FROM market_data md
+            JOIN listings l ON md.symbol = l.symbol
+            WHERE UPPER(l.exchange) = ?
+            ORDER BY md.symbol
+            """,
+            (exchange_norm,),
+        ).fetchall()
+        symbols = [row[0] for row in rows]
     if not symbols:
-        print("No market data found to update.")
+        print(f"No market data found to update for exchange {exchange_norm}.")
         return 0
 
     total = len(symbols)
     updated_rows = 0
-    print(f"Recomputing market cap for {total} symbols")
+    print(f"Recomputing market cap for {total} symbols on {exchange_norm}")
     try:
         with market_repo._connect() as conn:
             for idx, symbol in enumerate(symbols, 1):
@@ -2046,6 +2105,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             provider=args.provider,
             symbol=args.symbol,
             database=args.database,
+            exchange_code=args.exchange_code,
         )
     if args.command == "normalize-fundamentals-bulk":
         return cmd_normalize_fundamentals_bulk(
@@ -2054,7 +2114,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             exchange_code=args.exchange_code,
         )
     if args.command == "update-market-data":
-        return cmd_update_market_data(symbol=args.symbol, database=args.database)
+        return cmd_update_market_data(
+            symbol=args.symbol,
+            database=args.database,
+            exchange_code=args.exchange_code,
+        )
     if args.command == "update-market-data-bulk":
         return cmd_update_market_data_bulk(
             database=args.database,
@@ -2106,7 +2170,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             exchange_code=args.exchange_code,
         )
     if args.command == "recalc-market-cap":
-        return cmd_recalc_market_cap(database=args.database)
+        return cmd_recalc_market_cap(
+            database=args.database,
+            exchange_code=args.exchange_code,
+        )
     if args.command == "run-screen":
         return cmd_run_screen(symbol=args.symbol, config_path=args.config, database=args.database)
     if args.command == "run-screen-bulk":

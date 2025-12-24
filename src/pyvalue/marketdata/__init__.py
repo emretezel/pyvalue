@@ -4,7 +4,6 @@ Author: Emre Tezel
 """
 
 from .base import PriceData, MarketDataProvider
-from .alpha_vantage import AlphaVantageProvider
 from .eodhd import EODHDProvider
 
-__all__ = ["PriceData", "MarketDataProvider", "AlphaVantageProvider", "EODHDProvider"]
+__all__ = ["PriceData", "MarketDataProvider", "EODHDProvider"]

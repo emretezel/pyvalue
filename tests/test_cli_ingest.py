@@ -647,7 +647,12 @@ def test_cmd_normalize_fundamentals_sec(monkeypatch, tmp_path):
     fake_normalizer = FakeNormalizer()
     monkeypatch.setattr(cli, "SECFactsNormalizer", lambda: fake_normalizer)
 
-    rc = cli.cmd_normalize_fundamentals(provider="SEC", symbol="AAPL", database=str(db_path))
+    rc = cli.cmd_normalize_fundamentals(
+        provider="SEC",
+        symbol="AAPL",
+        database=str(db_path),
+        exchange_code=None,
+    )
     assert rc == 0
 
     result_repo = FinancialFactsRepository(db_path)
@@ -690,7 +695,7 @@ def test_cmd_normalize_fundamentals_bulk_sec(monkeypatch, tmp_path):
     rc = cli.cmd_normalize_fundamentals_bulk(
         provider="SEC",
         database=str(db_path),
-        exchange_code="NYSE",
+        exchange_code="US",
     )
     assert rc == 0
     cursor = normalization_repo._connect().execute(
@@ -770,7 +775,12 @@ def test_cmd_normalize_fundamentals_eodhd(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cli, "EODHDFactsNormalizer", lambda: FakeNormalizer())
 
-    rc = cli.cmd_normalize_fundamentals(provider="EODHD", symbol="SHEL", database=str(db_path))
+    rc = cli.cmd_normalize_fundamentals(
+        provider="EODHD",
+        symbol="SHEL",
+        database=str(db_path),
+        exchange_code="LSE",
+    )
     assert rc == 0
 
     fact_repo = FinancialFactsRepository(db_path)
@@ -785,6 +795,14 @@ def test_cmd_normalize_fundamentals_eodhd(monkeypatch, tmp_path):
 
 def test_cmd_recalc_market_cap(tmp_path):
     db_path = tmp_path / "marketcap.db"
+    universe_repo = UniverseRepository(db_path)
+    universe_repo.initialize_schema()
+    universe_repo.replace_universe(
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+        ]
+    )
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
     fact_repo.replace_facts(
@@ -803,7 +821,7 @@ def test_cmd_recalc_market_cap(tmp_path):
     market_repo.upsert_price("AAA.US", "2024-01-01", price=50.0)
     market_repo.upsert_price("BBB.US", "2024-01-01", price=70.0)
 
-    rc = cli.cmd_recalc_market_cap(database=str(db_path))
+    rc = cli.cmd_recalc_market_cap(database=str(db_path), exchange_code="NYSE")
     assert rc == 0
     snapshot = market_repo.latest_snapshot("AAA.US")
     assert snapshot.market_cap == 5000.0
