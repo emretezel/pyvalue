@@ -271,6 +271,10 @@ is derived from normalized SEC or market data plus the value-investing intuition
 
 Place API keys or region-specific credentials inside the `private/` directory (ignored by git).
 
+## Disclaimer
+
+This project is provided for educational and informational purposes only and does not constitute investment, financial, legal, or tax advice. Outputs may be inaccurate, incomplete, or delayed and are provided “as is” without warranties of any kind. You are solely responsible for any investment decisions and outcomes based on this software; use at your own risk. Nothing here is an offer or solicitation to buy or sell any security, and past performance is not indicative of future results. Consult a licensed professional before making investment decisions.
+
 ## End-to-end workflow
 
 1. Load the latest US universe into SQLite:
