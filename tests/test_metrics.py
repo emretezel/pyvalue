@@ -166,6 +166,41 @@ def test_graham_multiplier_metric():
     assert result.value > 0
 
 
+def test_graham_multiplier_falls_back_to_fy_eps():
+    metric = GrahamMultiplierMetric()
+    recent = (date.today() - timedelta(days=20)).isoformat()
+
+    class DummyRepo:
+        def __init__(self):
+            self.values = {
+                "StockholdersEquity": 1000,
+                "CommonStockSharesOutstanding": 100,
+                "Goodwill": 50,
+                "IntangibleAssetsNetExcludingGoodwill": 25,
+            }
+
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "EarningsPerShare" and fiscal_period == "FY":
+                return [fact(symbol=symbol, concept=concept, fiscal_period="FY", end_date=recent, value=5.0)]
+            return []
+
+        def latest_fact(self, symbol, concept):
+            value = self.values.get(concept)
+            if value is None:
+                return None
+            return fact(symbol=symbol, concept=concept, end_date=recent, value=value)
+
+    class DummyMarketRepo:
+        def latest_price(self, symbol):
+            return (recent, 150.0)
+
+    repo = DummyRepo()
+    market_repo = DummyMarketRepo()
+    result = metric.compute("AAPL.US", repo, market_repo)
+    assert result is not None
+    assert result.value > 0
+
+
 def test_graham_multiplier_uses_zero_when_optional_values_missing():
     metric = GrahamMultiplierMetric()
     recent = (date.today() - timedelta(days=20)).isoformat()
@@ -229,6 +264,27 @@ def test_earnings_yield_metric():
     result = metric.compute("AAPL.US", repo, market_repo)
     assert result is not None
     assert result.value == (2.5 + 2.0 + 1.5 + 1.0) / 50.0
+
+
+def test_earnings_yield_metric_falls_back_to_fy():
+    metric = EarningsYieldMetric()
+    recent_fy = (date.today() - timedelta(days=20)).isoformat()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "EarningsPerShare" and fiscal_period == "FY":
+                return [fact(symbol=symbol, concept=concept, fiscal_period="FY", end_date=recent_fy, value=4.0)]
+            return []
+
+    class DummyMarketRepo:
+        def latest_price(self, symbol):
+            return (recent_fy, 40.0)
+
+    repo = DummyRepo()
+    market_repo = DummyMarketRepo()
+    result = metric.compute("AAPL.US", repo, market_repo)
+    assert result is not None
+    assert result.value == 4.0 / 40.0
 
 
 def test_price_to_fcf_metric():
@@ -322,6 +378,23 @@ def test_eps_ttm_metric():
     assert result is not None
     assert result.value == 7.0
     assert result.as_of == recent
+
+
+def test_eps_ttm_metric_falls_back_to_fy():
+    metric = EarningsPerShareTTM()
+    recent_fy = (date.today() - timedelta(days=30)).isoformat()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "EarningsPerShare" and fiscal_period == "FY":
+                return [fact(symbol=symbol, concept=concept, fiscal_period="FY", end_date=recent_fy, value=4.2)]
+            return []
+
+    repo = DummyRepo()
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.value == 4.2
+    assert result.as_of == recent_fy
 
 
 def test_eps_6y_avg_metric():

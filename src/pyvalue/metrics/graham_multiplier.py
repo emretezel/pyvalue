@@ -39,14 +39,26 @@ class GrahamMultiplierMetric:
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
         eps_records = self._latest_quarters(symbol, repo)
-        if len(eps_records) < 4:
-            LOGGER.warning("graham_multiplier: missing EPS quarters for %s", symbol)
-            return None
-        ttm_eps = sum(record.value for record in eps_records[:4])
+        eps_currency = None
+        if len(eps_records) >= 4:
+            ttm_eps = sum(record.value for record in eps_records[:4])
+            eps_as_of = eps_records[0].end_date
+            eps_currency = eps_records[0].currency
+        else:
+            fy_record = self._latest_fy_eps(symbol, repo)
+            if fy_record is None or not is_recent_fact(fy_record):
+                LOGGER.warning("graham_multiplier: missing EPS quarters for %s", symbol)
+                return None
+            if fy_record.value is None:
+                LOGGER.warning("graham_multiplier: missing FY EPS value for %s", symbol)
+                return None
+            ttm_eps = fy_record.value
+            eps_as_of = fy_record.end_date
+            eps_currency = fy_record.currency
+
         if ttm_eps <= 0:
             LOGGER.warning("graham_multiplier: non-positive TTM EPS for %s", symbol)
             return None
-        eps_as_of = eps_records[0].end_date
 
         equity, equity_currency = self._latest_value(symbol, repo, EQUITY_CONCEPTS)
         shares, _ = self._latest_value(symbol, repo, SHARE_CONCEPTS)
@@ -64,7 +76,7 @@ class GrahamMultiplierMetric:
         price = price_data.price
 
         target_currency = self._select_currency(
-            eps_records[0].currency if eps_records else None,
+            eps_currency,
             equity_currency,
             goodwill_currency,
             intangibles_currency,
@@ -95,6 +107,12 @@ class GrahamMultiplierMetric:
 
     def _latest_quarters(self, symbol: str, repo: FinancialFactsRepository):
         return latest_quarterly_records(repo.facts_for_concept, symbol, EPS_CONCEPTS, periods=4)
+
+    def _latest_fy_eps(self, symbol: str, repo: FinancialFactsRepository) -> Optional[FactRecord]:
+        records = repo.facts_for_concept(symbol, "EarningsPerShare", fiscal_period="FY", limit=1)
+        if records:
+            return records[0]
+        return None
 
     def _latest_value(
         self, symbol: str, repo: FinancialFactsRepository, concepts: list[str]

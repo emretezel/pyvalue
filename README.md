@@ -243,8 +243,8 @@ Additional metrics include:
 
 - `eps_streak`: Counts consecutive positive EPS (diluted) FY values.
 - `current_ratio`: Current assets divided by current liabilities.
-- `graham_eps_10y_cagr_3y_avg`: Graham EPS 10-year CAGR averaged over the latest three
-  periods (using full-year GAAP EPS data).
+- `graham_eps_10y_cagr_3y_avg`: Graham EPS 10-year-period CAGR using 3-year average EPS at
+  the start and end of the period (using full-year GAAP EPS data).
 
 ## Metric reference
 
@@ -258,7 +258,7 @@ is derived from normalized SEC or market data plus the value-investing intuition
 | `current_ratio` | Latest `AssetsCurrent / LiabilitiesCurrent`. | A current ratio above ~1 indicates the business can stomach short-term shocks without forced asset sales or equity issuance. |
 | `earnings_yield` | Trailing 12-month EPS (sum of latest four quarterly EPS values) divided by the latest price. | The inverse of P/E highlights how much earnings power you receive per dollar invested; higher yields can indicate cheaper valuations. |
 | `eps_streak` | Number of consecutive fiscal years with positive EPS. | Consistent profitability signals durable business quality and lowers the odds that current earnings are a cyclical mirage. |
-| `graham_eps_10y_cagr_3y_avg` | Computes the 10-year EPS CAGR for up to the last three years and averages the values. | Requires decade-long compounding, favoring firms that can steadily grow earnings instead of relying on one-off rebounds. |
+| `graham_eps_10y_cagr_3y_avg` | Computes the 10-year-period EPS CAGR using 3-year average EPS at the start and end of the period. | Requires sustained compounding, favoring firms that can steadily grow earnings instead of relying on one-off rebounds. |
 | `graham_multiplier` | `(Price / TTM EPS) × (Price / TBVPS)`, where TBVPS is tangible book value per share (`(Equity - Goodwill - Intangibles) / Shares`). | Benjamin Graham’s combined PE×PB test guards against paying too much for either earnings or assets, enforcing a strict valuation ceiling. |
 | `roc_greenblatt_5y_avg` | Average over up to five fiscal years of `EBIT / Tangible Capital`, where tangible capital is `Net PPE + AssetsCurrent - LiabilitiesCurrent`. | Joel Greenblatt’s ROC stresses whether management can reinvest incremental capital at high rates—a key quality signal for value investors who want cheap *and* good businesses. |
 | `roe_greenblatt_5y_avg` | Average over up to five fiscal years of net income available to common shareholders divided by the two-year average of common equity (after subtracting preferred equity). | Sustained high ROE shows that the firm generates attractive returns on shareholders’ capital without leverage-driven distortion. |
