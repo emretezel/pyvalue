@@ -2032,41 +2032,44 @@ def cmd_report_metric_failures(
 
     db_path = _resolve_database_path(database)
     region_label = (region or "US").upper()
-    if symbols:
-        selected: List[str] = []
-        for entry in symbols:
-            for symbol in entry.split(","):
-                symbol = symbol.strip()
-                if not symbol:
-                    continue
-                selected.append(_qualify_symbol(symbol, region=region_label))
-        symbols = list(dict.fromkeys(selected))
-    else:
-        if exchange_code:
-            exchange_norm = exchange_code.upper()
-            universe_repo = UniverseRepository(db_path)
-            universe_repo.initialize_schema()
-            region_filter = region.upper() if region else None
-            pairs = universe_repo.fetch_symbol_regions_by_exchange(exchange_norm, region=region_filter)
-            symbols = [symbol for symbol, _ in pairs]
-            if not symbols:
-                fund_repo = FundamentalsRepository(db_path)
-                fund_repo.initialize_schema()
-                query = ["SELECT DISTINCT symbol FROM fundamentals_raw WHERE UPPER(exchange) = ?"]
-                params: List[str] = [exchange_norm]
-                if region_filter:
-                    query.append("AND region = ?")
-                    params.append(region_filter)
-                query.append("ORDER BY symbol")
-                sql = " ".join(query)
-                with fund_repo._connect() as conn:
-                    rows = conn.execute(sql, params).fetchall()
-                symbols = [row[0] for row in rows]
+    exchange_norm = exchange_code.upper() if exchange_code else None
+    if exchange_norm:
+        universe_repo = UniverseRepository(db_path)
+        universe_repo.initialize_schema()
+        region_filter = region.upper() if region else None
+        pairs = universe_repo.fetch_symbol_regions_by_exchange(exchange_norm, region=region_filter)
+        listing_symbols = [symbol for symbol, _ in pairs]
+        if not listing_symbols:
+            raise SystemExit(
+                f"No symbols found for exchange {exchange_norm}. "
+                "Load a universe first."
+            )
+        if symbols:
+            selected: List[str] = []
+            for entry in symbols:
+                for symbol in entry.split(","):
+                    symbol = symbol.strip()
+                    if not symbol:
+                        continue
+                    selected.append(_qualify_symbol(symbol, exchange=exchange_norm))
+            requested = list(dict.fromkeys(selected))
+            symbols = [symbol for symbol in listing_symbols if symbol in requested]
             if not symbols:
                 raise SystemExit(
-                    f"No symbols found for exchange {exchange_norm}. "
-                    "Load a universe or ingest fundamentals first."
+                    f"No symbols found for exchange {exchange_norm} matching the provided list."
                 )
+        else:
+            symbols = listing_symbols
+    else:
+        if symbols:
+            selected = []
+            for entry in symbols:
+                for symbol in entry.split(","):
+                    symbol = symbol.strip()
+                    if not symbol:
+                        continue
+                    selected.append(_qualify_symbol(symbol, region=region_label))
+            symbols = list(dict.fromkeys(selected))
         else:
             symbols = _symbols_for_region_or_raise(db_path, region_label)
             if not symbols:
