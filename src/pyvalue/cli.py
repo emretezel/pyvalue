@@ -337,7 +337,7 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_fundamentals.add_argument(
         "--exchange-code",
         default=None,
-        help="EODHD exchange code to use (required for provider=EODHD).",
+        help="Exchange code required when the symbol has no suffix (e.g., US, LSE).",
     )
     ingest_fundamentals.add_argument(
         "--user-agent",
@@ -417,7 +417,7 @@ def build_parser() -> argparse.ArgumentParser:
     normalize_fundamentals.add_argument("symbol", help="Ticker symbol already ingested for the provider.")
     normalize_fundamentals.add_argument(
         "--exchange-code",
-        help="Exchange code required for EODHD normalization (e.g., US, LSE).",
+        help="Exchange code required when the symbol has no suffix (e.g., US, LSE).",
     )
     normalize_fundamentals.add_argument(
         "--database",
@@ -442,7 +442,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     normalize_fundamentals_bulk.add_argument(
         "--exchange-code",
-        required=True,
         help="Exchange code to select symbols from listings.",
     )
 
@@ -476,6 +475,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--all",
         action="store_true",
         help="Compute all registered metrics",
+    )
+    compute_metrics.add_argument(
+        "--exchange-code",
+        help="Exchange code required for unqualified symbols (e.g., US, LSE).",
     )
     compute_metrics.add_argument(
         "--database",
@@ -615,6 +618,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_screen.add_argument("symbol", help="Ticker symbol")
     run_screen.add_argument("config", help="Path to screening config (YAML)")
+    run_screen.add_argument(
+        "--exchange-code",
+        help="Exchange code required for unqualified symbols (e.g., US, LSE).",
+    )
     run_screen.add_argument(
         "--database",
         default="data/pyvalue.db",
@@ -757,8 +764,6 @@ def cmd_ingest_eodhd_fundamentals(
 ) -> int:
     """Fetch EODHD fundamentals for a ticker and store raw payload."""
 
-    if not exchange_code:
-        raise SystemExit("--exchange-code is required when provider=EODHD.")
     api_key = _require_eodhd_key()
     client = EODHDFundamentalsClient(api_key=api_key)
     base_symbol = symbol.upper()
@@ -767,7 +772,11 @@ def cmd_ingest_eodhd_fundamentals(
         base, suffix = base_symbol.split(".", 1)
         base_symbol = base
         inferred_exchange = suffix
-    exch_code = (exchange_code or inferred_exchange or "").upper() or None
+    if not exchange_code and not inferred_exchange:
+        raise SystemExit(
+            "--exchange-code is required when provider=EODHD and symbol has no exchange suffix."
+        )
+    exch_code = (inferred_exchange or exchange_code or "").upper() or None
     qualified_symbol = _qualify_symbol(base_symbol, exch_code)
     fetch_symbol = qualified_symbol
     payload = client.fetch_fundamentals(fetch_symbol, exchange_code=None)
@@ -864,6 +873,21 @@ def cmd_ingest_fundamentals(
 
     provider_norm = _normalize_provider(provider)
     if provider_norm == "SEC":
+        symbol_upper = symbol.strip().upper()
+        if "." in symbol_upper:
+            if not symbol_upper.endswith(".US"):
+                raise SystemExit(
+                    "SEC ingestion requires a .US suffix or an unqualified US symbol."
+                )
+            if exchange_code and exchange_code.upper() != "US":
+                raise SystemExit("SEC ingestion only supports --exchange-code US.")
+        else:
+            if not exchange_code:
+                raise SystemExit(
+                    "--exchange-code is required when SEC symbol has no suffix."
+                )
+            if exchange_code.upper() != "US":
+                raise SystemExit("SEC ingestion only supports --exchange-code US.")
         client = SECCompanyFactsClient(user_agent=user_agent)
         symbol_qualified = _qualify_symbol(symbol, exchange="US")
         if cik:
@@ -881,8 +905,10 @@ def cmd_ingest_fundamentals(
         print(f"Stored SEC company facts for {symbol_qualified} ({cik_value}) in {database}")
         return 0
     if provider_norm == "EODHD":
-        if not exchange_code:
-            raise SystemExit("--exchange-code is required when provider=EODHD.")
+        if not exchange_code and "." not in symbol:
+            raise SystemExit(
+                "--exchange-code is required when provider=EODHD and symbol has no exchange suffix."
+            )
         return cmd_ingest_eodhd_fundamentals(symbol=symbol, database=database, exchange_code=exchange_code)
     raise SystemExit(f"Unsupported provider: {provider}")
 
@@ -1185,11 +1211,35 @@ def cmd_normalize_fundamentals(
 
     provider_norm = _normalize_provider(provider)
     if provider_norm == "SEC":
+        symbol_upper = symbol.strip().upper()
+        if "." in symbol_upper:
+            if not symbol_upper.endswith(".US"):
+                raise SystemExit(
+                    "SEC normalization requires a .US suffix or an unqualified US symbol."
+                )
+            if exchange_code and exchange_code.upper() != "US":
+                raise SystemExit("SEC normalization only supports --exchange-code US.")
+        else:
+            if not exchange_code:
+                raise SystemExit(
+                    "--exchange-code is required when SEC symbol has no suffix."
+                )
+            if exchange_code.upper() != "US":
+                raise SystemExit("SEC normalization only supports --exchange-code US.")
         return cmd_normalize_us_facts(symbol=symbol, database=database)
     if provider_norm == "EODHD":
-        if not exchange_code:
-            raise SystemExit("--exchange-code is required for EODHD normalization.")
-        return cmd_normalize_eodhd_fundamentals(symbol=symbol, database=database)
+        symbol_upper = symbol.strip().upper()
+        inferred_exchange = None
+        base_symbol = symbol_upper
+        if "." in symbol_upper:
+            base_symbol, inferred_exchange = symbol_upper.split(".", 1)
+        if not exchange_code and not inferred_exchange:
+            raise SystemExit(
+                "--exchange-code is required for EODHD normalization when symbol has no exchange suffix."
+            )
+        exch_code = inferred_exchange or exchange_code
+        qualified = _qualify_symbol(base_symbol, exch_code) if exch_code else symbol_upper
+        return cmd_normalize_eodhd_fundamentals(symbol=qualified, database=database)
     raise SystemExit(f"Unsupported provider: {provider}")
 
 
@@ -1200,8 +1250,12 @@ def cmd_normalize_fundamentals_bulk(
 
     provider_norm = _normalize_provider(provider)
     if not exchange_code:
-        raise SystemExit("--exchange-code is required for bulk fundamentals normalization.")
-    exchange_norm = exchange_code.upper()
+        if provider_norm == "SEC":
+            exchange_norm = "US"
+        else:
+            raise SystemExit("--exchange-code is required for bulk fundamentals normalization.")
+    else:
+        exchange_norm = exchange_code.upper()
     if provider_norm == "SEC" and exchange_norm != "US":
         raise SystemExit("SEC normalization only supports --exchange-code US.")
     listings = _select_listing_symbols_by_exchange(database=database, exchange_code=exchange_norm)
@@ -1295,6 +1349,7 @@ def cmd_compute_metrics(
     metric_ids: Sequence[str],
     database: str,
     run_all: bool,
+    exchange_code: Optional[str],
 ) -> int:
     """Compute one or more metrics and store the results."""
 
@@ -1304,7 +1359,13 @@ def cmd_compute_metrics(
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
     computed = 0
-    symbol_upper = symbol.upper()
+    symbol_upper = symbol.strip().upper()
+    if "." not in symbol_upper:
+        if not exchange_code:
+            raise SystemExit(
+                "--exchange-code is required when symbol has no exchange suffix (e.g., AAPL.US)."
+            )
+        symbol_upper = _format_market_symbol(symbol_upper, exchange_code)
     market_repo: Optional[MarketDataRepository] = None
     ids_to_compute = list(REGISTRY.keys()) if run_all else list(metric_ids)
     for metric_id in ids_to_compute:
@@ -1858,10 +1919,22 @@ def cmd_clear_metrics(database: str) -> int:
     return 0
 
 
-def cmd_run_screen(symbol: str, config_path: str, database: str) -> int:
+def cmd_run_screen(
+    symbol: str,
+    config_path: str,
+    database: str,
+    exchange_code: Optional[str],
+) -> int:
     """Evaluate screening criteria against stored/derived metrics."""
 
     definition = load_screen(config_path)
+    symbol_upper = symbol.strip().upper()
+    if "." not in symbol_upper:
+        if not exchange_code:
+            raise SystemExit(
+                "--exchange-code is required when symbol has no exchange suffix (e.g., AAPL.US)."
+            )
+        symbol_upper = _format_market_symbol(symbol_upper, exchange_code)
     metrics_repo = MetricsRepository(database)
     metrics_repo.initialize_schema()
     base_fact_repo = FinancialFactsRepository(database)
@@ -1870,7 +1943,6 @@ def cmd_run_screen(symbol: str, config_path: str, database: str) -> int:
     market_repo.initialize_schema()
     entity_repo = EntityMetadataRepository(database)
     entity_repo.initialize_schema()
-    symbol_upper = symbol.upper()
     entity_name = entity_repo.fetch(symbol_upper) or symbol_upper
     description = entity_repo.fetch_description(symbol_upper) or "N/A"
     snapshot = market_repo.latest_snapshot(symbol_upper)
@@ -2139,6 +2211,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             metric_ids=args.metrics,
             database=args.database,
             run_all=args.all,
+            exchange_code=args.exchange_code,
         )
     if args.command == "compute-metrics-bulk":
         return cmd_compute_metrics_bulk(
@@ -2175,7 +2248,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             exchange_code=args.exchange_code,
         )
     if args.command == "run-screen":
-        return cmd_run_screen(symbol=args.symbol, config_path=args.config, database=args.database)
+        return cmd_run_screen(
+            symbol=args.symbol,
+            config_path=args.config,
+            database=args.database,
+            exchange_code=args.exchange_code,
+        )
     if args.command == "run-screen-bulk":
         return cmd_run_screen_bulk(
             config_path=args.config,

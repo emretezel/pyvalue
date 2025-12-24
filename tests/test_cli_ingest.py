@@ -62,7 +62,7 @@ def test_cmd_ingest_fundamentals_sec(monkeypatch, tmp_path):
         provider="SEC",
         symbol="AAPL",
         database=str(db_path),
-        exchange_code=None,
+        exchange_code="US",
         user_agent="UA",
         cik=None,
     )
@@ -651,7 +651,7 @@ def test_cmd_normalize_fundamentals_sec(monkeypatch, tmp_path):
         provider="SEC",
         symbol="AAPL",
         database=str(db_path),
-        exchange_code=None,
+        exchange_code="US",
     )
     assert rc == 0
 
@@ -758,7 +758,7 @@ def test_cmd_normalize_fundamentals_eodhd(monkeypatch, tmp_path):
     fund_repo.initialize_schema()
     fund_repo.upsert(
         "EODHD",
-        "SHEL",
+        "SHEL.LSE",
         {"General": {"Name": "Shell PLC"}, "Financials": {}},
     )
 
@@ -777,21 +777,21 @@ def test_cmd_normalize_fundamentals_eodhd(monkeypatch, tmp_path):
 
     rc = cli.cmd_normalize_fundamentals(
         provider="EODHD",
-        symbol="SHEL",
+        symbol="SHEL.LSE",
         database=str(db_path),
-        exchange_code="LSE",
+        exchange_code=None,
     )
     assert rc == 0
 
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
     rows = fact_repo._connect().execute(
-        "SELECT concept, value FROM financial_facts WHERE symbol='SHEL'"
+        "SELECT concept, value FROM financial_facts WHERE symbol='SHEL.LSE'"
     ).fetchall()
     assert [(row[0], row[1]) for row in rows] == [("NetIncomeLoss", 10.0)]
     entity_repo = EntityMetadataRepository(db_path)
     entity_repo.initialize_schema()
-    assert entity_repo.fetch("SHEL") == "Shell PLC"
+    assert entity_repo.fetch("SHEL.LSE") == "Shell PLC"
 
 def test_cmd_recalc_market_cap(tmp_path):
     db_path = tmp_path / "marketcap.db"
@@ -1013,7 +1013,13 @@ def test_cmd_compute_metrics(tmp_path):
     market_repo.initialize_schema()
     market_repo.upsert_price("AAPL.US", recent, 150.0)
 
-    rc = cli.cmd_compute_metrics("AAPL.US", ["working_capital", "graham_multiplier"], str(db_path), run_all=False)
+    rc = cli.cmd_compute_metrics(
+        "AAPL.US",
+        ["working_capital", "graham_multiplier"],
+        str(db_path),
+        run_all=False,
+        exchange_code=None,
+    )
     assert rc == 0
     value = repo.fetch("AAPL.US", "working_capital")
     assert value[0] == 300
@@ -1134,7 +1140,13 @@ def test_cmd_compute_metrics_all(tmp_path):
     market_repo.upsert_price("AAPL.US", q3, 150.0, market_cap=50000.0)
     market_repo.upsert_price("AAPL.US", f"{current_year-5}-09-30", 100.0, market_cap=30000.0)
 
-    rc = cli.cmd_compute_metrics("AAPL.US", ["placeholder"], str(db_path), run_all=True)
+    rc = cli.cmd_compute_metrics(
+        "AAPL.US",
+        ["placeholder"],
+        str(db_path),
+        run_all=True,
+        exchange_code=None,
+    )
     assert rc == 0
     for metric_id in REGISTRY.keys():
         row = metrics_repo.fetch("AAPL.US", metric_id)

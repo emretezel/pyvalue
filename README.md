@@ -24,6 +24,10 @@ python -m pip install -e .[dev]
 pytest
 ```
 
+## Disclaimer
+
+This project is provided for educational and informational purposes only and does not constitute investment, financial, legal, or tax advice. Outputs may be inaccurate, incomplete, or delayed and are provided “as is” without warranties of any kind. You are solely responsible for any investment decisions and outcomes based on this software; use at your own risk. Nothing here is an offer or solicitation to buy or sell any security, and past performance is not indicative of future results. Consult a licensed professional before making investment decisions.
+
 ## Data providers
 
 - **SEC**: US-only fundamentals. SEC digital company facts do not enforce reporting standards, so some metrics may not be computable.
@@ -77,7 +81,7 @@ export PYVALUE_SEC_USER_AGENT="pyvalue/0.1 (contact: you@example.com)"
 Then ingest the latest company facts for a ticker (AAPL shown below). Note that SEC data is less standardized; some metrics may be missing compared to EODHD:
 
 ```bash
-pyvalue ingest-fundamentals --provider SEC AAPL
+pyvalue ingest-fundamentals --provider SEC AAPL.US
 ```
 
 This downloads the JSON payload from `https://data.sec.gov/api/xbrl/companyfacts/…` and
@@ -86,13 +90,13 @@ stores it in the `fundamentals_raw` table. Pass `--cik` if you already know the 
 Normalize the previously ingested payload into structured rows for downstream metrics:
 
 ```bash
-pyvalue normalize-fundamentals --provider SEC AAPL
+pyvalue normalize-fundamentals --provider SEC AAPL.US
 ```
 
 To normalize every stored SEC payload after a bulk ingest, run:
 
 ```bash
-pyvalue normalize-fundamentals-bulk --provider SEC --exchange-code US
+pyvalue normalize-fundamentals-bulk --provider SEC
 ```
 
 This iterates over the `fundamentals_raw` table, converts each JSON payload into
@@ -101,18 +105,18 @@ This iterates over the `fundamentals_raw` table, converts each JSON payload into
 This populates the `financial_facts` table with the concepts required to compute the
 initial metric set (debt, current assets/liabilities, EPS, dividends, cash flow, etc.).
 
-Provider-agnostic commands can target specific sources:
+Provider-specific commands target a source:
 
 ```bash
-pyvalue ingest-fundamentals --provider SEC AAPL
-pyvalue normalize-fundamentals --provider SEC AAPL
+pyvalue ingest-fundamentals --provider SEC AAPL.US
+pyvalue normalize-fundamentals --provider SEC AAPL.US
 ```
 
 To ingest and normalize US fundamentals from EODHD as well:
 
 ```bash
-pyvalue ingest-fundamentals --provider EODHD --exchange-code US AAPL.US
-pyvalue normalize-fundamentals --provider EODHD --exchange-code US AAPL.US
+pyvalue ingest-fundamentals --provider EODHD AAPL.US
+pyvalue normalize-fundamentals --provider EODHD AAPL.US
 ```
 
 Normalized facts are provider-agnostic. Re-normalizing a symbol replaces any
@@ -145,7 +149,7 @@ To refresh every stored ticker on an exchange (using the latest universe in SQLi
 that respects EODHD limits, run:
 
 ```bash
-pyvalue update-market-data-bulk --exchange-code NYSE --rate 950
+pyvalue update-market-data-bulk --exchange-code US --rate 950
 ```
 
 The bulk command enforces the requested symbols-per-minute rate (950 by default) and can
@@ -154,7 +158,7 @@ be interrupted with Ctrl+C.
 If you ingest raw prices before share counts were available, recompute stored market caps later via:
 
 ```bash
-pyvalue recalc-market-cap --exchange-code NYSE
+pyvalue recalc-market-cap --exchange-code US
 ```
 
 This multiplies each stored price by the latest share count from normalized SEC data.
@@ -171,8 +175,8 @@ fundamentals for a ticker and normalize them into `financial_facts` using the EO
 (region is inferred from the exchange’s country code):
 
 ```bash
-pyvalue ingest-fundamentals --provider EODHD --exchange-code LSE SHEL.LSE
-pyvalue normalize-fundamentals --provider EODHD --exchange-code LSE SHEL.LSE
+pyvalue ingest-fundamentals --provider EODHD SHEL.LSE
+pyvalue normalize-fundamentals --provider EODHD SHEL.LSE
 ```
 
 To ingest and normalize every listing for an exchange directly from EODHD (example: London
@@ -183,12 +187,6 @@ pyvalue ingest-fundamentals-bulk --provider EODHD --exchange-code LSE
 pyvalue normalize-fundamentals-bulk --provider EODHD --exchange-code LSE
 ```
 
-You can also ingest via the provider-agnostic bulk command:
-
-```bash
-pyvalue ingest-fundamentals-bulk --provider EODHD --exchange-code LSE
-pyvalue normalize-fundamentals-bulk --provider EODHD --exchange-code LSE
-```
 Metrics and screening read only `financial_facts`. They do not track provider.
 
 ## Metrics and screening
@@ -202,7 +200,7 @@ pyvalue compute-metrics AAPL.US --metrics working_capital long_term_debt
 To compute the full metric set for every stored ticker, run:
 
 ```bash
-pyvalue compute-metrics-bulk --exchange-code NYSE
+pyvalue compute-metrics-bulk --exchange-code US
 ```
 
 The bulk command iterates over the stored exchange listings, evaluates each metric,
@@ -230,7 +228,7 @@ valuation). Metrics are cached in the `metrics` table for reuse.
 To evaluate every stored symbol and print a pass-only table, run:
 
 ```bash
-pyvalue run-screen-bulk screeners/value.yml --exchange-code NYSE
+pyvalue run-screen-bulk screeners/value.yml --exchange-code US
 ```
 
 Rows represent criteria and columns show the symbols that satisfied every rule along with the
@@ -270,10 +268,6 @@ is derived from normalized SEC or market data plus the value-investing intuition
 
 Place API keys or region-specific credentials inside the `private/` directory (ignored by git).
 
-## Disclaimer
-
-This project is provided for educational and informational purposes only and does not constitute investment, financial, legal, or tax advice. Outputs may be inaccurate, incomplete, or delayed and are provided “as is” without warranties of any kind. You are solely responsible for any investment decisions and outcomes based on this software; use at your own risk. Nothing here is an offer or solicitation to buy or sell any security, and past performance is not indicative of future results. Consult a licensed professional before making investment decisions.
-
 ## End-to-end workflow
 
 1. Load the latest US universe into SQLite:
@@ -286,19 +280,19 @@ This project is provided for educational and informational purposes only and doe
    ```
 3. Normalize the ingested payloads so metrics can consume them:
    ```bash
-   pyvalue normalize-fundamentals-bulk --provider SEC --exchange-code US
+   pyvalue normalize-fundamentals-bulk --provider SEC
    ```
 4. Fetch market data for every ticker (default EODHD, throttled to 950/min):
    ```bash
-   pyvalue update-market-data-bulk --exchange-code NYSE
+   pyvalue update-market-data-bulk --exchange-code US
    ```
 5. Compute the entire metric set for all tickers:
    ```bash
-   pyvalue compute-metrics-bulk --exchange-code NYSE
+   pyvalue compute-metrics-bulk --exchange-code US
    ```
 6. Run the value screen across the universe (CSV export defaults to `data/screen_results.csv`):
    ```bash
-   pyvalue run-screen-bulk screeners/value.yml --exchange-code NYSE
+   pyvalue run-screen-bulk screeners/value.yml --exchange-code US
    ```
 
 ### Example: LSE (non-US exchange)
