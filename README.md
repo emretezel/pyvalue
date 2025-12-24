@@ -6,7 +6,6 @@ Fundamental data ingestion and screening toolkit focusing on value-oriented stra
 - [Quick start](#quick-start)
 - [Data providers](#data-providers)
 - [Symbol format](#symbol-format)
-- [US universe loader](#us-universe-loader)
 - [CLI persistence](#cli-persistence)
 - [EODHD universes and fundamentals](#eodhd-universes-and-fundamentals)
 - [SEC company facts (US only)](#sec-company-facts-us-only)
@@ -36,19 +35,6 @@ Recommendation: use **EODHD** for all purposes (including US fundamentals) for b
 
 All tickers are stored and referenced with an exchange suffix using EODHD codes
 (e.g., `AAPL.US`, `SHEL.LSE`). US symbols always use `.US`.
-
-## US universe loader
-
-```python
-from pyvalue.universe import USUniverseLoader
-
-loader = USUniverseLoader()
-universe = loader.load()
-for item in universe:
-    print(item.symbol, item.exchange)
-```
-
-The loader downloads Nasdaq Trader symbol directories, filters out test issues, and normalizes exchange names across NASDAQ, NYSE, NYSE Arca, NYSE MKT, and Cboe BZX.
 
 ## CLI persistence
 
@@ -106,7 +92,7 @@ pyvalue normalize-fundamentals --provider SEC AAPL
 To normalize every stored SEC payload after a bulk ingest, run:
 
 ```bash
-pyvalue normalize-fundamentals-bulk --provider SEC --exchange-code NYSE
+pyvalue normalize-fundamentals-bulk --provider SEC --exchange-code US
 ```
 
 This iterates over the `fundamentals_raw` table, converts each JSON payload into
@@ -293,11 +279,11 @@ This project is provided for educational and informational purposes only and doe
    ```
 2. Ingest SEC facts for every stored ticker on an exchange (honors API-rate throttling):
    ```bash
-   pyvalue ingest-fundamentals-bulk --provider SEC --exchange-code NYSE --user-agent "pyvalue/0.1 (your@email)"
+   pyvalue ingest-fundamentals-bulk --provider SEC --exchange-code US --user-agent "pyvalue/0.1 (your@email)"
    ```
 3. Normalize the ingested payloads so metrics can consume them:
    ```bash
-   pyvalue normalize-fundamentals-bulk --provider SEC --exchange-code NYSE
+   pyvalue normalize-fundamentals-bulk --provider SEC --exchange-code US
    ```
 4. Fetch market data for every ticker (default EODHD, throttled to 950/min):
    ```bash
