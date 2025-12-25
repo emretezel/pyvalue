@@ -460,6 +460,84 @@ def build_parser() -> argparse.ArgumentParser:
         help="Exchange code to select symbols from listings.",
     )
 
+    refresh_exchange = subparsers.add_parser(
+        "refresh-exchange",
+        help="Run universe, fundamentals, market data, normalization, and metrics in order for an exchange.",
+    )
+    refresh_exchange.add_argument(
+        "--provider",
+        required=True,
+        choices=["SEC", "EODHD"],
+        help="Fundamentals provider to use.",
+    )
+    refresh_exchange.add_argument(
+        "--exchange-code",
+        required=True,
+        help="Exchange code to select symbols from listings (e.g., US, LSE, NYSE).",
+    )
+    refresh_exchange.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
+    )
+    refresh_exchange.add_argument(
+        "--include-etfs",
+        action="store_true",
+        help="Persist ETFs alongside operating companies.",
+    )
+    refresh_exchange.add_argument(
+        "--currencies",
+        nargs="+",
+        default=None,
+        help="Limit to these currency codes (EODHD only).",
+    )
+    refresh_exchange.add_argument(
+        "--include-exchanges",
+        nargs="+",
+        default=None,
+        help="Only include listings whose Exchange field matches these values (EODHD only).",
+    )
+    refresh_exchange.add_argument(
+        "--fundamentals-rate",
+        type=float,
+        default=None,
+        help="Throttle rate for fundamentals ingestion (provider defaults when omitted).",
+    )
+    refresh_exchange.add_argument(
+        "--market-rate",
+        type=float,
+        default=950.0,
+        help="Throttle speed for market data updates (symbols per minute).",
+    )
+    refresh_exchange.add_argument(
+        "--max-symbols",
+        type=int,
+        default=None,
+        help="Maximum number of symbols to ingest in this run.",
+    )
+    refresh_exchange.add_argument(
+        "--max-age-days",
+        type=int,
+        default=None,
+        help="Only ingest symbols with older fundamentals (days) or missing data.",
+    )
+    refresh_exchange.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip symbols that are still in backoff from prior failures.",
+    )
+    refresh_exchange.add_argument(
+        "--user-agent",
+        default=None,
+        help="Custom User-Agent for SEC (falls back to PYVALUE_SEC_USER_AGENT).",
+    )
+    refresh_exchange.add_argument(
+        "--metrics",
+        nargs="+",
+        default=None,
+        help="Metric identifiers to compute (default: all registered metrics).",
+    )
+
     market_data = subparsers.add_parser(
         "update-market-data",
         help="Fetch latest market data for a ticker and persist it.",
@@ -1293,6 +1371,84 @@ def cmd_normalize_fundamentals_bulk(
     if provider_norm == "EODHD":
         return cmd_normalize_eodhd_fundamentals_bulk(database=database, symbols=symbols)
     raise SystemExit(f"Unsupported provider: {provider}")
+
+
+def cmd_refresh_exchange(
+    provider: str,
+    exchange_code: str,
+    database: str,
+    include_etfs: bool,
+    currencies: Optional[Sequence[str]],
+    include_exchanges: Optional[Sequence[str]],
+    fundamentals_rate: Optional[float],
+    market_rate: float,
+    max_symbols: Optional[int],
+    max_age_days: Optional[int],
+    resume: bool,
+    user_agent: Optional[str],
+    metrics: Optional[Sequence[str]],
+) -> int:
+    """Run universe, fundamentals, market data, normalization, and metrics for an exchange."""
+
+    provider_norm = _normalize_provider(provider)
+    exchange_norm = exchange_code.upper()
+    if provider_norm == "SEC" and exchange_norm != "US":
+        raise SystemExit("provider=SEC only supports --exchange-code US.")
+    if provider_norm == "SEC" and (currencies or include_exchanges):
+        raise SystemExit("--currencies/--include-exchanges are only valid with provider=EODHD.")
+
+    load_exchange = None if provider_norm == "SEC" else exchange_norm
+
+    print("Step 1/5: load universe")
+    result = cmd_load_universe(
+        provider=provider_norm,
+        database=database,
+        include_etfs=include_etfs,
+        exchange_code=load_exchange,
+        currencies=currencies,
+        include_exchanges=include_exchanges,
+    )
+    if result != 0:
+        return result
+
+    print("Step 2/5: ingest fundamentals")
+    result = cmd_ingest_fundamentals_bulk(
+        provider=provider_norm,
+        database=database,
+        rate=fundamentals_rate,
+        exchange_code=exchange_norm,
+        user_agent=user_agent,
+        max_symbols=max_symbols,
+        max_age_days=max_age_days,
+        resume=resume,
+    )
+    if result != 0:
+        return result
+
+    print("Step 3/5: update market data")
+    result = cmd_update_market_data_bulk(
+        database=database,
+        rate=market_rate,
+        exchange_code=exchange_norm,
+    )
+    if result != 0:
+        return result
+
+    print("Step 4/5: normalize fundamentals")
+    result = cmd_normalize_fundamentals_bulk(
+        provider=provider_norm,
+        database=database,
+        exchange_code=exchange_norm,
+    )
+    if result != 0:
+        return result
+
+    print("Step 5/5: compute metrics")
+    return cmd_compute_metrics_bulk(
+        database=database,
+        metric_ids=metrics,
+        exchange_code=exchange_norm,
+    )
 
 
 def cmd_update_market_data(symbol: str, database: str, exchange_code: Optional[str]) -> int:
@@ -2223,6 +2379,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             provider=args.provider,
             database=args.database,
             exchange_code=args.exchange_code,
+        )
+    if args.command == "refresh-exchange":
+        return cmd_refresh_exchange(
+            provider=args.provider,
+            exchange_code=args.exchange_code,
+            database=args.database,
+            include_etfs=args.include_etfs,
+            currencies=args.currencies,
+            include_exchanges=args.include_exchanges,
+            fundamentals_rate=args.fundamentals_rate,
+            market_rate=args.market_rate,
+            max_symbols=args.max_symbols,
+            max_age_days=args.max_age_days,
+            resume=args.resume,
+            user_agent=args.user_agent,
+            metrics=args.metrics,
         )
     if args.command == "update-market-data":
         return cmd_update_market_data(
