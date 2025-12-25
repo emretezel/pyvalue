@@ -71,6 +71,19 @@ class FXRateStore:
         inverse = self._rate(to_code, from_code, as_of_date)
         if inverse is not None and inverse != 0:
             return amount / inverse
+        # Fallback: triangulate via USD when no direct pair exists.
+        pivot = "USD"
+        if from_code != pivot and to_code != pivot:
+            via_from = self._rate(from_code, pivot, as_of_date)
+            if via_from is None:
+                inv_from = self._rate(pivot, from_code, as_of_date)
+                via_from = (1 / inv_from) if inv_from not in (None, 0) else None
+            via_to = self._rate(pivot, to_code, as_of_date)
+            if via_to is None:
+                inv_to = self._rate(to_code, pivot, as_of_date)
+                via_to = (1 / inv_to) if inv_to not in (None, 0) else None
+            if via_from is not None and via_to is not None:
+                return amount * via_from * via_to
         return None
 
     def _rate(self, base: str, quote: str, as_of: date) -> Optional[float]:
