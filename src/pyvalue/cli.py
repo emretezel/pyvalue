@@ -1613,6 +1613,7 @@ def _write_metric_failure_report_csv(
     failures: Dict[str, Counter],
     examples: Dict[str, Dict[str, tuple[str, Optional[float]]]],
     total_symbols: int,
+    metric_order: Sequence[str],
     path: str,
 ) -> None:
     with open(path, "w", newline="") as handle:
@@ -1628,7 +1629,8 @@ def _write_metric_failure_report_csv(
                 "example_market_cap",
             ]
         )
-        for metric_id, counter in failures.items():
+        for metric_id in metric_order:
+            counter = failures.get(metric_id, Counter())
             if not counter:
                 writer.writerow([metric_id, "", 0, total_symbols, 0.0, "", ""])
                 continue
@@ -1732,9 +1734,10 @@ def cmd_report_metric_failures(
         root_logger.removeHandler(handler)
 
     total_symbols = len(symbols)
+    metric_order = sorted(totals.keys(), key=lambda metric_id: (-totals.get(metric_id, 0), metric_id))
     scope_label = f"exchange {exchange_code.upper()}"
     print(f"Metric failure reasons for {scope_label} (symbols={total_symbols}, metrics={len(metric_classes)})")
-    for metric_id in [getattr(cls, "id", cls.__name__) for cls in metric_classes]:
+    for metric_id in metric_order:
         total_failures = totals.get(metric_id, 0)
         print(f"- {metric_id}: failures={total_failures}/{total_symbols}")
         counter = failures.get(metric_id)
@@ -1750,7 +1753,7 @@ def cmd_report_metric_failures(
                 print(f"    {reason}: {count}")
 
     if output_csv:
-        _write_metric_failure_report_csv(failures, examples, total_symbols, output_csv)
+        _write_metric_failure_report_csv(failures, examples, total_symbols, metric_order, output_csv)
         print(f"Wrote metric failure reasons to {output_csv}")
     return 0
 
