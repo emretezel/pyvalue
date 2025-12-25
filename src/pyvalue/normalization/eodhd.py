@@ -23,6 +23,23 @@ EBIT_FALLBACK_CONCEPTS: tuple[str, ...] = ()
 PPE_FALLBACK_CONCEPTS: tuple[str, ...] = ()
 INCOME_AVAILABLE_TO_COMMON_FALLBACK = ("NetIncomeLoss",)
 PREFERRED_DIVIDEND_FALLBACK = ("PreferredStockDividendsAndOtherAdjustments",)
+EPS_UNIT_FLIP_RATIO_MIN = 40.0
+EPS_UNIT_FLIP_RATIO_MAX = 140.0
+EPS_MIN_ABS_FOR_UNIT_CHECK = 0.05
+EPS_IMPLIED_MIN_MATCHES = 2
+EPS_IMPLIED_RATIO_NEAR_ONE = 2.0
+NET_INCOME_KEYS = (
+    "netIncomeApplicableToCommonShares",
+    "netIncome",
+    "netIncomeFromContinuingOps",
+)
+INCOME_STATEMENT_SHARES_KEYS = (
+    "weightedAverageShsOutDil",
+    "weightedAverageShsOutDiluted",
+    "weightedAverageShsOut",
+    "weightedAverageShsOutBasic",
+)
+BALANCE_SHEET_SHARES_KEYS = ("commonStockSharesOutstanding", "shareIssued")
 
 EODHD_STATEMENT_FIELDS = {
     "Balance_Sheet": {
@@ -443,6 +460,115 @@ class EODHDFactsNormalizer:
                 )
         return records
 
+    def _build_implied_eps_maps(self, payload: Dict) -> tuple[Dict[str, float], Dict[str, float]]:
+        financials = payload.get("Financials") or {}
+        income = financials.get("Income_Statement") or {}
+        balance = financials.get("Balance_Sheet") or {}
+
+        net_income_quarterly = self._build_net_income_map(income.get("quarterly"))
+        net_income_annual = self._build_net_income_map(income.get("yearly"))
+
+        shares_quarterly = self._build_income_statement_shares_map(income.get("quarterly"))
+        shares_annual = self._build_income_statement_shares_map(income.get("yearly"))
+
+        shares_quarterly = self._merge_missing(
+            shares_quarterly,
+            self._build_outstanding_shares_map(payload.get("outstandingShares"), "quarterly"),
+        )
+        shares_annual = self._merge_missing(
+            shares_annual,
+            self._build_outstanding_shares_map(payload.get("outstandingShares"), "annual"),
+        )
+        shares_quarterly = self._merge_missing(
+            shares_quarterly,
+            self._build_balance_sheet_shares_map(balance.get("quarterly")),
+        )
+        shares_annual = self._merge_missing(
+            shares_annual,
+            self._build_balance_sheet_shares_map(balance.get("yearly")),
+        )
+
+        return (
+            self._build_implied_eps_map(net_income_quarterly, shares_quarterly),
+            self._build_implied_eps_map(net_income_annual, shares_annual),
+        )
+
+    def _merge_missing(self, target: Dict[str, float], fallback: Dict[str, float]) -> Dict[str, float]:
+        for date_str, value in fallback.items():
+            target.setdefault(date_str, value)
+        return target
+
+    def _build_net_income_map(self, entries) -> Dict[str, float]:
+        net_income: Dict[str, float] = {}
+        for key, entry in self._iter_entries_with_keys(entries):
+            date_str = self._extract_entry_date_keyed(key, entry)
+            if not date_str:
+                continue
+            value = self._extract_value(entry, list(NET_INCOME_KEYS))
+            if value is None:
+                continue
+            net_income[date_str] = value
+        return net_income
+
+    def _build_income_statement_shares_map(self, entries) -> Dict[str, float]:
+        shares: Dict[str, float] = {}
+        for key, entry in self._iter_entries_with_keys(entries):
+            date_str = self._extract_entry_date_keyed(key, entry)
+            if not date_str:
+                continue
+            value = self._extract_value(entry, list(INCOME_STATEMENT_SHARES_KEYS))
+            if value is None:
+                continue
+            shares[date_str] = value
+        return shares
+
+    def _build_balance_sheet_shares_map(self, entries) -> Dict[str, float]:
+        shares: Dict[str, float] = {}
+        for key, entry in self._iter_entries_with_keys(entries):
+            date_str = self._extract_entry_date_keyed(key, entry)
+            if not date_str:
+                continue
+            value = self._extract_value(entry, list(BALANCE_SHEET_SHARES_KEYS))
+            if value is None:
+                continue
+            shares[date_str] = value
+        return shares
+
+    def _build_outstanding_shares_map(self, shares_payload: Optional[Dict], bucket: str) -> Dict[str, float]:
+        if not shares_payload:
+            return {}
+        entries = shares_payload.get(bucket)
+        shares: Dict[str, float] = {}
+        for key, entry in self._iter_entries_with_keys(entries):
+            date_value = entry.get("dateFormatted") or entry.get("date") or key
+            end_date = self._extract_date({"date": date_value}) if date_value else None
+            if not end_date and isinstance(date_value, str) and date_value.isdigit() and len(date_value) == 4:
+                end_date = f"{date_value}-12-31"
+            if not end_date:
+                continue
+            value = _to_float(entry.get("shares"))
+            if value is None:
+                shares_mln = _to_float(entry.get("sharesMln"))
+                if shares_mln is not None:
+                    value = shares_mln * 1_000_000
+            if value is None:
+                continue
+            shares[end_date] = value
+        return shares
+
+    def _build_implied_eps_map(
+        self,
+        net_income: Dict[str, float],
+        shares: Dict[str, float],
+    ) -> Dict[str, float]:
+        implied: Dict[str, float] = {}
+        for date_str, income in net_income.items():
+            share_count = shares.get(date_str)
+            if share_count is None or share_count == 0:
+                continue
+            implied[date_str] = income / share_count
+        return implied
+
     def _normalize_earnings_eps(
         self,
         payload: Dict,
@@ -452,11 +578,15 @@ class EODHDFactsNormalizer:
         earnings = payload.get("Earnings") or {}
         history = earnings.get("History") or {}
         annual = earnings.get("Annual") or {}
+        general = payload.get("General") or {}
+        general_currency = _normalize_currency_code(general.get("CurrencyCode"))
         earnings_currency = self._latest_earnings_currency(history, annual)
+        implied_quarterly, implied_annual = self._build_implied_eps_maps(payload)
         records: List[FactRecord] = []
 
         def add_record(date_str: str, value: float, period: str, currency_hint: Optional[str]) -> None:
-            currency = _normalize_currency_code(currency_hint) or earnings_currency
+            currency = _normalize_currency_code(currency_hint) or earnings_currency or general_currency
+            value, currency = self._normalize_value_currency(value, currency)
             records.append(
                 FactRecord(
                     symbol=symbol.upper(),
@@ -474,6 +604,18 @@ class EODHDFactsNormalizer:
                 )
             )
 
+        if general_currency in {"GBP", "GBX", "GBP0.01"}:
+            for date_str, value, currency in self._normalize_eps_series(
+                history, general_currency, implied_quarterly
+            ):
+                period = self._infer_quarter({"date": date_str}) or ""
+                add_record(date_str, value, period, currency)
+            for date_str, value, currency in self._normalize_eps_series(
+                annual, general_currency, implied_annual
+            ):
+                add_record(date_str, value, "FY", currency)
+            return records
+
         for date_str, entry in history.items():
             val = _to_float(entry.get("epsActual"))
             if val is None:
@@ -488,6 +630,155 @@ class EODHDFactsNormalizer:
             add_record(date_str[:10], val, "FY", entry.get("currency"))
 
         return records
+
+    def _normalize_eps_series(
+        self,
+        entries: Dict,
+        base_currency: Optional[str],
+        implied_eps: Optional[Dict[str, float]] = None,
+    ) -> List[tuple[str, float, Optional[str]]]:
+        ordered: List[tuple[str, Dict]] = []
+        if isinstance(entries, dict):
+            items = entries.items()
+        elif isinstance(entries, list):
+            items = [(entry.get("date") or entry.get("Date") or entry.get("period"), entry) for entry in entries]
+        else:
+            items = []
+        for key, entry in items:
+            if not isinstance(entry, dict):
+                continue
+            date_str = self._extract_date(entry) or self._extract_date({"date": key}) or str(key or "")
+            if not date_str:
+                continue
+            ordered.append((date_str[:10], entry))
+        ordered.sort(key=lambda item: item[0])
+
+        normalized_base = _normalize_currency_code(base_currency)
+        target_currency = "GBP"
+        scale = 1.0
+        if normalized_base in {"GBX", "GBP0.01"}:
+            scale = 0.01
+        elif normalized_base == "GBP":
+            scale = 1.0
+        else:
+            target_currency = normalized_base
+
+        if target_currency != "GBP":
+            normalized: List[tuple[str, float, Optional[str]]] = []
+            for date_str, entry in ordered:
+                value = _to_float(entry.get("epsActual"))
+                if value is None:
+                    continue
+                currency = _normalize_currency_code(entry.get("currency")) or normalized_base
+                value, currency = self._normalize_value_currency(value, currency)
+                normalized.append((date_str, value, currency))
+            return normalized
+
+        normalized: List[tuple[str, float, Optional[str]]] = []
+        values: List[float] = []
+        dates: List[str] = []
+        for date_str, entry in ordered:
+            value = _to_float(entry.get("epsActual"))
+            if value is None:
+                continue
+            values.append(value)
+            dates.append(date_str)
+
+        default_scale = scale
+        implied_scale = self._infer_eps_scale_from_implied(values, dates, implied_eps, default_scale)
+        if implied_scale is not None:
+            default_scale = implied_scale
+
+        boundaries: List[int] = []
+        for idx in range(1, len(values)):
+            prev = values[idx - 1]
+            curr = values[idx]
+            if (
+                abs(prev) < EPS_MIN_ABS_FOR_UNIT_CHECK
+                or abs(curr) < EPS_MIN_ABS_FOR_UNIT_CHECK
+            ):
+                continue
+            ratio = max(abs(curr) / abs(prev), abs(prev) / abs(curr))
+            if EPS_UNIT_FLIP_RATIO_MIN <= ratio <= EPS_UNIT_FLIP_RATIO_MAX:
+                boundaries.append(idx)
+
+        segment_starts = [0] + boundaries
+        segment_ends = boundaries + [len(values)]
+        segment_medians: List[Optional[float]] = []
+        for start, end in zip(segment_starts, segment_ends):
+            segment = [
+                abs(values[i])
+                for i in range(start, end)
+                if abs(values[i]) >= EPS_MIN_ABS_FOR_UNIT_CHECK
+            ]
+            if not segment:
+                segment_medians.append(None)
+                continue
+            segment.sort()
+            mid = len(segment) // 2
+            if len(segment) % 2 == 0:
+                median = (segment[mid - 1] + segment[mid]) / 2
+            else:
+                median = segment[mid]
+            segment_medians.append(median)
+
+        min_median = min((m for m in segment_medians if m is not None), default=None)
+        max_median = max((m for m in segment_medians if m is not None), default=None)
+        use_clusters = False
+        if min_median is not None and max_median is not None and min_median > 0:
+            ratio = max_median / min_median
+            if EPS_UNIT_FLIP_RATIO_MIN <= ratio <= EPS_UNIT_FLIP_RATIO_MAX:
+                use_clusters = True
+                threshold = (min_median * max_median) ** 0.5
+
+        segment_scales: List[float] = []
+        for median in segment_medians:
+            if not use_clusters or median is None:
+                segment_scales.append(default_scale)
+            else:
+                # Smaller cluster is treated as GBP, larger cluster as GBX (pence).
+                segment_scales.append(1.0 if median <= threshold else 0.01)
+
+        for seg_index, (start, end) in enumerate(zip(segment_starts, segment_ends)):
+            seg_scale = segment_scales[seg_index]
+            for idx in range(start, end):
+                scaled = values[idx] * seg_scale
+                normalized.append((dates[idx], scaled, "GBP"))
+        return normalized
+
+    def _infer_eps_scale_from_implied(
+        self,
+        values: List[float],
+        dates: List[str],
+        implied_eps: Optional[Dict[str, float]],
+        base_scale: float,
+    ) -> Optional[float]:
+        if not implied_eps:
+            return None
+        ratios: List[float] = []
+        for date_str, value in zip(dates, values):
+            implied = implied_eps.get(date_str)
+            if implied is None:
+                continue
+            if (
+                abs(value) < EPS_MIN_ABS_FOR_UNIT_CHECK
+                or abs(implied) < EPS_MIN_ABS_FOR_UNIT_CHECK
+            ):
+                continue
+            ratios.append(abs(value) / abs(implied))
+        if len(ratios) < EPS_IMPLIED_MIN_MATCHES:
+            return None
+        ratios.sort()
+        mid = len(ratios) // 2
+        if len(ratios) % 2 == 0:
+            median = (ratios[mid - 1] + ratios[mid]) / 2
+        else:
+            median = ratios[mid]
+        if EPS_UNIT_FLIP_RATIO_MIN <= median <= EPS_UNIT_FLIP_RATIO_MAX:
+            return 0.01
+        if base_scale == 0.01 and (1.0 / EPS_IMPLIED_RATIO_NEAR_ONE) <= median <= EPS_IMPLIED_RATIO_NEAR_ONE:
+            return 1.0
+        return None
 
     def _index_records(self, records: List[FactRecord]) -> Dict[str, Dict[tuple[str, str, str], FactRecord]]:
         indexed: Dict[str, Dict[tuple[str, str, str], FactRecord]] = {}
@@ -901,6 +1192,14 @@ class EODHDFactsNormalizer:
             return None
         return str(date)[:10]
 
+    def _extract_entry_date_keyed(self, key: Optional[str], entry: Dict) -> Optional[str]:
+        date_str = self._extract_date(entry)
+        if date_str:
+            return date_str
+        if isinstance(key, str):
+            return self._extract_date({"date": key})
+        return None
+
     def _infer_quarter(self, entry: Dict) -> Optional[str]:
         explicit = (entry.get("period") or "").upper()
         if explicit in {"Q1", "Q2", "Q3", "Q4"}:
@@ -965,6 +1264,17 @@ class EODHDFactsNormalizer:
         else:
             return []
         return [entry for entry in values if isinstance(entry, dict)]
+
+    def _iter_entries_with_keys(self, container) -> Iterable[tuple[Optional[str], Dict]]:
+        if container is None:
+            return []
+        if isinstance(container, dict):
+            items = container.items()
+        elif isinstance(container, list):
+            items = [(None, entry) for entry in container]
+        else:
+            return []
+        return [(key, entry) for key, entry in items if isinstance(entry, dict)]
 
 
 __all__ = [
