@@ -28,6 +28,15 @@ EPS_UNIT_FLIP_RATIO_MAX = 140.0
 EPS_MIN_ABS_FOR_UNIT_CHECK = 0.05
 EPS_IMPLIED_MIN_MATCHES = 2
 EPS_IMPLIED_RATIO_NEAR_ONE = 2.0
+EPS_IMPLIED_MAX_GAP_DAYS_Q = 120
+EPS_IMPLIED_MAX_GAP_DAYS_FY = 370
+EPS_STATEMENT_KEYS = (
+    "epsDiluted",
+    "epsdiluted",
+    "epsDilluted",
+    "eps",
+    "epsBasic",
+)
 NET_INCOME_KEYS = (
     "netIncomeApplicableToCommonShares",
     "netIncome",
@@ -489,8 +498,16 @@ class EODHDFactsNormalizer:
         )
 
         return (
-            self._build_implied_eps_map(net_income_quarterly, shares_quarterly),
-            self._build_implied_eps_map(net_income_annual, shares_annual),
+            self._build_implied_eps_map(
+                net_income_quarterly,
+                shares_quarterly,
+                max_gap_days=EPS_IMPLIED_MAX_GAP_DAYS_Q,
+            ),
+            self._build_implied_eps_map(
+                net_income_annual,
+                shares_annual,
+                max_gap_days=EPS_IMPLIED_MAX_GAP_DAYS_FY,
+            ),
         )
 
     def _merge_missing(self, target: Dict[str, float], fallback: Dict[str, float]) -> Dict[str, float]:
@@ -521,6 +538,18 @@ class EODHDFactsNormalizer:
                 continue
             shares[date_str] = value
         return shares
+
+    def _collect_statement_eps_dates(self, entries) -> set[str]:
+        dates: set[str] = set()
+        for key, entry in self._iter_entries_with_keys(entries):
+            date_str = self._extract_entry_date_keyed(key, entry)
+            if not date_str:
+                continue
+            value = self._extract_value(entry, list(EPS_STATEMENT_KEYS))
+            if value is None:
+                continue
+            dates.add(date_str)
+        return dates
 
     def _build_balance_sheet_shares_map(self, entries) -> Dict[str, float]:
         shares: Dict[str, float] = {}
@@ -560,10 +589,26 @@ class EODHDFactsNormalizer:
         self,
         net_income: Dict[str, float],
         shares: Dict[str, float],
+        max_gap_days: Optional[int] = None,
     ) -> Dict[str, float]:
         implied: Dict[str, float] = {}
+        share_dates: List[tuple[datetime, float]] = []
+        if max_gap_days is not None:
+            for date_str, share_value in shares.items():
+                share_date = self._parse_date_value(date_str)
+                if share_date:
+                    share_dates.append((share_date, share_value))
         for date_str, income in net_income.items():
             share_count = shares.get(date_str)
+            if share_count is None and max_gap_days is not None and share_dates:
+                income_date = self._parse_date_value(date_str)
+                if income_date:
+                    nearest_date, nearest_value = min(
+                        share_dates,
+                        key=lambda item: abs((item[0] - income_date).days),
+                    )
+                    if abs((nearest_date - income_date).days) <= max_gap_days:
+                        share_count = nearest_value
             if share_count is None or share_count == 0:
                 continue
             implied[date_str] = income / share_count
@@ -581,6 +626,31 @@ class EODHDFactsNormalizer:
         general = payload.get("General") or {}
         general_currency = _normalize_currency_code(general.get("CurrencyCode"))
         earnings_currency = self._latest_earnings_currency(history, annual)
+        income_statement = (payload.get("Financials") or {}).get("Income_Statement") or {}
+        statement_currency = _normalize_currency_code(income_statement.get("currency_symbol")) or general_currency
+        statement_eps_quarterly = self._collect_statement_eps_dates(income_statement.get("quarterly"))
+        statement_eps_annual = self._collect_statement_eps_dates(income_statement.get("yearly"))
+        history_eps_dates: set[str] = set()
+        for date_str, entry in history.items():
+            if _to_float((entry or {}).get("epsActual")) is None:
+                continue
+            if isinstance(entry, dict):
+                normalized = self._extract_date(entry)
+            else:
+                normalized = None
+            normalized = normalized or self._extract_date({"date": date_str}) or str(date_str)[:10]
+            history_eps_dates.add(normalized)
+
+        annual_eps_dates: set[str] = set()
+        for date_str, entry in annual.items():
+            if _to_float((entry or {}).get("epsActual")) is None:
+                continue
+            if isinstance(entry, dict):
+                normalized = self._extract_date(entry)
+            else:
+                normalized = None
+            normalized = normalized or self._extract_date({"date": date_str}) or str(date_str)[:10]
+            annual_eps_dates.add(normalized)
         implied_quarterly, implied_annual = self._build_implied_eps_maps(payload)
         records: List[FactRecord] = []
 
@@ -604,6 +674,20 @@ class EODHDFactsNormalizer:
                 )
             )
 
+        def add_fallback(
+            implied_map: Dict[str, float],
+            existing_dates: set[str],
+            statement_dates: set[str],
+            period_hint: Optional[str],
+        ) -> None:
+            for date_str, value in implied_map.items():
+                if date_str in existing_dates or date_str in statement_dates:
+                    continue
+                period = period_hint or (self._infer_quarter({"date": date_str}) or "")
+                if not period:
+                    continue
+                add_record(date_str, value, period, statement_currency)
+
         if general_currency in {"GBP", "GBX", "GBP0.01"}:
             for date_str, value, currency in self._normalize_eps_series(
                 history, general_currency, implied_quarterly
@@ -614,20 +698,22 @@ class EODHDFactsNormalizer:
                 annual, general_currency, implied_annual
             ):
                 add_record(date_str, value, "FY", currency)
-            return records
+        else:
+            for date_str, entry in history.items():
+                val = _to_float(entry.get("epsActual"))
+                if val is None:
+                    continue
+                period = self._infer_quarter({"date": date_str}) or ""
+                add_record(date_str[:10], val, period, entry.get("currency"))
 
-        for date_str, entry in history.items():
-            val = _to_float(entry.get("epsActual"))
-            if val is None:
-                continue
-            period = self._infer_quarter({"date": date_str}) or ""
-            add_record(date_str[:10], val, period, entry.get("currency"))
+            for date_str, entry in annual.items():
+                val = _to_float(entry.get("epsActual"))
+                if val is None:
+                    continue
+                add_record(date_str[:10], val, "FY", entry.get("currency"))
 
-        for date_str, entry in annual.items():
-            val = _to_float(entry.get("epsActual"))
-            if val is None:
-                continue
-            add_record(date_str[:10], val, "FY", entry.get("currency"))
+        add_fallback(implied_quarterly, history_eps_dates, statement_eps_quarterly, None)
+        add_fallback(implied_annual, annual_eps_dates, statement_eps_annual, "FY")
 
         return records
 
@@ -1191,6 +1277,14 @@ class EODHDFactsNormalizer:
         except ValueError:
             return None
         return str(date)[:10]
+
+    def _parse_date_value(self, value: Optional[str]) -> Optional[datetime]:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value)[:10])
+        except ValueError:
+            return None
 
     def _extract_entry_date_keyed(self, key: Optional[str], entry: Dict) -> Optional[str]:
         date_str = self._extract_date(entry)
