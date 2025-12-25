@@ -23,7 +23,6 @@ EBIT_FALLBACK_CONCEPTS: tuple[str, ...] = ()
 PPE_FALLBACK_CONCEPTS: tuple[str, ...] = ()
 INCOME_AVAILABLE_TO_COMMON_FALLBACK = ("NetIncomeLoss",)
 PREFERRED_DIVIDEND_FALLBACK = ("PreferredStockDividendsAndOtherAdjustments",)
-COMMON_EQUITY_FALLBACK = ("StockholdersEquity",)
 
 EODHD_STATEMENT_FIELDS = {
     "Balance_Sheet": {
@@ -86,6 +85,7 @@ EODHD_STATEMENT_FIELDS = {
 EODHD_TARGET_CONCEPTS = {
     concept for statement in EODHD_STATEMENT_FIELDS.values() for concept in statement
 }
+EODHD_DERIVED_OVERRIDE_CONCEPTS = ("CommonStockholdersEquity",)
 
 
 def _to_float(value: object) -> Optional[float]:
@@ -110,8 +110,16 @@ class EODHDFactsNormalizer:
 
     STATEMENT_FIELDS = EODHD_STATEMENT_FIELDS
 
-    def __init__(self, concepts: Optional[Iterable[str]] = None) -> None:
+    def __init__(
+        self,
+        concepts: Optional[Iterable[str]] = None,
+        derived_overrides: Optional[Iterable[str]] = None,
+    ) -> None:
         self.concepts = set(concepts or EODHD_TARGET_CONCEPTS)
+        if derived_overrides is None:
+            self.derived_overrides = set(EODHD_DERIVED_OVERRIDE_CONCEPTS)
+        else:
+            self.derived_overrides = set(derived_overrides)
 
     def normalize(
         self,
@@ -143,16 +151,56 @@ class EODHDFactsNormalizer:
         records.extend(self._normalize_share_counts(payload, symbol, accounting_standard, currency_code))
         records.extend(self._normalize_outstanding_shares(payload, symbol, accounting_standard, currency_code))
         records.extend(self._normalize_earnings_eps(payload, symbol, accounting_standard))
-        records.extend(self._derive_eps_alias(records))
-        records.extend(self._derive_intangibles_excluding_goodwill(records))
-        records.extend(self._derive_equity_alias(records))
-        records.extend(self._derive_shares_alias(records))
-        records.extend(self._derive_operating_cash_flow_alias(records))
-        records.extend(self._derive_capex_alias(records))
-        records.extend(self._derive_ebit_alias(records))
-        records.extend(self._derive_ppe_alias(records))
-        records.extend(self._derive_net_income_available_to_common(records))
-        records.extend(self._derive_common_stockholders_equity(records))
+        records = self._extend_with_override(
+            records,
+            self._derive_eps_alias(records),
+            "EarningsPerShare",
+        )
+        records = self._extend_with_override(
+            records,
+            self._derive_intangibles_excluding_goodwill(records),
+            "IntangibleAssetsNetExcludingGoodwill",
+        )
+        records = self._extend_with_override(
+            records,
+            self._derive_equity_alias(records),
+            "StockholdersEquity",
+        )
+        records = self._extend_with_override(
+            records,
+            self._derive_shares_alias(records),
+            "CommonStockSharesOutstanding",
+        )
+        records = self._extend_with_override(
+            records,
+            self._derive_operating_cash_flow_alias(records),
+            "NetCashProvidedByUsedInOperatingActivities",
+        )
+        records = self._extend_with_override(
+            records,
+            self._derive_capex_alias(records),
+            "CapitalExpenditures",
+        )
+        records = self._extend_with_override(
+            records,
+            self._derive_ebit_alias(records),
+            "OperatingIncomeLoss",
+        )
+        records = self._extend_with_override(
+            records,
+            self._derive_ppe_alias(records),
+            "PropertyPlantAndEquipmentNet",
+        )
+        records = self._extend_with_override(
+            records,
+            self._derive_net_income_available_to_common(records),
+            "NetIncomeLossAvailableToCommonStockholdersBasic",
+        )
+        records = self._extend_with_override(
+            records,
+            self._derive_common_stockholders_equity(records),
+            "CommonStockholdersEquity",
+        )
         return records
 
     def _normalize_statement(
@@ -450,6 +498,30 @@ class EODHDFactsNormalizer:
                 bucket[key] = record
         return indexed
 
+    def _should_override(self, concept: str) -> bool:
+        return concept in self.derived_overrides
+
+    def _extend_with_override(
+        self,
+        records: List[FactRecord],
+        derived: List[FactRecord],
+        concept: str,
+    ) -> List[FactRecord]:
+        if not derived:
+            return records
+        if self._should_override(concept):
+            derived_keys = {(rec.end_date, rec.fiscal_period or "", rec.unit) for rec in derived}
+            records = [
+                rec
+                for rec in records
+                if not (
+                    rec.concept == concept
+                    and (rec.end_date, rec.fiscal_period or "", rec.unit) in derived_keys
+                )
+            ]
+        records.extend(derived)
+        return records
+
     def _derive_eps_alias(self, records: List[FactRecord]) -> List[FactRecord]:
         indexed = self._index_records(records)
         existing = indexed.get("EarningsPerShare", {})
@@ -458,8 +530,9 @@ class EODHDFactsNormalizer:
             candidate_keys.update(indexed.get(concept, {}).keys())
 
         derived: List[FactRecord] = []
+        override = self._should_override("EarningsPerShare")
         for key in candidate_keys:
-            if key in existing:
+            if key in existing and not override:
                 continue
             base = None
             for concept in EPS_PREFERRED_CONCEPTS:
@@ -484,8 +557,9 @@ class EODHDFactsNormalizer:
         candidate_keys.update(net_tangible.keys())
 
         derived: List[FactRecord] = []
+        override = self._should_override("IntangibleAssetsNetExcludingGoodwill")
         for key in candidate_keys:
-            if key in existing:
+            if key in existing and not override:
                 continue
             base = None
             for concept in INTANGIBLE_EXCL_GOODWILL_FALLBACK:
@@ -542,7 +616,8 @@ class EODHDFactsNormalizer:
             candidate_keys.update(indexed.get(concept, {}).keys())
 
         derived: List[FactRecord] = []
-        derived_keys = set(existing.keys())
+        override = self._should_override("StockholdersEquity")
+        derived_keys = set() if override else set(existing.keys())
         for key in candidate_keys:
             if key in derived_keys:
                 continue
@@ -589,8 +664,9 @@ class EODHDFactsNormalizer:
             candidate_keys.update(indexed.get(concept, {}).keys())
 
         derived: List[FactRecord] = []
+        override = self._should_override("CommonStockSharesOutstanding")
         for key in candidate_keys:
-            if key in existing:
+            if key in existing and not override:
                 continue
             base = None
             for concept in SHARES_FALLBACK_CONCEPTS:
@@ -610,8 +686,9 @@ class EODHDFactsNormalizer:
             candidate_keys.update(indexed.get(concept, {}).keys())
 
         derived: List[FactRecord] = []
+        override = self._should_override("NetCashProvidedByUsedInOperatingActivities")
         for key in candidate_keys:
-            if key in existing:
+            if key in existing and not override:
                 continue
             base = None
             for concept in OPERATING_CASH_FLOW_FALLBACK:
@@ -631,8 +708,9 @@ class EODHDFactsNormalizer:
             candidate_keys.update(indexed.get(concept, {}).keys())
 
         derived: List[FactRecord] = []
+        override = self._should_override("CapitalExpenditures")
         for key in candidate_keys:
-            if key in existing:
+            if key in existing and not override:
                 continue
             base = None
             for concept in CAPEX_FALLBACK_CONCEPTS:
@@ -652,8 +730,9 @@ class EODHDFactsNormalizer:
             candidate_keys.update(indexed.get(concept, {}).keys())
 
         derived: List[FactRecord] = []
+        override = self._should_override("OperatingIncomeLoss")
         for key in candidate_keys:
-            if key in existing:
+            if key in existing and not override:
                 continue
             base = None
             for concept in EBIT_FALLBACK_CONCEPTS:
@@ -673,8 +752,9 @@ class EODHDFactsNormalizer:
             candidate_keys.update(indexed.get(concept, {}).keys())
 
         derived: List[FactRecord] = []
+        override = self._should_override("PropertyPlantAndEquipmentNet")
         for key in candidate_keys:
-            if key in existing:
+            if key in existing and not override:
                 continue
             base = None
             for concept in PPE_FALLBACK_CONCEPTS:
@@ -694,8 +774,9 @@ class EODHDFactsNormalizer:
             candidate_keys.update(indexed.get(concept, {}).keys())
 
         derived: List[FactRecord] = []
+        override = self._should_override("NetIncomeLossAvailableToCommonStockholdersBasic")
         for key in candidate_keys:
-            if key in existing:
+            if key in existing and not override:
                 continue
             base = None
             for concept in INCOME_AVAILABLE_TO_COMMON_FALLBACK:
@@ -733,21 +814,15 @@ class EODHDFactsNormalizer:
     def _derive_common_stockholders_equity(self, records: List[FactRecord]) -> List[FactRecord]:
         indexed = self._index_records(records)
         existing = indexed.get("CommonStockholdersEquity", {})
-        candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
-        for concept in COMMON_EQUITY_FALLBACK:
-            candidate_keys.update(indexed.get(concept, {}).keys())
+        stockholders_equity = indexed.get("StockholdersEquity", {})
         noncontrolling = indexed.get("NoncontrollingInterestInConsolidatedEntity", {})
 
         derived: List[FactRecord] = []
-        for key in candidate_keys:
-            if key in existing:
+        override = self._should_override("CommonStockholdersEquity")
+        for key, base in stockholders_equity.items():
+            if key in existing and not override:
                 continue
-            base = None
-            for concept in COMMON_EQUITY_FALLBACK:
-                base = indexed.get(concept, {}).get(key)
-                if base and base.value is not None:
-                    break
-            if base is None or base.value is None:
+            if base.value is None:
                 continue
             preferred = indexed.get("PreferredStock", {}).get(key)
             preferred_value = preferred.value if preferred and preferred.value is not None else 0.0
@@ -892,4 +967,8 @@ class EODHDFactsNormalizer:
         return [entry for entry in values if isinstance(entry, dict)]
 
 
-__all__ = ["EODHDFactsNormalizer", "EODHD_TARGET_CONCEPTS"]
+__all__ = [
+    "EODHDFactsNormalizer",
+    "EODHD_TARGET_CONCEPTS",
+    "EODHD_DERIVED_OVERRIDE_CONCEPTS",
+]
