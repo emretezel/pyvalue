@@ -328,6 +328,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="SQLite database file used for storage (default: %(default)s)",
     )
 
+    clear_market_data = subparsers.add_parser(
+        "clear-market-data",
+        help="Delete all stored market data snapshots.",
+    )
+    clear_market_data.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
+    )
+
     ingest_fundamentals = subparsers.add_parser(
         "ingest-fundamentals",
         help="Download fundamentals for a ticker from a chosen provider.",
@@ -1927,6 +1937,17 @@ def cmd_clear_metrics(database: str) -> int:
     return 0
 
 
+def cmd_clear_market_data(database: str) -> int:
+    """Delete all stored market data."""
+
+    repo = MarketDataRepository(database)
+    with repo._connect() as conn:
+        conn.execute("DROP TABLE IF EXISTS market_data")
+    repo.initialize_schema()
+    print(f"Cleared market_data table in {database}")
+    return 0
+
+
 def cmd_run_screen(
     symbol: str,
     config_path: str,
@@ -2222,6 +2243,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return cmd_clear_fundamentals_raw(database=args.database)
     if args.command == "clear-metrics":
         return cmd_clear_metrics(database=args.database)
+    if args.command == "clear-market-data":
+        return cmd_clear_market_data(database=args.database)
     if args.command == "compute-metrics":
         return cmd_compute_metrics(
             symbol=args.symbol,
