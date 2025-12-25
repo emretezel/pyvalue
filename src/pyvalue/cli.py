@@ -1565,7 +1565,8 @@ def cmd_report_metric_coverage(
         f"Metric coverage for exchange {exchange_norm} (symbols={total_symbols}, metrics={len(metric_classes)})"
     )
     print(f"Symbols where all metrics computed: {all_success}/{total_symbols}")
-    for metric_id, count in per_metric_success.items():
+    ordered = sorted(per_metric_success.items(), key=lambda item: (item[1], item[0]))
+    for metric_id, count in ordered:
         print(f"- {metric_id}: {count}/{total_symbols} symbols")
     return 0
 
