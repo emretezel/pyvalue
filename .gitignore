@@ -79,7 +79,7 @@ private/
 .env.*
 secret*/
 data/logs/
-data/screen_results.csv
+data/screen_results*.csv
 data/*.db-journal
 data/*.db-wal
 data/*.db-shm

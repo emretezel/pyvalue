@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 import logging
 import re
@@ -38,7 +38,7 @@ from pyvalue.storage import (
 from pyvalue.universe import UKUniverseLoader, USUniverseLoader
 
 LOGGER = logging.getLogger(__name__)
-DEFAULT_SCREEN_RESULTS_CSV = "data/screen_results.csv"
+DEFAULT_SCREEN_RESULTS_PREFIX = "data/screen_results"
 
 
 def _resolve_database_path(database: str) -> Path:
@@ -52,6 +52,11 @@ def _resolve_database_path(database: str) -> Path:
         if repo_path.exists():
             return repo_path
     return db_path
+
+
+def _default_screen_results_path(exchange_code: str, as_of: Optional[date] = None) -> str:
+    date_label = (as_of or date.today()).strftime("%Y%m%d")
+    return f"{DEFAULT_SCREEN_RESULTS_PREFIX}_{exchange_code.upper()}_{date_label}.csv"
 
 
 def _qualify_symbol(symbol: str, exchange: Optional[str] = None) -> str:
@@ -645,8 +650,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_screen_bulk.add_argument(
         "--output-csv",
-        default=DEFAULT_SCREEN_RESULTS_CSV,
-        help="Path to write passing results as CSV (default: %(default)s)",
+        default=None,
+        help="Path to write passing results as CSV (default: data/screen_results_<EXCHANGE>_<YYYYMMDD>.csv)",
     )
 
     return parser
@@ -1972,12 +1977,12 @@ def cmd_run_screen_bulk(
     """Evaluate screening criteria for every ticker stored in the universe."""
 
     definition = load_screen(config_path)
-    output_csv = output_csv or DEFAULT_SCREEN_RESULTS_CSV
     universe_repo = UniverseRepository(database)
     universe_repo.initialize_schema()
     if not exchange_code:
         raise SystemExit("--exchange-code is required for bulk screening.")
     exchange_norm = exchange_code.upper()
+    output_csv = output_csv or _default_screen_results_path(exchange_norm)
     symbols = universe_repo.fetch_symbols_by_exchange(exchange_norm)
     if not symbols:
         raise SystemExit(
@@ -2027,17 +2032,23 @@ def cmd_run_screen_bulk(
     if not passed_symbols:
         print("No symbols satisfied all criteria.")
         if output_csv:
-            _write_screen_csv(definition.criteria, [], {}, {}, {}, {}, output_csv)
+            _write_screen_csv(definition.criteria, [], {}, {}, {}, {}, {}, output_csv)
         return 1
 
     selected_names = {symbol: entity_labels.get(symbol, symbol) for symbol in passed_symbols}
     selected_descriptions: Dict[str, str] = {}
     selected_prices: Dict[str, str] = {}
+    selected_price_currencies: Dict[str, str] = {}
     for symbol in passed_symbols:
         description = entity_repo.fetch_description(symbol)
         selected_descriptions[symbol] = description if description else "N/A"
         snapshot = market_repo.latest_snapshot(symbol)
-        selected_prices[symbol] = _format_value(snapshot.price) if snapshot else "N/A"
+        if snapshot:
+            selected_prices[symbol] = _format_value(snapshot.price)
+            selected_price_currencies[symbol] = snapshot.currency or "N/A"
+        else:
+            selected_prices[symbol] = "N/A"
+            selected_price_currencies[symbol] = "N/A"
     _print_screen_table(
         definition.criteria,
         passed_symbols,
@@ -2054,6 +2065,7 @@ def cmd_run_screen_bulk(
             selected_names,
             selected_descriptions,
             selected_prices,
+            selected_price_currencies,
             output_csv,
         )
     return 0
@@ -2095,6 +2107,7 @@ def _write_screen_csv(
     entity_names: Dict[str, str],
     descriptions: Dict[str, str],
     prices: Dict[str, str],
+    price_currencies: Dict[str, str],
     path: str,
 ) -> None:
     with open(path, "w", newline="") as handle:
@@ -2103,6 +2116,7 @@ def _write_screen_csv(
         writer.writerow(["Entity", *[entity_names.get(symbol, symbol) for symbol in symbols]])
         writer.writerow(["Description", *[descriptions.get(symbol, "N/A") for symbol in symbols]])
         writer.writerow(["Price", *[prices.get(symbol, "N/A") for symbol in symbols]])
+        writer.writerow(["Price Currency", *[price_currencies.get(symbol, "N/A") for symbol in symbols]])
         for criterion in criteria:
             row = [criterion.name]
             for symbol in symbols:
