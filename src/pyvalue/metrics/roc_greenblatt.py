@@ -73,27 +73,21 @@ class ROCGreenblattMetric:
         return MetricResult(symbol=symbol, metric_id=self.id, value=avg, as_of=latest)
 
     def _fetch_ebit_history(self, symbol: str, repo: FinancialFactsRepository) -> List[FactRecord]:
-        return repo.facts_for_concept(symbol, "OperatingIncomeLoss")
+        return repo.facts_for_concept(symbol, "OperatingIncomeLoss", fiscal_period="FY")
 
     def _fetch_tangible_capital_history(self, symbol: str, repo: FinancialFactsRepository) -> List[FactRecord]:
-        ppe_records = repo.facts_for_concept(symbol, "PropertyPlantAndEquipmentNet")
+        ppe_records = repo.facts_for_concept(symbol, "PropertyPlantAndEquipmentNet", fiscal_period="FY")
         if not ppe_records:
             return []
-        assets_records = repo.facts_for_concept(symbol, "AssetsCurrent")
-        liabilities_records = repo.facts_for_concept(symbol, "LiabilitiesCurrent")
+        assets_records = repo.facts_for_concept(symbol, "AssetsCurrent", fiscal_period="FY")
+        liabilities_records = repo.facts_for_concept(symbol, "LiabilitiesCurrent", fiscal_period="FY")
         assets_by_period = self._index_by_period(assets_records)
         liabilities_by_period = self._index_by_period(liabilities_records)
         combined: List[FactRecord] = []
         for ppe in ppe_records:
-            if not is_recent_fact(ppe, max_age_days=MAX_FY_FACT_AGE_DAYS):
-                continue
             assets = assets_by_period.get((ppe.end_date, ppe.fiscal_period))
             liabilities = liabilities_by_period.get((ppe.end_date, ppe.fiscal_period))
             if assets is None or liabilities is None:
-                continue
-            if not is_recent_fact(assets, max_age_days=MAX_FY_FACT_AGE_DAYS):
-                continue
-            if not is_recent_fact(liabilities, max_age_days=MAX_FY_FACT_AGE_DAYS):
                 continue
             value = (ppe.value or 0) + (assets.value or 0) - (liabilities.value or 0)
             combined.append(

@@ -462,43 +462,51 @@ def test_market_capitalization_metric():
 
 def test_roc_greenblatt_metric():
     metric = ROCGreenblattMetric()
-    recent = (date.today() - timedelta(days=20)).isoformat()
+    recent_quarter = (date.today() - timedelta(days=20)).isoformat()
+    recent_fy = (date.today() - timedelta(days=200)).isoformat()
 
     class DummyRepo:
         def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            records = []
             if concept == "OperatingIncomeLoss":
-                return [
-                    fact(symbol=symbol, concept=concept, end_date=recent, value=220),
-                    fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=200),
-                    fact(symbol=symbol, concept=concept, end_date="2022-09-30", value=150),
+                records = [
+                    fact(symbol=symbol, concept=concept, end_date=recent_fy, value=220, fiscal_period="FY"),
+                    fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=200, fiscal_period="FY"),
+                    fact(symbol=symbol, concept=concept, end_date="2022-09-30", value=150, fiscal_period="FY"),
+                    fact(symbol=symbol, concept=concept, end_date=recent_quarter, value=999, fiscal_period="Q1"),
                 ]
             if concept == "PropertyPlantAndEquipmentNet":
-                return [
-                    fact(symbol=symbol, concept=concept, end_date=recent, value=520),
-                    fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=500),
-                    fact(symbol=symbol, concept=concept, end_date="2022-09-30", value=450),
+                records = [
+                    fact(symbol=symbol, concept=concept, end_date=recent_fy, value=520, fiscal_period="FY"),
+                    fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=500, fiscal_period="FY"),
+                    fact(symbol=symbol, concept=concept, end_date="2022-09-30", value=450, fiscal_period="FY"),
+                    fact(symbol=symbol, concept=concept, end_date=recent_quarter, value=777, fiscal_period="Q1"),
                 ]
             if concept == "AssetsCurrent":
-                return [
-                    fact(symbol=symbol, concept=concept, end_date=recent, value=420),
-                    fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=400),
-                    fact(symbol=symbol, concept=concept, end_date="2022-09-30", value=350),
+                records = [
+                    fact(symbol=symbol, concept=concept, end_date=recent_fy, value=420, fiscal_period="FY"),
+                    fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=400, fiscal_period="FY"),
+                    fact(symbol=symbol, concept=concept, end_date="2022-09-30", value=350, fiscal_period="FY"),
+                    fact(symbol=symbol, concept=concept, end_date=recent_quarter, value=888, fiscal_period="Q1"),
                 ]
             if concept == "LiabilitiesCurrent":
-                return [
-                    fact(symbol=symbol, concept=concept, end_date=recent, value=310),
-                    fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=300),
-                    fact(symbol=symbol, concept=concept, end_date="2022-09-30", value=250),
+                records = [
+                    fact(symbol=symbol, concept=concept, end_date=recent_fy, value=310, fiscal_period="FY"),
+                    fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=300, fiscal_period="FY"),
+                    fact(symbol=symbol, concept=concept, end_date="2022-09-30", value=250, fiscal_period="FY"),
+                    fact(symbol=symbol, concept=concept, end_date=recent_quarter, value=444, fiscal_period="Q1"),
                 ]
-            return []
+            if fiscal_period:
+                return [record for record in records if (record.fiscal_period or "").upper() == fiscal_period.upper()]
+            return records
 
         def latest_fact(self, symbol, concept):
-            return fact(symbol=symbol, concept=concept, end_date=recent, value=0.0)
+            return fact(symbol=symbol, concept=concept, end_date=recent_quarter, value=0.0, fiscal_period="Q1")
 
     repo = DummyRepo()
     result = metric.compute("AAPL.US", repo)
     assert result is not None
-    assert result.as_of == recent
+    assert result.as_of == recent_fy
 
 
 def test_roe_greenblatt_metric():

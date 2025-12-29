@@ -124,6 +124,7 @@ def test_roc_metric_uses_recent_concept_even_if_fy_old(tmp_path):
     repo.initialize_schema()
     # FY data older than a year.
     fy_old = (date.today() - timedelta(days=500)).isoformat()
+    # Recent quarterly facts to satisfy freshness.
     repo.replace_facts(
         "TEST.US",
         [
@@ -131,12 +132,6 @@ def test_roc_metric_uses_recent_concept_even_if_fy_old(tmp_path):
             FactRecord(symbol="TEST.US", concept="PropertyPlantAndEquipmentNet", fiscal_period="FY", end_date=fy_old, unit="USD", value=100.0),
             FactRecord(symbol="TEST.US", concept="AssetsCurrent", fiscal_period="FY", end_date=fy_old, unit="USD", value=50.0),
             FactRecord(symbol="TEST.US", concept="LiabilitiesCurrent", fiscal_period="FY", end_date=fy_old, unit="USD", value=25.0),
-        ],
-    )
-    # Recent quarterly facts to satisfy freshness.
-    repo.replace_facts(
-        "TEST.US",
-        [
             FactRecord(symbol="TEST.US", concept="OperatingIncomeLoss", fiscal_period="Q3", end_date=(date.today() - timedelta(days=45)).isoformat(), unit="USD", value=180.0),
             FactRecord(symbol="TEST.US", concept="PropertyPlantAndEquipmentNet", fiscal_period="Q3", end_date=(date.today() - timedelta(days=45)).isoformat(), unit="USD", value=90.0),
             FactRecord(symbol="TEST.US", concept="AssetsCurrent", fiscal_period="Q3", end_date=(date.today() - timedelta(days=45)).isoformat(), unit="USD", value=40.0),
