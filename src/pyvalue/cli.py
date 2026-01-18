@@ -14,7 +14,7 @@ import re
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from pyvalue.config import Config
 from pyvalue.ingestion import EODHDFundamentalsClient, SECCompanyFactsClient
@@ -23,7 +23,11 @@ from pyvalue.metrics import REGISTRY
 from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS
 from pyvalue.normalization import EODHDFactsNormalizer, SECFactsNormalizer
 from pyvalue.reporting import MetricCoverage, compute_fact_coverage
-from pyvalue.screening import Criterion, evaluate_criterion, load_screen, evaluate_criterion_verbose
+from pyvalue.screening import (
+    Criterion,
+    load_screen,
+    evaluate_criterion_verbose,
+)
 from pyvalue.logging_utils import setup_logging
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.storage import (
@@ -54,7 +58,9 @@ def _resolve_database_path(database: str) -> Path:
     return db_path
 
 
-def _default_screen_results_path(exchange_code: str, as_of: Optional[date] = None) -> str:
+def _default_screen_results_path(
+    exchange_code: str, as_of: Optional[date] = None
+) -> str:
     date_label = (as_of or date.today()).strftime("%Y%m%d")
     return f"{DEFAULT_SCREEN_RESULTS_PREFIX}_{exchange_code.upper()}_{date_label}.csv"
 
@@ -104,7 +110,8 @@ def _symbols_for_exchange_or_raise(db_path: Path, exchange_code: str) -> List[st
 
     with universe_repo._connect() as conn:
         available_exchanges = [
-            row[0] for row in conn.execute("SELECT DISTINCT exchange FROM listings").fetchall()
+            row[0]
+            for row in conn.execute("SELECT DISTINCT exchange FROM listings").fetchall()
         ]
     raise SystemExit(
         f"No symbols found for exchange {exchange_norm}. Load a universe first. "
@@ -165,7 +172,7 @@ def _select_exchange_listings_for_provider(
     universe_repo.initialize_schema()
 
     now = datetime.now(timezone.utc)
-    params: List[str] = [provider.upper(), provider.upper(), exchange_code.upper()]
+    params: List[object] = [provider.upper(), provider.upper(), exchange_code.upper()]
     query = [
         "SELECT l.symbol, fr.fetched_at, fs.next_eligible_at",
         "FROM listings l",
@@ -348,7 +355,9 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["SEC", "EODHD"],
         help="Fundamentals provider to use.",
     )
-    ingest_fundamentals.add_argument("symbol", help="Ticker symbol, e.g. AAPL or SHEL.LSE")
+    ingest_fundamentals.add_argument(
+        "symbol", help="Ticker symbol, e.g. AAPL or SHEL.LSE"
+    )
     ingest_fundamentals.add_argument(
         "--exchange-code",
         default=None,
@@ -429,7 +438,9 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["SEC", "EODHD"],
         help="Fundamentals provider to normalize.",
     )
-    normalize_fundamentals.add_argument("symbol", help="Ticker symbol already ingested for the provider.")
+    normalize_fundamentals.add_argument(
+        "symbol", help="Ticker symbol already ingested for the provider."
+    )
     normalize_fundamentals.add_argument(
         "--exchange-code",
         help="Exchange code required when the symbol has no suffix (e.g., US, LSE).",
@@ -789,7 +800,9 @@ def cmd_load_us_universe(database: str, include_etfs: bool) -> int:
     LOGGER.info("Fetched %s US listings", len(listings))
 
     # Drop ETFs unless explicitly requested in the CLI arguments.
-    filtered = [item for item in listings if _should_keep_listing(include_etfs, item.is_etf)]
+    filtered = [
+        item for item in listings if _should_keep_listing(include_etfs, item.is_etf)
+    ]
     LOGGER.info("Remaining listings after ETF filter: %s", len(filtered))
 
     # Persist the normalized listings to SQLite storage.
@@ -822,17 +835,21 @@ def cmd_load_eodhd_universe(
 
     allowed_currencies = _parse_currency_codes(currencies)
     allowed_exchanges = _parse_exchange_filters(include_exchanges)
+    currency_list = sorted(allowed_currencies) if allowed_currencies else None
+    exchange_list = sorted(allowed_exchanges) if allowed_exchanges else None
     loader = UKUniverseLoader(
         api_key=api_key,
         exchange_code=exchange_code,
         include_etfs=include_etfs,
-        allowed_currencies=allowed_currencies,
-        include_exchanges=allowed_exchanges,
+        allowed_currencies=currency_list,
+        include_exchanges=exchange_list,
     )
     listings = loader.load()
     LOGGER.info("Fetched %s listings for exchange %s", len(listings), exchange_code)
 
-    filtered = [item for item in listings if _should_keep_listing(include_etfs, item.is_etf)]
+    filtered = [
+        item for item in listings if _should_keep_listing(include_etfs, item.is_etf)
+    ]
     LOGGER.info("Remaining listings after ETF filter: %s", len(filtered))
 
     repo = UniverseRepository(database)
@@ -846,7 +863,9 @@ def cmd_load_eodhd_universe(
 def _require_eodhd_key() -> str:
     api_key = Config().eodhd_api_key
     if not api_key:
-        raise SystemExit("EODHD API key missing. Add [eodhd].api_key to private/config.toml.")
+        raise SystemExit(
+            "EODHD API key missing. Add [eodhd].api_key to private/config.toml."
+        )
     return api_key
 
 
@@ -906,7 +925,9 @@ def cmd_ingest_eodhd_fundamentals_bulk(
     if exch_code:
         meta = client.exchange_metadata(exch_code)
         if meta is None:
-            raise SystemExit(f"Exchange {exchange_code} not found in EODHD exchange list.")
+            raise SystemExit(
+                f"Exchange {exchange_code} not found in EODHD exchange list."
+            )
         rows = client.list_symbols(exch_code)
         for row in rows:
             code = (row.get("Code") or "").strip()
@@ -918,12 +939,16 @@ def cmd_ingest_eodhd_fundamentals_bulk(
             qualified = _qualify_symbol(code, exch_code)
             listings.append((qualified, exch_code))
         if not listings:
-            raise SystemExit(f"No symbols found for exchange {exchange_code} from EODHD.")
+            raise SystemExit(
+                f"No symbols found for exchange {exchange_code} from EODHD."
+            )
 
     interval = 60.0 / rate if rate and rate > 0 else 0.0
     total = len(listings)
     processed = 0
-    print(f"Fetching EODHD fundamentals for {total} symbols at <= {rate:.2f} per minute")
+    print(
+        f"Fetching EODHD fundamentals for {total} symbols at <= {rate:.2f} per minute"
+    )
 
     try:
         for idx, (symbol, exchange) in enumerate(listings, 1):
@@ -939,7 +964,10 @@ def cmd_ingest_eodhd_fundamentals_bulk(
                     exchange=exchange or exch_code,
                 )
                 processed += 1
-                print(f"[{idx}/{total}] Stored fundamentals for {symbol.upper()}", flush=True)
+                print(
+                    f"[{idx}/{total}] Stored fundamentals for {symbol.upper()}",
+                    flush=True,
+                )
             except Exception as exc:  # pragma: no cover - network errors
                 LOGGER.error("Failed to fetch fundamentals for %s: %s", symbol, exc)
 
@@ -989,20 +1017,28 @@ def cmd_ingest_fundamentals(
             info = client.resolve_company(symbol_qualified.split(".")[0])
             cik_value = info.cik
             symbol_qualified = _qualify_symbol(info.symbol, exchange="US")
-            LOGGER.info("Resolved %s to CIK %s (%s)", symbol_qualified, cik_value, info.name)
+            LOGGER.info(
+                "Resolved %s to CIK %s (%s)", symbol_qualified, cik_value, info.name
+            )
 
         payload = client.fetch_company_facts(cik_value)
         fundamentals_repo = FundamentalsRepository(database)
         fundamentals_repo.initialize_schema()
-        fundamentals_repo.upsert("SEC", symbol_qualified.upper(), payload, exchange="US")
-        print(f"Stored SEC company facts for {symbol_qualified} ({cik_value}) in {database}")
+        fundamentals_repo.upsert(
+            "SEC", symbol_qualified.upper(), payload, exchange="US"
+        )
+        print(
+            f"Stored SEC company facts for {symbol_qualified} ({cik_value}) in {database}"
+        )
         return 0
     if provider_norm == "EODHD":
         if not exchange_code and "." not in symbol:
             raise SystemExit(
                 "--exchange-code is required when provider=EODHD and symbol has no exchange suffix."
             )
-        return cmd_ingest_eodhd_fundamentals(symbol=symbol, database=database, exchange_code=exchange_code)
+        return cmd_ingest_eodhd_fundamentals(
+            symbol=symbol, database=database, exchange_code=exchange_code
+        )
     raise SystemExit(f"Unsupported provider: {provider}")
 
 
@@ -1061,7 +1097,9 @@ def cmd_ingest_fundamentals_bulk(
                 try:
                     payload = client.fetch_company_facts(info.cik)
                 except Exception as exc:  # pragma: no cover - network errors
-                    LOGGER.error("Failed to fetch company facts for %s: %s", info.symbol, exc)
+                    LOGGER.error(
+                        "Failed to fetch company facts for %s: %s", info.symbol, exc
+                    )
                     last_fetch = time.perf_counter()
                     continue
 
@@ -1074,7 +1112,9 @@ def cmd_ingest_fundamentals_bulk(
                     exchange=exchange_norm,
                 )
                 processed += 1
-                print(f"[{idx}/{total}] Stored company facts for {qualified}", flush=True)
+                print(
+                    f"[{idx}/{total}] Stored company facts for {qualified}", flush=True
+                )
         except KeyboardInterrupt:
             print(f"\\nCancelled after {processed} of {total} symbols.")
             return 1
@@ -1097,7 +1137,7 @@ def cmd_ingest_fundamentals_bulk(
             return 0
 
         api_key = _require_eodhd_key()
-        client = EODHDFundamentalsClient(api_key=api_key)
+        eodhd_client = EODHDFundamentalsClient(api_key=api_key)
         repo = FundamentalsRepository(database)
         repo.initialize_schema()
         state_repo = FundamentalsFetchStateRepository(database)
@@ -1115,7 +1155,9 @@ def cmd_ingest_fundamentals_bulk(
             for idx, symbol in enumerate(symbols, 1):
                 start = time.perf_counter()
                 try:
-                    payload = client.fetch_fundamentals(symbol, exchange_code=None)
+                    payload = eodhd_client.fetch_fundamentals(
+                        symbol, exchange_code=None
+                    )
                     general = payload.get("General") or {}
                     repo.upsert(
                         "EODHD",
@@ -1126,7 +1168,10 @@ def cmd_ingest_fundamentals_bulk(
                     )
                     state_repo.mark_success("EODHD", symbol)
                     processed += 1
-                    print(f"[{idx}/{total}] Stored fundamentals for {symbol.upper()}", flush=True)
+                    print(
+                        f"[{idx}/{total}] Stored fundamentals for {symbol.upper()}",
+                        flush=True,
+                    )
                 except Exception as exc:  # pragma: no cover - network errors
                     LOGGER.error("Failed to fetch fundamentals for %s: %s", symbol, exc)
                     state_repo.mark_failure("EODHD", symbol, str(exc))
@@ -1169,7 +1214,9 @@ def cmd_normalize_us_facts(symbol: str, database: str) -> int:
     return 0
 
 
-def cmd_normalize_us_facts_bulk(database: str, symbols: Optional[Sequence[str]] = None) -> int:
+def cmd_normalize_us_facts_bulk(
+    database: str, symbols: Optional[Sequence[str]] = None
+) -> int:
     """Normalize raw SEC facts for every stored ticker."""
 
     fund_repo = FundamentalsRepository(database)
@@ -1203,7 +1250,10 @@ def cmd_normalize_us_facts_bulk(database: str, symbols: Optional[Sequence[str]] 
             if entity_name:
                 entity_repo.upsert(symbol, entity_name)
             stored = normalization_repo.replace_facts(symbol, records)
-            print(f"[{idx}/{total}] Stored {stored} normalized facts for {symbol}", flush=True)
+            print(
+                f"[{idx}/{total}] Stored {stored} normalized facts for {symbol}",
+                flush=True,
+            )
     except KeyboardInterrupt:
         print("\nBulk normalization cancelled by user.")
         return 1
@@ -1285,7 +1335,10 @@ def cmd_normalize_eodhd_fundamentals_bulk(
             if entity_name or entity_description:
                 entity_repo.upsert(symbol, entity_name, description=entity_description)
             stored = fact_repo.replace_facts(symbol, records)
-            print(f"[{idx}/{total}] Stored {stored} normalized facts for {symbol}", flush=True)
+            print(
+                f"[{idx}/{total}] Stored {stored} normalized facts for {symbol}",
+                flush=True,
+            )
     except KeyboardInterrupt:
         print("\nBulk normalization cancelled by user.")
         return 1
@@ -1331,7 +1384,9 @@ def cmd_normalize_fundamentals(
                 "--exchange-code is required for EODHD normalization when symbol has no exchange suffix."
             )
         exch_code = inferred_exchange or exchange_code
-        qualified = _qualify_symbol(base_symbol, exch_code) if exch_code else symbol_upper
+        qualified = (
+            _qualify_symbol(base_symbol, exch_code) if exch_code else symbol_upper
+        )
         return cmd_normalize_eodhd_fundamentals(symbol=qualified, database=database)
     raise SystemExit(f"Unsupported provider: {provider}")
 
@@ -1346,16 +1401,19 @@ def cmd_normalize_fundamentals_bulk(
         if provider_norm == "SEC":
             exchange_norm = "US"
         else:
-            raise SystemExit("--exchange-code is required for bulk fundamentals normalization.")
+            raise SystemExit(
+                "--exchange-code is required for bulk fundamentals normalization."
+            )
     else:
         exchange_norm = exchange_code.upper()
     if provider_norm == "SEC" and exchange_norm != "US":
         raise SystemExit("SEC normalization only supports --exchange-code US.")
-    listings = _select_listing_symbols_by_exchange(database=database, exchange_code=exchange_norm)
+    listings = _select_listing_symbols_by_exchange(
+        database=database, exchange_code=exchange_norm
+    )
     if not listings:
         raise SystemExit(
-            f"No listings found for exchange {exchange_norm}. "
-            "Run load-universe first."
+            f"No listings found for exchange {exchange_norm}. Run load-universe first."
         )
     fund_repo = FundamentalsRepository(database)
     fund_repo.initialize_schema()
@@ -1395,7 +1453,9 @@ def cmd_refresh_exchange(
     if provider_norm == "SEC" and exchange_norm != "US":
         raise SystemExit("provider=SEC only supports --exchange-code US.")
     if provider_norm == "SEC" and (currencies or include_exchanges):
-        raise SystemExit("--currencies/--include-exchanges are only valid with provider=EODHD.")
+        raise SystemExit(
+            "--currencies/--include-exchanges are only valid with provider=EODHD."
+        )
 
     load_exchange = None if provider_norm == "SEC" else exchange_norm
 
@@ -1451,7 +1511,9 @@ def cmd_refresh_exchange(
     )
 
 
-def cmd_update_market_data(symbol: str, database: str, exchange_code: Optional[str]) -> int:
+def cmd_update_market_data(
+    symbol: str, database: str, exchange_code: Optional[str]
+) -> int:
     """Fetch latest market data for a ticker and store it."""
 
     symbol_clean = symbol.strip().upper()
@@ -1552,7 +1614,9 @@ def cmd_compute_metrics(
         else:
             result = metric.compute(symbol_upper, fact_repo)
         if result is None:
-            LOGGER.warning("Metric %s could not be computed for %s", metric_id, symbol_upper)
+            LOGGER.warning(
+                "Metric %s could not be computed for %s", metric_id, symbol_upper
+            )
             continue
         metrics_repo.upsert(result.symbol, result.metric_id, result.value, result.as_of)
         computed += 1
@@ -1577,8 +1641,7 @@ def cmd_compute_metrics_bulk(
     symbols = universe_repo.fetch_symbols_by_exchange(exchange_norm)
     if not symbols:
         raise SystemExit(
-            f"No listings found for exchange {exchange_norm}. "
-            "Run load-universe first."
+            f"No listings found for exchange {exchange_norm}. Run load-universe first."
         )
 
     base_fact_repo = FinancialFactsRepository(db_path)
@@ -1593,7 +1656,9 @@ def cmd_compute_metrics_bulk(
         raise SystemExit("No metrics specified.")
 
     total_symbols = len(symbols)
-    print(f"Computing metrics for {total_symbols} symbols ({len(ids_to_compute)} metrics each)")
+    print(
+        f"Computing metrics for {total_symbols} symbols ({len(ids_to_compute)} metrics each)"
+    )
 
     try:
         for idx, symbol in enumerate(symbols, 1):
@@ -1611,14 +1676,25 @@ def cmd_compute_metrics_bulk(
                     else:
                         result = metric.compute(symbol_upper, fact_repo)
                 except Exception as exc:  # pragma: no cover - metric errors
-                    LOGGER.error("Metric %s failed for %s: %s", metric_id, symbol_upper, exc)
+                    LOGGER.error(
+                        "Metric %s failed for %s: %s", metric_id, symbol_upper, exc
+                    )
                     continue
                 if result is None:
-                    LOGGER.warning("Metric %s could not be computed for %s", metric_id, symbol_upper)
+                    LOGGER.warning(
+                        "Metric %s could not be computed for %s",
+                        metric_id,
+                        symbol_upper,
+                    )
                     continue
-                metrics_repo.upsert(result.symbol, result.metric_id, result.value, result.as_of)
+                metrics_repo.upsert(
+                    result.symbol, result.metric_id, result.value, result.as_of
+                )
                 computed += 1
-            print(f"[{idx}/{total_symbols}] Computed {computed} metrics for {symbol_upper}", flush=True)
+            print(
+                f"[{idx}/{total_symbols}] Computed {computed} metrics for {symbol_upper}",
+                flush=True,
+            )
     except KeyboardInterrupt:
         print("\nBulk metric computation cancelled by user.")
         return 1
@@ -1667,7 +1743,9 @@ def cmd_report_fact_freshness(
             if not show_all and concept.missing == 0 and concept.stale == 0:
                 continue
             fresh = max(entry.total_symbols - concept.missing - concept.stale, 0)
-            print(f"    {concept.concept}: fresh={fresh}, stale={concept.stale}, missing={concept.missing}")
+            print(
+                f"    {concept.concept}: fresh={fresh}, stale={concept.stale}, missing={concept.missing}"
+            )
     if output_csv:
         _write_fact_report_csv(coverage, output_csv)
         print(f"Wrote concept-level coverage to {output_csv}")
@@ -1694,7 +1772,9 @@ def cmd_report_metric_coverage(
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
 
-    per_metric_success: Dict[str, int] = {getattr(cls, "id", cls.__name__): 0 for cls in metric_classes}
+    per_metric_success: Dict[str, int] = {
+        getattr(cls, "id", cls.__name__): 0 for cls in metric_classes
+    }
     all_success = 0
 
     for symbol in symbols:
@@ -1707,7 +1787,12 @@ def cmd_report_metric_coverage(
                 else:
                     result = metric.compute(symbol, fact_repo)
             except Exception as exc:  # pragma: no cover - defensive logging
-                LOGGER.error("Metric %s failed for %s: %s", getattr(metric_cls, "id", metric_cls.__name__), symbol, exc)
+                LOGGER.error(
+                    "Metric %s failed for %s: %s",
+                    getattr(metric_cls, "id", metric_cls.__name__),
+                    symbol,
+                    exc,
+                )
                 result = None
             if result is None:
                 symbol_ok = False
@@ -1766,12 +1851,12 @@ def _format_failure_reason(records: Sequence[logging.LogRecord], symbol: str) ->
 
     try:
         if isinstance(args, dict):
-            transformed = {key: transform(value) for key, value in args.items()}
-            return msg % transformed
+            transformed_map = {key: transform(value) for key, value in args.items()}
+            return msg % transformed_map
         if not isinstance(args, tuple):
             args = (args,)
-        transformed = tuple(transform(value) for value in args)
-        return msg % transformed
+        transformed_args = tuple(transform(value) for value in args)
+        return msg % transformed_args
     except Exception:
         return record.getMessage()
 
@@ -1806,7 +1891,17 @@ def _write_metric_failure_report_csv(
                 example = examples.get(metric_id, {}).get(reason)
                 example_symbol = example[0] if example else ""
                 example_cap = example[1] if example else None
-                writer.writerow([metric_id, reason, count, total_symbols, rate, example_symbol, example_cap or ""])
+                writer.writerow(
+                    [
+                        metric_id,
+                        reason,
+                        count,
+                        total_symbols,
+                        rate,
+                        example_symbol,
+                        example_cap or "",
+                    ]
+                )
 
 
 def cmd_report_metric_failures(
@@ -1827,8 +1922,7 @@ def cmd_report_metric_failures(
     listing_symbols = universe_repo.fetch_symbols_by_exchange(exchange_norm)
     if not listing_symbols:
         raise SystemExit(
-            f"No symbols found for exchange {exchange_norm}. "
-            "Load a universe first."
+            f"No symbols found for exchange {exchange_norm}. Load a universe first."
         )
     if symbols:
         selected: List[str] = []
@@ -1854,8 +1948,12 @@ def cmd_report_metric_failures(
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
 
-    failures: Dict[str, Counter] = {getattr(cls, "id", cls.__name__): Counter() for cls in metric_classes}
-    totals: Dict[str, int] = {getattr(cls, "id", cls.__name__): 0 for cls in metric_classes}
+    failures: Dict[str, Counter] = {
+        getattr(cls, "id", cls.__name__): Counter() for cls in metric_classes
+    }
+    totals: Dict[str, int] = {
+        getattr(cls, "id", cls.__name__): 0 for cls in metric_classes
+    }
     examples: Dict[str, Dict[str, tuple[str, Optional[float]]]] = {
         getattr(cls, "id", cls.__name__): {} for cls in metric_classes
     }
@@ -1895,15 +1993,21 @@ def cmd_report_metric_failures(
                         examples[metric_id][reason] = (symbol_upper, cap)
                     else:
                         current_cap = current[1]
-                        if cap is not None and (current_cap is None or cap > current_cap):
+                        if cap is not None and (
+                            current_cap is None or cap > current_cap
+                        ):
                             examples[metric_id][reason] = (symbol_upper, cap)
     finally:
         root_logger.removeHandler(handler)
 
     total_symbols = len(symbols)
-    metric_order = sorted(totals.keys(), key=lambda metric_id: (-totals.get(metric_id, 0), metric_id))
+    metric_order = sorted(
+        totals.keys(), key=lambda metric_id: (-totals.get(metric_id, 0), metric_id)
+    )
     scope_label = f"exchange {exchange_code.upper()}"
-    print(f"Metric failure reasons for {scope_label} (symbols={total_symbols}, metrics={len(metric_classes)})")
+    print(
+        f"Metric failure reasons for {scope_label} (symbols={total_symbols}, metrics={len(metric_classes)})"
+    )
     for metric_id in metric_order:
         total_failures = totals.get(metric_id, 0)
         print(f"- {metric_id}: failures={total_failures}/{total_symbols}")
@@ -1914,13 +2018,19 @@ def cmd_report_metric_failures(
             example = examples.get(metric_id, {}).get(reason)
             if example:
                 example_symbol, example_cap = example
-                cap_display = _format_value(example_cap) if example_cap is not None else "N/A"
-                print(f"    {reason}: {count} (example={example_symbol}, market_cap={cap_display})")
+                cap_display = (
+                    _format_value(example_cap) if example_cap is not None else "N/A"
+                )
+                print(
+                    f"    {reason}: {count} (example={example_symbol}, market_cap={cap_display})"
+                )
             else:
                 print(f"    {reason}: {count}")
 
     if output_csv:
-        _write_metric_failure_report_csv(failures, examples, total_symbols, metric_order, output_csv)
+        _write_metric_failure_report_csv(
+            failures, examples, total_symbols, metric_order, output_csv
+        )
         print(f"Wrote metric failure reasons to {output_csv}")
     return 0
 
@@ -1968,7 +2078,9 @@ def cmd_purge_us_nonfilers(database: str, apply: bool) -> int:
     with universe_repo._connect() as conn:
         us_symbols = [
             row[0]
-            for row in conn.execute("SELECT symbol FROM listings WHERE symbol LIKE '%.US'").fetchall()
+            for row in conn.execute(
+                "SELECT symbol FROM listings WHERE symbol LIKE '%.US'"
+            ).fetchall()
         ]
 
     eligible = set(_eligible_sec_filers(db_path))
@@ -1985,7 +2097,9 @@ def cmd_purge_us_nonfilers(database: str, apply: bool) -> int:
         return 0
 
     with universe_repo._connect() as conn:
-        conn.executemany("DELETE FROM listings WHERE symbol = ?", [(sym,) for sym in to_remove])
+        conn.executemany(
+            "DELETE FROM listings WHERE symbol = ?", [(sym,) for sym in to_remove]
+        )
     print(f"Deleted {len(to_remove)} US listings from listings table.")
     return 0
 
@@ -2187,7 +2301,9 @@ def cmd_run_screen_bulk(
     universe_names = {row[0].upper(): (row[1] or row[0].upper()) for row in name_rows}
     entity_labels: Dict[str, str] = {}
     passed_symbols: List[str] = []
-    criterion_values: Dict[str, Dict[str, float]] = {c.name: {} for c in definition.criteria}
+    criterion_values: Dict[str, Dict[str, float]] = {
+        c.name: {} for c in definition.criteria
+    }
 
     for symbol in symbols:
         symbol_upper = symbol.upper()
@@ -2195,7 +2311,11 @@ def cmd_run_screen_bulk(
         per_symbol_values: Dict[str, float] = {}
         label = entity_labels.get(symbol_upper)
         if label is None:
-            label = entity_repo.fetch(symbol_upper) or universe_names.get(symbol_upper) or symbol_upper
+            label = (
+                entity_repo.fetch(symbol_upper)
+                or universe_names.get(symbol_upper)
+                or symbol_upper
+            )
             entity_labels[symbol_upper] = label
         for criterion in definition.criteria:
             passed, left_value = evaluate_criterion_verbose(
@@ -2208,7 +2328,9 @@ def cmd_run_screen_bulk(
         if symbol_passed:
             passed_symbols.append(symbol_upper)
             for criterion in definition.criteria:
-                criterion_values[criterion.name][symbol_upper] = per_symbol_values[criterion.name]
+                criterion_values[criterion.name][symbol_upper] = per_symbol_values[
+                    criterion.name
+                ]
 
     if not passed_symbols:
         print("No symbols satisfied all criteria.")
@@ -2216,7 +2338,9 @@ def cmd_run_screen_bulk(
             _write_screen_csv(definition.criteria, [], {}, {}, {}, {}, {}, output_csv)
         return 1
 
-    selected_names = {symbol: entity_labels.get(symbol, symbol) for symbol in passed_symbols}
+    selected_names = {
+        symbol: entity_labels.get(symbol, symbol) for symbol in passed_symbols
+    }
     selected_descriptions: Dict[str, str] = {}
     selected_prices: Dict[str, str] = {}
     selected_price_currencies: Dict[str, str] = {}
@@ -2263,7 +2387,9 @@ def _print_screen_table(
     header = ["Criterion"] + list(symbols)
     rows: List[List[str]] = [header]
     rows.append(["Entity"] + [entity_names.get(symbol, symbol) for symbol in symbols])
-    rows.append(["Description"] + [descriptions.get(symbol, "N/A") for symbol in symbols])
+    rows.append(
+        ["Description"] + [descriptions.get(symbol, "N/A") for symbol in symbols]
+    )
     rows.append(["Price"] + [prices.get(symbol, "N/A") for symbol in symbols])
     for criterion in criteria:
         row = [criterion.name]
@@ -2294,10 +2420,19 @@ def _write_screen_csv(
     with open(path, "w", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(["Criterion", *symbols])
-        writer.writerow(["Entity", *[entity_names.get(symbol, symbol) for symbol in symbols]])
-        writer.writerow(["Description", *[descriptions.get(symbol, "N/A") for symbol in symbols]])
+        writer.writerow(
+            ["Entity", *[entity_names.get(symbol, symbol) for symbol in symbols]]
+        )
+        writer.writerow(
+            ["Description", *[descriptions.get(symbol, "N/A") for symbol in symbols]]
+        )
         writer.writerow(["Price", *[prices.get(symbol, "N/A") for symbol in symbols]])
-        writer.writerow(["Price Currency", *[price_currencies.get(symbol, "N/A") for symbol in symbols]])
+        writer.writerow(
+            [
+                "Price Currency",
+                *[price_currencies.get(symbol, "N/A") for symbol in symbols],
+            ]
+        )
         for criterion in criteria:
             row = [criterion.name]
             for symbol in symbols:
@@ -2309,11 +2444,29 @@ def _write_screen_csv(
 def _write_fact_report_csv(report: Sequence[MetricCoverage], path: str) -> None:
     with open(path, "w", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["metric_id", "concept", "missing", "stale", "fresh", "fully_covered", "total_symbols"])
+        writer.writerow(
+            [
+                "metric_id",
+                "concept",
+                "missing",
+                "stale",
+                "fresh",
+                "fully_covered",
+                "total_symbols",
+            ]
+        )
         for entry in report:
             if not entry.concepts:
                 writer.writerow(
-                    [entry.metric_id, "", 0, 0, entry.total_symbols, entry.fully_covered, entry.total_symbols]
+                    [
+                        entry.metric_id,
+                        "",
+                        0,
+                        0,
+                        entry.total_symbols,
+                        entry.fully_covered,
+                        entry.total_symbols,
+                    ]
                 )
                 continue
             for concept in entry.concepts:

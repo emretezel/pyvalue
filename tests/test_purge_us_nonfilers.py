@@ -1,7 +1,5 @@
 """Tests for purge-us-nonfilers CLI."""
 
-import json
-
 from pyvalue.cli import cmd_purge_us_nonfilers
 from pyvalue.storage import FundamentalsRepository, UniverseRepository
 from pyvalue.universe import Listing
@@ -27,7 +25,15 @@ def _seed_company_facts(db_path):
                 "Assets": {
                     "units": {
                         "USD": [
-                            {"end": "2024-12-31", "val": 1, "accn": "000", "fy": 2024, "fp": "FY", "form": "10-K", "filed": "2025-01-01"}
+                            {
+                                "end": "2024-12-31",
+                                "val": 1,
+                                "accn": "000",
+                                "fy": 2024,
+                                "fp": "FY",
+                                "form": "10-K",
+                                "filed": "2025-01-01",
+                            }
                         ]
                     }
                 }
@@ -50,7 +56,9 @@ def test_purge_us_nonfilers_dry_run(tmp_path, capsys):
     # Ensure listings intact
     universe = UniverseRepository(db_path)
     with universe._connect() as conn:
-        count = conn.execute("SELECT COUNT(*) FROM listings WHERE symbol LIKE '%.US'").fetchone()[0]
+        count = conn.execute(
+            "SELECT COUNT(*) FROM listings WHERE symbol LIKE '%.US'"
+        ).fetchone()[0]
     assert count == 2
 
 
@@ -64,5 +72,10 @@ def test_purge_us_nonfilers_apply(tmp_path):
     assert exit_code == 0
     universe = UniverseRepository(db_path)
     with universe._connect() as conn:
-        symbols = [row[0] for row in conn.execute("SELECT symbol FROM listings WHERE symbol LIKE '%.US'")]
+        symbols = [
+            row[0]
+            for row in conn.execute(
+                "SELECT symbol FROM listings WHERE symbol LIKE '%.US'"
+            )
+        ]
     assert symbols == ["FILER.US"]

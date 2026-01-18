@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sqlite3
-from typing import Callable, List, Sequence, Tuple, Union
+from typing import Callable, List, Sequence, Union
 
 Migration = Callable[[sqlite3.Connection], None]
 
@@ -604,7 +604,9 @@ def _migration_015_drop_region_columns(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE fundamentals_raw_old")
 
 
-def _migration_016_drop_exchange_metadata_and_company_facts(conn: sqlite3.Connection) -> None:
+def _migration_016_drop_exchange_metadata_and_company_facts(
+    conn: sqlite3.Connection,
+) -> None:
     """Drop unused exchange metadata and company facts tables."""
 
     conn.execute("DROP TABLE IF EXISTS exchange_metadata")

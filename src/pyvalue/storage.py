@@ -200,7 +200,14 @@ class FundamentalsRepository(SQLiteStore):
                     data = excluded.data,
                     fetched_at = excluded.fetched_at
                 """,
-                (provider.upper(), symbol.upper(), currency, exchange, serialized, fetched_at),
+                (
+                    provider.upper(),
+                    symbol.upper(),
+                    currency,
+                    exchange,
+                    serialized,
+                    fetched_at,
+                ),
             )
 
     def fetch(self, provider: str, symbol: str) -> Optional[Dict[str, Any]]:
@@ -216,7 +223,9 @@ class FundamentalsRepository(SQLiteStore):
             return None
         return json.loads(row[0])
 
-    def fetch_record(self, provider: str, symbol: str) -> Optional[Tuple[str, Optional[str], Dict[str, Any]]]:
+    def fetch_record(
+        self, provider: str, symbol: str
+    ) -> Optional[Tuple[str, Optional[str], Dict[str, Any]]]:
         with self._connect() as conn:
             row = conn.execute(
                 """
@@ -275,7 +284,9 @@ class FundamentalsFetchStateRepository(SQLiteStore):
                 """
             )
 
-    def fetch(self, provider: str, symbol: str) -> Optional[Dict[str, Optional[str]]]:
+    def fetch(
+        self, provider: str, symbol: str
+    ) -> Optional[Dict[str, Optional[str] | int]]:
         self.initialize_schema()
         with self._connect() as conn:
             row = conn.execute(
@@ -336,7 +347,8 @@ class FundamentalsFetchStateRepository(SQLiteStore):
     ) -> None:
         self.initialize_schema()
         state = self.fetch(provider, symbol)
-        attempts = (state.get("attempts") if state else 0) or 0
+        attempts_value = state.get("attempts") if state else 0
+        attempts = int(attempts_value or 0)
         attempts += 1
         backoff = min(base_backoff_seconds * (2 ** (attempts - 1)), max_backoff_seconds)
         now = datetime.now(timezone.utc)

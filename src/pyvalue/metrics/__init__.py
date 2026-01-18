@@ -17,6 +17,7 @@ from .market_capitalization import MarketCapitalizationMetric
 from .price_to_fcf import PriceToFCFMetric
 from .roc_greenblatt import ROCGreenblattMetric
 from .roe_greenblatt import ROEGreenblattMetric
+from .net_debt_to_ebitda import NetDebtToEBITDAMetric
 
 REGISTRY = {
     WorkingCapitalMetric.id: WorkingCapitalMetric,
@@ -30,6 +31,7 @@ REGISTRY = {
     EarningsYieldMetric.id: EarningsYieldMetric,
     MarketCapitalizationMetric.id: MarketCapitalizationMetric,
     PriceToFCFMetric.id: PriceToFCFMetric,
+    NetDebtToEBITDAMetric.id: NetDebtToEBITDAMetric,
     ROCGreenblattMetric.id: ROCGreenblattMetric,
     ROEGreenblattMetric.id: ROEGreenblattMetric,
 }
@@ -48,6 +50,7 @@ __all__ = [
     "EarningsYieldMetric",
     "MarketCapitalizationMetric",
     "PriceToFCFMetric",
+    "NetDebtToEBITDAMetric",
     "ROCGreenblattMetric",
     "ROEGreenblattMetric",
     "REGISTRY",

@@ -6,15 +6,15 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Optional
 
 import logging
 
-from pyvalue.metrics.base import Metric, MetricResult
+from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import is_recent_fact, latest_quarterly_records
 from pyvalue.fx import FXRateStore
 from pyvalue.marketdata.base import PriceData
-from pyvalue.storage import FinancialFactsRepository, MarketDataRepository
+from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
 
 EPS_CONCEPTS = ["EarningsPerShare"]
 
@@ -63,8 +63,14 @@ class EarningsYieldMetric:
             return None
         price = price_data.price
         target_currency = self._select_currency(quarterly_records, eps_currency)
-        if target_currency and price_data.currency and price_data.currency != target_currency:
-            converted = FXRateStore().convert(price, price_data.currency, target_currency, price_data.as_of)
+        if (
+            target_currency
+            and price_data.currency
+            and price_data.currency != target_currency
+        ):
+            converted = FXRateStore().convert(
+                price, price_data.currency, target_currency, price_data.as_of
+            )
             if converted is None:
                 LOGGER.warning(
                     "earnings_yield: FX conversion failed %s -> %s for %s",
@@ -78,18 +84,30 @@ class EarningsYieldMetric:
             LOGGER.warning("earnings_yield: non-positive price after FX for %s", symbol)
             return None
         yield_value = ttm_eps / price
-        return MetricResult(symbol=symbol, metric_id=self.id, value=yield_value, as_of=as_of)
+        return MetricResult(
+            symbol=symbol, metric_id=self.id, value=yield_value, as_of=as_of
+        )
 
-    def _latest_quarters(self, symbol: str, repo: FinancialFactsRepository) -> List:
-        return latest_quarterly_records(repo.facts_for_concept, symbol, EPS_CONCEPTS, periods=4)
+    def _latest_quarters(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> list[FactRecord]:
+        return latest_quarterly_records(
+            repo.facts_for_concept, symbol, EPS_CONCEPTS, periods=4
+        )
 
-    def _latest_fy_eps(self, symbol: str, repo: FinancialFactsRepository) -> Optional:
-        records = repo.facts_for_concept(symbol, "EarningsPerShare", fiscal_period="FY", limit=1)
+    def _latest_fy_eps(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> Optional[FactRecord]:
+        records = repo.facts_for_concept(
+            symbol, "EarningsPerShare", fiscal_period="FY", limit=1
+        )
         if records:
             return records[0]
         return None
 
-    def _latest_snapshot(self, market_repo: MarketDataRepository, symbol: str) -> Optional[PriceData]:
+    def _latest_snapshot(
+        self, market_repo: MarketDataRepository, symbol: str
+    ) -> Optional[PriceData]:
         if hasattr(market_repo, "latest_snapshot"):
             snapshot = market_repo.latest_snapshot(symbol)
             if snapshot:
@@ -103,7 +121,9 @@ class EarningsYieldMetric:
                 return PriceData(symbol=symbol, price=price, as_of=as_of)
         return None
 
-    def _select_currency(self, records: List, fallback: Optional[str]) -> Optional[str]:
+    def _select_currency(
+        self, records: list[FactRecord], fallback: Optional[str]
+    ) -> Optional[str]:
         for record in records:
             code = getattr(record, "currency", None)
             if code:

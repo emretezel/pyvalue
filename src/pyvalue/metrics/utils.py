@@ -6,7 +6,7 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from datetime import date, timedelta
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Sequence
 
 from pyvalue.storage import FactRecord
 
@@ -34,7 +34,9 @@ def is_recent_fact(
     return end_date >= cutoff
 
 
-def has_recent_fact(repo, symbol: str, concepts: Sequence[str], max_age_days: int = MAX_FACT_AGE_DAYS) -> bool:
+def has_recent_fact(
+    repo, symbol: str, concepts: Sequence[str], max_age_days: int = MAX_FACT_AGE_DAYS
+) -> bool:
     """Return True if any concept has a recent fact regardless of fiscal period."""
 
     for concept in concepts:

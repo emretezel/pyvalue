@@ -5,7 +5,7 @@ Author: Emre Tezel
 
 import pytest
 
-from pyvalue.universe import USUniverseLoader, Listing
+from pyvalue.universe import USUniverseLoader
 from pyvalue.universe.us import NASDAQ_LISTED_PATH, OTHER_LISTED_PATH
 
 
@@ -38,11 +38,18 @@ def test_loader_combines_files(nasdaq_payload, other_payload, monkeypatch):
     def fetcher(path: str) -> str:
         return payloads[path]
 
-    loader = USUniverseLoader(fetcher=fetcher, allowed_exchanges=["NASDAQ", "NYSE", "NYSE Arca"])
+    loader = USUniverseLoader(
+        fetcher=fetcher, allowed_exchanges=["NASDAQ", "NYSE", "NYSE Arca"]
+    )
 
     listings = loader.load()
 
-    assert [listing.symbol for listing in listings] == ["AAPL.US", "BRK.A.US", "IVV.US", "MSFT.US"]
+    assert [listing.symbol for listing in listings] == [
+        "AAPL.US",
+        "BRK.A.US",
+        "IVV.US",
+        "MSFT.US",
+    ]
 
     berkshire = next(item for item in listings if item.symbol == "BRK.A.US")
     assert berkshire.exchange == "NYSE"
@@ -64,7 +71,10 @@ File Creation Time: 20230901
         OTHER_LISTED_PATH: other_payload,
     }
 
-    loader = USUniverseLoader(fetcher=lambda path: payloads[path], allowed_exchanges=["NASDAQ", "NYSE", "NYSE Arca"])
+    loader = USUniverseLoader(
+        fetcher=lambda path: payloads[path],
+        allowed_exchanges=["NASDAQ", "NYSE", "NYSE Arca"],
+    )
 
     listings = loader.load()
 

@@ -48,7 +48,9 @@ def test_long_term_debt_metric_uses_other_long_term_debt_fallback(tmp_path):
             }
         }
     }
-    normalizer = SECFactsNormalizer(concepts=["OtherLongTermDebt", "LongTermDebtCurrent"])
+    normalizer = SECFactsNormalizer(
+        concepts=["OtherLongTermDebt", "LongTermDebtCurrent"]
+    )
     records = normalizer.normalize(payload, symbol="TEST.US", cik="CIK0000")
 
     repo = FinancialFactsRepository(tmp_path / "facts.db")
@@ -135,7 +137,9 @@ def test_long_term_debt_metric_uses_operating_lease_noncurrent_fallback(tmp_path
             }
         }
     }
-    normalizer = SECFactsNormalizer(concepts=["OperatingLeaseLiabilityNoncurrent", "LongTermDebtCurrent"])
+    normalizer = SECFactsNormalizer(
+        concepts=["OperatingLeaseLiabilityNoncurrent", "LongTermDebtCurrent"]
+    )
     records = normalizer.normalize(payload, symbol="TEST.US", cik="CIK0000")
 
     repo = FinancialFactsRepository(tmp_path / "facts.db")

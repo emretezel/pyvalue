@@ -75,7 +75,7 @@ class USUniverseLoader:
             # Deduplicate by ticker so the latest row for a symbol wins.
             listings[listing.symbol] = listing
         LOGGER.info("Loaded %s symbols from SEC/Nasdaq feeds", len(listings))
-        return sorted(listings.values(), key=lambda l: l.symbol)
+        return sorted(listings.values(), key=lambda listing: listing.symbol)
 
     def _download_and_parse(self, path: str, source: str) -> List[Mapping[str, str]]:
         # Simple helper that fetches a remote table and parses it.
@@ -95,7 +95,9 @@ class USUniverseLoader:
 
     def _parse_pipe_table(self, body: str, source: str) -> List[Mapping[str, str]]:
         # Nasdaq symbol files end with a footer row. We drop incomplete rows.
-        cleaned_lines = [line for line in body.splitlines() if line and "File Creation" not in line]
+        cleaned_lines = [
+            line for line in body.splitlines() if line and "File Creation" not in line
+        ]
         reader = csv.DictReader(io.StringIO("\n".join(cleaned_lines)), delimiter="|")
         rows: List[Mapping[str, str]] = []
         for row in reader:
@@ -128,7 +130,7 @@ class USUniverseLoader:
         except ValueError:
             round_lot = None
 
-        is_etf = (row.get("ETF") or row.get("ETF?" ) or "N").strip().upper() == "Y"
+        is_etf = (row.get("ETF") or row.get("ETF?") or "N").strip().upper() == "Y"
         market_category = row.get("Market Category") or row.get("Tier") or None
 
         qualified = symbol.upper()
@@ -137,7 +139,9 @@ class USUniverseLoader:
 
         return Listing(
             symbol=qualified,
-            security_name=(row.get("Security Name") or row.get("Company Name") or "").strip(),
+            security_name=(
+                row.get("Security Name") or row.get("Company Name") or ""
+            ).strip(),
             exchange=exchange,
             market_category=market_category,
             is_etf=is_etf,

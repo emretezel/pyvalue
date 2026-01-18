@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import logging
 from typing import Dict, List, Optional
 
-import requests
+import requests  # type: ignore[import-untyped]
 
 LOGGER = logging.getLogger(__name__)
 
@@ -27,7 +27,9 @@ class ExchangeSymbol:
 class EODHDFundamentalsClient:
     """Download fundamentals and exchange metadata from EODHD."""
 
-    def __init__(self, api_key: str, session: Optional[requests.Session] = None) -> None:
+    def __init__(
+        self, api_key: str, session: Optional[requests.Session] = None
+    ) -> None:
         if not api_key:
             raise ValueError("EODHD API key is required")
         self.api_key = api_key
@@ -43,7 +45,9 @@ class EODHDFundamentalsClient:
             raise ValueError(f"Unexpected EODHD exchange response: {payload}")
         return payload
 
-    def exchange_metadata(self, code: str, timeout: int = DEFAULT_TIMEOUT) -> Optional[Dict]:
+    def exchange_metadata(
+        self, code: str, timeout: int = DEFAULT_TIMEOUT
+    ) -> Optional[Dict]:
         payload = self.list_exchanges(timeout=timeout)
         for entry in payload:
             if not isinstance(entry, dict):
@@ -52,7 +56,9 @@ class EODHDFundamentalsClient:
                 return entry
         return None
 
-    def list_symbols(self, exchange_code: str, timeout: int = DEFAULT_TIMEOUT) -> List[Dict]:
+    def list_symbols(
+        self, exchange_code: str, timeout: int = DEFAULT_TIMEOUT
+    ) -> List[Dict]:
         code = exchange_code.upper()
         url = f"{BASE_URL}/exchange-symbol-list/{code}"
         params = {
@@ -81,7 +87,9 @@ class EODHDFundamentalsClient:
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):
-            raise ValueError(f"Unexpected EODHD fundamentals response for {ticker}: {payload}")
+            raise ValueError(
+                f"Unexpected EODHD fundamentals response for {ticker}: {payload}"
+            )
         return payload
 
     def _format_symbol(self, symbol: str, exchange_code: Optional[str]) -> str:

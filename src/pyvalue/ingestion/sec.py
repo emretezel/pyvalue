@@ -6,12 +6,11 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
 import logging
 import os
 from typing import Dict, Optional
 
-import requests
+import requests  # type: ignore[import-untyped]
 
 from pyvalue.config import Config
 
@@ -50,7 +49,9 @@ class SECCompanyFactsClient:
         session: Optional[requests.Session] = None,
     ) -> None:
         cfg = Config()
-        ua = user_agent or cfg.sec_user_agent or os.environ.get("PYVALUE_SEC_USER_AGENT")
+        ua = (
+            user_agent or cfg.sec_user_agent or os.environ.get("PYVALUE_SEC_USER_AGENT")
+        )
         if not ua:
             raise ValueError(
                 "SEC user agent is required. Provide --user-agent, set [sec].user_agent in config, "
@@ -60,7 +61,9 @@ class SECCompanyFactsClient:
         self.session.headers.update({"User-Agent": ua, "Accept": "application/json"})
         self._ticker_cache: Dict[str, CompanyInfo] = {}
 
-    def resolve_company(self, symbol: str, timeout: int = DEFAULT_TIMEOUT) -> CompanyInfo:
+    def resolve_company(
+        self, symbol: str, timeout: int = DEFAULT_TIMEOUT
+    ) -> CompanyInfo:
         """Lookup the CIK associated with the given ticker."""
 
         normalized = symbol.upper().strip()

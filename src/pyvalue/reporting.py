@@ -6,7 +6,7 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Sequence, Tuple, Type
+from typing import Dict, List, Sequence, Tuple, Type
 
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS, is_recent_fact
@@ -33,7 +33,7 @@ class MetricCoverage:
 
 
 def compute_fact_coverage(
-    fact_repo: FinancialFactsRepository,
+    fact_repo: FinancialFactsRepository | RegionFactsRepository,
     symbols: Sequence[str],
     metric_classes: Sequence[Type],
     *,
@@ -48,9 +48,11 @@ def compute_fact_coverage(
         max_age_days: Maximum allowed age (days) for a fact to be considered fresh.
     """
 
-    fact_repo.initialize_schema()
-    if not isinstance(fact_repo, RegionFactsRepository):
-        fact_repo = RegionFactsRepository(fact_repo)
+    if isinstance(fact_repo, RegionFactsRepository):
+        fact_repo_wrapped = fact_repo
+    else:
+        fact_repo.initialize_schema()
+        fact_repo_wrapped = RegionFactsRepository(fact_repo)
     symbols_upper = [symbol.upper() for symbol in symbols]
     coverage: List[MetricCoverage] = []
     fact_cache: Dict[Tuple[str, str], FactRecord | None] = {}
@@ -65,7 +67,9 @@ def compute_fact_coverage(
             ordered_concepts.append(concept)
             seen.add(concept)
 
-        concept_counts: Dict[str, Dict[str, int]] = {concept: {"missing": 0, "stale": 0} for concept in ordered_concepts}
+        concept_counts: Dict[str, Dict[str, int]] = {
+            concept: {"missing": 0, "stale": 0} for concept in ordered_concepts
+        }
         fully_covered = len(symbols_upper) if not ordered_concepts else 0
 
         for symbol in symbols_upper:
@@ -76,7 +80,7 @@ def compute_fact_coverage(
                 key = (symbol, concept)
                 record = fact_cache.get(key)
                 if key not in fact_cache:
-                    record = fact_repo.latest_fact(symbol, concept)
+                    record = fact_repo_wrapped.latest_fact(symbol, concept)
                     fact_cache[key] = record
 
                 if record is None:
@@ -96,7 +100,11 @@ def compute_fact_coverage(
                 total_symbols=len(symbols_upper),
                 fully_covered=fully_covered,
                 concepts=[
-                    ConceptCoverage(concept=concept, missing=concept_counts[concept]["missing"], stale=concept_counts[concept]["stale"])
+                    ConceptCoverage(
+                        concept=concept,
+                        missing=concept_counts[concept]["missing"],
+                        stale=concept_counts[concept]["stale"],
+                    )
                     for concept in ordered_concepts
                 ],
             )

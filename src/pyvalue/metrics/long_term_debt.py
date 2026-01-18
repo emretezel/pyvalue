@@ -10,7 +10,7 @@ from typing import Optional
 
 import logging
 
-from pyvalue.metrics.base import Metric, MetricResult
+from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import is_recent_fact
 from pyvalue.storage import FinancialFactsRepository
 
@@ -22,7 +22,9 @@ class LongTermDebtMetric:
     id: str = "long_term_debt"
     required_concepts = ("LongTermDebt",)
 
-    def compute(self, symbol: str, repo: FinancialFactsRepository) -> Optional[MetricResult]:
+    def compute(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> Optional[MetricResult]:
         fact = repo.latest_fact(symbol, "LongTermDebt")
         if fact is not None and is_recent_fact(fact):
             return MetricResult(

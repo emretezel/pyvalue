@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-import requests
+import requests  # type: ignore[import-untyped]
 
 from pyvalue.marketdata.base import MarketDataProvider, PriceData
 
@@ -20,7 +20,9 @@ API_URL = "https://eodhd.com/api/eod"
 class EODHDProvider(MarketDataProvider):
     """Fetch latest EOD price data from the EODHD API."""
 
-    def __init__(self, api_key: str, session: Optional[requests.Session] = None) -> None:
+    def __init__(
+        self, api_key: str, session: Optional[requests.Session] = None
+    ) -> None:
         if not api_key:
             raise ValueError("EODHD API key is required")
         self.api_key = api_key
@@ -39,8 +41,12 @@ class EODHDProvider(MarketDataProvider):
         entry = payload[-1]
         price = self._extract_float(entry, "Close")
         if price is None:
-            raise ValueError(f"Missing Close price in EODHD response for {symbol}: {entry}")
-        currency = (entry.get("currency") or entry.get("Currency") or "").upper() or None
+            raise ValueError(
+                f"Missing Close price in EODHD response for {symbol}: {entry}"
+            )
+        currency = (
+            entry.get("currency") or entry.get("Currency") or ""
+        ).upper() or None
         gbx_hint = suffix in {"LSE", "LON", "XLON"}
         if currency in {"GBX", "GBP0.01"}:
             price = price / 100.0
@@ -50,7 +56,13 @@ class EODHDProvider(MarketDataProvider):
             currency = "GBP"
         as_of = entry.get("date") or entry.get("Date")
         volume = self._extract_int(entry, "Volume")
-        return PriceData(symbol=symbol.upper(), price=price, as_of=as_of, volume=volume, currency=currency)
+        return PriceData(
+            symbol=symbol.upper(),
+            price=price,
+            as_of=as_of,
+            volume=volume,
+            currency=currency,
+        )
 
     def _format_symbol(self, symbol: str) -> str:
         if "." in symbol:

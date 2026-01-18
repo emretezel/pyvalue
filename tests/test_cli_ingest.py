@@ -2,6 +2,7 @@
 
 Author: Emre Tezel
 """
+
 from datetime import date, timedelta
 from types import SimpleNamespace
 
@@ -49,7 +50,9 @@ def test_cmd_ingest_fundamentals_sec(monkeypatch, tmp_path):
             calls["ua"] = user_agent
 
         def resolve_company(self, symbol):
-            return SimpleNamespace(symbol=symbol.upper(), cik="CIK0000320193", name="Apple")
+            return SimpleNamespace(
+                symbol=symbol.upper(), cik="CIK0000320193", name="Apple"
+            )
 
         def fetch_company_facts(self, cik):
             calls["cik"] = cik
@@ -175,7 +178,9 @@ def test_cmd_ingest_fundamentals_bulk_eodhd_with_exchange(monkeypatch, tmp_path)
     assert repo.fetch("EODHD", "CCC.LSE")["General"]["Name"] == "CCC.LSE"
 
 
-def test_cmd_ingest_fundamentals_bulk_eodhd_with_exchange_symbols(monkeypatch, tmp_path):
+def test_cmd_ingest_fundamentals_bulk_eodhd_with_exchange_symbols(
+    monkeypatch, tmp_path
+):
     db_path = tmp_path / "bulkfunds_region.db"
     universe_repo = UniverseRepository(db_path)
     universe_repo.initialize_schema()
@@ -216,6 +221,7 @@ def test_cmd_ingest_fundamentals_bulk_eodhd_with_exchange_symbols(monkeypatch, t
     assert repo.fetch("EODHD", "AAA.US")["General"]["Name"] == "AAA.US"
     assert repo.fetch("EODHD", "BBB.US")["General"]["Name"] == "BBB.US"
 
+
 def test_cmd_ingest_fundamentals_bulk_sec(monkeypatch, tmp_path):
     db_path = tmp_path / "bulk.db"
     universe_repo = UniverseRepository(db_path)
@@ -239,7 +245,9 @@ def test_cmd_ingest_fundamentals_bulk_sec(monkeypatch, tmp_path):
             return {"cik": cik}
 
     fake_client = FakeClient()
-    monkeypatch.setattr(cli, "SECCompanyFactsClient", lambda user_agent=None: fake_client)
+    monkeypatch.setattr(
+        cli, "SECCompanyFactsClient", lambda user_agent=None: fake_client
+    )
 
     rc = cli.cmd_ingest_fundamentals_bulk(
         provider="SEC",
@@ -280,14 +288,26 @@ def test_cmd_load_universe_eodhd(monkeypatch, tmp_path):
 
         def load(self):
             return [
-                Listing(symbol="AAA.LSE", security_name="AAA plc", exchange="LSE", currency="GBX"),
-                Listing(symbol="ETF1.LSE", security_name="ETF", exchange="LSE", is_etf=True, currency="GBX"),
+                Listing(
+                    symbol="AAA.LSE",
+                    security_name="AAA plc",
+                    exchange="LSE",
+                    currency="GBX",
+                ),
+                Listing(
+                    symbol="ETF1.LSE",
+                    security_name="ETF",
+                    exchange="LSE",
+                    is_etf=True,
+                    currency="GBX",
+                ),
             ]
 
     monkeypatch.setattr(cli, "UKUniverseLoader", FakeLoader)
     monkeypatch.setattr(cli, "Config", lambda: SimpleNamespace(eodhd_api_key="KEY"))
 
     db_path = tmp_path / "uk.db"
+
     class FakeClient:
         def __init__(self, api_key):
             calls["meta_api_key"] = api_key
@@ -311,8 +331,8 @@ def test_cmd_load_universe_eodhd(monkeypatch, tmp_path):
     assert calls["api_key"] == "KEY"
     assert calls["exchange_code"] == "LSE"
     assert calls["include_etfs"] is False
-    assert calls["allowed_currencies"] == {"GBP"}
-    assert calls["include_exchanges"] == {"LSE"}
+    assert calls["allowed_currencies"] == ["GBP"]
+    assert calls["include_exchanges"] == ["LSE"]
 
 
 def test_cmd_ingest_fundamentals_bulk_uses_exchange_listings(monkeypatch, tmp_path):
@@ -327,7 +347,9 @@ def test_cmd_ingest_fundamentals_bulk_uses_exchange_listings(monkeypatch, tmp_pa
             return {"General": {"CurrencyCode": "USD"}}
 
         def list_symbols(self, exchange_code):
-            raise AssertionError("Should not call list_symbols for exchange listings path")
+            raise AssertionError(
+                "Should not call list_symbols for exchange listings path"
+            )
 
     monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
     monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
@@ -394,7 +416,9 @@ def test_cmd_ingest_fundamentals_bulk_skips_fresh_and_backoff(monkeypatch, tmp_p
 
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert("EODHD", "AAA.US", {"General": {"CurrencyCode": "USD"}}, exchange="US")
+    fund_repo.upsert(
+        "EODHD", "AAA.US", {"General": {"CurrencyCode": "USD"}}, exchange="US"
+    )
 
     state_repo = FundamentalsFetchStateRepository(db_path)
     state_repo.initialize_schema()
@@ -428,6 +452,7 @@ def test_cmd_ingest_fundamentals_bulk_skips_fresh_and_backoff(monkeypatch, tmp_p
 
     assert rc == 0
     assert calls["fetched"] == [("BBB.US", None)]
+
 
 def test_cmd_update_market_data_bulk(monkeypatch, tmp_path):
     db_path = tmp_path / "marketbulk.db"
@@ -489,6 +514,7 @@ def test_cmd_update_market_data_bulk_with_exchange(monkeypatch, tmp_path):
     assert rc == 0
     assert calls == [("AAA", "AAA.LSE")]
 
+
 def test_cmd_compute_metrics_bulk(monkeypatch, tmp_path):
     db_path = tmp_path / "metricsbulk.db"
     universe_repo = UniverseRepository(db_path)
@@ -513,7 +539,9 @@ def test_cmd_compute_metrics_bulk(monkeypatch, tmp_path):
         uses_market_data = False
 
         def compute(self, symbol, repo):
-            return MetricResult(symbol=symbol, metric_id=self.id, value=len(symbol), as_of="2024-01-01")
+            return MetricResult(
+                symbol=symbol, metric_id=self.id, value=len(symbol), as_of="2024-01-01"
+            )
 
     monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
 
@@ -548,7 +576,9 @@ def test_cmd_compute_metrics_bulk_with_exchange(monkeypatch, tmp_path):
         uses_market_data = False
 
         def compute(self, symbol, repo):
-            return MetricResult(symbol=symbol, metric_id=self.id, value=1.0, as_of="2024-01-01")
+            return MetricResult(
+                symbol=symbol, metric_id=self.id, value=1.0, as_of="2024-01-01"
+            )
 
     monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
 
@@ -561,9 +591,11 @@ def test_cmd_compute_metrics_bulk_with_exchange(monkeypatch, tmp_path):
 
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
-    rows = metrics_repo._connect().execute(
-        "SELECT symbol FROM metrics ORDER BY symbol"
-    ).fetchall()
+    rows = (
+        metrics_repo._connect()
+        .execute("SELECT symbol FROM metrics ORDER BY symbol")
+        .fetchall()
+    )
     assert [row[0] for row in rows] == ["CCC.LSE"]
 
 
@@ -579,7 +611,12 @@ def test_cmd_compute_metrics_bulk_requires_listings(monkeypatch, tmp_path):
     fact_repo.replace_facts(
         "AAA.LSE",
         [
-            make_fact(symbol="AAA.LSE", concept="NetIncomeLoss", end_date="2023-12-31", value=10.0)
+            make_fact(
+                symbol="AAA.LSE",
+                concept="NetIncomeLoss",
+                end_date="2023-12-31",
+                value=10.0,
+            )
         ],
     )
 
@@ -592,7 +629,9 @@ def test_cmd_compute_metrics_bulk_requires_listings(monkeypatch, tmp_path):
         uses_market_data = False
 
         def compute(self, symbol, repo):
-            return MetricResult(symbol=symbol, metric_id=self.id, value=len(symbol), as_of="2024-01-01")
+            return MetricResult(
+                symbol=symbol, metric_id=self.id, value=len(symbol), as_of="2024-01-01"
+            )
 
     monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
 
@@ -620,6 +659,7 @@ def test_cmd_clear_fundamentals_raw(tmp_path):
     with repo._connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM fundamentals_raw").fetchone()[0] == 0
 
+
 def test_cmd_normalize_fundamentals_sec(monkeypatch, tmp_path):
     db_path = tmp_path / "facts.db"
     fund_repo = FundamentalsRepository(db_path)
@@ -632,7 +672,6 @@ def test_cmd_normalize_fundamentals_sec(monkeypatch, tmp_path):
 
         def normalize(self, payload, symbol, cik=None):
             self.calls.append((payload, symbol, cik))
-            from pyvalue.storage import FactRecord
 
             return [
                 make_fact(
@@ -657,13 +696,16 @@ def test_cmd_normalize_fundamentals_sec(monkeypatch, tmp_path):
 
     result_repo = FinancialFactsRepository(db_path)
     result_repo.initialize_schema()
-    rows = result_repo._connect().execute(
-        "SELECT concept, value FROM financial_facts WHERE symbol='AAPL.US'"
-    ).fetchall()
+    rows = (
+        result_repo._connect()
+        .execute("SELECT concept, value FROM financial_facts WHERE symbol='AAPL.US'")
+        .fetchall()
+    )
     assert [(row[0], row[1]) for row in rows] == [("NetIncomeLoss", 123.0)]
     entity_repo = EntityMetadataRepository(db_path)
     entity_repo.initialize_schema()
     assert entity_repo.fetch("AAPL.US") == "Apple Inc"
+
 
 def test_cmd_normalize_fundamentals_bulk_sec(monkeypatch, tmp_path):
     db_path = tmp_path / "facts.db"
@@ -683,7 +725,13 @@ def test_cmd_normalize_fundamentals_bulk_sec(monkeypatch, tmp_path):
     class DummyNormalizer:
         def normalize(self, payload, symbol, cik=None):
             return [
-                make_fact(symbol=symbol, cik=cik, concept="Dummy", end_date="2023-12-31", value=len(symbol))
+                make_fact(
+                    symbol=symbol,
+                    cik=cik,
+                    concept="Dummy",
+                    end_date="2023-12-31",
+                    value=len(symbol),
+                )
             ]
 
     normalization_repo = FinancialFactsRepository(db_path)
@@ -732,7 +780,9 @@ def test_cmd_normalize_fundamentals_bulk_with_exchange(monkeypatch, tmp_path):
     class DummyNormalizer:
         def normalize(self, payload, symbol, cik=None):
             return [
-                make_fact(symbol=symbol, concept="Dummy", end_date="2023-12-31", value=1.0)
+                make_fact(
+                    symbol=symbol, concept="Dummy", end_date="2023-12-31", value=1.0
+                )
             ]
 
     monkeypatch.setattr(cli, "SECFactsNormalizer", lambda: DummyNormalizer())
@@ -746,9 +796,11 @@ def test_cmd_normalize_fundamentals_bulk_with_exchange(monkeypatch, tmp_path):
 
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
-    rows = fact_repo._connect().execute(
-        "SELECT symbol FROM financial_facts ORDER BY symbol"
-    ).fetchall()
+    rows = (
+        fact_repo._connect()
+        .execute("SELECT symbol FROM financial_facts ORDER BY symbol")
+        .fetchall()
+    )
     assert [row[0] for row in rows] == ["AAA.US", "BBB.US"]
 
 
@@ -785,13 +837,16 @@ def test_cmd_normalize_fundamentals_eodhd(monkeypatch, tmp_path):
 
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
-    rows = fact_repo._connect().execute(
-        "SELECT concept, value FROM financial_facts WHERE symbol='SHEL.LSE'"
-    ).fetchall()
+    rows = (
+        fact_repo._connect()
+        .execute("SELECT concept, value FROM financial_facts WHERE symbol='SHEL.LSE'")
+        .fetchall()
+    )
     assert [(row[0], row[1]) for row in rows] == [("NetIncomeLoss", 10.0)]
     entity_repo = EntityMetadataRepository(db_path)
     entity_repo.initialize_schema()
     assert entity_repo.fetch("SHEL.LSE") == "Shell PLC"
+
 
 def test_cmd_recalc_market_cap(tmp_path):
     db_path = tmp_path / "marketcap.db"
@@ -808,12 +863,12 @@ def test_cmd_recalc_market_cap(tmp_path):
     fact_repo.replace_facts(
         "AAA.US",
         [
-        make_fact(
-            concept="CommonStockSharesOutstanding",
-            end_date="2023-12-31",
-            value=100,
-            symbol="AAA.US",
-        )
+            make_fact(
+                concept="CommonStockSharesOutstanding",
+                end_date="2023-12-31",
+                value=100,
+                symbol="AAA.US",
+            )
         ],
     )
     market_repo = MarketDataRepository(db_path)
@@ -827,6 +882,7 @@ def test_cmd_recalc_market_cap(tmp_path):
     assert snapshot.market_cap == 5000.0
     snapshot_b = market_repo.latest_snapshot("BBB.US")
     assert snapshot_b.market_cap is None
+
 
 def test_cmd_run_screen_bulk(tmp_path, capsys):
     db_path = tmp_path / "screen.db"
@@ -984,6 +1040,7 @@ def test_cmd_report_metric_failures_with_exchange(tmp_path, capsys):
     assert "example=AAA.LSE" in output
     assert "BBB.US" not in output
 
+
 def test_cmd_compute_metrics(tmp_path):
     db_path = tmp_path / "facts.db"
     fact_repo = FinancialFactsRepository(db_path)
@@ -997,14 +1054,31 @@ def test_cmd_compute_metrics(tmp_path):
         [
             make_fact(concept="AssetsCurrent", end_date=recent, value=500),
             make_fact(concept="LiabilitiesCurrent", end_date=recent, value=200),
-            make_fact(concept="EarningsPerShare", end_date=recent, value=2.5, fiscal_period="Q4"),
-            make_fact(concept="EarningsPerShare", end_date=q3, value=2.0, fiscal_period="Q3"),
-            make_fact(concept="EarningsPerShare", end_date=q2, value=1.5, fiscal_period="Q2"),
-            make_fact(concept="EarningsPerShare", end_date=q1, value=1.0, fiscal_period="Q1"),
+            make_fact(
+                concept="EarningsPerShare",
+                end_date=recent,
+                value=2.5,
+                fiscal_period="Q4",
+            ),
+            make_fact(
+                concept="EarningsPerShare", end_date=q3, value=2.0, fiscal_period="Q3"
+            ),
+            make_fact(
+                concept="EarningsPerShare", end_date=q2, value=1.5, fiscal_period="Q2"
+            ),
+            make_fact(
+                concept="EarningsPerShare", end_date=q1, value=1.0, fiscal_period="Q1"
+            ),
             make_fact(concept="StockholdersEquity", end_date=recent, value=1000),
-            make_fact(concept="CommonStockSharesOutstanding", end_date=recent, value=100),
+            make_fact(
+                concept="CommonStockSharesOutstanding", end_date=recent, value=100
+            ),
             make_fact(concept="Goodwill", end_date=recent, value=50),
-            make_fact(concept="IntangibleAssetsNetExcludingGoodwill", end_date=recent, value=25),
+            make_fact(
+                concept="IntangibleAssetsNetExcludingGoodwill",
+                end_date=recent,
+                value=25,
+            ),
         ],
     )
     repo = MetricsRepository(db_path)
@@ -1050,8 +1124,12 @@ def test_cmd_compute_metrics_all(tmp_path):
         records.extend(
             [
                 make_fact(concept="AssetsCurrent", end_date=end_date, value=400 + year),
-                make_fact(concept="LiabilitiesCurrent", end_date=end_date, value=200 + year),
-                make_fact(concept="OperatingIncomeLoss", end_date=end_date, value=150 + year),
+                make_fact(
+                    concept="LiabilitiesCurrent", end_date=end_date, value=200 + year
+                ),
+                make_fact(
+                    concept="OperatingIncomeLoss", end_date=end_date, value=150 + year
+                ),
                 make_fact(
                     concept="PropertyPlantAndEquipmentNet",
                     end_date=end_date,
@@ -1060,30 +1138,120 @@ def test_cmd_compute_metrics_all(tmp_path):
             ]
         )
         records.extend(
-                [
-                    make_fact(concept="StockholdersEquity", end_date=f"{current_year}-09-30", value=2000),
-                    make_fact(concept="StockholdersEquity", end_date=f"{current_year-1}-09-30", value=1800),
-                    make_fact(concept="StockholdersEquity", end_date=f"{current_year-2}-09-30", value=1600),
-                make_fact(concept="StockholdersEquity", end_date=f"{current_year-3}-09-30", value=1400),
-                make_fact(concept="StockholdersEquity", end_date=f"{current_year-4}-09-30", value=1200),
-                make_fact(concept="StockholdersEquity", end_date=f"{current_year-5}-09-30", value=1000),
-                make_fact(concept="CommonStockholdersEquity", end_date=f"{current_year}-09-30", value=2000),
-                make_fact(concept="CommonStockholdersEquity", end_date=f"{current_year-1}-09-30", value=1800),
-                make_fact(concept="CommonStockholdersEquity", end_date=f"{current_year-2}-09-30", value=1600),
-                make_fact(concept="CommonStockholdersEquity", end_date=f"{current_year-3}-09-30", value=1400),
-                make_fact(concept="CommonStockholdersEquity", end_date=f"{current_year-4}-09-30", value=1200),
-                make_fact(concept="CommonStockholdersEquity", end_date=f"{current_year-5}-09-30", value=1000),
-                make_fact(concept="NetIncomeLossAvailableToCommonStockholdersBasic", end_date=f"{current_year}-09-30", value=250),
-                make_fact(concept="NetIncomeLossAvailableToCommonStockholdersBasic", end_date=f"{current_year-1}-09-30", value=230),
-                make_fact(concept="NetIncomeLossAvailableToCommonStockholdersBasic", end_date=f"{current_year-2}-09-30", value=210),
-                make_fact(concept="NetIncomeLossAvailableToCommonStockholdersBasic", end_date=f"{current_year-3}-09-30", value=190),
-                make_fact(concept="NetIncomeLossAvailableToCommonStockholdersBasic", end_date=f"{current_year-4}-09-30", value=170),
-                make_fact(concept="PreferredStock", end_date=f"{current_year}-09-30", value=0),
-                make_fact(concept="CommonStockSharesOutstanding", end_date=f"{current_year}-09-30", value=500),
-                    make_fact(concept="Goodwill", end_date=f"{current_year}-09-30", value=100),
-                    make_fact(concept="IntangibleAssetsNetExcludingGoodwill", end_date=f"{current_year}-09-30", value=50),
-                    make_fact(concept="LongTermDebt", end_date=f"{current_year}-09-30", value=300),
-                ]
+            [
+                make_fact(
+                    concept="StockholdersEquity",
+                    end_date=f"{current_year}-09-30",
+                    value=2000,
+                ),
+                make_fact(
+                    concept="StockholdersEquity",
+                    end_date=f"{current_year - 1}-09-30",
+                    value=1800,
+                ),
+                make_fact(
+                    concept="StockholdersEquity",
+                    end_date=f"{current_year - 2}-09-30",
+                    value=1600,
+                ),
+                make_fact(
+                    concept="StockholdersEquity",
+                    end_date=f"{current_year - 3}-09-30",
+                    value=1400,
+                ),
+                make_fact(
+                    concept="StockholdersEquity",
+                    end_date=f"{current_year - 4}-09-30",
+                    value=1200,
+                ),
+                make_fact(
+                    concept="StockholdersEquity",
+                    end_date=f"{current_year - 5}-09-30",
+                    value=1000,
+                ),
+                make_fact(
+                    concept="CommonStockholdersEquity",
+                    end_date=f"{current_year}-09-30",
+                    value=2000,
+                ),
+                make_fact(
+                    concept="CommonStockholdersEquity",
+                    end_date=f"{current_year - 1}-09-30",
+                    value=1800,
+                ),
+                make_fact(
+                    concept="CommonStockholdersEquity",
+                    end_date=f"{current_year - 2}-09-30",
+                    value=1600,
+                ),
+                make_fact(
+                    concept="CommonStockholdersEquity",
+                    end_date=f"{current_year - 3}-09-30",
+                    value=1400,
+                ),
+                make_fact(
+                    concept="CommonStockholdersEquity",
+                    end_date=f"{current_year - 4}-09-30",
+                    value=1200,
+                ),
+                make_fact(
+                    concept="CommonStockholdersEquity",
+                    end_date=f"{current_year - 5}-09-30",
+                    value=1000,
+                ),
+                make_fact(
+                    concept="NetIncomeLossAvailableToCommonStockholdersBasic",
+                    end_date=f"{current_year}-09-30",
+                    value=250,
+                ),
+                make_fact(
+                    concept="NetIncomeLossAvailableToCommonStockholdersBasic",
+                    end_date=f"{current_year - 1}-09-30",
+                    value=230,
+                ),
+                make_fact(
+                    concept="NetIncomeLossAvailableToCommonStockholdersBasic",
+                    end_date=f"{current_year - 2}-09-30",
+                    value=210,
+                ),
+                make_fact(
+                    concept="NetIncomeLossAvailableToCommonStockholdersBasic",
+                    end_date=f"{current_year - 3}-09-30",
+                    value=190,
+                ),
+                make_fact(
+                    concept="NetIncomeLossAvailableToCommonStockholdersBasic",
+                    end_date=f"{current_year - 4}-09-30",
+                    value=170,
+                ),
+                make_fact(
+                    concept="PreferredStock", end_date=f"{current_year}-09-30", value=0
+                ),
+                make_fact(
+                    concept="CommonStockSharesOutstanding",
+                    end_date=f"{current_year}-09-30",
+                    value=500,
+                ),
+                make_fact(
+                    concept="Goodwill", end_date=f"{current_year}-09-30", value=100
+                ),
+                make_fact(
+                    concept="IntangibleAssetsNetExcludingGoodwill",
+                    end_date=f"{current_year}-09-30",
+                    value=50,
+                ),
+                make_fact(
+                    concept="LongTermDebt", end_date=f"{current_year}-09-30", value=300
+                ),
+                make_fact(
+                    concept="ShortTermDebt", end_date=f"{current_year}-09-30", value=75
+                ),
+                make_fact(
+                    concept="CashAndShortTermInvestments",
+                    end_date=f"{current_year}-09-30",
+                    value=125,
+                ),
+            ]
         )
     q4 = (date.today() - timedelta(days=20)).isoformat()
     q3 = (date.today() - timedelta(days=110)).isoformat()
@@ -1131,6 +1299,21 @@ def test_cmd_compute_metrics_all(tmp_path):
                 frame=f"CY{end_date[:4]}{period}",
             )
         )
+    quarterly_ebitda = [
+        (q4, "Q4", 400.0),
+        (q3, "Q3", 350.0),
+        (q2, "Q2", 300.0),
+        (q1, "Q1", 250.0),
+    ]
+    for end_date, period, value in quarterly_ebitda:
+        records.append(
+            make_fact(
+                concept="EBITDA",
+                end_date=end_date,
+                fiscal_period=period,
+                value=value,
+            )
+        )
     fact_repo.replace_facts("AAPL.US", records)
 
     metrics_repo = MetricsRepository(db_path)
@@ -1138,7 +1321,9 @@ def test_cmd_compute_metrics_all(tmp_path):
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
     market_repo.upsert_price("AAPL.US", q3, 150.0, market_cap=50000.0)
-    market_repo.upsert_price("AAPL.US", f"{current_year-5}-09-30", 100.0, market_cap=30000.0)
+    market_repo.upsert_price(
+        "AAPL.US", f"{current_year - 5}-09-30", 100.0, market_cap=30000.0
+    )
 
     rc = cli.cmd_compute_metrics(
         "AAPL.US",

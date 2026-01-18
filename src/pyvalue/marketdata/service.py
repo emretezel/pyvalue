@@ -12,7 +12,12 @@ from typing import Optional, Union
 from pyvalue.config import Config
 from pyvalue.marketdata import EODHDProvider, MarketDataProvider, PriceData
 from pyvalue.facts import RegionFactsRepository
-from pyvalue.storage import FinancialFactsRepository, FundamentalsRepository, MarketDataRepository, UniverseRepository
+from pyvalue.storage import (
+    FinancialFactsRepository,
+    FundamentalsRepository,
+    MarketDataRepository,
+    UniverseRepository,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -22,7 +27,9 @@ SHARE_CONCEPTS = [
 ]
 
 
-def latest_share_count(symbol: str, repo: FinancialFactsRepository) -> Optional[float]:
+def latest_share_count(
+    symbol: str, repo: FinancialFactsRepository | RegionFactsRepository
+) -> Optional[float]:
     for concept in SHARE_CONCEPTS:
         fact = repo.latest_fact(symbol, concept)
         if fact is None or fact.value is None:
@@ -84,13 +91,19 @@ class MarketDataService:
                 continue
         return None
 
-    def refresh_symbol(self, symbol: str, fetch_symbol: Optional[str] = None) -> PriceData:
+    def refresh_symbol(
+        self, symbol: str, fetch_symbol: Optional[str] = None
+    ) -> PriceData:
         fetch = fetch_symbol or symbol
         data = self.provider.latest_price(fetch)
         data.symbol = symbol.upper()
         currency_hint = data.currency or self.universe_repo.fetch_currency(symbol)
         price = data.price
-        if currency_hint and currency_hint.upper() in {"GBX", "GBP0.01"} and price is not None:
+        if (
+            currency_hint
+            and currency_hint.upper() in {"GBX", "GBP0.01"}
+            and price is not None
+        ):
             price = price / 100.0
             currency_hint = "GBP"
         market_cap = data.market_cap
@@ -113,5 +126,6 @@ class MarketDataService:
         data.currency = currency_hint or data.currency
         LOGGER.info("Stored market data for %s at %s", data.symbol, data.as_of)
         return data
+
 
 __all__ = ["MarketDataService", "latest_share_count"]

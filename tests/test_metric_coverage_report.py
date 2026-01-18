@@ -1,5 +1,7 @@
 """Metric coverage report."""
 
+from datetime import date
+
 from pyvalue.cli import cmd_report_metric_coverage
 from pyvalue.metrics.working_capital import WorkingCapitalMetric
 from pyvalue.metrics.current_ratio import CurrentRatioMetric
@@ -23,18 +25,40 @@ def test_metric_coverage_counts_symbols(tmp_path, capsys):
     _seed_universe(db_path)
     repo = FinancialFactsRepository(db_path)
     repo.initialize_schema()
+    recent = date.today().isoformat()
     # AAA has full facts; BBB missing liabilities.
     repo.replace_facts(
         "AAA.US",
         [
-            FactRecord(symbol="AAA.US", concept="AssetsCurrent", fiscal_period="Q1", end_date="2025-01-01", unit="USD", value=100.0),
-            FactRecord(symbol="AAA.US", concept="LiabilitiesCurrent", fiscal_period="Q1", end_date="2025-01-01", unit="USD", value=50.0),
+            FactRecord(
+                symbol="AAA.US",
+                concept="AssetsCurrent",
+                fiscal_period="Q1",
+                end_date=recent,
+                unit="USD",
+                value=100.0,
+            ),
+            FactRecord(
+                symbol="AAA.US",
+                concept="LiabilitiesCurrent",
+                fiscal_period="Q1",
+                end_date=recent,
+                unit="USD",
+                value=50.0,
+            ),
         ],
     )
     repo.replace_facts(
         "BBB.US",
         [
-            FactRecord(symbol="BBB.US", concept="AssetsCurrent", fiscal_period="Q1", end_date="2025-01-01", unit="USD", value=200.0),
+            FactRecord(
+                symbol="BBB.US",
+                concept="AssetsCurrent",
+                fiscal_period="Q1",
+                end_date=recent,
+                unit="USD",
+                value=200.0,
+            ),
         ],
     )
 

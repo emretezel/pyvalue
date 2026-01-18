@@ -22,19 +22,39 @@ def eodhd_payload():
                 "Isin": "GB000AAA",
                 "Currency": "GBP",
             },
-            {"Code": "BBB", "Name": "BBB plc", "Exchange": "LSE", "Type": "Preferred Stock", "Currency": "EUR"},
-            {"Code": "ETF1", "Name": "ETF", "Exchange": "LSE", "Type": "ETF", "Currency": "GBP"},
-            {"Code": "WRT", "Name": "Warrant", "Exchange": "LSE", "Type": "Warrant", "Currency": "USD"},
+            {
+                "Code": "BBB",
+                "Name": "BBB plc",
+                "Exchange": "LSE",
+                "Type": "Preferred Stock",
+                "Currency": "EUR",
+            },
+            {
+                "Code": "ETF1",
+                "Name": "ETF",
+                "Exchange": "LSE",
+                "Type": "ETF",
+                "Currency": "GBP",
+            },
+            {
+                "Code": "WRT",
+                "Name": "Warrant",
+                "Exchange": "LSE",
+                "Type": "Warrant",
+                "Currency": "USD",
+            },
         ]
     )
 
 
 def test_loader_filters_by_type(eodhd_payload):
-    loader = UKUniverseLoader(api_key="dummy", exchange_code="LSE", fetcher=lambda _: eodhd_payload)
+    loader = UKUniverseLoader(
+        api_key="dummy", exchange_code="LSE", fetcher=lambda _: eodhd_payload
+    )
 
     listings = loader.load()
 
-    symbols = [l.symbol for l in listings]
+    symbols = [listing.symbol for listing in listings]
     assert symbols == ["AAA.LSE"]
 
     aaa = next(item for item in listings if item.symbol == "AAA.LSE")
@@ -52,7 +72,7 @@ def test_loader_includes_etfs_when_enabled(eodhd_payload):
 
     listings = loader.load()
 
-    symbols = [l.symbol for l in listings]
+    symbols = [listing.symbol for listing in listings]
     assert symbols == ["AAA.LSE", "ETF1.LSE"]
 
     etf = next(item for item in listings if item.symbol == "ETF1.LSE")
@@ -69,7 +89,7 @@ def test_loader_filters_by_currency(eodhd_payload):
 
     listings = loader.load()
 
-    symbols = [l.symbol for l in listings]
+    symbols = [listing.symbol for listing in listings]
     assert symbols == ["AAA.LSE"]
 
 
@@ -101,7 +121,7 @@ def test_loader_filters_by_exchange_field():
 
     listings = loader.load()
 
-    symbols = [l.symbol for l in listings]
+    symbols = [listing.symbol for listing in listings]
     assert symbols == ["AAA.US"]
 
 
@@ -117,7 +137,9 @@ def test_loader_uses_exchange_code_for_exchange_field():
             }
         ]
     )
-    loader = UKUniverseLoader(api_key="dummy", exchange_code="LSE", fetcher=lambda _: payload)
+    loader = UKUniverseLoader(
+        api_key="dummy", exchange_code="LSE", fetcher=lambda _: payload
+    )
 
     listings = loader.load()
 

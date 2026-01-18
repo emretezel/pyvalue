@@ -1,14 +1,14 @@
 import sqlite3
 
-from pyvalue.storage import FactRecord, FundamentalsRepository, UniverseRepository
+from pyvalue.storage import FundamentalsRepository, UniverseRepository
 from pyvalue.universe import Listing
 
 
 def _listing(symbol: str, is_etf: bool = False) -> Listing:
     """Helper to instantiate listings in a compact way.
 
-Author: Emre Tezel
-"""
+    Author: Emre Tezel
+    """
 
     return Listing(
         symbol=f"{symbol}.US" if "." not in symbol else symbol,

@@ -22,5 +22,4 @@ class PriceData:
 class MarketDataProvider(Protocol):
     """Protocol for fetching latest price/market data."""
 
-    def latest_price(self, symbol: str) -> PriceData:
-        ...
+    def latest_price(self, symbol: str) -> PriceData: ...

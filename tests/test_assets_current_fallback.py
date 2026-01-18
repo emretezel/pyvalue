@@ -38,7 +38,9 @@ def test_normalizer_derives_assets_current_from_components():
     derived = [
         rec
         for rec in records
-        if rec.concept == "AssetsCurrent" and rec.end_date == recent and rec.fiscal_period == "Q1"
+        if rec.concept == "AssetsCurrent"
+        and rec.end_date == recent
+        and rec.fiscal_period == "Q1"
     ]
     assert len(derived) == 1
     assert derived[0].value == 75.0
@@ -64,7 +66,9 @@ def test_normalizer_skips_assets_current_derivation_when_total_present():
     assets = [
         rec
         for rec in records
-        if rec.concept == "AssetsCurrent" and rec.end_date == recent and rec.fiscal_period == "Q1"
+        if rec.concept == "AssetsCurrent"
+        and rec.end_date == recent
+        and rec.fiscal_period == "Q1"
     ]
     assert len(assets) == 1
     assert assets[0].value == 100.0

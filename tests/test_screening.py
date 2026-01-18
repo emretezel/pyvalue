@@ -2,10 +2,9 @@
 
 Author: Emre Tezel
 """
-from pathlib import Path
 
 from pyvalue.screening import Criterion, Term, evaluate_criterion
-from pyvalue.storage import FinancialFactsRepository, MetricsRepository, FactRecord
+from pyvalue.storage import FinancialFactsRepository, MetricsRepository
 
 
 def test_evaluate_criterion_uses_metrics_repo(tmp_path):
@@ -42,6 +41,7 @@ def test_evaluate_criterion_filters_when_metric_missing(tmp_path):
     )
 
     assert evaluate_criterion(criterion, "AAPL.US", metrics_repo, fact_repo) is False
+
 
 def test_evaluate_criterion_supports_constant_terms(tmp_path):
     db = tmp_path / "test2.db"

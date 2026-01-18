@@ -10,7 +10,7 @@ from typing import Optional
 
 import logging
 
-from pyvalue.metrics.base import Metric, MetricResult
+from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import is_recent_fact
 from pyvalue.storage import FinancialFactsRepository
 
@@ -22,15 +22,23 @@ class WorkingCapitalMetric:
     id: str = "working_capital"
     required_concepts = ("AssetsCurrent", "LiabilitiesCurrent")
 
-    def compute(self, symbol: str, repo: FinancialFactsRepository) -> Optional[MetricResult]:
+    def compute(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> Optional[MetricResult]:
         assets = repo.latest_fact(symbol, "AssetsCurrent")
         liabilities = repo.latest_fact(symbol, "LiabilitiesCurrent")
         if assets is None or liabilities is None:
             LOGGER.warning("working_capital: missing assets/liabilities for %s", symbol)
             return None
-        as_of_record = assets if assets.end_date >= liabilities.end_date else liabilities
+        as_of_record = (
+            assets if assets.end_date >= liabilities.end_date else liabilities
+        )
         if not is_recent_fact(as_of_record):
-            LOGGER.warning("working_capital: latest assets/liabilities too old for %s (%s)", symbol, as_of_record.end_date)
+            LOGGER.warning(
+                "working_capital: latest assets/liabilities too old for %s (%s)",
+                symbol,
+                as_of_record.end_date,
+            )
             return None
         as_of = as_of_record.end_date
         return MetricResult(

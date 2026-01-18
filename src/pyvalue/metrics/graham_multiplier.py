@@ -10,11 +10,11 @@ from typing import Optional, Tuple
 
 import logging
 
-from pyvalue.metrics.base import Metric, MetricResult
+from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import is_recent_fact, latest_quarterly_records
 from pyvalue.fx import FXRateStore
 from pyvalue.marketdata.base import PriceData
-from pyvalue.storage import FinancialFactsRepository, MarketDataRepository
+from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
 
 
 EPS_CONCEPTS = ["EarningsPerShare"]
@@ -29,7 +29,13 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class GrahamMultiplierMetric:
     id: str = "graham_multiplier"
-    required_concepts = tuple(EPS_CONCEPTS + EQUITY_CONCEPTS + SHARE_CONCEPTS + GOODWILL_CONCEPTS + INTANGIBLE_CONCEPTS)
+    required_concepts = tuple(
+        EPS_CONCEPTS
+        + EQUITY_CONCEPTS
+        + SHARE_CONCEPTS
+        + GOODWILL_CONCEPTS
+        + INTANGIBLE_CONCEPTS
+    )
     uses_market_data = True
 
     def compute(
@@ -66,8 +72,12 @@ class GrahamMultiplierMetric:
             LOGGER.warning("graham_multiplier: equity/shares missing for %s", symbol)
             return None
 
-        goodwill, goodwill_currency = self._latest_optional_value(symbol, repo, GOODWILL_CONCEPTS)
-        intangibles, intangibles_currency = self._latest_optional_value(symbol, repo, INTANGIBLE_CONCEPTS)
+        goodwill, goodwill_currency = self._latest_optional_value(
+            symbol, repo, GOODWILL_CONCEPTS
+        )
+        intangibles, intangibles_currency = self._latest_optional_value(
+            symbol, repo, INTANGIBLE_CONCEPTS
+        )
 
         price_data = self._latest_snapshot(market_repo, symbol)
         if price_data is None or price_data.price is None:
@@ -81,8 +91,14 @@ class GrahamMultiplierMetric:
             goodwill_currency,
             intangibles_currency,
         )
-        if target_currency and price_data.currency and price_data.currency != target_currency:
-            converted = FXRateStore().convert(price, price_data.currency, target_currency, price_data.as_of)
+        if (
+            target_currency
+            and price_data.currency
+            and price_data.currency != target_currency
+        ):
+            converted = FXRateStore().convert(
+                price, price_data.currency, target_currency, price_data.as_of
+            )
             if converted is None:
                 LOGGER.warning(
                     "graham_multiplier: FX conversion failed %s -> %s for %s",
@@ -94,7 +110,9 @@ class GrahamMultiplierMetric:
             price = converted
 
         if price is None or price <= 0:
-            LOGGER.warning("graham_multiplier: non-positive price after FX for %s", symbol)
+            LOGGER.warning(
+                "graham_multiplier: non-positive price after FX for %s", symbol
+            )
             return None
 
         tbvps = (equity - goodwill - intangibles) / shares
@@ -103,13 +121,23 @@ class GrahamMultiplierMetric:
             return None
 
         multiplier = (price / ttm_eps) * (price / tbvps)
-        return MetricResult(symbol=symbol, metric_id=self.id, value=multiplier, as_of=eps_as_of)
+        return MetricResult(
+            symbol=symbol, metric_id=self.id, value=multiplier, as_of=eps_as_of
+        )
 
-    def _latest_quarters(self, symbol: str, repo: FinancialFactsRepository):
-        return latest_quarterly_records(repo.facts_for_concept, symbol, EPS_CONCEPTS, periods=4)
+    def _latest_quarters(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> list[FactRecord]:
+        return latest_quarterly_records(
+            repo.facts_for_concept, symbol, EPS_CONCEPTS, periods=4
+        )
 
-    def _latest_fy_eps(self, symbol: str, repo: FinancialFactsRepository) -> Optional[FactRecord]:
-        records = repo.facts_for_concept(symbol, "EarningsPerShare", fiscal_period="FY", limit=1)
+    def _latest_fy_eps(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> Optional[FactRecord]:
+        records = repo.facts_for_concept(
+            symbol, "EarningsPerShare", fiscal_period="FY", limit=1
+        )
         if records:
             return records[0]
         return None
@@ -136,7 +164,9 @@ class GrahamMultiplierMetric:
             return 0.0, None
         return value, currency
 
-    def _latest_snapshot(self, market_repo: MarketDataRepository, symbol: str) -> Optional[PriceData]:
+    def _latest_snapshot(
+        self, market_repo: MarketDataRepository, symbol: str
+    ) -> Optional[PriceData]:
         if hasattr(market_repo, "latest_snapshot"):
             snapshot = market_repo.latest_snapshot(symbol)
             if snapshot:

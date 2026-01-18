@@ -10,7 +10,7 @@ from typing import List, Optional
 
 import logging
 
-from pyvalue.metrics.base import Metric, MetricResult
+from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import MAX_FY_FACT_AGE_DAYS, has_recent_fact, is_recent_fact
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
@@ -29,25 +29,35 @@ class ROCGreenblattMetric:
         "LiabilitiesCurrent",
     )
 
-    def compute(self, symbol: str, repo: FinancialFactsRepository) -> Optional[MetricResult]:
+    def compute(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> Optional[MetricResult]:
         ebit_records = self._fetch_ebit_history(symbol, repo)
         if not ebit_records:
             LOGGER.warning("roc_greenblatt: no FY EBIT records for %s", symbol)
             return None
-        if not has_recent_fact(repo, symbol, EBIT_CONCEPTS, max_age_days=MAX_FY_FACT_AGE_DAYS):
+        if not has_recent_fact(
+            repo, symbol, EBIT_CONCEPTS, max_age_days=MAX_FY_FACT_AGE_DAYS
+        ):
             LOGGER.warning("roc_greenblatt: no recent FY EBIT fact for %s", symbol)
             return None
 
         tangible_capital_records = self._fetch_tangible_capital_history(symbol, repo)
         if not tangible_capital_records:
-            LOGGER.warning("roc_greenblatt: missing tangible capital components for %s", symbol)
+            LOGGER.warning(
+                "roc_greenblatt: missing tangible capital components for %s", symbol
+            )
             return None
         assets_check = repo.latest_fact(symbol, "AssetsCurrent")
         liabilities_check = repo.latest_fact(symbol, "LiabilitiesCurrent")
-        if assets_check is None or not is_recent_fact(assets_check, max_age_days=MAX_FY_FACT_AGE_DAYS):
+        if assets_check is None or not is_recent_fact(
+            assets_check, max_age_days=MAX_FY_FACT_AGE_DAYS
+        ):
             LOGGER.warning("roc_greenblatt: no recent assets current for %s", symbol)
             return None
-        if liabilities_check is None or not is_recent_fact(liabilities_check, max_age_days=MAX_FY_FACT_AGE_DAYS):
+        if liabilities_check is None or not is_recent_fact(
+            liabilities_check, max_age_days=MAX_FY_FACT_AGE_DAYS
+        ):
             LOGGER.warning("roc_greenblatt: liabilities current too old for %s", symbol)
             return None
 
@@ -66,21 +76,33 @@ class ROCGreenblattMetric:
             if years_considered == 5:
                 break
         if not values:
-            LOGGER.warning("roc_greenblatt: insufficient overlapping years for %s", symbol)
+            LOGGER.warning(
+                "roc_greenblatt: insufficient overlapping years for %s", symbol
+            )
             return None
         avg = sum(values) / len(values)
         latest = ebit_records[0].end_date
         return MetricResult(symbol=symbol, metric_id=self.id, value=avg, as_of=latest)
 
-    def _fetch_ebit_history(self, symbol: str, repo: FinancialFactsRepository) -> List[FactRecord]:
+    def _fetch_ebit_history(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> List[FactRecord]:
         return repo.facts_for_concept(symbol, "OperatingIncomeLoss", fiscal_period="FY")
 
-    def _fetch_tangible_capital_history(self, symbol: str, repo: FinancialFactsRepository) -> List[FactRecord]:
-        ppe_records = repo.facts_for_concept(symbol, "PropertyPlantAndEquipmentNet", fiscal_period="FY")
+    def _fetch_tangible_capital_history(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> List[FactRecord]:
+        ppe_records = repo.facts_for_concept(
+            symbol, "PropertyPlantAndEquipmentNet", fiscal_period="FY"
+        )
         if not ppe_records:
             return []
-        assets_records = repo.facts_for_concept(symbol, "AssetsCurrent", fiscal_period="FY")
-        liabilities_records = repo.facts_for_concept(symbol, "LiabilitiesCurrent", fiscal_period="FY")
+        assets_records = repo.facts_for_concept(
+            symbol, "AssetsCurrent", fiscal_period="FY"
+        )
+        liabilities_records = repo.facts_for_concept(
+            symbol, "LiabilitiesCurrent", fiscal_period="FY"
+        )
         assets_by_period = self._index_by_period(assets_records)
         liabilities_by_period = self._index_by_period(liabilities_records)
         combined: List[FactRecord] = []
@@ -107,7 +129,9 @@ class ROCGreenblattMetric:
             )
         return combined
 
-    def _index_by_period(self, records: List[FactRecord]) -> dict[tuple[str, str], FactRecord]:
+    def _index_by_period(
+        self, records: List[FactRecord]
+    ) -> dict[tuple[str, str], FactRecord]:
         indexed: dict[tuple[str, str], FactRecord] = {}
         for record in records:
             key = (record.end_date, record.fiscal_period)

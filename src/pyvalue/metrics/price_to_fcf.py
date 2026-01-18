@@ -10,7 +10,7 @@ from typing import Iterable, Optional, Sequence
 
 import logging
 
-from pyvalue.metrics.base import Metric, MetricResult
+from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import is_recent_fact
 from pyvalue.fx import FXRateStore
 from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
@@ -54,12 +54,15 @@ class PriceToFCFMetric:
             return None
 
         market_cap = snapshot.market_cap
-        if fcf_result.currency and getattr(snapshot, "currency", None):
-            converted = FXRateStore().convert(market_cap, snapshot.currency, fcf_result.currency, snapshot.as_of)
+        snapshot_currency = getattr(snapshot, "currency", None)
+        if fcf_result.currency and snapshot_currency:
+            converted = FXRateStore().convert(
+                market_cap, snapshot_currency, fcf_result.currency, snapshot.as_of
+            )
             if converted is None:
                 LOGGER.warning(
                     "price_to_fcf: FX conversion failed %s -> %s for %s",
-                    snapshot.currency,
+                    snapshot_currency,
                     fcf_result.currency,
                     symbol,
                 )
@@ -67,7 +70,9 @@ class PriceToFCFMetric:
             market_cap = converted
 
         ratio = market_cap / fcf_result.total
-        return MetricResult(symbol=symbol, metric_id=self.id, value=ratio, as_of=fcf_result.as_of)
+        return MetricResult(
+            symbol=symbol, metric_id=self.id, value=ratio, as_of=fcf_result.as_of
+        )
 
     def _compute_ttm_fcf(
         self,
@@ -79,7 +84,9 @@ class PriceToFCFMetric:
         if operating is None:
             return None
         if capex is None:
-            LOGGER.warning("price_to_fcf: missing/stale capex for %s; assuming zero", symbol)
+            LOGGER.warning(
+                "price_to_fcf: missing/stale capex for %s; assuming zero", symbol
+            )
             capex_total = 0.0
             capex_as_of = operating.as_of
             capex_currency = None
@@ -102,7 +109,12 @@ class PriceToFCFMetric:
             records = repo.facts_for_concept(symbol, concept)
             quarterly = self._filter_quarterly(records)
             if len(quarterly) < 4:
-                LOGGER.warning("price_to_fcf: need 4 quarterly %s records for %s, found %s", concept, symbol, len(quarterly))
+                LOGGER.warning(
+                    "price_to_fcf: need 4 quarterly %s records for %s, found %s",
+                    concept,
+                    symbol,
+                    len(quarterly),
+                )
                 continue
             values = quarterly[:4]
             if not is_recent_fact(values[0]):
@@ -115,10 +127,16 @@ class PriceToFCFMetric:
                 continue
             normalized, currency = self._normalize_quarterly(values)
             if normalized is None:
-                LOGGER.warning("price_to_fcf: currency conflict in %s quarterly values for %s", concept, symbol)
+                LOGGER.warning(
+                    "price_to_fcf: currency conflict in %s quarterly values for %s",
+                    concept,
+                    symbol,
+                )
                 continue
             total = sum(record.value for record in normalized)
-            return _TTMResult(total=total, as_of=normalized[0].end_date, currency=currency or None)
+            return _TTMResult(
+                total=total, as_of=normalized[0].end_date, currency=currency or None
+            )
         return None
 
     def _filter_quarterly(self, records: Iterable[FactRecord]) -> list[FactRecord]:
@@ -136,7 +154,9 @@ class PriceToFCFMetric:
             seen_end_dates.add(record.end_date)
         return filtered
 
-    def _normalize_quarterly(self, records: list[FactRecord]) -> tuple[Optional[list[FactRecord]], Optional[str]]:
+    def _normalize_quarterly(
+        self, records: list[FactRecord]
+    ) -> tuple[Optional[list[FactRecord]], Optional[str]]:
         """Normalize GBX/GBP0.01 records to GBP and ensure consistent currency."""
 
         currency = None

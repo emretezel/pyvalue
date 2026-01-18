@@ -2,7 +2,12 @@
 
 Author: Emre Tezel
 """
-from pyvalue.ingestion.sec import COMPANY_FACTS_URL, COMPANY_TICKERS_URL, SECCompanyFactsClient
+
+from pyvalue.ingestion.sec import (
+    COMPANY_FACTS_URL,
+    COMPANY_TICKERS_URL,
+    SECCompanyFactsClient,
+)
 
 
 class DummyResponse:

@@ -14,6 +14,7 @@ from pyvalue.metrics.eps_streak import EPSStreakMetric
 from pyvalue.metrics.graham_eps_cagr import GrahamEPSCAGRMetric
 from pyvalue.metrics.graham_multiplier import GrahamMultiplierMetric
 from pyvalue.metrics.market_capitalization import MarketCapitalizationMetric
+from pyvalue.metrics.net_debt_to_ebitda import NetDebtToEBITDAMetric
 from pyvalue.metrics.price_to_fcf import PriceToFCFMetric
 from pyvalue.metrics.roc_greenblatt import ROCGreenblattMetric
 from pyvalue.metrics.roe_greenblatt import ROEGreenblattMetric
@@ -46,7 +47,9 @@ def test_working_capital_metric_computes_difference():
     class DummyRepo:
         def latest_fact(self, symbol, concept):
             if concept == "AssetsCurrent":
-                return fact(symbol=symbol, concept=concept, end_date=recent, value=200.0)
+                return fact(
+                    symbol=symbol, concept=concept, end_date=recent, value=200.0
+                )
             if concept == "LiabilitiesCurrent":
                 return fact(symbol=symbol, concept=concept, end_date=recent, value=50.0)
             return None
@@ -64,9 +67,13 @@ def test_current_ratio_metric():
     class DummyRepo:
         def latest_fact(self, symbol, concept):
             if concept == "AssetsCurrent":
-                return fact(symbol=symbol, concept=concept, end_date=recent, value=400.0)
+                return fact(
+                    symbol=symbol, concept=concept, end_date=recent, value=400.0
+                )
             if concept == "LiabilitiesCurrent":
-                return fact(symbol=symbol, concept=concept, end_date=recent, value=200.0)
+                return fact(
+                    symbol=symbol, concept=concept, end_date=recent, value=200.0
+                )
             return None
 
     repo = DummyRepo()
@@ -83,10 +90,34 @@ def test_eps_streak_counts_consecutive_positive_years():
         def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
             if concept == "EarningsPerShare":
                 return [
-                    fact(symbol=symbol, concept=concept, end_date=recent, value=2.0, frame=f"CY{date.today().year}"),
-                    fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=2.1, frame="CY2023"),
-                    fact(symbol=symbol, concept=concept, end_date="2022-09-30", value=1.5, frame="CY2022"),
-                    fact(symbol=symbol, concept=concept, end_date="2021-09-30", value=-0.5, frame="CY2021"),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        end_date=recent,
+                        value=2.0,
+                        frame=f"CY{date.today().year}",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        end_date="2023-09-30",
+                        value=2.1,
+                        frame="CY2023",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        end_date="2022-09-30",
+                        value=1.5,
+                        frame="CY2022",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        end_date="2021-09-30",
+                        value=-0.5,
+                        frame="CY2021",
+                    ),
                 ]
             return []
 
@@ -108,12 +139,24 @@ def test_graham_eps_cagr_metric():
         def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
             if concept == "EarningsPerShare":
                 records = [
-                    fact(symbol=symbol, concept=concept, end_date=recent, value=2.0, frame="CYRECENT"),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        end_date=recent,
+                        value=2.0,
+                        frame="CYRECENT",
+                    ),
                 ]
                 for year in range(2000, 2015):
                     value = 1.0 + (year - 2000) * 0.1
                     records.append(
-                        fact(symbol=symbol, concept=concept, end_date=f"{year}-09-30", value=value, frame=f"CY{year}")
+                        fact(
+                            symbol=symbol,
+                            concept=concept,
+                            end_date=f"{year}-09-30",
+                            value=value,
+                            frame=f"CY{year}",
+                        )
                     )
                 return records
             return []
@@ -142,10 +185,34 @@ def test_graham_multiplier_metric():
         def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
             if concept == "EarningsPerShare":
                 return [
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q4", end_date=recent, value=2.5),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q3", end_date="2024-09-30", value=2.0),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q2", end_date="2024-06-30", value=1.5),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q1", end_date="2024-03-31", value=1.0),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=recent,
+                        value=2.5,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date="2024-09-30",
+                        value=2.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q2",
+                        end_date="2024-06-30",
+                        value=1.5,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q1",
+                        end_date="2024-03-31",
+                        value=1.0,
+                    ),
                 ]
             return []
 
@@ -181,7 +248,15 @@ def test_graham_multiplier_falls_back_to_fy_eps():
 
         def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
             if concept == "EarningsPerShare" and fiscal_period == "FY":
-                return [fact(symbol=symbol, concept=concept, fiscal_period="FY", end_date=recent, value=5.0)]
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=recent,
+                        value=5.0,
+                    )
+                ]
             return []
 
         def latest_fact(self, symbol, concept):
@@ -198,7 +273,165 @@ def test_graham_multiplier_falls_back_to_fy_eps():
     market_repo = DummyMarketRepo()
     result = metric.compute("AAPL.US", repo, market_repo)
     assert result is not None
-    assert result.value > 0
+
+
+def test_net_debt_to_ebitda_metric():
+    metric = NetDebtToEBITDAMetric()
+    today = date.today()
+    q4 = (today - timedelta(days=30)).isoformat()
+    q3 = (today - timedelta(days=120)).isoformat()
+    q2 = (today - timedelta(days=210)).isoformat()
+    q1 = (today - timedelta(days=300)).isoformat()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "EBITDA":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=40.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=q3,
+                        value=30.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q2",
+                        end_date=q2,
+                        value=20.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q1",
+                        end_date=q1,
+                        value=10.0,
+                        currency="USD",
+                    ),
+                ]
+            return []
+
+        def latest_fact(self, symbol, concept):
+            if concept == "ShortTermDebt":
+                return fact(
+                    symbol=symbol,
+                    concept=concept,
+                    end_date=q4,
+                    value=10.0,
+                    currency="USD",
+                )
+            if concept == "LongTermDebt":
+                return fact(
+                    symbol=symbol,
+                    concept=concept,
+                    end_date=q4,
+                    value=90.0,
+                    currency="USD",
+                )
+            if concept == "CashAndShortTermInvestments":
+                return fact(
+                    symbol=symbol,
+                    concept=concept,
+                    end_date=q4,
+                    value=20.0,
+                    currency="USD",
+                )
+            return None
+
+    repo = DummyRepo()
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.value == 0.8
+
+
+def test_net_debt_to_ebitda_skips_non_positive_ebitda():
+    metric = NetDebtToEBITDAMetric()
+    today = date.today()
+    q4 = (today - timedelta(days=30)).isoformat()
+    q3 = (today - timedelta(days=120)).isoformat()
+    q2 = (today - timedelta(days=210)).isoformat()
+    q1 = (today - timedelta(days=300)).isoformat()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "EBITDA":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=0.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=q3,
+                        value=0.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q2",
+                        end_date=q2,
+                        value=0.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q1",
+                        end_date=q1,
+                        value=0.0,
+                        currency="USD",
+                    ),
+                ]
+            return []
+
+        def latest_fact(self, symbol, concept):
+            if concept == "ShortTermDebt":
+                return fact(
+                    symbol=symbol,
+                    concept=concept,
+                    end_date=q4,
+                    value=10.0,
+                    currency="USD",
+                )
+            if concept == "LongTermDebt":
+                return fact(
+                    symbol=symbol,
+                    concept=concept,
+                    end_date=q4,
+                    value=90.0,
+                    currency="USD",
+                )
+            if concept == "CashAndShortTermInvestments":
+                return fact(
+                    symbol=symbol,
+                    concept=concept,
+                    end_date=q4,
+                    value=20.0,
+                    currency="USD",
+                )
+            return None
+
+    repo = DummyRepo()
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
 
 
 def test_graham_multiplier_uses_zero_when_optional_values_missing():
@@ -215,10 +448,34 @@ def test_graham_multiplier_uses_zero_when_optional_values_missing():
         def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
             if concept == "EarningsPerShare":
                 return [
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q4", end_date=recent, value=2.5),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q3", end_date="2024-09-30", value=2.0),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q2", end_date="2024-06-30", value=1.5),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q1", end_date="2024-03-31", value=1.0),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=recent,
+                        value=2.5,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date="2024-09-30",
+                        value=2.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q2",
+                        end_date="2024-06-30",
+                        value=1.5,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q1",
+                        end_date="2024-03-31",
+                        value=1.0,
+                    ),
                 ]
             return []
 
@@ -248,10 +505,34 @@ def test_earnings_yield_metric():
         def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
             if concept == "EarningsPerShare":
                 return [
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q4", end_date=recent, value=2.5),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q3", end_date=older, value=2.0),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q2", end_date="2024-06-30", value=1.5),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q1", end_date="2024-03-31", value=1.0),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=recent,
+                        value=2.5,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=older,
+                        value=2.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q2",
+                        end_date="2024-06-30",
+                        value=1.5,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q1",
+                        end_date="2024-03-31",
+                        value=1.0,
+                    ),
                 ]
             return []
 
@@ -273,7 +554,15 @@ def test_earnings_yield_metric_falls_back_to_fy():
     class DummyRepo:
         def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
             if concept == "EarningsPerShare" and fiscal_period == "FY":
-                return [fact(symbol=symbol, concept=concept, fiscal_period="FY", end_date=recent_fy, value=4.0)]
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=recent_fy,
+                        value=4.0,
+                    )
+                ]
             return []
 
     class DummyMarketRepo:
@@ -296,17 +585,65 @@ def test_price_to_fcf_metric():
         def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
             if concept == "NetCashProvidedByUsedInOperatingActivities":
                 return [
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q4", end_date=recent, value=130.0),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q3", end_date=older, value=120.0),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q2", end_date="2024-06-30", value=110.0),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q1", end_date="2024-03-31", value=100.0),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=recent,
+                        value=130.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=older,
+                        value=120.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q2",
+                        end_date="2024-06-30",
+                        value=110.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q1",
+                        end_date="2024-03-31",
+                        value=100.0,
+                    ),
                 ]
             if concept == "CapitalExpenditures":
                 return [
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q4", end_date=recent, value=-30.0),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q3", end_date=older, value=-40.0),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q2", end_date="2024-06-30", value=-50.0),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q1", end_date="2024-03-31", value=-60.0),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=recent,
+                        value=-30.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=older,
+                        value=-40.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q2",
+                        end_date="2024-06-30",
+                        value=-50.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q1",
+                        end_date="2024-03-31",
+                        value=-60.0,
+                    ),
                 ]
             return []
 
@@ -334,10 +671,34 @@ def test_price_to_fcf_metric_uses_zero_capex_when_missing():
         def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
             if concept == "NetCashProvidedByUsedInOperatingActivities":
                 return [
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q4", end_date=recent, value=130.0),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q3", end_date=older, value=120.0),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q2", end_date="2024-06-30", value=110.0),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q1", end_date="2024-03-31", value=100.0),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=recent,
+                        value=130.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=older,
+                        value=120.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q2",
+                        end_date="2024-06-30",
+                        value=110.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q1",
+                        end_date="2024-03-31",
+                        value=100.0,
+                    ),
                 ]
             return []
 
@@ -365,11 +726,41 @@ def test_eps_ttm_metric():
         def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
             if concept == "EarningsPerShare":
                 return [
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q4", end_date=recent, value=2.5),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q3", end_date=older, value=2.0),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q2", end_date="2024-06-30", value=1.5),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q1", end_date="2024-03-31", value=1.0),
-                    fact(symbol=symbol, concept=concept, fiscal_period="Q4", end_date="2023-12-31", value=0.5),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=recent,
+                        value=2.5,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=older,
+                        value=2.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q2",
+                        end_date="2024-06-30",
+                        value=1.5,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q1",
+                        end_date="2024-03-31",
+                        value=1.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date="2023-12-31",
+                        value=0.5,
+                    ),
                 ]
             return []
 
@@ -387,7 +778,15 @@ def test_eps_ttm_metric_falls_back_to_fy():
     class DummyRepo:
         def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
             if concept == "EarningsPerShare" and fiscal_period == "FY":
-                return [fact(symbol=symbol, concept=concept, fiscal_period="FY", end_date=recent_fy, value=4.2)]
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=recent_fy,
+                        value=4.2,
+                    )
+                ]
             return []
 
     repo = DummyRepo()
@@ -470,38 +869,144 @@ def test_roc_greenblatt_metric():
             records = []
             if concept == "OperatingIncomeLoss":
                 records = [
-                    fact(symbol=symbol, concept=concept, end_date=recent_fy, value=220, fiscal_period="FY"),
-                    fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=200, fiscal_period="FY"),
-                    fact(symbol=symbol, concept=concept, end_date="2022-09-30", value=150, fiscal_period="FY"),
-                    fact(symbol=symbol, concept=concept, end_date=recent_quarter, value=999, fiscal_period="Q1"),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        end_date=recent_fy,
+                        value=220,
+                        fiscal_period="FY",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        end_date="2023-09-30",
+                        value=200,
+                        fiscal_period="FY",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        end_date="2022-09-30",
+                        value=150,
+                        fiscal_period="FY",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        end_date=recent_quarter,
+                        value=999,
+                        fiscal_period="Q1",
+                    ),
                 ]
             if concept == "PropertyPlantAndEquipmentNet":
                 records = [
-                    fact(symbol=symbol, concept=concept, end_date=recent_fy, value=520, fiscal_period="FY"),
-                    fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=500, fiscal_period="FY"),
-                    fact(symbol=symbol, concept=concept, end_date="2022-09-30", value=450, fiscal_period="FY"),
-                    fact(symbol=symbol, concept=concept, end_date=recent_quarter, value=777, fiscal_period="Q1"),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        end_date=recent_fy,
+                        value=520,
+                        fiscal_period="FY",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        end_date="2023-09-30",
+                        value=500,
+                        fiscal_period="FY",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        end_date="2022-09-30",
+                        value=450,
+                        fiscal_period="FY",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        end_date=recent_quarter,
+                        value=777,
+                        fiscal_period="Q1",
+                    ),
                 ]
             if concept == "AssetsCurrent":
                 records = [
-                    fact(symbol=symbol, concept=concept, end_date=recent_fy, value=420, fiscal_period="FY"),
-                    fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=400, fiscal_period="FY"),
-                    fact(symbol=symbol, concept=concept, end_date="2022-09-30", value=350, fiscal_period="FY"),
-                    fact(symbol=symbol, concept=concept, end_date=recent_quarter, value=888, fiscal_period="Q1"),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        end_date=recent_fy,
+                        value=420,
+                        fiscal_period="FY",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        end_date="2023-09-30",
+                        value=400,
+                        fiscal_period="FY",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        end_date="2022-09-30",
+                        value=350,
+                        fiscal_period="FY",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        end_date=recent_quarter,
+                        value=888,
+                        fiscal_period="Q1",
+                    ),
                 ]
             if concept == "LiabilitiesCurrent":
                 records = [
-                    fact(symbol=symbol, concept=concept, end_date=recent_fy, value=310, fiscal_period="FY"),
-                    fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=300, fiscal_period="FY"),
-                    fact(symbol=symbol, concept=concept, end_date="2022-09-30", value=250, fiscal_period="FY"),
-                    fact(symbol=symbol, concept=concept, end_date=recent_quarter, value=444, fiscal_period="Q1"),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        end_date=recent_fy,
+                        value=310,
+                        fiscal_period="FY",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        end_date="2023-09-30",
+                        value=300,
+                        fiscal_period="FY",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        end_date="2022-09-30",
+                        value=250,
+                        fiscal_period="FY",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        end_date=recent_quarter,
+                        value=444,
+                        fiscal_period="Q1",
+                    ),
                 ]
             if fiscal_period:
-                return [record for record in records if (record.fiscal_period or "").upper() == fiscal_period.upper()]
+                return [
+                    record
+                    for record in records
+                    if (record.fiscal_period or "").upper() == fiscal_period.upper()
+                ]
             return records
 
         def latest_fact(self, symbol, concept):
-            return fact(symbol=symbol, concept=concept, end_date=recent_quarter, value=0.0, fiscal_period="Q1")
+            return fact(
+                symbol=symbol,
+                concept=concept,
+                end_date=recent_quarter,
+                value=0.0,
+                fiscal_period="Q1",
+            )
 
     repo = DummyRepo()
     result = metric.compute("AAPL.US", repo)
@@ -518,14 +1023,25 @@ def test_roe_greenblatt_metric():
             if concept == "NetIncomeLossAvailableToCommonStockholdersBasic":
                 return [
                     fact(symbol=symbol, concept=concept, end_date=recent, value=220),
-                    fact(symbol=symbol, concept=concept, end_date="2024-09-30", value=200),
-                    fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=180),
+                    fact(
+                        symbol=symbol, concept=concept, end_date="2024-09-30", value=200
+                    ),
+                    fact(
+                        symbol=symbol, concept=concept, end_date="2023-09-30", value=180
+                    ),
                 ]
             if concept == "CommonStockholdersEquity":
                 return [
                     fact(symbol=symbol, concept=concept, end_date=recent, value=1100),
-                    fact(symbol=symbol, concept=concept, end_date="2024-09-30", value=1000),
-                    fact(symbol=symbol, concept=concept, end_date="2023-09-30", value=900),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        end_date="2024-09-30",
+                        value=1000,
+                    ),
+                    fact(
+                        symbol=symbol, concept=concept, end_date="2023-09-30", value=900
+                    ),
                 ]
             return []
 

@@ -25,5 +25,4 @@ class Metric(Protocol):
     id: str
     required_concepts: Sequence[str]
 
-    def compute(self, symbol: str, repo) -> Optional[MetricResult]:
-        ...
+    def compute(self, symbol: str, repo) -> Optional[MetricResult]: ...

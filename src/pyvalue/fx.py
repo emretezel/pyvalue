@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -52,7 +52,9 @@ class FXRateStore:
         self.root = Path(root)
         self.cache: Dict[str, List[FXRate]] = {}
 
-    def convert(self, amount: float, from_currency: str, to_currency: str, as_of: str | date) -> Optional[float]:
+    def convert(
+        self, amount: float, from_currency: str, to_currency: str, as_of: str | date
+    ) -> Optional[float]:
         """Convert ``amount`` from ``from_currency`` into ``to_currency`` at the closest available rate."""
 
         from_code = (from_currency or "").upper()
@@ -77,11 +79,13 @@ class FXRateStore:
             via_from = self._rate(from_code, pivot, as_of_date)
             if via_from is None:
                 inv_from = self._rate(pivot, from_code, as_of_date)
-                via_from = (1 / inv_from) if inv_from not in (None, 0) else None
+                if inv_from is not None and inv_from != 0:
+                    via_from = 1 / inv_from
             via_to = self._rate(pivot, to_code, as_of_date)
             if via_to is None:
                 inv_to = self._rate(to_code, pivot, as_of_date)
-                via_to = (1 / inv_to) if inv_to not in (None, 0) else None
+                if inv_to is not None and inv_to != 0:
+                    via_to = 1 / inv_to
             if via_from is not None and via_to is not None:
                 return amount * via_from * via_to
         return None

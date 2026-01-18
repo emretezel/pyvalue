@@ -2,6 +2,7 @@
 
 Author: Emre Tezel
 """
+
 from datetime import date, timedelta
 
 from pyvalue.normalization import SECFactsNormalizer
@@ -15,26 +16,24 @@ def test_normalizer_emits_records_for_target_concepts():
     recent = _recent_date()
     payload = {
         "facts": {
-                "us-gaap": {
-                    "NetIncomeLoss": {
-                        "units": {
-                            "USD": [
-                                {
-                                    "val": "123.45",
-                                    "fy": 2023,
-                                    "fp": "FY",
-                                    "end": recent,
-                                    "accn": "000",
-                                    "filed": recent,
-                                    "frame": f"CY{recent[:4]}",
-                                    "form": "10-K",
-                                }
-                            ]
-                        }
-                    },
-                "Unused": {
-                    "units": {"USD": [{"val": 1, "end": recent}]}
+            "us-gaap": {
+                "NetIncomeLoss": {
+                    "units": {
+                        "USD": [
+                            {
+                                "val": "123.45",
+                                "fy": 2023,
+                                "fp": "FY",
+                                "end": recent,
+                                "accn": "000",
+                                "filed": recent,
+                                "frame": f"CY{recent[:4]}",
+                                "form": "10-K",
+                            }
+                        ]
+                    }
                 },
+                "Unused": {"units": {"USD": [{"val": 1, "end": recent}]}},
             }
         }
     }
@@ -43,9 +42,16 @@ def test_normalizer_emits_records_for_target_concepts():
     records = normalizer.normalize(payload, symbol="AAPL.US", cik="CIK0000320193")
 
     concepts = {rec.concept for rec in records}
-    assert concepts == {"NetIncomeLoss", "NetIncomeLossAvailableToCommonStockholdersBasic"}
+    assert concepts == {
+        "NetIncomeLoss",
+        "NetIncomeLossAvailableToCommonStockholdersBasic",
+    }
     net_income = next(rec for rec in records if rec.concept == "NetIncomeLoss")
-    derived = next(rec for rec in records if rec.concept == "NetIncomeLossAvailableToCommonStockholdersBasic")
+    derived = next(
+        rec
+        for rec in records
+        if rec.concept == "NetIncomeLossAvailableToCommonStockholdersBasic"
+    )
     assert net_income.value == 123.45
     assert net_income.end_date == recent
     assert derived.value == 123.45
@@ -256,14 +262,18 @@ def test_normalizer_derives_long_term_debt_from_noncurrent_and_current():
             }
         }
     }
-    normalizer = SECFactsNormalizer(concepts=["LongTermDebtNoncurrent", "LongTermDebtCurrent"])
+    normalizer = SECFactsNormalizer(
+        concepts=["LongTermDebtNoncurrent", "LongTermDebtCurrent"]
+    )
 
     records = normalizer.normalize(payload, symbol="TEST", cik="CIK0000")
 
     derived = [
         rec
         for rec in records
-        if rec.concept == "LongTermDebt" and rec.end_date == recent and rec.fiscal_period == "Q1"
+        if rec.concept == "LongTermDebt"
+        and rec.end_date == recent
+        and rec.fiscal_period == "Q1"
     ]
     assert len(derived) == 1
     assert derived[0].value == 120
@@ -325,7 +335,9 @@ def test_normalizer_prefers_long_term_debt_tag_over_fallbacks():
     derived = [
         rec
         for rec in records
-        if rec.concept == "LongTermDebt" and rec.end_date == recent and rec.fiscal_period == "Q1"
+        if rec.concept == "LongTermDebt"
+        and rec.end_date == recent
+        and rec.fiscal_period == "Q1"
     ]
     assert len(derived) == 1
     assert derived[0].value == 200
@@ -372,7 +384,9 @@ def test_normalizer_derives_earnings_per_share_from_diluted():
     derived = [
         rec
         for rec in records
-        if rec.concept == "EarningsPerShare" and rec.end_date == recent and rec.fiscal_period == "Q1"
+        if rec.concept == "EarningsPerShare"
+        and rec.end_date == recent
+        and rec.fiscal_period == "Q1"
     ]
     assert len(derived) == 1
     assert derived[0].value == 2.0
@@ -406,7 +420,9 @@ def test_normalizer_derives_earnings_per_share_from_stale_fallback():
     derived = [
         rec
         for rec in records
-        if rec.concept == "EarningsPerShare" and rec.end_date == stale and rec.fiscal_period == "FY"
+        if rec.concept == "EarningsPerShare"
+        and rec.end_date == stale
+        and rec.fiscal_period == "FY"
     ]
     assert len(derived) == 1
     assert derived[0].value == 3.2
@@ -469,7 +485,11 @@ def test_normalizer_derives_stockholders_equity_from_equity_including_noncontrol
             }
         }
     }
-    normalizer = SECFactsNormalizer(concepts=["StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"])
+    normalizer = SECFactsNormalizer(
+        concepts=[
+            "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"
+        ]
+    )
 
     records = normalizer.normalize(payload, symbol="TEST", cik="CIK0000")
 
@@ -541,7 +561,9 @@ def test_normalizer_derives_operating_cash_flow_from_continuing_operations():
             }
         }
     }
-    normalizer = SECFactsNormalizer(concepts=["NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"])
+    normalizer = SECFactsNormalizer(
+        concepts=["NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"]
+    )
 
     records = normalizer.normalize(payload, symbol="TEST", cik="CIK0000")
 
@@ -577,7 +599,9 @@ def test_normalizer_derives_capex_from_payments_to_acquire_ppe():
             }
         }
     }
-    normalizer = SECFactsNormalizer(concepts=["PaymentsToAcquirePropertyPlantAndEquipment"])
+    normalizer = SECFactsNormalizer(
+        concepts=["PaymentsToAcquirePropertyPlantAndEquipment"]
+    )
 
     records = normalizer.normalize(payload, symbol="TEST", cik="CIK0000")
 
@@ -614,7 +638,9 @@ def test_normalizer_derives_operating_income_from_income_before_taxes():
         }
     }
     normalizer = SECFactsNormalizer(
-        concepts=["IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest"]
+        concepts=[
+            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest"
+        ]
     )
 
     records = normalizer.normalize(payload, symbol="TEST", cik="CIK0000")
@@ -1136,7 +1162,9 @@ def test_normalizer_derives_long_term_debt_from_other_long_term_debt():
             }
         }
     }
-    normalizer = SECFactsNormalizer(concepts=["OtherLongTermDebt", "LongTermDebtCurrent"])
+    normalizer = SECFactsNormalizer(
+        concepts=["OtherLongTermDebt", "LongTermDebtCurrent"]
+    )
 
     records = normalizer.normalize(payload, symbol="TEST", cik="CIK0000")
 
@@ -1223,14 +1251,18 @@ def test_normalizer_derives_long_term_debt_from_other_liabilities_noncurrent():
             }
         }
     }
-    normalizer = SECFactsNormalizer(concepts=["OtherLiabilitiesNoncurrent", "LongTermDebtCurrent"])
+    normalizer = SECFactsNormalizer(
+        concepts=["OtherLiabilitiesNoncurrent", "LongTermDebtCurrent"]
+    )
 
     records = normalizer.normalize(payload, symbol="TEST", cik="CIK0000")
 
     derived = [
         rec
         for rec in records
-        if rec.concept == "LongTermDebt" and rec.end_date == recent and rec.fiscal_period == "Q3"
+        if rec.concept == "LongTermDebt"
+        and rec.end_date == recent
+        and rec.fiscal_period == "Q3"
     ]
     assert len(derived) == 1
     assert derived[0].value == 80.0
@@ -1279,7 +1311,9 @@ def test_normalizer_derives_long_term_debt_from_operating_lease_liability_noncur
     derived = [
         rec
         for rec in records
-        if rec.concept == "LongTermDebt" and rec.end_date == recent and rec.fiscal_period == "Q2"
+        if rec.concept == "LongTermDebt"
+        and rec.end_date == recent
+        and rec.fiscal_period == "Q2"
     ]
     assert len(derived) == 1
     assert derived[0].value == 64.0
@@ -1310,5 +1344,9 @@ def test_normalizer_skips_stale_long_term_debt_records():
 
     records = normalizer.normalize(payload, symbol="TEST", cik="CIK0000")
 
-    derived = [rec for rec in records if rec.concept == "LongTermDebt" and rec.end_date == stale]
+    derived = [
+        rec
+        for rec in records
+        if rec.concept == "LongTermDebt" and rec.end_date == stale
+    ]
     assert not derived

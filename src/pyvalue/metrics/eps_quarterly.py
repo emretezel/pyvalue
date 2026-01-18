@@ -10,7 +10,7 @@ from typing import Iterable, Optional
 
 import logging
 
-from pyvalue.metrics.base import Metric, MetricResult
+from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import is_recent_fact
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
@@ -53,7 +53,9 @@ class EarningsPerShareTTM:
                 )
             return None
         if not is_recent_fact(fy_record):
-            LOGGER.warning("eps_ttm: latest FY EPS too old for %s (%s)", symbol, fy_record.end_date)
+            LOGGER.warning(
+                "eps_ttm: latest FY EPS too old for %s (%s)", symbol, fy_record.end_date
+            )
             return None
         if fy_record.value is None:
             LOGGER.warning("eps_ttm: missing FY EPS value for %s", symbol)
@@ -68,7 +70,9 @@ class EarningsPerShareTTM:
             as_of=as_of,
         )
 
-    def _fetch_quarters(self, symbol: str, repo: FinancialFactsRepository) -> list[FactRecord]:
+    def _fetch_quarters(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> list[FactRecord]:
         for concept in EPS_CONCEPTS:
             records = repo.facts_for_concept(symbol, concept)
             quarterly = self._filter_quarterly(records)
@@ -76,9 +80,13 @@ class EarningsPerShareTTM:
                 return quarterly[:4]
         return []
 
-    def _latest_fy_eps(self, symbol: str, repo: FinancialFactsRepository) -> Optional[FactRecord]:
+    def _latest_fy_eps(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> Optional[FactRecord]:
         for concept in EPS_CONCEPTS:
-            records = repo.facts_for_concept(symbol, concept, fiscal_period="FY", limit=1)
+            records = repo.facts_for_concept(
+                symbol, concept, fiscal_period="FY", limit=1
+            )
             if records:
                 return records[0]
         return None

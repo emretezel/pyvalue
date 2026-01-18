@@ -6,7 +6,12 @@ Author: Emre Tezel
 from pyvalue.marketdata.eodhd import EODHDProvider
 from pyvalue.marketdata.base import PriceData
 from pyvalue.marketdata.service import MarketDataService
-from pyvalue.storage import FactRecord, FinancialFactsRepository, FundamentalsRepository, MarketDataRepository
+from pyvalue.storage import (
+    FactRecord,
+    FinancialFactsRepository,
+    FundamentalsRepository,
+    MarketDataRepository,
+)
 
 
 class DummyEODSession:
@@ -79,7 +84,13 @@ def test_market_data_service_persists_prices(tmp_path):
 def test_market_data_service_derives_market_cap_from_shares(tmp_path):
     class DummyProvider:
         def latest_price(self, symbol):
-            return PriceData(symbol=symbol, price=50.0, as_of="2024-01-02", volume=None, currency=None)
+            return PriceData(
+                symbol=symbol,
+                price=50.0,
+                as_of="2024-01-02",
+                volume=None,
+                currency=None,
+            )
 
     class DummyConfig:
         eodhd_api_key = None
@@ -106,7 +117,9 @@ def test_market_data_service_derives_market_cap_from_shares(tmp_path):
         ],
     )
 
-    service = MarketDataService(db_path=db_path, provider=DummyProvider(), config=DummyConfig())
+    service = MarketDataService(
+        db_path=db_path, provider=DummyProvider(), config=DummyConfig()
+    )
     service.refresh_symbol("AAPL.US")
 
     repo = MarketDataRepository(db_path)
@@ -144,7 +157,13 @@ def test_eodhd_provider_converts_gbx_by_suffix_when_currency_missing():
 def test_market_data_service_uses_fundamentals_shares(tmp_path):
     class DummyProvider:
         def latest_price(self, symbol):
-            return PriceData(symbol=symbol, price=20.0, as_of="2024-01-02", volume=None, currency=None)
+            return PriceData(
+                symbol=symbol,
+                price=20.0,
+                as_of="2024-01-02",
+                volume=None,
+                currency=None,
+            )
 
     class DummyConfig:
         eodhd_api_key = None
@@ -159,7 +178,9 @@ def test_market_data_service_uses_fundamentals_shares(tmp_path):
         exchange="LSE",
     )
 
-    service = MarketDataService(db_path=db_path, provider=DummyProvider(), config=DummyConfig())
+    service = MarketDataService(
+        db_path=db_path, provider=DummyProvider(), config=DummyConfig()
+    )
     service.refresh_symbol("SHEL.LSE")
 
     repo = MarketDataRepository(db_path)

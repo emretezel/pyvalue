@@ -10,8 +10,12 @@ from typing import Dict, List, Optional
 
 import logging
 
-from pyvalue.metrics.base import Metric, MetricResult
-from pyvalue.metrics.utils import MAX_FY_FACT_AGE_DAYS, filter_unique_fy, has_recent_fact
+from pyvalue.metrics.base import MetricResult
+from pyvalue.metrics.utils import (
+    MAX_FY_FACT_AGE_DAYS,
+    filter_unique_fy,
+    has_recent_fact,
+)
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 EPS_CONCEPTS = ["EarningsPerShare"]
@@ -33,7 +37,9 @@ class GrahamEPSCAGRMetric:
     id: str = "graham_eps_10y_cagr_3y_avg"
     required_concepts = tuple(EPS_CONCEPTS)
 
-    def compute(self, symbol: str, repo: FinancialFactsRepository) -> Optional[MetricResult]:
+    def compute(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> Optional[MetricResult]:
         records: List[FactRecord] = []
         for concept in EPS_CONCEPTS:
             records = repo.facts_for_concept(symbol, concept, fiscal_period="FY")
@@ -47,7 +53,9 @@ class GrahamEPSCAGRMetric:
                 len(records),
             )
             return None
-        if not has_recent_fact(repo, symbol, EPS_CONCEPTS, max_age_days=MAX_FY_FACT_AGE_DAYS):
+        if not has_recent_fact(
+            repo, symbol, EPS_CONCEPTS, max_age_days=MAX_FY_FACT_AGE_DAYS
+        ):
             LOGGER.warning("graham_eps_cagr: no recent FY EPS fact for %s", symbol)
             return None
         latest_date = records[0].end_date
@@ -63,9 +71,13 @@ class GrahamEPSCAGRMetric:
             return None
         cagr_value = self._compute_cagr(ordered)
         if cagr_value is None:
-            LOGGER.warning("graham_eps_cagr: could not derive CAGR value for %s", symbol)
+            LOGGER.warning(
+                "graham_eps_cagr: could not derive CAGR value for %s", symbol
+            )
             return None
-        return MetricResult(symbol=symbol, metric_id=self.id, value=cagr_value, as_of=latest_date)
+        return MetricResult(
+            symbol=symbol, metric_id=self.id, value=cagr_value, as_of=latest_date
+        )
 
     def _compute_cagr(self, ordered: List[FactRecord]) -> Optional[float]:
         eps_history = ordered[-WINDOW_YEARS:]

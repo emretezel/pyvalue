@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
-from typing import Optional, Union
+from typing import Union
 
 
 def setup_logging(

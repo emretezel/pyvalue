@@ -30,14 +30,35 @@ def _seed_facts(repo: FinancialFactsRepository):
     repo.replace_facts(
         "AAA.US",
         [
-            FactRecord(symbol="AAA.US", concept="AssetsCurrent", fiscal_period="Q1", end_date=fresh_date, unit="USD", value=100.0),
-            FactRecord(symbol="AAA.US", concept="LiabilitiesCurrent", fiscal_period="Q1", end_date=fresh_date, unit="USD", value=50.0),
+            FactRecord(
+                symbol="AAA.US",
+                concept="AssetsCurrent",
+                fiscal_period="Q1",
+                end_date=fresh_date,
+                unit="USD",
+                value=100.0,
+            ),
+            FactRecord(
+                symbol="AAA.US",
+                concept="LiabilitiesCurrent",
+                fiscal_period="Q1",
+                end_date=fresh_date,
+                unit="USD",
+                value=50.0,
+            ),
         ],
     )
     repo.replace_facts(
         "BBB.US",
         [
-            FactRecord(symbol="BBB.US", concept="AssetsCurrent", fiscal_period="Q1", end_date=stale_date, unit="USD", value=75.0),
+            FactRecord(
+                symbol="BBB.US",
+                concept="AssetsCurrent",
+                fiscal_period="Q1",
+                end_date=stale_date,
+                unit="USD",
+                value=75.0,
+            ),
         ],
     )
 
@@ -49,7 +70,9 @@ def test_compute_fact_coverage_counts_missing_and_stale(tmp_path):
     fact_repo.initialize_schema()
     _seed_facts(fact_repo)
 
-    report = compute_fact_coverage(fact_repo, ["AAA.US", "BBB.US"], [WorkingCapitalMetric], max_age_days=365)
+    report = compute_fact_coverage(
+        fact_repo, ["AAA.US", "BBB.US"], [WorkingCapitalMetric], max_age_days=365
+    )
 
     assert len(report) == 1
     entry = report[0]
@@ -96,12 +119,28 @@ def test_fact_report_counts_assets_current_from_components(tmp_path):
     fact_repo.replace_facts(
         "AAA.US",
         [
-            FactRecord(symbol="AAA.US", concept="CashAndCashEquivalents", fiscal_period="Q1", end_date=today, unit="USD", value=10.0),
-            FactRecord(symbol="AAA.US", concept="LiabilitiesCurrent", fiscal_period="Q1", end_date=today, unit="USD", value=5.0),
+            FactRecord(
+                symbol="AAA.US",
+                concept="CashAndCashEquivalents",
+                fiscal_period="Q1",
+                end_date=today,
+                unit="USD",
+                value=10.0,
+            ),
+            FactRecord(
+                symbol="AAA.US",
+                concept="LiabilitiesCurrent",
+                fiscal_period="Q1",
+                end_date=today,
+                unit="USD",
+                value=5.0,
+            ),
         ],
     )
 
-    report = compute_fact_coverage(fact_repo, ["AAA.US"], [WorkingCapitalMetric], max_age_days=365)
+    report = compute_fact_coverage(
+        fact_repo, ["AAA.US"], [WorkingCapitalMetric], max_age_days=365
+    )
     entry = report[0]
     coverage = {c.concept: c for c in entry.concepts}
     assert coverage["AssetsCurrent"].missing == 1
@@ -118,13 +157,36 @@ def test_fact_report_counts_liabilities_current_from_components(tmp_path):
     fact_repo.replace_facts(
         "AAA.US",
         [
-            FactRecord(symbol="AAA.US", concept="AssetsCurrent", fiscal_period="Q1", end_date=today, unit="USD", value=50.0),
-            FactRecord(symbol="AAA.US", concept="AccountsPayableCurrent", fiscal_period="Q1", end_date=today, unit="USD", value=10.0),
-            FactRecord(symbol="AAA.US", concept="AccruedLiabilitiesCurrent", fiscal_period="Q1", end_date=today, unit="USD", value=5.0),
+            FactRecord(
+                symbol="AAA.US",
+                concept="AssetsCurrent",
+                fiscal_period="Q1",
+                end_date=today,
+                unit="USD",
+                value=50.0,
+            ),
+            FactRecord(
+                symbol="AAA.US",
+                concept="AccountsPayableCurrent",
+                fiscal_period="Q1",
+                end_date=today,
+                unit="USD",
+                value=10.0,
+            ),
+            FactRecord(
+                symbol="AAA.US",
+                concept="AccruedLiabilitiesCurrent",
+                fiscal_period="Q1",
+                end_date=today,
+                unit="USD",
+                value=5.0,
+            ),
         ],
     )
 
-    report = compute_fact_coverage(fact_repo, ["AAA.US"], [WorkingCapitalMetric], max_age_days=365)
+    report = compute_fact_coverage(
+        fact_repo, ["AAA.US"], [WorkingCapitalMetric], max_age_days=365
+    )
     entry = report[0]
     coverage = {c.concept: c for c in entry.concepts}
     assert coverage["LiabilitiesCurrent"].missing == 1

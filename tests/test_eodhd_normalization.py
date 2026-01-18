@@ -45,8 +45,12 @@ def test_eodhd_derives_intangibles_excluding_goodwill_from_net():
     }
 
     records = normalizer.normalize(payload, symbol="TEST.LSE")
-    derived = [r for r in records if r.concept == "IntangibleAssetsNetExcludingGoodwill"]
-    assert derived, "IntangibleAssetsNetExcludingGoodwill should be derived from IntangibleAssetsNet"
+    derived = [
+        r for r in records if r.concept == "IntangibleAssetsNetExcludingGoodwill"
+    ]
+    assert derived, (
+        "IntangibleAssetsNetExcludingGoodwill should be derived from IntangibleAssetsNet"
+    )
     assert derived[0].value == 80.0
 
 
@@ -69,7 +73,9 @@ def test_eodhd_derives_common_shares_from_entity_shares():
 
     records = normalizer.normalize(payload, symbol="TEST.LSE")
     derived = [r for r in records if r.concept == "CommonStockSharesOutstanding"]
-    assert derived, "CommonStockSharesOutstanding should be derived from EntityCommonStockSharesOutstanding"
+    assert derived, (
+        "CommonStockSharesOutstanding should be derived from EntityCommonStockSharesOutstanding"
+    )
     assert derived[0].value == 1500.0
 
 
@@ -114,8 +120,14 @@ def test_eodhd_normalizes_net_income_to_common_from_applicable_shares():
     }
 
     records = normalizer.normalize(payload, symbol="TEST.LSE")
-    derived = [r for r in records if r.concept == "NetIncomeLossAvailableToCommonStockholdersBasic"]
-    assert derived, "NetIncomeLossAvailableToCommonStockholdersBasic should map from netIncomeApplicableToCommonShares"
+    derived = [
+        r
+        for r in records
+        if r.concept == "NetIncomeLossAvailableToCommonStockholdersBasic"
+    ]
+    assert derived, (
+        "NetIncomeLossAvailableToCommonStockholdersBasic should map from netIncomeApplicableToCommonShares"
+    )
     assert derived[0].value == 120.0
 
 
@@ -138,7 +150,9 @@ def test_eodhd_normalizes_operating_income_from_ebit():
 
     records = normalizer.normalize(payload, symbol="TEST.LSE")
     derived = [r for r in records if r.concept == "OperatingIncomeLoss"]
-    assert derived, "OperatingIncomeLoss should map from ebit when operatingIncome is missing"
+    assert derived, (
+        "OperatingIncomeLoss should map from ebit when operatingIncome is missing"
+    )
     assert derived[0].value == 55.0
 
 
@@ -166,6 +180,58 @@ def test_eodhd_normalizes_common_equity_from_common_stock_total_equity():
     equity = [r for r in records if r.concept == "StockholdersEquity"]
     assert equity, "StockholdersEquity should fall back to CommonStockholdersEquity"
     assert equity[0].value == 500.0
+
+
+def test_eodhd_normalizes_ebitda():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Income_Statement": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "ebitda": 42.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.LSE")
+    derived = [r for r in records if r.concept == "EBITDA"]
+    assert derived, "EBITDA should map from ebitda"
+    assert derived[0].value == 42.0
+
+
+def test_eodhd_normalizes_short_term_debt_and_cash_investments():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Balance_Sheet": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "shortTermDebt": 15.0,
+                        "cashAndShortTermInvestments": 60.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.LSE")
+    short_term = [r for r in records if r.concept == "ShortTermDebt"]
+    cash = [r for r in records if r.concept == "CashAndShortTermInvestments"]
+    assert short_term, "ShortTermDebt should map from shortTermDebt"
+    assert cash, (
+        "CashAndShortTermInvestments should map from cashAndShortTermInvestments"
+    )
+    assert short_term[0].value == 15.0
+    assert cash[0].value == 60.0
 
 
 def test_eodhd_does_not_normalize_long_term_debt_from_short_long_term_debt_total():
