@@ -13,6 +13,7 @@ from .eps_average import EPSAverageSixYearMetric
 from .graham_eps_cagr import GrahamEPSCAGRMetric
 from .graham_multiplier import GrahamMultiplierMetric
 from .earnings_yield import EarningsYieldMetric
+from .interest_coverage import InterestCoverageMetric
 from .market_capitalization import MarketCapitalizationMetric
 from .price_to_fcf import PriceToFCFMetric
 from .roc_greenblatt import ROCGreenblattMetric
@@ -29,6 +30,7 @@ REGISTRY = {
     GrahamEPSCAGRMetric.id: GrahamEPSCAGRMetric,
     GrahamMultiplierMetric.id: GrahamMultiplierMetric,
     EarningsYieldMetric.id: EarningsYieldMetric,
+    InterestCoverageMetric.id: InterestCoverageMetric,
     MarketCapitalizationMetric.id: MarketCapitalizationMetric,
     PriceToFCFMetric.id: PriceToFCFMetric,
     NetDebtToEBITDAMetric.id: NetDebtToEBITDAMetric,
@@ -48,6 +50,7 @@ __all__ = [
     "GrahamEPSCAGRMetric",
     "GrahamMultiplierMetric",
     "EarningsYieldMetric",
+    "InterestCoverageMetric",
     "MarketCapitalizationMetric",
     "PriceToFCFMetric",
     "NetDebtToEBITDAMetric",

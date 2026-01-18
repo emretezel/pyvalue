@@ -99,6 +99,7 @@ EODHD_STATEMENT_FIELDS = {
     },
     "Income_Statement": {
         "EBITDA": ["ebitda", "EBITDA"],
+        "InterestExpense": ["interestExpense"],
         "NetIncomeLoss": ["netIncome", "netIncomeFromContinuingOps"],
         "NetIncomeLossAvailableToCommonStockholdersBasic": [
             "netIncomeApplicableToCommonShares"

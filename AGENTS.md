@@ -27,6 +27,7 @@ pyvalue is a Python toolkit for ingesting, normalizing, and screening fundamenta
 - Ask the user which conda env to use before running tests; use `conda run -n <env> pytest`.
 - Naming: files `tests/test_*.py`, functions `test_*`.
 - Add tests for new metrics, CLI commands, and normalization paths; reuse fixtures in `tests/conftest.py`.
+- When implementing new features, always add or update unit tests.
 
 ## Formatting & Static Checks
 - After every Codex update, run these in the user-specified conda env:
@@ -44,3 +45,4 @@ pyvalue is a Python toolkit for ingesting, normalizing, and screening fundamenta
 - Store credentials in `private/config.toml` or environment variables like `PYVALUE_SEC_USER_AGENT`; never commit secrets.
 - Screen outputs default to `data/screen_results_*.csv` and are treated as local artifacts.
 - If you import a new third-party package, add it to `pyproject.toml` under `[project].dependencies`.
+- Always check whether `README.md` needs updates when behavior, metrics, or CLI usage changes.

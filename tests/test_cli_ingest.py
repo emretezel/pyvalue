@@ -1314,6 +1314,36 @@ def test_cmd_compute_metrics_all(tmp_path):
                 value=value,
             )
         )
+    quarterly_ebit = [
+        (q4, "Q4", 300.0),
+        (q3, "Q3", 250.0),
+        (q2, "Q2", 200.0),
+        (q1, "Q1", 150.0),
+    ]
+    for end_date, period, value in quarterly_ebit:
+        records.append(
+            make_fact(
+                concept="OperatingIncomeLoss",
+                end_date=end_date,
+                fiscal_period=period,
+                value=value,
+            )
+        )
+    quarterly_interest = [
+        (q4, "Q4", 12.0),
+        (q3, "Q3", 11.0),
+        (q2, "Q2", 10.0),
+        (q1, "Q1", 9.0),
+    ]
+    for end_date, period, value in quarterly_interest:
+        records.append(
+            make_fact(
+                concept="InterestExpense",
+                end_date=end_date,
+                fiscal_period=period,
+                value=value,
+            )
+        )
     fact_repo.replace_facts("AAPL.US", records)
 
     metrics_repo = MetricsRepository(db_path)

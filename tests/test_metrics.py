@@ -13,6 +13,7 @@ from pyvalue.metrics.eps_quarterly import EarningsPerShareTTM
 from pyvalue.metrics.eps_streak import EPSStreakMetric
 from pyvalue.metrics.graham_eps_cagr import GrahamEPSCAGRMetric
 from pyvalue.metrics.graham_multiplier import GrahamMultiplierMetric
+from pyvalue.metrics.interest_coverage import InterestCoverageMetric
 from pyvalue.metrics.market_capitalization import MarketCapitalizationMetric
 from pyvalue.metrics.net_debt_to_ebitda import NetDebtToEBITDAMetric
 from pyvalue.metrics.price_to_fcf import PriceToFCFMetric
@@ -353,6 +354,181 @@ def test_net_debt_to_ebitda_metric():
     result = metric.compute("AAPL.US", repo)
     assert result is not None
     assert result.value == 0.8
+
+
+def test_interest_coverage_metric():
+    metric = InterestCoverageMetric()
+    today = date.today()
+    q4 = (today - timedelta(days=30)).isoformat()
+    q3 = (today - timedelta(days=120)).isoformat()
+    q2 = (today - timedelta(days=210)).isoformat()
+    q1 = (today - timedelta(days=300)).isoformat()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "OperatingIncomeLoss":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=40.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=q3,
+                        value=30.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q2",
+                        end_date=q2,
+                        value=20.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q1",
+                        end_date=q1,
+                        value=10.0,
+                        currency="USD",
+                    ),
+                ]
+            if concept == "InterestExpense":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=4.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=q3,
+                        value=3.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q2",
+                        end_date=q2,
+                        value=2.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q1",
+                        end_date=q1,
+                        value=1.0,
+                        currency="USD",
+                    ),
+                ]
+            return []
+
+    repo = DummyRepo()
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.value == 10.0
+
+
+def test_interest_coverage_skips_non_positive_interest():
+    metric = InterestCoverageMetric()
+    today = date.today()
+    q4 = (today - timedelta(days=30)).isoformat()
+    q3 = (today - timedelta(days=120)).isoformat()
+    q2 = (today - timedelta(days=210)).isoformat()
+    q1 = (today - timedelta(days=300)).isoformat()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "OperatingIncomeLoss":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=40.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=q3,
+                        value=30.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q2",
+                        end_date=q2,
+                        value=20.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q1",
+                        end_date=q1,
+                        value=10.0,
+                        currency="USD",
+                    ),
+                ]
+            if concept == "InterestExpense":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=0.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=q3,
+                        value=0.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q2",
+                        end_date=q2,
+                        value=0.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q1",
+                        end_date=q1,
+                        value=0.0,
+                        currency="USD",
+                    ),
+                ]
+            return []
+
+    repo = DummyRepo()
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
 
 
 def test_net_debt_to_ebitda_skips_non_positive_ebitda():
