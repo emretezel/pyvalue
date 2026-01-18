@@ -20,6 +20,7 @@ from pyvalue.metrics.net_debt_to_ebitda import NetDebtToEBITDAMetric
 from pyvalue.metrics.price_to_fcf import PriceToFCFMetric
 from pyvalue.metrics.roc_greenblatt import ROCGreenblattMetric
 from pyvalue.metrics.roe_greenblatt import ROEGreenblattMetric
+from pyvalue.metrics.short_term_debt_share import ShortTermDebtShareMetric
 from pyvalue.metrics.working_capital import WorkingCapitalMetric
 from pyvalue.storage import FactRecord
 
@@ -462,6 +463,61 @@ def test_debt_paydown_years_metric():
     result = metric.compute("AAPL.US", repo)
     assert result is not None
     assert result.value == 1.0
+
+
+def test_short_term_debt_share_metric():
+    metric = ShortTermDebtShareMetric()
+    recent = (date.today() - timedelta(days=10)).isoformat()
+
+    class DummyRepo:
+        def latest_fact(self, symbol, concept):
+            if concept == "ShortTermDebt":
+                return fact(
+                    symbol=symbol,
+                    concept=concept,
+                    end_date=recent,
+                    value=25.0,
+                )
+            if concept == "LongTermDebt":
+                return fact(
+                    symbol=symbol,
+                    concept=concept,
+                    end_date=recent,
+                    value=75.0,
+                )
+            return None
+
+    repo = DummyRepo()
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.value == 0.25
+
+
+def test_short_term_debt_share_skips_non_positive_total():
+    metric = ShortTermDebtShareMetric()
+    recent = (date.today() - timedelta(days=10)).isoformat()
+
+    class DummyRepo:
+        def latest_fact(self, symbol, concept):
+            if concept == "ShortTermDebt":
+                return fact(
+                    symbol=symbol,
+                    concept=concept,
+                    end_date=recent,
+                    value=0.0,
+                )
+            if concept == "LongTermDebt":
+                return fact(
+                    symbol=symbol,
+                    concept=concept,
+                    end_date=recent,
+                    value=0.0,
+                )
+            return None
+
+    repo = DummyRepo()
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
 
 
 def test_debt_paydown_years_skips_non_positive_fcf():
