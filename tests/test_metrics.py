@@ -21,6 +21,7 @@ from pyvalue.metrics.price_to_fcf import PriceToFCFMetric
 from pyvalue.metrics.roc_greenblatt import ROCGreenblattMetric
 from pyvalue.metrics.roe_greenblatt import ROEGreenblattMetric
 from pyvalue.metrics.short_term_debt_share import ShortTermDebtShareMetric
+from pyvalue.metrics.return_on_invested_capital import ReturnOnInvestedCapitalMetric
 from pyvalue.metrics.working_capital import WorkingCapitalMetric
 from pyvalue.storage import FactRecord
 
@@ -518,6 +519,302 @@ def test_short_term_debt_share_skips_non_positive_total():
     repo = DummyRepo()
     result = metric.compute("AAPL.US", repo)
     assert result is None
+
+
+def test_return_on_invested_capital_metric():
+    metric = ReturnOnInvestedCapitalMetric()
+    today = date.today()
+    q4 = (today - timedelta(days=30)).isoformat()
+    q3 = (today - timedelta(days=120)).isoformat()
+    q2 = (today - timedelta(days=210)).isoformat()
+    q1 = (today - timedelta(days=300)).isoformat()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "OperatingIncomeLoss":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=100.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=q3,
+                        value=100.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q2",
+                        end_date=q2,
+                        value=100.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q1",
+                        end_date=q1,
+                        value=100.0,
+                    ),
+                ]
+            if concept == "IncomeBeforeIncomeTaxes":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=125.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=q3,
+                        value=125.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q2",
+                        end_date=q2,
+                        value=125.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q1",
+                        end_date=q1,
+                        value=125.0,
+                    ),
+                ]
+            if concept == "IncomeTaxExpense":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=25.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=q3,
+                        value=25.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q2",
+                        end_date=q2,
+                        value=25.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q1",
+                        end_date=q1,
+                        value=25.0,
+                    ),
+                ]
+            if concept == "ShortTermDebt":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=50.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=q3,
+                        value=40.0,
+                    ),
+                ]
+            if concept == "LongTermDebt":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=150.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=q3,
+                        value=140.0,
+                    ),
+                ]
+            if concept == "StockholdersEquity":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=600.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=q3,
+                        value=600.0,
+                    ),
+                ]
+            if concept == "CashAndShortTermInvestments":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=150.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=q3,
+                        value=150.0,
+                    ),
+                ]
+            return []
+
+    repo = DummyRepo()
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.value == 0.5
+
+
+def test_return_on_invested_capital_uses_fallback_tax_rate():
+    metric = ReturnOnInvestedCapitalMetric()
+    today = date.today()
+    q4 = (today - timedelta(days=30)).isoformat()
+    q3 = (today - timedelta(days=120)).isoformat()
+    q2 = (today - timedelta(days=210)).isoformat()
+    q1 = (today - timedelta(days=300)).isoformat()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "OperatingIncomeLoss":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=100.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=q3,
+                        value=100.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q2",
+                        end_date=q2,
+                        value=100.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q1",
+                        end_date=q1,
+                        value=100.0,
+                    ),
+                ]
+            if concept == "ShortTermDebt":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=50.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=q3,
+                        value=40.0,
+                    ),
+                ]
+            if concept == "LongTermDebt":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=150.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=q3,
+                        value=140.0,
+                    ),
+                ]
+            if concept == "StockholdersEquity":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=600.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=q3,
+                        value=600.0,
+                    ),
+                ]
+            if concept == "CashAndShortTermInvestments":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=150.0,
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=q3,
+                        value=150.0,
+                    ),
+                ]
+            return []
+
+    repo = DummyRepo()
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert round(result.value, 4) == round(316.0 / 640.0, 4)
 
 
 def test_debt_paydown_years_skips_non_positive_fcf():

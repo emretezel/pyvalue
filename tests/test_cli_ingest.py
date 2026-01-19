@@ -1244,12 +1244,27 @@ def test_cmd_compute_metrics_all(tmp_path):
                     concept="LongTermDebt", end_date=f"{current_year}-09-30", value=300
                 ),
                 make_fact(
+                    concept="LongTermDebt",
+                    end_date=f"{current_year - 1}-09-30",
+                    value=280,
+                ),
+                make_fact(
                     concept="ShortTermDebt", end_date=f"{current_year}-09-30", value=75
+                ),
+                make_fact(
+                    concept="ShortTermDebt",
+                    end_date=f"{current_year - 1}-09-30",
+                    value=70,
                 ),
                 make_fact(
                     concept="CashAndShortTermInvestments",
                     end_date=f"{current_year}-09-30",
                     value=125,
+                ),
+                make_fact(
+                    concept="CashAndShortTermInvestments",
+                    end_date=f"{current_year - 1}-09-30",
+                    value=120,
                 ),
             ]
         )
@@ -1324,6 +1339,36 @@ def test_cmd_compute_metrics_all(tmp_path):
         records.append(
             make_fact(
                 concept="OperatingIncomeLoss",
+                end_date=end_date,
+                fiscal_period=period,
+                value=value,
+            )
+        )
+    quarterly_pretax = [
+        (q4, "Q4", 320.0),
+        (q3, "Q3", 270.0),
+        (q2, "Q2", 220.0),
+        (q1, "Q1", 170.0),
+    ]
+    for end_date, period, value in quarterly_pretax:
+        records.append(
+            make_fact(
+                concept="IncomeBeforeIncomeTaxes",
+                end_date=end_date,
+                fiscal_period=period,
+                value=value,
+            )
+        )
+    quarterly_tax = [
+        (q4, "Q4", 64.0),
+        (q3, "Q3", 54.0),
+        (q2, "Q2", 44.0),
+        (q1, "Q1", 34.0),
+    ]
+    for end_date, period, value in quarterly_tax:
+        records.append(
+            make_fact(
+                concept="IncomeTaxExpense",
                 end_date=end_date,
                 fiscal_period=period,
                 value=value,
