@@ -1147,6 +1147,18 @@ def test_cmd_compute_metrics_all(tmp_path):
                     fiscal_period="FY",
                     value=70 + year,
                 ),
+                make_fact(
+                    concept="ShortTermDebt",
+                    end_date=end_date,
+                    fiscal_period="FY",
+                    value=60 + (year - (current_year - 9)),
+                ),
+                make_fact(
+                    concept="CashAndShortTermInvestments",
+                    end_date=end_date,
+                    fiscal_period="FY",
+                    value=100 + (year - (current_year - 9)),
+                ),
             ]
         )
         records.extend(
@@ -1285,6 +1297,46 @@ def test_cmd_compute_metrics_all(tmp_path):
     q2 = (date.today() - timedelta(days=200)).isoformat()
     q1 = (date.today() - timedelta(days=290)).isoformat()
     q4_prev = (date.today() - timedelta(days=380)).isoformat()
+    quarterly_nwc_points = [
+        (q4, "Q4", 620.0, 360.0, 130.0, 55.0),
+        (q3, "Q3", 600.0, 350.0, 125.0, 50.0),
+        (q2, "Q2", 590.0, 345.0, 120.0, 48.0),
+        (q1, "Q1", 580.0, 340.0, 115.0, 46.0),
+        (q4_prev, "Q4", 560.0, 350.0, 140.0, 65.0),
+    ]
+    for end_date, period, assets, liabilities, cash, short_debt in quarterly_nwc_points:
+        records.append(
+            make_fact(
+                concept="AssetsCurrent",
+                end_date=end_date,
+                fiscal_period=period,
+                value=assets,
+            )
+        )
+        records.append(
+            make_fact(
+                concept="LiabilitiesCurrent",
+                end_date=end_date,
+                fiscal_period=period,
+                value=liabilities,
+            )
+        )
+        records.append(
+            make_fact(
+                concept="CashAndShortTermInvestments",
+                end_date=end_date,
+                fiscal_period=period,
+                value=cash,
+            )
+        )
+        records.append(
+            make_fact(
+                concept="ShortTermDebt",
+                end_date=end_date,
+                fiscal_period=period,
+                value=short_debt,
+            )
+        )
     quarterly_cash_flows = [
         (q4, "Q4", 130.0, 40.0),
         (q3, "Q3", 120.0, 35.0),

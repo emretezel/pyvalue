@@ -22,6 +22,13 @@ from pyvalue.metrics.mcapex import (
     MCapexTTMMetric,
 )
 from pyvalue.metrics.net_debt_to_ebitda import NetDebtToEBITDAMetric
+from pyvalue.metrics.nwc import (
+    DeltaNWCFYMetric,
+    DeltaNWCMaintMetric,
+    DeltaNWCTTMMetric,
+    NWCFYMetric,
+    NWCMostRecentQuarterMetric,
+)
 from pyvalue.metrics.price_to_fcf import PriceToFCFMetric
 from pyvalue.metrics.roc_greenblatt import ROCGreenblattMetric
 from pyvalue.metrics.roe_greenblatt import ROEGreenblattMetric
@@ -2250,9 +2257,1041 @@ def test_mcapex_5y_metric_allows_year_gaps():
     assert result.value == 100.0
 
 
+def test_nwc_mqr_metric_base_formula():
+    metric = NWCMostRecentQuarterMetric()
+    q4 = (date.today() - timedelta(days=20)).isoformat()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "AssetsCurrent":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=500.0,
+                        currency="USD",
+                    )
+                ]
+            if concept == "LiabilitiesCurrent":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=300.0,
+                        currency="USD",
+                    )
+                ]
+            if concept == "CashAndShortTermInvestments":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=100.0,
+                        currency="USD",
+                    )
+                ]
+            if concept == "ShortTermDebt":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=50.0,
+                        currency="USD",
+                    )
+                ]
+            return []
+
+    result = metric.compute("AAPL.US", DummyRepo())
+    assert result is not None
+    assert result.value == 150.0
+
+
+def test_nwc_mqr_metric_short_term_debt_fallback():
+    metric = NWCMostRecentQuarterMetric()
+    q4 = (date.today() - timedelta(days=20)).isoformat()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "AssetsCurrent":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=500.0,
+                        currency="USD",
+                    )
+                ]
+            if concept == "LiabilitiesCurrent":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=300.0,
+                        currency="USD",
+                    )
+                ]
+            if concept == "CashAndShortTermInvestments":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=100.0,
+                        currency="USD",
+                    )
+                ]
+            return []
+
+    result = metric.compute("AAPL.US", DummyRepo())
+    assert result is not None
+    assert result.value == 100.0
+
+
+def test_nwc_mqr_metric_cash_fallback_uses_components():
+    metric = NWCMostRecentQuarterMetric()
+    q4 = (date.today() - timedelta(days=20)).isoformat()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "AssetsCurrent":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=500.0,
+                        currency="USD",
+                    )
+                ]
+            if concept == "LiabilitiesCurrent":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=300.0,
+                        currency="USD",
+                    )
+                ]
+            if concept == "CashAndCashEquivalents":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=80.0,
+                        currency="USD",
+                    )
+                ]
+            if concept == "ShortTermInvestments":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=20.0,
+                        currency="USD",
+                    )
+                ]
+            if concept == "ShortTermDebt":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=50.0,
+                        currency="USD",
+                    )
+                ]
+            return []
+
+    result = metric.compute("AAPL.US", DummyRepo())
+    assert result is not None
+    assert result.value == 150.0
+
+
+def test_nwc_mqr_metric_returns_none_without_cash_source():
+    metric = NWCMostRecentQuarterMetric()
+    q4 = (date.today() - timedelta(days=20)).isoformat()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "AssetsCurrent":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=500.0,
+                        currency="USD",
+                    )
+                ]
+            if concept == "LiabilitiesCurrent":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=300.0,
+                        currency="USD",
+                    )
+                ]
+            return []
+
+    result = metric.compute("AAPL.US", DummyRepo())
+    assert result is None
+
+
+def test_nwc_mqr_metric_floors_adjusted_liabilities():
+    metric = NWCMostRecentQuarterMetric()
+    q4 = (date.today() - timedelta(days=20)).isoformat()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "AssetsCurrent":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=300.0,
+                        currency="USD",
+                    )
+                ]
+            if concept == "LiabilitiesCurrent":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=100.0,
+                        currency="USD",
+                    )
+                ]
+            if concept == "CashAndShortTermInvestments":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=50.0,
+                        currency="USD",
+                    )
+                ]
+            if concept == "ShortTermDebt":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=150.0,
+                        currency="USD",
+                    )
+                ]
+            return []
+
+    result = metric.compute("AAPL.US", DummyRepo())
+    assert result is not None
+    assert result.value == 250.0
+
+
+def test_nwc_fy_metric():
+    metric = NWCFYMetric()
+    fy = (date.today() - timedelta(days=100)).isoformat()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "AssetsCurrent":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=fy,
+                        value=500.0,
+                        currency="USD",
+                    )
+                ]
+            if concept == "LiabilitiesCurrent":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=fy,
+                        value=300.0,
+                        currency="USD",
+                    )
+                ]
+            if concept == "CashAndShortTermInvestments":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=fy,
+                        value=100.0,
+                        currency="USD",
+                    )
+                ]
+            if concept == "ShortTermDebt":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=fy,
+                        value=50.0,
+                        currency="USD",
+                    )
+                ]
+            return []
+
+    result = metric.compute("AAPL.US", DummyRepo())
+    assert result is not None
+    assert result.value == 150.0
+
+
+def test_delta_nwc_ttm_metric():
+    metric = DeltaNWCTTMMetric()
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q4_prev = (today - timedelta(days=380)).isoformat()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "AssetsCurrent":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=500.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4_prev,
+                        value=450.0,
+                        currency="USD",
+                    ),
+                ]
+            if concept == "LiabilitiesCurrent":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=300.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4_prev,
+                        value=310.0,
+                        currency="USD",
+                    ),
+                ]
+            if concept == "CashAndShortTermInvestments":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=100.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4_prev,
+                        value=120.0,
+                        currency="USD",
+                    ),
+                ]
+            if concept == "ShortTermDebt":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=50.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4_prev,
+                        value=60.0,
+                        currency="USD",
+                    ),
+                ]
+            return []
+
+    result = metric.compute("AAPL.US", DummyRepo())
+    assert result is not None
+    assert result.value == 70.0
+
+
+def test_delta_nwc_ttm_metric_requires_same_quarter_last_year():
+    metric = DeltaNWCTTMMetric()
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3_prev = (today - timedelta(days=470)).isoformat()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "AssetsCurrent":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=500.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=q3_prev,
+                        value=450.0,
+                        currency="USD",
+                    ),
+                ]
+            if concept == "LiabilitiesCurrent":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=300.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=q3_prev,
+                        value=310.0,
+                        currency="USD",
+                    ),
+                ]
+            if concept == "CashAndShortTermInvestments":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=100.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=q3_prev,
+                        value=120.0,
+                        currency="USD",
+                    ),
+                ]
+            if concept == "ShortTermDebt":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=50.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=q3_prev,
+                        value=60.0,
+                        currency="USD",
+                    ),
+                ]
+            return []
+
+    result = metric.compute("AAPL.US", DummyRepo())
+    assert result is None
+
+
+def test_delta_nwc_fy_metric():
+    metric = DeltaNWCFYMetric()
+    y0 = f"{date.today().year - 1}-09-30"
+    y1 = f"{date.today().year - 2}-09-30"
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "AssetsCurrent":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y0,
+                        value=500.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y1,
+                        value=450.0,
+                        currency="USD",
+                    ),
+                ]
+            if concept == "LiabilitiesCurrent":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y0,
+                        value=300.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y1,
+                        value=310.0,
+                        currency="USD",
+                    ),
+                ]
+            if concept == "CashAndShortTermInvestments":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y0,
+                        value=100.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y1,
+                        value=120.0,
+                        currency="USD",
+                    ),
+                ]
+            if concept == "ShortTermDebt":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y0,
+                        value=50.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y1,
+                        value=60.0,
+                        currency="USD",
+                    ),
+                ]
+            return []
+
+    result = metric.compute("AAPL.US", DummyRepo())
+    assert result is not None
+    assert result.value == 70.0
+
+
+def test_delta_nwc_maint_metric():
+    metric = DeltaNWCMaintMetric()
+    current_year = date.today().year
+    y0 = f"{current_year - 1}-09-30"
+    y1 = f"{current_year - 2}-09-30"
+    y2 = f"{current_year - 3}-09-30"
+    y3 = f"{current_year - 4}-09-30"
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "AssetsCurrent":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y0,
+                        value=560.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y1,
+                        value=520.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y2,
+                        value=500.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y3,
+                        value=470.0,
+                        currency="USD",
+                    ),
+                ]
+            if concept == "LiabilitiesCurrent":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y0,
+                        value=320.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y1,
+                        value=300.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y2,
+                        value=290.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y3,
+                        value=280.0,
+                        currency="USD",
+                    ),
+                ]
+            if concept == "CashAndShortTermInvestments":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y0,
+                        value=90.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y1,
+                        value=100.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y2,
+                        value=70.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y3,
+                        value=85.0,
+                        currency="USD",
+                    ),
+                ]
+            if concept == "ShortTermDebt":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y0,
+                        value=40.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y1,
+                        value=35.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y2,
+                        value=30.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y3,
+                        value=30.0,
+                        currency="USD",
+                    ),
+                ]
+            return []
+
+    result = metric.compute("AAPL.US", DummyRepo())
+    assert result is not None
+    assert round(result.value, 4) == round((35.0 - 15.0 + 35.0) / 3.0, 4)
+
+
+def test_delta_nwc_maint_metric_floors_negative_average_to_zero():
+    metric = DeltaNWCMaintMetric()
+    current_year = date.today().year
+    y0 = f"{current_year - 1}-09-30"
+    y1 = f"{current_year - 2}-09-30"
+    y2 = f"{current_year - 3}-09-30"
+    y3 = f"{current_year - 4}-09-30"
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "AssetsCurrent":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y0,
+                        value=600.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y1,
+                        value=550.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y2,
+                        value=500.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y3,
+                        value=450.0,
+                        currency="USD",
+                    ),
+                ]
+            if concept == "LiabilitiesCurrent":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y0,
+                        value=450.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y1,
+                        value=350.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y2,
+                        value=280.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y3,
+                        value=200.0,
+                        currency="USD",
+                    ),
+                ]
+            if concept == "CashAndShortTermInvestments":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y0,
+                        value=60.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y1,
+                        value=70.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y2,
+                        value=80.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y3,
+                        value=90.0,
+                        currency="USD",
+                    ),
+                ]
+            if concept == "ShortTermDebt":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y0,
+                        value=40.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y1,
+                        value=35.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y2,
+                        value=30.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y3,
+                        value=25.0,
+                        currency="USD",
+                    ),
+                ]
+            return []
+
+    result = metric.compute("AAPL.US", DummyRepo())
+    assert result is not None
+    assert result.value == 0.0
+
+
+def test_delta_nwc_maint_metric_requires_consecutive_deltas():
+    metric = DeltaNWCMaintMetric()
+    current_year = date.today().year
+    y0 = f"{current_year - 1}-09-30"
+    y1 = f"{current_year - 2}-09-30"
+    y3 = f"{current_year - 4}-09-30"
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "AssetsCurrent":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y0,
+                        value=560.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y1,
+                        value=520.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y3,
+                        value=470.0,
+                        currency="USD",
+                    ),
+                ]
+            if concept == "LiabilitiesCurrent":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y0,
+                        value=320.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y1,
+                        value=300.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y3,
+                        value=280.0,
+                        currency="USD",
+                    ),
+                ]
+            if concept == "CashAndShortTermInvestments":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y0,
+                        value=90.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y1,
+                        value=100.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y3,
+                        value=85.0,
+                        currency="USD",
+                    ),
+                ]
+            if concept == "ShortTermDebt":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y0,
+                        value=40.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y1,
+                        value=35.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=y3,
+                        value=30.0,
+                        currency="USD",
+                    ),
+                ]
+            return []
+
+    result = metric.compute("AAPL.US", DummyRepo())
+    assert result is None
+
+
 def test_registry_contains_all_ids():
     # Ensure the registry still exposes all metric identifiers
     assert len(REGISTRY) >= 1
     assert "mcapex_fy" in REGISTRY
     assert "mcapex_5y" in REGISTRY
     assert "mcapex_ttm" in REGISTRY
+    assert "nwc_mqr" in REGISTRY
+    assert "nwc_fy" in REGISTRY
+    assert "delta_nwc_ttm" in REGISTRY
+    assert "delta_nwc_fy" in REGISTRY
+    assert "delta_nwc_maint" in REGISTRY

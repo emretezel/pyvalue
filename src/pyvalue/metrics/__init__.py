@@ -23,6 +23,13 @@ from .net_debt_to_ebitda import NetDebtToEBITDAMetric
 from .short_term_debt_share import ShortTermDebtShareMetric
 from .return_on_invested_capital import ReturnOnInvestedCapitalMetric
 from .mcapex import MCapexFYMetric, MCapexFiveYearMetric, MCapexTTMMetric
+from .nwc import (
+    NWCMostRecentQuarterMetric,
+    NWCFYMetric,
+    DeltaNWCTTMMetric,
+    DeltaNWCFYMetric,
+    DeltaNWCMaintMetric,
+)
 
 REGISTRY = {
     WorkingCapitalMetric.id: WorkingCapitalMetric,
@@ -44,6 +51,11 @@ REGISTRY = {
     MCapexFYMetric.id: MCapexFYMetric,
     MCapexFiveYearMetric.id: MCapexFiveYearMetric,
     MCapexTTMMetric.id: MCapexTTMMetric,
+    NWCMostRecentQuarterMetric.id: NWCMostRecentQuarterMetric,
+    NWCFYMetric.id: NWCFYMetric,
+    DeltaNWCTTMMetric.id: DeltaNWCTTMMetric,
+    DeltaNWCFYMetric.id: DeltaNWCFYMetric,
+    DeltaNWCMaintMetric.id: DeltaNWCMaintMetric,
     ROCGreenblattMetric.id: ROCGreenblattMetric,
     ROEGreenblattMetric.id: ROEGreenblattMetric,
 }
@@ -70,6 +82,11 @@ __all__ = [
     "MCapexFYMetric",
     "MCapexFiveYearMetric",
     "MCapexTTMMetric",
+    "NWCMostRecentQuarterMetric",
+    "NWCFYMetric",
+    "DeltaNWCTTMMetric",
+    "DeltaNWCFYMetric",
+    "DeltaNWCMaintMetric",
     "ROCGreenblattMetric",
     "ROEGreenblattMetric",
     "REGISTRY",

@@ -377,3 +377,72 @@ def test_eodhd_normalizes_depreciation_from_cash_flow():
     derived = [r for r in records if r.concept == "DepreciationFromCashFlow"]
     assert derived, "DepreciationFromCashFlow should map from cash-flow depreciation"
     assert derived[0].value == 18.0
+
+
+def test_eodhd_normalizes_cash_and_cash_equivalents():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Balance_Sheet": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "cashAndEquivalents": 44.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.LSE")
+    derived = [r for r in records if r.concept == "CashAndCashEquivalents"]
+    assert derived, "CashAndCashEquivalents should map from cashAndEquivalents"
+    assert derived[0].value == 44.0
+
+
+def test_eodhd_normalizes_cash_and_cash_equivalents_fallback_from_cash():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Balance_Sheet": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "cash": 33.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.LSE")
+    derived = [r for r in records if r.concept == "CashAndCashEquivalents"]
+    assert derived, "CashAndCashEquivalents should fall back to cash"
+    assert derived[0].value == 33.0
+
+
+def test_eodhd_normalizes_short_term_investments():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Balance_Sheet": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "shortTermInvestments": 19.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.LSE")
+    derived = [r for r in records if r.concept == "ShortTermInvestments"]
+    assert derived, "ShortTermInvestments should map from shortTermInvestments"
+    assert derived[0].value == 19.0

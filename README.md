@@ -248,6 +248,13 @@ Additional metrics include:
   (requires exactly five FY points; gaps are allowed).
 - `mcapex_ttm`: Maintenance capex proxy for TTM, computed as
   `min(Capex_TTM, 1.1 × D&A_TTM)` with single-input fallback and absolute-value handling.
+- `nwc_mqr`: Net working capital for the most recent quarter using
+  `(AssetsCurrent - Cash) - (LiabilitiesCurrent - ShortTermDebt)` with EODHD-specific fallbacks.
+- `nwc_fy`: Net working capital for latest FY end using the same adjusted-NWC formula.
+- `delta_nwc_ttm`: Quarter-over-quarter-year change in NWC
+  (`NWC(MQR) - NWC(same quarter last year)`).
+- `delta_nwc_fy`: Fiscal-year NWC change (`NWC(latest FY) - NWC(prior FY)`).
+- `delta_nwc_maint`: `max(average(last 3 FY deltas of NWC), 0)`.
 
 ## Metric reference
 
@@ -274,6 +281,11 @@ is derived from normalized SEC or market data plus the value-investing intuition
 | `mcapex_fy` | Latest fiscal-year maintenance capex proxy: `min(CapitalExpenditures_FY, 1.1 × D&A_FY)`, where D&A uses `DepreciationDepletionAndAmortization` and falls back to cash-flow depreciation when needed (EODHD-only). If only one side exists, uses that side; absolute values are used for sign consistency. | Approximates recurring reinvestment needs without letting unusually high growth capex dominate the estimate. |
 | `mcapex_5y` | Average of the latest 5 available fiscal-year `mcapex_fy` values (requires exactly five points; year gaps allowed; EODHD-only). | Smooths one-off investment cycles and produces a steadier maintenance reinvestment baseline. |
 | `mcapex_ttm` | Trailing 12-month maintenance capex proxy: `min(CapitalExpenditures_TTM, 1.1 × D&A_TTM)` using quarterly sums and the same D&A fallback/sign rules (EODHD-only). | Gives a near-term maintenance reinvestment estimate for valuation and cash-flow quality checks. |
+| `nwc_mqr` | Most recent-quarter net working capital: `(AssetsCurrent - Cash) - (LiabilitiesCurrent - ShortTermDebt)` where `Cash` prefers `CashAndShortTermInvestments` and falls back to `CashAndCashEquivalents + ShortTermInvestments`; if short-term debt is missing, liabilities are used as-is (EODHD-oriented). | Isolates operating working capital by excluding cash and debt components, helping assess short-term capital lock-up. |
+| `nwc_fy` | Latest FY-end net working capital using the same adjusted formula and fallback rules as `nwc_mqr` (EODHD-oriented). | Provides an annual baseline for working-capital intensity and trend analysis. |
+| `delta_nwc_ttm` | `NWC(MQR) - NWC(same fiscal quarter previous year)` with strict quarter matching (EODHD-oriented). | Captures year-over-year working-capital drift without quarter-seasonality distortion. |
+| `delta_nwc_fy` | `NWC(latest FY) - NWC(strict prior FY)` (EODHD-oriented). | Highlights annual changes in operating working-capital requirements. |
+| `delta_nwc_maint` | `max(average(last 3 consecutive FY deltas of NWC), 0)` (EODHD-oriented). | Converts multi-year NWC drift into a conservative maintenance adjustment that does not go negative. |
 | `market_cap` | Latest stored market capitalization snapshot. | Screening for a minimum size filters out illiquid micro-caps where information quality and trading costs can erode returns. |
 | `eps_ttm` | Sum of the most recent four quarterly EPS values. | Used to verify that current earnings have not collapsed relative to history, preventing “cheap” valuations caused by deteriorating fundamentals. |
 | `eps_6y_avg` | Average of the latest six fiscal-year EPS values. | Provides a normalized earnings power baseline for comparisons against current EPS streaks or TTM values, smoothing out cyclical peaks and troughs. |

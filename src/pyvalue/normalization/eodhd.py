@@ -71,6 +71,8 @@ EODHD_STATEMENT_FIELDS = {
             "noncontrollingInterestInConsolidatedEntity"
         ],
         "CashAndShortTermInvestments": ["cashAndShortTermInvestments"],
+        "CashAndCashEquivalents": ["cashAndEquivalents", "cash"],
+        "ShortTermInvestments": ["shortTermInvestments"],
         "ShortTermDebt": ["shortTermDebt", "shortLongTermDebt"],
         "LongTermDebtNoncurrent": [
             "longTermDebtNoncurrent",
