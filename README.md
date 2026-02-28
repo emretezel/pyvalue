@@ -255,6 +255,11 @@ Additional metrics include:
   (`NWC(MQR) - NWC(same quarter last year)`).
 - `delta_nwc_fy`: Fiscal-year NWC change (`NWC(latest FY) - NWC(prior FY)`).
 - `delta_nwc_maint`: `max(average(last 3 FY deltas of NWC), 0)`.
+- `oe_equity_ttm`: Owner earnings equity (TTM), computed as
+  `NI_TTM + D&A_TTM - MCapex_TTM - delta_nwc_maint` (EODHD-oriented).
+- `oe_equity_5y_avg`: Average of the latest five available FY owner earnings equity
+  values using `OE_FY = NI_FY + D&A_FY - MCapex_FY - latest_delta_nwc_maint`
+  (requires exactly five points; gaps allowed; EODHD-oriented).
 
 ## Metric reference
 
@@ -286,6 +291,8 @@ is derived from normalized SEC or market data plus the value-investing intuition
 | `delta_nwc_ttm` | `NWC(MQR) - NWC(same fiscal quarter previous year)` with strict quarter matching (EODHD-oriented). | Captures year-over-year working-capital drift without quarter-seasonality distortion. |
 | `delta_nwc_fy` | `NWC(latest FY) - NWC(strict prior FY)` (EODHD-oriented). | Highlights annual changes in operating working-capital requirements. |
 | `delta_nwc_maint` | `max(average(last 3 consecutive FY deltas of NWC), 0)` (EODHD-oriented). | Converts multi-year NWC drift into a conservative maintenance adjustment that does not go negative. |
+| `oe_equity_ttm` | Owner earnings equity TTM: `NI_TTM + D&A_TTM - MCapex_TTM - delta_nwc_maint` (EODHD-oriented), where NI prefers `NetIncomeLoss` and falls back to net income available to common, D&A prefers income-statement D&A and falls back to cash-flow depreciation, and missing D&A defaults to 0. | Approximates owner earnings after maintenance reinvestment and sustained working-capital drag using near-term (TTM) fundamentals. |
+| `oe_equity_5y_avg` | Average of latest 5 FY owner earnings equity values, each computed as `NI_FY + D&A_FY - MCapex_FY - latest_delta_nwc_maint` (EODHD-oriented; strict 5 values; year gaps allowed; same NI/D&A fallback rules as TTM). | Smooths cyclical noise and yields a multi-year owner-earnings baseline for intrinsic-value comparisons. |
 | `market_cap` | Latest stored market capitalization snapshot. | Screening for a minimum size filters out illiquid micro-caps where information quality and trading costs can erode returns. |
 | `eps_ttm` | Sum of the most recent four quarterly EPS values. | Used to verify that current earnings have not collapsed relative to history, preventing “cheap” valuations caused by deteriorating fundamentals. |
 | `eps_6y_avg` | Average of the latest six fiscal-year EPS values. | Provides a normalized earnings power baseline for comparisons against current EPS streaks or TTM values, smoothing out cyclical peaks and troughs. |

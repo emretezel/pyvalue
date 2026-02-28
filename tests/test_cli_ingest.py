@@ -1369,6 +1369,22 @@ def test_cmd_compute_metrics_all(tmp_path):
                 value=capex * 0.8,
             )
         )
+    quarterly_net_income = [
+        (q4, "Q4", 220.0),
+        (q3, "Q3", 210.0),
+        (q2, "Q2", 200.0),
+        (q1, "Q1", 190.0),
+        (q4_prev, "Q4", 180.0),
+    ]
+    for end_date, period, value in quarterly_net_income:
+        records.append(
+            make_fact(
+                concept="NetIncomeLoss",
+                end_date=end_date,
+                fiscal_period=period,
+                value=value,
+            )
+        )
     quarterly_eps = [
         (q4, "Q4", 2.5),
         (q3, "Q3", 2.0),

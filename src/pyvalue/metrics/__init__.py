@@ -30,6 +30,10 @@ from .nwc import (
     DeltaNWCFYMetric,
     DeltaNWCMaintMetric,
 )
+from .owner_earnings_equity import (
+    OwnerEarningsEquityTTMMetric,
+    OwnerEarningsEquityFiveYearAverageMetric,
+)
 
 REGISTRY = {
     WorkingCapitalMetric.id: WorkingCapitalMetric,
@@ -56,6 +60,8 @@ REGISTRY = {
     DeltaNWCTTMMetric.id: DeltaNWCTTMMetric,
     DeltaNWCFYMetric.id: DeltaNWCFYMetric,
     DeltaNWCMaintMetric.id: DeltaNWCMaintMetric,
+    OwnerEarningsEquityTTMMetric.id: OwnerEarningsEquityTTMMetric,
+    OwnerEarningsEquityFiveYearAverageMetric.id: OwnerEarningsEquityFiveYearAverageMetric,
     ROCGreenblattMetric.id: ROCGreenblattMetric,
     ROEGreenblattMetric.id: ROEGreenblattMetric,
 }
@@ -87,6 +93,8 @@ __all__ = [
     "DeltaNWCTTMMetric",
     "DeltaNWCFYMetric",
     "DeltaNWCMaintMetric",
+    "OwnerEarningsEquityTTMMetric",
+    "OwnerEarningsEquityFiveYearAverageMetric",
     "ROCGreenblattMetric",
     "ROEGreenblattMetric",
     "REGISTRY",
