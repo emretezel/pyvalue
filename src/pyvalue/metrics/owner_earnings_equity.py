@@ -56,6 +56,13 @@ REQUIRED_CONCEPTS = tuple(
 )
 
 
+@dataclass(frozen=True)
+class OwnerEarningsEquitySnapshot:
+    value: float
+    as_of: str
+    currency: Optional[str]
+
+
 @dataclass
 class _AmountResult:
     total: float
@@ -67,9 +74,151 @@ class _AmountResult:
 class _FYPoint:
     value: float
     as_of: str
+    currency: Optional[str]
 
 
-class _OwnerEarningsEquityBase:
+class OwnerEarningsEquityCalculator:
+    """Shared calculator for owner earnings equity numerators."""
+
+    def compute_ttm(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> Optional[OwnerEarningsEquitySnapshot]:
+        delta_nwc_maint = self._compute_delta_nwc_maint(symbol, repo)
+        if delta_nwc_maint is None:
+            LOGGER.warning("oe_equity_ttm: missing delta_nwc_maint for %s", symbol)
+            return None
+
+        ni = self._compute_ttm_amount(
+            symbol,
+            repo,
+            NI_CONCEPTS,
+            context="oe_equity_ttm",
+            absolute=False,
+        )
+        if ni is None:
+            LOGGER.warning("oe_equity_ttm: missing TTM net income for %s", symbol)
+            return None
+
+        da = self._compute_ttm_amount(
+            symbol,
+            repo,
+            DA_PRIMARY_CONCEPTS,
+            context="oe_equity_ttm",
+            absolute=False,
+        )
+        if da is None:
+            da = self._compute_ttm_amount(
+                symbol,
+                repo,
+                DA_FALLBACK_CONCEPTS,
+                context="oe_equity_ttm",
+                absolute=False,
+            )
+
+        mcapex = self._compute_mcapex_ttm(symbol, repo)
+        if mcapex is None:
+            LOGGER.warning("oe_equity_ttm: missing TTM mcapex inputs for %s", symbol)
+            return None
+
+        currency = self._combine_currency(
+            [ni.currency, da.currency if da else None, mcapex.currency]
+        )
+        if currency is None and any(
+            code is not None
+            for code in (ni.currency, da.currency if da else None, mcapex.currency)
+        ):
+            LOGGER.warning("oe_equity_ttm: currency mismatch for %s", symbol)
+            return None
+
+        da_total = da.total if da is not None else 0.0
+        as_of_dates = [ni.as_of, mcapex.as_of, delta_nwc_maint.as_of]
+        if da is not None:
+            as_of_dates.append(da.as_of)
+        as_of = max(as_of_dates)
+        value = ni.total + da_total - mcapex.total - delta_nwc_maint.value
+        return OwnerEarningsEquitySnapshot(value=value, as_of=as_of, currency=currency)
+
+    def compute_5y_average(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> Optional[OwnerEarningsEquitySnapshot]:
+        delta_nwc_maint = self._compute_delta_nwc_maint(symbol, repo)
+        if delta_nwc_maint is None:
+            LOGGER.warning("oe_equity_5y_avg: missing delta_nwc_maint for %s", symbol)
+            return None
+
+        ni_map = self._build_fy_amount_map(symbol, repo, NI_CONCEPTS, absolute=False)
+        da_map = self._build_fy_amount_map(
+            symbol, repo, DA_PRIMARY_CONCEPTS + DA_FALLBACK_CONCEPTS, absolute=False
+        )
+        mcapex_map = self._build_mcapex_fy_map(symbol, repo)
+
+        candidate_dates = sorted(
+            set(ni_map.keys()).intersection(mcapex_map.keys()),
+            reverse=True,
+        )
+        points: list[_FYPoint] = []
+        for end_date in candidate_dates:
+            ni = ni_map[end_date]
+            mcapex = mcapex_map[end_date]
+            da = da_map.get(end_date)
+
+            point_currency = self._combine_currency(
+                [ni.currency, da.currency if da else None, mcapex.currency]
+            )
+            if point_currency is None and any(
+                code is not None
+                for code in (ni.currency, da.currency if da else None, mcapex.currency)
+            ):
+                LOGGER.warning(
+                    "oe_equity_5y_avg: currency mismatch on %s for %s",
+                    end_date,
+                    symbol,
+                )
+                continue
+
+            point_value = ni.total + (da.total if da is not None else 0.0)
+            point_value = point_value - mcapex.total - delta_nwc_maint.value
+            points.append(
+                _FYPoint(value=point_value, as_of=end_date, currency=point_currency)
+            )
+
+        if len(points) < 5:
+            LOGGER.warning(
+                "oe_equity_5y_avg: need 5 FY owner earnings values for %s, found %s",
+                symbol,
+                len(points),
+            )
+            return None
+
+        latest = points[0]
+        if not self._is_recent_as_of(latest.as_of, max_age_days=MAX_FY_FACT_AGE_DAYS):
+            LOGGER.warning(
+                "oe_equity_5y_avg: latest FY (%s) too old for %s",
+                latest.as_of,
+                symbol,
+            )
+            return None
+
+        latest_five = points[:5]
+        series_currency = self._combine_currency(
+            [point.currency for point in latest_five]
+        )
+        if series_currency is None and any(
+            point.currency is not None for point in latest_five
+        ):
+            LOGGER.warning(
+                "oe_equity_5y_avg: currency mismatch across selected FY series for %s",
+                symbol,
+            )
+            return None
+
+        average = sum(point.value for point in latest_five) / 5.0
+        return OwnerEarningsEquitySnapshot(
+            value=average,
+            as_of=latest_five[0].as_of,
+            currency=series_currency,
+        )
+
     def _compute_delta_nwc_maint(
         self, symbol: str, repo: FinancialFactsRepository
     ) -> Optional[MetricResult]:
@@ -324,7 +473,7 @@ class _OwnerEarningsEquityBase:
 
 
 @dataclass
-class OwnerEarningsEquityTTMMetric(_OwnerEarningsEquityBase):
+class OwnerEarningsEquityTTMMetric:
     """Compute TTM owner earnings equity for EODHD-oriented data."""
 
     id: str = "oe_equity_ttm"
@@ -333,64 +482,19 @@ class OwnerEarningsEquityTTMMetric(_OwnerEarningsEquityBase):
     def compute(
         self, symbol: str, repo: FinancialFactsRepository
     ) -> Optional[MetricResult]:
-        delta_nwc_maint = self._compute_delta_nwc_maint(symbol, repo)
-        if delta_nwc_maint is None:
-            LOGGER.warning("oe_equity_ttm: missing delta_nwc_maint for %s", symbol)
+        snapshot = OwnerEarningsEquityCalculator().compute_ttm(symbol, repo)
+        if snapshot is None:
             return None
-
-        ni = self._compute_ttm_amount(
-            symbol,
-            repo,
-            NI_CONCEPTS,
-            context="oe_equity_ttm",
-            absolute=False,
+        return MetricResult(
+            symbol=symbol,
+            metric_id=self.id,
+            value=snapshot.value,
+            as_of=snapshot.as_of,
         )
-        if ni is None:
-            LOGGER.warning("oe_equity_ttm: missing TTM net income for %s", symbol)
-            return None
-
-        da = self._compute_ttm_amount(
-            symbol,
-            repo,
-            DA_PRIMARY_CONCEPTS,
-            context="oe_equity_ttm",
-            absolute=False,
-        )
-        if da is None:
-            da = self._compute_ttm_amount(
-                symbol,
-                repo,
-                DA_FALLBACK_CONCEPTS,
-                context="oe_equity_ttm",
-                absolute=False,
-            )
-
-        mcapex = self._compute_mcapex_ttm(symbol, repo)
-        if mcapex is None:
-            LOGGER.warning("oe_equity_ttm: missing TTM mcapex inputs for %s", symbol)
-            return None
-
-        currency = self._combine_currency(
-            [ni.currency, da.currency if da else None, mcapex.currency]
-        )
-        if currency is None and any(
-            code is not None
-            for code in (ni.currency, da.currency if da else None, mcapex.currency)
-        ):
-            LOGGER.warning("oe_equity_ttm: currency mismatch for %s", symbol)
-            return None
-
-        da_total = da.total if da is not None else 0.0
-        as_of_dates = [ni.as_of, mcapex.as_of, delta_nwc_maint.as_of]
-        if da is not None:
-            as_of_dates.append(da.as_of)
-        as_of = max(as_of_dates)
-        value = ni.total + da_total - mcapex.total - delta_nwc_maint.value
-        return MetricResult(symbol=symbol, metric_id=self.id, value=value, as_of=as_of)
 
 
 @dataclass
-class OwnerEarningsEquityFiveYearAverageMetric(_OwnerEarningsEquityBase):
+class OwnerEarningsEquityFiveYearAverageMetric:
     """Compute 5-year average FY owner earnings equity for EODHD-oriented data."""
 
     id: str = "oe_equity_5y_avg"
@@ -399,70 +503,20 @@ class OwnerEarningsEquityFiveYearAverageMetric(_OwnerEarningsEquityBase):
     def compute(
         self, symbol: str, repo: FinancialFactsRepository
     ) -> Optional[MetricResult]:
-        delta_nwc_maint = self._compute_delta_nwc_maint(symbol, repo)
-        if delta_nwc_maint is None:
-            LOGGER.warning("oe_equity_5y_avg: missing delta_nwc_maint for %s", symbol)
+        snapshot = OwnerEarningsEquityCalculator().compute_5y_average(symbol, repo)
+        if snapshot is None:
             return None
-
-        ni_map = self._build_fy_amount_map(symbol, repo, NI_CONCEPTS, absolute=False)
-        da_map = self._build_fy_amount_map(
-            symbol, repo, DA_PRIMARY_CONCEPTS + DA_FALLBACK_CONCEPTS, absolute=False
-        )
-        mcapex_map = self._build_mcapex_fy_map(symbol, repo)
-
-        candidate_dates = sorted(
-            set(ni_map.keys()).intersection(mcapex_map.keys()),
-            reverse=True,
-        )
-        points: list[_FYPoint] = []
-        for end_date in candidate_dates:
-            ni = ni_map[end_date]
-            mcapex = mcapex_map[end_date]
-            da = da_map.get(end_date)
-
-            currency = self._combine_currency(
-                [ni.currency, da.currency if da else None, mcapex.currency]
-            )
-            if currency is None and any(
-                code is not None
-                for code in (ni.currency, da.currency if da else None, mcapex.currency)
-            ):
-                LOGGER.warning(
-                    "oe_equity_5y_avg: currency mismatch on %s for %s",
-                    end_date,
-                    symbol,
-                )
-                continue
-
-            value = ni.total + (da.total if da is not None else 0.0)
-            value = value - mcapex.total - delta_nwc_maint.value
-            points.append(_FYPoint(value=value, as_of=end_date))
-
-        if len(points) < 5:
-            LOGGER.warning(
-                "oe_equity_5y_avg: need 5 FY owner earnings values for %s, found %s",
-                symbol,
-                len(points),
-            )
-            return None
-
-        latest = points[0]
-        if not self._is_recent_as_of(latest.as_of, max_age_days=MAX_FY_FACT_AGE_DAYS):
-            LOGGER.warning(
-                "oe_equity_5y_avg: latest FY (%s) too old for %s",
-                latest.as_of,
-                symbol,
-            )
-            return None
-
-        latest_five = points[:5]
-        average = sum(point.value for point in latest_five) / 5.0
         return MetricResult(
             symbol=symbol,
             metric_id=self.id,
-            value=average,
-            as_of=latest_five[0].as_of,
+            value=snapshot.value,
+            as_of=snapshot.as_of,
         )
 
 
-__all__ = ["OwnerEarningsEquityTTMMetric", "OwnerEarningsEquityFiveYearAverageMetric"]
+__all__ = [
+    "OwnerEarningsEquitySnapshot",
+    "OwnerEarningsEquityCalculator",
+    "OwnerEarningsEquityTTMMetric",
+    "OwnerEarningsEquityFiveYearAverageMetric",
+]

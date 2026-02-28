@@ -1499,3 +1499,5 @@ def test_cmd_compute_metrics_all(tmp_path):
     for metric_id in REGISTRY.keys():
         row = metrics_repo.fetch("AAPL.US", metric_id)
         assert row is not None, f"{metric_id} missing"
+    assert metrics_repo.fetch("AAPL.US", "oey_equity") is not None
+    assert metrics_repo.fetch("AAPL.US", "oey_equity_5y") is not None

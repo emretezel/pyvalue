@@ -34,6 +34,10 @@ from .owner_earnings_equity import (
     OwnerEarningsEquityTTMMetric,
     OwnerEarningsEquityFiveYearAverageMetric,
 )
+from .owner_earnings_yield import (
+    OwnerEarningsYieldEquityMetric,
+    OwnerEarningsYieldEquityFiveYearMetric,
+)
 
 REGISTRY = {
     WorkingCapitalMetric.id: WorkingCapitalMetric,
@@ -62,6 +66,8 @@ REGISTRY = {
     DeltaNWCMaintMetric.id: DeltaNWCMaintMetric,
     OwnerEarningsEquityTTMMetric.id: OwnerEarningsEquityTTMMetric,
     OwnerEarningsEquityFiveYearAverageMetric.id: OwnerEarningsEquityFiveYearAverageMetric,
+    OwnerEarningsYieldEquityMetric.id: OwnerEarningsYieldEquityMetric,
+    OwnerEarningsYieldEquityFiveYearMetric.id: OwnerEarningsYieldEquityFiveYearMetric,
     ROCGreenblattMetric.id: ROCGreenblattMetric,
     ROEGreenblattMetric.id: ROEGreenblattMetric,
 }
@@ -95,6 +101,8 @@ __all__ = [
     "DeltaNWCMaintMetric",
     "OwnerEarningsEquityTTMMetric",
     "OwnerEarningsEquityFiveYearAverageMetric",
+    "OwnerEarningsYieldEquityMetric",
+    "OwnerEarningsYieldEquityFiveYearMetric",
     "ROCGreenblattMetric",
     "ROEGreenblattMetric",
     "REGISTRY",

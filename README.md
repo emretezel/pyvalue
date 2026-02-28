@@ -260,6 +260,10 @@ Additional metrics include:
 - `oe_equity_5y_avg`: Average of the latest five available FY owner earnings equity
   values using `OE_FY = NI_FY + D&A_FY - MCapex_FY - latest_delta_nwc_maint`
   (requires exactly five points; gaps allowed; EODHD-oriented).
+- `oey_equity`: Owner earnings yield (equity) using
+  `oe_equity_ttm / market_cap_snapshot` (EODHD-oriented).
+- `oey_equity_5y`: Owner earnings yield (equity) using
+  `oe_equity_5y_avg / market_cap_snapshot` (EODHD-oriented).
 
 ## Metric reference
 
@@ -293,6 +297,8 @@ is derived from normalized SEC or market data plus the value-investing intuition
 | `delta_nwc_maint` | `max(average(last 3 consecutive FY deltas of NWC), 0)` (EODHD-oriented). | Converts multi-year NWC drift into a conservative maintenance adjustment that does not go negative. |
 | `oe_equity_ttm` | Owner earnings equity TTM: `NI_TTM + D&A_TTM - MCapex_TTM - delta_nwc_maint` (EODHD-oriented), where NI prefers `NetIncomeLoss` and falls back to net income available to common, D&A prefers income-statement D&A and falls back to cash-flow depreciation, and missing D&A defaults to 0. | Approximates owner earnings after maintenance reinvestment and sustained working-capital drag using near-term (TTM) fundamentals. |
 | `oe_equity_5y_avg` | Average of latest 5 FY owner earnings equity values, each computed as `NI_FY + D&A_FY - MCapex_FY - latest_delta_nwc_maint` (EODHD-oriented; strict 5 values; year gaps allowed; same NI/D&A fallback rules as TTM). | Smooths cyclical noise and yields a multi-year owner-earnings baseline for intrinsic-value comparisons. |
+| `oey_equity` | Owner earnings yield (equity): `oe_equity_ttm / market_cap_snapshot` (EODHD-oriented). Uses latest market-data snapshot market cap as denominator and converts denominator currency to numerator currency via FX when both currencies are known and differ. | Scales owner earnings by current equity value, making cross-company comparisons more interpretable than absolute owner-earnings levels. |
+| `oey_equity_5y` | Owner earnings yield (equity, 5Y): `oe_equity_5y_avg / market_cap_snapshot` (EODHD-oriented). Uses the same market-cap/FX rules as `oey_equity`; signed values are allowed. | Pairs normalized multi-year owner earnings with current market value to reduce single-year noise in yield signals. |
 | `market_cap` | Latest stored market capitalization snapshot. | Screening for a minimum size filters out illiquid micro-caps where information quality and trading costs can erode returns. |
 | `eps_ttm` | Sum of the most recent four quarterly EPS values. | Used to verify that current earnings have not collapsed relative to history, preventing “cheap” valuations caused by deteriorating fundamentals. |
 | `eps_6y_avg` | Average of the latest six fiscal-year EPS values. | Provides a normalized earnings power baseline for comparisons against current EPS streaks or TTM values, smoothing out cyclical peaks and troughs. |

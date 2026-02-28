@@ -33,6 +33,10 @@ from pyvalue.metrics.owner_earnings_equity import (
     OwnerEarningsEquityFiveYearAverageMetric,
     OwnerEarningsEquityTTMMetric,
 )
+from pyvalue.metrics.owner_earnings_yield import (
+    OwnerEarningsYieldEquityFiveYearMetric,
+    OwnerEarningsYieldEquityMetric,
+)
 from pyvalue.metrics.price_to_fcf import PriceToFCFMetric
 from pyvalue.metrics.roc_greenblatt import ROCGreenblattMetric
 from pyvalue.metrics.roe_greenblatt import ROEGreenblattMetric
@@ -4286,6 +4290,865 @@ def test_oe_equity_5y_avg_metric_uses_latest_delta_nwc_maint_for_all_years():
     assert result.value == 280.0
 
 
+def test_oe_equity_5y_avg_metric_requires_consistent_currency_across_years():
+    metric = OwnerEarningsEquityFiveYearAverageMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    years = [latest_year - offset for offset in range(5)]
+    currencies = ["USD", "USD", "USD", "EUR", "EUR"]
+
+    records_by_concept = _build_nwc_fy_records(
+        symbol, latest_year, [150.0, 130.0, 110.0, 90.0, 70.0]
+    )
+    records_by_concept.update(
+        {
+            "NetIncomeLoss": [
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="FY",
+                    end_date=f"{year}-09-30",
+                    value=400.0,
+                    currency=currency,
+                )
+                for year, currency in zip(years, currencies)
+            ],
+            "DepreciationDepletionAndAmortization": [
+                fact(
+                    symbol=symbol,
+                    concept="DepreciationDepletionAndAmortization",
+                    fiscal_period="FY",
+                    end_date=f"{year}-09-30",
+                    value=100.0,
+                    currency=currency,
+                )
+                for year, currency in zip(years, currencies)
+            ],
+            "CapitalExpenditures": [
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="FY",
+                    end_date=f"{year}-09-30",
+                    value=90.0,
+                    currency=currency,
+                )
+                for year, currency in zip(years, currencies)
+            ],
+        }
+    )
+
+    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    assert result is None
+
+
+def test_oey_equity_metric_computes_ratio_from_ttm_numerator():
+    metric = OwnerEarningsYieldEquityMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_nwc_fy_records(
+        symbol, latest_year, [150.0, 130.0, 110.0, 90.0]
+    )
+    records_by_concept.update(
+        {
+            "NetIncomeLoss": [
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="Q4",
+                    end_date=q4,
+                    value=200.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="Q3",
+                    end_date=q3,
+                    value=200.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="Q2",
+                    end_date=q2,
+                    value=200.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="Q1",
+                    end_date=q1,
+                    value=200.0,
+                    currency="USD",
+                ),
+            ],
+            "DepreciationDepletionAndAmortization": [
+                fact(
+                    symbol=symbol,
+                    concept="DepreciationDepletionAndAmortization",
+                    fiscal_period="Q4",
+                    end_date=q4,
+                    value=90.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="DepreciationDepletionAndAmortization",
+                    fiscal_period="Q3",
+                    end_date=q3,
+                    value=90.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="DepreciationDepletionAndAmortization",
+                    fiscal_period="Q2",
+                    end_date=q2,
+                    value=90.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="DepreciationDepletionAndAmortization",
+                    fiscal_period="Q1",
+                    end_date=q1,
+                    value=90.0,
+                    currency="USD",
+                ),
+            ],
+            "CapitalExpenditures": [
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="Q4",
+                    end_date=q4,
+                    value=100.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="Q3",
+                    end_date=q3,
+                    value=100.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="Q2",
+                    end_date=q2,
+                    value=100.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="Q1",
+                    end_date=q1,
+                    value=100.0,
+                    currency="USD",
+                ),
+            ],
+        }
+    )
+
+    class DummyMarketRepo:
+        def latest_snapshot(self, symbol):
+            class Snapshot:
+                market_cap = 7440.0
+                as_of = q3
+                currency = "USD"
+
+            return Snapshot()
+
+    result = metric.compute(
+        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
+    )
+    assert result is not None
+    assert result.as_of == q4
+    assert result.value == 0.1
+
+
+def test_oey_equity_5y_metric_computes_ratio_from_5y_numerator():
+    metric = OwnerEarningsYieldEquityFiveYearMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    years = [latest_year - offset for offset in range(5)]
+
+    records_by_concept = _build_nwc_fy_records(
+        symbol, latest_year, [150.0, 130.0, 110.0, 90.0, 70.0]
+    )
+    records_by_concept.update(
+        {
+            "NetIncomeLoss": [
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="FY",
+                    end_date=f"{years[0]}-09-30",
+                    value=500.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="FY",
+                    end_date=f"{years[1]}-09-30",
+                    value=450.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="FY",
+                    end_date=f"{years[2]}-09-30",
+                    value=400.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="FY",
+                    end_date=f"{years[3]}-09-30",
+                    value=350.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="FY",
+                    end_date=f"{years[4]}-09-30",
+                    value=300.0,
+                    currency="USD",
+                ),
+            ],
+            "DepreciationDepletionAndAmortization": [
+                fact(
+                    symbol=symbol,
+                    concept="DepreciationDepletionAndAmortization",
+                    fiscal_period="FY",
+                    end_date=f"{year}-09-30",
+                    value=100.0,
+                    currency="USD",
+                )
+                for year in years
+            ],
+            "CapitalExpenditures": [
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="FY",
+                    end_date=f"{year}-09-30",
+                    value=90.0,
+                    currency="USD",
+                )
+                for year in years
+            ],
+        }
+    )
+
+    class DummyMarketRepo:
+        def latest_snapshot(self, symbol):
+            class Snapshot:
+                market_cap = 3900.0
+                as_of = "2026-01-01"
+                currency = "USD"
+
+            return Snapshot()
+
+    result = metric.compute(
+        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
+    )
+    assert result is not None
+    assert result.value == 0.1
+    assert result.as_of == f"{years[0]}-09-30"
+
+
+def test_oey_equity_metric_returns_none_when_market_cap_missing():
+    metric = OwnerEarningsYieldEquityMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_nwc_fy_records(
+        symbol, latest_year, [150.0, 130.0, 110.0, 90.0]
+    )
+    records_by_concept.update(
+        {
+            "NetIncomeLoss": [
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="Q4",
+                    end_date=q4,
+                    value=200.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="Q3",
+                    end_date=q3,
+                    value=200.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="Q2",
+                    end_date=q2,
+                    value=200.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="Q1",
+                    end_date=q1,
+                    value=200.0,
+                    currency="USD",
+                ),
+            ],
+            "CapitalExpenditures": [
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="Q4",
+                    end_date=q4,
+                    value=100.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="Q3",
+                    end_date=q3,
+                    value=100.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="Q2",
+                    end_date=q2,
+                    value=100.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="Q1",
+                    end_date=q1,
+                    value=100.0,
+                    currency="USD",
+                ),
+            ],
+        }
+    )
+
+    class DummyMarketRepo:
+        def latest_snapshot(self, symbol):
+            class Snapshot:
+                market_cap = None
+                as_of = q3
+                currency = "USD"
+
+            return Snapshot()
+
+    result = metric.compute(
+        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
+    )
+    assert result is None
+
+
+def test_oey_equity_metric_returns_none_when_market_cap_non_positive():
+    metric = OwnerEarningsYieldEquityMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_nwc_fy_records(
+        symbol, latest_year, [150.0, 130.0, 110.0, 90.0]
+    )
+    records_by_concept.update(
+        {
+            "NetIncomeLoss": [
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="Q4",
+                    end_date=q4,
+                    value=120.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="Q3",
+                    end_date=q3,
+                    value=120.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="Q2",
+                    end_date=q2,
+                    value=120.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="Q1",
+                    end_date=q1,
+                    value=120.0,
+                    currency="USD",
+                ),
+            ],
+            "CapitalExpenditures": [
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="Q4",
+                    end_date=q4,
+                    value=40.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="Q3",
+                    end_date=q3,
+                    value=40.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="Q2",
+                    end_date=q2,
+                    value=40.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="Q1",
+                    end_date=q1,
+                    value=40.0,
+                    currency="USD",
+                ),
+            ],
+        }
+    )
+
+    class DummyMarketRepo:
+        def latest_snapshot(self, symbol):
+            class Snapshot:
+                market_cap = 0.0
+                as_of = q3
+                currency = "USD"
+
+            return Snapshot()
+
+    result = metric.compute(
+        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
+    )
+    assert result is None
+
+
+def test_oey_equity_metric_returns_none_when_numerator_missing():
+    metric = OwnerEarningsYieldEquityMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_nwc_fy_records(
+        symbol, latest_year, [150.0, 130.0, 110.0, 90.0]
+    )
+
+    class DummyMarketRepo:
+        def latest_snapshot(self, symbol):
+            class Snapshot:
+                market_cap = 1000.0
+                as_of = "2026-01-01"
+                currency = "USD"
+
+            return Snapshot()
+
+    result = metric.compute(
+        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
+    )
+    assert result is None
+
+
+def test_oey_equity_metric_applies_fx_conversion(monkeypatch):
+    metric = OwnerEarningsYieldEquityMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_nwc_fy_records(
+        symbol, latest_year, [150.0, 130.0, 110.0, 90.0]
+    )
+    records_by_concept.update(
+        {
+            "NetIncomeLoss": [
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="Q4",
+                    end_date=q4,
+                    value=200.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="Q3",
+                    end_date=q3,
+                    value=200.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="Q2",
+                    end_date=q2,
+                    value=200.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="Q1",
+                    end_date=q1,
+                    value=200.0,
+                    currency="USD",
+                ),
+            ],
+            "DepreciationDepletionAndAmortization": [
+                fact(
+                    symbol=symbol,
+                    concept="DepreciationDepletionAndAmortization",
+                    fiscal_period="Q4",
+                    end_date=q4,
+                    value=90.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="DepreciationDepletionAndAmortization",
+                    fiscal_period="Q3",
+                    end_date=q3,
+                    value=90.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="DepreciationDepletionAndAmortization",
+                    fiscal_period="Q2",
+                    end_date=q2,
+                    value=90.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="DepreciationDepletionAndAmortization",
+                    fiscal_period="Q1",
+                    end_date=q1,
+                    value=90.0,
+                    currency="USD",
+                ),
+            ],
+            "CapitalExpenditures": [
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="Q4",
+                    end_date=q4,
+                    value=100.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="Q3",
+                    end_date=q3,
+                    value=100.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="Q2",
+                    end_date=q2,
+                    value=100.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="Q1",
+                    end_date=q1,
+                    value=100.0,
+                    currency="USD",
+                ),
+            ],
+        }
+    )
+
+    monkeypatch.setattr(
+        "pyvalue.metrics.owner_earnings_yield.FXRateStore.convert",
+        lambda self, amount, from_currency, to_currency, as_of: amount * 2.0,
+    )
+
+    class DummyMarketRepo:
+        def latest_snapshot(self, symbol):
+            class Snapshot:
+                market_cap = 100.0
+                as_of = q3
+                currency = "EUR"
+
+            return Snapshot()
+
+    result = metric.compute(
+        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
+    )
+    assert result is not None
+    assert result.value == 744.0 / 200.0
+
+
+def test_oey_equity_metric_returns_none_when_fx_conversion_fails(monkeypatch):
+    metric = OwnerEarningsYieldEquityMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_nwc_fy_records(
+        symbol, latest_year, [150.0, 130.0, 110.0, 90.0]
+    )
+    records_by_concept.update(
+        {
+            "NetIncomeLoss": [
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="Q4",
+                    end_date=q4,
+                    value=200.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="Q3",
+                    end_date=q3,
+                    value=200.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="Q2",
+                    end_date=q2,
+                    value=200.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="Q1",
+                    end_date=q1,
+                    value=200.0,
+                    currency="USD",
+                ),
+            ],
+            "CapitalExpenditures": [
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="Q4",
+                    end_date=q4,
+                    value=100.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="Q3",
+                    end_date=q3,
+                    value=100.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="Q2",
+                    end_date=q2,
+                    value=100.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="Q1",
+                    end_date=q1,
+                    value=100.0,
+                    currency="USD",
+                ),
+            ],
+        }
+    )
+
+    monkeypatch.setattr(
+        "pyvalue.metrics.owner_earnings_yield.FXRateStore.convert",
+        lambda self, amount, from_currency, to_currency, as_of: None,
+    )
+
+    class DummyMarketRepo:
+        def latest_snapshot(self, symbol):
+            class Snapshot:
+                market_cap = 100.0
+                as_of = q3
+                currency = "EUR"
+
+            return Snapshot()
+
+    result = metric.compute(
+        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
+    )
+    assert result is None
+
+
+def test_oey_equity_metric_allows_negative_values():
+    metric = OwnerEarningsYieldEquityMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_nwc_fy_records(
+        symbol, latest_year, [150.0, 130.0, 110.0, 90.0]
+    )
+    records_by_concept.update(
+        {
+            "NetIncomeLoss": [
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="Q4",
+                    end_date=q4,
+                    value=-100.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="Q3",
+                    end_date=q3,
+                    value=-100.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="Q2",
+                    end_date=q2,
+                    value=-100.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    fiscal_period="Q1",
+                    end_date=q1,
+                    value=-100.0,
+                    currency="USD",
+                ),
+            ],
+            "CapitalExpenditures": [
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="Q4",
+                    end_date=q4,
+                    value=20.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="Q3",
+                    end_date=q3,
+                    value=20.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="Q2",
+                    end_date=q2,
+                    value=20.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="Q1",
+                    end_date=q1,
+                    value=20.0,
+                    currency="USD",
+                ),
+            ],
+        }
+    )
+
+    class DummyMarketRepo:
+        def latest_snapshot(self, symbol):
+            class Snapshot:
+                market_cap = 4920.0
+                as_of = q3
+                currency = "USD"
+
+            return Snapshot()
+
+    result = metric.compute(
+        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
+    )
+    assert result is not None
+    assert result.value == -500.0 / 4920.0
+
+
 def test_registry_contains_all_ids():
     # Ensure the registry still exposes all metric identifiers
     assert len(REGISTRY) >= 1
@@ -4299,3 +5162,5 @@ def test_registry_contains_all_ids():
     assert "delta_nwc_maint" in REGISTRY
     assert "oe_equity_ttm" in REGISTRY
     assert "oe_equity_5y_avg" in REGISTRY
+    assert "oey_equity" in REGISTRY
+    assert "oey_equity_5y" in REGISTRY
