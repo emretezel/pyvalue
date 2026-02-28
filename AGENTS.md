@@ -12,7 +12,8 @@ pyvalue is a Python toolkit for ingesting, normalizing, and screening fundamenta
 
 ## Build, Test, and Development Commands
 - `python -m pip install -e .[dev]`: install editable package (Python >=3.9).
-- `conda run -n <env> pytest`: run the test suite in the user-specified conda env.
+- Use the `pyvalue` conda environment for all project commands.
+- `conda run -n pyvalue pytest`: run the test suite in the `pyvalue` conda env.
 - `pyvalue --help`: list CLI entry points; examples in `README.md` show workflows.
 
 ## Coding Style & Naming Conventions
@@ -24,17 +25,17 @@ pyvalue is a Python toolkit for ingesting, normalizing, and screening fundamenta
 
 ## Testing Guidelines
 - Framework: `pytest` (see `pyproject.toml`).
-- Ask the user which conda env to use before running tests; use `conda run -n <env> pytest`.
+- Use the `pyvalue` conda environment for tests; run `conda run -n pyvalue pytest`.
 - Naming: files `tests/test_*.py`, functions `test_*`.
 - Add tests for new metrics, CLI commands, and normalization paths; reuse fixtures in `tests/conftest.py`.
 - When implementing new features, always add or update unit tests.
 
 ## Formatting & Static Checks
-- After every Codex update, run these in the user-specified conda env:
-  - `conda run -n <env> ruff format .`
-  - `conda run -n <env> ruff check .`
-  - `conda run -n <env> mypy src/pyvalue`
-- If any command reports errors, ask the user whether they want them fixed.
+- After every Codex update, run these in the `pyvalue` conda env:
+  - `conda run -n pyvalue ruff format .`
+  - `conda run -n pyvalue ruff check .`
+  - `conda run -n pyvalue mypy src/pyvalue`
+- If any command reports formatting or static-check errors, fix them automatically.
 
 ## Commit & Pull Request Guidelines
 - Commit messages in history are concise, imperative, and often scoped (e.g., `cli: add refresh-exchange pipeline command`, `eodhd: infer EPS unit...`). Keep subjects short and omit trailing periods.
