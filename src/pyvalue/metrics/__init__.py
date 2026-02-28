@@ -22,6 +22,7 @@ from .roe_greenblatt import ROEGreenblattMetric
 from .net_debt_to_ebitda import NetDebtToEBITDAMetric
 from .short_term_debt_share import ShortTermDebtShareMetric
 from .return_on_invested_capital import ReturnOnInvestedCapitalMetric
+from .mcapex import MCapexFYMetric, MCapexFiveYearMetric, MCapexTTMMetric
 
 REGISTRY = {
     WorkingCapitalMetric.id: WorkingCapitalMetric,
@@ -40,6 +41,9 @@ REGISTRY = {
     NetDebtToEBITDAMetric.id: NetDebtToEBITDAMetric,
     ShortTermDebtShareMetric.id: ShortTermDebtShareMetric,
     ReturnOnInvestedCapitalMetric.id: ReturnOnInvestedCapitalMetric,
+    MCapexFYMetric.id: MCapexFYMetric,
+    MCapexFiveYearMetric.id: MCapexFiveYearMetric,
+    MCapexTTMMetric.id: MCapexTTMMetric,
     ROCGreenblattMetric.id: ROCGreenblattMetric,
     ROEGreenblattMetric.id: ROEGreenblattMetric,
 }
@@ -63,6 +67,9 @@ __all__ = [
     "NetDebtToEBITDAMetric",
     "ShortTermDebtShareMetric",
     "ReturnOnInvestedCapitalMetric",
+    "MCapexFYMetric",
+    "MCapexFiveYearMetric",
+    "MCapexTTMMetric",
     "ROCGreenblattMetric",
     "ROEGreenblattMetric",
     "REGISTRY",

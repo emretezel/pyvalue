@@ -300,3 +300,80 @@ def test_eodhd_does_not_normalize_long_term_debt_from_short_long_term_debt_total
     records = normalizer.normalize(payload, symbol="TEST.LSE")
     derived = [r for r in records if r.concept == "LongTermDebt"]
     assert not derived, "LongTermDebt should not map from shortLongTermDebtTotal"
+
+
+def test_eodhd_normalizes_da_from_income_statement():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Income_Statement": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "depreciationAndAmortization": 34.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.LSE")
+    derived = [
+        r for r in records if r.concept == "DepreciationDepletionAndAmortization"
+    ]
+    assert derived, (
+        "DepreciationDepletionAndAmortization should map from depreciationAndAmortization"
+    )
+    assert derived[0].value == 34.0
+
+
+def test_eodhd_normalizes_da_from_reconciled_depreciation_fallback():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Income_Statement": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "reconciledDepreciation": 21.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.LSE")
+    derived = [
+        r for r in records if r.concept == "DepreciationDepletionAndAmortization"
+    ]
+    assert derived, (
+        "DepreciationDepletionAndAmortization should fall back to reconciledDepreciation"
+    )
+    assert derived[0].value == 21.0
+
+
+def test_eodhd_normalizes_depreciation_from_cash_flow():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Cash_Flow": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "depreciation": 18.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.LSE")
+    derived = [r for r in records if r.concept == "DepreciationFromCashFlow"]
+    assert derived, "DepreciationFromCashFlow should map from cash-flow depreciation"
+    assert derived[0].value == 18.0

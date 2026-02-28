@@ -99,6 +99,10 @@ EODHD_STATEMENT_FIELDS = {
     },
     "Income_Statement": {
         "EBITDA": ["ebitda", "EBITDA"],
+        "DepreciationDepletionAndAmortization": [
+            "depreciationAndAmortization",
+            "reconciledDepreciation",
+        ],
         "IncomeTaxExpense": ["incomeTaxExpense"],
         "InterestExpense": ["interestExpense"],
         "NetIncomeLoss": ["netIncome", "netIncomeFromContinuingOps"],
@@ -127,6 +131,7 @@ EODHD_STATEMENT_FIELDS = {
             "totalCashFromOperatingActivities",
         ],
         "CapitalExpenditures": ["capitalExpenditures", "capex"],
+        "DepreciationFromCashFlow": ["depreciation"],
     },
 }
 

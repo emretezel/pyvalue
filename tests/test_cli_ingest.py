@@ -1135,6 +1135,18 @@ def test_cmd_compute_metrics_all(tmp_path):
                     end_date=end_date,
                     value=500 + year,
                 ),
+                make_fact(
+                    concept="CapitalExpenditures",
+                    end_date=end_date,
+                    fiscal_period="FY",
+                    value=80 + year,
+                ),
+                make_fact(
+                    concept="DepreciationDepletionAndAmortization",
+                    end_date=end_date,
+                    fiscal_period="FY",
+                    value=70 + year,
+                ),
             ]
         )
         records.extend(
@@ -1295,6 +1307,14 @@ def test_cmd_compute_metrics_all(tmp_path):
                 end_date=end_date,
                 fiscal_period=period,
                 value=capex,
+            )
+        )
+        records.append(
+            make_fact(
+                concept="DepreciationDepletionAndAmortization",
+                end_date=end_date,
+                fiscal_period=period,
+                value=capex * 0.8,
             )
         )
     quarterly_eps = [

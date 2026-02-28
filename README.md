@@ -242,6 +242,12 @@ Additional metrics include:
 - `current_ratio`: Current assets divided by current liabilities.
 - `graham_eps_10y_cagr_3y_avg`: Graham EPS 10-year-period CAGR using 3-year average EPS at
   the start and end of the period (using full-year GAAP EPS data).
+- `mcapex_fy`: Maintenance capex proxy for the latest FY, computed as
+  `min(Capex_FY, 1.1 × D&A_FY)` with single-input fallback and absolute-value handling.
+- `mcapex_5y`: Average of the latest five available FY `mcapex_fy` values
+  (requires exactly five FY points; gaps are allowed).
+- `mcapex_ttm`: Maintenance capex proxy for TTM, computed as
+  `min(Capex_TTM, 1.1 × D&A_TTM)` with single-input fallback and absolute-value handling.
 
 ## Metric reference
 
@@ -265,6 +271,9 @@ is derived from normalized SEC or market data plus the value-investing intuition
 | `roc_greenblatt_5y_avg` | Average over up to five fiscal years of `EBIT / Tangible Capital`, where tangible capital is `Net PPE + AssetsCurrent - LiabilitiesCurrent`. | Joel Greenblatt’s ROC stresses whether management can reinvest incremental capital at high rates—a key quality signal for value investors who want cheap *and* good businesses. |
 | `roe_greenblatt_5y_avg` | Average over up to five fiscal years of net income available to common shareholders divided by the two-year average of common equity (after subtracting preferred equity). | Sustained high ROE shows that the firm generates attractive returns on shareholders’ capital without leverage-driven distortion. |
 | `price_to_fcf` | Latest market cap divided by trailing 12-month free cash flow, with FCF computed as (operating cash flow – capex) across the latest four quarters. | Cash flow–based multiples focus on hard cash instead of accounting earnings, helping avoid value traps with low-quality accrual profits. |
+| `mcapex_fy` | Latest fiscal-year maintenance capex proxy: `min(CapitalExpenditures_FY, 1.1 × D&A_FY)`, where D&A uses `DepreciationDepletionAndAmortization` and falls back to cash-flow depreciation when needed (EODHD-only). If only one side exists, uses that side; absolute values are used for sign consistency. | Approximates recurring reinvestment needs without letting unusually high growth capex dominate the estimate. |
+| `mcapex_5y` | Average of the latest 5 available fiscal-year `mcapex_fy` values (requires exactly five points; year gaps allowed; EODHD-only). | Smooths one-off investment cycles and produces a steadier maintenance reinvestment baseline. |
+| `mcapex_ttm` | Trailing 12-month maintenance capex proxy: `min(CapitalExpenditures_TTM, 1.1 × D&A_TTM)` using quarterly sums and the same D&A fallback/sign rules (EODHD-only). | Gives a near-term maintenance reinvestment estimate for valuation and cash-flow quality checks. |
 | `market_cap` | Latest stored market capitalization snapshot. | Screening for a minimum size filters out illiquid micro-caps where information quality and trading costs can erode returns. |
 | `eps_ttm` | Sum of the most recent four quarterly EPS values. | Used to verify that current earnings have not collapsed relative to history, preventing “cheap” valuations caused by deteriorating fundamentals. |
 | `eps_6y_avg` | Average of the latest six fiscal-year EPS values. | Provides a normalized earnings power baseline for comparisons against current EPS streaks or TTM values, smoothing out cyclical peaks and troughs. |

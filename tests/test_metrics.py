@@ -16,6 +16,11 @@ from pyvalue.metrics.graham_eps_cagr import GrahamEPSCAGRMetric
 from pyvalue.metrics.graham_multiplier import GrahamMultiplierMetric
 from pyvalue.metrics.interest_coverage import InterestCoverageMetric
 from pyvalue.metrics.market_capitalization import MarketCapitalizationMetric
+from pyvalue.metrics.mcapex import (
+    MCapexFYMetric,
+    MCapexFiveYearMetric,
+    MCapexTTMMetric,
+)
 from pyvalue.metrics.net_debt_to_ebitda import NetDebtToEBITDAMetric
 from pyvalue.metrics.price_to_fcf import PriceToFCFMetric
 from pyvalue.metrics.roc_greenblatt import ROCGreenblattMetric
@@ -1797,6 +1802,457 @@ def test_roe_greenblatt_metric():
     assert result.value > 0
 
 
+def test_mcapex_fy_metric_uses_min_formula():
+    metric = MCapexFYMetric()
+    recent = (date.today() - timedelta(days=20)).isoformat()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "CapitalExpenditures":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=recent,
+                        value=100.0,
+                        currency="USD",
+                    )
+                ]
+            if concept == "DepreciationDepletionAndAmortization":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=recent,
+                        value=80.0,
+                        currency="USD",
+                    )
+                ]
+            return []
+
+    result = metric.compute("AAPL.US", DummyRepo())
+    assert result is not None
+    assert result.value == 88.0
+
+
+def test_mcapex_fy_metric_falls_back_to_capex_when_da_missing():
+    metric = MCapexFYMetric()
+    recent = (date.today() - timedelta(days=20)).isoformat()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "CapitalExpenditures":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=recent,
+                        value=120.0,
+                        currency="USD",
+                    )
+                ]
+            return []
+
+    result = metric.compute("AAPL.US", DummyRepo())
+    assert result is not None
+    assert result.value == 120.0
+
+
+def test_mcapex_fy_metric_falls_back_to_da_when_capex_missing():
+    metric = MCapexFYMetric()
+    recent = (date.today() - timedelta(days=20)).isoformat()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "DepreciationDepletionAndAmortization":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=recent,
+                        value=50.0,
+                        currency="USD",
+                    )
+                ]
+            return []
+
+    result = metric.compute("AAPL.US", DummyRepo())
+    assert result is not None
+    assert round(result.value, 6) == 55.0
+
+
+def test_mcapex_fy_metric_uses_absolute_values():
+    metric = MCapexFYMetric()
+    recent = (date.today() - timedelta(days=20)).isoformat()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "CapitalExpenditures":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=recent,
+                        value=-120.0,
+                        currency="USD",
+                    )
+                ]
+            if concept == "DepreciationDepletionAndAmortization":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=recent,
+                        value=-80.0,
+                        currency="USD",
+                    )
+                ]
+            return []
+
+    result = metric.compute("AAPL.US", DummyRepo())
+    assert result is not None
+    assert result.value == 88.0
+
+
+def test_mcapex_ttm_metric_uses_quarterly_formula():
+    metric = MCapexTTMMetric()
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "CapitalExpenditures":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=100.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=q3,
+                        value=100.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q2",
+                        end_date=q2,
+                        value=100.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q1",
+                        end_date=q1,
+                        value=100.0,
+                        currency="USD",
+                    ),
+                ]
+            if concept == "DepreciationDepletionAndAmortization":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=80.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=q3,
+                        value=80.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q2",
+                        end_date=q2,
+                        value=80.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q1",
+                        end_date=q1,
+                        value=80.0,
+                        currency="USD",
+                    ),
+                ]
+            return []
+
+    result = metric.compute("AAPL.US", DummyRepo())
+    assert result is not None
+    assert result.value == 352.0
+
+
+def test_mcapex_ttm_metric_falls_back_to_cash_flow_da():
+    metric = MCapexTTMMetric()
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "CapitalExpenditures":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=100.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=q3,
+                        value=100.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q2",
+                        end_date=q2,
+                        value=100.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q1",
+                        end_date=q1,
+                        value=100.0,
+                        currency="USD",
+                    ),
+                ]
+            if concept == "DepreciationFromCashFlow":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=70.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q3",
+                        end_date=q3,
+                        value=70.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q2",
+                        end_date=q2,
+                        value=70.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="Q1",
+                        end_date=q1,
+                        value=70.0,
+                        currency="USD",
+                    ),
+                ]
+            return []
+
+    result = metric.compute("AAPL.US", DummyRepo())
+    assert result is not None
+    assert result.value == 308.0
+
+
+def test_mcapex_5y_metric_requires_exactly_five_values():
+    metric = MCapexFiveYearMetric()
+    d0 = (date.today() - timedelta(days=20)).isoformat()
+    d1 = (date.today() - timedelta(days=390)).isoformat()
+    d2 = (date.today() - timedelta(days=760)).isoformat()
+    d3 = (date.today() - timedelta(days=1130)).isoformat()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept in {
+                "CapitalExpenditures",
+                "DepreciationDepletionAndAmortization",
+            }:
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=d0,
+                        value=100.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=d1,
+                        value=100.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=d2,
+                        value=100.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=d3,
+                        value=100.0,
+                        currency="USD",
+                    ),
+                ]
+            return []
+
+    result = metric.compute("AAPL.US", DummyRepo())
+    assert result is None
+
+
+def test_mcapex_5y_metric_allows_year_gaps():
+    metric = MCapexFiveYearMetric()
+    d0 = (date.today() - timedelta(days=20)).isoformat()
+    d1 = (date.today() - timedelta(days=760)).isoformat()
+    d2 = (date.today() - timedelta(days=1130)).isoformat()
+    d3 = (date.today() - timedelta(days=1860)).isoformat()
+    d4 = (date.today() - timedelta(days=2230)).isoformat()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "CapitalExpenditures":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=d0,
+                        value=100.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=d1,
+                        value=100.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=d2,
+                        value=100.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=d3,
+                        value=100.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=d4,
+                        value=100.0,
+                        currency="USD",
+                    ),
+                ]
+            if concept == "DepreciationDepletionAndAmortization":
+                return [
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=d0,
+                        value=200.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=d1,
+                        value=200.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=d2,
+                        value=200.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=d3,
+                        value=200.0,
+                        currency="USD",
+                    ),
+                    fact(
+                        symbol=symbol,
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=d4,
+                        value=200.0,
+                        currency="USD",
+                    ),
+                ]
+            return []
+
+    result = metric.compute("AAPL.US", DummyRepo())
+    assert result is not None
+    assert result.value == 100.0
+
+
 def test_registry_contains_all_ids():
     # Ensure the registry still exposes all metric identifiers
     assert len(REGISTRY) >= 1
+    assert "mcapex_fy" in REGISTRY
+    assert "mcapex_5y" in REGISTRY
+    assert "mcapex_ttm" in REGISTRY
