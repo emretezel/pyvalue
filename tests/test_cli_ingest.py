@@ -1501,3 +1501,5 @@ def test_cmd_compute_metrics_all(tmp_path):
         assert row is not None, f"{metric_id} missing"
     assert metrics_repo.fetch("AAPL.US", "oey_equity") is not None
     assert metrics_repo.fetch("AAPL.US", "oey_equity_5y") is not None
+    assert metrics_repo.fetch("AAPL.US", "oe_ev_ttm") is not None
+    assert metrics_repo.fetch("AAPL.US", "oe_ev_5y_avg") is not None

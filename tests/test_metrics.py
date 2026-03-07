@@ -37,6 +37,10 @@ from pyvalue.metrics.owner_earnings_yield import (
     OwnerEarningsYieldEquityFiveYearMetric,
     OwnerEarningsYieldEquityMetric,
 )
+from pyvalue.metrics.owner_earnings_enterprise import (
+    OwnerEarningsEnterpriseFiveYearAverageMetric,
+    OwnerEarningsEnterpriseTTMMetric,
+)
 from pyvalue.metrics.price_to_fcf import PriceToFCFMetric
 from pyvalue.metrics.roc_greenblatt import ROCGreenblattMetric
 from pyvalue.metrics.roe_greenblatt import ROEGreenblattMetric
@@ -4342,6 +4346,912 @@ def test_oe_equity_5y_avg_metric_requires_consistent_currency_across_years():
     assert result is None
 
 
+def test_oe_ev_ttm_metric_computes_formula():
+    metric = OwnerEarningsEnterpriseTTMMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_nwc_fy_records(
+        symbol, latest_year, [150.0, 130.0, 110.0, 90.0]
+    )
+    records_by_concept.update(
+        {
+            "OperatingIncomeLoss": [
+                fact(
+                    symbol=symbol,
+                    concept="OperatingIncomeLoss",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=200.0,
+                    currency="USD",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+            "IncomeTaxExpense": [
+                fact(
+                    symbol=symbol,
+                    concept="IncomeTaxExpense",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=40.0,
+                    currency="USD",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+            "IncomeBeforeIncomeTaxes": [
+                fact(
+                    symbol=symbol,
+                    concept="IncomeBeforeIncomeTaxes",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=200.0,
+                    currency="USD",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+            "DepreciationDepletionAndAmortization": [
+                fact(
+                    symbol=symbol,
+                    concept="DepreciationDepletionAndAmortization",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=90.0,
+                    currency="USD",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+            "CapitalExpenditures": [
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=100.0,
+                    currency="USD",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+        }
+    )
+
+    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    assert result is not None
+    assert result.as_of == q4
+    assert result.value == 584.0
+
+
+def test_oe_ev_ttm_metric_uses_fy_tax_rate_fallback():
+    metric = OwnerEarningsEnterpriseTTMMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_nwc_fy_records(
+        symbol, latest_year, [150.0, 130.0, 110.0, 90.0]
+    )
+    records_by_concept.update(
+        {
+            "OperatingIncomeLoss": [
+                fact(
+                    symbol=symbol,
+                    concept="OperatingIncomeLoss",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=100.0,
+                    currency="USD",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+            "IncomeTaxExpense": [
+                fact(
+                    symbol=symbol,
+                    concept="IncomeTaxExpense",
+                    fiscal_period="Q4",
+                    end_date=q4,
+                    value=5.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="IncomeTaxExpense",
+                    fiscal_period="Q3",
+                    end_date=q3,
+                    value=5.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="IncomeTaxExpense",
+                    fiscal_period="Q2",
+                    end_date=q2,
+                    value=5.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="IncomeTaxExpense",
+                    fiscal_period="Q1",
+                    end_date=q1,
+                    value=5.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="IncomeTaxExpense",
+                    fiscal_period="FY",
+                    end_date=f"{latest_year}-09-30",
+                    value=30.0,
+                    currency="USD",
+                ),
+            ],
+            "IncomeBeforeIncomeTaxes": [
+                fact(
+                    symbol=symbol,
+                    concept="IncomeBeforeIncomeTaxes",
+                    fiscal_period="Q4",
+                    end_date=q4,
+                    value=-10.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="IncomeBeforeIncomeTaxes",
+                    fiscal_period="Q3",
+                    end_date=q3,
+                    value=-10.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="IncomeBeforeIncomeTaxes",
+                    fiscal_period="Q2",
+                    end_date=q2,
+                    value=-10.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="IncomeBeforeIncomeTaxes",
+                    fiscal_period="Q1",
+                    end_date=q1,
+                    value=-10.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="IncomeBeforeIncomeTaxes",
+                    fiscal_period="FY",
+                    end_date=f"{latest_year}-09-30",
+                    value=100.0,
+                    currency="USD",
+                ),
+            ],
+            "DepreciationDepletionAndAmortization": [
+                fact(
+                    symbol=symbol,
+                    concept="DepreciationDepletionAndAmortization",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=20.0,
+                    currency="USD",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+            "CapitalExpenditures": [
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=15.0,
+                    currency="USD",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+        }
+    )
+
+    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    assert result is not None
+    assert result.value == 280.0
+
+
+def test_oe_ev_ttm_metric_uses_default_tax_rate_when_no_valid_proxy():
+    metric = OwnerEarningsEnterpriseTTMMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_nwc_fy_records(
+        symbol, latest_year, [150.0, 130.0, 110.0, 90.0]
+    )
+    records_by_concept.update(
+        {
+            "OperatingIncomeLoss": [
+                fact(
+                    symbol=symbol,
+                    concept="OperatingIncomeLoss",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=100.0,
+                    currency="USD",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+            "IncomeTaxExpense": [
+                fact(
+                    symbol=symbol,
+                    concept="IncomeTaxExpense",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=5.0,
+                    currency="USD",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+            "IncomeBeforeIncomeTaxes": [
+                fact(
+                    symbol=symbol,
+                    concept="IncomeBeforeIncomeTaxes",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=-10.0,
+                    currency="USD",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+            "CapitalExpenditures": [
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=30.0,
+                    currency="USD",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+        }
+    )
+
+    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    assert result is not None
+    assert result.value == 176.0
+
+
+def test_oe_ev_ttm_metric_treats_missing_da_as_zero():
+    metric = OwnerEarningsEnterpriseTTMMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_nwc_fy_records(
+        symbol, latest_year, [150.0, 130.0, 110.0, 90.0]
+    )
+    records_by_concept.update(
+        {
+            "OperatingIncomeLoss": [
+                fact(
+                    symbol=symbol,
+                    concept="OperatingIncomeLoss",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=80.0,
+                    currency="USD",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+            "IncomeTaxExpense": [
+                fact(
+                    symbol=symbol,
+                    concept="IncomeTaxExpense",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=16.0,
+                    currency="USD",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+            "IncomeBeforeIncomeTaxes": [
+                fact(
+                    symbol=symbol,
+                    concept="IncomeBeforeIncomeTaxes",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=80.0,
+                    currency="USD",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+            "CapitalExpenditures": [
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=20.0,
+                    currency="USD",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+        }
+    )
+
+    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    assert result is not None
+    assert result.value == 156.0
+
+
+def test_oe_ev_ttm_metric_requires_delta_nwc_maint():
+    metric = OwnerEarningsEnterpriseTTMMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_nwc_fy_records(
+        symbol, latest_year, [150.0, 130.0, 110.0]
+    )
+    records_by_concept.update(
+        {
+            "OperatingIncomeLoss": [
+                fact(
+                    symbol=symbol,
+                    concept="OperatingIncomeLoss",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=100.0,
+                    currency="USD",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+            "IncomeTaxExpense": [
+                fact(
+                    symbol=symbol,
+                    concept="IncomeTaxExpense",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=20.0,
+                    currency="USD",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+            "IncomeBeforeIncomeTaxes": [
+                fact(
+                    symbol=symbol,
+                    concept="IncomeBeforeIncomeTaxes",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=100.0,
+                    currency="USD",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+            "CapitalExpenditures": [
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=40.0,
+                    currency="USD",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+        }
+    )
+
+    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    assert result is None
+
+
+def test_oe_ev_ttm_metric_currency_mismatch_returns_none():
+    metric = OwnerEarningsEnterpriseTTMMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_nwc_fy_records(
+        symbol, latest_year, [150.0, 130.0, 110.0, 90.0]
+    )
+    records_by_concept.update(
+        {
+            "OperatingIncomeLoss": [
+                fact(
+                    symbol=symbol,
+                    concept="OperatingIncomeLoss",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=100.0,
+                    currency="USD",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+            "IncomeTaxExpense": [
+                fact(
+                    symbol=symbol,
+                    concept="IncomeTaxExpense",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=20.0,
+                    currency="USD",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+            "IncomeBeforeIncomeTaxes": [
+                fact(
+                    symbol=symbol,
+                    concept="IncomeBeforeIncomeTaxes",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=100.0,
+                    currency="USD",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+            "DepreciationDepletionAndAmortization": [
+                fact(
+                    symbol=symbol,
+                    concept="DepreciationDepletionAndAmortization",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=30.0,
+                    currency="EUR",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+            "CapitalExpenditures": [
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=30.0,
+                    currency="EUR",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+        }
+    )
+
+    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    assert result is None
+
+
+def test_oe_ev_ttm_metric_allows_negative_values():
+    metric = OwnerEarningsEnterpriseTTMMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_nwc_fy_records(
+        symbol, latest_year, [150.0, 130.0, 110.0, 90.0]
+    )
+    records_by_concept.update(
+        {
+            "OperatingIncomeLoss": [
+                fact(
+                    symbol=symbol,
+                    concept="OperatingIncomeLoss",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=10.0,
+                    currency="USD",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+            "IncomeTaxExpense": [
+                fact(
+                    symbol=symbol,
+                    concept="IncomeTaxExpense",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=2.0,
+                    currency="USD",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+            "IncomeBeforeIncomeTaxes": [
+                fact(
+                    symbol=symbol,
+                    concept="IncomeBeforeIncomeTaxes",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=10.0,
+                    currency="USD",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+            "CapitalExpenditures": [
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=30.0,
+                    currency="USD",
+                )
+                for end_date, period in [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+            ],
+        }
+    )
+
+    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    assert result is not None
+    assert result.value == -108.0
+
+
+def test_oe_ev_5y_avg_metric_computes_expected_average():
+    metric = OwnerEarningsEnterpriseFiveYearAverageMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    years = [latest_year - offset for offset in range(5)]
+
+    records_by_concept = _build_nwc_fy_records(
+        symbol, latest_year, [300.0, 250.0, 230.0, 210.0, 190.0, 170.0]
+    )
+    records_by_concept.update(
+        {
+            "OperatingIncomeLoss": [
+                fact(
+                    symbol=symbol,
+                    concept="OperatingIncomeLoss",
+                    fiscal_period="FY",
+                    end_date=f"{year}-09-30",
+                    value=value,
+                    currency="USD",
+                )
+                for year, value in zip(years, [500.0, 450.0, 400.0, 350.0, 300.0])
+            ],
+            "IncomeTaxExpense": [
+                fact(
+                    symbol=symbol,
+                    concept="IncomeTaxExpense",
+                    fiscal_period="FY",
+                    end_date=f"{year}-09-30",
+                    value=value,
+                    currency="USD",
+                )
+                for year, value in zip(years, [100.0, 90.0, 80.0, 70.0, 60.0])
+            ],
+            "IncomeBeforeIncomeTaxes": [
+                fact(
+                    symbol=symbol,
+                    concept="IncomeBeforeIncomeTaxes",
+                    fiscal_period="FY",
+                    end_date=f"{year}-09-30",
+                    value=value,
+                    currency="USD",
+                )
+                for year, value in zip(years, [500.0, 450.0, 400.0, 350.0, 300.0])
+            ],
+            "DepreciationDepletionAndAmortization": [
+                fact(
+                    symbol=symbol,
+                    concept="DepreciationDepletionAndAmortization",
+                    fiscal_period="FY",
+                    end_date=f"{year}-09-30",
+                    value=100.0,
+                    currency="USD",
+                )
+                for year in years
+            ],
+            "CapitalExpenditures": [
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="FY",
+                    end_date=f"{year}-09-30",
+                    value=90.0,
+                    currency="USD",
+                )
+                for year in years
+            ],
+        }
+    )
+
+    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    assert result is not None
+    assert result.as_of == f"{years[0]}-09-30"
+    assert result.value == 300.0
+
+
+def test_oe_ev_5y_avg_metric_requires_five_points():
+    metric = OwnerEarningsEnterpriseFiveYearAverageMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    years = [latest_year - offset for offset in range(4)]
+
+    records_by_concept = _build_nwc_fy_records(
+        symbol, latest_year, [300.0, 250.0, 230.0, 210.0, 190.0, 170.0]
+    )
+    records_by_concept.update(
+        {
+            "OperatingIncomeLoss": [
+                fact(
+                    symbol=symbol,
+                    concept="OperatingIncomeLoss",
+                    fiscal_period="FY",
+                    end_date=f"{year}-09-30",
+                    value=400.0,
+                    currency="USD",
+                )
+                for year in years
+            ],
+            "CapitalExpenditures": [
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="FY",
+                    end_date=f"{year}-09-30",
+                    value=90.0,
+                    currency="USD",
+                )
+                for year in years
+            ],
+        }
+    )
+
+    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    assert result is None
+
+
+def test_oe_ev_5y_avg_metric_allows_year_gaps():
+    metric = OwnerEarningsEnterpriseFiveYearAverageMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    fy_years = [
+        latest_year,
+        latest_year - 2,
+        latest_year - 3,
+        latest_year - 5,
+        latest_year - 6,
+    ]
+
+    records_by_concept = _build_nwc_fy_records(
+        symbol, latest_year, [300.0, 250.0, 230.0, 210.0, 190.0, 170.0, 150.0]
+    )
+    records_by_concept.update(
+        {
+            "OperatingIncomeLoss": [
+                fact(
+                    symbol=symbol,
+                    concept="OperatingIncomeLoss",
+                    fiscal_period="FY",
+                    end_date=f"{year}-09-30",
+                    value=value,
+                    currency="USD",
+                )
+                for year, value in zip(fy_years, [500.0, 420.0, 380.0, 320.0, 280.0])
+            ],
+            "IncomeTaxExpense": [
+                fact(
+                    symbol=symbol,
+                    concept="IncomeTaxExpense",
+                    fiscal_period="FY",
+                    end_date=f"{year}-09-30",
+                    value=value,
+                    currency="USD",
+                )
+                for year, value in zip(fy_years, [100.0, 84.0, 76.0, 64.0, 56.0])
+            ],
+            "IncomeBeforeIncomeTaxes": [
+                fact(
+                    symbol=symbol,
+                    concept="IncomeBeforeIncomeTaxes",
+                    fiscal_period="FY",
+                    end_date=f"{year}-09-30",
+                    value=value,
+                    currency="USD",
+                )
+                for year, value in zip(fy_years, [500.0, 420.0, 380.0, 320.0, 280.0])
+            ],
+            "DepreciationDepletionAndAmortization": [
+                fact(
+                    symbol=symbol,
+                    concept="DepreciationDepletionAndAmortization",
+                    fiscal_period="FY",
+                    end_date=f"{year}-09-30",
+                    value=100.0,
+                    currency="USD",
+                )
+                for year in fy_years
+            ],
+            "CapitalExpenditures": [
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="FY",
+                    end_date=f"{year}-09-30",
+                    value=90.0,
+                    currency="USD",
+                )
+                for year in fy_years
+            ],
+        }
+    )
+
+    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    assert result is not None
+    assert result.value == 284.0
+
+
+def test_oe_ev_5y_avg_metric_uses_latest_delta_nwc_maint_for_all_years():
+    metric = OwnerEarningsEnterpriseFiveYearAverageMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    years = [latest_year - offset for offset in range(5)]
+
+    records_by_concept = _build_nwc_fy_records(
+        symbol, latest_year, [300.0, 250.0, 230.0, 210.0, 190.0, 170.0]
+    )
+    records_by_concept.update(
+        {
+            "OperatingIncomeLoss": [
+                fact(
+                    symbol=symbol,
+                    concept="OperatingIncomeLoss",
+                    fiscal_period="FY",
+                    end_date=f"{year}-09-30",
+                    value=200.0,
+                    currency="USD",
+                )
+                for year in years
+            ],
+            "IncomeTaxExpense": [
+                fact(
+                    symbol=symbol,
+                    concept="IncomeTaxExpense",
+                    fiscal_period="FY",
+                    end_date=f"{year}-09-30",
+                    value=40.0,
+                    currency="USD",
+                )
+                for year in years
+            ],
+            "IncomeBeforeIncomeTaxes": [
+                fact(
+                    symbol=symbol,
+                    concept="IncomeBeforeIncomeTaxes",
+                    fiscal_period="FY",
+                    end_date=f"{year}-09-30",
+                    value=200.0,
+                    currency="USD",
+                )
+                for year in years
+            ],
+            "DepreciationDepletionAndAmortization": [
+                fact(
+                    symbol=symbol,
+                    concept="DepreciationDepletionAndAmortization",
+                    fiscal_period="FY",
+                    end_date=f"{year}-09-30",
+                    value=100.0,
+                    currency="USD",
+                )
+                for year in years
+            ],
+            "CapitalExpenditures": [
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="FY",
+                    end_date=f"{year}-09-30",
+                    value=90.0,
+                    currency="USD",
+                )
+                for year in years
+            ],
+        }
+    )
+
+    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    assert result is not None
+    assert result.value == 140.0
+
+
+def test_oe_ev_5y_avg_metric_requires_consistent_currency_across_years():
+    metric = OwnerEarningsEnterpriseFiveYearAverageMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    years = [latest_year - offset for offset in range(5)]
+    currencies = ["USD", "USD", "USD", "EUR", "EUR"]
+
+    records_by_concept = _build_nwc_fy_records(
+        symbol, latest_year, [300.0, 250.0, 230.0, 210.0, 190.0, 170.0]
+    )
+    records_by_concept.update(
+        {
+            "OperatingIncomeLoss": [
+                fact(
+                    symbol=symbol,
+                    concept="OperatingIncomeLoss",
+                    fiscal_period="FY",
+                    end_date=f"{year}-09-30",
+                    value=300.0,
+                    currency=currency,
+                )
+                for year, currency in zip(years, currencies)
+            ],
+            "IncomeTaxExpense": [
+                fact(
+                    symbol=symbol,
+                    concept="IncomeTaxExpense",
+                    fiscal_period="FY",
+                    end_date=f"{year}-09-30",
+                    value=60.0,
+                    currency=currency,
+                )
+                for year, currency in zip(years, currencies)
+            ],
+            "IncomeBeforeIncomeTaxes": [
+                fact(
+                    symbol=symbol,
+                    concept="IncomeBeforeIncomeTaxes",
+                    fiscal_period="FY",
+                    end_date=f"{year}-09-30",
+                    value=300.0,
+                    currency=currency,
+                )
+                for year, currency in zip(years, currencies)
+            ],
+            "DepreciationDepletionAndAmortization": [
+                fact(
+                    symbol=symbol,
+                    concept="DepreciationDepletionAndAmortization",
+                    fiscal_period="FY",
+                    end_date=f"{year}-09-30",
+                    value=100.0,
+                    currency=currency,
+                )
+                for year, currency in zip(years, currencies)
+            ],
+            "CapitalExpenditures": [
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="FY",
+                    end_date=f"{year}-09-30",
+                    value=90.0,
+                    currency=currency,
+                )
+                for year, currency in zip(years, currencies)
+            ],
+        }
+    )
+
+    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    assert result is None
+
+
 def test_oey_equity_metric_computes_ratio_from_ttm_numerator():
     metric = OwnerEarningsYieldEquityMetric()
     symbol = "AAPL.US"
@@ -5164,3 +6074,5 @@ def test_registry_contains_all_ids():
     assert "oe_equity_5y_avg" in REGISTRY
     assert "oey_equity" in REGISTRY
     assert "oey_equity_5y" in REGISTRY
+    assert "oe_ev_ttm" in REGISTRY
+    assert "oe_ev_5y_avg" in REGISTRY
