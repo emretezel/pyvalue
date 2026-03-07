@@ -257,6 +257,63 @@ def test_eodhd_normalizes_interest_expense():
     assert derived[0].value == 12.5
 
 
+def test_eodhd_derives_interest_expense_from_net_interest_income():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Income_Statement": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "interestIncome": 40.0,
+                        "netInterestIncome": 15.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.LSE")
+    derived = [
+        r for r in records if r.concept == "InterestExpenseFromNetInterestIncome"
+    ]
+    assert derived, "InterestExpenseFromNetInterestIncome should be derived"
+    assert derived[0].value == 25.0
+
+
+def test_eodhd_skips_non_positive_derived_interest_expense():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Income_Statement": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "interestIncome": 15.0,
+                        "netInterestIncome": 15.0,
+                        "currency_symbol": "USD",
+                    },
+                    {
+                        "date": "2023-12-31",
+                        "interestIncome": 10.0,
+                        "netInterestIncome": 12.0,
+                        "currency_symbol": "USD",
+                    },
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.LSE")
+    derived = [
+        r for r in records if r.concept == "InterestExpenseFromNetInterestIncome"
+    ]
+    assert not derived
+
+
 def test_eodhd_normalizes_income_tax_expense():
     normalizer = EODHDFactsNormalizer()
     payload = {

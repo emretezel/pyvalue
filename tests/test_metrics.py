@@ -94,7 +94,7 @@ def _build_net_debt_repo(*, concept_records=None, latest_records=None):
 
 
 def _quarterly_records(concept, quarter_dates, values, *, currency="USD"):
-    periods = ("Q4", "Q3", "Q2", "Q1")
+    periods = ("Q4", "Q3", "Q2", "Q1")[: len(quarter_dates)]
     return [
         fact(
             concept=concept,
@@ -1173,6 +1173,121 @@ def test_interest_coverage_skips_non_positive_interest():
     repo = DummyRepo()
     result = metric.compute("AAPL.US", repo)
     assert result is None
+
+
+def test_interest_coverage_uses_derived_interest_fallback():
+    metric = InterestCoverageMetric()
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "OperatingIncomeLoss":
+                return _quarterly_records(
+                    concept, (q4, q3, q2, q1), (40.0, 30.0, 20.0, 10.0)
+                )
+            if concept == "InterestExpense":
+                return _quarterly_records(concept, (q4, q3), (4.0, 3.0))
+            if concept == "InterestExpenseFromNetInterestIncome":
+                return _quarterly_records(concept, (q2, q1), (2.0, 1.0))
+            return []
+
+    repo = DummyRepo()
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.value == 10.0
+
+
+def test_interest_coverage_keeps_direct_path_when_valid():
+    metric = InterestCoverageMetric()
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "OperatingIncomeLoss":
+                return _quarterly_records(
+                    concept, (q4, q3, q2, q1), (40.0, 30.0, 20.0, 10.0)
+                )
+            if concept == "InterestExpense":
+                return _quarterly_records(
+                    concept, (q4, q3, q2, q1), (4.0, 3.0, 2.0, 1.0)
+                )
+            if concept == "InterestExpenseFromNetInterestIncome":
+                return _quarterly_records(
+                    concept, (q4, q3, q2, q1), (40.0, 30.0, 20.0, 10.0)
+                )
+            return []
+
+    repo = DummyRepo()
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.value == 10.0
+
+
+def test_interest_coverage_returns_none_when_fallback_insufficient():
+    metric = InterestCoverageMetric()
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "OperatingIncomeLoss":
+                return _quarterly_records(
+                    concept, (q4, q3, q2, q1), (40.0, 30.0, 20.0, 10.0)
+                )
+            if concept == "InterestExpense":
+                return _quarterly_records(concept, (q4, q3), (4.0, 3.0))
+            if concept == "InterestExpenseFromNetInterestIncome":
+                return _quarterly_records(concept, (q2,), (2.0,))
+            return []
+
+    repo = DummyRepo()
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_interest_coverage_returns_none_on_fallback_currency_mismatch():
+    metric = InterestCoverageMetric()
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "OperatingIncomeLoss":
+                return _quarterly_records(
+                    concept, (q4, q3, q2, q1), (40.0, 30.0, 20.0, 10.0)
+                )
+            if concept == "InterestExpense":
+                return _quarterly_records(concept, (q4, q3), (4.0, 3.0))
+            if concept == "InterestExpenseFromNetInterestIncome":
+                return _quarterly_records(concept, (q2, q1), (2.0, 1.0), currency="EUR")
+            return []
+
+    repo = DummyRepo()
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_interest_coverage_normalizes_gbx_to_gbp():
+    metric = InterestCoverageMetric()
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            if concept == "OperatingIncomeLoss":
+                return _quarterly_records(
+                    concept, (q4, q3, q2, q1), (4.0, 3.0, 2.0, 1.0), currency="GBP"
+                )
+            if concept == "InterestExpense":
+                return _quarterly_records(
+                    concept,
+                    (q4, q3, q2, q1),
+                    (40.0, 30.0, 20.0, 10.0),
+                    currency="GBX",
+                )
+            return []
+
+    repo = DummyRepo()
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.value == 10.0
 
 
 def test_net_debt_to_ebitda_skips_non_positive_ebitda():

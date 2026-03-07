@@ -107,6 +107,7 @@ EODHD_STATEMENT_FIELDS = {
         ],
         "IncomeTaxExpense": ["incomeTaxExpense"],
         "InterestExpense": ["interestExpense"],
+        "InterestExpenseFromNetInterestIncome": [],
         "NetIncomeLoss": ["netIncome", "netIncomeFromContinuingOps"],
         "NetIncomeLossAvailableToCommonStockholdersBasic": [
             "netIncomeApplicableToCommonShares"
@@ -422,6 +423,19 @@ class EODHDFactsNormalizer:
                                 total_revenue - total_operating_expenses
                             )
 
+                derived_interest_expense_from_net_interest_income = None
+                if "InterestExpenseFromNetInterestIncome" in field_map:
+                    interest_income = self._extract_value(entry, ["interestIncome"])
+                    net_interest_income = self._extract_value(
+                        entry, ["netInterestIncome"]
+                    )
+                    if interest_income is not None and net_interest_income is not None:
+                        candidate = interest_income - net_interest_income
+                        if candidate > 0:
+                            derived_interest_expense_from_net_interest_income = (
+                                candidate
+                            )
+
                 derived_capex = None
                 if "CapitalExpenditures" in field_map:
                     operating_cash = self._extract_value(
@@ -453,6 +467,11 @@ class EODHDFactsNormalizer:
                         value = derived_ppe
                     if value is None and concept == "OperatingIncomeLoss":
                         value = derived_operating_income
+                    if (
+                        value is None
+                        and concept == "InterestExpenseFromNetInterestIncome"
+                    ):
+                        value = derived_interest_expense_from_net_interest_income
                     if value is None and concept == "CapitalExpenditures":
                         value = derived_capex
                     if (
