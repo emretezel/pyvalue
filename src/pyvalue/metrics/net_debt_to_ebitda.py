@@ -17,9 +17,15 @@ from pyvalue.storage import FactRecord, FinancialFactsRepository
 LOGGER = logging.getLogger(__name__)
 
 QUARTERLY_PERIODS = {"Q1", "Q2", "Q3", "Q4"}
-EBITDA_CONCEPTS = ("EBITDA",)
+EBIT_CONCEPTS = ("OperatingIncomeLoss",)
+DA_PRIMARY_CONCEPTS = ("DepreciationDepletionAndAmortization",)
+DA_FALLBACK_CONCEPTS = ("DepreciationFromCashFlow",)
 DEBT_CONCEPTS = ("ShortTermDebt", "LongTermDebt")
-CASH_CONCEPTS = ("CashAndShortTermInvestments",)
+CASH_CONCEPTS = (
+    "CashAndShortTermInvestments",
+    "CashAndCashEquivalents",
+    "ShortTermInvestments",
+)
 
 
 @dataclass
@@ -37,11 +43,24 @@ class _NetDebtResult:
 
 
 @dataclass
+class _CashResult:
+    total: float
+    as_of: str
+    currency: Optional[str]
+
+
+@dataclass
 class NetDebtToEBITDAMetric:
     """Compute net debt to TTM EBITDA for EODHD-normalized facts."""
 
     id: str = "net_debt_to_ebitda"
-    required_concepts = tuple(EBITDA_CONCEPTS + DEBT_CONCEPTS + CASH_CONCEPTS)
+    required_concepts = tuple(
+        EBIT_CONCEPTS
+        + DA_PRIMARY_CONCEPTS
+        + DA_FALLBACK_CONCEPTS
+        + DEBT_CONCEPTS
+        + CASH_CONCEPTS
+    )
 
     def compute(
         self, symbol: str, repo: FinancialFactsRepository
@@ -70,56 +89,97 @@ class NetDebtToEBITDAMetric:
     def _compute_ttm_ebitda(
         self, symbol: str, repo: FinancialFactsRepository
     ) -> Optional[_TTMResult]:
-        records = repo.facts_for_concept(symbol, EBITDA_CONCEPTS[0])
-        quarterly = self._filter_quarterly(records)
-        if len(quarterly) < 4:
+        ebit_records = self._filter_quarterly(
+            repo.facts_for_concept(symbol, EBIT_CONCEPTS[0])
+        )
+        if len(ebit_records) < 4:
             LOGGER.warning(
-                "net_debt_to_ebitda: need 4 quarterly EBITDA records for %s", symbol
+                "net_debt_to_ebitda: need 4 quarterly EBIT records for %s", symbol
             )
             return None
-        if not is_recent_fact(quarterly[0]):
+        if not is_recent_fact(ebit_records[0]):
             LOGGER.warning(
-                "net_debt_to_ebitda: latest EBITDA (%s) too old for %s",
-                quarterly[0].end_date,
+                "net_debt_to_ebitda: latest EBIT (%s) too old for %s",
+                ebit_records[0].end_date,
                 symbol,
             )
             return None
 
-        # Normalize currency and GBX/GBP0.01 quirks before summing.
-        normalized, currency = self._normalize_quarterly(quarterly[:4])
-        if normalized is None:
-            LOGGER.warning(
-                "net_debt_to_ebitda: currency conflict in EBITDA for %s", symbol
-            )
-            return None
+        da_primary = self._quarterly_map(
+            repo.facts_for_concept(symbol, DA_PRIMARY_CONCEPTS[0])
+        )
+        da_fallback = self._quarterly_map(
+            repo.facts_for_concept(symbol, DA_FALLBACK_CONCEPTS[0])
+        )
 
-        total = sum(record.value for record in normalized)
-        return _TTMResult(total=total, as_of=quarterly[0].end_date, currency=currency)
+        total = 0.0
+        currency = None
+        for ebit_record in ebit_records[:4]:
+            da_record = da_primary.get(ebit_record.end_date) or da_fallback.get(
+                ebit_record.end_date
+            )
+            if da_record is None:
+                LOGGER.warning(
+                    "net_debt_to_ebitda: missing D&A for quarter %s (%s)",
+                    ebit_record.end_date,
+                    symbol,
+                )
+                return None
+
+            ebit_value, ebit_currency = self._normalize_currency(ebit_record)
+            da_value, da_currency = self._normalize_currency(da_record)
+            merged = self._merge_currency([currency, ebit_currency, da_currency])
+            if merged is None and any(
+                code is not None for code in (currency, ebit_currency, da_currency)
+            ):
+                LOGGER.warning(
+                    "net_debt_to_ebitda: currency conflict in EBIT/D&A for %s",
+                    symbol,
+                )
+                return None
+            currency = merged
+            total += ebit_value + da_value
+
+        return _TTMResult(
+            total=total, as_of=ebit_records[0].end_date, currency=currency
+        )
 
     def _compute_net_debt(
         self, symbol: str, repo: FinancialFactsRepository
     ) -> Optional[_NetDebtResult]:
-        short_debt = repo.latest_fact(symbol, "ShortTermDebt")
-        long_debt = repo.latest_fact(symbol, "LongTermDebt")
-        cash = repo.latest_fact(symbol, "CashAndShortTermInvestments")
-        if short_debt is None or long_debt is None or cash is None:
-            return None
-        if not all(is_recent_fact(record) for record in (short_debt, long_debt, cash)):
+        short_debt = self._latest_recent_fact(repo, symbol, "ShortTermDebt")
+        long_debt = self._latest_recent_fact(repo, symbol, "LongTermDebt")
+        if short_debt is None and long_debt is None:
             return None
 
-        # Normalize currencies for balance sheet facts; we require a single currency.
-        short_value, short_currency = self._normalize_currency(short_debt)
-        long_value, long_currency = self._normalize_currency(long_debt)
-        cash_value, cash_currency = self._normalize_currency(cash)
-        currency = self._merge_currency([short_currency, long_currency, cash_currency])
+        cash = self._compute_cash(symbol, repo)
+        if cash is None:
+            return None
+
+        short_value, short_currency = (
+            self._normalize_currency(short_debt)
+            if short_debt is not None
+            else (0.0, None)
+        )
+        long_value, long_currency = (
+            self._normalize_currency(long_debt)
+            if long_debt is not None
+            else (0.0, None)
+        )
+        currency = self._merge_currency([short_currency, long_currency, cash.currency])
         if currency is None and any(
-            code is not None for code in (short_currency, long_currency, cash_currency)
+            code is not None for code in (short_currency, long_currency, cash.currency)
         ):
             return None
 
         total_debt = short_value + long_value
-        net_debt = total_debt - cash_value
-        as_of = max(short_debt.end_date, long_debt.end_date, cash.end_date)
+        net_debt = total_debt - cash.total
+        as_of_candidates = [cash.as_of]
+        if short_debt is not None:
+            as_of_candidates.append(short_debt.end_date)
+        if long_debt is not None:
+            as_of_candidates.append(long_debt.end_date)
+        as_of = max(as_of_candidates)
         return _NetDebtResult(total=net_debt, as_of=as_of, currency=currency)
 
     def _filter_quarterly(self, records: Sequence[FactRecord]) -> list[FactRecord]:
@@ -135,37 +195,61 @@ class NetDebtToEBITDAMetric:
                 continue
             filtered.append(record)
             seen_end_dates.add(record.end_date)
+        filtered.sort(key=lambda record: record.end_date, reverse=True)
         return filtered
 
-    def _normalize_quarterly(
-        self, records: Sequence[FactRecord]
-    ) -> tuple[Optional[list[FactRecord]], Optional[str]]:
-        currency = None
-        normalized: list[FactRecord] = []
-        for record in records:
-            value, code = self._normalize_currency(record)
-            if currency is None and code:
-                currency = code
-            elif code and currency and code != currency:
-                return None, None
-            normalized.append(
-                FactRecord(
-                    symbol=record.symbol,
-                    cik=record.cik,
-                    concept=record.concept,
-                    fiscal_period=record.fiscal_period,
-                    end_date=record.end_date,
-                    unit=record.unit,
-                    value=value,
-                    accn=record.accn,
-                    filed=record.filed,
-                    frame=record.frame,
-                    start_date=getattr(record, "start_date", None),
-                    accounting_standard=getattr(record, "accounting_standard", None),
-                    currency=code,
-                )
+    def _quarterly_map(self, records: Sequence[FactRecord]) -> dict[str, FactRecord]:
+        return {record.end_date: record for record in self._filter_quarterly(records)}
+
+    def _latest_recent_fact(
+        self,
+        repo: FinancialFactsRepository,
+        symbol: str,
+        concept: str,
+    ) -> Optional[FactRecord]:
+        record = repo.latest_fact(symbol, concept)
+        if record is None:
+            return None
+        if not is_recent_fact(record):
+            return None
+        return record
+
+    def _compute_cash(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> Optional[_CashResult]:
+        primary = self._latest_recent_fact(repo, symbol, "CashAndShortTermInvestments")
+        if primary is not None:
+            value, currency = self._normalize_currency(primary)
+            return _CashResult(total=value, as_of=primary.end_date, currency=currency)
+
+        cash_eq = self._latest_recent_fact(repo, symbol, "CashAndCashEquivalents")
+        if cash_eq is None:
+            return None
+        short_term_investments = self._latest_recent_fact(
+            repo, symbol, "ShortTermInvestments"
+        )
+
+        cash_value, cash_currency = self._normalize_currency(cash_eq)
+        short_term_value = 0.0
+        short_term_currency = None
+        as_of_candidates = [cash_eq.end_date]
+        if short_term_investments is not None:
+            short_term_value, short_term_currency = self._normalize_currency(
+                short_term_investments
             )
-        return normalized, currency
+            as_of_candidates.append(short_term_investments.end_date)
+
+        currency = self._merge_currency([cash_currency, short_term_currency])
+        if currency is None and any(
+            code is not None for code in (cash_currency, short_term_currency)
+        ):
+            return None
+
+        return _CashResult(
+            total=cash_value + short_term_value,
+            as_of=max(as_of_candidates),
+            currency=currency,
+        )
 
     def _normalize_currency(self, record: FactRecord) -> tuple[float, Optional[str]]:
         value = record.value

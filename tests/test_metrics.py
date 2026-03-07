@@ -69,6 +69,92 @@ def fact(**kwargs):
     return FactRecord(**base)
 
 
+def _net_debt_quarter_dates():
+    today = date.today()
+    return (
+        (today - timedelta(days=30)).isoformat(),
+        (today - timedelta(days=120)).isoformat(),
+        (today - timedelta(days=210)).isoformat(),
+        (today - timedelta(days=300)).isoformat(),
+    )
+
+
+def _build_net_debt_repo(*, concept_records=None, latest_records=None):
+    concept_records = concept_records or {}
+    latest_records = latest_records or {}
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            return concept_records.get(concept, [])
+
+        def latest_fact(self, symbol, concept):
+            return latest_records.get(concept)
+
+    return DummyRepo()
+
+
+def _quarterly_records(concept, quarter_dates, values, *, currency="USD"):
+    periods = ("Q4", "Q3", "Q2", "Q1")
+    return [
+        fact(
+            concept=concept,
+            fiscal_period=period,
+            end_date=end_date,
+            value=value,
+            currency=currency,
+        )
+        for period, end_date, value in zip(periods, quarter_dates, values, strict=True)
+    ]
+
+
+def _base_ebit_da_concepts(
+    quarter_dates,
+    *,
+    ebit_values=(20.0, 20.0, 20.0, 20.0),
+    ebit_currency="USD",
+    da_values=(5.0, 5.0, 5.0, 5.0),
+    da_currency="USD",
+    da_concept="DepreciationDepletionAndAmortization",
+):
+    return {
+        "OperatingIncomeLoss": _quarterly_records(
+            "OperatingIncomeLoss",
+            quarter_dates,
+            ebit_values,
+            currency=ebit_currency,
+        ),
+        da_concept: _quarterly_records(
+            da_concept,
+            quarter_dates,
+            da_values,
+            currency=da_currency,
+        ),
+    }
+
+
+def _default_net_debt_latest_records(q4):
+    return {
+        "ShortTermDebt": fact(
+            concept="ShortTermDebt",
+            end_date=q4,
+            value=10.0,
+            currency="USD",
+        ),
+        "LongTermDebt": fact(
+            concept="LongTermDebt",
+            end_date=q4,
+            value=90.0,
+            currency="USD",
+        ),
+        "CashAndShortTermInvestments": fact(
+            concept="CashAndShortTermInvestments",
+            end_date=q4,
+            value=20.0,
+            currency="USD",
+        ),
+    }
+
+
 def test_working_capital_metric_computes_difference():
     metric = WorkingCapitalMetric()
     recent = (date.today() - timedelta(days=10)).isoformat()
@@ -306,82 +392,48 @@ def test_graham_multiplier_falls_back_to_fy_eps():
 
 def test_net_debt_to_ebitda_metric():
     metric = NetDebtToEBITDAMetric()
-    today = date.today()
-    q4 = (today - timedelta(days=30)).isoformat()
-    q3 = (today - timedelta(days=120)).isoformat()
-    q2 = (today - timedelta(days=210)).isoformat()
-    q1 = (today - timedelta(days=300)).isoformat()
-
-    class DummyRepo:
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
-            if concept == "EBITDA":
-                return [
-                    fact(
-                        symbol=symbol,
-                        concept=concept,
-                        fiscal_period="Q4",
-                        end_date=q4,
-                        value=40.0,
-                        currency="USD",
-                    ),
-                    fact(
-                        symbol=symbol,
-                        concept=concept,
-                        fiscal_period="Q3",
-                        end_date=q3,
-                        value=30.0,
-                        currency="USD",
-                    ),
-                    fact(
-                        symbol=symbol,
-                        concept=concept,
-                        fiscal_period="Q2",
-                        end_date=q2,
-                        value=20.0,
-                        currency="USD",
-                    ),
-                    fact(
-                        symbol=symbol,
-                        concept=concept,
-                        fiscal_period="Q1",
-                        end_date=q1,
-                        value=10.0,
-                        currency="USD",
-                    ),
-                ]
-            return []
-
-        def latest_fact(self, symbol, concept):
-            if concept == "ShortTermDebt":
-                return fact(
-                    symbol=symbol,
-                    concept=concept,
-                    end_date=q4,
-                    value=10.0,
-                    currency="USD",
-                )
-            if concept == "LongTermDebt":
-                return fact(
-                    symbol=symbol,
-                    concept=concept,
-                    end_date=q4,
-                    value=90.0,
-                    currency="USD",
-                )
-            if concept == "CashAndShortTermInvestments":
-                return fact(
-                    symbol=symbol,
-                    concept=concept,
-                    end_date=q4,
-                    value=20.0,
-                    currency="USD",
-                )
-            return None
-
-    repo = DummyRepo()
+    quarter_dates = _net_debt_quarter_dates()
+    q4 = quarter_dates[0]
+    repo = _build_net_debt_repo(
+        concept_records=_base_ebit_da_concepts(quarter_dates),
+        latest_records=_default_net_debt_latest_records(q4),
+    )
     result = metric.compute("AAPL.US", repo)
     assert result is not None
     assert result.value == 0.8
+
+
+def test_net_debt_to_ebitda_uses_da_fallback_per_quarter():
+    metric = NetDebtToEBITDAMetric()
+    quarter_dates = _net_debt_quarter_dates()
+    q4 = quarter_dates[0]
+    concept_records = _base_ebit_da_concepts(quarter_dates)
+    concept_records["DepreciationDepletionAndAmortization"] = concept_records[
+        "DepreciationDepletionAndAmortization"
+    ][:2]
+    concept_records["DepreciationFromCashFlow"] = _quarterly_records(
+        "DepreciationFromCashFlow", quarter_dates, (5.0, 5.0, 5.0, 5.0)
+    )[2:]
+    repo = _build_net_debt_repo(
+        concept_records=concept_records,
+        latest_records=_default_net_debt_latest_records(q4),
+    )
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.value == 0.8
+
+
+def test_net_debt_to_ebitda_requires_four_quarters_of_ebit():
+    metric = NetDebtToEBITDAMetric()
+    quarter_dates = _net_debt_quarter_dates()
+    concept_records = _base_ebit_da_concepts(quarter_dates)
+    concept_records["OperatingIncomeLoss"] = concept_records["OperatingIncomeLoss"][:3]
+    repo = _build_net_debt_repo(
+        concept_records=concept_records,
+        latest_records={},
+    )
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
 
 
 def test_debt_paydown_years_metric():
@@ -1125,79 +1177,143 @@ def test_interest_coverage_skips_non_positive_interest():
 
 def test_net_debt_to_ebitda_skips_non_positive_ebitda():
     metric = NetDebtToEBITDAMetric()
-    today = date.today()
-    q4 = (today - timedelta(days=30)).isoformat()
-    q3 = (today - timedelta(days=120)).isoformat()
-    q2 = (today - timedelta(days=210)).isoformat()
-    q1 = (today - timedelta(days=300)).isoformat()
+    quarter_dates = _net_debt_quarter_dates()
+    q4 = quarter_dates[0]
+    repo = _build_net_debt_repo(
+        concept_records=_base_ebit_da_concepts(
+            quarter_dates,
+            ebit_values=(0.0, 0.0, 0.0, 0.0),
+            da_values=(0.0, 0.0, 0.0, 0.0),
+        ),
+        latest_records=_default_net_debt_latest_records(q4),
+    )
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
 
-    class DummyRepo:
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
-            if concept == "EBITDA":
-                return [
-                    fact(
-                        symbol=symbol,
-                        concept=concept,
-                        fiscal_period="Q4",
-                        end_date=q4,
-                        value=0.0,
-                        currency="USD",
-                    ),
-                    fact(
-                        symbol=symbol,
-                        concept=concept,
-                        fiscal_period="Q3",
-                        end_date=q3,
-                        value=0.0,
-                        currency="USD",
-                    ),
-                    fact(
-                        symbol=symbol,
-                        concept=concept,
-                        fiscal_period="Q2",
-                        end_date=q2,
-                        value=0.0,
-                        currency="USD",
-                    ),
-                    fact(
-                        symbol=symbol,
-                        concept=concept,
-                        fiscal_period="Q1",
-                        end_date=q1,
-                        value=0.0,
-                        currency="USD",
-                    ),
-                ]
-            return []
 
-        def latest_fact(self, symbol, concept):
-            if concept == "ShortTermDebt":
-                return fact(
-                    symbol=symbol,
-                    concept=concept,
-                    end_date=q4,
-                    value=10.0,
-                    currency="USD",
-                )
-            if concept == "LongTermDebt":
-                return fact(
-                    symbol=symbol,
-                    concept=concept,
-                    end_date=q4,
-                    value=90.0,
-                    currency="USD",
-                )
-            if concept == "CashAndShortTermInvestments":
-                return fact(
-                    symbol=symbol,
-                    concept=concept,
-                    end_date=q4,
-                    value=20.0,
-                    currency="USD",
-                )
-            return None
+def test_net_debt_to_ebitda_allows_single_debt_side():
+    metric = NetDebtToEBITDAMetric()
+    quarter_dates = _net_debt_quarter_dates()
+    q4 = quarter_dates[0]
+    latest_records = _default_net_debt_latest_records(q4)
+    latest_records.pop("ShortTermDebt")
+    repo = _build_net_debt_repo(
+        concept_records=_base_ebit_da_concepts(quarter_dates),
+        latest_records=latest_records,
+    )
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.value == 0.7
 
-    repo = DummyRepo()
+
+def test_net_debt_to_ebitda_requires_at_least_one_debt_component():
+    metric = NetDebtToEBITDAMetric()
+    quarter_dates = _net_debt_quarter_dates()
+    q4 = quarter_dates[0]
+    repo = _build_net_debt_repo(
+        concept_records=_base_ebit_da_concepts(quarter_dates),
+        latest_records={
+            "CashAndShortTermInvestments": fact(
+                concept="CashAndShortTermInvestments",
+                end_date=q4,
+                value=20.0,
+                currency="USD",
+            )
+        },
+    )
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_net_debt_to_ebitda_uses_cash_component_fallback():
+    metric = NetDebtToEBITDAMetric()
+    quarter_dates = _net_debt_quarter_dates()
+    q4 = quarter_dates[0]
+    latest_records = _default_net_debt_latest_records(q4)
+    latest_records.pop("CashAndShortTermInvestments")
+    latest_records["CashAndCashEquivalents"] = fact(
+        concept="CashAndCashEquivalents",
+        end_date=q4,
+        value=15.0,
+        currency="USD",
+    )
+    latest_records["ShortTermInvestments"] = fact(
+        concept="ShortTermInvestments",
+        end_date=q4,
+        value=5.0,
+        currency="USD",
+    )
+    repo = _build_net_debt_repo(
+        concept_records=_base_ebit_da_concepts(quarter_dates),
+        latest_records=latest_records,
+    )
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.value == 0.8
+
+
+def test_net_debt_to_ebitda_cash_component_fallback_allows_missing_sti():
+    metric = NetDebtToEBITDAMetric()
+    quarter_dates = _net_debt_quarter_dates()
+    q4 = quarter_dates[0]
+    latest_records = _default_net_debt_latest_records(q4)
+    latest_records.pop("CashAndShortTermInvestments")
+    latest_records["CashAndCashEquivalents"] = fact(
+        concept="CashAndCashEquivalents",
+        end_date=q4,
+        value=20.0,
+        currency="USD",
+    )
+    repo = _build_net_debt_repo(
+        concept_records=_base_ebit_da_concepts(quarter_dates),
+        latest_records=latest_records,
+    )
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.value == 0.8
+
+
+def test_net_debt_to_ebitda_requires_cash_source():
+    metric = NetDebtToEBITDAMetric()
+    quarter_dates = _net_debt_quarter_dates()
+    q4 = quarter_dates[0]
+    latest_records = _default_net_debt_latest_records(q4)
+    latest_records.pop("CashAndShortTermInvestments")
+    repo = _build_net_debt_repo(
+        concept_records=_base_ebit_da_concepts(quarter_dates),
+        latest_records=latest_records,
+    )
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_net_debt_to_ebitda_returns_none_on_denominator_currency_mismatch():
+    metric = NetDebtToEBITDAMetric()
+    quarter_dates = _net_debt_quarter_dates()
+    q4 = quarter_dates[0]
+    repo = _build_net_debt_repo(
+        concept_records=_base_ebit_da_concepts(quarter_dates, da_currency="EUR"),
+        latest_records=_default_net_debt_latest_records(q4),
+    )
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_net_debt_to_ebitda_returns_none_on_net_debt_currency_mismatch():
+    metric = NetDebtToEBITDAMetric()
+    quarter_dates = _net_debt_quarter_dates()
+    q4 = quarter_dates[0]
+    latest_records = _default_net_debt_latest_records(q4)
+    latest_records["CashAndShortTermInvestments"] = fact(
+        concept="CashAndShortTermInvestments",
+        end_date=q4,
+        value=20.0,
+        currency="EUR",
+    )
+    repo = _build_net_debt_repo(
+        concept_records=_base_ebit_da_concepts(quarter_dates),
+        latest_records=latest_records,
+    )
     result = metric.compute("AAPL.US", repo)
     assert result is None
 
