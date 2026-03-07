@@ -137,9 +137,10 @@ EODHD_STATEMENT_FIELDS = {
     },
 }
 
+EODHD_EXTRA_CONCEPTS = {"EnterpriseValue"}
 EODHD_TARGET_CONCEPTS = {
     concept for statement in EODHD_STATEMENT_FIELDS.values() for concept in statement
-}
+} | EODHD_EXTRA_CONCEPTS
 EODHD_DERIVED_OVERRIDE_CONCEPTS = ("CommonStockholdersEquity",)
 
 
@@ -205,6 +206,14 @@ class EODHDFactsNormalizer:
                 )
             )
 
+        records.extend(
+            self._normalize_enterprise_value(
+                payload,
+                symbol=symbol,
+                accounting_standard=accounting_standard,
+                default_currency=currency_code,
+            )
+        )
         records.extend(
             self._normalize_share_counts(
                 payload, symbol, accounting_standard, currency_code
@@ -475,6 +484,69 @@ class EODHDFactsNormalizer:
                         )
                     )
         return records
+
+    def _normalize_enterprise_value(
+        self,
+        payload: Dict,
+        *,
+        symbol: str,
+        accounting_standard: Optional[str],
+        default_currency: Optional[str],
+    ) -> List[FactRecord]:
+        if "EnterpriseValue" not in self.concepts:
+            return []
+
+        valuation = payload.get("Valuation") or {}
+        raw_value = _to_float(valuation.get("EnterpriseValue"))
+        if raw_value is None:
+            return []
+
+        highlights = payload.get("Highlights") or {}
+        end_date = self._extract_date({"date": highlights.get("MostRecentQuarter")})
+        if not end_date:
+            end_date = self._latest_financials_end_date(payload.get("Financials") or {})
+        if not end_date:
+            return []
+
+        currency = _normalize_currency_code(default_currency)
+        normalized_value, normalized_currency = self._normalize_value_currency(
+            raw_value, currency
+        )
+        if normalized_value is None:
+            return []
+
+        return [
+            FactRecord(
+                symbol=symbol.upper(),
+                concept="EnterpriseValue",
+                fiscal_period="",
+                end_date=end_date,
+                unit=currency or "",
+                value=normalized_value,
+                accn=None,
+                filed=None,
+                frame=None,
+                start_date=None,
+                accounting_standard=accounting_standard,
+                currency=normalized_currency,
+            )
+        ]
+
+    def _latest_financials_end_date(self, financials: Dict) -> Optional[str]:
+        latest: Optional[str] = None
+        for statement_payload in financials.values():
+            if not isinstance(statement_payload, dict):
+                continue
+            for frequency in ("yearly", "quarterly"):
+                for key, entry in self._iter_entries_with_keys(
+                    statement_payload.get(frequency)
+                ):
+                    end_date = self._extract_entry_date_keyed(key, entry)
+                    if not end_date:
+                        continue
+                    if latest is None or end_date > latest:
+                        latest = end_date
+        return latest
 
     def _normalize_share_counts(
         self,

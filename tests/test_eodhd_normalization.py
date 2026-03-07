@@ -446,3 +446,82 @@ def test_eodhd_normalizes_short_term_investments():
     derived = [r for r in records if r.concept == "ShortTermInvestments"]
     assert derived, "ShortTermInvestments should map from shortTermInvestments"
     assert derived[0].value == 19.0
+
+
+def test_eodhd_normalizes_enterprise_value_from_valuation():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Valuation": {"EnterpriseValue": 1234.0},
+        "Highlights": {"MostRecentQuarter": "2025-09-30"},
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+    derived = [r for r in records if r.concept == "EnterpriseValue"]
+    assert derived, "EnterpriseValue should map from Valuation.EnterpriseValue"
+    assert derived[0].value == 1234.0
+    assert derived[0].end_date == "2025-09-30"
+    assert derived[0].fiscal_period == ""
+
+
+def test_eodhd_enterprise_value_uses_most_recent_quarter_date_when_present():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Valuation": {"EnterpriseValue": 555.0},
+        "Highlights": {"MostRecentQuarter": "2025-06-30"},
+        "Financials": {
+            "Income_Statement": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "totalRevenue": 1000.0,
+                        "currency_symbol": "USD",
+                    }
+                ],
+                "quarterly": [
+                    {
+                        "date": "2025-09-30",
+                        "totalRevenue": 300.0,
+                        "currency_symbol": "USD",
+                    }
+                ],
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+    derived = [r for r in records if r.concept == "EnterpriseValue"]
+    assert derived, "EnterpriseValue should be normalized when valuation value exists"
+    assert derived[0].end_date == "2025-06-30"
+
+
+def test_eodhd_enterprise_value_falls_back_to_latest_statement_date():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Valuation": {"EnterpriseValue": 777.0},
+        "Financials": {
+            "Income_Statement": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "totalRevenue": 1000.0,
+                        "currency_symbol": "USD",
+                    }
+                ],
+                "quarterly": [
+                    {
+                        "date": "2025-09-30",
+                        "totalRevenue": 300.0,
+                        "currency_symbol": "USD",
+                    }
+                ],
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+    derived = [r for r in records if r.concept == "EnterpriseValue"]
+    assert derived, "EnterpriseValue should fall back to latest statement date"
+    assert derived[0].end_date == "2025-09-30"

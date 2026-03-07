@@ -36,6 +36,7 @@ from pyvalue.metrics.owner_earnings_equity import (
 from pyvalue.metrics.owner_earnings_yield import (
     OwnerEarningsYieldEquityFiveYearMetric,
     OwnerEarningsYieldEquityMetric,
+    OwnerEarningsYieldEVMetric,
 )
 from pyvalue.metrics.owner_earnings_enterprise import (
     OwnerEarningsEnterpriseFiveYearAverageMetric,
@@ -3377,6 +3378,94 @@ class _OwnerEarningsRepo:
             return records[:limit]
         return records
 
+    def latest_fact(self, symbol, concept):
+        records = self.facts_for_concept(symbol, concept)
+        if not records:
+            return None
+        return max(records, key=lambda record: record.end_date)
+
+
+def _build_oe_ev_ttm_input_records(
+    *,
+    symbol: str,
+    q4: str,
+    q3: str,
+    q2: str,
+    q1: str,
+    latest_year: int,
+    ebit: float = 200.0,
+    tax: float = 40.0,
+    pretax: float = 200.0,
+    capex: float = 100.0,
+    da: float | None = 90.0,
+    base_currency: str = "USD",
+) -> dict[str, list[FactRecord]]:
+    records_by_concept = _build_nwc_fy_records(
+        symbol, latest_year, [150.0, 130.0, 110.0, 90.0]
+    )
+    periods = [(q4, "Q4"), (q3, "Q3"), (q2, "Q2"), (q1, "Q1")]
+    records_by_concept.update(
+        {
+            "OperatingIncomeLoss": [
+                fact(
+                    symbol=symbol,
+                    concept="OperatingIncomeLoss",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=ebit,
+                    currency=base_currency,
+                )
+                for end_date, period in periods
+            ],
+            "IncomeTaxExpense": [
+                fact(
+                    symbol=symbol,
+                    concept="IncomeTaxExpense",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=tax,
+                    currency=base_currency,
+                )
+                for end_date, period in periods
+            ],
+            "IncomeBeforeIncomeTaxes": [
+                fact(
+                    symbol=symbol,
+                    concept="IncomeBeforeIncomeTaxes",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=pretax,
+                    currency=base_currency,
+                )
+                for end_date, period in periods
+            ],
+            "CapitalExpenditures": [
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period=period,
+                    end_date=end_date,
+                    value=capex,
+                    currency=base_currency,
+                )
+                for end_date, period in periods
+            ],
+        }
+    )
+    if da is not None:
+        records_by_concept["DepreciationDepletionAndAmortization"] = [
+            fact(
+                symbol=symbol,
+                concept="DepreciationDepletionAndAmortization",
+                fiscal_period=period,
+                end_date=end_date,
+                value=da,
+                currency=base_currency,
+            )
+            for end_date, period in periods
+        ]
+    return records_by_concept
+
 
 def test_oe_equity_ttm_metric_computes_formula():
     metric = OwnerEarningsEquityTTMMetric()
@@ -6059,6 +6148,315 @@ def test_oey_equity_metric_allows_negative_values():
     assert result.value == -500.0 / 4920.0
 
 
+def test_oey_ev_metric_uses_normalized_enterprise_value_denominator():
+    metric = OwnerEarningsYieldEVMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_oe_ev_ttm_input_records(
+        symbol=symbol,
+        q4=q4,
+        q3=q3,
+        q2=q2,
+        q1=q1,
+        latest_year=latest_year,
+    )
+    records_by_concept["EnterpriseValue"] = [
+        fact(
+            symbol=symbol,
+            concept="EnterpriseValue",
+            end_date=q4,
+            value=5840.0,
+            currency="USD",
+            fiscal_period="",
+        )
+    ]
+
+    class DummyMarketRepo:
+        def latest_snapshot(self, symbol):
+            return None
+
+    result = metric.compute(
+        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
+    )
+    assert result is not None
+    assert result.as_of == q4
+    assert result.value == 0.1
+
+
+def test_oey_ev_metric_falls_back_to_derived_ev_when_primary_missing():
+    metric = OwnerEarningsYieldEVMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_oe_ev_ttm_input_records(
+        symbol=symbol,
+        q4=q4,
+        q3=q3,
+        q2=q2,
+        q1=q1,
+        latest_year=latest_year,
+    )
+    records_by_concept["LongTermDebt"] = [
+        fact(
+            symbol=symbol,
+            concept="LongTermDebt",
+            fiscal_period="FY",
+            end_date=f"{latest_year}-09-30",
+            value=300.0,
+            currency="USD",
+        )
+    ]
+
+    class DummyMarketRepo:
+        def latest_snapshot(self, symbol):
+            class Snapshot:
+                market_cap = 1000.0
+                as_of = q4
+                currency = "USD"
+
+            return Snapshot()
+
+    result = metric.compute(
+        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
+    )
+    assert result is not None
+    assert result.value == 584.0 / 1250.0
+
+
+def test_oey_ev_metric_falls_back_to_derived_ev_when_primary_non_positive():
+    metric = OwnerEarningsYieldEVMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_oe_ev_ttm_input_records(
+        symbol=symbol,
+        q4=q4,
+        q3=q3,
+        q2=q2,
+        q1=q1,
+        latest_year=latest_year,
+    )
+    records_by_concept["EnterpriseValue"] = [
+        fact(
+            symbol=symbol,
+            concept="EnterpriseValue",
+            end_date=q4,
+            value=0.0,
+            currency="USD",
+            fiscal_period="",
+        )
+    ]
+    records_by_concept["LongTermDebt"] = [
+        fact(
+            symbol=symbol,
+            concept="LongTermDebt",
+            fiscal_period="FY",
+            end_date=f"{latest_year}-09-30",
+            value=300.0,
+            currency="USD",
+        )
+    ]
+
+    class DummyMarketRepo:
+        def latest_snapshot(self, symbol):
+            class Snapshot:
+                market_cap = 1000.0
+                as_of = q4
+                currency = "USD"
+
+            return Snapshot()
+
+    result = metric.compute(
+        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
+    )
+    assert result is not None
+    assert result.value == 584.0 / 1250.0
+
+
+def test_oey_ev_metric_returns_none_when_ev_primary_and_fallback_unavailable():
+    metric = OwnerEarningsYieldEVMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_oe_ev_ttm_input_records(
+        symbol=symbol,
+        q4=q4,
+        q3=q3,
+        q2=q2,
+        q1=q1,
+        latest_year=latest_year,
+    )
+
+    class DummyMarketRepo:
+        def latest_snapshot(self, symbol):
+            class Snapshot:
+                market_cap = None
+                as_of = q4
+                currency = "USD"
+
+            return Snapshot()
+
+    result = metric.compute(
+        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
+    )
+    assert result is None
+
+
+def test_oey_ev_metric_applies_fx_conversion(monkeypatch):
+    metric = OwnerEarningsYieldEVMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_oe_ev_ttm_input_records(
+        symbol=symbol,
+        q4=q4,
+        q3=q3,
+        q2=q2,
+        q1=q1,
+        latest_year=latest_year,
+    )
+    records_by_concept["EnterpriseValue"] = [
+        fact(
+            symbol=symbol,
+            concept="EnterpriseValue",
+            end_date=q4,
+            value=100.0,
+            currency="EUR",
+            fiscal_period="",
+        )
+    ]
+
+    monkeypatch.setattr(
+        "pyvalue.metrics.owner_earnings_yield.FXRateStore.convert",
+        lambda self, amount, from_currency, to_currency, as_of: amount * 2.0,
+    )
+
+    class DummyMarketRepo:
+        def latest_snapshot(self, symbol):
+            return None
+
+    result = metric.compute(
+        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
+    )
+    assert result is not None
+    assert result.value == 584.0 / 200.0
+
+
+def test_oey_ev_metric_returns_none_when_fx_conversion_fails(monkeypatch):
+    metric = OwnerEarningsYieldEVMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_oe_ev_ttm_input_records(
+        symbol=symbol,
+        q4=q4,
+        q3=q3,
+        q2=q2,
+        q1=q1,
+        latest_year=latest_year,
+    )
+    records_by_concept["EnterpriseValue"] = [
+        fact(
+            symbol=symbol,
+            concept="EnterpriseValue",
+            end_date=q4,
+            value=100.0,
+            currency="EUR",
+            fiscal_period="",
+        )
+    ]
+
+    monkeypatch.setattr(
+        "pyvalue.metrics.owner_earnings_yield.FXRateStore.convert",
+        lambda self, amount, from_currency, to_currency, as_of: None,
+    )
+
+    class DummyMarketRepo:
+        def latest_snapshot(self, symbol):
+            return None
+
+    result = metric.compute(
+        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
+    )
+    assert result is None
+
+
+def test_oey_ev_metric_allows_negative_values():
+    metric = OwnerEarningsYieldEVMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_oe_ev_ttm_input_records(
+        symbol=symbol,
+        q4=q4,
+        q3=q3,
+        q2=q2,
+        q1=q1,
+        latest_year=latest_year,
+        ebit=10.0,
+        tax=2.0,
+        pretax=10.0,
+        capex=30.0,
+        da=None,
+    )
+    records_by_concept["EnterpriseValue"] = [
+        fact(
+            symbol=symbol,
+            concept="EnterpriseValue",
+            end_date=q4,
+            value=1080.0,
+            currency="USD",
+            fiscal_period="",
+        )
+    ]
+
+    class DummyMarketRepo:
+        def latest_snapshot(self, symbol):
+            return None
+
+    result = metric.compute(
+        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
+    )
+    assert result is not None
+    assert result.value == -0.1
+
+
 def test_registry_contains_all_ids():
     # Ensure the registry still exposes all metric identifiers
     assert len(REGISTRY) >= 1
@@ -6074,5 +6472,6 @@ def test_registry_contains_all_ids():
     assert "oe_equity_5y_avg" in REGISTRY
     assert "oey_equity" in REGISTRY
     assert "oey_equity_5y" in REGISTRY
+    assert "oey_ev" in REGISTRY
     assert "oe_ev_ttm" in REGISTRY
     assert "oe_ev_5y_avg" in REGISTRY

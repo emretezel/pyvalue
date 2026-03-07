@@ -1,4 +1,4 @@
-"""Owner earnings yield (equity) metrics.
+"""Owner earnings yield metrics.
 
 Author: Emre Tezel
 """
@@ -6,19 +6,82 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Sequence
 
 import logging
 
 from pyvalue.fx import FXRateStore
 from pyvalue.metrics.base import MetricResult
+from pyvalue.metrics.owner_earnings_enterprise import (
+    REQUIRED_CONCEPTS as OE_EV_REQUIRED_CONCEPTS,
+    OwnerEarningsEnterpriseCalculator,
+)
 from pyvalue.metrics.owner_earnings_equity import (
-    REQUIRED_CONCEPTS,
+    REQUIRED_CONCEPTS as OE_EQUITY_REQUIRED_CONCEPTS,
     OwnerEarningsEquityCalculator,
 )
-from pyvalue.storage import FinancialFactsRepository, MarketDataRepository
+from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
+
+EV_FALLBACK_REQUIRED_CONCEPTS = (
+    "EnterpriseValue",
+    "LongTermDebt",
+    "CashAndShortTermInvestments",
+)
+REQUIRED_CONCEPTS = OE_EQUITY_REQUIRED_CONCEPTS
+REQUIRED_EV_CONCEPTS = tuple(
+    dict.fromkeys(OE_EV_REQUIRED_CONCEPTS + EV_FALLBACK_REQUIRED_CONCEPTS)
+)
+
+
+def _normalize_fact(record: FactRecord) -> tuple[float, Optional[str]]:
+    value = record.value
+    currency = record.currency
+    if currency in {"GBX", "GBP0.01"}:
+        return value / 100.0, "GBP"
+    return value, currency
+
+
+def _merge_currency(codes: Sequence[Optional[str]]) -> Optional[str]:
+    merged = None
+    for code in codes:
+        if not code:
+            continue
+        if merged is None:
+            merged = code
+        elif merged != code:
+            return None
+    return merged
+
+
+def _convert_denominator(
+    *,
+    symbol: str,
+    amount: float,
+    source_currency: Optional[str],
+    target_currency: Optional[str],
+    as_of: str,
+    context: str,
+) -> Optional[float]:
+    if target_currency and source_currency and source_currency != target_currency:
+        converted = FXRateStore().convert(
+            amount,
+            source_currency,
+            target_currency,
+            as_of,
+        )
+        if converted is None:
+            LOGGER.warning(
+                "%s: FX conversion failed %s -> %s for %s",
+                context,
+                source_currency,
+                target_currency,
+                symbol,
+            )
+            return None
+        return converted
+    return amount
 
 
 def _denominator_market_cap(
@@ -36,26 +99,109 @@ def _denominator_market_cap(
         LOGGER.warning("%s: non-positive market cap snapshot for %s", context, symbol)
         return None
 
-    market_cap = snapshot.market_cap
-    snapshot_currency = getattr(snapshot, "currency", None)
-    if target_currency and snapshot_currency and snapshot_currency != target_currency:
-        converted = FXRateStore().convert(
-            market_cap,
-            snapshot_currency,
-            target_currency,
-            snapshot.as_of,
-        )
-        if converted is None:
-            LOGGER.warning(
-                "%s: FX conversion failed %s -> %s for %s",
-                context,
-                snapshot_currency,
-                target_currency,
-                symbol,
+    return _convert_denominator(
+        symbol=symbol,
+        amount=snapshot.market_cap,
+        source_currency=getattr(snapshot, "currency", None),
+        target_currency=target_currency,
+        as_of=snapshot.as_of,
+        context=context,
+    )
+
+
+def _denominator_enterprise_value(
+    *,
+    symbol: str,
+    repo: FinancialFactsRepository,
+    market_repo: MarketDataRepository,
+    target_currency: Optional[str],
+    context: str,
+) -> Optional[float]:
+    ev_fact = repo.latest_fact(symbol, "EnterpriseValue")
+    if ev_fact is not None:
+        ev_value, ev_currency = _normalize_fact(ev_fact)
+        if ev_value > 0:
+            converted = _convert_denominator(
+                symbol=symbol,
+                amount=ev_value,
+                source_currency=ev_currency,
+                target_currency=target_currency,
+                as_of=ev_fact.end_date,
+                context=context,
             )
+            if converted is not None and converted > 0:
+                return converted
+            if converted is not None and converted <= 0:
+                LOGGER.warning(
+                    "%s: non-positive enterprise value after FX for %s",
+                    context,
+                    symbol,
+                )
             return None
-        market_cap = converted
-    return market_cap
+        LOGGER.warning(
+            "%s: non-positive normalized enterprise value for %s; trying fallback",
+            context,
+            symbol,
+        )
+
+    snapshot = market_repo.latest_snapshot(symbol)
+    if snapshot is None or snapshot.market_cap is None:
+        LOGGER.warning("%s: missing market cap snapshot for %s", context, symbol)
+        return None
+    if snapshot.market_cap <= 0:
+        LOGGER.warning("%s: non-positive market cap snapshot for %s", context, symbol)
+        return None
+
+    short_debt = repo.latest_fact(symbol, "ShortTermDebt")
+    long_debt = repo.latest_fact(symbol, "LongTermDebt")
+    cash = repo.latest_fact(symbol, "CashAndShortTermInvestments")
+    if short_debt is None or long_debt is None or cash is None:
+        LOGGER.warning(
+            "%s: missing EV fallback debt/cash facts for %s", context, symbol
+        )
+        return None
+
+    short_value, short_currency = _normalize_fact(short_debt)
+    long_value, long_currency = _normalize_fact(long_debt)
+    cash_value, cash_currency = _normalize_fact(cash)
+    currency = _merge_currency(
+        [
+            getattr(snapshot, "currency", None),
+            short_currency,
+            long_currency,
+            cash_currency,
+        ]
+    )
+    if currency is None and any(
+        code is not None
+        for code in (
+            getattr(snapshot, "currency", None),
+            short_currency,
+            long_currency,
+            cash_currency,
+        )
+    ):
+        LOGGER.warning("%s: EV fallback currency mismatch for %s", context, symbol)
+        return None
+
+    ev_value = snapshot.market_cap + short_value + long_value - cash_value
+    if ev_value <= 0:
+        LOGGER.warning("%s: non-positive derived EV for %s", context, symbol)
+        return None
+
+    converted = _convert_denominator(
+        symbol=symbol,
+        amount=ev_value,
+        source_currency=currency,
+        target_currency=target_currency,
+        as_of=snapshot.as_of,
+        context=context,
+    )
+    if converted is None or converted <= 0:
+        if converted is not None:
+            LOGGER.warning("%s: non-positive EV after FX for %s", context, symbol)
+        return None
+    return converted
 
 
 @dataclass
@@ -130,4 +276,45 @@ class OwnerEarningsYieldEquityFiveYearMetric:
         )
 
 
-__all__ = ["OwnerEarningsYieldEquityMetric", "OwnerEarningsYieldEquityFiveYearMetric"]
+@dataclass
+class OwnerEarningsYieldEVMetric:
+    """Compute owner earnings yield using TTM owner earnings enterprise."""
+
+    id: str = "oey_ev"
+    required_concepts = REQUIRED_EV_CONCEPTS
+    uses_market_data = True
+
+    def compute(
+        self,
+        symbol: str,
+        repo: FinancialFactsRepository,
+        market_repo: MarketDataRepository,
+    ) -> Optional[MetricResult]:
+        numerator = OwnerEarningsEnterpriseCalculator().compute_ttm(symbol, repo)
+        if numerator is None:
+            LOGGER.warning("oey_ev: missing numerator for %s", symbol)
+            return None
+
+        enterprise_value = _denominator_enterprise_value(
+            symbol=symbol,
+            repo=repo,
+            market_repo=market_repo,
+            target_currency=numerator.currency,
+            context=self.id,
+        )
+        if enterprise_value is None:
+            return None
+
+        return MetricResult(
+            symbol=symbol,
+            metric_id=self.id,
+            value=numerator.value / enterprise_value,
+            as_of=numerator.as_of,
+        )
+
+
+__all__ = [
+    "OwnerEarningsYieldEquityMetric",
+    "OwnerEarningsYieldEquityFiveYearMetric",
+    "OwnerEarningsYieldEVMetric",
+]
