@@ -7,7 +7,7 @@ from datetime import date, timedelta
 
 from pyvalue.metrics import REGISTRY
 from pyvalue.metrics.current_ratio import CurrentRatioMetric
-from pyvalue.metrics.debt_paydown_years import DebtPaydownYearsMetric
+from pyvalue.metrics.debt_paydown_years import DebtPaydownYearsMetric, FCFToDebtMetric
 from pyvalue.metrics.earnings_yield import EarningsYieldMetric
 from pyvalue.metrics.eps_average import EPSAverageSixYearMetric
 from pyvalue.metrics.eps_quarterly import EarningsPerShareTTM
@@ -153,6 +153,52 @@ def _default_net_debt_latest_records(q4):
             currency="USD",
         ),
     }
+
+
+def _base_debt_paydown_concepts(quarter_dates):
+    return {
+        "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+            "NetCashProvidedByUsedInOperatingActivities",
+            quarter_dates,
+            (100.0, 100.0, 100.0, 100.0),
+        ),
+        "CapitalExpenditures": _quarterly_records(
+            "CapitalExpenditures",
+            quarter_dates,
+            (50.0, 50.0, 50.0, 50.0),
+        ),
+    }
+
+
+def _default_debt_paydown_latest_records(q4):
+    return {
+        "ShortTermDebt": fact(
+            concept="ShortTermDebt",
+            end_date=q4,
+            value=50.0,
+            currency="USD",
+        ),
+        "LongTermDebt": fact(
+            concept="LongTermDebt",
+            end_date=q4,
+            value=150.0,
+            currency="USD",
+        ),
+    }
+
+
+def _build_fcf_debt_repo(*, concept_records=None, latest_records=None):
+    concept_records = concept_records or {}
+    latest_records = latest_records or {}
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            return concept_records.get(concept, [])
+
+        def latest_fact(self, symbol, concept):
+            return latest_records.get(concept)
+
+    return DummyRepo()
 
 
 def test_working_capital_metric_computes_difference():
@@ -438,109 +484,76 @@ def test_net_debt_to_ebitda_requires_four_quarters_of_ebit():
 
 def test_debt_paydown_years_metric():
     metric = DebtPaydownYearsMetric()
-    today = date.today()
-    q4 = (today - timedelta(days=30)).isoformat()
-    q3 = (today - timedelta(days=120)).isoformat()
-    q2 = (today - timedelta(days=210)).isoformat()
-    q1 = (today - timedelta(days=300)).isoformat()
-
-    class DummyRepo:
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
-            if concept == "NetCashProvidedByUsedInOperatingActivities":
-                return [
-                    fact(
-                        symbol=symbol,
-                        concept=concept,
-                        fiscal_period="Q4",
-                        end_date=q4,
-                        value=100.0,
-                        currency="USD",
-                    ),
-                    fact(
-                        symbol=symbol,
-                        concept=concept,
-                        fiscal_period="Q3",
-                        end_date=q3,
-                        value=100.0,
-                        currency="USD",
-                    ),
-                    fact(
-                        symbol=symbol,
-                        concept=concept,
-                        fiscal_period="Q2",
-                        end_date=q2,
-                        value=100.0,
-                        currency="USD",
-                    ),
-                    fact(
-                        symbol=symbol,
-                        concept=concept,
-                        fiscal_period="Q1",
-                        end_date=q1,
-                        value=100.0,
-                        currency="USD",
-                    ),
-                ]
-            if concept == "CapitalExpenditures":
-                return [
-                    fact(
-                        symbol=symbol,
-                        concept=concept,
-                        fiscal_period="Q4",
-                        end_date=q4,
-                        value=50.0,
-                        currency="USD",
-                    ),
-                    fact(
-                        symbol=symbol,
-                        concept=concept,
-                        fiscal_period="Q3",
-                        end_date=q3,
-                        value=50.0,
-                        currency="USD",
-                    ),
-                    fact(
-                        symbol=symbol,
-                        concept=concept,
-                        fiscal_period="Q2",
-                        end_date=q2,
-                        value=50.0,
-                        currency="USD",
-                    ),
-                    fact(
-                        symbol=symbol,
-                        concept=concept,
-                        fiscal_period="Q1",
-                        end_date=q1,
-                        value=50.0,
-                        currency="USD",
-                    ),
-                ]
-            return []
-
-        def latest_fact(self, symbol, concept):
-            if concept == "ShortTermDebt":
-                return fact(
-                    symbol=symbol,
-                    concept=concept,
-                    end_date=q4,
-                    value=50.0,
-                    currency="USD",
-                )
-            if concept == "LongTermDebt":
-                return fact(
-                    symbol=symbol,
-                    concept=concept,
-                    end_date=q4,
-                    value=150.0,
-                    currency="USD",
-                )
-            return None
-
-    repo = DummyRepo()
+    quarter_dates = _net_debt_quarter_dates()
+    q4 = quarter_dates[0]
+    repo = _build_fcf_debt_repo(
+        concept_records=_base_debt_paydown_concepts(quarter_dates),
+        latest_records=_default_debt_paydown_latest_records(q4),
+    )
     result = metric.compute("AAPL.US", repo)
     assert result is not None
     assert result.value == 1.0
+
+
+def test_fcf_to_debt_metric():
+    metric = FCFToDebtMetric()
+    quarter_dates = _net_debt_quarter_dates()
+    q4 = quarter_dates[0]
+    repo = _build_fcf_debt_repo(
+        concept_records=_base_debt_paydown_concepts(quarter_dates),
+        latest_records=_default_debt_paydown_latest_records(q4),
+    )
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.value == 1.0
+
+
+def test_debt_paydown_years_uses_total_debt_fallback():
+    metric = DebtPaydownYearsMetric()
+    quarter_dates = _net_debt_quarter_dates()
+    q4 = quarter_dates[0]
+    latest = {
+        "LongTermDebt": fact(
+            concept="LongTermDebt",
+            end_date=q4,
+            value=999.0,
+            currency="USD",
+        ),
+        "TotalDebtFromBalanceSheet": fact(
+            concept="TotalDebtFromBalanceSheet",
+            end_date=q4,
+            value=200.0,
+            currency="USD",
+        ),
+    }
+    repo = _build_fcf_debt_repo(
+        concept_records=_base_debt_paydown_concepts(quarter_dates),
+        latest_records=latest,
+    )
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.value == 1.0
+
+
+def test_debt_paydown_years_uses_one_side_debt_fallback():
+    metric = DebtPaydownYearsMetric()
+    quarter_dates = _net_debt_quarter_dates()
+    q4 = quarter_dates[0]
+    latest = {
+        "LongTermDebt": fact(
+            concept="LongTermDebt",
+            end_date=q4,
+            value=150.0,
+            currency="USD",
+        ),
+    }
+    repo = _build_fcf_debt_repo(
+        concept_records=_base_debt_paydown_concepts(quarter_dates),
+        latest_records=latest,
+    )
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.value == 0.75
 
 
 def test_short_term_debt_share_metric():
@@ -998,6 +1011,105 @@ def test_debt_paydown_years_skips_non_positive_fcf():
     repo = DummyRepo()
     result = metric.compute("AAPL.US", repo)
     assert result is None
+
+
+def test_fcf_to_debt_skips_non_positive_fcf():
+    metric = FCFToDebtMetric()
+    quarter_dates = _net_debt_quarter_dates()
+    q4 = quarter_dates[0]
+    concept_records = {
+        "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+            "NetCashProvidedByUsedInOperatingActivities",
+            quarter_dates,
+            (50.0, 50.0, 50.0, 50.0),
+        ),
+        "CapitalExpenditures": _quarterly_records(
+            "CapitalExpenditures",
+            quarter_dates,
+            (60.0, 60.0, 60.0, 60.0),
+        ),
+    }
+    repo = _build_fcf_debt_repo(
+        concept_records=concept_records,
+        latest_records=_default_debt_paydown_latest_records(q4),
+    )
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_fcf_and_debt_paydown_skip_non_positive_debt():
+    quarter_dates = _net_debt_quarter_dates()
+    q4 = quarter_dates[0]
+    latest = _default_debt_paydown_latest_records(q4)
+    latest["ShortTermDebt"] = fact(
+        concept="ShortTermDebt",
+        end_date=q4,
+        value=0.0,
+        currency="USD",
+    )
+    latest["LongTermDebt"] = fact(
+        concept="LongTermDebt",
+        end_date=q4,
+        value=0.0,
+        currency="USD",
+    )
+    repo = _build_fcf_debt_repo(
+        concept_records=_base_debt_paydown_concepts(quarter_dates),
+        latest_records=latest,
+    )
+
+    assert DebtPaydownYearsMetric().compute("AAPL.US", repo) is None
+    assert FCFToDebtMetric().compute("AAPL.US", repo) is None
+
+
+def test_fcf_to_debt_uses_capex_zero_when_missing():
+    metric = FCFToDebtMetric()
+    quarter_dates = _net_debt_quarter_dates()
+    q4 = quarter_dates[0]
+    concept_records = {
+        "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+            "NetCashProvidedByUsedInOperatingActivities",
+            quarter_dates,
+            (100.0, 100.0, 100.0, 100.0),
+        )
+    }
+    repo = _build_fcf_debt_repo(
+        concept_records=concept_records,
+        latest_records=_default_debt_paydown_latest_records(q4),
+    )
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.value == 2.0
+
+
+def test_fcf_and_debt_paydown_return_none_on_currency_mismatch():
+    quarter_dates = _net_debt_quarter_dates()
+    q4 = quarter_dates[0]
+    concept_records = {
+        "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+            "NetCashProvidedByUsedInOperatingActivities",
+            quarter_dates,
+            (100.0, 100.0, 100.0, 100.0),
+            currency="GBP",
+        ),
+        "CapitalExpenditures": _quarterly_records(
+            "CapitalExpenditures",
+            quarter_dates,
+            (50.0, 50.0, 50.0, 50.0),
+            currency="GBP",
+        ),
+    }
+    repo = _build_fcf_debt_repo(
+        concept_records=concept_records,
+        latest_records=_default_debt_paydown_latest_records(q4),
+    )
+
+    assert DebtPaydownYearsMetric().compute("AAPL.US", repo) is None
+    assert FCFToDebtMetric().compute("AAPL.US", repo) is None
+
+
+def test_registry_includes_fcf_to_debt_metric():
+    assert "fcf_to_debt" in REGISTRY
 
 
 def test_interest_coverage_metric():

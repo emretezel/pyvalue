@@ -84,6 +84,7 @@ EODHD_STATEMENT_FIELDS = {
             "longTermDebt",
             "longTermDebtNoncurrent",
         ],
+        "TotalDebtFromBalanceSheet": ["shortLongTermDebtTotal"],
         "PropertyPlantAndEquipmentNet": [
             "propertyPlantAndEquipmentNet",
             "propertyPlantEquipment",

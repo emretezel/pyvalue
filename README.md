@@ -242,6 +242,7 @@ Additional metrics include:
 - `current_ratio`: Current assets divided by current liabilities.
 - `graham_eps_10y_cagr_3y_avg`: Graham EPS 10-year-period CAGR using 3-year average EPS at
   the start and end of the period (using full-year GAAP EPS data).
+- `fcf_to_debt`: Trailing 12-month free cash flow divided by total debt (EODHD-only).
 - `mcapex_fy`: Maintenance capex proxy for the latest FY, computed as
   `min(Capex_FY, 1.1 × D&A_FY)` with single-input fallback and absolute-value handling.
 - `mcapex_5y`: Average of the latest five available FY `mcapex_fy` values
@@ -284,7 +285,8 @@ is derived from normalized SEC or market data plus the value-investing intuition
 | --- | --- | --- |
 | `working_capital` | Latest `AssetsCurrent - LiabilitiesCurrent`. | Healthy working capital protects downside by ensuring near-term obligations are covered without diluting shareholders. |
 | `long_term_debt` | US SEC: `LongTermDebtNoncurrent + LongTermDebtCurrent`; else sum noncurrent components + current, falling back to notes payable or debt+lease rollups. | Excessive leverage magnifies downside, so keeping long-term debt manageable relative to liquidity (e.g., working capital) preserves margin of safety. |
-| `debt_paydown_years` | Total debt (`ShortTermDebt + LongTermDebt`) divided by trailing 12-month free cash flow (quarterly OCF minus capex, EODHD-only). | Estimates how many years of current free cash flow would be needed to repay debt; lower is healthier. |
+| `debt_paydown_years` | Total debt divided by trailing 12-month free cash flow (quarterly OCF minus capex, EODHD-only). Debt resolution uses layered fallback: `(ShortTermDebt + LongTermDebt)` when both exist, else `TotalDebtFromBalanceSheet` (from `shortLongTermDebtTotal`), else one available debt side (missing side treated as 0). Returns no metric when debt or FCF is non-positive. | Estimates how many years of current free cash flow would be needed to repay debt; lower is healthier. |
+| `fcf_to_debt` | Reciprocal of debt paydown years: trailing 12-month free cash flow divided by total debt using the same EODHD debt fallback chain and positive-gating rules as `debt_paydown_years`. | Shows debt service capacity as a direct yield-like ratio; higher values indicate faster potential debt reduction. |
 | `short_term_debt_share` | Short-term debt divided by total debt (`ShortTermDebt / (ShortTermDebt + LongTermDebt)`, EODHD-only). | Shows how much debt matures soon; higher shares imply more refinancing risk. |
 | `return_on_invested_capital` | TTM EBIT × (1 − tax rate) divided by average invested capital, where invested capital is `ShortTermDebt + LongTermDebt + StockholdersEquity − CashAndShortTermInvestments` (EODHD-only, tax rate uses a fallback when needed). | Measures how efficiently the business earns after-tax operating profits on the capital invested. |
 | `net_debt_to_ebitda` | Net debt divided by trailing 12-month component EBITDA (EODHD-only): `NetDebt = ShortTermDebt + LongTermDebt - Cash`, where cash prefers `CashAndShortTermInvestments` then `CashAndCashEquivalents + ShortTermInvestments` (missing STI treated as 0), and `EBITDA_TTM = OperatingIncomeLoss_TTM + D&A_TTM` with D&A fallback to cash-flow depreciation. One missing debt side is treated as 0 if the other exists; non-positive EBITDA returns no metric. | Highlights leverage relative to operating cash earnings; lower or negative suggests balance-sheet strength. |

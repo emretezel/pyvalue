@@ -6,7 +6,7 @@ Author: Emre Tezel
 from .base import Metric, MetricResult
 from .working_capital import WorkingCapitalMetric
 from .current_ratio import CurrentRatioMetric
-from .debt_paydown_years import DebtPaydownYearsMetric
+from .debt_paydown_years import DebtPaydownYearsMetric, FCFToDebtMetric
 from .long_term_debt import LongTermDebtMetric
 from .eps_streak import EPSStreakMetric
 from .eps_quarterly import EarningsPerShareTTM
@@ -48,6 +48,7 @@ REGISTRY = {
     WorkingCapitalMetric.id: WorkingCapitalMetric,
     CurrentRatioMetric.id: CurrentRatioMetric,
     DebtPaydownYearsMetric.id: DebtPaydownYearsMetric,
+    FCFToDebtMetric.id: FCFToDebtMetric,
     LongTermDebtMetric.id: LongTermDebtMetric,
     EPSStreakMetric.id: EPSStreakMetric,
     EarningsPerShareTTM.id: EarningsPerShareTTM,
@@ -86,6 +87,7 @@ __all__ = [
     "WorkingCapitalMetric",
     "CurrentRatioMetric",
     "DebtPaydownYearsMetric",
+    "FCFToDebtMetric",
     "LongTermDebtMetric",
     "EPSStreakMetric",
     "EarningsPerShareTTM",
