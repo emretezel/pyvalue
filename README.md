@@ -256,6 +256,12 @@ Additional metrics include:
   (`NWC(MQR) - NWC(same quarter last year)`).
 - `delta_nwc_fy`: Fiscal-year NWC change (`NWC(latest FY) - NWC(prior FY)`).
 - `delta_nwc_maint`: `max(average(last 3 FY deltas of NWC), 0)`.
+- `ic_mqr`: Invested capital snapshot for the latest quarter using
+  `TotalDebt + TotalEquity - CashAndEquivalents` with EODHD debt/cash fallbacks.
+- `ic_fy`: Invested capital snapshot for the latest FY using the same IC formula and
+  fallback chain as `ic_mqr`.
+- `avg_ic`: Average invested capital using same-quarter YoY (`(IC_now + IC_prior_year_same_q) / 2`)
+  and falling back to strict prior-FY average when quarterly pairing is unavailable.
 - `oe_equity_ttm`: Owner earnings equity (TTM), computed as
   `NI_TTM + D&A_TTM - MCapex_TTM - delta_nwc_maint` (EODHD-oriented).
 - `oe_equity_5y_avg`: Average of the latest five available FY owner earnings equity
@@ -289,6 +295,9 @@ is derived from normalized SEC or market data plus the value-investing intuition
 | `fcf_to_debt` | Reciprocal of debt paydown years: trailing 12-month free cash flow divided by total debt using the same EODHD debt fallback chain and positive-gating rules as `debt_paydown_years`. | Shows debt service capacity as a direct yield-like ratio; higher values indicate faster potential debt reduction. |
 | `short_term_debt_share` | Short-term debt share (EODHD-only): `ShortTermDebt / TotalDebt` where denominator prefers `ShortTermDebt + LongTermDebt` and falls back to `TotalDebtFromBalanceSheet` when long debt is missing/unusable. Requires explicit short-term debt, denominator `> 0`, and final share within `[0,1]`. | Shows how much debt matures soon; higher shares imply more refinancing risk. |
 | `return_on_invested_capital` | TTM EBIT × (1 − tax rate) divided by average invested capital, where invested capital is `ShortTermDebt + LongTermDebt + StockholdersEquity − CashAndShortTermInvestments` (EODHD-only, tax rate uses a fallback when needed). | Measures how efficiently the business earns after-tax operating profits on the capital invested. |
+| `ic_mqr` | Most recent-quarter invested capital (EODHD-oriented): `TotalDebt + TotalEquity - CashAndEquivalents`, where debt resolves as `ShortTermDebt + LongTermDebt`, then `TotalDebtFromBalanceSheet`, then one available debt side; equity prefers `StockholdersEquity` then `CommonStockholdersEquity`; cash prefers `CashAndCashEquivalents` then `CashAndShortTermInvestments`. | Provides a direct snapshot of operating capital committed to the business after cash balances. |
+| `ic_fy` | Latest FY invested capital using the same formula and debt/equity/cash fallback chain as `ic_mqr` (EODHD-oriented). | Gives an annual invested-capital anchor that is less sensitive to intra-year seasonality than quarter-end snapshots. |
+| `avg_ic` | Average invested capital (EODHD-oriented): primary `(IC_now + IC_same_quarter_last_year) / 2` with strict fiscal-quarter matching; if unavailable, falls back to strict prior-FY average `(IC_latest_FY + IC_prior_FY) / 2`. | Smooths denominator noise for capital-efficiency and owner-earnings style analyses while keeping period alignment disciplined. |
 | `net_debt_to_ebitda` | Net debt divided by trailing 12-month component EBITDA (EODHD-only): `NetDebt = ShortTermDebt + LongTermDebt - Cash`, where cash prefers `CashAndShortTermInvestments` then `CashAndCashEquivalents + ShortTermInvestments` (missing STI treated as 0), and `EBITDA_TTM = OperatingIncomeLoss_TTM + D&A_TTM` with D&A fallback to cash-flow depreciation. One missing debt side is treated as 0 if the other exists; non-positive EBITDA returns no metric. | Highlights leverage relative to operating cash earnings; lower or negative suggests balance-sheet strength. |
 | `interest_coverage` | Trailing 12-month `OperatingIncomeLoss` divided by trailing 12-month `InterestExpense` (quarterly sums, EODHD-only). Uses direct normalized `InterestExpense` first and, only when direct computation is unavailable, fills missing quarters with derived `interestIncome - netInterestIncome` (`InterestExpenseFromNetInterestIncome`). Returns no metric when `EBIT_TTM <= 0` or `InterestExpense_TTM <= 0`. | Indicates how comfortably operating profits cover financing costs; higher is safer. |
 | `current_ratio` | Latest `AssetsCurrent / LiabilitiesCurrent`. | A current ratio above ~1 indicates the business can stomach short-term shocks without forced asset sales or equity issuance. |

@@ -15,6 +15,11 @@ from pyvalue.metrics.eps_streak import EPSStreakMetric
 from pyvalue.metrics.graham_eps_cagr import GrahamEPSCAGRMetric
 from pyvalue.metrics.graham_multiplier import GrahamMultiplierMetric
 from pyvalue.metrics.interest_coverage import InterestCoverageMetric
+from pyvalue.metrics.invested_capital import (
+    AvgICMetric,
+    ICFYMetric,
+    ICMostRecentQuarterMetric,
+)
 from pyvalue.metrics.market_capitalization import MarketCapitalizationMetric
 from pyvalue.metrics.mcapex import (
     MCapexFYMetric,
@@ -197,6 +202,16 @@ def _build_fcf_debt_repo(*, concept_records=None, latest_records=None):
 
         def latest_fact(self, symbol, concept):
             return latest_records.get(concept)
+
+    return DummyRepo()
+
+
+def _build_ic_repo(*, concept_records=None):
+    concept_records = concept_records or {}
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            return concept_records.get(concept, [])
 
     return DummyRepo()
 
@@ -728,6 +743,839 @@ def test_short_term_debt_share_skips_currency_mismatch():
             return None
 
     repo = DummyRepo()
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_ic_mqr_metric():
+    metric = ICMostRecentQuarterMetric()
+    q4 = (date.today() - timedelta(days=20)).isoformat()
+    concept_records = {
+        "ShortTermDebt": [
+            fact(
+                concept="ShortTermDebt",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=50.0,
+                currency="USD",
+            )
+        ],
+        "LongTermDebt": [
+            fact(
+                concept="LongTermDebt",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=150.0,
+                currency="USD",
+            )
+        ],
+        "StockholdersEquity": [
+            fact(
+                concept="StockholdersEquity",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=500.0,
+                currency="USD",
+            )
+        ],
+        "CashAndCashEquivalents": [
+            fact(
+                concept="CashAndCashEquivalents",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=100.0,
+                currency="USD",
+            )
+        ],
+    }
+    repo = _build_ic_repo(concept_records=concept_records)
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.value == 600.0
+
+
+def test_ic_mqr_uses_total_debt_fallback_when_long_missing():
+    metric = ICMostRecentQuarterMetric()
+    q4 = (date.today() - timedelta(days=20)).isoformat()
+    concept_records = {
+        "ShortTermDebt": [
+            fact(
+                concept="ShortTermDebt",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=50.0,
+                currency="USD",
+            )
+        ],
+        "TotalDebtFromBalanceSheet": [
+            fact(
+                concept="TotalDebtFromBalanceSheet",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=260.0,
+                currency="USD",
+            )
+        ],
+        "StockholdersEquity": [
+            fact(
+                concept="StockholdersEquity",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=500.0,
+                currency="USD",
+            )
+        ],
+        "CashAndCashEquivalents": [
+            fact(
+                concept="CashAndCashEquivalents",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=100.0,
+                currency="USD",
+            )
+        ],
+    }
+    repo = _build_ic_repo(concept_records=concept_records)
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.value == 660.0
+
+
+def test_ic_mqr_uses_one_side_debt_fallback():
+    metric = ICMostRecentQuarterMetric()
+    q4 = (date.today() - timedelta(days=20)).isoformat()
+    concept_records = {
+        "LongTermDebt": [
+            fact(
+                concept="LongTermDebt",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=180.0,
+                currency="USD",
+            )
+        ],
+        "StockholdersEquity": [
+            fact(
+                concept="StockholdersEquity",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=500.0,
+                currency="USD",
+            )
+        ],
+        "CashAndCashEquivalents": [
+            fact(
+                concept="CashAndCashEquivalents",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=100.0,
+                currency="USD",
+            )
+        ],
+    }
+    repo = _build_ic_repo(concept_records=concept_records)
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.value == 580.0
+
+
+def test_ic_mqr_uses_cash_fallback_when_primary_missing():
+    metric = ICMostRecentQuarterMetric()
+    q4 = (date.today() - timedelta(days=20)).isoformat()
+    concept_records = {
+        "ShortTermDebt": [
+            fact(
+                concept="ShortTermDebt",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=50.0,
+                currency="USD",
+            )
+        ],
+        "LongTermDebt": [
+            fact(
+                concept="LongTermDebt",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=150.0,
+                currency="USD",
+            )
+        ],
+        "StockholdersEquity": [
+            fact(
+                concept="StockholdersEquity",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=500.0,
+                currency="USD",
+            )
+        ],
+        "CashAndShortTermInvestments": [
+            fact(
+                concept="CashAndShortTermInvestments",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=120.0,
+                currency="USD",
+            )
+        ],
+    }
+    repo = _build_ic_repo(concept_records=concept_records)
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.value == 580.0
+
+
+def test_ic_mqr_returns_none_when_missing_required_inputs():
+    metric = ICMostRecentQuarterMetric()
+    q4 = (date.today() - timedelta(days=20)).isoformat()
+    concept_records = {
+        "ShortTermDebt": [
+            fact(
+                concept="ShortTermDebt",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=50.0,
+                currency="USD",
+            )
+        ],
+        "LongTermDebt": [
+            fact(
+                concept="LongTermDebt",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=150.0,
+                currency="USD",
+            )
+        ],
+        "StockholdersEquity": [
+            fact(
+                concept="StockholdersEquity",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=500.0,
+                currency="USD",
+            )
+        ],
+    }
+    repo = _build_ic_repo(concept_records=concept_records)
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_ic_mqr_returns_none_on_currency_mismatch():
+    metric = ICMostRecentQuarterMetric()
+    q4 = (date.today() - timedelta(days=20)).isoformat()
+    concept_records = {
+        "ShortTermDebt": [
+            fact(
+                concept="ShortTermDebt",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=50.0,
+                currency="USD",
+            )
+        ],
+        "LongTermDebt": [
+            fact(
+                concept="LongTermDebt",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=150.0,
+                currency="USD",
+            )
+        ],
+        "StockholdersEquity": [
+            fact(
+                concept="StockholdersEquity",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=500.0,
+                currency="USD",
+            )
+        ],
+        "CashAndCashEquivalents": [
+            fact(
+                concept="CashAndCashEquivalents",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=100.0,
+                currency="EUR",
+            )
+        ],
+    }
+    repo = _build_ic_repo(concept_records=concept_records)
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_ic_mqr_emits_signed_negative_value():
+    metric = ICMostRecentQuarterMetric()
+    q4 = (date.today() - timedelta(days=20)).isoformat()
+    concept_records = {
+        "ShortTermDebt": [
+            fact(
+                concept="ShortTermDebt",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=50.0,
+                currency="USD",
+            )
+        ],
+        "LongTermDebt": [
+            fact(
+                concept="LongTermDebt",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=50.0,
+                currency="USD",
+            )
+        ],
+        "StockholdersEquity": [
+            fact(
+                concept="StockholdersEquity",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=100.0,
+                currency="USD",
+            )
+        ],
+        "CashAndCashEquivalents": [
+            fact(
+                concept="CashAndCashEquivalents",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=300.0,
+                currency="USD",
+            )
+        ],
+    }
+    repo = _build_ic_repo(concept_records=concept_records)
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.value == -100.0
+
+
+def test_ic_mqr_returns_none_when_latest_quarter_is_stale():
+    metric = ICMostRecentQuarterMetric()
+    stale_q4 = (date.today() - timedelta(days=500)).isoformat()
+    concept_records = {
+        "ShortTermDebt": [
+            fact(
+                concept="ShortTermDebt",
+                fiscal_period="Q4",
+                end_date=stale_q4,
+                value=50.0,
+                currency="USD",
+            )
+        ],
+        "LongTermDebt": [
+            fact(
+                concept="LongTermDebt",
+                fiscal_period="Q4",
+                end_date=stale_q4,
+                value=150.0,
+                currency="USD",
+            )
+        ],
+        "StockholdersEquity": [
+            fact(
+                concept="StockholdersEquity",
+                fiscal_period="Q4",
+                end_date=stale_q4,
+                value=500.0,
+                currency="USD",
+            )
+        ],
+        "CashAndCashEquivalents": [
+            fact(
+                concept="CashAndCashEquivalents",
+                fiscal_period="Q4",
+                end_date=stale_q4,
+                value=100.0,
+                currency="USD",
+            )
+        ],
+    }
+    repo = _build_ic_repo(concept_records=concept_records)
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_ic_fy_metric():
+    metric = ICFYMetric()
+    fy = (date.today() - timedelta(days=30)).isoformat()
+    concept_records = {
+        "ShortTermDebt": [
+            fact(
+                concept="ShortTermDebt",
+                fiscal_period="FY",
+                end_date=fy,
+                value=80.0,
+                currency="USD",
+            )
+        ],
+        "LongTermDebt": [
+            fact(
+                concept="LongTermDebt",
+                fiscal_period="FY",
+                end_date=fy,
+                value=220.0,
+                currency="USD",
+            )
+        ],
+        "StockholdersEquity": [
+            fact(
+                concept="StockholdersEquity",
+                fiscal_period="FY",
+                end_date=fy,
+                value=1000.0,
+                currency="USD",
+            )
+        ],
+        "CashAndCashEquivalents": [
+            fact(
+                concept="CashAndCashEquivalents",
+                fiscal_period="FY",
+                end_date=fy,
+                value=200.0,
+                currency="USD",
+            )
+        ],
+    }
+    repo = _build_ic_repo(concept_records=concept_records)
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.value == 1100.0
+
+
+def test_ic_fy_returns_none_when_latest_fy_is_stale():
+    metric = ICFYMetric()
+    stale_fy = (date.today() - timedelta(days=500)).isoformat()
+    concept_records = {
+        "ShortTermDebt": [
+            fact(
+                concept="ShortTermDebt",
+                fiscal_period="FY",
+                end_date=stale_fy,
+                value=80.0,
+                currency="USD",
+            )
+        ],
+        "LongTermDebt": [
+            fact(
+                concept="LongTermDebt",
+                fiscal_period="FY",
+                end_date=stale_fy,
+                value=220.0,
+                currency="USD",
+            )
+        ],
+        "StockholdersEquity": [
+            fact(
+                concept="StockholdersEquity",
+                fiscal_period="FY",
+                end_date=stale_fy,
+                value=1000.0,
+                currency="USD",
+            )
+        ],
+        "CashAndCashEquivalents": [
+            fact(
+                concept="CashAndCashEquivalents",
+                fiscal_period="FY",
+                end_date=stale_fy,
+                value=200.0,
+                currency="USD",
+            )
+        ],
+    }
+    repo = _build_ic_repo(concept_records=concept_records)
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_avg_ic_uses_same_quarter_yoy_when_available():
+    metric = AvgICMetric()
+    q4 = (date.today() - timedelta(days=20)).isoformat()
+    q4_prev = (date.today() - timedelta(days=380)).isoformat()
+    concept_records = {
+        "ShortTermDebt": [
+            fact(
+                concept="ShortTermDebt",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=60.0,
+                currency="USD",
+            ),
+            fact(
+                concept="ShortTermDebt",
+                fiscal_period="Q4",
+                end_date=q4_prev,
+                value=50.0,
+                currency="USD",
+            ),
+        ],
+        "LongTermDebt": [
+            fact(
+                concept="LongTermDebt",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=140.0,
+                currency="USD",
+            ),
+            fact(
+                concept="LongTermDebt",
+                fiscal_period="Q4",
+                end_date=q4_prev,
+                value=100.0,
+                currency="USD",
+            ),
+        ],
+        "StockholdersEquity": [
+            fact(
+                concept="StockholdersEquity",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=500.0,
+                currency="USD",
+            ),
+            fact(
+                concept="StockholdersEquity",
+                fiscal_period="Q4",
+                end_date=q4_prev,
+                value=450.0,
+                currency="USD",
+            ),
+        ],
+        "CashAndCashEquivalents": [
+            fact(
+                concept="CashAndCashEquivalents",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=100.0,
+                currency="USD",
+            ),
+            fact(
+                concept="CashAndCashEquivalents",
+                fiscal_period="Q4",
+                end_date=q4_prev,
+                value=90.0,
+                currency="USD",
+            ),
+        ],
+    }
+    repo = _build_ic_repo(concept_records=concept_records)
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.value == 555.0
+    assert result.as_of == q4
+
+
+def test_avg_ic_falls_back_to_fy_when_quarterly_pair_missing():
+    metric = AvgICMetric()
+    q4 = (date.today() - timedelta(days=20)).isoformat()
+    fy_latest = (date.today() - timedelta(days=45)).isoformat()
+    fy_prior = (date.today() - timedelta(days=400)).isoformat()
+    concept_records = {
+        "ShortTermDebt": [
+            fact(
+                concept="ShortTermDebt",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=60.0,
+                currency="USD",
+            ),
+            fact(
+                concept="ShortTermDebt",
+                fiscal_period="FY",
+                end_date=fy_latest,
+                value=90.0,
+                currency="USD",
+            ),
+            fact(
+                concept="ShortTermDebt",
+                fiscal_period="FY",
+                end_date=fy_prior,
+                value=80.0,
+                currency="USD",
+            ),
+        ],
+        "LongTermDebt": [
+            fact(
+                concept="LongTermDebt",
+                fiscal_period="FY",
+                end_date=fy_latest,
+                value=210.0,
+                currency="USD",
+            ),
+            fact(
+                concept="LongTermDebt",
+                fiscal_period="FY",
+                end_date=fy_prior,
+                value=200.0,
+                currency="USD",
+            ),
+        ],
+        "StockholdersEquity": [
+            fact(
+                concept="StockholdersEquity",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=500.0,
+                currency="USD",
+            ),
+            fact(
+                concept="StockholdersEquity",
+                fiscal_period="FY",
+                end_date=fy_latest,
+                value=1000.0,
+                currency="USD",
+            ),
+            fact(
+                concept="StockholdersEquity",
+                fiscal_period="FY",
+                end_date=fy_prior,
+                value=900.0,
+                currency="USD",
+            ),
+        ],
+        "CashAndShortTermInvestments": [
+            fact(
+                concept="CashAndShortTermInvestments",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=100.0,
+                currency="USD",
+            ),
+            fact(
+                concept="CashAndShortTermInvestments",
+                fiscal_period="FY",
+                end_date=fy_latest,
+                value=200.0,
+                currency="USD",
+            ),
+            fact(
+                concept="CashAndShortTermInvestments",
+                fiscal_period="FY",
+                end_date=fy_prior,
+                value=180.0,
+                currency="USD",
+            ),
+        ],
+    }
+    repo = _build_ic_repo(concept_records=concept_records)
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.value == 1050.0
+    assert result.as_of == fy_latest
+
+
+def test_avg_ic_requires_strict_prior_year_for_fy_fallback():
+    metric = AvgICMetric()
+    q4 = (date.today() - timedelta(days=20)).isoformat()
+    fy_latest = (date.today() - timedelta(days=45)).isoformat()
+    fy_gap = (date.today() - timedelta(days=800)).isoformat()
+    concept_records = {
+        "ShortTermDebt": [
+            fact(
+                concept="ShortTermDebt",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=60.0,
+                currency="USD",
+            ),
+            fact(
+                concept="ShortTermDebt",
+                fiscal_period="FY",
+                end_date=fy_latest,
+                value=90.0,
+                currency="USD",
+            ),
+            fact(
+                concept="ShortTermDebt",
+                fiscal_period="FY",
+                end_date=fy_gap,
+                value=80.0,
+                currency="USD",
+            ),
+        ],
+        "LongTermDebt": [
+            fact(
+                concept="LongTermDebt",
+                fiscal_period="FY",
+                end_date=fy_latest,
+                value=210.0,
+                currency="USD",
+            ),
+            fact(
+                concept="LongTermDebt",
+                fiscal_period="FY",
+                end_date=fy_gap,
+                value=200.0,
+                currency="USD",
+            ),
+        ],
+        "StockholdersEquity": [
+            fact(
+                concept="StockholdersEquity",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=500.0,
+                currency="USD",
+            ),
+            fact(
+                concept="StockholdersEquity",
+                fiscal_period="FY",
+                end_date=fy_latest,
+                value=1000.0,
+                currency="USD",
+            ),
+            fact(
+                concept="StockholdersEquity",
+                fiscal_period="FY",
+                end_date=fy_gap,
+                value=900.0,
+                currency="USD",
+            ),
+        ],
+        "CashAndShortTermInvestments": [
+            fact(
+                concept="CashAndShortTermInvestments",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=100.0,
+                currency="USD",
+            ),
+            fact(
+                concept="CashAndShortTermInvestments",
+                fiscal_period="FY",
+                end_date=fy_latest,
+                value=200.0,
+                currency="USD",
+            ),
+            fact(
+                concept="CashAndShortTermInvestments",
+                fiscal_period="FY",
+                end_date=fy_gap,
+                value=180.0,
+                currency="USD",
+            ),
+        ],
+    }
+    repo = _build_ic_repo(concept_records=concept_records)
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_avg_ic_returns_none_when_no_quarterly_or_fy_pairs():
+    metric = AvgICMetric()
+    q4 = (date.today() - timedelta(days=20)).isoformat()
+    concept_records = {
+        "ShortTermDebt": [
+            fact(
+                concept="ShortTermDebt",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=60.0,
+                currency="USD",
+            )
+        ],
+        "StockholdersEquity": [
+            fact(
+                concept="StockholdersEquity",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=500.0,
+                currency="USD",
+            )
+        ],
+        "CashAndShortTermInvestments": [
+            fact(
+                concept="CashAndShortTermInvestments",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=100.0,
+                currency="USD",
+            )
+        ],
+    }
+    repo = _build_ic_repo(concept_records=concept_records)
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_avg_ic_returns_none_on_cross_point_currency_mismatch():
+    metric = AvgICMetric()
+    q4 = (date.today() - timedelta(days=20)).isoformat()
+    q4_prev = (date.today() - timedelta(days=380)).isoformat()
+    concept_records = {
+        "ShortTermDebt": [
+            fact(
+                concept="ShortTermDebt",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=60.0,
+                currency="USD",
+            ),
+            fact(
+                concept="ShortTermDebt",
+                fiscal_period="Q4",
+                end_date=q4_prev,
+                value=50.0,
+                currency="EUR",
+            ),
+        ],
+        "LongTermDebt": [
+            fact(
+                concept="LongTermDebt",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=140.0,
+                currency="USD",
+            ),
+            fact(
+                concept="LongTermDebt",
+                fiscal_period="Q4",
+                end_date=q4_prev,
+                value=100.0,
+                currency="EUR",
+            ),
+        ],
+        "StockholdersEquity": [
+            fact(
+                concept="StockholdersEquity",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=500.0,
+                currency="USD",
+            ),
+            fact(
+                concept="StockholdersEquity",
+                fiscal_period="Q4",
+                end_date=q4_prev,
+                value=450.0,
+                currency="EUR",
+            ),
+        ],
+        "CashAndCashEquivalents": [
+            fact(
+                concept="CashAndCashEquivalents",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=100.0,
+                currency="USD",
+            ),
+            fact(
+                concept="CashAndCashEquivalents",
+                fiscal_period="Q4",
+                end_date=q4_prev,
+                value=90.0,
+                currency="EUR",
+            ),
+        ],
+    }
+    repo = _build_ic_repo(concept_records=concept_records)
     result = metric.compute("AAPL.US", repo)
     assert result is None
 
@@ -6940,3 +7788,6 @@ def test_registry_contains_all_ids():
     assert "oe_ev_ttm" in REGISTRY
     assert "oe_ev_5y_avg" in REGISTRY
     assert "short_term_debt_share" in REGISTRY
+    assert "ic_mqr" in REGISTRY
+    assert "ic_fy" in REGISTRY
+    assert "avg_ic" in REGISTRY

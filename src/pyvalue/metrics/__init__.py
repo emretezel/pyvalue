@@ -21,6 +21,7 @@ from .roc_greenblatt import ROCGreenblattMetric
 from .roe_greenblatt import ROEGreenblattMetric
 from .net_debt_to_ebitda import NetDebtToEBITDAMetric
 from .short_term_debt_share import ShortTermDebtShareMetric
+from .invested_capital import ICMostRecentQuarterMetric, ICFYMetric, AvgICMetric
 from .return_on_invested_capital import ReturnOnInvestedCapitalMetric
 from .mcapex import MCapexFYMetric, MCapexFiveYearMetric, MCapexTTMMetric
 from .nwc import (
@@ -61,6 +62,9 @@ REGISTRY = {
     PriceToFCFMetric.id: PriceToFCFMetric,
     NetDebtToEBITDAMetric.id: NetDebtToEBITDAMetric,
     ShortTermDebtShareMetric.id: ShortTermDebtShareMetric,
+    ICMostRecentQuarterMetric.id: ICMostRecentQuarterMetric,
+    ICFYMetric.id: ICFYMetric,
+    AvgICMetric.id: AvgICMetric,
     ReturnOnInvestedCapitalMetric.id: ReturnOnInvestedCapitalMetric,
     MCapexFYMetric.id: MCapexFYMetric,
     MCapexFiveYearMetric.id: MCapexFiveYearMetric,
@@ -100,6 +104,9 @@ __all__ = [
     "PriceToFCFMetric",
     "NetDebtToEBITDAMetric",
     "ShortTermDebtShareMetric",
+    "ICMostRecentQuarterMetric",
+    "ICFYMetric",
+    "AvgICMetric",
     "ReturnOnInvestedCapitalMetric",
     "MCapexFYMetric",
     "MCapexFiveYearMetric",

@@ -1337,6 +1337,14 @@ def test_cmd_compute_metrics_all(tmp_path):
                 value=short_debt,
             )
         )
+        records.append(
+            make_fact(
+                concept="StockholdersEquity",
+                end_date=end_date,
+                fiscal_period=period,
+                value=assets + 400.0,
+            )
+        )
     quarterly_cash_flows = [
         (q4, "Q4", 130.0, 40.0),
         (q3, "Q3", 120.0, 35.0),
