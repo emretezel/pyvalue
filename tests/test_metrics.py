@@ -49,6 +49,11 @@ from pyvalue.metrics.owner_earnings_enterprise import (
 )
 from pyvalue.metrics.price_to_fcf import PriceToFCFMetric
 from pyvalue.metrics.roc_greenblatt import ROCGreenblattMetric
+from pyvalue.metrics.roic_fy_series import (
+    ROIC10YMedianMetric,
+    ROIC10YMinMetric,
+    ROICYearsAbove12PctMetric,
+)
 from pyvalue.metrics.roic_ttm import RoicTTMMetric
 from pyvalue.metrics.roe_greenblatt import ROEGreenblattMetric
 from pyvalue.metrics.return_on_invested_capital import ReturnOnInvestedCapitalMetric
@@ -400,6 +405,148 @@ def _base_roic_concepts(
         ]
 
     return concepts
+
+
+def _base_roic_10y_concepts(
+    *,
+    latest_year=None,
+    ebit_by_year=None,
+    tax_by_year=None,
+    pretax_by_year=None,
+    ic_short_by_year=None,
+    ic_long_by_year=None,
+    ic_equity_by_year=None,
+    ic_cash_by_year=None,
+    currency_by_year=None,
+):
+    if latest_year is None:
+        latest_year = date.today().year - 1
+
+    # Need 11 IC points (Y..Y-10) to compute 10 ROIC points (Y..Y-9).
+    ic_years = list(range(latest_year - 10, latest_year + 1))
+    roic_years = list(range(latest_year - 9, latest_year + 1))
+
+    if ebit_by_year is None:
+        ebit_values = [
+            300.0,
+            275.0,
+            250.0,
+            225.0,
+            200.0,
+            175.0,
+            150.0,
+            125.0,
+            100.0,
+            75.0,
+        ]
+        ebit_by_year = {
+            year: value
+            for year, value in zip(reversed(roic_years), ebit_values, strict=True)
+        }
+    if tax_by_year is None:
+        tax_by_year = {year: 40.0 for year in roic_years}
+    if pretax_by_year is None:
+        pretax_by_year = {year: 200.0 for year in roic_years}
+    if ic_short_by_year is None:
+        ic_short_by_year = {year: 100.0 for year in ic_years}
+    if ic_long_by_year is None:
+        ic_long_by_year = {year: 300.0 for year in ic_years}
+    if ic_equity_by_year is None:
+        ic_equity_by_year = {year: 900.0 for year in ic_years}
+    if ic_cash_by_year is None:
+        ic_cash_by_year = {year: 300.0 for year in ic_years}
+    if currency_by_year is None:
+        currency_by_year = {}
+
+    concept_records = {
+        "OperatingIncomeLoss": [],
+        "IncomeTaxExpense": [],
+        "IncomeBeforeIncomeTaxes": [],
+        "ShortTermDebt": [],
+        "LongTermDebt": [],
+        "StockholdersEquity": [],
+        "CashAndCashEquivalents": [],
+    }
+
+    for year in roic_years:
+        currency = currency_by_year.get(year, "USD")
+        end_date = f"{year}-09-30"
+        if year in ebit_by_year:
+            concept_records["OperatingIncomeLoss"].append(
+                fact(
+                    concept="OperatingIncomeLoss",
+                    fiscal_period="FY",
+                    end_date=end_date,
+                    value=ebit_by_year[year],
+                    currency=currency,
+                )
+            )
+        if year in tax_by_year:
+            concept_records["IncomeTaxExpense"].append(
+                fact(
+                    concept="IncomeTaxExpense",
+                    fiscal_period="FY",
+                    end_date=end_date,
+                    value=tax_by_year[year],
+                    currency=currency,
+                )
+            )
+        if year in pretax_by_year:
+            concept_records["IncomeBeforeIncomeTaxes"].append(
+                fact(
+                    concept="IncomeBeforeIncomeTaxes",
+                    fiscal_period="FY",
+                    end_date=end_date,
+                    value=pretax_by_year[year],
+                    currency=currency,
+                )
+            )
+
+    for year in ic_years:
+        currency = currency_by_year.get(year, "USD")
+        end_date = f"{year}-09-30"
+        if year in ic_short_by_year:
+            concept_records["ShortTermDebt"].append(
+                fact(
+                    concept="ShortTermDebt",
+                    fiscal_period="FY",
+                    end_date=end_date,
+                    value=ic_short_by_year[year],
+                    currency=currency,
+                )
+            )
+        if year in ic_long_by_year:
+            concept_records["LongTermDebt"].append(
+                fact(
+                    concept="LongTermDebt",
+                    fiscal_period="FY",
+                    end_date=end_date,
+                    value=ic_long_by_year[year],
+                    currency=currency,
+                )
+            )
+        if year in ic_equity_by_year:
+            concept_records["StockholdersEquity"].append(
+                fact(
+                    concept="StockholdersEquity",
+                    fiscal_period="FY",
+                    end_date=end_date,
+                    value=ic_equity_by_year[year],
+                    currency=currency,
+                )
+            )
+        if year in ic_cash_by_year:
+            concept_records["CashAndCashEquivalents"].append(
+                fact(
+                    concept="CashAndCashEquivalents",
+                    fiscal_period="FY",
+                    end_date=end_date,
+                    value=ic_cash_by_year[year],
+                    currency=currency,
+                )
+            )
+
+    return concept_records
 
 
 def test_working_capital_metric_computes_difference():
@@ -2187,6 +2334,134 @@ def test_roic_ttm_returns_none_on_numerator_vs_avg_ic_currency_mismatch():
         concept_records=_base_roic_concepts(
             avg_currency="EUR",
         )
+    )
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_roic_10y_metrics_happy_path():
+    median_metric = ROIC10YMedianMetric()
+    count_metric = ROICYearsAbove12PctMetric()
+    min_metric = ROIC10YMinMetric()
+    repo = _build_ic_repo(concept_records=_base_roic_10y_concepts())
+
+    median_result = median_metric.compute("AAPL.US", repo)
+    count_result = count_metric.compute("AAPL.US", repo)
+    min_result = min_metric.compute("AAPL.US", repo)
+
+    assert median_result is not None
+    assert count_result is not None
+    assert min_result is not None
+    assert round(median_result.value, 6) == 0.15
+    assert count_result.value == 6.0
+    assert round(min_result.value, 6) == 0.06
+
+
+def test_roic_10y_returns_none_when_strict_window_missing_year():
+    metric = ROIC10YMedianMetric()
+    latest_year = date.today().year - 1
+    concepts = _base_roic_10y_concepts()
+    concepts["OperatingIncomeLoss"] = [
+        rec
+        for rec in concepts["OperatingIncomeLoss"]
+        if rec.end_date != f"{latest_year - 5}-09-30"
+    ]
+    repo = _build_ic_repo(concept_records=concepts)
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_roic_10y_tax_fallback_uses_latest_valid_fy_proxy():
+    metric = ROICYearsAbove12PctMetric()
+    latest_year = date.today().year - 1
+    roic_years = range(latest_year - 9, latest_year + 1)
+    ebit = {year: 200.0 for year in roic_years}
+    tax = {year: 80.0 for year in roic_years}
+    pretax = {year: 200.0 for year in roic_years}
+    pretax[latest_year] = 0.0
+    repo = _build_ic_repo(
+        concept_records=_base_roic_10y_concepts(
+            latest_year=latest_year,
+            ebit_by_year=ebit,
+            tax_by_year=tax,
+            pretax_by_year=pretax,
+        )
+    )
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.value == 0.0
+
+
+def test_roic_10y_tax_fallback_uses_default_when_no_valid_proxy():
+    metric = ROIC10YMedianMetric()
+    latest_year = date.today().year - 1
+    roic_years = range(latest_year - 9, latest_year + 1)
+    ebit = {year: 200.0 for year in roic_years}
+    tax = {year: 80.0 for year in roic_years}
+    pretax = {year: 0.0 for year in roic_years}
+    repo = _build_ic_repo(
+        concept_records=_base_roic_10y_concepts(
+            latest_year=latest_year,
+            ebit_by_year=ebit,
+            tax_by_year=tax,
+            pretax_by_year=pretax,
+        )
+    )
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert round(result.value, 6) == round(0.158, 6)
+
+
+def test_roic_10y_min_keeps_signed_negative_year():
+    metric = ROIC10YMinMetric()
+    latest_year = date.today().year - 1
+    concepts = _base_roic_10y_concepts()
+    concepts["OperatingIncomeLoss"] = [
+        fact(
+            concept=rec.concept,
+            fiscal_period=rec.fiscal_period,
+            end_date=rec.end_date,
+            value=-50.0 if rec.end_date == f"{latest_year - 9}-09-30" else rec.value,
+            currency=rec.currency,
+        )
+        for rec in concepts["OperatingIncomeLoss"]
+    ]
+    repo = _build_ic_repo(concept_records=concepts)
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert round(result.value, 6) == -0.04
+
+
+def test_roic_10y_returns_none_when_avg_ic_year_pair_is_zero():
+    metric = ROIC10YMedianMetric()
+    latest_year = date.today().year - 1
+    concepts = _base_roic_10y_concepts(
+        ic_cash_by_year={
+            year: (2300.0 if year == latest_year - 1 else 300.0)
+            for year in range(latest_year - 10, latest_year + 1)
+        }
+    )
+    repo = _build_ic_repo(concept_records=concepts)
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_roic_10y_returns_none_on_series_currency_conflict():
+    metric = ROIC10YMedianMetric()
+    latest_year = date.today().year - 1
+    concepts = _base_roic_10y_concepts(
+        currency_by_year={latest_year - 3: "EUR"},
+    )
+    repo = _build_ic_repo(concept_records=concepts)
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_roic_10y_returns_none_when_latest_fy_stale():
+    metric = ROIC10YMedianMetric()
+    stale_latest_year = date.today().year - 3
+    repo = _build_ic_repo(
+        concept_records=_base_roic_10y_concepts(latest_year=stale_latest_year)
     )
     result = metric.compute("AAPL.US", repo)
     assert result is None
@@ -8108,3 +8383,6 @@ def test_registry_contains_all_ids():
     assert "ic_fy" in REGISTRY
     assert "avg_ic" in REGISTRY
     assert "roic_ttm" in REGISTRY
+    assert "roic_10y_median" in REGISTRY
+    assert "roic_years_above_12pct" in REGISTRY
+    assert "roic_10y_min" in REGISTRY

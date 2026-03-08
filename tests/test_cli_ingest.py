@@ -1119,7 +1119,7 @@ def test_cmd_compute_metrics_all(tmp_path):
                 fiscal_period="FY",
             )
         )
-    for year in range(current_year - 9, current_year + 1):
+    for year in range(current_year - 10, current_year + 1):
         end_date = f"{year}-09-30"
         records.extend(
             [
@@ -1158,6 +1158,18 @@ def test_cmd_compute_metrics_all(tmp_path):
                     end_date=end_date,
                     fiscal_period="FY",
                     value=100 + (year - (current_year - 9)),
+                ),
+                make_fact(
+                    concept="StockholdersEquity",
+                    end_date=end_date,
+                    fiscal_period="FY",
+                    value=1500 + (year - (current_year - 10)),
+                ),
+                make_fact(
+                    concept="CommonStockholdersEquity",
+                    end_date=end_date,
+                    fiscal_period="FY",
+                    value=1500 + (year - (current_year - 10)),
                 ),
             ]
         )

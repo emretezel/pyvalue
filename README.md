@@ -264,6 +264,10 @@ Additional metrics include:
   and falling back to strict prior-FY average when quarterly pairing is unavailable.
 - `roic_ttm`: TTM ROIC using `NOPAT_TTM / avg_ic`, where
   `NOPAT_TTM = EBIT_TTM × (1 - effective_tax_rate)`.
+- `roic_10y_median`: Median FY ROIC over the latest strict 10 consecutive FY years.
+- `roic_years_above_12pct`: Count of FY ROIC years `> 12%` over latest strict 10
+  consecutive FY years.
+- `roic_10y_min`: Minimum FY ROIC over latest strict 10 consecutive FY years.
 - `oe_equity_ttm`: Owner earnings equity (TTM), computed as
   `NI_TTM + D&A_TTM - MCapex_TTM - delta_nwc_maint` (EODHD-oriented).
 - `oe_equity_5y_avg`: Average of the latest five available FY owner earnings equity
@@ -301,6 +305,9 @@ is derived from normalized SEC or market data plus the value-investing intuition
 | `ic_fy` | Latest FY invested capital using the same formula and debt/equity/cash fallback chain as `ic_mqr` (EODHD-oriented). | Gives an annual invested-capital anchor that is less sensitive to intra-year seasonality than quarter-end snapshots. |
 | `avg_ic` | Average invested capital (EODHD-oriented): primary `(IC_now + IC_same_quarter_last_year) / 2` with strict fiscal-quarter matching; if unavailable, falls back to strict prior-FY average `(IC_latest_FY + IC_prior_FY) / 2`. | Smooths denominator noise for capital-efficiency and owner-earnings style analyses while keeping period alignment disciplined. |
 | `roic_ttm` | TTM ROIC (EODHD-oriented): `NOPAT_TTM / avg_ic`, where `NOPAT_TTM = OperatingIncomeLoss_TTM × (1 - effective_tax_rate)`. Tax rate prefers TTM `IncomeTaxExpense / IncomeBeforeIncomeTaxes`, falls back to latest valid FY proxy, then `0.21`; `avg_ic` uses the `avg_ic` metric fallback chain. Returns no metric when `NOPAT_TTM <= 0` or `avg_ic <= 0`. | Measures after-tax operating return on invested capital using the newer AvgIC denominator, with pragmatic tax-rate fallback for sparse filings. |
+| `roic_10y_median` | Median FY ROIC (EODHD-oriented) over the latest strict 10 consecutive years, where each year uses `ROIC_FY = (EBIT_FY × (1 - tax_rate_FY)) / AvgIC_FY` and `AvgIC_FY = (IC_FY + IC_prior_FY) / 2`. Tax rate per year uses `Tax/Pretax`, then latest valid FY proxy, then `0.21`. | Captures central tendency of long-cycle capital efficiency while damping one-off peak/trough years. |
+| `roic_years_above_12pct` | Count of FY ROIC values strictly `> 12%` across the same latest strict 10 consecutive FY ROIC years used by `roic_10y_median` (EODHD-oriented). | Measures persistence of strong capital returns, a practical moat/quality signal over a full decade. |
+| `roic_10y_min` | Minimum FY ROIC across the same latest strict 10 consecutive FY ROIC years (EODHD-oriented). | Stress-tests resilience by highlighting the weakest return year across cycles and adverse conditions. |
 | `net_debt_to_ebitda` | Net debt divided by trailing 12-month component EBITDA (EODHD-only): `NetDebt = ShortTermDebt + LongTermDebt - Cash`, where cash prefers `CashAndShortTermInvestments` then `CashAndCashEquivalents + ShortTermInvestments` (missing STI treated as 0), and `EBITDA_TTM = OperatingIncomeLoss_TTM + D&A_TTM` with D&A fallback to cash-flow depreciation. One missing debt side is treated as 0 if the other exists; non-positive EBITDA returns no metric. | Highlights leverage relative to operating cash earnings; lower or negative suggests balance-sheet strength. |
 | `interest_coverage` | Trailing 12-month `OperatingIncomeLoss` divided by trailing 12-month `InterestExpense` (quarterly sums, EODHD-only). Uses direct normalized `InterestExpense` first and, only when direct computation is unavailable, fills missing quarters with derived `interestIncome - netInterestIncome` (`InterestExpenseFromNetInterestIncome`). Returns no metric when `EBIT_TTM <= 0` or `InterestExpense_TTM <= 0`. | Indicates how comfortably operating profits cover financing costs; higher is safer. |
 | `current_ratio` | Latest `AssetsCurrent / LiabilitiesCurrent`. | A current ratio above ~1 indicates the business can stomach short-term shocks without forced asset sales or equity issuance. |

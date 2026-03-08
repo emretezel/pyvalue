@@ -354,6 +354,21 @@ class InvestedCapitalCalculator(_InvestedCapitalBase):
             value=latest.value, as_of=latest.as_of, currency=latest.currency
         )
 
+    def compute_fy_series(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> list[InvestedCapitalSnapshot]:
+        """Return FY invested-capital points (latest first) without freshness gating."""
+
+        points = self._build_points(symbol, repo, FY_PERIODS)
+        return [
+            InvestedCapitalSnapshot(
+                value=point.value,
+                as_of=point.as_of,
+                currency=point.currency,
+            )
+            for point in points
+        ]
+
     def compute_avg(
         self, symbol: str, repo: FinancialFactsRepository
     ) -> Optional[InvestedCapitalSnapshot]:
