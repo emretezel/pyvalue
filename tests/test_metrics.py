@@ -49,6 +49,7 @@ from pyvalue.metrics.owner_earnings_enterprise import (
 )
 from pyvalue.metrics.price_to_fcf import PriceToFCFMetric
 from pyvalue.metrics.roc_greenblatt import ROCGreenblattMetric
+from pyvalue.metrics.roic_ttm import RoicTTMMetric
 from pyvalue.metrics.roe_greenblatt import ROEGreenblattMetric
 from pyvalue.metrics.return_on_invested_capital import ReturnOnInvestedCapitalMetric
 from pyvalue.metrics.short_term_debt_share import ShortTermDebtShareMetric
@@ -214,6 +215,191 @@ def _build_ic_repo(*, concept_records=None):
             return concept_records.get(concept, [])
 
     return DummyRepo()
+
+
+def _roic_dates():
+    today = date.today()
+    return {
+        "q4": (today - timedelta(days=20)).isoformat(),
+        "q3": (today - timedelta(days=110)).isoformat(),
+        "q2": (today - timedelta(days=200)).isoformat(),
+        "q1": (today - timedelta(days=290)).isoformat(),
+        "q4_prev": (today - timedelta(days=380)).isoformat(),
+        "fy_latest": (today - timedelta(days=45)).isoformat(),
+        "fy_prior": (today - timedelta(days=410)).isoformat(),
+    }
+
+
+def _base_roic_concepts(
+    *,
+    ebit_currency="USD",
+    tax_currency="USD",
+    pretax_currency="USD",
+    avg_currency="USD",
+    include_ttm_tax=True,
+    include_ttm_pretax=True,
+    include_fy_tax_proxy=True,
+    include_avg_ic=True,
+    quarterly_ebit_values=(100.0, 100.0, 100.0, 100.0),
+    quarterly_tax_values=(25.0, 25.0, 25.0, 25.0),
+    quarterly_pretax_values=(125.0, 125.0, 125.0, 125.0),
+    avg_latest=(60.0, 140.0, 500.0, 100.0),
+    avg_prior=(50.0, 100.0, 450.0, 90.0),
+):
+    dates = _roic_dates()
+    q_dates = [dates["q4"], dates["q3"], dates["q2"], dates["q1"]]
+    concepts = {
+        "OperatingIncomeLoss": [
+            fact(
+                concept="OperatingIncomeLoss",
+                fiscal_period=period,
+                end_date=end_date,
+                value=value,
+                currency=ebit_currency,
+            )
+            for period, end_date, value in zip(
+                ("Q4", "Q3", "Q2", "Q1"), q_dates, quarterly_ebit_values, strict=True
+            )
+        ],
+    }
+
+    if include_ttm_tax:
+        concepts["IncomeTaxExpense"] = [
+            fact(
+                concept="IncomeTaxExpense",
+                fiscal_period=period,
+                end_date=end_date,
+                value=value,
+                currency=tax_currency,
+            )
+            for period, end_date, value in zip(
+                ("Q4", "Q3", "Q2", "Q1"), q_dates, quarterly_tax_values, strict=True
+            )
+        ]
+    if include_ttm_pretax:
+        concepts["IncomeBeforeIncomeTaxes"] = [
+            fact(
+                concept="IncomeBeforeIncomeTaxes",
+                fiscal_period=period,
+                end_date=end_date,
+                value=value,
+                currency=pretax_currency,
+            )
+            for period, end_date, value in zip(
+                ("Q4", "Q3", "Q2", "Q1"),
+                q_dates,
+                quarterly_pretax_values,
+                strict=True,
+            )
+        ]
+
+    if include_fy_tax_proxy:
+        concepts.setdefault("IncomeTaxExpense", []).extend(
+            [
+                fact(
+                    concept="IncomeTaxExpense",
+                    fiscal_period="FY",
+                    end_date=dates["fy_latest"],
+                    value=90.0,
+                    currency=tax_currency,
+                ),
+                fact(
+                    concept="IncomeTaxExpense",
+                    fiscal_period="FY",
+                    end_date=dates["fy_prior"],
+                    value=80.0,
+                    currency=tax_currency,
+                ),
+            ]
+        )
+        concepts.setdefault("IncomeBeforeIncomeTaxes", []).extend(
+            [
+                fact(
+                    concept="IncomeBeforeIncomeTaxes",
+                    fiscal_period="FY",
+                    end_date=dates["fy_latest"],
+                    value=300.0,
+                    currency=pretax_currency,
+                ),
+                fact(
+                    concept="IncomeBeforeIncomeTaxes",
+                    fiscal_period="FY",
+                    end_date=dates["fy_prior"],
+                    value=280.0,
+                    currency=pretax_currency,
+                ),
+            ]
+        )
+
+    if include_avg_ic:
+        short_latest, long_latest, equity_latest, cash_latest = avg_latest
+        short_prior, long_prior, equity_prior, cash_prior = avg_prior
+        concepts["ShortTermDebt"] = [
+            fact(
+                concept="ShortTermDebt",
+                fiscal_period="Q4",
+                end_date=dates["q4"],
+                value=short_latest,
+                currency=avg_currency,
+            ),
+            fact(
+                concept="ShortTermDebt",
+                fiscal_period="Q4",
+                end_date=dates["q4_prev"],
+                value=short_prior,
+                currency=avg_currency,
+            ),
+        ]
+        concepts["LongTermDebt"] = [
+            fact(
+                concept="LongTermDebt",
+                fiscal_period="Q4",
+                end_date=dates["q4"],
+                value=long_latest,
+                currency=avg_currency,
+            ),
+            fact(
+                concept="LongTermDebt",
+                fiscal_period="Q4",
+                end_date=dates["q4_prev"],
+                value=long_prior,
+                currency=avg_currency,
+            ),
+        ]
+        concepts["StockholdersEquity"] = [
+            fact(
+                concept="StockholdersEquity",
+                fiscal_period="Q4",
+                end_date=dates["q4"],
+                value=equity_latest,
+                currency=avg_currency,
+            ),
+            fact(
+                concept="StockholdersEquity",
+                fiscal_period="Q4",
+                end_date=dates["q4_prev"],
+                value=equity_prior,
+                currency=avg_currency,
+            ),
+        ]
+        concepts["CashAndCashEquivalents"] = [
+            fact(
+                concept="CashAndCashEquivalents",
+                fiscal_period="Q4",
+                end_date=dates["q4"],
+                value=cash_latest,
+                currency=avg_currency,
+            ),
+            fact(
+                concept="CashAndCashEquivalents",
+                fiscal_period="Q4",
+                end_date=dates["q4_prev"],
+                value=cash_prior,
+                currency=avg_currency,
+            ),
+        ]
+
+    return concepts
 
 
 def test_working_capital_metric_computes_difference():
@@ -1874,6 +2060,136 @@ def test_return_on_invested_capital_uses_fallback_tax_rate():
     result = metric.compute("AAPL.US", repo)
     assert result is not None
     assert round(result.value, 4) == round(316.0 / 640.0, 4)
+
+
+def test_roic_ttm_metric():
+    metric = RoicTTMMetric()
+    repo = _build_ic_repo(concept_records=_base_roic_concepts())
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert round(result.value, 6) == round(320.0 / 555.0, 6)
+
+
+def test_roic_ttm_uses_fy_tax_proxy_when_ttm_rate_invalid():
+    metric = RoicTTMMetric()
+    repo = _build_ic_repo(
+        concept_records=_base_roic_concepts(
+            quarterly_pretax_values=(0.0, 0.0, 0.0, 0.0),
+        )
+    )
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert round(result.value, 6) == round(280.0 / 555.0, 6)
+
+
+def test_roic_ttm_uses_default_tax_rate_when_no_valid_tax_inputs():
+    metric = RoicTTMMetric()
+    repo = _build_ic_repo(
+        concept_records=_base_roic_concepts(
+            include_ttm_tax=False,
+            include_ttm_pretax=False,
+            include_fy_tax_proxy=False,
+        )
+    )
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert round(result.value, 6) == round(316.0 / 555.0, 6)
+
+
+def test_roic_ttm_returns_none_when_ebit_missing():
+    metric = RoicTTMMetric()
+    concepts = _base_roic_concepts()
+    concepts["OperatingIncomeLoss"] = concepts["OperatingIncomeLoss"][:3]
+    repo = _build_ic_repo(concept_records=concepts)
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_roic_ttm_returns_none_when_ebit_stale():
+    metric = RoicTTMMetric()
+    stale_dates = [
+        (date.today() - timedelta(days=500)).isoformat(),
+        (date.today() - timedelta(days=590)).isoformat(),
+        (date.today() - timedelta(days=680)).isoformat(),
+        (date.today() - timedelta(days=770)).isoformat(),
+    ]
+    concepts = _base_roic_concepts()
+    concepts["OperatingIncomeLoss"] = [
+        fact(
+            concept="OperatingIncomeLoss",
+            fiscal_period=period,
+            end_date=end_date,
+            value=100.0,
+            currency="USD",
+        )
+        for period, end_date in zip(("Q4", "Q3", "Q2", "Q1"), stale_dates, strict=True)
+    ]
+    repo = _build_ic_repo(concept_records=concepts)
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_roic_ttm_returns_none_when_avg_ic_missing():
+    metric = RoicTTMMetric()
+    repo = _build_ic_repo(
+        concept_records=_base_roic_concepts(
+            include_avg_ic=False,
+        )
+    )
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_roic_ttm_returns_none_when_nopat_non_positive():
+    metric = RoicTTMMetric()
+    repo = _build_ic_repo(
+        concept_records=_base_roic_concepts(
+            include_ttm_tax=False,
+            include_ttm_pretax=False,
+            include_fy_tax_proxy=False,
+            quarterly_ebit_values=(-100.0, -100.0, -100.0, -100.0),
+        )
+    )
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_roic_ttm_returns_none_when_avg_ic_non_positive():
+    metric = RoicTTMMetric()
+    repo = _build_ic_repo(
+        concept_records=_base_roic_concepts(
+            avg_latest=(60.0, 140.0, 100.0, 500.0),
+            avg_prior=(50.0, 100.0, 100.0, 450.0),
+        )
+    )
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_roic_ttm_returns_none_on_numerator_currency_mismatch():
+    metric = RoicTTMMetric()
+    concepts = _base_roic_concepts()
+    concepts["OperatingIncomeLoss"][1] = fact(
+        concept="OperatingIncomeLoss",
+        fiscal_period="Q3",
+        end_date=concepts["OperatingIncomeLoss"][1].end_date,
+        value=100.0,
+        currency="EUR",
+    )
+    repo = _build_ic_repo(concept_records=concepts)
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_roic_ttm_returns_none_on_numerator_vs_avg_ic_currency_mismatch():
+    metric = RoicTTMMetric()
+    repo = _build_ic_repo(
+        concept_records=_base_roic_concepts(
+            avg_currency="EUR",
+        )
+    )
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
 
 
 def test_debt_paydown_years_skips_non_positive_fcf():
@@ -7791,3 +8107,4 @@ def test_registry_contains_all_ids():
     assert "ic_mqr" in REGISTRY
     assert "ic_fy" in REGISTRY
     assert "avg_ic" in REGISTRY
+    assert "roic_ttm" in REGISTRY

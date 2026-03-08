@@ -337,6 +337,29 @@ def test_eodhd_normalizes_income_tax_expense():
     assert derived[0].value == 18.5
 
 
+def test_eodhd_normalizes_income_tax_expense_from_tax_provision():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Income_Statement": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "taxProvision": 22.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.LSE")
+    derived = [r for r in records if r.concept == "IncomeTaxExpense"]
+    assert derived, "IncomeTaxExpense should map from taxProvision fallback"
+    assert derived[0].value == 22.0
+
+
 def test_eodhd_does_not_normalize_long_term_debt_from_short_long_term_debt_total():
     normalizer = EODHDFactsNormalizer()
     payload = {

@@ -106,7 +106,7 @@ EODHD_STATEMENT_FIELDS = {
             "depreciationAndAmortization",
             "reconciledDepreciation",
         ],
-        "IncomeTaxExpense": ["incomeTaxExpense"],
+        "IncomeTaxExpense": ["incomeTaxExpense", "taxProvision"],
         "InterestExpense": ["interestExpense"],
         "InterestExpenseFromNetInterestIncome": [],
         "NetIncomeLoss": ["netIncome", "netIncomeFromContinuingOps"],

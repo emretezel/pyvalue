@@ -22,6 +22,7 @@ from .roe_greenblatt import ROEGreenblattMetric
 from .net_debt_to_ebitda import NetDebtToEBITDAMetric
 from .short_term_debt_share import ShortTermDebtShareMetric
 from .invested_capital import ICMostRecentQuarterMetric, ICFYMetric, AvgICMetric
+from .roic_ttm import RoicTTMMetric
 from .return_on_invested_capital import ReturnOnInvestedCapitalMetric
 from .mcapex import MCapexFYMetric, MCapexFiveYearMetric, MCapexTTMMetric
 from .nwc import (
@@ -65,6 +66,7 @@ REGISTRY = {
     ICMostRecentQuarterMetric.id: ICMostRecentQuarterMetric,
     ICFYMetric.id: ICFYMetric,
     AvgICMetric.id: AvgICMetric,
+    RoicTTMMetric.id: RoicTTMMetric,
     ReturnOnInvestedCapitalMetric.id: ReturnOnInvestedCapitalMetric,
     MCapexFYMetric.id: MCapexFYMetric,
     MCapexFiveYearMetric.id: MCapexFiveYearMetric,
@@ -107,6 +109,7 @@ __all__ = [
     "ICMostRecentQuarterMetric",
     "ICFYMetric",
     "AvgICMetric",
+    "RoicTTMMetric",
     "ReturnOnInvestedCapitalMetric",
     "MCapexFYMetric",
     "MCapexFiveYearMetric",

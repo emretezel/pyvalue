@@ -54,6 +54,13 @@ class _ICPoint:
     currency: Optional[str]
 
 
+@dataclass(frozen=True)
+class InvestedCapitalSnapshot:
+    value: float
+    as_of: str
+    currency: Optional[str]
+
+
 class _InvestedCapitalBase:
     def _build_points(
         self,
@@ -318,63 +325,43 @@ class _InvestedCapitalBase:
         return True
 
 
-@dataclass
-class ICMostRecentQuarterMetric(_InvestedCapitalBase):
-    """Compute invested capital for the latest quarter (EODHD-oriented)."""
+class InvestedCapitalCalculator(_InvestedCapitalBase):
+    """Shared calculator for invested-capital snapshots."""
 
-    id: str = "ic_mqr"
-    required_concepts = REQUIRED_CONCEPTS
-
-    def compute(
+    def compute_mqr(
         self, symbol: str, repo: FinancialFactsRepository
-    ) -> Optional[MetricResult]:
+    ) -> Optional[InvestedCapitalSnapshot]:
         points = self._build_points(symbol, repo, QUARTERLY_PERIODS)
         latest = self._select_latest_point(
-            points, max_age_days=MAX_FACT_AGE_DAYS, context=self.id, symbol=symbol
+            points, max_age_days=MAX_FACT_AGE_DAYS, context="ic_mqr", symbol=symbol
         )
         if latest is None:
             return None
-        return MetricResult(
-            symbol=symbol, metric_id=self.id, value=latest.value, as_of=latest.as_of
+        return InvestedCapitalSnapshot(
+            value=latest.value, as_of=latest.as_of, currency=latest.currency
         )
 
-
-@dataclass
-class ICFYMetric(_InvestedCapitalBase):
-    """Compute invested capital for the latest FY point (EODHD-oriented)."""
-
-    id: str = "ic_fy"
-    required_concepts = REQUIRED_CONCEPTS
-
-    def compute(
+    def compute_fy(
         self, symbol: str, repo: FinancialFactsRepository
-    ) -> Optional[MetricResult]:
+    ) -> Optional[InvestedCapitalSnapshot]:
         points = self._build_points(symbol, repo, FY_PERIODS)
         latest = self._select_latest_point(
-            points, max_age_days=MAX_FY_FACT_AGE_DAYS, context=self.id, symbol=symbol
+            points, max_age_days=MAX_FY_FACT_AGE_DAYS, context="ic_fy", symbol=symbol
         )
         if latest is None:
             return None
-        return MetricResult(
-            symbol=symbol, metric_id=self.id, value=latest.value, as_of=latest.as_of
+        return InvestedCapitalSnapshot(
+            value=latest.value, as_of=latest.as_of, currency=latest.currency
         )
 
-
-@dataclass
-class AvgICMetric(_InvestedCapitalBase):
-    """Compute averaged invested capital from quarterly or FY pairs (EODHD-oriented)."""
-
-    id: str = "avg_ic"
-    required_concepts = REQUIRED_CONCEPTS
-
-    def compute(
+    def compute_avg(
         self, symbol: str, repo: FinancialFactsRepository
-    ) -> Optional[MetricResult]:
+    ) -> Optional[InvestedCapitalSnapshot]:
         quarterly_points = self._build_points(symbol, repo, QUARTERLY_PERIODS)
         latest_quarter = self._select_latest_point(
             quarterly_points,
             max_age_days=MAX_FACT_AGE_DAYS,
-            context=self.id,
+            context="avg_ic",
             symbol=symbol,
         )
         if latest_quarter is not None:
@@ -395,16 +382,18 @@ class AvgICMetric(_InvestedCapitalBase):
                             )
                             break
                         value = (latest_quarter.value + point.value) / 2.0
-                        return MetricResult(
-                            symbol=symbol,
-                            metric_id=self.id,
+                        return InvestedCapitalSnapshot(
                             value=value,
                             as_of=latest_quarter.as_of,
+                            currency=latest_quarter.currency or point.currency,
                         )
 
         fy_points = self._build_points(symbol, repo, FY_PERIODS)
         latest_fy = self._select_latest_point(
-            fy_points, max_age_days=MAX_FY_FACT_AGE_DAYS, context=self.id, symbol=symbol
+            fy_points,
+            max_age_days=MAX_FY_FACT_AGE_DAYS,
+            context="avg_ic",
+            symbol=symbol,
         )
         if latest_fy is None:
             return None
@@ -430,12 +419,80 @@ class AvgICMetric(_InvestedCapitalBase):
             return None
 
         value = (latest_fy.value + prior_fy.value) / 2.0
-        return MetricResult(
-            symbol=symbol,
-            metric_id=self.id,
+        return InvestedCapitalSnapshot(
             value=value,
             as_of=latest_fy.as_of,
+            currency=latest_fy.currency or prior_fy.currency,
         )
 
 
-__all__ = ["ICMostRecentQuarterMetric", "ICFYMetric", "AvgICMetric"]
+@dataclass
+class ICMostRecentQuarterMetric(_InvestedCapitalBase):
+    """Compute invested capital for the latest quarter (EODHD-oriented)."""
+
+    id: str = "ic_mqr"
+    required_concepts = REQUIRED_CONCEPTS
+
+    def compute(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> Optional[MetricResult]:
+        snapshot = InvestedCapitalCalculator().compute_mqr(symbol, repo)
+        if snapshot is None:
+            return None
+        return MetricResult(
+            symbol=symbol,
+            metric_id=self.id,
+            value=snapshot.value,
+            as_of=snapshot.as_of,
+        )
+
+
+@dataclass
+class ICFYMetric(_InvestedCapitalBase):
+    """Compute invested capital for the latest FY point (EODHD-oriented)."""
+
+    id: str = "ic_fy"
+    required_concepts = REQUIRED_CONCEPTS
+
+    def compute(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> Optional[MetricResult]:
+        snapshot = InvestedCapitalCalculator().compute_fy(symbol, repo)
+        if snapshot is None:
+            return None
+        return MetricResult(
+            symbol=symbol,
+            metric_id=self.id,
+            value=snapshot.value,
+            as_of=snapshot.as_of,
+        )
+
+
+@dataclass
+class AvgICMetric(_InvestedCapitalBase):
+    """Compute averaged invested capital from quarterly or FY pairs (EODHD-oriented)."""
+
+    id: str = "avg_ic"
+    required_concepts = REQUIRED_CONCEPTS
+
+    def compute(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> Optional[MetricResult]:
+        snapshot = InvestedCapitalCalculator().compute_avg(symbol, repo)
+        if snapshot is None:
+            return None
+        return MetricResult(
+            symbol=symbol,
+            metric_id=self.id,
+            value=snapshot.value,
+            as_of=snapshot.as_of,
+        )
+
+
+__all__ = [
+    "InvestedCapitalSnapshot",
+    "InvestedCapitalCalculator",
+    "ICMostRecentQuarterMetric",
+    "ICFYMetric",
+    "AvgICMetric",
+]
