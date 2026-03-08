@@ -584,6 +584,67 @@ def test_short_term_debt_share_metric():
     assert result.value == 0.25
 
 
+def test_short_term_debt_share_uses_total_debt_fallback_when_long_missing():
+    metric = ShortTermDebtShareMetric()
+    recent = (date.today() - timedelta(days=10)).isoformat()
+
+    class DummyRepo:
+        def latest_fact(self, symbol, concept):
+            if concept == "ShortTermDebt":
+                return fact(
+                    symbol=symbol,
+                    concept=concept,
+                    end_date=recent,
+                    value=30.0,
+                    currency="USD",
+                )
+            if concept == "LongTermDebt":
+                return None
+            if concept == "TotalDebtFromBalanceSheet":
+                return fact(
+                    symbol=symbol,
+                    concept=concept,
+                    end_date=recent,
+                    value=120.0,
+                    currency="USD",
+                )
+            return None
+
+    repo = DummyRepo()
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.value == 0.25
+
+
+def test_short_term_debt_share_requires_short_term_debt():
+    metric = ShortTermDebtShareMetric()
+    recent = (date.today() - timedelta(days=10)).isoformat()
+
+    class DummyRepo:
+        def latest_fact(self, symbol, concept):
+            if concept == "LongTermDebt":
+                return fact(
+                    symbol=symbol,
+                    concept=concept,
+                    end_date=recent,
+                    value=100.0,
+                    currency="USD",
+                )
+            if concept == "TotalDebtFromBalanceSheet":
+                return fact(
+                    symbol=symbol,
+                    concept=concept,
+                    end_date=recent,
+                    value=140.0,
+                    currency="USD",
+                )
+            return None
+
+    repo = DummyRepo()
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
 def test_short_term_debt_share_skips_non_positive_total():
     metric = ShortTermDebtShareMetric()
     recent = (date.today() - timedelta(days=10)).isoformat()
@@ -603,6 +664,66 @@ def test_short_term_debt_share_skips_non_positive_total():
                     concept=concept,
                     end_date=recent,
                     value=0.0,
+                )
+            return None
+
+    repo = DummyRepo()
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_short_term_debt_share_skips_ratio_out_of_bounds():
+    metric = ShortTermDebtShareMetric()
+    recent = (date.today() - timedelta(days=10)).isoformat()
+
+    class DummyRepo:
+        def latest_fact(self, symbol, concept):
+            if concept == "ShortTermDebt":
+                return fact(
+                    symbol=symbol,
+                    concept=concept,
+                    end_date=recent,
+                    value=120.0,
+                    currency="USD",
+                )
+            if concept == "TotalDebtFromBalanceSheet":
+                return fact(
+                    symbol=symbol,
+                    concept=concept,
+                    end_date=recent,
+                    value=100.0,
+                    currency="USD",
+                )
+            return None
+
+    repo = DummyRepo()
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_short_term_debt_share_skips_currency_mismatch():
+    metric = ShortTermDebtShareMetric()
+    recent = (date.today() - timedelta(days=10)).isoformat()
+
+    class DummyRepo:
+        def latest_fact(self, symbol, concept):
+            if concept == "ShortTermDebt":
+                return fact(
+                    symbol=symbol,
+                    concept=concept,
+                    end_date=recent,
+                    value=30.0,
+                    currency="USD",
+                )
+            if concept == "LongTermDebt":
+                return None
+            if concept == "TotalDebtFromBalanceSheet":
+                return fact(
+                    symbol=symbol,
+                    concept=concept,
+                    end_date=recent,
+                    value=120.0,
+                    currency="EUR",
                 )
             return None
 
@@ -6818,3 +6939,4 @@ def test_registry_contains_all_ids():
     assert "oey_ev" in REGISTRY
     assert "oe_ev_ttm" in REGISTRY
     assert "oe_ev_5y_avg" in REGISTRY
+    assert "short_term_debt_share" in REGISTRY
