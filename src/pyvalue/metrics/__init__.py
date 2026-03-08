@@ -24,6 +24,7 @@ from .short_term_debt_share import ShortTermDebtShareMetric
 from .invested_capital import ICMostRecentQuarterMetric, ICFYMetric, AvgICMetric
 from .roic_ttm import RoicTTMMetric
 from .roic_fy_series import (
+    IncrementalROICFiveYearMetric,
     ROIC10YMedianMetric,
     ROICYearsAbove12PctMetric,
     ROIC10YMinMetric,
@@ -75,6 +76,7 @@ REGISTRY = {
     ROIC10YMedianMetric.id: ROIC10YMedianMetric,
     ROICYearsAbove12PctMetric.id: ROICYearsAbove12PctMetric,
     ROIC10YMinMetric.id: ROIC10YMinMetric,
+    IncrementalROICFiveYearMetric.id: IncrementalROICFiveYearMetric,
     ReturnOnInvestedCapitalMetric.id: ReturnOnInvestedCapitalMetric,
     MCapexFYMetric.id: MCapexFYMetric,
     MCapexFiveYearMetric.id: MCapexFiveYearMetric,
@@ -121,6 +123,7 @@ __all__ = [
     "ROIC10YMedianMetric",
     "ROICYearsAbove12PctMetric",
     "ROIC10YMinMetric",
+    "IncrementalROICFiveYearMetric",
     "ReturnOnInvestedCapitalMetric",
     "MCapexFYMetric",
     "MCapexFiveYearMetric",

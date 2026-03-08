@@ -34,6 +34,8 @@ DEFAULT_TAX_RATE = 0.21
 PRETAX_MIN_ABS = 1.0
 ABOVE_THRESHOLD = 0.12
 SERIES_YEARS = 10
+IROIC_LOOKBACK_YEARS = 5
+IROIC_MIN_RELATIVE_DELTA_IC = 0.01
 
 REQUIRED_CONCEPTS = tuple(
     dict.fromkeys(
@@ -69,6 +71,13 @@ class _ROICFYPoint:
 @dataclass(frozen=True)
 class ROICFYSeriesSnapshot:
     points: tuple[_ROICFYPoint, ...]
+    as_of: str
+    currency: Optional[str]
+
+
+@dataclass(frozen=True)
+class IncrementalROICSnapshot:
+    value: float
     as_of: str
     currency: Optional[str]
 
@@ -170,6 +179,102 @@ class ROICFYSeriesCalculator:
             currency=series_currency,
         )
 
+    def compute_incremental_5y(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> Optional[IncrementalROICSnapshot]:
+        ebit_map = self._fy_map(symbol, repo, EBIT_CONCEPT)
+        if not ebit_map:
+            LOGGER.warning("iroic_5y: missing FY EBIT history for %s", symbol)
+            return None
+
+        ic_map = self._fy_invested_capital_map(symbol, repo)
+        if not ic_map:
+            LOGGER.warning(
+                "iroic_5y: missing FY invested capital history for %s", symbol
+            )
+            return None
+
+        latest_year = self._latest_incremental_year(ebit_map, ic_map)
+        if latest_year is None:
+            LOGGER.warning("iroic_5y: missing strict t and t-5 FY pair for %s", symbol)
+            return None
+
+        prior_year = latest_year - IROIC_LOOKBACK_YEARS
+        latest_ebit = ebit_map[latest_year]
+        prior_ebit = ebit_map[prior_year]
+        latest_ic = ic_map[latest_year]
+        prior_ic = ic_map[prior_year]
+
+        latest_pair_as_of = max(latest_ebit.as_of, latest_ic.as_of)
+        if not self._is_recent_as_of(
+            latest_pair_as_of, max_age_days=MAX_FY_FACT_AGE_DAYS
+        ):
+            LOGGER.warning("iroic_5y: latest FY point too old for %s", symbol)
+            return None
+
+        pair_currency = self._combine_currency(
+            [
+                latest_ebit.currency,
+                prior_ebit.currency,
+                latest_ic.currency,
+                prior_ic.currency,
+            ]
+        )
+        if pair_currency is None and any(
+            code is not None
+            for code in (
+                latest_ebit.currency,
+                prior_ebit.currency,
+                latest_ic.currency,
+                prior_ic.currency,
+            )
+        ):
+            LOGGER.warning("iroic_5y: currency mismatch across FY pair for %s", symbol)
+            return None
+
+        tax_map = self._fy_map(symbol, repo, TAX_EXPENSE_CONCEPT)
+        pretax_map = self._fy_map(symbol, repo, PRETAX_INCOME_CONCEPT)
+        latest_valid_tax_rate = self._latest_valid_fy_tax_rate(tax_map, pretax_map)
+        latest_tax_rate = self._tax_rate_for_year(
+            year=latest_year,
+            tax_map=tax_map,
+            pretax_map=pretax_map,
+            latest_valid_tax_rate=latest_valid_tax_rate,
+        )
+        prior_tax_rate = self._tax_rate_for_year(
+            year=prior_year,
+            tax_map=tax_map,
+            pretax_map=pretax_map,
+            latest_valid_tax_rate=latest_valid_tax_rate,
+        )
+
+        latest_nopat = latest_ebit.total * (1.0 - latest_tax_rate.rate)
+        prior_nopat = prior_ebit.total * (1.0 - prior_tax_rate.rate)
+        delta_nopat = latest_nopat - prior_nopat
+
+        delta_ic = latest_ic.total - prior_ic.total
+        if delta_ic <= 0:
+            LOGGER.warning(
+                "iroic_5y: non-positive delta invested capital for %s", symbol
+            )
+            return None
+
+        ic_scale = max(abs(latest_ic.total), abs(prior_ic.total), 1.0)
+        relative_delta_ic = abs(delta_ic) / ic_scale
+        if relative_delta_ic < IROIC_MIN_RELATIVE_DELTA_IC:
+            LOGGER.warning("iroic_5y: tiny delta invested capital for %s", symbol)
+            return None
+
+        as_of_values = [latest_ebit.as_of, latest_ic.as_of]
+        if latest_tax_rate.as_of is not None:
+            as_of_values.append(latest_tax_rate.as_of)
+
+        return IncrementalROICSnapshot(
+            value=delta_nopat / delta_ic,
+            as_of=max(as_of_values),
+            currency=pair_currency,
+        )
+
     def _fy_invested_capital_map(
         self, symbol: str, repo: FinancialFactsRepository
     ) -> dict[int, _AmountResult]:
@@ -234,6 +339,17 @@ class ROICFYSeriesCalculator:
         if latest_valid_tax_rate is not None:
             return latest_valid_tax_rate
         return _TaxRateResult(rate=DEFAULT_TAX_RATE, as_of=None)
+
+    def _latest_incremental_year(
+        self,
+        ebit_map: dict[int, _AmountResult],
+        ic_map: dict[int, _AmountResult],
+    ) -> Optional[int]:
+        for year in sorted(set(ebit_map).intersection(ic_map), reverse=True):
+            prior_year = year - IROIC_LOOKBACK_YEARS
+            if prior_year in ebit_map and prior_year in ic_map:
+                return year
+        return None
 
     def _rate_from_amounts(
         self,
@@ -374,10 +490,33 @@ class ROIC10YMinMetric:
         )
 
 
+@dataclass
+class IncrementalROICFiveYearMetric:
+    """Compute incremental ROIC using FY t versus strict FY t-5."""
+
+    id: str = "iroic_5y"
+    required_concepts = REQUIRED_CONCEPTS
+
+    def compute(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> Optional[MetricResult]:
+        snapshot = ROICFYSeriesCalculator().compute_incremental_5y(symbol, repo)
+        if snapshot is None:
+            return None
+        return MetricResult(
+            symbol=symbol,
+            metric_id=self.id,
+            value=snapshot.value,
+            as_of=snapshot.as_of,
+        )
+
+
 __all__ = [
     "ROICFYSeriesSnapshot",
+    "IncrementalROICSnapshot",
     "ROICFYSeriesCalculator",
     "ROIC10YMedianMetric",
     "ROICYearsAbove12PctMetric",
     "ROIC10YMinMetric",
+    "IncrementalROICFiveYearMetric",
 ]

@@ -50,6 +50,7 @@ from pyvalue.metrics.owner_earnings_enterprise import (
 from pyvalue.metrics.price_to_fcf import PriceToFCFMetric
 from pyvalue.metrics.roc_greenblatt import ROCGreenblattMetric
 from pyvalue.metrics.roic_fy_series import (
+    IncrementalROICFiveYearMetric,
     ROIC10YMedianMetric,
     ROIC10YMinMetric,
     ROICYearsAbove12PctMetric,
@@ -547,6 +548,13 @@ def _base_roic_10y_concepts(
             )
 
     return concept_records
+
+
+def _iroic_short_debt_ramp(latest_year, *, base=100.0, step=10.0):
+    return {
+        year: base + (year - (latest_year - 10)) * step
+        for year in range(latest_year - 10, latest_year + 1)
+    }
 
 
 def test_working_capital_metric_computes_difference():
@@ -2465,6 +2473,144 @@ def test_roic_10y_returns_none_when_latest_fy_stale():
     )
     result = metric.compute("AAPL.US", repo)
     assert result is None
+
+
+def test_iroic_5y_metric_happy_path():
+    metric = IncrementalROICFiveYearMetric()
+    latest_year = date.today().year - 1
+    concepts = _base_roic_10y_concepts(
+        latest_year=latest_year,
+        ic_short_by_year=_iroic_short_debt_ramp(latest_year, step=10.0),
+    )
+    repo = _build_ic_repo(concept_records=concepts)
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert round(result.value, 6) == 2.0
+
+
+def test_iroic_5y_returns_none_when_strict_t_minus_5_missing():
+    metric = IncrementalROICFiveYearMetric()
+    latest_year = date.today().year - 1
+    concepts = _base_roic_10y_concepts(
+        latest_year=latest_year,
+        ic_short_by_year=_iroic_short_debt_ramp(latest_year, step=10.0),
+    )
+    concepts["OperatingIncomeLoss"] = [
+        record
+        for record in concepts["OperatingIncomeLoss"]
+        if record.end_date != f"{latest_year - 5}-09-30"
+    ]
+    repo = _build_ic_repo(concept_records=concepts)
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_iroic_5y_tax_fallback_uses_latest_valid_fy_proxy():
+    metric = IncrementalROICFiveYearMetric()
+    latest_year = date.today().year - 1
+    roic_years = range(latest_year - 9, latest_year + 1)
+    tax = {year: 40.0 for year in roic_years}
+    pretax = {year: 200.0 for year in roic_years}
+    tax[latest_year - 1] = 60.0
+    pretax[latest_year] = 0.0
+    concepts = _base_roic_10y_concepts(
+        latest_year=latest_year,
+        tax_by_year=tax,
+        pretax_by_year=pretax,
+        ic_short_by_year=_iroic_short_debt_ramp(latest_year, step=10.0),
+    )
+    repo = _build_ic_repo(concept_records=concepts)
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert round(result.value, 6) == 1.4
+
+
+def test_iroic_5y_tax_fallback_uses_default_when_no_valid_proxy():
+    metric = IncrementalROICFiveYearMetric()
+    latest_year = date.today().year - 1
+    roic_years = range(latest_year - 9, latest_year + 1)
+    tax = {year: 40.0 for year in roic_years}
+    pretax = {year: 0.0 for year in roic_years}
+    concepts = _base_roic_10y_concepts(
+        latest_year=latest_year,
+        tax_by_year=tax,
+        pretax_by_year=pretax,
+        ic_short_by_year=_iroic_short_debt_ramp(latest_year, step=10.0),
+    )
+    repo = _build_ic_repo(concept_records=concepts)
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert round(result.value, 6) == 1.975
+
+
+def test_iroic_5y_returns_none_when_delta_ic_non_positive():
+    metric = IncrementalROICFiveYearMetric()
+    repo = _build_ic_repo(concept_records=_base_roic_10y_concepts())
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_iroic_5y_returns_none_when_relative_delta_ic_is_tiny():
+    metric = IncrementalROICFiveYearMetric()
+    latest_year = date.today().year - 1
+    concepts = _base_roic_10y_concepts(
+        latest_year=latest_year,
+        ic_short_by_year=_iroic_short_debt_ramp(latest_year, step=1.0),
+        ic_equity_by_year={
+            year: 900_000.0 for year in range(latest_year - 10, latest_year + 1)
+        },
+    )
+    repo = _build_ic_repo(concept_records=concepts)
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_iroic_5y_returns_none_on_currency_conflict():
+    metric = IncrementalROICFiveYearMetric()
+    latest_year = date.today().year - 1
+    concepts = _base_roic_10y_concepts(
+        latest_year=latest_year,
+        ic_short_by_year=_iroic_short_debt_ramp(latest_year, step=10.0),
+        currency_by_year={latest_year - 5: "EUR"},
+    )
+    repo = _build_ic_repo(concept_records=concepts)
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_iroic_5y_returns_none_when_latest_fy_stale():
+    metric = IncrementalROICFiveYearMetric()
+    stale_latest_year = date.today().year - 3
+    concepts = _base_roic_10y_concepts(
+        latest_year=stale_latest_year,
+        ic_short_by_year=_iroic_short_debt_ramp(stale_latest_year, step=10.0),
+    )
+    repo = _build_ic_repo(concept_records=concepts)
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_iroic_5y_keeps_signed_negative_delta_nopat():
+    metric = IncrementalROICFiveYearMetric()
+    latest_year = date.today().year - 1
+    concepts = _base_roic_10y_concepts(
+        latest_year=latest_year,
+        ic_short_by_year=_iroic_short_debt_ramp(latest_year, step=10.0),
+    )
+    concepts["OperatingIncomeLoss"] = [
+        fact(
+            concept=record.concept,
+            fiscal_period=record.fiscal_period,
+            end_date=record.end_date,
+            value=80.0 if record.end_date == f"{latest_year}-09-30" else record.value,
+            currency=record.currency,
+        )
+        for record in concepts["OperatingIncomeLoss"]
+    ]
+    repo = _build_ic_repo(concept_records=concepts)
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert round(result.value, 6) == -1.52
 
 
 def test_debt_paydown_years_skips_non_positive_fcf():
@@ -8386,3 +8532,4 @@ def test_registry_contains_all_ids():
     assert "roic_10y_median" in REGISTRY
     assert "roic_years_above_12pct" in REGISTRY
     assert "roic_10y_min" in REGISTRY
+    assert "iroic_5y" in REGISTRY
