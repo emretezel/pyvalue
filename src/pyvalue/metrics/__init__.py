@@ -51,6 +51,7 @@ from .owner_earnings_enterprise import (
     OwnerEarningsEnterpriseTTMMetric,
     OwnerEarningsEnterpriseFiveYearAverageMetric,
 )
+from .gross_margin_stability import GrossMarginTenYearStdMetric
 
 REGISTRY = {
     WorkingCapitalMetric.id: WorkingCapitalMetric,
@@ -77,6 +78,7 @@ REGISTRY = {
     ROICYearsAbove12PctMetric.id: ROICYearsAbove12PctMetric,
     ROIC10YMinMetric.id: ROIC10YMinMetric,
     IncrementalROICFiveYearMetric.id: IncrementalROICFiveYearMetric,
+    GrossMarginTenYearStdMetric.id: GrossMarginTenYearStdMetric,
     ReturnOnInvestedCapitalMetric.id: ReturnOnInvestedCapitalMetric,
     MCapexFYMetric.id: MCapexFYMetric,
     MCapexFiveYearMetric.id: MCapexFiveYearMetric,
@@ -124,6 +126,7 @@ __all__ = [
     "ROICYearsAbove12PctMetric",
     "ROIC10YMinMetric",
     "IncrementalROICFiveYearMetric",
+    "GrossMarginTenYearStdMetric",
     "ReturnOnInvestedCapitalMetric",
     "MCapexFYMetric",
     "MCapexFiveYearMetric",

@@ -102,6 +102,8 @@ EODHD_STATEMENT_FIELDS = {
     },
     "Income_Statement": {
         "EBITDA": ["ebitda", "EBITDA"],
+        "GrossProfit": ["grossProfit"],
+        "CostOfRevenue": ["costOfRevenue"],
         "DepreciationDepletionAndAmortization": [
             "depreciationAndAmortization",
             "reconciledDepreciation",

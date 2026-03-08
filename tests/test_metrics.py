@@ -14,6 +14,7 @@ from pyvalue.metrics.eps_quarterly import EarningsPerShareTTM
 from pyvalue.metrics.eps_streak import EPSStreakMetric
 from pyvalue.metrics.graham_eps_cagr import GrahamEPSCAGRMetric
 from pyvalue.metrics.graham_multiplier import GrahamMultiplierMetric
+from pyvalue.metrics.gross_margin_stability import GrossMarginTenYearStdMetric
 from pyvalue.metrics.interest_coverage import InterestCoverageMetric
 from pyvalue.metrics.invested_capital import (
     AvgICMetric,
@@ -555,6 +556,79 @@ def _iroic_short_debt_ramp(latest_year, *, base=100.0, step=10.0):
         year: base + (year - (latest_year - 10)) * step
         for year in range(latest_year - 10, latest_year + 1)
     }
+
+
+def _base_gm_10y_concepts(
+    *,
+    latest_year=None,
+    revenue_by_year=None,
+    gross_profit_by_year=None,
+    cost_of_revenue_by_year=None,
+    currency_by_year=None,
+):
+    if latest_year is None:
+        latest_year = date.today().year - 1
+    years = list(range(latest_year - 9, latest_year + 1))
+
+    if revenue_by_year is None:
+        revenue_by_year = {year: 1000.0 + 10.0 * idx for idx, year in enumerate(years)}
+    if gross_profit_by_year is None:
+        gross_profit_by_year = {
+            year: revenue_by_year[year] * (0.10 + 0.01 * idx)
+            for idx, year in enumerate(years)
+            if year in revenue_by_year
+        }
+    if cost_of_revenue_by_year is None:
+        cost_of_revenue_by_year = {
+            year: revenue_by_year[year] - gross_profit_by_year[year]
+            for year in years
+            if year in revenue_by_year and year in gross_profit_by_year
+        }
+    if currency_by_year is None:
+        currency_by_year = {}
+
+    concepts = {
+        "Revenues": [],
+        "GrossProfit": [],
+        "CostOfRevenue": [],
+    }
+    for year in years:
+        currency = currency_by_year.get(year, "USD")
+        end_date = f"{year}-09-30"
+        revenue = revenue_by_year.get(year)
+        if revenue is not None:
+            concepts["Revenues"].append(
+                fact(
+                    concept="Revenues",
+                    fiscal_period="FY",
+                    end_date=end_date,
+                    value=revenue,
+                    currency=currency,
+                )
+            )
+        gross_profit = gross_profit_by_year.get(year)
+        if gross_profit is not None:
+            concepts["GrossProfit"].append(
+                fact(
+                    concept="GrossProfit",
+                    fiscal_period="FY",
+                    end_date=end_date,
+                    value=gross_profit,
+                    currency=currency,
+                )
+            )
+        cost_of_revenue = cost_of_revenue_by_year.get(year)
+        if cost_of_revenue is not None:
+            concepts["CostOfRevenue"].append(
+                fact(
+                    concept="CostOfRevenue",
+                    fiscal_period="FY",
+                    end_date=end_date,
+                    value=cost_of_revenue,
+                    currency=currency,
+                )
+            )
+    return concepts
 
 
 def test_working_capital_metric_computes_difference():
@@ -2611,6 +2685,83 @@ def test_iroic_5y_keeps_signed_negative_delta_nopat():
     result = metric.compute("AAPL.US", repo)
     assert result is not None
     assert round(result.value, 6) == -1.52
+
+
+def test_gm_10y_std_metric_happy_path():
+    metric = GrossMarginTenYearStdMetric()
+    repo = _build_ic_repo(concept_records=_base_gm_10y_concepts())
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+
+    margins = [0.10 + 0.01 * idx for idx in range(10)]
+    mean = sum(margins) / len(margins)
+    expected = (sum((value - mean) ** 2 for value in margins) / len(margins)) ** 0.5
+    assert round(result.value, 12) == round(expected, 12)
+
+
+def test_gm_10y_std_uses_revenue_minus_cost_fallback_when_gross_missing():
+    metric = GrossMarginTenYearStdMetric()
+    latest_year = date.today().year - 1
+    concepts = _base_gm_10y_concepts(latest_year=latest_year)
+    concepts["GrossProfit"] = [
+        record
+        for record in concepts["GrossProfit"]
+        if record.end_date != f"{latest_year - 4}-09-30"
+    ]
+    repo = _build_ic_repo(concept_records=concepts)
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+
+
+def test_gm_10y_std_returns_none_when_strict_window_missing_year():
+    metric = GrossMarginTenYearStdMetric()
+    latest_year = date.today().year - 1
+    concepts = _base_gm_10y_concepts(latest_year=latest_year)
+    concepts["Revenues"] = [
+        record
+        for record in concepts["Revenues"]
+        if record.end_date != f"{latest_year - 5}-09-30"
+    ]
+    repo = _build_ic_repo(concept_records=concepts)
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_gm_10y_std_returns_none_when_revenue_non_positive():
+    metric = GrossMarginTenYearStdMetric()
+    latest_year = date.today().year - 1
+    concepts = _base_gm_10y_concepts(
+        latest_year=latest_year,
+        revenue_by_year={
+            year: (0.0 if year == latest_year else 1000.0 + idx * 10.0)
+            for idx, year in enumerate(range(latest_year - 9, latest_year + 1))
+        },
+    )
+    repo = _build_ic_repo(concept_records=concepts)
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_gm_10y_std_returns_none_on_series_currency_conflict():
+    metric = GrossMarginTenYearStdMetric()
+    latest_year = date.today().year - 1
+    concepts = _base_gm_10y_concepts(
+        latest_year=latest_year,
+        currency_by_year={latest_year - 2: "EUR"},
+    )
+    repo = _build_ic_repo(concept_records=concepts)
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_gm_10y_std_returns_none_when_latest_fy_stale():
+    metric = GrossMarginTenYearStdMetric()
+    stale_latest_year = date.today().year - 3
+    repo = _build_ic_repo(
+        concept_records=_base_gm_10y_concepts(latest_year=stale_latest_year)
+    )
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
 
 
 def test_debt_paydown_years_skips_non_positive_fcf():
@@ -8533,3 +8684,4 @@ def test_registry_contains_all_ids():
     assert "roic_years_above_12pct" in REGISTRY
     assert "roic_10y_min" in REGISTRY
     assert "iroic_5y" in REGISTRY
+    assert "gm_10y_std" in REGISTRY

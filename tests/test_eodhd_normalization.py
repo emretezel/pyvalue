@@ -205,6 +205,52 @@ def test_eodhd_normalizes_ebitda():
     assert derived[0].value == 42.0
 
 
+def test_eodhd_normalizes_gross_profit():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Income_Statement": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "grossProfit": 420.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+    derived = [r for r in records if r.concept == "GrossProfit"]
+    assert derived, "GrossProfit should map from grossProfit"
+    assert derived[0].value == 420.0
+
+
+def test_eodhd_normalizes_cost_of_revenue():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Income_Statement": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "costOfRevenue": 580.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+    derived = [r for r in records if r.concept == "CostOfRevenue"]
+    assert derived, "CostOfRevenue should map from costOfRevenue"
+    assert derived[0].value == 580.0
+
+
 def test_eodhd_normalizes_short_term_debt_and_cash_investments():
     normalizer = EODHDFactsNormalizer()
     payload = {
