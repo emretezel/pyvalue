@@ -767,3 +767,27 @@ def test_eodhd_normalizes_issuance_of_capital_stock():
     assert derived, "IssuanceOfCapitalStock should map from issuanceOfCapitalStock"
     assert derived[0].value == 12.0
     assert derived[0].fiscal_period == "FY"
+
+
+def test_eodhd_normalizes_stock_based_compensation():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Cash_Flow": {
+                "quarterly": [
+                    {
+                        "date": "2024-12-31",
+                        "stockBasedCompensation": 18.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.LSE")
+    derived = [r for r in records if r.concept == "StockBasedCompensation"]
+    assert derived, "StockBasedCompensation should map from stockBasedCompensation"
+    assert derived[0].value == 18.0
+    assert derived[0].fiscal_period == "Q4"

@@ -60,6 +60,7 @@ from .operating_margin_stability import (
 )
 from .share_count_change import ShareCountCAGR10YMetric, Shares10YPctChangeMetric
 from .buyback_yield import NetBuybackYieldMetric
+from .sbc_load import SBCToFCFMetric, SBCToRevenueMetric
 
 REGISTRY = {
     WorkingCapitalMetric.id: WorkingCapitalMetric,
@@ -95,6 +96,8 @@ REGISTRY = {
     ShareCountCAGR10YMetric.id: ShareCountCAGR10YMetric,
     Shares10YPctChangeMetric.id: Shares10YPctChangeMetric,
     NetBuybackYieldMetric.id: NetBuybackYieldMetric,
+    SBCToRevenueMetric.id: SBCToRevenueMetric,
+    SBCToFCFMetric.id: SBCToFCFMetric,
     ReturnOnInvestedCapitalMetric.id: ReturnOnInvestedCapitalMetric,
     MCapexFYMetric.id: MCapexFYMetric,
     MCapexFiveYearMetric.id: MCapexFiveYearMetric,
@@ -151,6 +154,8 @@ __all__ = [
     "ShareCountCAGR10YMetric",
     "Shares10YPctChangeMetric",
     "NetBuybackYieldMetric",
+    "SBCToRevenueMetric",
+    "SBCToFCFMetric",
     "ReturnOnInvestedCapitalMetric",
     "MCapexFYMetric",
     "MCapexFiveYearMetric",

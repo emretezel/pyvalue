@@ -1399,13 +1399,13 @@ def test_cmd_compute_metrics_all(tmp_path):
             )
         )
     quarterly_cash_flows = [
-        (q4, "Q4", 130.0, 40.0, -60.0),
-        (q3, "Q3", 120.0, 35.0, -55.0),
-        (q2, "Q2", 110.0, 30.0, -50.0),
-        (q1, "Q1", 100.0, 25.0, -45.0),
-        (q4_prev, "Q4", 90.0, 20.0, -40.0),
+        (q4, "Q4", 130.0, 40.0, -60.0, 18.0),
+        (q3, "Q3", 120.0, 35.0, -55.0, 17.0),
+        (q2, "Q2", 110.0, 30.0, -50.0, 16.0),
+        (q1, "Q1", 100.0, 25.0, -45.0, 15.0),
+        (q4_prev, "Q4", 90.0, 20.0, -40.0, 14.0),
     ]
-    for end_date, period, ocf, capex, sale_purchase in quarterly_cash_flows:
+    for end_date, period, ocf, capex, sale_purchase, sbc in quarterly_cash_flows:
         records.append(
             make_fact(
                 concept="NetCashProvidedByUsedInOperatingActivities",
@@ -1438,6 +1438,14 @@ def test_cmd_compute_metrics_all(tmp_path):
                 value=sale_purchase,
             )
         )
+        records.append(
+            make_fact(
+                concept="StockBasedCompensation",
+                end_date=end_date,
+                fiscal_period=period,
+                value=sbc,
+            )
+        )
     quarterly_net_income = [
         (q4, "Q4", 220.0),
         (q3, "Q3", 210.0),
@@ -1449,6 +1457,21 @@ def test_cmd_compute_metrics_all(tmp_path):
         records.append(
             make_fact(
                 concept="NetIncomeLoss",
+                end_date=end_date,
+                fiscal_period=period,
+                value=value,
+            )
+        )
+    quarterly_revenues = [
+        (q4, "Q4", 600.0),
+        (q3, "Q3", 580.0),
+        (q2, "Q2", 560.0),
+        (q1, "Q1", 540.0),
+    ]
+    for end_date, period, value in quarterly_revenues:
+        records.append(
+            make_fact(
+                concept="Revenues",
                 end_date=end_date,
                 fiscal_period=period,
                 value=value,

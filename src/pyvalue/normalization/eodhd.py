@@ -138,6 +138,7 @@ EODHD_STATEMENT_FIELDS = {
         ],
         "CapitalExpenditures": ["capitalExpenditures", "capex"],
         "DepreciationFromCashFlow": ["depreciation"],
+        "StockBasedCompensation": ["stockBasedCompensation"],
         "SalePurchaseOfStock": ["salePurchaseOfStock"],
         "IssuanceOfCapitalStock": ["issuanceOfCapitalStock"],
     },

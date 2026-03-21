@@ -12,6 +12,7 @@ from pyvalue.metrics.cash_conversion import (
     CFOToNITenYearMedianMetric,
     CFOToNITTMMetric,
 )
+from pyvalue.metrics.sbc_load import SBCToFCFMetric, SBCToRevenueMetric
 from pyvalue.metrics.current_ratio import CurrentRatioMetric
 from pyvalue.metrics.debt_paydown_years import DebtPaydownYearsMetric, FCFToDebtMetric
 from pyvalue.metrics.earnings_yield import EarningsYieldMetric
@@ -10123,6 +10124,299 @@ def test_net_buyback_yield_metric_requires_positive_share_counts_in_fallback():
     )
 
 
+def test_sbc_to_revenue_metric_computes_ttm_ratio():
+    metric = SBCToRevenueMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+
+    repo = _OwnerEarningsRepo(
+        {
+            "StockBasedCompensation": _quarterly_records(
+                "StockBasedCompensation",
+                (q4, q3, q2, q1),
+                (10.0, 9.0, 8.0, 7.0),
+                currency="USD",
+            ),
+            "Revenues": _quarterly_records(
+                "Revenues",
+                (q4, q3, q2, q1),
+                (100.0, 110.0, 120.0, 130.0),
+                currency="USD",
+            ),
+        }
+    )
+
+    result = metric.compute(symbol, repo)
+
+    assert result is not None
+    assert result.as_of == q4
+    assert round(result.value, 10) == round(34.0 / 460.0, 10)
+
+
+def test_sbc_to_fcf_metric_computes_ttm_ratio():
+    metric = SBCToFCFMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+
+    repo = _OwnerEarningsRepo(
+        {
+            "StockBasedCompensation": _quarterly_records(
+                "StockBasedCompensation",
+                (q4, q3, q2, q1),
+                (10.0, 10.0, 10.0, 10.0),
+                currency="USD",
+            ),
+            "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+                "NetCashProvidedByUsedInOperatingActivities",
+                (q4, q3, q2, q1),
+                (100.0, 100.0, 100.0, 100.0),
+                currency="USD",
+            ),
+            "CapitalExpenditures": _quarterly_records(
+                "CapitalExpenditures",
+                (q4, q3, q2, q1),
+                (20.0, 20.0, 20.0, 20.0),
+                currency="USD",
+            ),
+        }
+    )
+
+    result = metric.compute(symbol, repo)
+
+    assert result is not None
+    assert result.as_of == q4
+    assert result.value == 0.125
+
+
+def test_sbc_to_fcf_metric_uses_zero_capex_when_capex_missing():
+    metric = SBCToFCFMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+
+    repo = _OwnerEarningsRepo(
+        {
+            "StockBasedCompensation": _quarterly_records(
+                "StockBasedCompensation",
+                (q4, q3, q2, q1),
+                (10.0, 10.0, 10.0, 10.0),
+                currency="USD",
+            ),
+            "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+                "NetCashProvidedByUsedInOperatingActivities",
+                (q4, q3, q2, q1),
+                (100.0, 100.0, 100.0, 100.0),
+                currency="USD",
+            ),
+        }
+    )
+
+    result = metric.compute(symbol, repo)
+
+    assert result is not None
+    assert result.value == 0.1
+
+
+def test_sbc_load_metrics_return_none_when_sbc_missing():
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        {
+            "Revenues": _quarterly_records(
+                "Revenues",
+                (q4, q3, q2, q1),
+                (100.0, 100.0, 100.0, 100.0),
+            ),
+            "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+                "NetCashProvidedByUsedInOperatingActivities",
+                (q4, q3, q2, q1),
+                (100.0, 100.0, 100.0, 100.0),
+            ),
+        }
+    )
+
+    assert SBCToRevenueMetric().compute(symbol, repo) is None
+    assert SBCToFCFMetric().compute(symbol, repo) is None
+
+
+def test_sbc_load_metrics_require_four_quarters_of_sbc():
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        {
+            "StockBasedCompensation": _quarterly_records(
+                "StockBasedCompensation",
+                (q4, q3, q2),
+                (10.0, 9.0, 8.0),
+            ),
+            "Revenues": _quarterly_records(
+                "Revenues",
+                (q4, q3, q2, q1),
+                (100.0, 100.0, 100.0, 100.0),
+            ),
+            "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+                "NetCashProvidedByUsedInOperatingActivities",
+                (q4, q3, q2, q1),
+                (100.0, 100.0, 100.0, 100.0),
+            ),
+        }
+    )
+
+    assert SBCToRevenueMetric().compute(symbol, repo) is None
+    assert SBCToFCFMetric().compute(symbol, repo) is None
+
+
+def test_sbc_load_metrics_reject_stale_latest_quarter():
+    symbol = "AAPL.US"
+    q4 = (date.today() - timedelta(days=MAX_FACT_AGE_DAYS + 10)).isoformat()
+    q3 = (date.today() - timedelta(days=MAX_FACT_AGE_DAYS + 100)).isoformat()
+    q2 = (date.today() - timedelta(days=MAX_FACT_AGE_DAYS + 190)).isoformat()
+    q1 = (date.today() - timedelta(days=MAX_FACT_AGE_DAYS + 280)).isoformat()
+
+    repo = _OwnerEarningsRepo(
+        {
+            "StockBasedCompensation": _quarterly_records(
+                "StockBasedCompensation",
+                (q4, q3, q2, q1),
+                (10.0, 9.0, 8.0, 7.0),
+            ),
+            "Revenues": _quarterly_records(
+                "Revenues",
+                (q4, q3, q2, q1),
+                (100.0, 100.0, 100.0, 100.0),
+            ),
+            "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+                "NetCashProvidedByUsedInOperatingActivities",
+                (q4, q3, q2, q1),
+                (100.0, 100.0, 100.0, 100.0),
+            ),
+        }
+    )
+
+    assert SBCToRevenueMetric().compute(symbol, repo) is None
+    assert SBCToFCFMetric().compute(symbol, repo) is None
+
+
+def test_sbc_to_revenue_metric_requires_positive_revenue():
+    metric = SBCToRevenueMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+
+    repo = _OwnerEarningsRepo(
+        {
+            "StockBasedCompensation": _quarterly_records(
+                "StockBasedCompensation",
+                (q4, q3, q2, q1),
+                (10.0, 10.0, 10.0, 10.0),
+            ),
+            "Revenues": _quarterly_records(
+                "Revenues",
+                (q4, q3, q2, q1),
+                (0.0, 0.0, 0.0, 0.0),
+            ),
+        }
+    )
+
+    assert metric.compute(symbol, repo) is None
+
+
+def test_sbc_to_fcf_metric_requires_positive_fcf():
+    metric = SBCToFCFMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+
+    repo = _OwnerEarningsRepo(
+        {
+            "StockBasedCompensation": _quarterly_records(
+                "StockBasedCompensation",
+                (q4, q3, q2, q1),
+                (10.0, 10.0, 10.0, 10.0),
+            ),
+            "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+                "NetCashProvidedByUsedInOperatingActivities",
+                (q4, q3, q2, q1),
+                (20.0, 20.0, 20.0, 20.0),
+            ),
+            "CapitalExpenditures": _quarterly_records(
+                "CapitalExpenditures",
+                (q4, q3, q2, q1),
+                (20.0, 20.0, 20.0, 20.0),
+            ),
+        }
+    )
+
+    assert metric.compute(symbol, repo) is None
+
+
+def test_sbc_load_metrics_reject_currency_mismatch():
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    sbc_repo = _OwnerEarningsRepo(
+        {
+            "StockBasedCompensation": _quarterly_records(
+                "StockBasedCompensation",
+                (q4, q3, q2, q1),
+                (10.0, 9.0, 8.0, 7.0),
+                currency="USD",
+            ),
+            "Revenues": _quarterly_records(
+                "Revenues",
+                (q4, q3, q2, q1),
+                (100.0, 100.0, 100.0, 100.0),
+                currency="EUR",
+            ),
+        }
+    )
+    fcf_repo = _OwnerEarningsRepo(
+        {
+            "StockBasedCompensation": _quarterly_records(
+                "StockBasedCompensation",
+                (q4, q3, q2, q1),
+                (10.0, 9.0, 8.0, 7.0),
+                currency="USD",
+            ),
+            "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+                "NetCashProvidedByUsedInOperatingActivities",
+                (q4, q3, q2, q1),
+                (100.0, 100.0, 100.0, 100.0),
+                currency="EUR",
+            ),
+        }
+    )
+
+    assert SBCToRevenueMetric().compute(symbol, sbc_repo) is None
+    assert SBCToFCFMetric().compute(symbol, fcf_repo) is None
+
+
+def test_sbc_load_metrics_reject_currency_conflict_within_sbc():
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        {
+            "StockBasedCompensation": _quarterly_records(
+                "StockBasedCompensation",
+                (q4, q3, q2, q1),
+                (10.0, 9.0, 8.0, 7.0),
+                currency="USD",
+            ),
+            "Revenues": _quarterly_records(
+                "Revenues",
+                (q4, q3, q2, q1),
+                (100.0, 100.0, 100.0, 100.0),
+                currency="USD",
+            ),
+        }
+    )
+    repo.records_by_concept["StockBasedCompensation"][2] = fact(
+        concept="StockBasedCompensation",
+        fiscal_period="Q2",
+        end_date=q2,
+        value=8.0,
+        currency="EUR",
+    )
+
+    assert SBCToRevenueMetric().compute(symbol, repo) is None
+
+
 def test_registry_contains_all_ids():
     # Ensure the registry still exposes all metric identifiers
     assert len(REGISTRY) >= 1
@@ -10159,3 +10453,5 @@ def test_registry_contains_all_ids():
     assert "share_count_cagr_10y" in REGISTRY
     assert "shares_10y_pct_change" in REGISTRY
     assert "net_buyback_yield" in REGISTRY
+    assert "sbc_to_revenue" in REGISTRY
+    assert "sbc_to_fcf" in REGISTRY
