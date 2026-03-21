@@ -74,6 +74,21 @@ from pyvalue.metrics.operating_margin_stability import (
     OperatingMarginTenYearStdMetric,
 )
 from pyvalue.metrics.price_to_fcf import PriceToFCFMetric
+from pyvalue.metrics.profitability_returns_growth import (
+    DividendPayoutRatioTTMMetric,
+    DividendYieldTTMMetric,
+    FCFMarginTTMMetric,
+    FCFPerShareCAGR10YMetric,
+    GrossMarginTTMMetric,
+    GrossProfitToAssetsTTMMetric,
+    OperatingMarginTTMMetric,
+    OwnerEarningsCAGR10YMetric,
+    ROATTMMetric,
+    ROETTMMetric,
+    ROETangibleCommonEquityTTMMetric,
+    RevenueCAGR10YMetric,
+    ShareholderYieldTTMMetric,
+)
 from pyvalue.metrics.roc_greenblatt import ROCGreenblattMetric
 from pyvalue.metrics.roic_fy_series import (
     IncrementalROICFiveYearMetric,
@@ -250,6 +265,30 @@ def _build_ic_repo(*, concept_records=None):
     class DummyRepo:
         def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
             return concept_records.get(concept, [])
+
+    return DummyRepo()
+
+
+def _build_metric_repo(*, concept_records=None, latest_records=None):
+    concept_records = concept_records or {}
+    latest_records = latest_records or {}
+
+    class DummyRepo:
+        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+            records = concept_records.get(concept, [])
+            if fiscal_period is None:
+                return records
+            return [
+                record
+                for record in records
+                if (record.fiscal_period or "").upper() == fiscal_period.upper()
+            ]
+
+        def latest_fact(self, symbol, concept):
+            if concept in latest_records:
+                return latest_records[concept]
+            records = concept_records.get(concept, [])
+            return records[0] if records else None
 
     return DummyRepo()
 
@@ -5918,7 +5957,7 @@ def _build_share_count_records(
     }
 
 
-def _build_market_repo(*, market_cap, as_of, currency="USD"):
+def _build_market_repo(*, market_cap, as_of, currency="USD", price=100.0):
     class DummyMarketRepo:
         def latest_snapshot(self, symbol):
             class Snapshot:
@@ -5928,6 +5967,7 @@ def _build_market_repo(*, market_cap, as_of, currency="USD"):
             snapshot.market_cap = market_cap
             snapshot.as_of = as_of
             snapshot.currency = currency
+            snapshot.price = price
             return snapshot
 
     return DummyMarketRepo()
@@ -11441,6 +11481,541 @@ def test_oey_ev_norm_metric_returns_none_when_fx_conversion_fails(monkeypatch):
     assert result is None
 
 
+def _new_metric_quarter_dates():
+    today = date.today()
+    return (
+        (today - timedelta(days=20)).isoformat(),
+        (today - timedelta(days=110)).isoformat(),
+        (today - timedelta(days=200)).isoformat(),
+        (today - timedelta(days=290)).isoformat(),
+        (today - timedelta(days=380)).isoformat(),
+    )
+
+
+def test_gross_margin_ttm_metric_clamps_and_uses_gross_profit_fallback():
+    metric = GrossMarginTTMMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1, _ = _new_metric_quarter_dates()
+    repo = _build_metric_repo(
+        concept_records={
+            "Revenues": _quarterly_records(
+                "Revenues", (q4, q3, q2, q1), (100.0, 100.0, 100.0, 100.0)
+            ),
+            "GrossProfit": _quarterly_records(
+                "GrossProfit", (q4, q3, q2, q1), (250.0, 250.0, 250.0, 250.0)
+            ),
+        }
+    )
+
+    result = metric.compute(symbol, repo)
+    assert result is not None
+    assert result.value == 1.0
+
+
+def test_gross_margin_ttm_metric_returns_none_when_revenue_non_positive():
+    metric = GrossMarginTTMMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1, _ = _new_metric_quarter_dates()
+    repo = _build_metric_repo(
+        concept_records={
+            "Revenues": _quarterly_records(
+                "Revenues", (q4, q3, q2, q1), (-10.0, -10.0, -10.0, -10.0)
+            ),
+            "CostOfRevenue": _quarterly_records(
+                "CostOfRevenue", (q4, q3, q2, q1), (5.0, 5.0, 5.0, 5.0)
+            ),
+        }
+    )
+
+    assert metric.compute(symbol, repo) is None
+
+
+def test_operating_margin_ttm_metric_allows_negative_values():
+    metric = OperatingMarginTTMMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1, _ = _new_metric_quarter_dates()
+    repo = _build_metric_repo(
+        concept_records={
+            "Revenues": _quarterly_records(
+                "Revenues", (q4, q3, q2, q1), (100.0, 100.0, 100.0, 100.0)
+            ),
+            "OperatingIncomeLoss": _quarterly_records(
+                "OperatingIncomeLoss", (q4, q3, q2, q1), (-10.0, -10.0, -10.0, -10.0)
+            ),
+        }
+    )
+
+    result = metric.compute(symbol, repo)
+    assert result is not None
+    assert result.value == -0.1
+
+
+def test_fcf_margin_ttm_metric_allows_negative_values():
+    metric = FCFMarginTTMMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1, _ = _new_metric_quarter_dates()
+    repo = _build_metric_repo(
+        concept_records={
+            "Revenues": _quarterly_records(
+                "Revenues", (q4, q3, q2, q1), (100.0, 100.0, 100.0, 100.0)
+            ),
+            "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+                "NetCashProvidedByUsedInOperatingActivities",
+                (q4, q3, q2, q1),
+                (5.0, 5.0, 5.0, 5.0),
+            ),
+            "CapitalExpenditures": _quarterly_records(
+                "CapitalExpenditures", (q4, q3, q2, q1), (10.0, 10.0, 10.0, 10.0)
+            ),
+        }
+    )
+
+    result = metric.compute(symbol, repo)
+    assert result is not None
+    assert result.value == -0.05
+
+
+def test_gross_profit_to_assets_ttm_metric_uses_avg_assets():
+    metric = GrossProfitToAssetsTTMMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1, q4_prev = _new_metric_quarter_dates()
+    repo = _build_metric_repo(
+        concept_records={
+            "Revenues": _quarterly_records(
+                "Revenues", (q4, q3, q2, q1), (100.0, 100.0, 100.0, 100.0)
+            ),
+            "CostOfRevenue": _quarterly_records(
+                "CostOfRevenue", (q4, q3, q2, q1), (40.0, 40.0, 40.0, 40.0)
+            ),
+            "Assets": [
+                fact(
+                    symbol=symbol,
+                    concept="Assets",
+                    fiscal_period="Q4",
+                    end_date=q4,
+                    value=200.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="Assets",
+                    fiscal_period="Q4",
+                    end_date=q4_prev,
+                    value=100.0,
+                    currency="USD",
+                ),
+            ],
+        }
+    )
+
+    result = metric.compute(symbol, repo)
+    assert result is not None
+    assert result.value == 240.0 / 150.0
+
+
+def test_roe_ttm_metric_falls_back_to_fy_average():
+    metric = ROETTMMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1, _ = _new_metric_quarter_dates()
+    current_year = date.today().year - 1
+    repo = _build_metric_repo(
+        concept_records={
+            "NetIncomeLossAvailableToCommonStockholdersBasic": _quarterly_records(
+                "NetIncomeLossAvailableToCommonStockholdersBasic",
+                (q4, q3, q2, q1),
+                (25.0, 25.0, 25.0, 25.0),
+            ),
+            "CommonStockholdersEquity": [
+                fact(
+                    symbol=symbol,
+                    concept="CommonStockholdersEquity",
+                    fiscal_period="FY",
+                    end_date=f"{current_year}-09-30",
+                    value=200.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="CommonStockholdersEquity",
+                    fiscal_period="FY",
+                    end_date=f"{current_year - 1}-09-30",
+                    value=100.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="CommonStockholdersEquity",
+                    fiscal_period="Q4",
+                    end_date=q4,
+                    value=190.0,
+                    currency="USD",
+                ),
+            ],
+        }
+    )
+
+    result = metric.compute(symbol, repo)
+    assert result is not None
+    assert result.value == 100.0 / 150.0
+
+
+def test_roa_ttm_metric_uses_same_quarter_average_assets():
+    metric = ROATTMMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1, q4_prev = _new_metric_quarter_dates()
+    repo = _build_metric_repo(
+        concept_records={
+            "NetIncomeLoss": _quarterly_records(
+                "NetIncomeLoss", (q4, q3, q2, q1), (10.0, 10.0, 10.0, 10.0)
+            ),
+            "Assets": [
+                fact(
+                    symbol=symbol,
+                    concept="Assets",
+                    fiscal_period="Q4",
+                    end_date=q4,
+                    value=250.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="Assets",
+                    fiscal_period="Q4",
+                    end_date=q4_prev,
+                    value=150.0,
+                    currency="USD",
+                ),
+            ],
+        }
+    )
+
+    result = metric.compute(symbol, repo)
+    assert result is not None
+    assert result.value == 40.0 / 200.0
+
+
+def test_roetce_ttm_metric_treats_missing_goodwill_and_intangibles_as_zero():
+    metric = ROETangibleCommonEquityTTMMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1, q4_prev = _new_metric_quarter_dates()
+    repo = _build_metric_repo(
+        concept_records={
+            "NetIncomeLossAvailableToCommonStockholdersBasic": _quarterly_records(
+                "NetIncomeLossAvailableToCommonStockholdersBasic",
+                (q4, q3, q2, q1),
+                (10.0, 10.0, 10.0, 10.0),
+            ),
+            "CommonStockholdersEquity": [
+                fact(
+                    symbol=symbol,
+                    concept="CommonStockholdersEquity",
+                    fiscal_period="Q4",
+                    end_date=q4,
+                    value=200.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="CommonStockholdersEquity",
+                    fiscal_period="Q4",
+                    end_date=q4_prev,
+                    value=100.0,
+                    currency="USD",
+                ),
+            ],
+        }
+    )
+
+    result = metric.compute(symbol, repo)
+    assert result is not None
+    assert result.value == 40.0 / 150.0
+
+
+def test_dividend_yield_ttm_metric_uses_cash_dividends_and_abs_sign():
+    metric = DividendYieldTTMMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1, _ = _new_metric_quarter_dates()
+    repo = _build_metric_repo(
+        concept_records={
+            "CommonStockDividendsPaid": _quarterly_records(
+                "CommonStockDividendsPaid",
+                (q4, q3, q2, q1),
+                (-5.0, -5.0, -5.0, -5.0),
+            )
+        }
+    )
+
+    result = metric.compute(
+        symbol, repo, _build_market_repo(market_cap=200.0, as_of=q4, price=100.0)
+    )
+    assert result is not None
+    assert result.value == 20.0 / 200.0
+
+
+def test_dividend_yield_ttm_metric_falls_back_to_dps_and_price():
+    metric = DividendYieldTTMMetric()
+    symbol = "AAPL.US"
+    q4, _, _, _, _ = _new_metric_quarter_dates()
+    repo = _build_metric_repo(
+        concept_records={
+            "CommonStockDividendsPerShareCashPaid": [
+                fact(
+                    symbol=symbol,
+                    concept="CommonStockDividendsPerShareCashPaid",
+                    fiscal_period="",
+                    end_date=q4,
+                    value=2.5,
+                    currency="USD",
+                )
+            ]
+        }
+    )
+
+    result = metric.compute(
+        symbol, repo, _build_market_repo(market_cap=None, as_of=q4, price=50.0)
+    )
+    assert result is not None
+    assert result.value == 2.5 / 50.0
+
+
+def test_shareholder_yield_ttm_metric_sums_dividend_and_buyback_yields():
+    metric = ShareholderYieldTTMMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1, _ = _new_metric_quarter_dates()
+    repo = _build_metric_repo(
+        concept_records={
+            "CommonStockDividendsPaid": _quarterly_records(
+                "CommonStockDividendsPaid",
+                (q4, q3, q2, q1),
+                (-5.0, -5.0, -5.0, -5.0),
+            ),
+            "SalePurchaseOfStock": _quarterly_records(
+                "SalePurchaseOfStock",
+                (q4, q3, q2, q1),
+                (-10.0, -10.0, -10.0, -10.0),
+            ),
+        }
+    )
+
+    result = metric.compute(
+        symbol, repo, _build_market_repo(market_cap=200.0, as_of=q4, price=100.0)
+    )
+    assert result is not None
+    assert result.value == (20.0 / 200.0) + (40.0 / 200.0)
+
+
+def test_dividend_payout_ratio_ttm_metric_requires_positive_net_income():
+    metric = DividendPayoutRatioTTMMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1, _ = _new_metric_quarter_dates()
+    repo = _build_metric_repo(
+        concept_records={
+            "CommonStockDividendsPaid": _quarterly_records(
+                "CommonStockDividendsPaid",
+                (q4, q3, q2, q1),
+                (-5.0, -5.0, -5.0, -5.0),
+            ),
+            "NetIncomeLossAvailableToCommonStockholdersBasic": _quarterly_records(
+                "NetIncomeLossAvailableToCommonStockholdersBasic",
+                (q4, q3, q2, q1),
+                (-10.0, -10.0, -10.0, -10.0),
+            ),
+        }
+    )
+
+    assert metric.compute(symbol, repo) is None
+
+
+def test_revenue_cagr_10y_metric_uses_strict_fy_pair():
+    metric = RevenueCAGR10YMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    repo = _build_metric_repo(
+        concept_records={
+            "Revenues": [
+                fact(
+                    symbol=symbol,
+                    concept="Revenues",
+                    fiscal_period="FY",
+                    end_date=f"{latest_year}-09-30",
+                    value=200.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="Revenues",
+                    fiscal_period="FY",
+                    end_date=f"{latest_year - 10}-09-30",
+                    value=100.0,
+                    currency="USD",
+                ),
+            ]
+        }
+    )
+
+    result = metric.compute(symbol, repo)
+    assert result is not None
+    assert round(result.value, 8) == round((2.0**0.1) - 1.0, 8)
+
+
+def test_fcf_per_share_cagr_10y_metric_computes_happy_path():
+    metric = FCFPerShareCAGR10YMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    repo = _build_metric_repo(
+        concept_records={
+            "NetCashProvidedByUsedInOperatingActivities": [
+                fact(
+                    symbol=symbol,
+                    concept="NetCashProvidedByUsedInOperatingActivities",
+                    fiscal_period="FY",
+                    end_date=f"{latest_year}-09-30",
+                    value=120.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="NetCashProvidedByUsedInOperatingActivities",
+                    fiscal_period="FY",
+                    end_date=f"{latest_year - 10}-09-30",
+                    value=60.0,
+                    currency="USD",
+                ),
+            ],
+            "CapitalExpenditures": [
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="FY",
+                    end_date=f"{latest_year}-09-30",
+                    value=20.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="CapitalExpenditures",
+                    fiscal_period="FY",
+                    end_date=f"{latest_year - 10}-09-30",
+                    value=10.0,
+                    currency="USD",
+                ),
+            ],
+            "WeightedAverageNumberOfDilutedSharesOutstanding": [
+                fact(
+                    symbol=symbol,
+                    concept="WeightedAverageNumberOfDilutedSharesOutstanding",
+                    fiscal_period="FY",
+                    end_date=f"{latest_year}-09-30",
+                    value=10.0,
+                    currency=None,
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="WeightedAverageNumberOfDilutedSharesOutstanding",
+                    fiscal_period="FY",
+                    end_date=f"{latest_year - 10}-09-30",
+                    value=10.0,
+                    currency=None,
+                ),
+            ],
+        }
+    )
+
+    result = metric.compute(symbol, repo)
+    assert result is not None
+    assert round(result.value, 8) == round((2.0**0.1) - 1.0, 8)
+
+
+def test_fcf_per_share_cagr_10y_metric_requires_diluted_shares():
+    metric = FCFPerShareCAGR10YMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    repo = _build_metric_repo(
+        concept_records={
+            "NetCashProvidedByUsedInOperatingActivities": [
+                fact(
+                    symbol=symbol,
+                    concept="NetCashProvidedByUsedInOperatingActivities",
+                    fiscal_period="FY",
+                    end_date=f"{latest_year}-09-30",
+                    value=120.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="NetCashProvidedByUsedInOperatingActivities",
+                    fiscal_period="FY",
+                    end_date=f"{latest_year - 10}-09-30",
+                    value=60.0,
+                    currency="USD",
+                ),
+            ]
+        }
+    )
+
+    assert metric.compute(symbol, repo) is None
+
+
+def test_owner_earnings_cagr_10y_metric_uses_three_year_endpoint_averages():
+    metric = OwnerEarningsCAGR10YMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    years = [latest_year - offset for offset in range(10)]
+    records_by_concept = _build_oe_ev_fy_input_records(
+        symbol=symbol,
+        latest_year=latest_year,
+        years=years,
+        ebit_values=[
+            530.0,
+            500.0,
+            470.0,
+            440.0,
+            410.0,
+            380.0,
+            350.0,
+            320.0,
+            290.0,
+            260.0,
+        ],
+        tax_values=[106.0, 100.0, 94.0, 88.0, 82.0, 76.0, 70.0, 64.0, 58.0, 52.0],
+        pretax_values=[
+            530.0,
+            500.0,
+            470.0,
+            440.0,
+            410.0,
+            380.0,
+            350.0,
+            320.0,
+            290.0,
+            260.0,
+        ],
+        da_values=[100.0] * 10,
+        capex_values=[90.0] * 10,
+        nwc_values=[
+            300.0,
+            280.0,
+            260.0,
+            240.0,
+            220.0,
+            200.0,
+            180.0,
+            160.0,
+            140.0,
+            120.0,
+            100.0,
+        ],
+    )
+
+    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    assert result is not None
+    start_avg = (246.0 + 222.0 + 198.0) / 3.0
+    end_avg = (414.0 + 390.0 + 366.0) / 3.0
+    assert round(result.value, 8) == round(
+        (end_avg / start_avg) ** (1.0 / 7.0) - 1.0, 8
+    )
+
+
 def test_registry_contains_all_ids():
     # Ensure the registry still exposes all metric identifiers
     assert len(REGISTRY) >= 1
@@ -11486,6 +12061,19 @@ def test_registry_contains_all_ids():
     assert "ev_to_ebitda" in REGISTRY
     assert "sbc_to_revenue" in REGISTRY
     assert "sbc_to_fcf" in REGISTRY
+    assert "gross_margin_ttm" in REGISTRY
+    assert "operating_margin_ttm" in REGISTRY
+    assert "fcf_margin_ttm" in REGISTRY
+    assert "roe_ttm" in REGISTRY
+    assert "roa_ttm" in REGISTRY
+    assert "roetce_ttm" in REGISTRY
+    assert "dividend_yield_ttm" in REGISTRY
+    assert "shareholder_yield_ttm" in REGISTRY
+    assert "dividend_payout_ratio_ttm" in REGISTRY
+    assert "revenue_cagr_10y" in REGISTRY
+    assert "fcf_per_share_cagr_10y" in REGISTRY
+    assert "owner_earnings_cagr_10y" in REGISTRY
+    assert "gross_profit_to_assets_ttm" in REGISTRY
     assert "oe_ev_fy_median_5y" in REGISTRY
     assert "worst_oe_ev_fy_10y" in REGISTRY
     assert "oey_ev_norm" in REGISTRY

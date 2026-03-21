@@ -58,6 +58,39 @@ def test_normalizer_emits_records_for_target_concepts():
     assert derived.end_date == recent
 
 
+def test_normalizer_derives_cost_of_revenue_from_cost_of_goods_sold():
+    recent = _recent_date()
+    payload = {
+        "facts": {
+            "us-gaap": {
+                "CostOfGoodsSold": {
+                    "units": {
+                        "USD": [
+                            {
+                                "val": 55.0,
+                                "fy": int(recent[:4]),
+                                "fp": "FY",
+                                "end": recent,
+                                "accn": "000",
+                                "filed": recent,
+                                "frame": f"CY{recent[:4]}",
+                                "form": "10-K",
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    normalizer = SECFactsNormalizer()
+
+    records = normalizer.normalize(payload, symbol="TEST", cik="CIK0000")
+
+    derived = [record for record in records if record.concept == "CostOfRevenue"]
+    assert derived, "CostOfRevenue should derive from CostOfGoodsSold"
+    assert derived[0].value == 55.0
+
+
 def test_normalizer_handles_quarters_that_cross_calendar_years():
     payload = {
         "facts": {

@@ -64,6 +64,8 @@ PRETAX_MIN_ABS = 1.0
 DA_MULTIPLIER = 1.1
 FIVE_YEAR_POINTS = 5
 TEN_YEAR_POINTS = 10
+AVG_WINDOW = 3
+OE_CAGR_YEARS = 7
 
 
 @dataclass(frozen=True)
@@ -261,6 +263,72 @@ class OwnerEarningsEnterpriseCalculator:
         return OwnerEarningsEnterpriseFYSeriesSnapshot(
             points=tuple(selected),
             as_of=selected[0].as_of,
+            currency=series_currency,
+        )
+
+    def compute_10y_cagr(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> Optional[OwnerEarningsEnterpriseSnapshot]:
+        points = self._build_fy_points(
+            symbol,
+            repo,
+            context="owner_earnings_cagr_10y",
+        )
+        if points is None:
+            return None
+        if len(points) < TEN_YEAR_POINTS:
+            LOGGER.warning(
+                "owner_earnings_cagr_10y: need 10 FY owner earnings values for %s, found %s",
+                symbol,
+                len(points),
+            )
+            return None
+
+        latest_ten = points[:TEN_YEAR_POINTS]
+        if not self._is_recent_as_of(
+            latest_ten[0].as_of, max_age_days=MAX_FY_FACT_AGE_DAYS
+        ):
+            LOGGER.warning(
+                "owner_earnings_cagr_10y: latest FY (%s) too old for %s",
+                latest_ten[0].as_of,
+                symbol,
+            )
+            return None
+
+        series_currency = self._combine_currency(
+            [point.currency for point in latest_ten]
+        )
+        if series_currency is None and any(
+            point.currency is not None for point in latest_ten
+        ):
+            LOGGER.warning(
+                "owner_earnings_cagr_10y: currency mismatch across selected FY series for %s",
+                symbol,
+            )
+            return None
+
+        ordered = list(reversed(latest_ten))
+        start_values = [point.value for point in ordered[:AVG_WINDOW]]
+        end_values = [point.value for point in ordered[-AVG_WINDOW:]]
+        if any(value <= 0 for value in start_values + end_values):
+            LOGGER.warning(
+                "owner_earnings_cagr_10y: non-positive endpoint averages for %s",
+                symbol,
+            )
+            return None
+
+        start_avg = sum(start_values) / AVG_WINDOW
+        end_avg = sum(end_values) / AVG_WINDOW
+        if start_avg <= 0 or end_avg <= 0:
+            LOGGER.warning(
+                "owner_earnings_cagr_10y: invalid endpoint averages for %s",
+                symbol,
+            )
+            return None
+
+        return OwnerEarningsEnterpriseSnapshot(
+            value=(end_avg / start_avg) ** (1.0 / OE_CAGR_YEARS) - 1.0,
+            as_of=latest_ten[0].as_of,
             currency=series_currency,
         )
 

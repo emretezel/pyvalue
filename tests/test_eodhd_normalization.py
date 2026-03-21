@@ -274,6 +274,50 @@ def test_eodhd_normalizes_cost_of_revenue():
     assert derived[0].value == 580.0
 
 
+def test_eodhd_normalizes_common_stock_dividends_paid():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Cash_Flow": {
+                "quarterly": [
+                    {
+                        "date": "2024-12-31",
+                        "dividendsPaid": -25.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+    derived = [r for r in records if r.concept == "CommonStockDividendsPaid"]
+    assert derived, "CommonStockDividendsPaid should map from dividendsPaid"
+    assert derived[0].value == -25.0
+
+
+def test_eodhd_normalizes_dividend_share_from_highlights():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Highlights": {
+            "DividendShare": 3.2,
+            "MostRecentQuarter": "2024-09-30",
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+    derived = [
+        r for r in records if r.concept == "CommonStockDividendsPerShareCashPaid"
+    ]
+    assert derived, (
+        "CommonStockDividendsPerShareCashPaid should map from Highlights.DividendShare"
+    )
+    assert derived[0].value == 3.2
+    assert derived[0].end_date == "2024-09-30"
+
+
 def test_eodhd_normalizes_short_term_debt_and_cash_investments():
     normalizer = EODHDFactsNormalizer()
     payload = {

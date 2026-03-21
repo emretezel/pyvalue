@@ -138,13 +138,14 @@ EODHD_STATEMENT_FIELDS = {
         ],
         "CapitalExpenditures": ["capitalExpenditures", "capex"],
         "DepreciationFromCashFlow": ["depreciation"],
+        "CommonStockDividendsPaid": ["dividendsPaid"],
         "StockBasedCompensation": ["stockBasedCompensation"],
         "SalePurchaseOfStock": ["salePurchaseOfStock"],
         "IssuanceOfCapitalStock": ["issuanceOfCapitalStock"],
     },
 }
 
-EODHD_EXTRA_CONCEPTS = {"EnterpriseValue"}
+EODHD_EXTRA_CONCEPTS = {"EnterpriseValue", "CommonStockDividendsPerShareCashPaid"}
 EODHD_TARGET_CONCEPTS = {
     concept for statement in EODHD_STATEMENT_FIELDS.values() for concept in statement
 } | EODHD_EXTRA_CONCEPTS
@@ -229,6 +230,14 @@ class EODHDFactsNormalizer:
         records.extend(
             self._normalize_outstanding_shares(
                 payload, symbol, accounting_standard, currency_code
+            )
+        )
+        records.extend(
+            self._normalize_dividends_per_share(
+                payload,
+                symbol=symbol,
+                accounting_standard=accounting_standard,
+                default_currency=currency_code,
             )
         )
         records.extend(
@@ -665,6 +674,52 @@ class EODHDFactsNormalizer:
                     )
                 )
         return records
+
+    def _normalize_dividends_per_share(
+        self,
+        payload: Dict,
+        *,
+        symbol: str,
+        accounting_standard: Optional[str],
+        default_currency: Optional[str],
+    ) -> List[FactRecord]:
+        if "CommonStockDividendsPerShareCashPaid" not in self.concepts:
+            return []
+
+        highlights = payload.get("Highlights") or {}
+        raw_value = _to_float(highlights.get("DividendShare"))
+        if raw_value is None:
+            return []
+
+        end_date = self._extract_date({"date": highlights.get("MostRecentQuarter")})
+        if not end_date:
+            end_date = self._latest_financials_end_date(payload.get("Financials") or {})
+        if not end_date:
+            return []
+
+        currency = _normalize_currency_code(default_currency)
+        normalized_value, normalized_currency = self._normalize_value_currency(
+            raw_value, currency
+        )
+        if normalized_value is None:
+            return []
+
+        return [
+            FactRecord(
+                symbol=symbol.upper(),
+                concept="CommonStockDividendsPerShareCashPaid",
+                fiscal_period="",
+                end_date=end_date,
+                unit=currency or "",
+                value=normalized_value,
+                accn=None,
+                filed=None,
+                frame=None,
+                start_date=None,
+                accounting_standard=accounting_standard,
+                currency=normalized_currency,
+            )
+        ]
 
     def _build_implied_eps_maps(
         self, payload: Dict

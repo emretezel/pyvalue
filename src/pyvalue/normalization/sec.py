@@ -149,6 +149,12 @@ TARGET_CONCEPTS = {
     "Revenues",
     "RevenueFromContractWithCustomerExcludingAssessedTax",
     "SalesRevenueNet",
+    "GrossProfit",
+    "CostOfRevenue",
+    "CostOfGoodsSold",
+    "CostOfGoodsAndServicesSold",
+    "CostOfSales",
+    "CostOfServices",
     "EarningsPerShare",
     "EarningsPerShareDiluted",
     "DilutedEPS",
@@ -372,6 +378,12 @@ EBIT_FALLBACK_CONCEPTS = (
     "IncomeFromOperations",
     "OperatingProfitLoss",
 )
+COST_OF_REVENUE_FALLBACK_CONCEPTS = (
+    "CostOfGoodsSold",
+    "CostOfGoodsAndServicesSold",
+    "CostOfSales",
+    "CostOfServices",
+)
 PPE_FALLBACK_CONCEPTS = (
     "NetPropertyPlantAndEquipment",
     "PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetAfterAccumulatedDepreciationAndAmortization",
@@ -448,6 +460,7 @@ class SECFactsNormalizer:
         )
         records.extend(self._derive_capex_alias(records, symbol, cik_value))
         records.extend(self._derive_ebit_alias(records, symbol, cik_value))
+        records.extend(self._derive_cost_of_revenue_alias(records, symbol, cik_value))
         records.extend(self._derive_ppe_alias(records, symbol, cik_value))
         records.extend(
             self._derive_net_income_available_to_common(records, symbol, cik_value)
@@ -1212,6 +1225,35 @@ class SECFactsNormalizer:
             derived.append(
                 self._build_derived_record(
                     base, "OperatingIncomeLoss", base.value, symbol, cik
+                )
+            )
+        return derived
+
+    def _derive_cost_of_revenue_alias(
+        self,
+        records: List[FactRecord],
+        symbol: str,
+        cik: Optional[str],
+    ) -> List[FactRecord]:
+        indexed = self._index_records(records)
+        existing = indexed.get("CostOfRevenue", {})
+        candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
+        for concept in COST_OF_REVENUE_FALLBACK_CONCEPTS:
+            candidate_keys.update(indexed.get(concept, {}).keys())
+
+        derived: List[FactRecord] = []
+        for key in candidate_keys:
+            if existing.get(key):
+                continue
+            base = self._pick_preferred_record(
+                indexed.get(concept, {}).get(key)
+                for concept in COST_OF_REVENUE_FALLBACK_CONCEPTS
+            )
+            if base is None:
+                continue
+            derived.append(
+                self._build_derived_record(
+                    base, "CostOfRevenue", base.value, symbol, cik
                 )
             )
         return derived

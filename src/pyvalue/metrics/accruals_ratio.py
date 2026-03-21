@@ -114,6 +114,13 @@ class AccrualsRatioCalculator:
             currency=numerator_currency or average_assets.currency,
         )
 
+    def compute_avg_total_assets(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> Optional[_AmountResult]:
+        """Return the average-assets denominator used by accrual-based metrics."""
+
+        return self._compute_avg_total_assets(symbol, repo)
+
     def _compute_ttm_amount(
         self,
         symbol: str,

@@ -1201,6 +1201,12 @@ def test_cmd_compute_metrics_all(tmp_path):
                     fiscal_period="FY",
                     value=500 + 10 * (year - (current_year - 10)),
                 ),
+                make_fact(
+                    concept="WeightedAverageNumberOfDilutedSharesOutstanding",
+                    end_date=end_date,
+                    fiscal_period="FY",
+                    value=480 + 8 * (year - (current_year - 10)),
+                ),
             ]
         )
         records.extend(
@@ -1475,6 +1481,30 @@ def test_cmd_compute_metrics_all(tmp_path):
                 end_date=end_date,
                 fiscal_period=period,
                 value=value,
+            )
+        )
+        records.append(
+            make_fact(
+                concept="GrossProfit",
+                end_date=end_date,
+                fiscal_period=period,
+                value=value * 0.6,
+            )
+        )
+        records.append(
+            make_fact(
+                concept="CostOfRevenue",
+                end_date=end_date,
+                fiscal_period=period,
+                value=value * 0.4,
+            )
+        )
+        records.append(
+            make_fact(
+                concept="CommonStockDividendsPaid",
+                end_date=end_date,
+                fiscal_period=period,
+                value=-12.5,
             )
         )
     quarterly_eps = [

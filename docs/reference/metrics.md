@@ -44,6 +44,18 @@ Columns:
 | Stock-Based Compensation to Revenue | `sbc_to_revenue` | EODHD-oriented: `StockBasedCompensation_TTM / Revenues_TTM`. | Shows how much top-line output is offset by equity compensation and potential dilution. |
 | Stock-Based Compensation to Free Cash Flow | `sbc_to_fcf` | EODHD-oriented: `StockBasedCompensation_TTM / FCF_TTM`, with `FCF_TTM = OCF_TTM - Capex_TTM` and capex missing treated as `0`. | Helps judge whether apparent cash generation is being offset by large stock comp. |
 
+## Profitability / Returns
+
+| English Descriptive Name of the Metric | pyvalue key | How is it calculated | Why is it important in identifying quality/value stocks |
+| --- | --- | --- | --- |
+| Gross Margin (TTM) | `gross_margin_ttm` | `(Revenue_TTM - COGS_TTM) / Revenue_TTM`, where `COGS_TTM` prefers normalized `CostOfRevenue` and falls back to `Revenue - GrossProfit`; clamped to `[-1, 1]`. | A high and stable gross margin usually points to pricing power or a structurally advantaged business model. |
+| Operating Margin (TTM) | `operating_margin_ttm` | `EBIT_TTM / Revenue_TTM`. | Shows how much revenue survives normal operating costs before financing and tax noise. |
+| Free Cash Flow Margin (TTM) | `fcf_margin_ttm` | `FCF_TTM / Revenue_TTM`, where `FCF_TTM = OCF_TTM - Capex_TTM` and capex missing is treated as `0`. | Tests whether accounting profitability is translating into real free cash generation. |
+| Return on Equity (TTM) | `roe_ttm` | `NetIncome_TTM / AvgCommonEquity`, using quarterly same-quarter averaging first and strict FY fallback. | Highlights how efficiently management turns common equity into earnings. |
+| Return on Assets (TTM) | `roa_ttm` | `NetIncome_TTM / AvgTotalAssets`, where assets use strict same-quarter prior-year averaging. | Helps compare earnings power across firms with different leverage. |
+| Return on Tangible Common Equity (TTM) | `roetce_ttm` | `NetIncome_TTM / AvgTangibleCommonEquity`, where `TangibleCommonEquity = CommonEquity - Goodwill - Intangibles` with missing goodwill/intangibles treated as `0`. | Reduces goodwill-driven ROE distortion and is especially useful for acquisitive businesses. |
+| Gross Profit to Assets (TTM) | `gross_profit_to_assets_ttm` | `(Revenue_TTM - COGS_TTM) / AvgTotalAssets`, using the same TTM gross-profit logic as `gross_margin_ttm` and the accruals-style asset average. | A strong ratio indicates the asset base is generating a lot of gross economic output before overhead. |
+
 ## Owner Earnings
 
 | English Descriptive Name of the Metric | pyvalue key | How is it calculated | Why is it important in identifying quality/value stocks |
@@ -106,6 +118,22 @@ Columns:
 | Share Count CAGR (10Y) | `share_count_cagr_10y` | Uses point-in-time outstanding shares only: `((Shares_t / Shares_t-10)^(1/10)) - 1`, preferring MRQ then falling back to FY. | Long-run dilution or shrinkage materially changes per-share value compounding. |
 | Share Count Percentage Change (10Y) | `shares_10y_pct_change` | Exact 10-year point-in-time share-count change: `(Shares_t / Shares_t-10) - 1`, using the same pairing rules as `share_count_cagr_10y`. | Gives a direct measure of dilution or buyback behavior over a decade. |
 | Net Buyback Yield | `net_buyback_yield` | EODHD-oriented: primary `-TTM(SalePurchaseOfStock) / market_cap_snapshot`, with issuance-only fallback and 1Y share-count fallback. | Captures whether management is shrinking or diluting the share base in value-relevant terms. |
+
+## Shareholder Returns / Distribution
+
+| English Descriptive Name of the Metric | pyvalue key | How is it calculated | Why is it important in identifying quality/value stocks |
+| --- | --- | --- | --- |
+| Dividend Yield (TTM) | `dividend_yield_ttm` | Primary `abs(CommonStockDividendsPaid_TTM) / market_cap_snapshot`; fallback `CommonStockDividendsPerShareCashPaid / latest price` when the cash-dividend path is unavailable. | Separates actual cash returned to owners from forward-looking provider yield fields. |
+| Shareholder Yield (TTM) | `shareholder_yield_ttm` | `dividend_yield_ttm + net_buyback_yield`, emitted only when both inputs are available. | Combines cash dividends and buybacks into one capital-allocation return measure. |
+| Dividend Payout Ratio (TTM) | `dividend_payout_ratio_ttm` | `abs(CommonStockDividendsPaid_TTM) / NetIncome_TTM`, only when `NetIncome_TTM > 0`. | Flags whether the dividend is comfortably covered by trailing earnings. |
+
+## Growth / Compounding
+
+| English Descriptive Name of the Metric | pyvalue key | How is it calculated | Why is it important in identifying quality/value stocks |
+| --- | --- | --- | --- |
+| Revenue CAGR (10Y) | `revenue_cagr_10y` | Strict FY endpoint CAGR: `((Revenue_FY0 / Revenue_FY-10)^(1/10)) - 1`. | Long-run sales compounding is a basic test of market opportunity and business relevance. |
+| Free Cash Flow per Share CAGR (10Y) | `fcf_per_share_cagr_10y` | Strict FY endpoint CAGR of `(FCF_FY / DilutedShares_FY)`, where `FCF_FY = OCF_FY - Capex_FY`. | Filters out growth that came from dilution rather than improving per-share economics. |
+| Owner Earnings CAGR (10Y) | `owner_earnings_cagr_10y` | EODHD-oriented enterprise owner-earnings CAGR using the latest 10 eligible FY OE points and 3-year average endpoints, mirroring the Graham-style EPS CAGR approach. | Tests whether maintenance-adjusted operating cash earnings are compounding over time, not just reported accounting profit. |
 
 ## Screening Utility / Misc
 
