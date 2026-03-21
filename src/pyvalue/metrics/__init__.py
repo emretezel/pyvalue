@@ -52,6 +52,10 @@ from .owner_earnings_enterprise import (
     OwnerEarningsEnterpriseFiveYearAverageMetric,
 )
 from .gross_margin_stability import GrossMarginTenYearStdMetric
+from .operating_margin_stability import (
+    OperatingMarginTenYearMinMetric,
+    OperatingMarginTenYearStdMetric,
+)
 
 REGISTRY = {
     WorkingCapitalMetric.id: WorkingCapitalMetric,
@@ -79,6 +83,8 @@ REGISTRY = {
     ROIC10YMinMetric.id: ROIC10YMinMetric,
     IncrementalROICFiveYearMetric.id: IncrementalROICFiveYearMetric,
     GrossMarginTenYearStdMetric.id: GrossMarginTenYearStdMetric,
+    OperatingMarginTenYearStdMetric.id: OperatingMarginTenYearStdMetric,
+    OperatingMarginTenYearMinMetric.id: OperatingMarginTenYearMinMetric,
     ReturnOnInvestedCapitalMetric.id: ReturnOnInvestedCapitalMetric,
     MCapexFYMetric.id: MCapexFYMetric,
     MCapexFiveYearMetric.id: MCapexFiveYearMetric,
@@ -127,6 +133,8 @@ __all__ = [
     "ROIC10YMinMetric",
     "IncrementalROICFiveYearMetric",
     "GrossMarginTenYearStdMetric",
+    "OperatingMarginTenYearStdMetric",
+    "OperatingMarginTenYearMinMetric",
     "ReturnOnInvestedCapitalMetric",
     "MCapexFYMetric",
     "MCapexFiveYearMetric",

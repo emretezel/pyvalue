@@ -48,6 +48,10 @@ from pyvalue.metrics.owner_earnings_enterprise import (
     OwnerEarningsEnterpriseFiveYearAverageMetric,
     OwnerEarningsEnterpriseTTMMetric,
 )
+from pyvalue.metrics.operating_margin_stability import (
+    OperatingMarginTenYearMinMetric,
+    OperatingMarginTenYearStdMetric,
+)
 from pyvalue.metrics.price_to_fcf import PriceToFCFMetric
 from pyvalue.metrics.roc_greenblatt import ROCGreenblattMetric
 from pyvalue.metrics.roic_fy_series import (
@@ -625,6 +629,60 @@ def _base_gm_10y_concepts(
                     fiscal_period="FY",
                     end_date=end_date,
                     value=cost_of_revenue,
+                    currency=currency,
+                )
+            )
+    return concepts
+
+
+def _base_opm_10y_concepts(
+    *,
+    latest_year=None,
+    revenue_by_year=None,
+    operating_income_by_year=None,
+    currency_by_year=None,
+):
+    if latest_year is None:
+        latest_year = date.today().year - 1
+    years = list(range(latest_year - 9, latest_year + 1))
+
+    if revenue_by_year is None:
+        revenue_by_year = {year: 1000.0 + 10.0 * idx for idx, year in enumerate(years)}
+    if operating_income_by_year is None:
+        operating_income_by_year = {
+            year: revenue_by_year[year] * (0.05 + 0.01 * idx)
+            for idx, year in enumerate(years)
+            if year in revenue_by_year
+        }
+    if currency_by_year is None:
+        currency_by_year = {}
+
+    concepts = {
+        "Revenues": [],
+        "OperatingIncomeLoss": [],
+    }
+    for year in years:
+        currency = currency_by_year.get(year, "USD")
+        end_date = f"{year}-09-30"
+        revenue = revenue_by_year.get(year)
+        if revenue is not None:
+            concepts["Revenues"].append(
+                fact(
+                    concept="Revenues",
+                    fiscal_period="FY",
+                    end_date=end_date,
+                    value=revenue,
+                    currency=currency,
+                )
+            )
+        operating_income = operating_income_by_year.get(year)
+        if operating_income is not None:
+            concepts["OperatingIncomeLoss"].append(
+                fact(
+                    concept="OperatingIncomeLoss",
+                    fiscal_period="FY",
+                    end_date=end_date,
+                    value=operating_income,
                     currency=currency,
                 )
             )
@@ -2762,6 +2820,95 @@ def test_gm_10y_std_returns_none_when_latest_fy_stale():
     )
     result = metric.compute("AAPL.US", repo)
     assert result is None
+
+
+def test_opm_10y_metrics_happy_path():
+    std_metric = OperatingMarginTenYearStdMetric()
+    min_metric = OperatingMarginTenYearMinMetric()
+    repo = _build_ic_repo(concept_records=_base_opm_10y_concepts())
+
+    std_result = std_metric.compute("AAPL.US", repo)
+    min_result = min_metric.compute("AAPL.US", repo)
+
+    assert std_result is not None
+    assert min_result is not None
+
+    margins = [0.05 + 0.01 * idx for idx in range(10)]
+    mean = sum(margins) / len(margins)
+    expected_std = (sum((value - mean) ** 2 for value in margins) / len(margins)) ** 0.5
+    assert round(std_result.value, 12) == round(expected_std, 12)
+    assert round(min_result.value, 12) == round(min(margins), 12)
+
+
+def test_opm_10y_returns_none_when_strict_window_missing_year():
+    metric = OperatingMarginTenYearStdMetric()
+    latest_year = date.today().year - 1
+    concepts = _base_opm_10y_concepts(latest_year=latest_year)
+    concepts["OperatingIncomeLoss"] = [
+        record
+        for record in concepts["OperatingIncomeLoss"]
+        if record.end_date != f"{latest_year - 5}-09-30"
+    ]
+    repo = _build_ic_repo(concept_records=concepts)
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_opm_10y_returns_none_when_revenue_non_positive():
+    metric = OperatingMarginTenYearStdMetric()
+    latest_year = date.today().year - 1
+    concepts = _base_opm_10y_concepts(
+        latest_year=latest_year,
+        revenue_by_year={
+            year: (0.0 if year == latest_year else 1000.0 + idx * 10.0)
+            for idx, year in enumerate(range(latest_year - 9, latest_year + 1))
+        },
+    )
+    repo = _build_ic_repo(concept_records=concepts)
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_opm_10y_returns_none_on_series_currency_conflict():
+    metric = OperatingMarginTenYearStdMetric()
+    latest_year = date.today().year - 1
+    concepts = _base_opm_10y_concepts(
+        latest_year=latest_year,
+        currency_by_year={latest_year - 2: "EUR"},
+    )
+    repo = _build_ic_repo(concept_records=concepts)
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_opm_10y_returns_none_when_latest_fy_stale():
+    metric = OperatingMarginTenYearStdMetric()
+    stale_latest_year = date.today().year - 3
+    repo = _build_ic_repo(
+        concept_records=_base_opm_10y_concepts(latest_year=stale_latest_year)
+    )
+    result = metric.compute("AAPL.US", repo)
+    assert result is None
+
+
+def test_opm_10y_min_keeps_signed_negative_margin():
+    metric = OperatingMarginTenYearMinMetric()
+    latest_year = date.today().year - 1
+    concepts = _base_opm_10y_concepts(
+        latest_year=latest_year,
+        operating_income_by_year={
+            year: (
+                -20.0
+                if year == latest_year - 4
+                else (1000.0 + 10.0 * idx) * (0.05 + 0.01 * idx)
+            )
+            for idx, year in enumerate(range(latest_year - 9, latest_year + 1))
+        },
+    )
+    repo = _build_ic_repo(concept_records=concepts)
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert round(result.value, 12) == round(-20.0 / (1000.0 + 10.0 * 5), 12)
 
 
 def test_debt_paydown_years_skips_non_positive_fcf():
@@ -8685,3 +8832,5 @@ def test_registry_contains_all_ids():
     assert "roic_10y_min" in REGISTRY
     assert "iroic_5y" in REGISTRY
     assert "gm_10y_std" in REGISTRY
+    assert "opm_10y_std" in REGISTRY
+    assert "opm_10y_min" in REGISTRY
