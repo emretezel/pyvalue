@@ -1,0 +1,84 @@
+criteria:
+  - name: "Minimum market cap (investable liquidity floor)"
+    left:
+      metric: market_cap
+    operator: ">"
+    right:
+      value: 2000000000
+
+  - name: "Positive trailing EPS (avoid structurally loss-making)"
+    left:
+      metric: eps_ttm
+    operator: ">"
+    right:
+      value: 0
+
+  - name: "ROIC median (10Y) >= 10% (durable economics)"
+    left:
+      metric: roic_10y_median
+    operator: ">="
+    right:
+      value: 0.10
+
+  - name: "ROIC minimum (10Y) >= 3% (avoid chronic weak years)"
+    left:
+      metric: roic_10y_min
+    operator: ">="
+    right:
+      value: 0.03
+
+  - name: "Operating margin minimum (10Y) >= 5% (baseline profitability)"
+    left:
+      metric: opm_10y_min
+    operator: ">="
+    right:
+      value: 0.05
+
+  - name: "Operating margin stability (10Y std) <= 7pp"
+    left:
+      metric: opm_10y_std
+    operator: "<="
+    right:
+      value: 0.07
+
+  - name: "Cash conversion (CFO / NI TTM) >= 0.90"
+    left:
+      metric: cfo_to_ni_ttm
+    operator: ">="
+    right:
+      value: 0.90
+
+  - name: "Accruals ratio <= 10% (earnings quality check)"
+    left:
+      metric: accruals_ratio
+    operator: "<="
+    right:
+      value: 0.10
+
+  - name: "Net debt / EBITDA <= 2.5x (conservative leverage)"
+    left:
+      metric: net_debt_to_ebitda
+    operator: "<="
+    right:
+      value: 2.5
+
+  - name: "Interest coverage >= 6x (debt-service capacity)"
+    left:
+      metric: interest_coverage
+    operator: ">="
+    right:
+      value: 6
+
+  - name: "FCF median (5Y FY) > 0 (structural free cash generation)"
+    left:
+      metric: fcf_fy_median_5y
+    operator: ">"
+    right:
+      value: 0
+
+  - name: "Share count CAGR (10Y) <= +1% (avoid heavy dilution)"
+    left:
+      metric: share_count_cagr_10y
+    operator: "<="
+    right:
+      value: 0.01
