@@ -1,0 +1,29 @@
+criteria:
+  - name: "Minimum market cap"
+    left:
+      metric: market_cap
+    operator: ">"
+    right:
+      value: 750000000
+
+  - name: "Current ratio floor"
+    left:
+      metric: current_ratio
+    operator: ">="
+    right:
+      value: 1.25
+
+  - name: "Positive earnings yield"
+    left:
+      metric: earnings_yield
+    operator: ">"
+    right:
+      value: 0
+
+  - name: "Long-term debt vs working capital"
+    left:
+      metric: long_term_debt
+    operator: "<="
+    right:
+      metric: working_capital
+      multiplier: 1.75

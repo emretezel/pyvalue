@@ -3,7 +3,10 @@
 Author: Emre Tezel
 """
 
+from pathlib import Path
+
 from pyvalue.screening import Criterion, Term, evaluate_criterion
+from pyvalue.screening import load_screen
 from pyvalue.storage import FinancialFactsRepository, MetricsRepository
 
 
@@ -59,3 +62,21 @@ def test_evaluate_criterion_supports_constant_terms(tmp_path):
     )
 
     assert evaluate_criterion(criterion, "AAPL.US", metrics_repo, fact_repo) is True
+
+
+def test_load_screen_parses_basic_value_example():
+    screen_path = Path(__file__).resolve().parents[1] / "screeners" / "basic_value.yml"
+
+    definition = load_screen(screen_path)
+
+    assert len(definition.criteria) == 4
+    assert {criterion.operator for criterion in definition.criteria} == {
+        ">",
+        ">=",
+        "<=",
+    }
+    assert definition.criteria[0].left.metric == "market_cap"
+    assert definition.criteria[0].right.value == 750000000
+    assert definition.criteria[3].left.metric == "long_term_debt"
+    assert definition.criteria[3].right.metric == "working_capital"
+    assert definition.criteria[3].right.multiplier == 1.75

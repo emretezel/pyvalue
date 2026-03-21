@@ -172,21 +172,33 @@ Key options:
 
 Evaluate a YAML screen for one symbol.
 
+Metrics must already be computed and stored before running the screen. For the YAML schema, example files, and workflow details, see the [Screening Guide](../guides/screening.md).
+
 Key options:
 - positional `symbol`
 - positional `config`
 - `--exchange-code <code>`
 - `--database <path>`
 
+Exit behavior:
+- returns `0` only when all criteria pass
+- returns non-zero when any criterion fails
+
 ### `run-screen-bulk`
 
 Evaluate a YAML screen for all symbols in an exchange universe.
+
+Metrics must already be computed and stored before running the screen. For the YAML schema, example files, and workflow details, see the [Screening Guide](../guides/screening.md).
 
 Key options:
 - positional `config`
 - `--exchange-code <code>`
 - `--output-csv <path>`
 - `--database <path>`
+
+Exit behavior:
+- returns `0` when at least one symbol passes
+- returns non-zero when no symbols satisfy all criteria
 
 ## Maintenance Commands
 
