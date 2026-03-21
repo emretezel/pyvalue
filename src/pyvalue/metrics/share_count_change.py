@@ -50,10 +50,25 @@ class ShareCountChangeCalculator:
     def compute_pair(
         self, symbol: str, repo: FinancialFactsRepository
     ) -> Optional[ShareCountTenYearSnapshot]:
+        return self.compute_pair_for_years(
+            symbol,
+            repo,
+            exact_years=EXACT_YEARS,
+            context="share_count_change",
+        )
+
+    def compute_pair_for_years(
+        self,
+        symbol: str,
+        repo: FinancialFactsRepository,
+        *,
+        exact_years: int,
+        context: str,
+    ) -> Optional[ShareCountTenYearSnapshot]:
         records = repo.facts_for_concept(symbol, SHARE_COUNT_CONCEPT)
         if not records:
             LOGGER.warning(
-                "share_count_change: missing outstanding share history for %s", symbol
+                "%s: missing outstanding share history for %s", context, symbol
             )
             return None
 
@@ -62,7 +77,9 @@ class ShareCountChangeCalculator:
             symbol,
             quarterly,
             max_age_days=MAX_FACT_AGE_DAYS,
+            exact_years=exact_years,
             context="quarterly",
+            logger_context=context,
         )
         if quarterly_snapshot is not None:
             return quarterly_snapshot
@@ -72,13 +89,17 @@ class ShareCountChangeCalculator:
             symbol,
             fy,
             max_age_days=MAX_FY_FACT_AGE_DAYS,
+            exact_years=exact_years,
             context="fy",
+            logger_context=context,
         )
         if fy_snapshot is not None:
             return fy_snapshot
 
         LOGGER.warning(
-            "share_count_change: no valid exact 10-year share-count pair for %s",
+            "%s: no valid exact %s-year share-count pair for %s",
+            context,
+            exact_years,
             symbol,
         )
         return None
@@ -89,7 +110,9 @@ class ShareCountChangeCalculator:
         records: Sequence[FactRecord],
         *,
         max_age_days: int,
+        exact_years: int,
         context: str,
+        logger_context: str,
     ) -> Optional[ShareCountTenYearSnapshot]:
         if not records:
             return None
@@ -99,7 +122,8 @@ class ShareCountChangeCalculator:
             return None
         if not is_recent_fact(records[0], max_age_days=max_age_days):
             LOGGER.warning(
-                "share_count_change: latest %s share-count point (%s) too old for %s",
+                "%s: latest %s share-count point (%s) too old for %s",
+                logger_context,
                 context,
                 records[0].end_date,
                 symbol,
@@ -107,13 +131,14 @@ class ShareCountChangeCalculator:
             return None
         if latest.shares <= 0:
             LOGGER.warning(
-                "share_count_change: non-positive latest %s share count for %s",
+                "%s: non-positive latest %s share count for %s",
+                logger_context,
                 context,
                 symbol,
             )
             return None
 
-        target_year = latest.year - EXACT_YEARS
+        target_year = latest.year - exact_years
         prior: Optional[_ShareCountPoint] = None
         for record in records[1:]:
             point = self._to_point(record)
@@ -128,15 +153,17 @@ class ShareCountChangeCalculator:
 
         if prior is None:
             LOGGER.warning(
-                "share_count_change: missing exact %s-year %s match for %s",
-                EXACT_YEARS,
+                "%s: missing exact %s-year %s match for %s",
+                logger_context,
+                exact_years,
                 context,
                 symbol,
             )
             return None
         if prior.shares <= 0:
             LOGGER.warning(
-                "share_count_change: non-positive prior %s share count for %s",
+                "%s: non-positive prior %s share count for %s",
+                logger_context,
                 context,
                 symbol,
             )

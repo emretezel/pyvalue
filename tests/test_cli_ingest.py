@@ -1399,13 +1399,13 @@ def test_cmd_compute_metrics_all(tmp_path):
             )
         )
     quarterly_cash_flows = [
-        (q4, "Q4", 130.0, 40.0),
-        (q3, "Q3", 120.0, 35.0),
-        (q2, "Q2", 110.0, 30.0),
-        (q1, "Q1", 100.0, 25.0),
-        (q4_prev, "Q4", 90.0, 20.0),
+        (q4, "Q4", 130.0, 40.0, -60.0),
+        (q3, "Q3", 120.0, 35.0, -55.0),
+        (q2, "Q2", 110.0, 30.0, -50.0),
+        (q1, "Q1", 100.0, 25.0, -45.0),
+        (q4_prev, "Q4", 90.0, 20.0, -40.0),
     ]
-    for end_date, period, ocf, capex in quarterly_cash_flows:
+    for end_date, period, ocf, capex, sale_purchase in quarterly_cash_flows:
         records.append(
             make_fact(
                 concept="NetCashProvidedByUsedInOperatingActivities",
@@ -1428,6 +1428,14 @@ def test_cmd_compute_metrics_all(tmp_path):
                 end_date=end_date,
                 fiscal_period=period,
                 value=capex * 0.8,
+            )
+        )
+        records.append(
+            make_fact(
+                concept="SalePurchaseOfStock",
+                end_date=end_date,
+                fiscal_period=period,
+                value=sale_purchase,
             )
         )
     quarterly_net_income = [

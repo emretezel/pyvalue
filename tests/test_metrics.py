@@ -7,6 +7,7 @@ from datetime import date, timedelta
 
 from pyvalue.metrics import REGISTRY
 from pyvalue.metrics.accruals_ratio import AccrualsRatioMetric
+from pyvalue.metrics.buyback_yield import NetBuybackYieldMetric
 from pyvalue.metrics.cash_conversion import (
     CFOToNITenYearMedianMetric,
     CFOToNITTMMetric,
@@ -5842,6 +5843,21 @@ def _build_share_count_records(
     }
 
 
+def _build_market_repo(*, market_cap, as_of, currency="USD"):
+    class DummyMarketRepo:
+        def latest_snapshot(self, symbol):
+            class Snapshot:
+                pass
+
+            snapshot = Snapshot()
+            snapshot.market_cap = market_cap
+            snapshot.as_of = as_of
+            snapshot.currency = currency
+            return snapshot
+
+    return DummyMarketRepo()
+
+
 class _OwnerEarningsRepo:
     def __init__(self, records_by_concept):
         self.records_by_concept = records_by_concept
@@ -9783,6 +9799,330 @@ def test_share_count_change_metrics_ignore_weighted_average_share_concepts():
     assert Shares10YPctChangeMetric().compute(symbol, repo) is None
 
 
+def test_net_buyback_yield_metric_computes_from_sale_purchase_ttm():
+    metric = NetBuybackYieldMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+
+    repo = _OwnerEarningsRepo(
+        {
+            "SalePurchaseOfStock": _quarterly_records(
+                "SalePurchaseOfStock",
+                (q4, q3, q2, q1),
+                (-40.0, -30.0, -20.0, -10.0),
+                currency="USD",
+            )
+        }
+    )
+
+    result = metric.compute(
+        symbol,
+        repo,
+        _build_market_repo(market_cap=1000.0, as_of=q3),
+    )
+
+    assert result is not None
+    assert result.as_of == q4
+    assert result.value == 0.1
+
+
+def test_net_buyback_yield_metric_allows_negative_values_for_net_issuance():
+    metric = NetBuybackYieldMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+
+    repo = _OwnerEarningsRepo(
+        {
+            "SalePurchaseOfStock": _quarterly_records(
+                "SalePurchaseOfStock",
+                (q4, q3, q2, q1),
+                (40.0, 30.0, 20.0, 10.0),
+                currency="USD",
+            )
+        }
+    )
+
+    result = metric.compute(
+        symbol,
+        repo,
+        _build_market_repo(market_cap=1000.0, as_of=q3),
+    )
+
+    assert result is not None
+    assert result.value == -0.1
+
+
+def test_net_buyback_yield_metric_falls_back_to_issuance_cash_flow():
+    metric = NetBuybackYieldMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+
+    repo = _OwnerEarningsRepo(
+        {
+            "IssuanceOfCapitalStock": _quarterly_records(
+                "IssuanceOfCapitalStock",
+                (q4, q3, q2, q1),
+                (10.0, 10.0, 10.0, 10.0),
+                currency="USD",
+            )
+        }
+    )
+
+    result = metric.compute(
+        symbol,
+        repo,
+        _build_market_repo(market_cap=200.0, as_of=q3),
+    )
+
+    assert result is not None
+    assert result.value == -0.2
+
+
+def test_net_buyback_yield_metric_falls_back_to_share_count_when_market_cap_missing():
+    metric = NetBuybackYieldMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q4_prev = (today - timedelta(days=380)).isoformat()
+
+    repo = _OwnerEarningsRepo(
+        _build_share_count_records(
+            symbol=symbol,
+            points=[
+                ("Q4", q4, 90.0),
+                ("Q4", q4_prev, 100.0),
+            ],
+        )
+    )
+
+    result = metric.compute(
+        symbol,
+        repo,
+        _build_market_repo(market_cap=None, as_of=q4),
+    )
+
+    assert result is not None
+    assert result.as_of == q4
+    assert round(result.value, 10) == 0.1
+
+
+def test_net_buyback_yield_metric_returns_none_when_market_cap_missing_and_no_share_fallback():
+    metric = NetBuybackYieldMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+
+    repo = _OwnerEarningsRepo(
+        {
+            "SalePurchaseOfStock": _quarterly_records(
+                "SalePurchaseOfStock",
+                (q4, q3, q2, q1),
+                (-20.0, -20.0, -20.0, -20.0),
+                currency="USD",
+            )
+        }
+    )
+
+    assert (
+        metric.compute(symbol, repo, _build_market_repo(market_cap=None, as_of=q4))
+        is None
+    )
+
+
+def test_net_buyback_yield_metric_applies_fx_conversion(monkeypatch):
+    metric = NetBuybackYieldMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+
+    repo = _OwnerEarningsRepo(
+        {
+            "SalePurchaseOfStock": _quarterly_records(
+                "SalePurchaseOfStock",
+                (q4, q3, q2, q1),
+                (-40.0, -30.0, -20.0, -10.0),
+                currency="USD",
+            )
+        }
+    )
+
+    monkeypatch.setattr(
+        "pyvalue.metrics.buyback_yield.FXRateStore.convert",
+        lambda self, amount, from_currency, to_currency, as_of: amount * 2.0,
+    )
+
+    result = metric.compute(
+        symbol,
+        repo,
+        _build_market_repo(market_cap=500.0, as_of=q3, currency="EUR"),
+    )
+
+    assert result is not None
+    assert result.value == 0.1
+
+
+def test_net_buyback_yield_metric_uses_share_count_fallback_when_fx_conversion_fails(
+    monkeypatch,
+):
+    metric = NetBuybackYieldMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    q4_prev = (today - timedelta(days=380)).isoformat()
+
+    records = {
+        "SalePurchaseOfStock": _quarterly_records(
+            "SalePurchaseOfStock",
+            (q4, q3, q2, q1),
+            (-40.0, -30.0, -20.0, -10.0),
+            currency="USD",
+        )
+    }
+    records.update(
+        _build_share_count_records(
+            symbol=symbol,
+            points=[
+                ("Q4", q4, 90.0),
+                ("Q4", q4_prev, 100.0),
+            ],
+        )
+    )
+    repo = _OwnerEarningsRepo(records)
+
+    monkeypatch.setattr(
+        "pyvalue.metrics.buyback_yield.FXRateStore.convert",
+        lambda self, amount, from_currency, to_currency, as_of: None,
+    )
+
+    result = metric.compute(
+        symbol,
+        repo,
+        _build_market_repo(market_cap=500.0, as_of=q3, currency="EUR"),
+    )
+
+    assert result is not None
+    assert round(result.value, 10) == 0.1
+    assert result.as_of == q4
+
+
+def test_net_buyback_yield_metric_falls_back_to_fy_share_change():
+    metric = NetBuybackYieldMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    repo = _OwnerEarningsRepo(
+        _build_share_count_records(
+            symbol=symbol,
+            points=[
+                ("FY", f"{latest_year}-09-30", 120.0),
+                ("FY", f"{latest_year - 1}-09-30", 100.0),
+            ],
+        )
+    )
+
+    result = metric.compute(
+        symbol,
+        repo,
+        _build_market_repo(market_cap=None, as_of=f"{latest_year}-09-30"),
+    )
+
+    assert result is not None
+    assert round(result.value, 10) == -0.2
+
+
+def test_net_buyback_yield_metric_ignores_weighted_average_shares_in_fallback():
+    metric = NetBuybackYieldMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    repo = _OwnerEarningsRepo(
+        _build_share_count_records(
+            symbol=symbol,
+            concept="WeightedAverageNumberOfSharesOutstandingBasic",
+            points=[
+                ("FY", f"{latest_year}-09-30", 120.0),
+                ("FY", f"{latest_year - 1}-09-30", 100.0),
+            ],
+        )
+    )
+
+    assert (
+        metric.compute(
+            symbol,
+            repo,
+            _build_market_repo(market_cap=None, as_of=f"{latest_year}-09-30"),
+        )
+        is None
+    )
+
+
+def test_net_buyback_yield_metric_requires_strict_prior_year_share_pair():
+    metric = NetBuybackYieldMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    repo = _OwnerEarningsRepo(
+        _build_share_count_records(
+            symbol=symbol,
+            points=[
+                ("FY", f"{latest_year}-09-30", 120.0),
+                ("FY", f"{latest_year - 2}-09-30", 100.0),
+            ],
+        )
+    )
+
+    assert (
+        metric.compute(
+            symbol,
+            repo,
+            _build_market_repo(market_cap=None, as_of=f"{latest_year}-09-30"),
+        )
+        is None
+    )
+
+
+def test_net_buyback_yield_metric_requires_positive_share_counts_in_fallback():
+    metric = NetBuybackYieldMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    repo = _OwnerEarningsRepo(
+        _build_share_count_records(
+            symbol=symbol,
+            points=[
+                ("FY", f"{latest_year}-09-30", 120.0),
+                ("FY", f"{latest_year - 1}-09-30", 0.0),
+            ],
+        )
+    )
+
+    assert (
+        metric.compute(
+            symbol,
+            repo,
+            _build_market_repo(market_cap=None, as_of=f"{latest_year}-09-30"),
+        )
+        is None
+    )
+
+
 def test_registry_contains_all_ids():
     # Ensure the registry still exposes all metric identifiers
     assert len(REGISTRY) >= 1
@@ -9818,3 +10158,4 @@ def test_registry_contains_all_ids():
     assert "accruals_ratio" in REGISTRY
     assert "share_count_cagr_10y" in REGISTRY
     assert "shares_10y_pct_change" in REGISTRY
+    assert "net_buyback_yield" in REGISTRY

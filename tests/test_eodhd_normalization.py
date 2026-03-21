@@ -719,3 +719,51 @@ def test_eodhd_enterprise_value_falls_back_to_latest_statement_date():
     derived = [r for r in records if r.concept == "EnterpriseValue"]
     assert derived, "EnterpriseValue should fall back to latest statement date"
     assert derived[0].end_date == "2025-09-30"
+
+
+def test_eodhd_normalizes_sale_purchase_of_stock():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Cash_Flow": {
+                "quarterly": [
+                    {
+                        "date": "2024-12-31",
+                        "salePurchaseOfStock": -25.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.LSE")
+    derived = [r for r in records if r.concept == "SalePurchaseOfStock"]
+    assert derived, "SalePurchaseOfStock should map from salePurchaseOfStock"
+    assert derived[0].value == -25.0
+    assert derived[0].fiscal_period == "Q4"
+
+
+def test_eodhd_normalizes_issuance_of_capital_stock():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Cash_Flow": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "issuanceOfCapitalStock": 12.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.LSE")
+    derived = [r for r in records if r.concept == "IssuanceOfCapitalStock"]
+    assert derived, "IssuanceOfCapitalStock should map from issuanceOfCapitalStock"
+    assert derived[0].value == 12.0
+    assert derived[0].fiscal_period == "FY"
