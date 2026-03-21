@@ -16,6 +16,12 @@ from pyvalue.metrics.sbc_load import SBCToFCFMetric, SBCToRevenueMetric
 from pyvalue.metrics.current_ratio import CurrentRatioMetric
 from pyvalue.metrics.debt_paydown_years import DebtPaydownYearsMetric, FCFToDebtMetric
 from pyvalue.metrics.earnings_yield import EarningsYieldMetric
+from pyvalue.metrics.enterprise_value_ratios import (
+    EBITYieldEVMetric,
+    EVToEBITDAMetric,
+    EVToEBITMetric,
+    FCFYieldEVMetric,
+)
 from pyvalue.metrics.eps_average import EPSAverageSixYearMetric
 from pyvalue.metrics.eps_quarterly import EarningsPerShareTTM
 from pyvalue.metrics.eps_streak import EPSStreakMetric
@@ -5859,6 +5865,121 @@ def _build_market_repo(*, market_cap, as_of, currency="USD"):
     return DummyMarketRepo()
 
 
+def _build_ev_ratio_records(
+    *,
+    symbol: str,
+    q4: str,
+    q3: str,
+    q2: str,
+    q1: str,
+    ebit_values: tuple[float, float, float, float] = (100.0, 100.0, 100.0, 100.0),
+    ebit_currency: str = "USD",
+    ocf_values: tuple[float, float, float, float] | None = (
+        125.0,
+        125.0,
+        125.0,
+        125.0,
+    ),
+    capex_values: tuple[float, float, float, float] | None = (
+        25.0,
+        25.0,
+        25.0,
+        25.0,
+    ),
+    da_primary_values: tuple[float, float, float, float] | None = (
+        25.0,
+        25.0,
+        25.0,
+        25.0,
+    ),
+    da_fallback_values: tuple[float, float, float, float] | None = None,
+    enterprise_value: float | None = 1000.0,
+    enterprise_currency: str = "USD",
+    short_debt: float = 50.0,
+    long_debt: float = 150.0,
+    cash: float = 20.0,
+    balance_currency: str = "USD",
+) -> dict[str, list[FactRecord]]:
+    records: dict[str, list[FactRecord]] = {
+        "OperatingIncomeLoss": _quarterly_records(
+            "OperatingIncomeLoss",
+            (q4, q3, q2, q1),
+            ebit_values,
+            currency=ebit_currency,
+        )
+    }
+    if ocf_values is not None:
+        records["NetCashProvidedByUsedInOperatingActivities"] = _quarterly_records(
+            "NetCashProvidedByUsedInOperatingActivities",
+            (q4, q3, q2, q1),
+            ocf_values,
+            currency=ebit_currency,
+        )
+    if capex_values is not None:
+        records["CapitalExpenditures"] = _quarterly_records(
+            "CapitalExpenditures",
+            (q4, q3, q2, q1),
+            capex_values,
+            currency=ebit_currency,
+        )
+    if da_primary_values is not None:
+        records["DepreciationDepletionAndAmortization"] = _quarterly_records(
+            "DepreciationDepletionAndAmortization",
+            (q4, q3, q2, q1),
+            da_primary_values,
+            currency=ebit_currency,
+        )
+    if da_fallback_values is not None:
+        records["DepreciationFromCashFlow"] = _quarterly_records(
+            "DepreciationFromCashFlow",
+            (q4, q3, q2, q1),
+            da_fallback_values,
+            currency=ebit_currency,
+        )
+    if enterprise_value is not None:
+        records["EnterpriseValue"] = [
+            fact(
+                symbol=symbol,
+                concept="EnterpriseValue",
+                end_date=q4,
+                fiscal_period="",
+                value=enterprise_value,
+                currency=enterprise_currency,
+            )
+        ]
+    records["ShortTermDebt"] = [
+        fact(
+            symbol=symbol,
+            concept="ShortTermDebt",
+            end_date=q4,
+            fiscal_period="Q4",
+            value=short_debt,
+            currency=balance_currency,
+        )
+    ]
+    records["LongTermDebt"] = [
+        fact(
+            symbol=symbol,
+            concept="LongTermDebt",
+            end_date=q4,
+            fiscal_period="Q4",
+            value=long_debt,
+            currency=balance_currency,
+        )
+    ]
+    records["CashAndShortTermInvestments"] = [
+        fact(
+            symbol=symbol,
+            concept="CashAndShortTermInvestments",
+            end_date=q4,
+            fiscal_period="Q4",
+            value=cash,
+            currency=balance_currency,
+        )
+    ]
+    return records
+
+
 class _OwnerEarningsRepo:
     def __init__(self, records_by_concept):
         self.records_by_concept = records_by_concept
@@ -8955,6 +9076,271 @@ def test_oey_ev_metric_allows_negative_values():
     assert result.value == -0.1
 
 
+def test_ebit_yield_ev_metric_uses_normalized_enterprise_value():
+    metric = EBITYieldEVMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        _build_ev_ratio_records(symbol=symbol, q4=q4, q3=q3, q2=q2, q1=q1)
+    )
+
+    result = metric.compute(
+        symbol, repo, _build_market_repo(market_cap=999.0, as_of=q4)
+    )
+
+    assert result is not None
+    assert result.as_of == q4
+    assert result.value == 0.4
+
+
+def test_ebit_yield_ev_metric_falls_back_to_derived_ev_when_primary_missing():
+    metric = EBITYieldEVMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        _build_ev_ratio_records(
+            symbol=symbol,
+            q4=q4,
+            q3=q3,
+            q2=q2,
+            q1=q1,
+            enterprise_value=None,
+        )
+    )
+
+    result = metric.compute(
+        symbol, repo, _build_market_repo(market_cap=820.0, as_of=q4)
+    )
+
+    assert result is not None
+    assert result.value == 0.4
+
+
+def test_ebit_yield_ev_metric_allows_negative_values():
+    metric = EBITYieldEVMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        _build_ev_ratio_records(
+            symbol=symbol,
+            q4=q4,
+            q3=q3,
+            q2=q2,
+            q1=q1,
+            ebit_values=(-50.0, -50.0, -50.0, -50.0),
+        )
+    )
+
+    result = metric.compute(
+        symbol, repo, _build_market_repo(market_cap=999.0, as_of=q4)
+    )
+
+    assert result is not None
+    assert result.value == -0.2
+
+
+def test_fcf_yield_ev_metric_uses_existing_fcf_policy():
+    metric = FCFYieldEVMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        _build_ev_ratio_records(symbol=symbol, q4=q4, q3=q3, q2=q2, q1=q1)
+    )
+
+    result = metric.compute(
+        symbol, repo, _build_market_repo(market_cap=999.0, as_of=q4)
+    )
+
+    assert result is not None
+    assert result.value == 0.4
+
+
+def test_fcf_yield_ev_metric_uses_zero_capex_when_missing():
+    metric = FCFYieldEVMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        _build_ev_ratio_records(
+            symbol=symbol,
+            q4=q4,
+            q3=q3,
+            q2=q2,
+            q1=q1,
+            capex_values=None,
+        )
+    )
+
+    result = metric.compute(
+        symbol, repo, _build_market_repo(market_cap=999.0, as_of=q4)
+    )
+
+    assert result is not None
+    assert result.value == 0.5
+
+
+def test_fcf_yield_ev_metric_allows_negative_values():
+    metric = FCFYieldEVMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        _build_ev_ratio_records(
+            symbol=symbol,
+            q4=q4,
+            q3=q3,
+            q2=q2,
+            q1=q1,
+            ocf_values=(20.0, 20.0, 20.0, 20.0),
+            capex_values=(30.0, 30.0, 30.0, 30.0),
+        )
+    )
+
+    result = metric.compute(
+        symbol, repo, _build_market_repo(market_cap=999.0, as_of=q4)
+    )
+
+    assert result is not None
+    assert result.value == -0.04
+
+
+def test_ev_to_ebit_metric_computes_with_positive_ebit():
+    metric = EVToEBITMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        _build_ev_ratio_records(symbol=symbol, q4=q4, q3=q3, q2=q2, q1=q1)
+    )
+
+    result = metric.compute(
+        symbol, repo, _build_market_repo(market_cap=999.0, as_of=q4)
+    )
+
+    assert result is not None
+    assert result.value == 2.5
+
+
+def test_ev_to_ebit_metric_returns_none_when_ebit_non_positive():
+    metric = EVToEBITMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        _build_ev_ratio_records(
+            symbol=symbol,
+            q4=q4,
+            q3=q3,
+            q2=q2,
+            q1=q1,
+            ebit_values=(0.0, 0.0, 0.0, 0.0),
+        )
+    )
+
+    assert (
+        metric.compute(symbol, repo, _build_market_repo(market_cap=999.0, as_of=q4))
+        is None
+    )
+
+
+def test_ev_to_ebitda_metric_uses_component_ebitda_and_da_fallback():
+    metric = EVToEBITDAMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        _build_ev_ratio_records(
+            symbol=symbol,
+            q4=q4,
+            q3=q3,
+            q2=q2,
+            q1=q1,
+            da_primary_values=None,
+            da_fallback_values=(25.0, 25.0, 25.0, 25.0),
+        )
+    )
+
+    result = metric.compute(
+        symbol, repo, _build_market_repo(market_cap=999.0, as_of=q4)
+    )
+
+    assert result is not None
+    assert result.value == 2.0
+
+
+def test_ev_to_ebitda_metric_returns_none_when_ebitda_non_positive():
+    metric = EVToEBITDAMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        _build_ev_ratio_records(
+            symbol=symbol,
+            q4=q4,
+            q3=q3,
+            q2=q2,
+            q1=q1,
+            ebit_values=(-20.0, -20.0, -20.0, -20.0),
+            da_primary_values=(10.0, 10.0, 10.0, 10.0),
+        )
+    )
+
+    assert (
+        metric.compute(symbol, repo, _build_market_repo(market_cap=999.0, as_of=q4))
+        is None
+    )
+
+
+def test_ebit_yield_ev_metric_applies_fx_conversion(monkeypatch):
+    metric = EBITYieldEVMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        _build_ev_ratio_records(
+            symbol=symbol,
+            q4=q4,
+            q3=q3,
+            q2=q2,
+            q1=q1,
+            enterprise_value=500.0,
+            enterprise_currency="EUR",
+        )
+    )
+
+    monkeypatch.setattr(
+        "pyvalue.metrics.enterprise_value_ratios.FXRateStore.convert",
+        lambda self, amount, from_currency, to_currency, as_of: amount * 2.0,
+    )
+
+    result = metric.compute(
+        symbol, repo, _build_market_repo(market_cap=999.0, as_of=q4)
+    )
+
+    assert result is not None
+    assert result.value == 0.4
+
+
+def test_ebit_yield_ev_metric_returns_none_when_fx_conversion_fails(monkeypatch):
+    metric = EBITYieldEVMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        _build_ev_ratio_records(
+            symbol=symbol,
+            q4=q4,
+            q3=q3,
+            q2=q2,
+            q1=q1,
+            enterprise_value=500.0,
+            enterprise_currency="EUR",
+        )
+    )
+
+    monkeypatch.setattr(
+        "pyvalue.metrics.enterprise_value_ratios.FXRateStore.convert",
+        lambda self, amount, from_currency, to_currency, as_of: None,
+    )
+
+    assert (
+        metric.compute(symbol, repo, _build_market_repo(market_cap=999.0, as_of=q4))
+        is None
+    )
+
+
 def test_cfo_to_ni_ttm_metric():
     metric = CFOToNITTMMetric()
     quarter_dates = _net_debt_quarter_dates()
@@ -10453,5 +10839,9 @@ def test_registry_contains_all_ids():
     assert "share_count_cagr_10y" in REGISTRY
     assert "shares_10y_pct_change" in REGISTRY
     assert "net_buyback_yield" in REGISTRY
+    assert "ebit_yield_ev" in REGISTRY
+    assert "fcf_yield_ev" in REGISTRY
+    assert "ev_to_ebit" in REGISTRY
+    assert "ev_to_ebitda" in REGISTRY
     assert "sbc_to_revenue" in REGISTRY
     assert "sbc_to_fcf" in REGISTRY

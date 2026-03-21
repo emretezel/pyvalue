@@ -60,6 +60,12 @@ from .operating_margin_stability import (
 )
 from .share_count_change import ShareCountCAGR10YMetric, Shares10YPctChangeMetric
 from .buyback_yield import NetBuybackYieldMetric
+from .enterprise_value_ratios import (
+    EBITYieldEVMetric,
+    FCFYieldEVMetric,
+    EVToEBITMetric,
+    EVToEBITDAMetric,
+)
 from .sbc_load import SBCToFCFMetric, SBCToRevenueMetric
 
 REGISTRY = {
@@ -96,6 +102,10 @@ REGISTRY = {
     ShareCountCAGR10YMetric.id: ShareCountCAGR10YMetric,
     Shares10YPctChangeMetric.id: Shares10YPctChangeMetric,
     NetBuybackYieldMetric.id: NetBuybackYieldMetric,
+    EBITYieldEVMetric.id: EBITYieldEVMetric,
+    FCFYieldEVMetric.id: FCFYieldEVMetric,
+    EVToEBITMetric.id: EVToEBITMetric,
+    EVToEBITDAMetric.id: EVToEBITDAMetric,
     SBCToRevenueMetric.id: SBCToRevenueMetric,
     SBCToFCFMetric.id: SBCToFCFMetric,
     ReturnOnInvestedCapitalMetric.id: ReturnOnInvestedCapitalMetric,
@@ -154,6 +164,10 @@ __all__ = [
     "ShareCountCAGR10YMetric",
     "Shares10YPctChangeMetric",
     "NetBuybackYieldMetric",
+    "EBITYieldEVMetric",
+    "FCFYieldEVMetric",
+    "EVToEBITMetric",
+    "EVToEBITDAMetric",
     "SBCToRevenueMetric",
     "SBCToFCFMetric",
     "ReturnOnInvestedCapitalMetric",
