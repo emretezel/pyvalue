@@ -1131,6 +1131,18 @@ def test_cmd_compute_metrics_all(tmp_path):
                     concept="OperatingIncomeLoss", end_date=end_date, value=150 + year
                 ),
                 make_fact(
+                    concept="NetCashProvidedByUsedInOperatingActivities",
+                    end_date=end_date,
+                    fiscal_period="FY",
+                    value=220 + year,
+                ),
+                make_fact(
+                    concept="NetIncomeLoss",
+                    end_date=end_date,
+                    fiscal_period="FY",
+                    value=110 + (year - (current_year - 10)),
+                ),
+                make_fact(
                     concept="Revenues",
                     end_date=end_date,
                     fiscal_period="FY",

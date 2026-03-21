@@ -6,6 +6,10 @@ Author: Emre Tezel
 from datetime import date, timedelta
 
 from pyvalue.metrics import REGISTRY
+from pyvalue.metrics.cash_conversion import (
+    CFOToNITenYearMedianMetric,
+    CFOToNITTMMetric,
+)
 from pyvalue.metrics.current_ratio import CurrentRatioMetric
 from pyvalue.metrics.debt_paydown_years import DebtPaydownYearsMetric, FCFToDebtMetric
 from pyvalue.metrics.earnings_yield import EarningsYieldMetric
@@ -5708,6 +5712,49 @@ def _build_nwc_fy_records(
     }
 
 
+def _build_cash_conversion_fy_records(
+    symbol: str,
+    latest_year: int,
+    cfo_values: list[float],
+    ni_values: list[float],
+    *,
+    ni_concept: str = "NetIncomeLoss",
+    cfo_currency: str = "USD",
+    ni_currency: str = "USD",
+) -> dict[str, list[FactRecord]]:
+    cfo_records: list[FactRecord] = []
+    net_income_records: list[FactRecord] = []
+    for offset, (cfo_value, ni_value) in enumerate(
+        zip(cfo_values, ni_values, strict=True)
+    ):
+        year = latest_year - offset
+        end_date = f"{year}-09-30"
+        cfo_records.append(
+            fact(
+                symbol=symbol,
+                concept="NetCashProvidedByUsedInOperatingActivities",
+                fiscal_period="FY",
+                end_date=end_date,
+                value=cfo_value,
+                currency=cfo_currency,
+            )
+        )
+        net_income_records.append(
+            fact(
+                symbol=symbol,
+                concept=ni_concept,
+                fiscal_period="FY",
+                end_date=end_date,
+                value=ni_value,
+                currency=ni_currency,
+            )
+        )
+    return {
+        "NetCashProvidedByUsedInOperatingActivities": cfo_records,
+        ni_concept: net_income_records,
+    }
+
+
 class _OwnerEarningsRepo:
     def __init__(self, records_by_concept):
         self.records_by_concept = records_by_concept
@@ -8804,6 +8851,234 @@ def test_oey_ev_metric_allows_negative_values():
     assert result.value == -0.1
 
 
+def test_cfo_to_ni_ttm_metric():
+    metric = CFOToNITTMMetric()
+    quarter_dates = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        {
+            "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+                "NetCashProvidedByUsedInOperatingActivities",
+                quarter_dates,
+                (120.0, 110.0, 100.0, 90.0),
+            ),
+            "NetIncomeLoss": _quarterly_records(
+                "NetIncomeLoss",
+                quarter_dates,
+                (60.0, 55.0, 50.0, 45.0),
+            ),
+        }
+    )
+
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.as_of == quarter_dates[0]
+    assert result.value == 2.0
+
+
+def test_cfo_to_ni_ttm_metric_net_income_fallback():
+    metric = CFOToNITTMMetric()
+    quarter_dates = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        {
+            "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+                "NetCashProvidedByUsedInOperatingActivities",
+                quarter_dates,
+                (100.0, 100.0, 100.0, 100.0),
+            ),
+            "NetIncomeLossAvailableToCommonStockholdersBasic": _quarterly_records(
+                "NetIncomeLossAvailableToCommonStockholdersBasic",
+                quarter_dates,
+                (50.0, 50.0, 50.0, 50.0),
+            ),
+        }
+    )
+
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.value == 2.0
+
+
+def test_cfo_to_ni_ttm_metric_requires_four_quarters():
+    metric = CFOToNITTMMetric()
+    quarter_dates = _net_debt_quarter_dates()[:3]
+    repo = _OwnerEarningsRepo(
+        {
+            "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+                "NetCashProvidedByUsedInOperatingActivities",
+                quarter_dates,
+                (120.0, 110.0, 100.0),
+            ),
+            "NetIncomeLoss": _quarterly_records(
+                "NetIncomeLoss",
+                quarter_dates,
+                (60.0, 55.0, 50.0),
+            ),
+        }
+    )
+
+    assert metric.compute("AAPL.US", repo) is None
+
+
+def test_cfo_to_ni_ttm_metric_rejects_stale_latest_quarter():
+    metric = CFOToNITTMMetric()
+    today = date.today()
+    quarter_dates = (
+        (today - timedelta(days=420)).isoformat(),
+        (today - timedelta(days=510)).isoformat(),
+        (today - timedelta(days=600)).isoformat(),
+        (today - timedelta(days=690)).isoformat(),
+    )
+    repo = _OwnerEarningsRepo(
+        {
+            "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+                "NetCashProvidedByUsedInOperatingActivities",
+                quarter_dates,
+                (120.0, 110.0, 100.0, 90.0),
+            ),
+            "NetIncomeLoss": _quarterly_records(
+                "NetIncomeLoss",
+                quarter_dates,
+                (60.0, 55.0, 50.0, 45.0),
+            ),
+        }
+    )
+
+    assert metric.compute("AAPL.US", repo) is None
+
+
+def test_cfo_to_ni_ttm_metric_rejects_non_positive_net_income():
+    metric = CFOToNITTMMetric()
+    quarter_dates = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        {
+            "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+                "NetCashProvidedByUsedInOperatingActivities",
+                quarter_dates,
+                (120.0, 110.0, 100.0, 90.0),
+            ),
+            "NetIncomeLoss": _quarterly_records(
+                "NetIncomeLoss",
+                quarter_dates,
+                (10.0, -10.0, 0.0, 0.0),
+            ),
+        }
+    )
+
+    assert metric.compute("AAPL.US", repo) is None
+
+
+def test_cfo_to_ni_ttm_metric_rejects_currency_mismatch():
+    metric = CFOToNITTMMetric()
+    quarter_dates = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        {
+            "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+                "NetCashProvidedByUsedInOperatingActivities",
+                quarter_dates,
+                (120.0, 110.0, 100.0, 90.0),
+                currency="USD",
+            ),
+            "NetIncomeLoss": _quarterly_records(
+                "NetIncomeLoss",
+                quarter_dates,
+                (60.0, 55.0, 50.0, 45.0),
+                currency="EUR",
+            ),
+        }
+    )
+
+    assert metric.compute("AAPL.US", repo) is None
+
+
+def test_cfo_to_ni_10y_median_metric():
+    metric = CFOToNITenYearMedianMetric()
+    latest_year = date.today().year - 1
+    repo = _OwnerEarningsRepo(
+        _build_cash_conversion_fy_records(
+            "AAPL.US",
+            latest_year,
+            [100.0 * value for value in range(1, 11)],
+            [100.0] * 10,
+        )
+    )
+
+    result = metric.compute("AAPL.US", repo)
+    assert result is not None
+    assert result.as_of == f"{latest_year}-09-30"
+    assert result.value == 5.5
+
+
+def test_cfo_to_ni_10y_median_metric_requires_strict_consecutive_years():
+    metric = CFOToNITenYearMedianMetric()
+    latest_year = date.today().year - 1
+    records_by_concept = _build_cash_conversion_fy_records(
+        "AAPL.US",
+        latest_year,
+        [100.0 * value for value in range(1, 11)],
+        [100.0] * 10,
+    )
+    records_by_concept["NetCashProvidedByUsedInOperatingActivities"] = [
+        record
+        for record in records_by_concept["NetCashProvidedByUsedInOperatingActivities"]
+        if record.end_date != f"{latest_year - 4}-09-30"
+    ]
+
+    assert metric.compute("AAPL.US", _OwnerEarningsRepo(records_by_concept)) is None
+
+
+def test_cfo_to_ni_10y_median_metric_rejects_non_positive_net_income_year():
+    metric = CFOToNITenYearMedianMetric()
+    latest_year = date.today().year - 1
+    ni_values = [100.0] * 10
+    ni_values[3] = 0.0
+    repo = _OwnerEarningsRepo(
+        _build_cash_conversion_fy_records(
+            "AAPL.US",
+            latest_year,
+            [150.0] * 10,
+            ni_values,
+        )
+    )
+
+    assert metric.compute("AAPL.US", repo) is None
+
+
+def test_cfo_to_ni_10y_median_metric_rejects_stale_latest_fy():
+    metric = CFOToNITenYearMedianMetric()
+    latest_year = date.today().year - 2
+    repo = _OwnerEarningsRepo(
+        _build_cash_conversion_fy_records(
+            "AAPL.US",
+            latest_year,
+            [150.0] * 10,
+            [100.0] * 10,
+        )
+    )
+
+    assert metric.compute("AAPL.US", repo) is None
+
+
+def test_cfo_to_ni_10y_median_metric_rejects_currency_conflict():
+    metric = CFOToNITenYearMedianMetric()
+    latest_year = date.today().year - 1
+    records_by_concept = _build_cash_conversion_fy_records(
+        "AAPL.US",
+        latest_year,
+        [150.0] * 10,
+        [100.0] * 10,
+    )
+    records_by_concept["NetIncomeLoss"][5] = fact(
+        symbol="AAPL.US",
+        concept="NetIncomeLoss",
+        fiscal_period="FY",
+        end_date=f"{latest_year - 5}-09-30",
+        value=100.0,
+        currency="EUR",
+    )
+
+    assert metric.compute("AAPL.US", _OwnerEarningsRepo(records_by_concept)) is None
+
+
 def test_registry_contains_all_ids():
     # Ensure the registry still exposes all metric identifiers
     assert len(REGISTRY) >= 1
@@ -8834,3 +9109,5 @@ def test_registry_contains_all_ids():
     assert "gm_10y_std" in REGISTRY
     assert "opm_10y_std" in REGISTRY
     assert "opm_10y_min" in REGISTRY
+    assert "cfo_to_ni_ttm" in REGISTRY
+    assert "cfo_to_ni_10y_median" in REGISTRY
