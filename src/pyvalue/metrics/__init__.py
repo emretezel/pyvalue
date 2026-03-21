@@ -8,6 +8,7 @@ from .working_capital import WorkingCapitalMetric
 from .current_ratio import CurrentRatioMetric
 from .debt_paydown_years import DebtPaydownYearsMetric, FCFToDebtMetric
 from .cash_conversion import CFOToNITTMMetric, CFOToNITenYearMedianMetric
+from .accruals_ratio import AccrualsRatioMetric
 from .long_term_debt import LongTermDebtMetric
 from .eps_streak import EPSStreakMetric
 from .eps_quarterly import EarningsPerShareTTM
@@ -65,6 +66,7 @@ REGISTRY = {
     FCFToDebtMetric.id: FCFToDebtMetric,
     CFOToNITTMMetric.id: CFOToNITTMMetric,
     CFOToNITenYearMedianMetric.id: CFOToNITenYearMedianMetric,
+    AccrualsRatioMetric.id: AccrualsRatioMetric,
     LongTermDebtMetric.id: LongTermDebtMetric,
     EPSStreakMetric.id: EPSStreakMetric,
     EarningsPerShareTTM.id: EarningsPerShareTTM,
@@ -117,6 +119,7 @@ __all__ = [
     "FCFToDebtMetric",
     "CFOToNITTMMetric",
     "CFOToNITenYearMedianMetric",
+    "AccrualsRatioMetric",
     "LongTermDebtMetric",
     "EPSStreakMetric",
     "EarningsPerShareTTM",

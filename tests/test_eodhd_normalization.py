@@ -27,6 +27,29 @@ def test_eodhd_normalizes_ppe_net():
     assert rec.fiscal_period == "FY"
 
 
+def test_eodhd_normalizes_assets_from_total_assets():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Balance_Sheet": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "totalAssets": 250.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.LSE")
+    assets_records = [r for r in records if r.concept == "Assets"]
+    assert assets_records, "Assets should be normalized from totalAssets"
+    assert assets_records[0].value == 250.0
+
+
 def test_eodhd_derives_intangibles_excluding_goodwill_from_net():
     normalizer = EODHDFactsNormalizer()
     payload = {

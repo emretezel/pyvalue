@@ -6,6 +6,7 @@ Author: Emre Tezel
 from datetime import date, timedelta
 
 from pyvalue.metrics import REGISTRY
+from pyvalue.metrics.accruals_ratio import AccrualsRatioMetric
 from pyvalue.metrics.cash_conversion import (
     CFOToNITenYearMedianMetric,
     CFOToNITTMMetric,
@@ -5755,6 +5756,67 @@ def _build_cash_conversion_fy_records(
     }
 
 
+def _build_assets_quarter_records(
+    *,
+    symbol: str,
+    q4: str,
+    q3: str,
+    q2: str,
+    q1: str,
+    q4_prev: str,
+    values: tuple[float, float, float, float, float] = (
+        1000.0,
+        980.0,
+        960.0,
+        940.0,
+        800.0,
+    ),
+    currency: str = "USD",
+) -> list[FactRecord]:
+    return [
+        fact(
+            symbol=symbol,
+            concept="Assets",
+            fiscal_period="Q4",
+            end_date=q4,
+            value=values[0],
+            currency=currency,
+        ),
+        fact(
+            symbol=symbol,
+            concept="Assets",
+            fiscal_period="Q3",
+            end_date=q3,
+            value=values[1],
+            currency=currency,
+        ),
+        fact(
+            symbol=symbol,
+            concept="Assets",
+            fiscal_period="Q2",
+            end_date=q2,
+            value=values[2],
+            currency=currency,
+        ),
+        fact(
+            symbol=symbol,
+            concept="Assets",
+            fiscal_period="Q1",
+            end_date=q1,
+            value=values[3],
+            currency=currency,
+        ),
+        fact(
+            symbol=symbol,
+            concept="Assets",
+            fiscal_period="Q4",
+            end_date=q4_prev,
+            value=values[4],
+            currency=currency,
+        ),
+    ]
+
+
 class _OwnerEarningsRepo:
     def __init__(self, records_by_concept):
         self.records_by_concept = records_by_concept
@@ -9079,6 +9141,461 @@ def test_cfo_to_ni_10y_median_metric_rejects_currency_conflict():
     assert metric.compute("AAPL.US", _OwnerEarningsRepo(records_by_concept)) is None
 
 
+def test_accruals_ratio_metric():
+    metric = AccrualsRatioMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    q4_prev = (today - timedelta(days=380)).isoformat()
+
+    repo = _OwnerEarningsRepo(
+        {
+            "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+                "NetCashProvidedByUsedInOperatingActivities",
+                (q4, q3, q2, q1),
+                (120.0, 110.0, 100.0, 90.0),
+            ),
+            "NetIncomeLoss": _quarterly_records(
+                "NetIncomeLoss",
+                (q4, q3, q2, q1),
+                (150.0, 140.0, 130.0, 120.0),
+            ),
+            "Assets": _build_assets_quarter_records(
+                symbol=symbol,
+                q4=q4,
+                q3=q3,
+                q2=q2,
+                q1=q1,
+                q4_prev=q4_prev,
+                values=(1000.0, 980.0, 960.0, 940.0, 800.0),
+            ),
+        }
+    )
+
+    result = metric.compute(symbol, repo)
+    assert result is not None
+    assert result.as_of == q4
+    assert result.value == 120.0 / 900.0
+
+
+def test_accruals_ratio_metric_net_income_fallback():
+    metric = AccrualsRatioMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    q4_prev = (today - timedelta(days=380)).isoformat()
+
+    repo = _OwnerEarningsRepo(
+        {
+            "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+                "NetCashProvidedByUsedInOperatingActivities",
+                (q4, q3, q2, q1),
+                (100.0, 100.0, 100.0, 100.0),
+            ),
+            "NetIncomeLossAvailableToCommonStockholdersBasic": _quarterly_records(
+                "NetIncomeLossAvailableToCommonStockholdersBasic",
+                (q4, q3, q2, q1),
+                (150.0, 150.0, 150.0, 150.0),
+            ),
+            "Assets": _build_assets_quarter_records(
+                symbol=symbol,
+                q4=q4,
+                q3=q3,
+                q2=q2,
+                q1=q1,
+                q4_prev=q4_prev,
+            ),
+        }
+    )
+
+    result = metric.compute(symbol, repo)
+    assert result is not None
+    assert result.value == 200.0 / 900.0
+
+
+def test_accruals_ratio_metric_allows_negative_values():
+    metric = AccrualsRatioMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    q4_prev = (today - timedelta(days=380)).isoformat()
+
+    repo = _OwnerEarningsRepo(
+        {
+            "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+                "NetCashProvidedByUsedInOperatingActivities",
+                (q4, q3, q2, q1),
+                (150.0, 150.0, 150.0, 150.0),
+            ),
+            "NetIncomeLoss": _quarterly_records(
+                "NetIncomeLoss",
+                (q4, q3, q2, q1),
+                (100.0, 100.0, 100.0, 100.0),
+            ),
+            "Assets": _build_assets_quarter_records(
+                symbol=symbol,
+                q4=q4,
+                q3=q3,
+                q2=q2,
+                q1=q1,
+                q4_prev=q4_prev,
+            ),
+        }
+    )
+
+    result = metric.compute(symbol, repo)
+    assert result is not None
+    assert result.value == -200.0 / 900.0
+
+
+def test_accruals_ratio_metric_requires_four_quarters():
+    metric = AccrualsRatioMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q4_prev = (today - timedelta(days=380)).isoformat()
+
+    repo = _OwnerEarningsRepo(
+        {
+            "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+                "NetCashProvidedByUsedInOperatingActivities",
+                (q4, q3, q2),
+                (120.0, 110.0, 100.0),
+            ),
+            "NetIncomeLoss": _quarterly_records(
+                "NetIncomeLoss",
+                (q4, q3, q2),
+                (150.0, 140.0, 130.0),
+            ),
+            "Assets": [
+                fact(
+                    symbol=symbol,
+                    concept="Assets",
+                    fiscal_period="Q4",
+                    end_date=q4,
+                    value=1000.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="Assets",
+                    fiscal_period="Q4",
+                    end_date=q4_prev,
+                    value=800.0,
+                    currency="USD",
+                ),
+            ],
+        }
+    )
+
+    assert metric.compute(symbol, repo) is None
+
+
+def test_accruals_ratio_metric_rejects_stale_numerator_quarter():
+    metric = AccrualsRatioMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=420)).isoformat()
+    q3 = (today - timedelta(days=510)).isoformat()
+    q2 = (today - timedelta(days=600)).isoformat()
+    q1 = (today - timedelta(days=690)).isoformat()
+    q4_prev = (today - timedelta(days=780)).isoformat()
+
+    repo = _OwnerEarningsRepo(
+        {
+            "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+                "NetCashProvidedByUsedInOperatingActivities",
+                (q4, q3, q2, q1),
+                (120.0, 110.0, 100.0, 90.0),
+            ),
+            "NetIncomeLoss": _quarterly_records(
+                "NetIncomeLoss",
+                (q4, q3, q2, q1),
+                (150.0, 140.0, 130.0, 120.0),
+            ),
+            "Assets": _build_assets_quarter_records(
+                symbol=symbol,
+                q4=q4,
+                q3=q3,
+                q2=q2,
+                q1=q1,
+                q4_prev=q4_prev,
+            ),
+        }
+    )
+
+    assert metric.compute(symbol, repo) is None
+
+
+def test_accruals_ratio_metric_rejects_stale_latest_assets_quarter():
+    metric = AccrualsRatioMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    q4_prev = (today - timedelta(days=380)).isoformat()
+    stale_assets_q4 = (today - timedelta(days=420)).isoformat()
+
+    repo = _OwnerEarningsRepo(
+        {
+            "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+                "NetCashProvidedByUsedInOperatingActivities",
+                (q4, q3, q2, q1),
+                (120.0, 110.0, 100.0, 90.0),
+            ),
+            "NetIncomeLoss": _quarterly_records(
+                "NetIncomeLoss",
+                (q4, q3, q2, q1),
+                (150.0, 140.0, 130.0, 120.0),
+            ),
+            "Assets": _build_assets_quarter_records(
+                symbol=symbol,
+                q4=stale_assets_q4,
+                q3=q3,
+                q2=q2,
+                q1=q1,
+                q4_prev=q4_prev,
+            ),
+        }
+    )
+
+    assert metric.compute(symbol, repo) is None
+
+
+def test_accruals_ratio_metric_requires_same_quarter_last_year_assets():
+    metric = AccrualsRatioMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+
+    repo = _OwnerEarningsRepo(
+        {
+            "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+                "NetCashProvidedByUsedInOperatingActivities",
+                (q4, q3, q2, q1),
+                (120.0, 110.0, 100.0, 90.0),
+            ),
+            "NetIncomeLoss": _quarterly_records(
+                "NetIncomeLoss",
+                (q4, q3, q2, q1),
+                (150.0, 140.0, 130.0, 120.0),
+            ),
+            "Assets": [
+                fact(
+                    symbol=symbol,
+                    concept="Assets",
+                    fiscal_period="Q4",
+                    end_date=q4,
+                    value=1000.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="Assets",
+                    fiscal_period="Q3",
+                    end_date=q3,
+                    value=980.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="Assets",
+                    fiscal_period="Q2",
+                    end_date=q2,
+                    value=960.0,
+                    currency="USD",
+                ),
+                fact(
+                    symbol=symbol,
+                    concept="Assets",
+                    fiscal_period="Q1",
+                    end_date=q1,
+                    value=940.0,
+                    currency="USD",
+                ),
+            ],
+        }
+    )
+
+    assert metric.compute(symbol, repo) is None
+
+
+def test_accruals_ratio_metric_rejects_non_positive_avg_assets():
+    metric = AccrualsRatioMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    q4_prev = (today - timedelta(days=380)).isoformat()
+
+    repo = _OwnerEarningsRepo(
+        {
+            "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+                "NetCashProvidedByUsedInOperatingActivities",
+                (q4, q3, q2, q1),
+                (120.0, 110.0, 100.0, 90.0),
+            ),
+            "NetIncomeLoss": _quarterly_records(
+                "NetIncomeLoss",
+                (q4, q3, q2, q1),
+                (150.0, 140.0, 130.0, 120.0),
+            ),
+            "Assets": _build_assets_quarter_records(
+                symbol=symbol,
+                q4=q4,
+                q3=q3,
+                q2=q2,
+                q1=q1,
+                q4_prev=q4_prev,
+                values=(-100.0, 980.0, 960.0, 940.0, 100.0),
+            ),
+        }
+    )
+
+    assert metric.compute(symbol, repo) is None
+
+
+def test_accruals_ratio_metric_rejects_numerator_currency_mismatch():
+    metric = AccrualsRatioMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    q4_prev = (today - timedelta(days=380)).isoformat()
+
+    repo = _OwnerEarningsRepo(
+        {
+            "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+                "NetCashProvidedByUsedInOperatingActivities",
+                (q4, q3, q2, q1),
+                (120.0, 110.0, 100.0, 90.0),
+                currency="USD",
+            ),
+            "NetIncomeLoss": _quarterly_records(
+                "NetIncomeLoss",
+                (q4, q3, q2, q1),
+                (150.0, 140.0, 130.0, 120.0),
+                currency="EUR",
+            ),
+            "Assets": _build_assets_quarter_records(
+                symbol=symbol,
+                q4=q4,
+                q3=q3,
+                q2=q2,
+                q1=q1,
+                q4_prev=q4_prev,
+            ),
+        }
+    )
+
+    assert metric.compute(symbol, repo) is None
+
+
+def test_accruals_ratio_metric_rejects_assets_currency_mismatch():
+    metric = AccrualsRatioMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    q4_prev = (today - timedelta(days=380)).isoformat()
+
+    assets_records = _build_assets_quarter_records(
+        symbol=symbol,
+        q4=q4,
+        q3=q3,
+        q2=q2,
+        q1=q1,
+        q4_prev=q4_prev,
+    )
+    assets_records[-1] = fact(
+        symbol=symbol,
+        concept="Assets",
+        fiscal_period="Q4",
+        end_date=q4_prev,
+        value=800.0,
+        currency="EUR",
+    )
+
+    repo = _OwnerEarningsRepo(
+        {
+            "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+                "NetCashProvidedByUsedInOperatingActivities",
+                (q4, q3, q2, q1),
+                (120.0, 110.0, 100.0, 90.0),
+            ),
+            "NetIncomeLoss": _quarterly_records(
+                "NetIncomeLoss",
+                (q4, q3, q2, q1),
+                (150.0, 140.0, 130.0, 120.0),
+            ),
+            "Assets": assets_records,
+        }
+    )
+
+    assert metric.compute(symbol, repo) is None
+
+
+def test_accruals_ratio_metric_rejects_numerator_denominator_currency_mismatch():
+    metric = AccrualsRatioMetric()
+    symbol = "AAPL.US"
+    today = date.today()
+    q4 = (today - timedelta(days=20)).isoformat()
+    q3 = (today - timedelta(days=110)).isoformat()
+    q2 = (today - timedelta(days=200)).isoformat()
+    q1 = (today - timedelta(days=290)).isoformat()
+    q4_prev = (today - timedelta(days=380)).isoformat()
+
+    repo = _OwnerEarningsRepo(
+        {
+            "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+                "NetCashProvidedByUsedInOperatingActivities",
+                (q4, q3, q2, q1),
+                (120.0, 110.0, 100.0, 90.0),
+                currency="USD",
+            ),
+            "NetIncomeLoss": _quarterly_records(
+                "NetIncomeLoss",
+                (q4, q3, q2, q1),
+                (150.0, 140.0, 130.0, 120.0),
+                currency="USD",
+            ),
+            "Assets": _build_assets_quarter_records(
+                symbol=symbol,
+                q4=q4,
+                q3=q3,
+                q2=q2,
+                q1=q1,
+                q4_prev=q4_prev,
+                currency="EUR",
+            ),
+        }
+    )
+
+    assert metric.compute(symbol, repo) is None
+
+
 def test_registry_contains_all_ids():
     # Ensure the registry still exposes all metric identifiers
     assert len(REGISTRY) >= 1
@@ -9111,3 +9628,4 @@ def test_registry_contains_all_ids():
     assert "opm_10y_min" in REGISTRY
     assert "cfo_to_ni_ttm" in REGISTRY
     assert "cfo_to_ni_10y_median" in REGISTRY
+    assert "accruals_ratio" in REGISTRY

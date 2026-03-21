@@ -1381,6 +1381,22 @@ def test_cmd_compute_metrics_all(tmp_path):
                 value=assets + 400.0,
             )
         )
+    quarterly_assets = [
+        (q4, "Q4", 1600.0),
+        (q3, "Q3", 1550.0),
+        (q2, "Q2", 1500.0),
+        (q1, "Q1", 1450.0),
+        (q4_prev, "Q4", 1400.0),
+    ]
+    for end_date, period, value in quarterly_assets:
+        records.append(
+            make_fact(
+                concept="Assets",
+                end_date=end_date,
+                fiscal_period=period,
+                value=value,
+            )
+        )
     quarterly_cash_flows = [
         (q4, "Q4", 130.0, 40.0),
         (q3, "Q3", 120.0, 35.0),
