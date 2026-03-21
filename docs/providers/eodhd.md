@@ -1,0 +1,103 @@
+# EODHD Provider Guide
+
+## What EODHD Covers
+
+EODHD is the recommended provider for most `pyvalue` workflows.
+
+It covers:
+- global exchange universes
+- global fundamentals
+- all market data used by the project
+
+## Subscription Requirements
+
+You need an active EODHD subscription for:
+- fundamentals endpoints
+- market data endpoints
+
+## Universe Loading
+
+Example:
+
+```bash
+pyvalue load-universe --provider EODHD --exchange-code LSE
+```
+
+Important options:
+- `--include-etfs`: keep ETFs instead of excluding them
+- `--currencies`: restrict listings by currency
+- `--include-exchanges`: restrict by EODHD `Exchange` field values
+
+## Fundamentals Ingestion
+
+Single symbol:
+
+```bash
+pyvalue ingest-fundamentals --provider EODHD AAPL.US
+```
+
+Bulk:
+
+```bash
+pyvalue ingest-fundamentals-bulk --provider EODHD --exchange-code US
+```
+
+Important bulk options:
+- `--rate`: symbols per minute
+- `--max-symbols`: limit one run
+- `--max-age-days`: refresh only stale or missing data
+- `--resume`: skip symbols still in backoff
+
+## Fundamentals Normalization
+
+Single symbol:
+
+```bash
+pyvalue normalize-fundamentals --provider EODHD AAPL.US
+```
+
+Bulk:
+
+```bash
+pyvalue normalize-fundamentals-bulk --provider EODHD --exchange-code US
+```
+
+Normalization converts raw EODHD payloads into provider-agnostic `financial_facts` records.
+
+## Market Data
+
+Market data is always fetched from EODHD.
+
+Single symbol:
+
+```bash
+pyvalue update-market-data AAPL.US
+```
+
+Bulk:
+
+```bash
+pyvalue update-market-data-bulk --exchange-code US
+```
+
+Market cap can be recalculated later from stored prices and latest share counts:
+
+```bash
+pyvalue recalc-market-cap --exchange-code US
+```
+
+## EODHD-Oriented Metrics
+
+Many newer metrics in the project are intentionally EODHD-oriented because they rely on normalized concepts or fallback logic designed around EODHD payload structure. The metrics catalog marks this in the calculation column where relevant.
+
+## Caveats
+
+- Exchange suffixes matter: use `AAPL.US`, `SHEL.LSE`, etc.
+- Some fields are normalized through EODHD-specific fallback chains; compute metrics only after normalization.
+- Market data freshness is independent from fundamentals freshness.
+
+## Related Docs
+
+- [Configuration](../configuration.md)
+- [Market Data Guide](../guides/market-data.md)
+- [Ingestion and Normalization Guide](../guides/ingestion-and-normalization.md)

@@ -1,455 +1,70 @@
 # pyvalue
 
-Fundamental data ingestion and screening toolkit focusing on value-oriented strategies. Two data providers are supported: SEC (US only) and EODHD (global).
-
-## Contents
-- [Quick start](#quick-start)
-- [Data providers](#data-providers)
-- [Symbol format](#symbol-format)
-- [CLI persistence](#cli-persistence)
-- [EODHD universes and fundamentals](#eodhd-universes-and-fundamentals)
-- [SEC company facts (US only)](#sec-company-facts-us-only)
-- [Market data (EODHD)](#market-data-eodhd)
-- [Global fundamentals (EODHD)](#global-fundamentals-eodhd)
-- [Metrics and screening](#metrics-and-screening)
-- [Metric reference](#metric-reference)
-- [Private configuration](#private-configuration)
-- [End-to-end workflow](#end-to-end-workflow)
-- [Example: LSE (non-US exchange)](#example-lse-non-us-exchange)
-
-## Quick start
-
-```bash
-python -m pip install -e .[dev]
-pytest
-```
+pyvalue is a fundamental-data ingestion, normalization, metric-computation, and stock-screening toolkit built for value-oriented workflows. It supports SEC fundamentals for US issuers and EODHD for global fundamentals and market data, with everything persisted in SQLite for repeatable analysis.
 
 ## Disclaimer
 
-This project is provided for educational and informational purposes only and does not constitute investment, financial, legal, or tax advice. Outputs may be inaccurate, incomplete, or delayed and are provided “as is” without warranties of any kind. You are solely responsible for any investment decisions and outcomes based on this software; use at your own risk. Nothing here is an offer or solicitation to buy or sell any security, and past performance is not indicative of future results. Consult a licensed professional before making investment decisions.
+This project is provided for educational and informational purposes only and does not constitute investment, financial, legal, or tax advice. Outputs may be inaccurate, incomplete, or delayed and are provided "as is" without warranties of any kind. You are solely responsible for any investment decisions and outcomes based on this software; use at your own risk. Nothing here is an offer or solicitation to buy or sell any security, and past performance is not indicative of future results. Consult a licensed professional before making investment decisions.
 
-## Data providers
-
-- **SEC**: US-only fundamentals. SEC digital company facts do not enforce reporting standards, so some metrics may not be computable.
-- **EODHD**: fundamentals for global exchanges, plus **all** market data.
-
-Recommendation: use **EODHD** for all purposes (including US fundamentals) for better coverage. You need active EODHD subscriptions for both market data and fundamentals.
-
-## Symbol format
-
-All tickers are stored and referenced with an exchange suffix using EODHD codes
-(e.g., `AAPL.US`, `SHEL.LSE`). US symbols always use `.US`.
-
-## CLI persistence
-
-Persist the US universe into a local SQLite database via the CLI:
+## 5-Minute Quickstart
 
 ```bash
-pyvalue load-universe --provider SEC
-```
-
-Unless noted otherwise, every CLI command accepts `--database` to point at a specific SQLite file;
-if omitted, it defaults to `data/pyvalue.db`.
-
-ETFs are excluded by default; pass `--include-etfs` to store them as well.
-
-> Nasdaq serves the symbol directories via FTP (`ftp://ftp.nasdaqtrader.com/symboldirectory/...`).
-> You can verify availability manually with
-> `curl "ftp://ftp.nasdaqtrader.com/symboldirectory/nasdaqlisted.txt"`.
-
-## EODHD universes and fundamentals
-
-**EODHD fundamentals subscription required.** Market data is always fetched from EODHD, so an EODHD market data subscription is also required.
-
-### Load an exchange (example: London Stock Exchange, LSE)
-
-```bash
-pyvalue load-universe --provider EODHD --exchange-code LSE --database data/pyvalue.db
-```
-
-This pulls the London Stock Exchange symbol list from EODHD (requires `[eodhd].api_key` in `private/config.toml`), keeps equities by default (ETFs excluded unless `--include-etfs`), and stores ISINs when available.
-
-### SEC company facts (US only)
-
-SEC requires a descriptive `User-Agent` header that includes contact details. Set
-`[sec].user_agent` in `private/config.toml` or an environment variable such as:
-
-```bash
-export PYVALUE_SEC_USER_AGENT="pyvalue/0.1 (contact: you@example.com)"
-```
-
-Then ingest the latest company facts for a ticker (AAPL shown below). Note that SEC data is less standardized; some metrics may be missing compared to EODHD:
-
-```bash
-pyvalue ingest-fundamentals --provider SEC AAPL.US
-```
-
-This downloads the JSON payload from `https://data.sec.gov/api/xbrl/companyfacts/…` and
-stores it in the `fundamentals_raw` table. Pass `--cik` if you already know the exact CIK.
-
-Normalize the previously ingested payload into structured rows for downstream metrics:
-
-```bash
-pyvalue normalize-fundamentals --provider SEC AAPL.US
-```
-
-To normalize every stored SEC payload after a bulk ingest, run:
-
-```bash
-pyvalue normalize-fundamentals-bulk --provider SEC
-```
-
-This iterates over the `fundamentals_raw` table, converts each JSON payload into
-`financial_facts`, reports progress, and can be cancelled with Ctrl+C.
-
-This populates the `financial_facts` table with the concepts required to compute the
-initial metric set (debt, current assets/liabilities, EPS, dividends, cash flow, etc.).
-
-Provider-specific commands target a source:
-
-```bash
-pyvalue ingest-fundamentals --provider SEC AAPL.US
-pyvalue normalize-fundamentals --provider SEC AAPL.US
-```
-
-To ingest and normalize US fundamentals from EODHD as well:
-
-```bash
-pyvalue ingest-fundamentals --provider EODHD AAPL.US
-pyvalue normalize-fundamentals --provider EODHD AAPL.US
-```
-
-Normalized facts are provider-agnostic. Re-normalizing a symbol replaces any
-previous facts for that symbol regardless of provider.
-
-## Market data (EODHD)
-
-Market data is always fetched from EODHD and requires an active EODHD market data subscription.
-
-Store your EODHD API token in `private/config.toml` (quotes optional; they are stripped automatically):
-
-```toml
-[eodhd]
-api_key = "YOUR_EOD_TOKEN"
-```
-
-Fetch the latest quote and persist it in `market_data`:
-
-```bash
-pyvalue update-market-data AAPL.US
-```
-
-If the symbol does not include an exchange suffix, pass `--exchange-code`:
-
-```bash
-pyvalue update-market-data AAPL --exchange-code US
-```
-
-To refresh every stored ticker on an exchange (using the latest universe in SQLite) with throttling
-that respects EODHD limits, run:
-
-```bash
-pyvalue update-market-data-bulk --exchange-code US --rate 950
-```
-
-The bulk command enforces the requested symbols-per-minute rate (950 by default) and can
-be interrupted with Ctrl+C.
-
-If you ingest raw prices before share counts were available, recompute stored market caps later via:
-
-```bash
-pyvalue recalc-market-cap --exchange-code US
-```
-
-This multiplies each stored price by the latest share count from normalized SEC data.
-
-By default the CLI uses EODHD’s `/api/eod/{symbol}.EXCH` endpoint and multiplies the returned
-close price by the latest share count (from SEC or EODHD fundamentals) to derive market cap.
-You can still inject a custom provider when instantiating `MarketDataService` in Python if you
-need a different feed.
-
-## Global fundamentals (EODHD)
-
-Store your EODHD API token in `private/config.toml` (see Market data section above). Pull
-fundamentals for a ticker and normalize them into `financial_facts` using the EODHD ruleset
-(region is inferred from the exchange’s country code):
-
-```bash
-pyvalue ingest-fundamentals --provider EODHD SHEL.LSE
-pyvalue normalize-fundamentals --provider EODHD SHEL.LSE
-```
-
-To ingest and normalize every listing for an exchange directly from EODHD (example: London
-Stock Exchange, code LSE):
-
-```bash
-pyvalue ingest-fundamentals-bulk --provider EODHD --exchange-code LSE
-pyvalue normalize-fundamentals-bulk --provider EODHD --exchange-code LSE
-```
-
-Metrics and screening read only `financial_facts`. They do not track provider.
-
-## Metrics and screening
-
-Compute metrics (e.g., working capital, long-term debt) for a ticker:
-
-```bash
-pyvalue compute-metrics AAPL.US --metrics working_capital long_term_debt
-```
-
-To compute the full metric set for every stored ticker, run:
-
-```bash
+python -m pip install -e .[dev]
+conda activate pyvalue
+pyvalue load-universe --provider EODHD --exchange-code US
+pyvalue ingest-fundamentals-bulk --provider EODHD --exchange-code US
+pyvalue normalize-fundamentals-bulk --provider EODHD --exchange-code US
+pyvalue update-market-data-bulk --exchange-code US
 pyvalue compute-metrics-bulk --exchange-code US
 ```
 
-The bulk command iterates over the stored exchange listings, evaluates each metric,
-prints progress, and can be cancelled with Ctrl+C.
+Default database: `data/pyvalue.db`
 
-### Fact coverage report
+## What pyvalue does
 
-List missing or stale (older than one year by default) financial facts required by the metrics for an exchange:
+- Load exchange universes into SQLite.
+- Ingest raw fundamentals from SEC or EODHD.
+- Normalize raw payloads into provider-agnostic financial facts.
+- Update market data and market caps.
+- Compute value and quality metrics.
+- Run YAML-based stock screens against stored data.
+
+## Supported Providers
+
+- `SEC`: US-only fundamentals. Coverage is useful, but normalization and metric coverage are less complete than EODHD.
+- `EODHD`: Global fundamentals and all market data. This is the recommended provider for most workflows, including US fundamentals.
+
+## Documentation
+
+Start here for the full docs: [Documentation Index](docs/index.md)
+
+Core pages:
+- [Getting Started](docs/getting-started.md)
+- [Configuration](docs/configuration.md)
+- [EODHD Provider Guide](docs/providers/eodhd.md)
+- [SEC Provider Guide](docs/providers/sec.md)
+- [CLI Reference](docs/reference/cli.md)
+- [Metrics Catalog](docs/reference/metrics.md)
+- [Screening Guide](docs/guides/screening.md)
+- [Architecture Overview](docs/architecture/data-model-and-storage.md)
+- [Normalization and Facts](docs/architecture/normalization-and-facts.md)
+- [Development Guide](docs/development/local-development.md)
+- [Testing and Quality Checks](docs/development/testing-and-quality.md)
+- [Troubleshooting](docs/troubleshooting.md)
+
+## Short End-to-End Example
 
 ```bash
-pyvalue report-fact-freshness --exchange-code US --metrics working_capital eps_ttm
+pyvalue load-universe --provider EODHD --exchange-code LSE
+pyvalue ingest-fundamentals --provider EODHD SHEL.LSE
+pyvalue normalize-fundamentals --provider EODHD SHEL.LSE
+pyvalue update-market-data SHEL.LSE
+pyvalue compute-metrics SHEL.LSE --all
+pyvalue run-screen SHEL.LSE screeners/value.yml
 ```
 
-Add `--output-csv fact_report.csv` for concept-level details that can be inspected in a spreadsheet.
+## Developer Notes
 
-Define screening criteria in YAML (see `screeners/value.yml`) and evaluate them:
-
-```bash
-pyvalue run-screen AAPL.US screeners/value.yml
-```
-
-The sample screen checks nine value-focused criteria (leverage, profitability, liquidity,
-valuation). Metrics are cached in the `metrics` table for reuse.
-
-To evaluate every stored symbol and print a pass-only table, run:
-
-```bash
-pyvalue run-screen-bulk screeners/value.yml --exchange-code US
-```
-
-Rows represent criteria and columns show the symbols that satisfied every rule along with the
-left-hand metric values used for comparison.
-
-By default the CSV is written to `data/screen_results.csv`. Pass `--output-csv results.csv` to override.
-
-Additional metrics include:
-
-- `eps_streak`: Counts consecutive positive EPS (diluted) FY values.
-- `current_ratio`: Current assets divided by current liabilities.
-- `graham_eps_10y_cagr_3y_avg`: Graham EPS 10-year-period CAGR using 3-year average EPS at
-  the start and end of the period (using full-year GAAP EPS data).
-- `fcf_to_debt`: Trailing 12-month free cash flow divided by total debt (EODHD-only).
-- `mcapex_fy`: Maintenance capex proxy for the latest FY, computed as
-  `min(Capex_FY, 1.1 × D&A_FY)` with single-input fallback and absolute-value handling.
-- `mcapex_5y`: Average of the latest five available FY `mcapex_fy` values
-  (requires exactly five FY points; gaps are allowed).
-- `mcapex_ttm`: Maintenance capex proxy for TTM, computed as
-  `min(Capex_TTM, 1.1 × D&A_TTM)` with single-input fallback and absolute-value handling.
-- `nwc_mqr`: Net working capital for the most recent quarter using
-  `(AssetsCurrent - Cash) - (LiabilitiesCurrent - ShortTermDebt)` with EODHD-specific fallbacks.
-- `nwc_fy`: Net working capital for latest FY end using the same adjusted-NWC formula.
-- `delta_nwc_ttm`: Quarter-over-quarter-year change in NWC
-  (`NWC(MQR) - NWC(same quarter last year)`).
-- `delta_nwc_fy`: Fiscal-year NWC change (`NWC(latest FY) - NWC(prior FY)`).
-- `delta_nwc_maint`: `max(average(last 3 FY deltas of NWC), 0)`.
-- `ic_mqr`: Invested capital snapshot for the latest quarter using
-  `TotalDebt + TotalEquity - CashAndEquivalents` with EODHD debt/cash fallbacks.
-- `ic_fy`: Invested capital snapshot for the latest FY using the same IC formula and
-  fallback chain as `ic_mqr`.
-- `avg_ic`: Average invested capital using same-quarter YoY (`(IC_now + IC_prior_year_same_q) / 2`)
-  and falling back to strict prior-FY average when quarterly pairing is unavailable.
-- `roic_ttm`: TTM ROIC using `NOPAT_TTM / avg_ic`, where
-  `NOPAT_TTM = EBIT_TTM × (1 - effective_tax_rate)`.
-- `roic_10y_median`: Median FY ROIC over the latest strict 10 consecutive FY years.
-- `roic_years_above_12pct`: Count of FY ROIC years `> 12%` over latest strict 10
-  consecutive FY years.
-- `roic_10y_min`: Minimum FY ROIC over latest strict 10 consecutive FY years.
-- `iroic_5y`: Incremental ROIC over a strict 5-year FY horizon using
-  `ΔNOPAT_5Y / ΔIC_5Y` with positive/non-tiny `ΔIC` gating.
-- `gm_10y_std`: Population standard deviation of FY gross margin over the latest
-  strict 10 consecutive FY years.
-- `opm_10y_std`: Population standard deviation of FY operating margin over the latest
-  strict 10 consecutive FY years.
-- `opm_10y_min`: Minimum FY operating margin over the latest strict 10 consecutive
-  FY years.
-- `cfo_to_ni_ttm`: Trailing 12-month cash conversion using `CFO_TTM / NetIncome_TTM`
-  with EODHD-oriented net-income fallback.
-- `cfo_to_ni_10y_median`: Median FY cash conversion over the latest strict
-  10 consecutive FY years using `CFO_FY / NetIncome_FY`.
-- `fcf_fy_median_5y`: Median of the latest five available FY free-cash-flow values,
-  where `FCF_FY = OCF_FY - Capex_FY` and missing FY capex is treated as zero.
-- `ni_loss_years_10y`: Count of fiscal years with `NetIncome_FY < 0` over the latest
-  strict 10 consecutive FY window.
-- `fcf_neg_years_10y`: Count of fiscal years with `FCF_FY < 0` over the latest
-  strict 10 consecutive FY window.
-- `accruals_ratio`: TTM accruals ratio using
-  `(NetIncome_TTM - CFO_TTM) / AvgTotalAssets` with strict same-quarter asset averaging.
-- `share_count_cagr_10y`: 10-year CAGR of point-in-time outstanding shares using
-  MRQ-preferred strict period matching and FY fallback.
-- `shares_10y_pct_change`: Exact 10-year percent change in point-in-time outstanding
-  shares using the same outstanding-shares-only source policy.
-- `net_buyback_yield`: EODHD net buyback yield using signed financing cash flow and
-  market-cap snapshot, with 1Y share-count fallback when cash-flow yield is unavailable.
-- `sbc_to_revenue`: EODHD SBC load using trailing stock-based compensation divided by
-  trailing revenue.
-- `sbc_to_fcf`: EODHD SBC load using trailing stock-based compensation divided by
-  trailing free cash flow, with capex-missing treated as zero in FCF.
-- `oe_equity_ttm`: Owner earnings equity (TTM), computed as
-  `NI_TTM + D&A_TTM - MCapex_TTM - delta_nwc_maint` (EODHD-oriented).
-- `oe_equity_5y_avg`: Average of the latest five available FY owner earnings equity
-  values using `OE_FY = NI_FY + D&A_FY - MCapex_FY - latest_delta_nwc_maint`
-  (requires exactly five points; gaps allowed; EODHD-oriented).
-- `oey_equity`: Owner earnings yield (equity) using
-  `oe_equity_ttm / market_cap_snapshot` (EODHD-oriented).
-- `oey_equity_5y`: Owner earnings yield (equity) using
-  `oe_equity_5y_avg / market_cap_snapshot` (EODHD-oriented).
-- `oey_ev`: Owner earnings yield on enterprise value using
-  `oe_ev_ttm / EV` (EODHD-oriented), where EV prefers normalized
-  `EnterpriseValue` and falls back to
-  `market_cap_snapshot + ShortTermDebt + LongTermDebt - CashAndShortTermInvestments`.
-- `ebit_yield_ev`: EODHD EBIT yield on enterprise value using `EBIT_TTM / EV`.
-- `fcf_yield_ev`: EODHD free-cash-flow yield on enterprise value using `FCF_TTM / EV`.
-- `ev_to_ebit`: EODHD enterprise-value multiple using `EV / EBIT_TTM`.
-- `ev_to_ebitda`: EODHD enterprise-value multiple using strict component
-  `EV / EBITDA_TTM`.
-- `oe_ev_ttm`: Owner earnings enterprise (TTM) using
-  `NOPAT_TTM + D&A_TTM - MCapex_TTM - delta_nwc_maint`, where
-  `NOPAT_TTM = EBIT_TTM × (1 - effective_tax_rate)` (EODHD-oriented).
-- `oe_ev_5y_avg`: Average of latest 5 FY owner earnings enterprise values using
-  `OE_EV_FY = NOPAT_FY + D&A_FY - MCapex_FY - latest_delta_nwc_maint`
-  (strict 5 points; gaps allowed; EODHD-oriented).
-- `oe_ev_fy_median_5y`: Median of the latest five available FY owner earnings
-  enterprise values using the same FY OE semantics as `oe_ev_5y_avg`.
-- `worst_oe_ev_fy_10y`: Minimum FY owner earnings enterprise value over the latest
-  strict 10 consecutive FY window.
-- `oey_ev_norm`: Normalized owner earnings yield using
-  `oe_ev_fy_median_5y / EV` with the same EV denominator policy as `oey_ev`.
-
-## Metric reference
-
-The built-in value screen relies on the following metrics. Each row outlines how the metric
-is derived from normalized SEC or market data plus the value-investing intuition behind it.
-
-| Metric | How it is calculated | Why value investors care |
-| --- | --- | --- |
-| `working_capital` | Latest `AssetsCurrent - LiabilitiesCurrent`. | Healthy working capital protects downside by ensuring near-term obligations are covered without diluting shareholders. |
-| `long_term_debt` | US SEC: `LongTermDebtNoncurrent + LongTermDebtCurrent`; else sum noncurrent components + current, falling back to notes payable or debt+lease rollups. | Excessive leverage magnifies downside, so keeping long-term debt manageable relative to liquidity (e.g., working capital) preserves margin of safety. |
-| `debt_paydown_years` | Total debt divided by trailing 12-month free cash flow (quarterly OCF minus capex, EODHD-only). Debt resolution uses layered fallback: `(ShortTermDebt + LongTermDebt)` when both exist, else `TotalDebtFromBalanceSheet` (from `shortLongTermDebtTotal`), else one available debt side (missing side treated as 0). Returns no metric when debt or FCF is non-positive. | Estimates how many years of current free cash flow would be needed to repay debt; lower is healthier. |
-| `fcf_to_debt` | Reciprocal of debt paydown years: trailing 12-month free cash flow divided by total debt using the same EODHD debt fallback chain and positive-gating rules as `debt_paydown_years`. | Shows debt service capacity as a direct yield-like ratio; higher values indicate faster potential debt reduction. |
-| `short_term_debt_share` | Short-term debt share (EODHD-only): `ShortTermDebt / TotalDebt` where denominator prefers `ShortTermDebt + LongTermDebt` and falls back to `TotalDebtFromBalanceSheet` when long debt is missing/unusable. Requires explicit short-term debt, denominator `> 0`, and final share within `[0,1]`. | Shows how much debt matures soon; higher shares imply more refinancing risk. |
-| `return_on_invested_capital` | TTM EBIT × (1 − tax rate) divided by average invested capital, where invested capital is `ShortTermDebt + LongTermDebt + StockholdersEquity − CashAndShortTermInvestments` (EODHD-only, tax rate uses a fallback when needed). | Measures how efficiently the business earns after-tax operating profits on the capital invested. |
-| `ic_mqr` | Most recent-quarter invested capital (EODHD-oriented): `TotalDebt + TotalEquity - CashAndEquivalents`, where debt resolves as `ShortTermDebt + LongTermDebt`, then `TotalDebtFromBalanceSheet`, then one available debt side; equity prefers `StockholdersEquity` then `CommonStockholdersEquity`; cash prefers `CashAndCashEquivalents` then `CashAndShortTermInvestments`. | Provides a direct snapshot of operating capital committed to the business after cash balances. |
-| `ic_fy` | Latest FY invested capital using the same formula and debt/equity/cash fallback chain as `ic_mqr` (EODHD-oriented). | Gives an annual invested-capital anchor that is less sensitive to intra-year seasonality than quarter-end snapshots. |
-| `avg_ic` | Average invested capital (EODHD-oriented): primary `(IC_now + IC_same_quarter_last_year) / 2` with strict fiscal-quarter matching; if unavailable, falls back to strict prior-FY average `(IC_latest_FY + IC_prior_FY) / 2`. | Smooths denominator noise for capital-efficiency and owner-earnings style analyses while keeping period alignment disciplined. |
-| `roic_ttm` | TTM ROIC (EODHD-oriented): `NOPAT_TTM / avg_ic`, where `NOPAT_TTM = OperatingIncomeLoss_TTM × (1 - effective_tax_rate)`. Tax rate prefers TTM `IncomeTaxExpense / IncomeBeforeIncomeTaxes`, falls back to latest valid FY proxy, then `0.21`; `avg_ic` uses the `avg_ic` metric fallback chain. Returns no metric when `NOPAT_TTM <= 0` or `avg_ic <= 0`. | Measures after-tax operating return on invested capital using the newer AvgIC denominator, with pragmatic tax-rate fallback for sparse filings. |
-| `roic_10y_median` | Median FY ROIC (EODHD-oriented) over the latest strict 10 consecutive years, where each year uses `ROIC_FY = (EBIT_FY × (1 - tax_rate_FY)) / AvgIC_FY` and `AvgIC_FY = (IC_FY + IC_prior_FY) / 2`. Tax rate per year uses `Tax/Pretax`, then latest valid FY proxy, then `0.21`. | Captures central tendency of long-cycle capital efficiency while damping one-off peak/trough years. |
-| `roic_years_above_12pct` | Count of FY ROIC values strictly `> 12%` across the same latest strict 10 consecutive FY ROIC years used by `roic_10y_median` (EODHD-oriented). | Measures persistence of strong capital returns, a practical moat/quality signal over a full decade. |
-| `roic_10y_min` | Minimum FY ROIC across the same latest strict 10 consecutive FY ROIC years (EODHD-oriented). | Stress-tests resilience by highlighting the weakest return year across cycles and adverse conditions. |
-| `iroic_5y` | Incremental ROIC over a strict FY 5-year delta (EODHD-oriented): `iROIC_5Y = ΔNOPAT_5Y / ΔIC_5Y`, where `ΔNOPAT_5Y = NOPAT_FY(t) - NOPAT_FY(t-5)`, `NOPAT_FY = EBIT_FY × (1 - tax_rate_FY)`, and `tax_rate_FY` uses year `Tax/Pretax`, then latest valid FY proxy, then `0.21`. Invested capital uses existing FY IC fallback chain; returns no metric when `ΔIC <= 0` or when `abs(ΔIC)/max(abs(IC_t), abs(IC_t-5), 1) < 1%`. | Highlights how efficiently incremental capital deployed over a longer horizon has translated into incremental after-tax operating profit. |
-| `gm_10y_std` | Gross-margin stability (EODHD-oriented): population stddev of `GrossMargin_FY = GrossProfit_FY / Revenues_FY` across the latest strict 10 consecutive FY years. Uses `GrossProfit` as primary input and falls back to `Revenues - CostOfRevenue` when `GrossProfit` is missing for a year; each included year requires `Revenues > 0`. | Quantifies consistency of unit economics; lower dispersion implies more stable margins and often more predictable intrinsic-value compounding. |
-| `opm_10y_std` | Operating-margin stability (EODHD-oriented): population stddev of `OpMargin_FY = OperatingIncomeLoss_FY / Revenues_FY` across the latest strict 10 consecutive FY years. Uses normalized `OperatingIncomeLoss` and `Revenues` only; each included year requires `Revenues > 0`. | Quantifies how volatile operating profitability is across full business cycles; lower dispersion usually signals steadier economics and better forecasting quality. |
-| `opm_10y_min` | Minimum FY operating margin across the same latest strict 10 consecutive FY operating-margin years used by `opm_10y_std` (EODHD-oriented). Signed values are preserved. | Stress-tests downside operating profitability by surfacing the weakest margin year over a decade. |
-| `cfo_to_ni_ttm` | Cash conversion (EODHD-oriented): `CFO_TTM / NetIncome_TTM`, where `CFO_TTM` is the sum of the latest 4 quarterly `NetCashProvidedByUsedInOperatingActivities` facts and `NetIncome_TTM` prefers `NetIncomeLoss` then `NetIncomeLossAvailableToCommonStockholdersBasic`. Requires 4 recent quarters, currency compatibility, and `NetIncome_TTM > 0`. | Shows how much accounting profit converts into operating cash over the last year; higher values usually indicate stronger earnings quality. |
-| `cfo_to_ni_10y_median` | Median FY cash conversion (EODHD-oriented) across the latest strict 10 consecutive FY years, where each yearly point is `NetCashProvidedByUsedInOperatingActivities_FY / NetIncome_FY` and FY net income prefers `NetIncomeLoss` then `NetIncomeLossAvailableToCommonStockholdersBasic`. Requires `NetIncome_FY > 0` for every selected year and a recent latest FY point. | Highlights whether profit consistently translates into cash across a full decade instead of only in a favorable recent period. |
-| `fcf_fy_median_5y` | Median FY free cash flow (EODHD-oriented) across the latest 5 available FY years, where `FCF_FY = NetCashProvidedByUsedInOperatingActivities_FY - CapitalExpenditures_FY`. Missing FY capex is treated as `0`, gaps are allowed, and the latest included FY must be recent and currency-consistent with the selected 5-year set. | Normalizes free-cash-flow power across multiple years so one unusually strong or weak period does not dominate the valuation view. |
-| `ni_loss_years_10y` | Count of fiscal years with `NetIncome_FY < 0` across the latest strict 10 consecutive FY years (EODHD-oriented). FY net income prefers `NetIncomeLoss` and falls back to `NetIncomeLossAvailableToCommonStockholdersBasic`. | Flags how often the business dipped into accounting losses over a full cycle, a useful “bad year” resilience check before paying up for quality. |
-| `fcf_neg_years_10y` | Count of fiscal years with `FCF_FY < 0` across the latest strict 10 consecutive FY years (EODHD-oriented), where `FCF_FY = OCF_FY - Capex_FY` and missing capex is treated as `0`. | Shows how often the business actually failed to produce free cash flow over a decade, which can surface cyclical or structurally cash-hungry models. |
-| `accruals_ratio` | Accruals ratio (EODHD-oriented): `(NetIncome_TTM - CFO_TTM) / AvgTotalAssets`, where `NetIncome_TTM` prefers `NetIncomeLoss` then `NetIncomeLossAvailableToCommonStockholdersBasic`, `CFO_TTM` is the latest 4-quarter sum of `NetCashProvidedByUsedInOperatingActivities`, and `AvgTotalAssets = (Assets_MRQ + Assets_sameQ_lastYr) / 2` using a strict same-fiscal-quarter prior-year match. Returns no metric when the numerator inputs are unavailable, the quarterly asset pair is missing/mismatched, or `AvgTotalAssets <= 0`. Signed values are preserved. | Highlights earnings quality by measuring how much reported profit is supported by cash generation relative to the asset base; lower or negative accruals often indicate cleaner cash conversion. |
-| `share_count_cagr_10y` | Share-count CAGR over an exact 10-year snapshot horizon (EODHD-oriented): `((Shares_t / Shares_t-10) ^ (1/10)) - 1`, using normalized `CommonStockSharesOutstanding` only. Prefers the latest recent quarterly snapshot paired to the strict same fiscal quarter 10 years earlier; if unavailable, falls back to the latest recent FY snapshot paired to strict FY-10. Ignores blank-period share snapshots and emits no metric when either point is missing or non-positive. | Highlights long-run dilution or buyback behavior using point-in-time outstanding shares instead of weighted-average share counts. |
-| `shares_10y_pct_change` | Exact 10-year percent change in point-in-time outstanding shares (EODHD-oriented): `(Shares_t / Shares_t-10) - 1`, using the same outstanding-shares-only, MRQ-preferred / FY-fallback pairing rules as `share_count_cagr_10y`. Signed values are preserved. | Gives a direct read on how much ownership per share has changed over a decade, complementing the CAGR view with an absolute 10-year dilution/buyback measure. |
-| `net_buyback_yield` | Net buyback yield (EODHD-oriented): primary `-TTM(SalePurchaseOfStock) / market_cap_snapshot`, where `SalePurchaseOfStock` is treated as the provider’s signed net stock-financing cash-flow line. If that TTM path is unavailable, falls back to `-TTM(IssuanceOfCapitalStock) / market_cap_snapshot`. If the cash-flow yield still cannot be produced, falls back to direct 1Y share-count change approximation `-((Shares_t / Shares_t-1) - 1)` using only `CommonStockSharesOutstanding` with quarterly preference and strict prior-year FY fallback. Signed values are preserved. | Captures capital return or dilution through repurchases and issuance in a yield-like form, while keeping a practical snapshot-share fallback when financing cash-flow detail is incomplete. |
-| `sbc_to_revenue` | SBC load (EODHD-oriented): `StockBasedCompensation_TTM / Revenues_TTM`, using direct normalized quarterly `StockBasedCompensation` and `Revenues` over the latest 4 recent quarters. Requires currency compatibility and `Revenues_TTM > 0`; there is no SBC fallback proxy. | Shows how much revenue is being offset by equity compensation, a useful dilution-aware quality check for serial share issuers. |
-| `sbc_to_fcf` | SBC load versus free cash flow (EODHD-oriented): `StockBasedCompensation_TTM / FCF_TTM`, where `FCF_TTM = OCF_TTM - Capex_TTM`, `OCF_TTM` uses quarterly `NetCashProvidedByUsedInOperatingActivities`, and missing/stale capex is treated as `0` to match the repo’s existing FCF convention. Requires `FCF_TTM > 0` and currency compatibility; there is no SBC fallback proxy. | Highlights how much of reported cash generation is offset by stock-based compensation, helping distinguish truly cash-generative businesses from those leaning heavily on equity pay. |
-| `net_debt_to_ebitda` | Net debt divided by trailing 12-month component EBITDA (EODHD-only): `NetDebt = ShortTermDebt + LongTermDebt - Cash`, where cash prefers `CashAndShortTermInvestments` then `CashAndCashEquivalents + ShortTermInvestments` (missing STI treated as 0), and `EBITDA_TTM = OperatingIncomeLoss_TTM + D&A_TTM` with D&A fallback to cash-flow depreciation. One missing debt side is treated as 0 if the other exists; non-positive EBITDA returns no metric. | Highlights leverage relative to operating cash earnings; lower or negative suggests balance-sheet strength. |
-| `interest_coverage` | Trailing 12-month `OperatingIncomeLoss` divided by trailing 12-month `InterestExpense` (quarterly sums, EODHD-only). Uses direct normalized `InterestExpense` first and, only when direct computation is unavailable, fills missing quarters with derived `interestIncome - netInterestIncome` (`InterestExpenseFromNetInterestIncome`). Returns no metric when `EBIT_TTM <= 0` or `InterestExpense_TTM <= 0`. | Indicates how comfortably operating profits cover financing costs; higher is safer. |
-| `current_ratio` | Latest `AssetsCurrent / LiabilitiesCurrent`. | A current ratio above ~1 indicates the business can stomach short-term shocks without forced asset sales or equity issuance. |
-| `earnings_yield` | Trailing 12-month EPS (sum of latest four quarterly EPS values) divided by the latest price. | The inverse of P/E highlights how much earnings power you receive per dollar invested; higher yields can indicate cheaper valuations. |
-| `eps_streak` | Number of consecutive fiscal years with positive EPS. | Consistent profitability signals durable business quality and lowers the odds that current earnings are a cyclical mirage. |
-| `graham_eps_10y_cagr_3y_avg` | Computes the 10-year-period EPS CAGR using 3-year average EPS at the start and end of the period. | Requires sustained compounding, favoring firms that can steadily grow earnings instead of relying on one-off rebounds. |
-| `graham_multiplier` | `(Price / TTM EPS) × (Price / TBVPS)`, where TBVPS is tangible book value per share (`(Equity - Goodwill - Intangibles) / Shares`). | Benjamin Graham’s combined PE×PB test guards against paying too much for either earnings or assets, enforcing a strict valuation ceiling. |
-| `roc_greenblatt_5y_avg` | Average over up to five fiscal years of `EBIT / Tangible Capital`, where tangible capital is `Net PPE + AssetsCurrent - LiabilitiesCurrent`. | Joel Greenblatt’s ROC stresses whether management can reinvest incremental capital at high rates—a key quality signal for value investors who want cheap *and* good businesses. |
-| `roe_greenblatt_5y_avg` | Average over up to five fiscal years of net income available to common shareholders divided by the two-year average of common equity (after subtracting preferred equity). | Sustained high ROE shows that the firm generates attractive returns on shareholders’ capital without leverage-driven distortion. |
-| `price_to_fcf` | Latest market cap divided by trailing 12-month free cash flow, with FCF computed as (operating cash flow – capex) across the latest four quarters. | Cash flow–based multiples focus on hard cash instead of accounting earnings, helping avoid value traps with low-quality accrual profits. |
-| `mcapex_fy` | Latest fiscal-year maintenance capex proxy: `min(CapitalExpenditures_FY, 1.1 × D&A_FY)`, where D&A uses `DepreciationDepletionAndAmortization` and falls back to cash-flow depreciation when needed (EODHD-only). If only one side exists, uses that side; absolute values are used for sign consistency. | Approximates recurring reinvestment needs without letting unusually high growth capex dominate the estimate. |
-| `mcapex_5y` | Average of the latest 5 available fiscal-year `mcapex_fy` values (requires exactly five points; year gaps allowed; EODHD-only). | Smooths one-off investment cycles and produces a steadier maintenance reinvestment baseline. |
-| `mcapex_ttm` | Trailing 12-month maintenance capex proxy: `min(CapitalExpenditures_TTM, 1.1 × D&A_TTM)` using quarterly sums and the same D&A fallback/sign rules (EODHD-only). | Gives a near-term maintenance reinvestment estimate for valuation and cash-flow quality checks. |
-| `nwc_mqr` | Most recent-quarter net working capital: `(AssetsCurrent - Cash) - (LiabilitiesCurrent - ShortTermDebt)` where `Cash` prefers `CashAndShortTermInvestments` and falls back to `CashAndCashEquivalents + ShortTermInvestments`; if short-term debt is missing, liabilities are used as-is (EODHD-oriented). | Isolates operating working capital by excluding cash and debt components, helping assess short-term capital lock-up. |
-| `nwc_fy` | Latest FY-end net working capital using the same adjusted formula and fallback rules as `nwc_mqr` (EODHD-oriented). | Provides an annual baseline for working-capital intensity and trend analysis. |
-| `delta_nwc_ttm` | `NWC(MQR) - NWC(same fiscal quarter previous year)` with strict quarter matching (EODHD-oriented). | Captures year-over-year working-capital drift without quarter-seasonality distortion. |
-| `delta_nwc_fy` | `NWC(latest FY) - NWC(strict prior FY)` (EODHD-oriented). | Highlights annual changes in operating working-capital requirements. |
-| `delta_nwc_maint` | `max(average(last 3 consecutive FY deltas of NWC), 0)` (EODHD-oriented). | Converts multi-year NWC drift into a conservative maintenance adjustment that does not go negative. |
-| `oe_equity_ttm` | Owner earnings equity TTM: `NI_TTM + D&A_TTM - MCapex_TTM - delta_nwc_maint` (EODHD-oriented), where NI prefers `NetIncomeLoss` and falls back to net income available to common, D&A prefers income-statement D&A and falls back to cash-flow depreciation, and missing D&A defaults to 0. | Approximates owner earnings after maintenance reinvestment and sustained working-capital drag using near-term (TTM) fundamentals. |
-| `oe_equity_5y_avg` | Average of latest 5 FY owner earnings equity values, each computed as `NI_FY + D&A_FY - MCapex_FY - latest_delta_nwc_maint` (EODHD-oriented; strict 5 values; year gaps allowed; same NI/D&A fallback rules as TTM). | Smooths cyclical noise and yields a multi-year owner-earnings baseline for intrinsic-value comparisons. |
-| `oey_equity` | Owner earnings yield (equity): `oe_equity_ttm / market_cap_snapshot` (EODHD-oriented). Uses latest market-data snapshot market cap as denominator and converts denominator currency to numerator currency via FX when both currencies are known and differ. | Scales owner earnings by current equity value, making cross-company comparisons more interpretable than absolute owner-earnings levels. |
-| `oey_equity_5y` | Owner earnings yield (equity, 5Y): `oe_equity_5y_avg / market_cap_snapshot` (EODHD-oriented). Uses the same market-cap/FX rules as `oey_equity`; signed values are allowed. | Pairs normalized multi-year owner earnings with current market value to reduce single-year noise in yield signals. |
-| `oey_ev` | Owner earnings yield on enterprise value: `oe_ev_ttm / EV` (EODHD-oriented). EV denominator uses normalized `EnterpriseValue` first, then falls back to `market_cap_snapshot + ShortTermDebt + LongTermDebt - CashAndShortTermInvestments`; denominator must be positive. Denominator currency is converted to numerator currency via FX when needed. | Scales unlevered owner earnings by enterprise value so comparisons are less distorted by capital-structure differences than equity-only yields. |
-| `oey_ev_norm` | Normalized owner earnings yield on enterprise value: `oe_ev_fy_median_5y / EV` (EODHD-oriented). Uses the same EV denominator and FX-conversion policy as `oey_ev`, but the numerator is the FY median of the latest 5 available owner-earnings-enterprise points. | Anchors enterprise-level owner-earnings yield to a normalized multi-year baseline so a peak recent year does not make a stock look artificially cheap. |
-| `ebit_yield_ev` | EBIT yield on enterprise value (EODHD-oriented): `EBIT_TTM / EV`, where `EBIT_TTM` is the latest 4-quarter sum of `OperatingIncomeLoss`. EV uses the same denominator policy as `oey_ev`: normalized `EnterpriseValue` first, then derived `market_cap_snapshot + ShortTermDebt + LongTermDebt - CashAndShortTermInvestments`, with FX conversion into numerator currency when needed. Signed values are allowed as long as `EV > 0`. | Gives a simple enterprise-level earnings yield before owner-earnings refinements, useful as a first-pass valuation sanity check. |
-| `fcf_yield_ev` | Free-cash-flow yield on enterprise value (EODHD-oriented): `FCF_TTM / EV`, where `FCF_TTM = OCF_TTM - Capex_TTM`, `OCF_TTM` uses quarterly `NetCashProvidedByUsedInOperatingActivities`, and missing/stale capex is treated as `0` to match the repo’s existing FCF convention. EV uses the same normalized/derived/FX rules as `oey_ev`. Signed values are allowed as long as `EV > 0`. | Shows how much enterprise value is backed by trailing free cash flow, providing a capital-structure-neutral valuation lens. |
-| `ev_to_ebit` | Enterprise value to EBIT (EODHD-oriented): `EV / EBIT_TTM`, using the same EV denominator policy as `oey_ev` and the latest 4-quarter sum of `OperatingIncomeLoss` for EBIT. Returns no metric when `EV <= 0` or `EBIT_TTM <= 0`. | A practical operating multiple that is less distorted by financing mix than equity-only multiples and easier to compare across firms. |
-| `ev_to_ebitda` | Enterprise value to EBITDA (EODHD-oriented): `EV / EBITDA_TTM`, where `EBITDA_TTM = OperatingIncomeLoss_TTM + D&A_TTM` using strict component EBITDA and D&A fallback to `DepreciationFromCashFlow`. EV uses the same normalized/derived/FX rules as `oey_ev`. Returns no metric when `EV <= 0` or `EBITDA_TTM <= 0`. | A common acquisition-style multiple that provides a quick cross-company valuation check using operating cash-earnings proxy rather than net income. |
-| `oe_ev_ttm` | Owner earnings enterprise TTM: `NOPAT_TTM + D&A_TTM - MCapex_TTM - delta_nwc_maint` (EODHD-oriented), where `NOPAT_TTM = EBIT_TTM × (1 - tax_rate)` and `tax_rate` prefers period `IncomeTaxExpense_TTM / IncomeBeforeIncomeTaxes_TTM`, then falls back to latest valid FY-derived rate, then 0.21. D&A uses income-statement concept then cash-flow fallback; missing D&A contributes 0. | Approximates unlevered owner earnings after tax, maintenance reinvestment, and sustained working-capital drag for near-term screening. |
-| `oe_ev_5y_avg` | Average of latest 5 FY owner earnings enterprise values: `OE_EV_FY = NOPAT_FY + D&A_FY - MCapex_FY - latest_delta_nwc_maint` (EODHD-oriented; strict 5 values; year gaps allowed). `NOPAT_FY` uses period tax rate with the same FY/default fallback policy as `oe_ev_ttm`; D&A fallback and missing-D&A-as-0 behavior are unchanged. | Smooths unlevered owner earnings across cycles while retaining maintenance capex and NWC maintenance adjustments. |
-| `oe_ev_fy_median_5y` | Median of latest 5 FY owner earnings enterprise values (EODHD-oriented), using the same FY point definition as `oe_ev_5y_avg`: `OE_EV_FY = NOPAT_FY + D&A_FY - MCapex_FY - latest_delta_nwc_maint`. Requires exactly 5 eligible FY points; year gaps are allowed. | Provides a more robust normalized owner-earnings baseline than an average when a single unusually strong or weak year would distort valuation. |
-| `worst_oe_ev_fy_10y` | Minimum FY owner earnings enterprise value across the latest strict 10 consecutive FY years (EODHD-oriented), using the same FY point definition and fallback chain as `oe_ev_fy_median_5y`. Signed values are preserved. | Stress-tests downside owner-earnings resilience by surfacing the weakest FY owner-earnings year over a full decade. |
-| `market_cap` | Latest stored market capitalization snapshot. | Screening for a minimum size filters out illiquid micro-caps where information quality and trading costs can erode returns. |
-| `eps_ttm` | Sum of the most recent four quarterly EPS values. | Used to verify that current earnings have not collapsed relative to history, preventing “cheap” valuations caused by deteriorating fundamentals. |
-| `eps_6y_avg` | Average of the latest six fiscal-year EPS values. | Provides a normalized earnings power baseline for comparisons against current EPS streaks or TTM values, smoothing out cyclical peaks and troughs. |
-
-## Private configuration
-
-Place API keys or region-specific credentials inside the `private/` directory (ignored by git).
-
-## End-to-end workflow
-
-1. Load the latest US universe into SQLite:
-   ```bash
-   pyvalue load-universe --provider SEC
-   ```
-2. Ingest SEC facts for every stored ticker on an exchange (honors API-rate throttling):
-   ```bash
-   pyvalue ingest-fundamentals-bulk --provider SEC --exchange-code US --user-agent "pyvalue/0.1 (your@email)"
-   ```
-3. Normalize the ingested payloads so metrics can consume them:
-   ```bash
-   pyvalue normalize-fundamentals-bulk --provider SEC
-   ```
-4. Fetch market data for every ticker (default EODHD, throttled to 950/min):
-   ```bash
-   pyvalue update-market-data-bulk --exchange-code US
-   ```
-5. Compute the entire metric set for all tickers:
-   ```bash
-   pyvalue compute-metrics-bulk --exchange-code US
-   ```
-6. Run the value screen across the universe (CSV export defaults to `data/screen_results.csv`):
-   ```bash
-   pyvalue run-screen-bulk screeners/value.yml --exchange-code US
-   ```
-
-### Example: LSE (non-US exchange)
-
-1. Load the LSE universe:
-   ```bash
-   pyvalue load-universe --provider EODHD --exchange-code LSE
-   ```
-2. Ingest EODHD fundamentals for all LSE tickers:
-   ```bash
-   pyvalue ingest-fundamentals-bulk --provider EODHD --exchange-code LSE
-   ```
-3. Normalize the ingested payloads:
-   ```bash
-   pyvalue normalize-fundamentals-bulk --provider EODHD --exchange-code LSE
-   ```
-4. Fetch market data for all LSE tickers:
-   ```bash
-   pyvalue update-market-data-bulk --exchange-code LSE
-   ```
-5. Compute metrics for all LSE tickers:
-   ```bash
-   pyvalue compute-metrics-bulk --exchange-code LSE
-   ```
+For local setup, tests, linting, and static checks, use:
+- [Development Guide](docs/development/local-development.md)
+- [Testing and Quality Checks](docs/development/testing-and-quality.md)
