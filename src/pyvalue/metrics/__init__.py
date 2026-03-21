@@ -58,6 +58,7 @@ from .operating_margin_stability import (
     OperatingMarginTenYearMinMetric,
     OperatingMarginTenYearStdMetric,
 )
+from .share_count_change import ShareCountCAGR10YMetric, Shares10YPctChangeMetric
 
 REGISTRY = {
     WorkingCapitalMetric.id: WorkingCapitalMetric,
@@ -90,6 +91,8 @@ REGISTRY = {
     GrossMarginTenYearStdMetric.id: GrossMarginTenYearStdMetric,
     OperatingMarginTenYearStdMetric.id: OperatingMarginTenYearStdMetric,
     OperatingMarginTenYearMinMetric.id: OperatingMarginTenYearMinMetric,
+    ShareCountCAGR10YMetric.id: ShareCountCAGR10YMetric,
+    Shares10YPctChangeMetric.id: Shares10YPctChangeMetric,
     ReturnOnInvestedCapitalMetric.id: ReturnOnInvestedCapitalMetric,
     MCapexFYMetric.id: MCapexFYMetric,
     MCapexFiveYearMetric.id: MCapexFiveYearMetric,
@@ -143,6 +146,8 @@ __all__ = [
     "GrossMarginTenYearStdMetric",
     "OperatingMarginTenYearStdMetric",
     "OperatingMarginTenYearMinMetric",
+    "ShareCountCAGR10YMetric",
+    "Shares10YPctChangeMetric",
     "ReturnOnInvestedCapitalMetric",
     "MCapexFYMetric",
     "MCapexFiveYearMetric",

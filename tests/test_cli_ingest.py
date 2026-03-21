@@ -1195,6 +1195,12 @@ def test_cmd_compute_metrics_all(tmp_path):
                     fiscal_period="FY",
                     value=1500 + (year - (current_year - 10)),
                 ),
+                make_fact(
+                    concept="CommonStockSharesOutstanding",
+                    end_date=end_date,
+                    fiscal_period="FY",
+                    value=500 + 10 * (year - (current_year - 10)),
+                ),
             ]
         )
         records.extend(
@@ -1286,11 +1292,6 @@ def test_cmd_compute_metrics_all(tmp_path):
                 ),
                 make_fact(
                     concept="PreferredStock", end_date=f"{current_year}-09-30", value=0
-                ),
-                make_fact(
-                    concept="CommonStockSharesOutstanding",
-                    end_date=f"{current_year}-09-30",
-                    value=500,
                 ),
                 make_fact(
                     concept="Goodwill", end_date=f"{current_year}-09-30", value=100

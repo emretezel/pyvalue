@@ -1,0 +1,242 @@
+"""Share-count change metric implementations.
+
+Author: Emre Tezel
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Optional, Sequence
+
+import logging
+
+from pyvalue.metrics.base import MetricResult
+from pyvalue.metrics.utils import (
+    MAX_FACT_AGE_DAYS,
+    MAX_FY_FACT_AGE_DAYS,
+    is_recent_fact,
+)
+from pyvalue.storage import FactRecord, FinancialFactsRepository
+
+LOGGER = logging.getLogger(__name__)
+
+SHARE_COUNT_CONCEPT = "CommonStockSharesOutstanding"
+
+QUARTERLY_PERIODS = {"Q1", "Q2", "Q3", "Q4"}
+FY_PERIODS = {"FY"}
+EXACT_YEARS = 10
+
+REQUIRED_CONCEPTS = (SHARE_COUNT_CONCEPT,)
+
+
+@dataclass(frozen=True)
+class _ShareCountPoint:
+    year: int
+    fiscal_period: str
+    shares: float
+    as_of: str
+
+
+@dataclass(frozen=True)
+class ShareCountTenYearSnapshot:
+    latest: _ShareCountPoint
+    prior: _ShareCountPoint
+    as_of: str
+
+
+class ShareCountChangeCalculator:
+    """Resolve the latest exact 10-year share-count comparison pair."""
+
+    def compute_pair(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> Optional[ShareCountTenYearSnapshot]:
+        records = repo.facts_for_concept(symbol, SHARE_COUNT_CONCEPT)
+        if not records:
+            LOGGER.warning(
+                "share_count_change: missing outstanding share history for %s", symbol
+            )
+            return None
+
+        quarterly = self._filter_periods(records, QUARTERLY_PERIODS)
+        quarterly_snapshot = self._resolve_period_pair(
+            symbol,
+            quarterly,
+            max_age_days=MAX_FACT_AGE_DAYS,
+            context="quarterly",
+        )
+        if quarterly_snapshot is not None:
+            return quarterly_snapshot
+
+        fy = self._filter_periods(records, FY_PERIODS)
+        fy_snapshot = self._resolve_period_pair(
+            symbol,
+            fy,
+            max_age_days=MAX_FY_FACT_AGE_DAYS,
+            context="fy",
+        )
+        if fy_snapshot is not None:
+            return fy_snapshot
+
+        LOGGER.warning(
+            "share_count_change: no valid exact 10-year share-count pair for %s",
+            symbol,
+        )
+        return None
+
+    def _resolve_period_pair(
+        self,
+        symbol: str,
+        records: Sequence[FactRecord],
+        *,
+        max_age_days: int,
+        context: str,
+    ) -> Optional[ShareCountTenYearSnapshot]:
+        if not records:
+            return None
+
+        latest = self._to_point(records[0])
+        if latest is None:
+            return None
+        if not is_recent_fact(records[0], max_age_days=max_age_days):
+            LOGGER.warning(
+                "share_count_change: latest %s share-count point (%s) too old for %s",
+                context,
+                records[0].end_date,
+                symbol,
+            )
+            return None
+        if latest.shares <= 0:
+            LOGGER.warning(
+                "share_count_change: non-positive latest %s share count for %s",
+                context,
+                symbol,
+            )
+            return None
+
+        target_year = latest.year - EXACT_YEARS
+        prior: Optional[_ShareCountPoint] = None
+        for record in records[1:]:
+            point = self._to_point(record)
+            if point is None:
+                continue
+            if (
+                point.fiscal_period == latest.fiscal_period
+                and point.year == target_year
+            ):
+                prior = point
+                break
+
+        if prior is None:
+            LOGGER.warning(
+                "share_count_change: missing exact %s-year %s match for %s",
+                EXACT_YEARS,
+                context,
+                symbol,
+            )
+            return None
+        if prior.shares <= 0:
+            LOGGER.warning(
+                "share_count_change: non-positive prior %s share count for %s",
+                context,
+                symbol,
+            )
+            return None
+
+        return ShareCountTenYearSnapshot(
+            latest=latest,
+            prior=prior,
+            as_of=latest.as_of,
+        )
+
+    def _filter_periods(
+        self, records: Sequence[FactRecord], periods: set[str]
+    ) -> list[FactRecord]:
+        filtered: list[FactRecord] = []
+        seen: set[tuple[str, str]] = set()
+        for record in records:
+            fiscal_period = (record.fiscal_period or "").upper()
+            key = (record.end_date, fiscal_period)
+            if fiscal_period not in periods:
+                continue
+            if record.value is None:
+                continue
+            if key in seen:
+                continue
+            filtered.append(record)
+            seen.add(key)
+        return filtered
+
+    def _to_point(self, record: FactRecord) -> Optional[_ShareCountPoint]:
+        year = self._extract_year(record.end_date)
+        fiscal_period = (record.fiscal_period or "").upper()
+        if year is None or not fiscal_period or record.value is None:
+            return None
+        return _ShareCountPoint(
+            year=year,
+            fiscal_period=fiscal_period,
+            shares=record.value,
+            as_of=record.end_date,
+        )
+
+    def _extract_year(self, value: str) -> Optional[int]:
+        if len(value) < 4:
+            return None
+        prefix = value[:4]
+        if not prefix.isdigit():
+            return None
+        return int(prefix)
+
+
+@dataclass
+class ShareCountCAGR10YMetric:
+    """Compute 10-year CAGR of outstanding shares."""
+
+    id: str = "share_count_cagr_10y"
+    required_concepts = REQUIRED_CONCEPTS
+
+    def compute(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> Optional[MetricResult]:
+        snapshot = ShareCountChangeCalculator().compute_pair(symbol, repo)
+        if snapshot is None:
+            return None
+
+        ratio = snapshot.latest.shares / snapshot.prior.shares
+        value = ratio ** (1.0 / EXACT_YEARS) - 1.0
+        return MetricResult(
+            symbol=symbol,
+            metric_id=self.id,
+            value=value,
+            as_of=snapshot.as_of,
+        )
+
+
+@dataclass
+class Shares10YPctChangeMetric:
+    """Compute exact 10-year percent change in outstanding shares."""
+
+    id: str = "shares_10y_pct_change"
+    required_concepts = REQUIRED_CONCEPTS
+
+    def compute(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> Optional[MetricResult]:
+        snapshot = ShareCountChangeCalculator().compute_pair(symbol, repo)
+        if snapshot is None:
+            return None
+
+        value = snapshot.latest.shares / snapshot.prior.shares - 1.0
+        return MetricResult(
+            symbol=symbol,
+            metric_id=self.id,
+            value=value,
+            as_of=snapshot.as_of,
+        )
+
+
+__all__ = [
+    "ShareCountTenYearSnapshot",
+    "ShareCountChangeCalculator",
+    "ShareCountCAGR10YMetric",
+    "Shares10YPctChangeMetric",
+]
