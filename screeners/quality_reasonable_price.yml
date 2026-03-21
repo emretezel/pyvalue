@@ -1,0 +1,49 @@
+criteria:
+  - name: "Minimum market cap"
+    left:
+      metric: market_cap
+    operator: ">"
+    right:
+      value: 2000000000
+
+  - name: "ROIC median (10Y) >= 10%"
+    left:
+      metric: roic_10y_median
+    operator: ">="
+    right:
+      value: 0.10
+
+  - name: "Operating margin minimum (10Y) >= 5%"
+    left:
+      metric: opm_10y_min
+    operator: ">="
+    right:
+      value: 0.05
+
+  - name: "Net debt / EBITDA <= 2.5x"
+    left:
+      metric: net_debt_to_ebitda
+    operator: "<="
+    right:
+      value: 2.5
+
+  - name: "Cash conversion (CFO / NI TTM) >= 0.90"
+    left:
+      metric: cfo_to_ni_ttm
+    operator: ">="
+    right:
+      value: 0.90
+
+  - name: "Owner earnings yield on EV (normalised) >= 5%"
+    left:
+      metric: oey_ev_norm
+    operator: ">="
+    right:
+      value: 0.05
+
+  - name: "Share count CAGR (10Y) <= +1%"
+    left:
+      metric: share_count_cagr_10y
+    operator: "<="
+    right:
+      value: 0.01

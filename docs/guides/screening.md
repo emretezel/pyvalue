@@ -63,10 +63,13 @@ Important limitation: `multiplier` is applied only to the right-hand side becaus
 
 ## Canonical Example
 
-This repo ships two example screens:
+This repo ships several example screens:
 
 - [`screeners/basic_value.yml`](../../screeners/basic_value.yml): small learning example
 - [`screeners/value.yml`](../../screeners/value.yml): larger opinionated value screen
+- [`screeners/value_normalized.yml`](../../screeners/value_normalized.yml): compact value screen using normalized owner earnings and EV/EBIT
+- [`screeners/quality.yml`](../../screeners/quality.yml): quality-focused screen with durability and balance-sheet checks
+- [`screeners/quality_reasonable_price.yml`](../../screeners/quality_reasonable_price.yml): quality at a reasonable price screen combining durability with valuation discipline
 
 The beginner example looks like this:
 

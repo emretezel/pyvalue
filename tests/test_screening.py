@@ -80,3 +80,47 @@ def test_load_screen_parses_basic_value_example():
     assert definition.criteria[3].left.metric == "long_term_debt"
     assert definition.criteria[3].right.metric == "working_capital"
     assert definition.criteria[3].right.multiplier == 1.75
+
+
+def test_load_screen_parses_value_normalized_example():
+    screen_path = (
+        Path(__file__).resolve().parents[1] / "screeners" / "value_normalized.yml"
+    )
+
+    definition = load_screen(screen_path)
+
+    assert len(definition.criteria) == 4
+    assert {criterion.operator for criterion in definition.criteria} == {
+        ">",
+        ">=",
+        "<=",
+    }
+    assert definition.criteria[0].left.metric == "market_cap"
+    assert definition.criteria[0].right.value == 2000000000
+    assert definition.criteria[1].left.metric == "oey_ev_norm"
+    assert definition.criteria[2].left.metric == "ev_to_ebit"
+    assert definition.criteria[3].left.metric == "graham_multiplier"
+
+
+def test_load_screen_parses_quality_reasonable_price_example():
+    screen_path = (
+        Path(__file__).resolve().parents[1]
+        / "screeners"
+        / "quality_reasonable_price.yml"
+    )
+
+    definition = load_screen(screen_path)
+
+    assert len(definition.criteria) == 7
+    assert {criterion.operator for criterion in definition.criteria} == {
+        ">",
+        ">=",
+        "<=",
+    }
+    assert definition.criteria[0].left.metric == "market_cap"
+    assert definition.criteria[1].left.metric == "roic_10y_median"
+    assert definition.criteria[2].left.metric == "opm_10y_min"
+    assert definition.criteria[3].left.metric == "net_debt_to_ebitda"
+    assert definition.criteria[4].left.metric == "cfo_to_ni_ttm"
+    assert definition.criteria[5].left.metric == "oey_ev_norm"
+    assert definition.criteria[6].left.metric == "share_count_cagr_10y"
