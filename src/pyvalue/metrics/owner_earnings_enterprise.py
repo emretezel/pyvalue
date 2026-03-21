@@ -62,6 +62,8 @@ FY_PERIODS = {"FY"}
 DEFAULT_TAX_RATE = 0.21
 PRETAX_MIN_ABS = 1.0
 DA_MULTIPLIER = 1.1
+FIVE_YEAR_POINTS = 5
+TEN_YEAR_POINTS = 10
 
 
 @dataclass(frozen=True)
@@ -86,7 +88,15 @@ class _TaxRateResult:
 
 @dataclass
 class _FYPoint:
+    year: int
     value: float
+    as_of: str
+    currency: Optional[str]
+
+
+@dataclass(frozen=True)
+class OwnerEarningsEnterpriseFYSeriesSnapshot:
+    points: tuple[_FYPoint, ...]
     as_of: str
     currency: Optional[str]
 
@@ -163,9 +173,151 @@ class OwnerEarningsEnterpriseCalculator:
     def compute_5y_average(
         self, symbol: str, repo: FinancialFactsRepository
     ) -> Optional[OwnerEarningsEnterpriseSnapshot]:
+        latest_five = self._latest_available_five_points(
+            symbol,
+            repo,
+            context="oe_ev_5y_avg",
+        )
+        if latest_five is None:
+            return None
+
+        average = sum(point.value for point in latest_five) / 5.0
+        return OwnerEarningsEnterpriseSnapshot(
+            value=average,
+            as_of=latest_five[0].as_of,
+            currency=self._combine_currency([point.currency for point in latest_five]),
+        )
+
+    def compute_5y_median(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> Optional[OwnerEarningsEnterpriseSnapshot]:
+        latest_five = self._latest_available_five_points(
+            symbol,
+            repo,
+            context="oe_ev_fy_median_5y",
+        )
+        if latest_five is None:
+            return None
+
+        median = sorted(point.value for point in latest_five)[2]
+        return OwnerEarningsEnterpriseSnapshot(
+            value=median,
+            as_of=latest_five[0].as_of,
+            currency=self._combine_currency([point.currency for point in latest_five]),
+        )
+
+    def compute_10y_series(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> Optional[OwnerEarningsEnterpriseFYSeriesSnapshot]:
+        points = self._build_fy_points(
+            symbol,
+            repo,
+            context="worst_oe_ev_fy_10y",
+        )
+        if points is None:
+            return None
+        if not points:
+            LOGGER.warning(
+                "worst_oe_ev_fy_10y: no FY owner earnings points for %s", symbol
+            )
+            return None
+
+        latest_by_year: dict[int, _FYPoint] = {}
+        for point in points:
+            latest_by_year.setdefault(point.year, point)
+
+        latest_year = max(latest_by_year)
+        selected: list[_FYPoint] = []
+        for year in range(latest_year, latest_year - TEN_YEAR_POINTS, -1):
+            selected_point = latest_by_year.get(year)
+            if selected_point is None:
+                LOGGER.warning(
+                    "worst_oe_ev_fy_10y: missing strict consecutive FY chain for %s",
+                    symbol,
+                )
+                return None
+            selected.append(selected_point)
+
+        if not self._is_recent_as_of(
+            selected[0].as_of, max_age_days=MAX_FY_FACT_AGE_DAYS
+        ):
+            LOGGER.warning(
+                "worst_oe_ev_fy_10y: latest FY (%s) too old for %s",
+                selected[0].as_of,
+                symbol,
+            )
+            return None
+
+        series_currency = self._combine_currency([point.currency for point in selected])
+        if series_currency is None and any(
+            point.currency is not None for point in selected
+        ):
+            LOGGER.warning(
+                "worst_oe_ev_fy_10y: currency mismatch across selected FY series for %s",
+                symbol,
+            )
+            return None
+
+        return OwnerEarningsEnterpriseFYSeriesSnapshot(
+            points=tuple(selected),
+            as_of=selected[0].as_of,
+            currency=series_currency,
+        )
+
+    def _latest_available_five_points(
+        self,
+        symbol: str,
+        repo: FinancialFactsRepository,
+        *,
+        context: str,
+    ) -> Optional[list[_FYPoint]]:
+        points = self._build_fy_points(symbol, repo, context=context)
+        if points is None:
+            return None
+        if len(points) < FIVE_YEAR_POINTS:
+            LOGGER.warning(
+                "%s: need 5 FY owner earnings values for %s, found %s",
+                context,
+                symbol,
+                len(points),
+            )
+            return None
+
+        latest = points[0]
+        if not self._is_recent_as_of(latest.as_of, max_age_days=MAX_FY_FACT_AGE_DAYS):
+            LOGGER.warning(
+                "%s: latest FY (%s) too old for %s",
+                context,
+                latest.as_of,
+                symbol,
+            )
+            return None
+
+        latest_five = points[:FIVE_YEAR_POINTS]
+        series_currency = self._combine_currency(
+            [point.currency for point in latest_five]
+        )
+        if series_currency is None and any(
+            point.currency is not None for point in latest_five
+        ):
+            LOGGER.warning(
+                "%s: currency mismatch across selected FY series for %s",
+                context,
+                symbol,
+            )
+            return None
+        return latest_five
+
+    def _build_fy_points(
+        self,
+        symbol: str,
+        repo: FinancialFactsRepository,
+        *,
+        context: str,
+    ) -> Optional[list[_FYPoint]]:
         delta_nwc_maint = self._compute_delta_nwc_maint(symbol, repo)
         if delta_nwc_maint is None:
-            LOGGER.warning("oe_ev_5y_avg: missing delta_nwc_maint for %s", symbol)
+            LOGGER.warning("%s: missing delta_nwc_maint for %s", context, symbol)
             return None
 
         ebit_map = self._build_fy_amount_map(
@@ -177,7 +329,7 @@ class OwnerEarningsEnterpriseCalculator:
             DA_PRIMARY_CONCEPTS + DA_FALLBACK_CONCEPTS,
             absolute=False,
         )
-        mcapex_map = self._build_mcapex_fy_map(symbol, repo)
+        mcapex_map = self._build_mcapex_fy_map(symbol, repo, context=context)
         tax_map = self._fy_map(symbol, repo, TAX_EXPENSE_CONCEPT, absolute=False)
         pretax_map = self._fy_map(symbol, repo, PRETAX_INCOME_CONCEPT, absolute=False)
 
@@ -185,7 +337,7 @@ class OwnerEarningsEnterpriseCalculator:
             tax_map,
             pretax_map,
             symbol=symbol,
-            context="oe_ev_5y_avg",
+            context=context,
         )
 
         candidate_dates = sorted(
@@ -194,6 +346,13 @@ class OwnerEarningsEnterpriseCalculator:
         )
         points: list[_FYPoint] = []
         for end_date in candidate_dates:
+            year = self._parse_year(end_date)
+            if year is None:
+                LOGGER.warning(
+                    "%s: invalid FY end date %s for %s", context, end_date, symbol
+                )
+                continue
+
             ebit = ebit_map[end_date]
             da = da_map.get(end_date)
             mcapex = mcapex_map[end_date]
@@ -203,7 +362,7 @@ class OwnerEarningsEnterpriseCalculator:
                 pretax_map=pretax_map,
                 latest_valid_fy_tax_rate=latest_valid_fy_tax_rate,
                 symbol=symbol,
-                context="oe_ev_5y_avg",
+                context=context,
             )
 
             point_currency = self._combine_currency(
@@ -218,7 +377,8 @@ class OwnerEarningsEnterpriseCalculator:
                 )
             ):
                 LOGGER.warning(
-                    "oe_ev_5y_avg: currency mismatch on %s for %s",
+                    "%s: currency mismatch on %s for %s",
+                    context,
                     end_date,
                     symbol,
                 )
@@ -226,47 +386,15 @@ class OwnerEarningsEnterpriseCalculator:
 
             nopat = ebit.total * (1.0 - tax_rate.rate)
             da_total = da.total if da is not None else 0.0
-            point_value = nopat + da_total - mcapex.total - delta_nwc_maint.value
             points.append(
-                _FYPoint(value=point_value, as_of=end_date, currency=point_currency)
+                _FYPoint(
+                    year=year,
+                    value=nopat + da_total - mcapex.total - delta_nwc_maint.value,
+                    as_of=end_date,
+                    currency=point_currency,
+                )
             )
-
-        if len(points) < 5:
-            LOGGER.warning(
-                "oe_ev_5y_avg: need 5 FY owner earnings values for %s, found %s",
-                symbol,
-                len(points),
-            )
-            return None
-
-        latest = points[0]
-        if not self._is_recent_as_of(latest.as_of, max_age_days=MAX_FY_FACT_AGE_DAYS):
-            LOGGER.warning(
-                "oe_ev_5y_avg: latest FY (%s) too old for %s",
-                latest.as_of,
-                symbol,
-            )
-            return None
-
-        latest_five = points[:5]
-        series_currency = self._combine_currency(
-            [point.currency for point in latest_five]
-        )
-        if series_currency is None and any(
-            point.currency is not None for point in latest_five
-        ):
-            LOGGER.warning(
-                "oe_ev_5y_avg: currency mismatch across selected FY series for %s",
-                symbol,
-            )
-            return None
-
-        average = sum(point.value for point in latest_five) / 5.0
-        return OwnerEarningsEnterpriseSnapshot(
-            value=average,
-            as_of=latest_five[0].as_of,
-            currency=series_currency,
-        )
+        return points
 
     def _effective_tax_rate_ttm(
         self, symbol: str, repo: FinancialFactsRepository
@@ -458,7 +586,11 @@ class OwnerEarningsEnterpriseCalculator:
         return merged
 
     def _build_mcapex_fy_map(
-        self, symbol: str, repo: FinancialFactsRepository
+        self,
+        symbol: str,
+        repo: FinancialFactsRepository,
+        *,
+        context: str,
     ) -> dict[str, _AmountResult]:
         capex_map = self._fy_map(symbol, repo, CAPEX_CONCEPT, absolute=True)
         da_primary_map = self._fy_map(symbol, repo, DA_PRIMARY_CONCEPT, absolute=True)
@@ -478,7 +610,7 @@ class OwnerEarningsEnterpriseCalculator:
                 capex,
                 da,
                 symbol=symbol,
-                context="oe_ev_5y_avg",
+                context=context,
             )
             if value is None:
                 continue
@@ -614,6 +746,12 @@ class OwnerEarningsEnterpriseCalculator:
             return False
         return end_date >= (date.today() - timedelta(days=max_age_days))
 
+    def _parse_year(self, as_of: str) -> Optional[int]:
+        try:
+            return date.fromisoformat(as_of).year
+        except ValueError:
+            return None
+
     def _currencies_match(self, left: Optional[str], right: Optional[str]) -> bool:
         if left and right:
             return left == right
@@ -673,9 +811,54 @@ class OwnerEarningsEnterpriseFiveYearAverageMetric:
         )
 
 
+@dataclass
+class OwnerEarningsEnterpriseFiveYearMedianMetric:
+    """Compute FY median owner earnings enterprise over the latest 5 available years."""
+
+    id: str = "oe_ev_fy_median_5y"
+    required_concepts = REQUIRED_CONCEPTS
+
+    def compute(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> Optional[MetricResult]:
+        snapshot = OwnerEarningsEnterpriseCalculator().compute_5y_median(symbol, repo)
+        if snapshot is None:
+            return None
+        return MetricResult(
+            symbol=symbol,
+            metric_id=self.id,
+            value=snapshot.value,
+            as_of=snapshot.as_of,
+        )
+
+
+@dataclass
+class WorstOwnerEarningsEnterpriseTenYearMetric:
+    """Compute the worst FY owner earnings enterprise value over a strict 10-year window."""
+
+    id: str = "worst_oe_ev_fy_10y"
+    required_concepts = REQUIRED_CONCEPTS
+
+    def compute(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> Optional[MetricResult]:
+        snapshot = OwnerEarningsEnterpriseCalculator().compute_10y_series(symbol, repo)
+        if snapshot is None:
+            return None
+        return MetricResult(
+            symbol=symbol,
+            metric_id=self.id,
+            value=min(point.value for point in snapshot.points),
+            as_of=snapshot.as_of,
+        )
+
+
 __all__ = [
+    "OwnerEarningsEnterpriseFYSeriesSnapshot",
     "OwnerEarningsEnterpriseSnapshot",
     "OwnerEarningsEnterpriseCalculator",
     "OwnerEarningsEnterpriseTTMMetric",
     "OwnerEarningsEnterpriseFiveYearAverageMetric",
+    "OwnerEarningsEnterpriseFiveYearMedianMetric",
+    "WorstOwnerEarningsEnterpriseTenYearMetric",
 ]

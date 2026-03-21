@@ -1594,5 +1594,11 @@ def test_cmd_compute_metrics_all(tmp_path):
     assert metrics_repo.fetch("AAPL.US", "oey_equity") is not None
     assert metrics_repo.fetch("AAPL.US", "oey_equity_5y") is not None
     assert metrics_repo.fetch("AAPL.US", "oey_ev") is not None
+    assert metrics_repo.fetch("AAPL.US", "oey_ev_norm") is not None
     assert metrics_repo.fetch("AAPL.US", "oe_ev_ttm") is not None
     assert metrics_repo.fetch("AAPL.US", "oe_ev_5y_avg") is not None
+    assert metrics_repo.fetch("AAPL.US", "oe_ev_fy_median_5y") is not None
+    assert metrics_repo.fetch("AAPL.US", "worst_oe_ev_fy_10y") is not None
+    assert metrics_repo.fetch("AAPL.US", "fcf_fy_median_5y") is not None
+    assert metrics_repo.fetch("AAPL.US", "ni_loss_years_10y") is not None
+    assert metrics_repo.fetch("AAPL.US", "fcf_neg_years_10y") is not None

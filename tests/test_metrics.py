@@ -12,6 +12,11 @@ from pyvalue.metrics.cash_conversion import (
     CFOToNITenYearMedianMetric,
     CFOToNITTMMetric,
 )
+from pyvalue.metrics.fundamental_consistency import (
+    FCFFiveYearMedianMetric,
+    FCFNegativeYearsTenYearMetric,
+    NetIncomeLossYearsTenYearMetric,
+)
 from pyvalue.metrics.sbc_load import SBCToFCFMetric, SBCToRevenueMetric
 from pyvalue.metrics.current_ratio import CurrentRatioMetric
 from pyvalue.metrics.debt_paydown_years import DebtPaydownYearsMetric, FCFToDebtMetric
@@ -56,10 +61,13 @@ from pyvalue.metrics.owner_earnings_yield import (
     OwnerEarningsYieldEquityFiveYearMetric,
     OwnerEarningsYieldEquityMetric,
     OwnerEarningsYieldEVMetric,
+    OwnerEarningsYieldEVNormalizedMetric,
 )
 from pyvalue.metrics.owner_earnings_enterprise import (
     OwnerEarningsEnterpriseFiveYearAverageMetric,
+    OwnerEarningsEnterpriseFiveYearMedianMetric,
     OwnerEarningsEnterpriseTTMMetric,
+    WorstOwnerEarningsEnterpriseTenYearMetric,
 )
 from pyvalue.metrics.operating_margin_stability import (
     OperatingMarginTenYearMinMetric,
@@ -5769,6 +5777,66 @@ def _build_cash_conversion_fy_records(
     }
 
 
+def _build_fcf_fy_records(
+    symbol: str,
+    latest_year: int,
+    ocf_values: list[float],
+    *,
+    capex_values: list[float] | None = None,
+    ocf_currency: str = "USD",
+    capex_currency: str = "USD",
+) -> dict[str, list[FactRecord]]:
+    records: dict[str, list[FactRecord]] = {
+        "NetCashProvidedByUsedInOperatingActivities": [
+            fact(
+                symbol=symbol,
+                concept="NetCashProvidedByUsedInOperatingActivities",
+                fiscal_period="FY",
+                end_date=f"{latest_year - offset}-09-30",
+                value=value,
+                currency=ocf_currency,
+            )
+            for offset, value in enumerate(ocf_values)
+        ]
+    }
+    if capex_values is not None:
+        records["CapitalExpenditures"] = [
+            fact(
+                symbol=symbol,
+                concept="CapitalExpenditures",
+                fiscal_period="FY",
+                end_date=f"{latest_year - offset}-09-30",
+                value=value,
+                currency=capex_currency,
+            )
+            for offset, value in enumerate(capex_values)
+        ]
+    return records
+
+
+def _build_net_income_fy_records(
+    symbol: str,
+    latest_year: int,
+    values: list[float],
+    *,
+    concept: str = "NetIncomeLoss",
+    currency: str = "USD",
+) -> dict[str, list[FactRecord]]:
+    return {
+        concept: [
+            fact(
+                symbol=symbol,
+                concept=concept,
+                fiscal_period="FY",
+                end_date=f"{latest_year - offset}-09-30",
+                value=value,
+                currency=currency,
+            )
+            for offset, value in enumerate(values)
+        ]
+    }
+
+
 def _build_assets_quarter_records(
     *,
     symbol: str,
@@ -6082,6 +6150,96 @@ def _build_oe_ev_ttm_input_records(
                 currency=base_currency,
             )
             for end_date, period in periods
+        ]
+    return records_by_concept
+
+
+def _build_oe_ev_fy_input_records(
+    *,
+    symbol: str,
+    latest_year: int,
+    years: list[int],
+    ebit_values: list[float],
+    tax_values: list[float] | None = None,
+    pretax_values: list[float] | None = None,
+    da_values: list[float] | None = None,
+    capex_values: list[float] | None = None,
+    currency: str = "USD",
+    nwc_values: list[float] | None = None,
+) -> dict[str, list[FactRecord]]:
+    if nwc_values is None:
+        nwc_values = [
+            300.0,
+            250.0,
+            230.0,
+            210.0,
+            190.0,
+            170.0,
+            150.0,
+            130.0,
+            110.0,
+            90.0,
+            70.0,
+        ]
+    records_by_concept = _build_nwc_fy_records(symbol, latest_year, nwc_values)
+    records_by_concept["OperatingIncomeLoss"] = [
+        fact(
+            symbol=symbol,
+            concept="OperatingIncomeLoss",
+            fiscal_period="FY",
+            end_date=f"{year}-09-30",
+            value=value,
+            currency=currency,
+        )
+        for year, value in zip(years, ebit_values, strict=True)
+    ]
+    if tax_values is not None:
+        records_by_concept["IncomeTaxExpense"] = [
+            fact(
+                symbol=symbol,
+                concept="IncomeTaxExpense",
+                fiscal_period="FY",
+                end_date=f"{year}-09-30",
+                value=value,
+                currency=currency,
+            )
+            for year, value in zip(years, tax_values, strict=True)
+        ]
+    if pretax_values is not None:
+        records_by_concept["IncomeBeforeIncomeTaxes"] = [
+            fact(
+                symbol=symbol,
+                concept="IncomeBeforeIncomeTaxes",
+                fiscal_period="FY",
+                end_date=f"{year}-09-30",
+                value=value,
+                currency=currency,
+            )
+            for year, value in zip(years, pretax_values, strict=True)
+        ]
+    if da_values is not None:
+        records_by_concept["DepreciationDepletionAndAmortization"] = [
+            fact(
+                symbol=symbol,
+                concept="DepreciationDepletionAndAmortization",
+                fiscal_period="FY",
+                end_date=f"{year}-09-30",
+                value=value,
+                currency=currency,
+            )
+            for year, value in zip(years, da_values, strict=True)
+        ]
+    if capex_values is not None:
+        records_by_concept["CapitalExpenditures"] = [
+            fact(
+                symbol=symbol,
+                concept="CapitalExpenditures",
+                fiscal_period="FY",
+                end_date=f"{year}-09-30",
+                value=value,
+                currency=currency,
+            )
+            for year, value in zip(years, capex_values, strict=True)
         ]
     return records_by_concept
 
@@ -10803,6 +10961,486 @@ def test_sbc_load_metrics_reject_currency_conflict_within_sbc():
     assert SBCToRevenueMetric().compute(symbol, repo) is None
 
 
+def test_oe_ev_fy_median_5y_metric_computes_expected_median():
+    metric = OwnerEarningsEnterpriseFiveYearMedianMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    years = [latest_year - offset for offset in range(5)]
+
+    records_by_concept = _build_oe_ev_fy_input_records(
+        symbol=symbol,
+        latest_year=latest_year,
+        years=years,
+        ebit_values=[500.0, 450.0, 400.0, 350.0, 300.0],
+        tax_values=[100.0, 90.0, 80.0, 70.0, 60.0],
+        pretax_values=[500.0, 450.0, 400.0, 350.0, 300.0],
+        da_values=[100.0, 100.0, 100.0, 100.0, 100.0],
+        capex_values=[90.0, 90.0, 90.0, 90.0, 90.0],
+    )
+
+    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    assert result is not None
+    assert result.as_of == f"{years[0]}-09-30"
+    assert result.value == 300.0
+
+
+def test_oe_ev_fy_median_5y_metric_requires_five_points():
+    metric = OwnerEarningsEnterpriseFiveYearMedianMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    years = [latest_year - offset for offset in range(4)]
+
+    records_by_concept = _build_oe_ev_fy_input_records(
+        symbol=symbol,
+        latest_year=latest_year,
+        years=years,
+        ebit_values=[400.0, 380.0, 360.0, 340.0],
+        capex_values=[90.0, 90.0, 90.0, 90.0],
+    )
+
+    assert metric.compute(symbol, _OwnerEarningsRepo(records_by_concept)) is None
+
+
+def test_oe_ev_fy_median_5y_metric_allows_year_gaps():
+    metric = OwnerEarningsEnterpriseFiveYearMedianMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    years = [
+        latest_year,
+        latest_year - 2,
+        latest_year - 3,
+        latest_year - 5,
+        latest_year - 6,
+    ]
+
+    records_by_concept = _build_oe_ev_fy_input_records(
+        symbol=symbol,
+        latest_year=latest_year,
+        years=years,
+        ebit_values=[500.0, 420.0, 380.0, 320.0, 280.0],
+        tax_values=[100.0, 84.0, 76.0, 64.0, 56.0],
+        pretax_values=[500.0, 420.0, 380.0, 320.0, 280.0],
+        da_values=[100.0, 100.0, 100.0, 100.0, 100.0],
+        capex_values=[90.0, 90.0, 90.0, 90.0, 90.0],
+    )
+
+    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    assert result is not None
+    assert result.value == 284.0
+
+
+def test_oe_ev_fy_median_5y_metric_returns_none_when_delta_nwc_maint_missing():
+    metric = OwnerEarningsEnterpriseFiveYearMedianMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    years = [latest_year - offset for offset in range(5)]
+
+    records_by_concept = _build_oe_ev_fy_input_records(
+        symbol=symbol,
+        latest_year=latest_year,
+        years=years,
+        ebit_values=[500.0, 450.0, 400.0, 350.0, 300.0],
+        tax_values=[100.0, 90.0, 80.0, 70.0, 60.0],
+        pretax_values=[500.0, 450.0, 400.0, 350.0, 300.0],
+        da_values=[100.0, 100.0, 100.0, 100.0, 100.0],
+        capex_values=[90.0, 90.0, 90.0, 90.0, 90.0],
+    )
+    records_by_concept.pop("AssetsCurrent")
+
+    assert metric.compute(symbol, _OwnerEarningsRepo(records_by_concept)) is None
+
+
+def test_worst_oe_ev_fy_10y_metric_preserves_negative_worst_year():
+    metric = WorstOwnerEarningsEnterpriseTenYearMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    years = [latest_year - offset for offset in range(10)]
+
+    records_by_concept = _build_oe_ev_fy_input_records(
+        symbol=symbol,
+        latest_year=latest_year,
+        years=years,
+        ebit_values=[
+            500.0,
+            450.0,
+            400.0,
+            350.0,
+            300.0,
+            250.0,
+            200.0,
+            150.0,
+            100.0,
+            0.0,
+        ],
+        tax_values=[100.0, 90.0, 80.0, 70.0, 60.0, 50.0, 40.0, 30.0, 20.0, 0.0],
+        pretax_values=[
+            500.0,
+            450.0,
+            400.0,
+            350.0,
+            300.0,
+            250.0,
+            200.0,
+            150.0,
+            100.0,
+            10.0,
+        ],
+        da_values=[100.0] * 10,
+        capex_values=[90.0] * 10,
+        nwc_values=[
+            300.0,
+            250.0,
+            230.0,
+            210.0,
+            190.0,
+            170.0,
+            150.0,
+            130.0,
+            110.0,
+            90.0,
+            70.0,
+        ],
+    )
+
+    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    assert result is not None
+    assert result.value == -20.0
+
+
+def test_worst_oe_ev_fy_10y_metric_requires_strict_consecutive_years():
+    metric = WorstOwnerEarningsEnterpriseTenYearMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    years = [
+        latest_year,
+        latest_year - 1,
+        latest_year - 2,
+        latest_year - 3,
+        latest_year - 4,
+        latest_year - 5,
+        latest_year - 6,
+        latest_year - 8,
+        latest_year - 9,
+        latest_year - 10,
+    ]
+
+    records_by_concept = _build_oe_ev_fy_input_records(
+        symbol=symbol,
+        latest_year=latest_year,
+        years=years,
+        ebit_values=[
+            500.0,
+            450.0,
+            400.0,
+            350.0,
+            300.0,
+            250.0,
+            200.0,
+            150.0,
+            100.0,
+            50.0,
+        ],
+        tax_values=[100.0, 90.0, 80.0, 70.0, 60.0, 50.0, 40.0, 30.0, 20.0, 10.0],
+        pretax_values=[
+            500.0,
+            450.0,
+            400.0,
+            350.0,
+            300.0,
+            250.0,
+            200.0,
+            150.0,
+            100.0,
+            50.0,
+        ],
+        da_values=[100.0] * 10,
+        capex_values=[90.0] * 10,
+        nwc_values=[
+            300.0,
+            250.0,
+            230.0,
+            210.0,
+            190.0,
+            170.0,
+            150.0,
+            130.0,
+            110.0,
+            90.0,
+            70.0,
+        ],
+    )
+
+    assert metric.compute(symbol, _OwnerEarningsRepo(records_by_concept)) is None
+
+
+def test_fcf_fy_median_5y_metric_computes_expected_median():
+    metric = FCFFiveYearMedianMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_fcf_fy_records(
+        symbol,
+        latest_year,
+        [200.0, 180.0, 160.0, 140.0, 120.0],
+        capex_values=[50.0, 50.0, 50.0, 50.0, 50.0],
+    )
+
+    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    assert result is not None
+    assert result.value == 110.0
+
+
+def test_fcf_fy_median_5y_metric_uses_zero_capex_when_missing():
+    metric = FCFFiveYearMedianMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_fcf_fy_records(
+        symbol,
+        latest_year,
+        [150.0, 140.0, 130.0, 120.0, 110.0],
+    )
+
+    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    assert result is not None
+    assert result.value == 130.0
+
+
+def test_fcf_fy_median_5y_metric_allows_year_gaps():
+    metric = FCFFiveYearMedianMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    years = [
+        latest_year,
+        latest_year - 2,
+        latest_year - 3,
+        latest_year - 5,
+        latest_year - 6,
+    ]
+
+    records_by_concept = {
+        "NetCashProvidedByUsedInOperatingActivities": [
+            fact(
+                symbol=symbol,
+                concept="NetCashProvidedByUsedInOperatingActivities",
+                fiscal_period="FY",
+                end_date=f"{year}-09-30",
+                value=value,
+                currency="USD",
+            )
+            for year, value in zip(
+                years, [200.0, 180.0, 160.0, 140.0, 120.0], strict=True
+            )
+        ],
+        "CapitalExpenditures": [
+            fact(
+                symbol=symbol,
+                concept="CapitalExpenditures",
+                fiscal_period="FY",
+                end_date=f"{year}-09-30",
+                value=50.0,
+                currency="USD",
+            )
+            for year in years
+        ],
+    }
+
+    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    assert result is not None
+    assert result.value == 110.0
+
+
+def test_fcf_fy_median_5y_metric_requires_five_points():
+    metric = FCFFiveYearMedianMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_fcf_fy_records(
+        symbol,
+        latest_year,
+        [200.0, 180.0, 160.0, 140.0],
+        capex_values=[50.0, 50.0, 50.0, 50.0],
+    )
+
+    assert metric.compute(symbol, _OwnerEarningsRepo(records_by_concept)) is None
+
+
+def test_fcf_neg_years_10y_metric_counts_negative_values():
+    metric = FCFNegativeYearsTenYearMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_fcf_fy_records(
+        symbol,
+        latest_year,
+        [100.0, 90.0, 80.0, 70.0, 60.0, 50.0, 40.0, 30.0, 20.0, 10.0],
+        capex_values=[20.0, 20.0, 20.0, 80.0, 80.0, 20.0, 20.0, 40.0, 30.0, 20.0],
+    )
+
+    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    assert result is not None
+    assert result.value == 5.0
+
+
+def test_fcf_neg_years_10y_metric_requires_strict_consecutive_years():
+    metric = FCFNegativeYearsTenYearMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_fcf_fy_records(
+        symbol,
+        latest_year,
+        [100.0, 90.0, 80.0, 70.0, 60.0, 50.0, 40.0, 30.0, 20.0],
+        capex_values=[20.0] * 9,
+    )
+
+    assert metric.compute(symbol, _OwnerEarningsRepo(records_by_concept)) is None
+
+
+def test_ni_loss_years_10y_metric_uses_fallback_and_counts_negative_values():
+    metric = NetIncomeLossYearsTenYearMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_net_income_fy_records(
+        symbol,
+        latest_year,
+        [10.0, -5.0, 20.0, -1.0, 30.0, -2.0, 40.0, 50.0, -3.0, 60.0],
+        concept="NetIncomeLossAvailableToCommonStockholdersBasic",
+    )
+
+    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    assert result is not None
+    assert result.value == 4.0
+
+
+def test_ni_loss_years_10y_metric_requires_strict_consecutive_years():
+    metric = NetIncomeLossYearsTenYearMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_net_income_fy_records(
+        symbol,
+        latest_year,
+        [10.0, -5.0, 20.0, -1.0, 30.0, -2.0, 40.0, 50.0, -3.0],
+    )
+
+    assert metric.compute(symbol, _OwnerEarningsRepo(records_by_concept)) is None
+
+
+def test_oey_ev_norm_metric_uses_oe_fy_median_and_normalized_ev():
+    metric = OwnerEarningsYieldEVNormalizedMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    years = [latest_year - offset for offset in range(5)]
+    records_by_concept = _build_oe_ev_fy_input_records(
+        symbol=symbol,
+        latest_year=latest_year,
+        years=years,
+        ebit_values=[500.0, 450.0, 400.0, 350.0, 300.0],
+        tax_values=[100.0, 90.0, 80.0, 70.0, 60.0],
+        pretax_values=[500.0, 450.0, 400.0, 350.0, 300.0],
+        da_values=[100.0, 100.0, 100.0, 100.0, 100.0],
+        capex_values=[90.0, 90.0, 90.0, 90.0, 90.0],
+    )
+    records_by_concept["EnterpriseValue"] = [
+        fact(
+            symbol=symbol,
+            concept="EnterpriseValue",
+            end_date=f"{latest_year}-09-30",
+            fiscal_period="",
+            value=3200.0,
+            currency="USD",
+        )
+    ]
+
+    result = metric.compute(
+        symbol,
+        _OwnerEarningsRepo(records_by_concept),
+        _build_market_repo(market_cap=1.0, as_of=f"{latest_year}-09-30"),
+    )
+    assert result is not None
+    assert result.value == 300.0 / 3200.0
+
+
+def test_oey_ev_norm_metric_falls_back_to_derived_ev():
+    metric = OwnerEarningsYieldEVNormalizedMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    years = [latest_year - offset for offset in range(5)]
+    records_by_concept = _build_oe_ev_fy_input_records(
+        symbol=symbol,
+        latest_year=latest_year,
+        years=years,
+        ebit_values=[500.0, 450.0, 400.0, 350.0, 300.0],
+        tax_values=[100.0, 90.0, 80.0, 70.0, 60.0],
+        pretax_values=[500.0, 450.0, 400.0, 350.0, 300.0],
+        da_values=[100.0, 100.0, 100.0, 100.0, 100.0],
+        capex_values=[90.0, 90.0, 90.0, 90.0, 90.0],
+    )
+    records_by_concept["LongTermDebt"] = [
+        fact(
+            symbol=symbol,
+            concept="LongTermDebt",
+            end_date=f"{latest_year}-09-30",
+            fiscal_period="FY",
+            value=350.0,
+            currency="USD",
+        )
+    ]
+
+    result = metric.compute(
+        symbol,
+        _OwnerEarningsRepo(records_by_concept),
+        _build_market_repo(
+            market_cap=2950.0,
+            as_of=f"{latest_year}-09-30",
+            currency="USD",
+        ),
+    )
+    assert result is not None
+    assert result.value == 300.0 / 3250.0
+
+
+def test_oey_ev_norm_metric_returns_none_when_fx_conversion_fails(monkeypatch):
+    metric = OwnerEarningsYieldEVNormalizedMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    years = [latest_year - offset for offset in range(5)]
+    records_by_concept = _build_oe_ev_fy_input_records(
+        symbol=symbol,
+        latest_year=latest_year,
+        years=years,
+        ebit_values=[500.0, 450.0, 400.0, 350.0, 300.0],
+        tax_values=[100.0, 90.0, 80.0, 70.0, 60.0],
+        pretax_values=[500.0, 450.0, 400.0, 350.0, 300.0],
+        da_values=[100.0, 100.0, 100.0, 100.0, 100.0],
+        capex_values=[90.0, 90.0, 90.0, 90.0, 90.0],
+    )
+    records_by_concept["EnterpriseValue"] = [
+        fact(
+            symbol=symbol,
+            concept="EnterpriseValue",
+            end_date=f"{latest_year}-09-30",
+            fiscal_period="",
+            value=100.0,
+            currency="EUR",
+        )
+    ]
+
+    monkeypatch.setattr(
+        "pyvalue.metrics.owner_earnings_yield.FXRateStore.convert",
+        lambda self, amount, from_currency, to_currency, as_of: None,
+    )
+
+    result = metric.compute(
+        symbol,
+        _OwnerEarningsRepo(records_by_concept),
+        _build_market_repo(market_cap=1.0, as_of=f"{latest_year}-09-30"),
+    )
+    assert result is None
+
+
 def test_registry_contains_all_ids():
     # Ensure the registry still exposes all metric identifiers
     assert len(REGISTRY) >= 1
@@ -10835,6 +11473,9 @@ def test_registry_contains_all_ids():
     assert "opm_10y_min" in REGISTRY
     assert "cfo_to_ni_ttm" in REGISTRY
     assert "cfo_to_ni_10y_median" in REGISTRY
+    assert "fcf_fy_median_5y" in REGISTRY
+    assert "ni_loss_years_10y" in REGISTRY
+    assert "fcf_neg_years_10y" in REGISTRY
     assert "accruals_ratio" in REGISTRY
     assert "share_count_cagr_10y" in REGISTRY
     assert "shares_10y_pct_change" in REGISTRY
@@ -10845,3 +11486,6 @@ def test_registry_contains_all_ids():
     assert "ev_to_ebitda" in REGISTRY
     assert "sbc_to_revenue" in REGISTRY
     assert "sbc_to_fcf" in REGISTRY
+    assert "oe_ev_fy_median_5y" in REGISTRY
+    assert "worst_oe_ev_fy_10y" in REGISTRY
+    assert "oey_ev_norm" in REGISTRY

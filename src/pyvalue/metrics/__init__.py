@@ -8,6 +8,11 @@ from .working_capital import WorkingCapitalMetric
 from .current_ratio import CurrentRatioMetric
 from .debt_paydown_years import DebtPaydownYearsMetric, FCFToDebtMetric
 from .cash_conversion import CFOToNITTMMetric, CFOToNITenYearMedianMetric
+from .fundamental_consistency import (
+    FCFFiveYearMedianMetric,
+    FCFNegativeYearsTenYearMetric,
+    NetIncomeLossYearsTenYearMetric,
+)
 from .accruals_ratio import AccrualsRatioMetric
 from .long_term_debt import LongTermDebtMetric
 from .eps_streak import EPSStreakMetric
@@ -48,10 +53,13 @@ from .owner_earnings_yield import (
     OwnerEarningsYieldEquityMetric,
     OwnerEarningsYieldEquityFiveYearMetric,
     OwnerEarningsYieldEVMetric,
+    OwnerEarningsYieldEVNormalizedMetric,
 )
 from .owner_earnings_enterprise import (
     OwnerEarningsEnterpriseTTMMetric,
     OwnerEarningsEnterpriseFiveYearAverageMetric,
+    OwnerEarningsEnterpriseFiveYearMedianMetric,
+    WorstOwnerEarningsEnterpriseTenYearMetric,
 )
 from .gross_margin_stability import GrossMarginTenYearStdMetric
 from .operating_margin_stability import (
@@ -75,6 +83,9 @@ REGISTRY = {
     FCFToDebtMetric.id: FCFToDebtMetric,
     CFOToNITTMMetric.id: CFOToNITTMMetric,
     CFOToNITenYearMedianMetric.id: CFOToNITenYearMedianMetric,
+    FCFFiveYearMedianMetric.id: FCFFiveYearMedianMetric,
+    FCFNegativeYearsTenYearMetric.id: FCFNegativeYearsTenYearMetric,
+    NetIncomeLossYearsTenYearMetric.id: NetIncomeLossYearsTenYearMetric,
     AccrualsRatioMetric.id: AccrualsRatioMetric,
     LongTermDebtMetric.id: LongTermDebtMetric,
     EPSStreakMetric.id: EPSStreakMetric,
@@ -122,8 +133,11 @@ REGISTRY = {
     OwnerEarningsYieldEquityMetric.id: OwnerEarningsYieldEquityMetric,
     OwnerEarningsYieldEquityFiveYearMetric.id: OwnerEarningsYieldEquityFiveYearMetric,
     OwnerEarningsYieldEVMetric.id: OwnerEarningsYieldEVMetric,
+    OwnerEarningsYieldEVNormalizedMetric.id: OwnerEarningsYieldEVNormalizedMetric,
     OwnerEarningsEnterpriseTTMMetric.id: OwnerEarningsEnterpriseTTMMetric,
     OwnerEarningsEnterpriseFiveYearAverageMetric.id: OwnerEarningsEnterpriseFiveYearAverageMetric,
+    OwnerEarningsEnterpriseFiveYearMedianMetric.id: OwnerEarningsEnterpriseFiveYearMedianMetric,
+    WorstOwnerEarningsEnterpriseTenYearMetric.id: WorstOwnerEarningsEnterpriseTenYearMetric,
     ROCGreenblattMetric.id: ROCGreenblattMetric,
     ROEGreenblattMetric.id: ROEGreenblattMetric,
 }
@@ -137,6 +151,9 @@ __all__ = [
     "FCFToDebtMetric",
     "CFOToNITTMMetric",
     "CFOToNITenYearMedianMetric",
+    "FCFFiveYearMedianMetric",
+    "FCFNegativeYearsTenYearMetric",
+    "NetIncomeLossYearsTenYearMetric",
     "AccrualsRatioMetric",
     "LongTermDebtMetric",
     "EPSStreakMetric",
@@ -184,8 +201,11 @@ __all__ = [
     "OwnerEarningsYieldEquityMetric",
     "OwnerEarningsYieldEquityFiveYearMetric",
     "OwnerEarningsYieldEVMetric",
+    "OwnerEarningsYieldEVNormalizedMetric",
     "OwnerEarningsEnterpriseTTMMetric",
     "OwnerEarningsEnterpriseFiveYearAverageMetric",
+    "OwnerEarningsEnterpriseFiveYearMedianMetric",
+    "WorstOwnerEarningsEnterpriseTenYearMetric",
     "ROCGreenblattMetric",
     "ROEGreenblattMetric",
     "REGISTRY",

@@ -207,8 +207,46 @@ class OwnerEarningsYieldEVMetric:
         )
 
 
+@dataclass
+class OwnerEarningsYieldEVNormalizedMetric:
+    """Compute normalized owner earnings yield using FY median owner earnings enterprise."""
+
+    id: str = "oey_ev_norm"
+    required_concepts = REQUIRED_EV_CONCEPTS
+    uses_market_data = True
+
+    def compute(
+        self,
+        symbol: str,
+        repo: FinancialFactsRepository,
+        market_repo: MarketDataRepository,
+    ) -> Optional[MetricResult]:
+        numerator = OwnerEarningsEnterpriseCalculator().compute_5y_median(symbol, repo)
+        if numerator is None:
+            LOGGER.warning("oey_ev_norm: missing numerator for %s", symbol)
+            return None
+
+        enterprise_value = _denominator_enterprise_value(
+            symbol=symbol,
+            repo=repo,
+            market_repo=market_repo,
+            target_currency=numerator.currency,
+            context=self.id,
+        )
+        if enterprise_value is None:
+            return None
+
+        return MetricResult(
+            symbol=symbol,
+            metric_id=self.id,
+            value=numerator.value / enterprise_value,
+            as_of=numerator.as_of,
+        )
+
+
 __all__ = [
     "OwnerEarningsYieldEquityMetric",
     "OwnerEarningsYieldEquityFiveYearMetric",
     "OwnerEarningsYieldEVMetric",
+    "OwnerEarningsYieldEVNormalizedMetric",
 ]
