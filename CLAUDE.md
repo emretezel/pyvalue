@@ -70,4 +70,4 @@ pyvalue is a Python toolkit for ingesting, normalizing, and screening fundamenta
 - Store credentials in `private/config.toml` or environment variables like `PYVALUE_SEC_USER_AGENT`; never commit secrets.
 - Screen outputs default to `data/screen_results_*.csv` and are treated as local artifacts.
 - If you import a new third-party package, add it to `pyproject.toml` under `[project].dependencies`.
-- Always check whether `README.md` needs updates when behavior, metrics, or CLI usage changes.
+- Whenever you make a change, explicitly decide whether documentation must be updated. Review the entire `docs/` tree to find the canonical file to update, and update `README.md` too when the repo landing-page guidance changes.
