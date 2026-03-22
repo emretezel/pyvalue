@@ -631,6 +631,56 @@ def _migration_017_add_description_to_entity_metadata(conn: sqlite3.Connection) 
     conn.execute("ALTER TABLE entity_metadata ADD COLUMN description TEXT")
 
 
+def _migration_018_create_supported_exchanges(conn: sqlite3.Connection) -> None:
+    """Store provider-supported exchange metadata."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS supported_exchanges (
+            provider TEXT NOT NULL,
+            code TEXT NOT NULL,
+            name TEXT,
+            country TEXT,
+            currency TEXT,
+            operating_mic TEXT,
+            country_iso2 TEXT,
+            country_iso3 TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (provider, code)
+        )
+        """
+    )
+
+
+def _migration_019_create_supported_tickers(conn: sqlite3.Connection) -> None:
+    """Store provider-supported tickers by exchange."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS supported_tickers (
+            provider TEXT NOT NULL,
+            exchange_code TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            code TEXT NOT NULL,
+            listing_exchange TEXT,
+            security_name TEXT,
+            security_type TEXT,
+            country TEXT,
+            currency TEXT,
+            isin TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (provider, symbol)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_supported_tickers_provider_exchange
+        ON supported_tickers(provider, exchange_code)
+        """
+    )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -649,6 +699,8 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_015_drop_region_columns,
     _migration_016_drop_exchange_metadata_and_company_facts,
     _migration_017_add_description_to_entity_metadata,
+    _migration_018_create_supported_exchanges,
+    _migration_019_create_supported_tickers,
 ]
 
 

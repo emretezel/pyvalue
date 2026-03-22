@@ -15,13 +15,22 @@ This file is gitignored and should never be committed.
 ```toml
 [eodhd]
 api_key = "YOUR_EOD_TOKEN"
+fundamentals_requests_per_minute = 600
+fundamentals_daily_buffer_calls = 5000
 ```
 
 Use this for:
 - `load-universe --provider EODHD`
+- `refresh-supported-exchanges --provider EODHD`
+- `refresh-supported-tickers --provider EODHD`
 - `ingest-fundamentals --provider EODHD`
+- `ingest-fundamentals-global --provider EODHD`
 - `update-market-data`
-- all bulk EODHD workflows
+- exchange and global EODHD workflows
+
+Optional EODHD throttling and quota settings:
+- `fundamentals_requests_per_minute`: default `600`, capped at the EODHD limit of `1000`; used by `ingest-fundamentals-global`
+- `fundamentals_daily_buffer_calls`: default `5000`, reserved from the daily call budget so global ingestion stops early instead of consuming the full allowance
 
 ## SEC User-Agent
 

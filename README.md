@@ -11,6 +11,8 @@ This project is provided for educational and informational purposes only and doe
 ```bash
 python -m pip install -e .[dev]
 conda activate pyvalue
+pyvalue refresh-supported-exchanges --provider EODHD
+pyvalue refresh-supported-tickers --provider EODHD --exchange-code US
 pyvalue load-universe --provider EODHD --exchange-code US
 pyvalue ingest-fundamentals-bulk --provider EODHD --exchange-code US
 pyvalue normalize-fundamentals-bulk --provider EODHD --exchange-code US

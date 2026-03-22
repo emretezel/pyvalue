@@ -33,6 +33,8 @@ data/pyvalue.db
 ## Recommended First Workflow: EODHD
 
 ```bash
+pyvalue refresh-supported-exchanges --provider EODHD
+pyvalue refresh-supported-tickers --provider EODHD --exchange-code US
 pyvalue load-universe --provider EODHD --exchange-code US
 pyvalue ingest-fundamentals-bulk --provider EODHD --exchange-code US
 pyvalue normalize-fundamentals-bulk --provider EODHD --exchange-code US

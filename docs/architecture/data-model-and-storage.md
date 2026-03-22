@@ -6,7 +6,10 @@
 
 The main persisted layers are:
 - listings / universe data
+- supported exchange catalogs
+- supported ticker catalogs
 - raw fundamentals
+- fundamentals fetch state
 - normalized financial facts
 - market data snapshots
 - computed metrics
@@ -21,6 +24,37 @@ Purpose:
 - preserve source payloads as received
 - support re-normalization when normalization logic changes
 - separate provider-fetch concerns from metric computation
+
+### `supported_exchanges`
+
+Provider-published exchange catalogs live here.
+
+Purpose:
+- cache provider exchange metadata such as code, country, currency, and MIC
+- avoid re-fetching exchange-list metadata on every EODHD lookup
+- support explicit catalog refreshes from the CLI
+
+### `supported_tickers`
+
+Provider-published ticker catalogs live here, keyed by provider and qualified symbol.
+
+Purpose:
+- cache the EODHD exchange symbol list by exchange code
+- store the fetchable qualified ticker symbol such as `AAPL.US` or `SHEL.LSE`
+- drive exchange-level and global EODHD fundamentals ingestion without a live symbol-list call
+- mirror the currently supported EODHD equity ticker set into `listings` for exchange workflows
+
+When a provider drops a symbol, it is removed from this operational catalog and
+from mirrored `listings`, but historical raw and derived tables are retained.
+
+### `fundamentals_fetch_state`
+
+Operational fetch progress and retry backoff live here.
+
+Purpose:
+- track retry state for failed fundamentals fetches
+- support resumable bulk ingestion
+- avoid repeatedly hitting symbols that are still inside backoff
 
 ### `financial_facts`
 
@@ -51,12 +85,13 @@ Purpose:
 
 A normal run looks like:
 
-1. universe loaded into listings storage
-2. raw payload fetched into `fundamentals_raw`
-3. provider-specific normalizer writes `financial_facts`
-4. market refresh writes `market_data`
-5. metric computation writes `metrics`
-6. screens read from stored metrics
+1. provider catalogs refreshed into `supported_exchanges` and `supported_tickers`
+2. universe loaded or mirrored into `listings`
+3. raw payload fetched into `fundamentals_raw`
+4. provider-specific normalizer writes `financial_facts`
+5. market refresh writes `market_data`
+6. metric computation writes `metrics`
+7. screens read from stored metrics
 
 ## Migration Notes
 

@@ -32,10 +32,29 @@ pyvalue compute-metrics AAPL.US --all
 Typical exchange-level run:
 
 ```bash
+pyvalue refresh-supported-exchanges --provider EODHD
+pyvalue refresh-supported-tickers --provider EODHD --exchange-code US
 pyvalue load-universe --provider EODHD --exchange-code US
 pyvalue ingest-fundamentals-bulk --provider EODHD --exchange-code US
 pyvalue normalize-fundamentals-bulk --provider EODHD --exchange-code US
 pyvalue compute-metrics-bulk --exchange-code US
+```
+
+Typical all-exchange bootstrap over multiple days:
+
+```bash
+pyvalue refresh-supported-exchanges --provider EODHD
+pyvalue refresh-supported-tickers --provider EODHD --all-exchanges
+pyvalue ingest-fundamentals-global --provider EODHD --resume
+```
+
+Re-run the global command on later days to continue from the remaining eligible
+tickers after the EODHD daily call budget resets.
+
+To refresh stale symbols later instead of only filling missing payloads:
+
+```bash
+pyvalue ingest-fundamentals-global --provider EODHD --max-age-days 30 --resume
 ```
 
 ## What Ingestion Does
@@ -46,6 +65,9 @@ Ingestion stores raw provider payloads as received, keyed by:
 - metadata such as currency and exchange when available
 
 This stage is useful because it preserves source payloads for later re-normalization.
+
+For repeated EODHD fundamentals ingestion, the latest raw payload for a symbol
+replaces the previously stored raw payload for that same symbol.
 
 ## What Normalization Does
 
@@ -67,6 +89,9 @@ Re-run ingestion when:
 - provider data is stale
 - you added new symbols
 - you want fresh payloads from the source
+
+For EODHD bulk workflows, refresh the stored ticker catalog when the provider's
+supported symbols may have changed.
 
 Re-run normalization when:
 - raw payloads changed

@@ -17,6 +17,35 @@ You need an active EODHD subscription for:
 
 ## Universe Loading
 
+`pyvalue` stores the EODHD supported-exchange catalog in SQLite and uses it for
+exchange metadata lookups. Refresh it explicitly when you want the latest
+exchange list from EODHD:
+
+```bash
+pyvalue refresh-supported-exchanges --provider EODHD
+```
+
+`load-universe` will also bootstrap the catalog automatically on cache miss.
+
+`pyvalue` also stores a per-exchange `supported_tickers` catalog for EODHD.
+Refresh one exchange:
+
+```bash
+pyvalue refresh-supported-tickers --provider EODHD --exchange-code LSE
+```
+
+Refresh all stored exchanges:
+
+```bash
+pyvalue refresh-supported-tickers --provider EODHD --all-exchanges
+```
+
+Ticker refresh keeps only `Common Stock`, `Preferred Stock`, and `Stock`.
+ETF, fund, and other security types are excluded from the operational catalog.
+When a ticker disappears from EODHD, it is removed from `supported_tickers`,
+mirrored `listings`, and stale fetch-state rows, but historical fundamentals and
+derived tables are kept.
+
 Example:
 
 ```bash
@@ -42,10 +71,42 @@ Bulk:
 pyvalue ingest-fundamentals-bulk --provider EODHD --exchange-code US
 ```
 
+Quota-aware global run across the stored supported-ticker catalog:
+
+```bash
+pyvalue ingest-fundamentals-global --provider EODHD
+```
+
+Exchange-level EODHD bulk ingestion reads from stored `supported_tickers`, not
+from a live symbol-list request. Refresh the ticker catalog before running it:
+
+```bash
+pyvalue refresh-supported-tickers --provider EODHD --exchange-code US
+pyvalue ingest-fundamentals-bulk --provider EODHD --exchange-code US
+```
+
+For large multi-day runs:
+
+```bash
+pyvalue refresh-supported-exchanges --provider EODHD
+pyvalue refresh-supported-tickers --provider EODHD --all-exchanges
+pyvalue ingest-fundamentals-global --provider EODHD --resume
+```
+
+`ingest-fundamentals-global` checks the EODHD user/quota endpoint before each
+run, subtracts the configured daily buffer, throttles by requests per minute,
+and exits cleanly when the remaining daily allowance is exhausted. Rerun it the
+next day to continue from the remaining eligible ticker set.
+
+Successful EODHD refreshes replace the stored raw payload for the same symbol in
+`fundamentals_raw`. Older historical periods remain available through the newly
+stored payload and normalized downstream tables are refreshed only when you run
+normalization again.
+
 Important bulk options:
-- `--rate`: symbols per minute
+- `--rate`: exchange bulk uses symbols per minute; global ingestion uses requests per minute
 - `--max-symbols`: limit one run
-- `--max-age-days`: refresh only stale or missing data
+- `--max-age-days`: refresh stale or missing data; when omitted on the global command, only missing payloads are selected
 - `--resume`: skip symbols still in backoff
 
 ## Fundamentals Normalization

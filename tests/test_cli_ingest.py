@@ -3,7 +3,7 @@
 Author: Emre Tezel
 """
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +19,8 @@ from pyvalue.storage import (
     FactRecord,
     MarketDataRepository,
     MetricsRepository,
+    SupportedExchangeRepository,
+    SupportedTickerRepository,
     UniverseRepository,
 )
 from pyvalue.universe import Listing
@@ -40,6 +42,56 @@ def make_fact(**kwargs):
     }
     base.update(kwargs)
     return FactRecord(**base)
+
+
+def store_supported_exchanges(
+    db_path,
+    rows=None,
+    provider: str = "EODHD",
+):
+    repo = SupportedExchangeRepository(db_path)
+    repo.initialize_schema()
+    repo.replace_for_provider(
+        provider,
+        rows
+        or [
+            {
+                "Code": "LSE",
+                "Name": "London Exchange",
+                "Country": "UK",
+                "Currency": "GBP",
+                "OperatingMIC": "XLON",
+                "CountryISO2": "GB",
+                "CountryISO3": "GBR",
+            }
+        ],
+    )
+    return repo
+
+
+def store_supported_tickers(
+    db_path,
+    exchange_code: str,
+    rows=None,
+    provider: str = "EODHD",
+):
+    repo = SupportedTickerRepository(db_path)
+    repo.initialize_schema()
+    repo.replace_for_exchange(
+        provider,
+        exchange_code,
+        rows
+        or [
+            {
+                "Code": "AAA",
+                "Name": "AAA plc",
+                "Exchange": exchange_code,
+                "Type": "Common Stock",
+                "Currency": "GBP",
+            }
+        ],
+    )
+    return repo
 
 
 def test_cmd_ingest_fundamentals_sec(monkeypatch, tmp_path):
@@ -126,15 +178,14 @@ def test_cmd_ingest_fundamentals_eodhd(monkeypatch, tmp_path):
 
 def test_cmd_ingest_fundamentals_bulk_eodhd_with_exchange(monkeypatch, tmp_path):
     db_path = tmp_path / "bulkfunds.db"
-    calls = {"listed": False, "fetched": []}
-
-    universe_repo = UniverseRepository(db_path)
-    universe_repo.initialize_schema()
-    universe_repo.replace_universe(
-        [
-            Listing(symbol="AAA.LSE", security_name="AAA plc", exchange="LSE"),
-            Listing(symbol="CCC.LSE", security_name="CCC plc", exchange="LSE"),
-        ]
+    calls = {"fetched": []}
+    store_supported_tickers(
+        db_path,
+        "LSE",
+        rows=[
+            {"Code": "AAA", "Exchange": "LSE", "Type": "Common Stock"},
+            {"Code": "CCC", "Exchange": "LSE", "Type": "Preferred Stock"},
+        ],
     )
 
     class FakeClient:
@@ -142,19 +193,13 @@ def test_cmd_ingest_fundamentals_bulk_eodhd_with_exchange(monkeypatch, tmp_path)
             calls["api_key"] = api_key
 
         def list_symbols(self, exchange_code):
-            calls["listed"] = exchange_code
-            return [
-                {"Code": "AAA", "Exchange": exchange_code, "Type": "Common Stock"},
-                {"Code": "BBB", "Exchange": exchange_code, "Type": "ETF"},
-                {"Code": "CCC", "Exchange": exchange_code, "Type": "Preferred Stock"},
-            ]
+            raise AssertionError(
+                "Bulk EODHD fundamentals should use stored supported_tickers."
+            )
 
         def fetch_fundamentals(self, symbol, exchange_code=None):
             calls["fetched"].append((symbol, exchange_code))
             return {"General": {"CurrencyCode": "USD", "Name": symbol}}
-
-        def exchange_metadata(self, exchange_code):
-            return {"Name": "London", "Country": "UK", "Currency": "GBP"}
 
     monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
     monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
@@ -182,19 +227,25 @@ def test_cmd_ingest_fundamentals_bulk_eodhd_with_exchange_symbols(
     monkeypatch, tmp_path
 ):
     db_path = tmp_path / "bulkfunds_region.db"
-    universe_repo = UniverseRepository(db_path)
-    universe_repo.initialize_schema()
-    listings = [
-        Listing(symbol="AAA.US", security_name="AAA Inc", exchange="US"),
-        Listing(symbol="BBB.US", security_name="BBB Inc", exchange="US"),
-    ]
-    universe_repo.replace_universe(listings)
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[
+            {"Code": "AAA", "Exchange": "US", "Type": "Common Stock"},
+            {"Code": "BBB", "Exchange": "US", "Type": "Stock"},
+        ],
+    )
 
     calls = {"fetched": []}
 
     class FakeClient:
         def __init__(self, api_key):
             calls["api_key"] = api_key
+
+        def list_symbols(self, exchange_code):
+            raise AssertionError(
+                "Bulk EODHD fundamentals should use stored supported_tickers."
+            )
 
         def fetch_fundamentals(self, symbol, exchange_code=None):
             calls["fetched"].append((symbol, exchange_code))
@@ -268,6 +319,21 @@ def test_cmd_ingest_fundamentals_bulk_sec(monkeypatch, tmp_path):
 
 def test_cmd_load_universe_eodhd(monkeypatch, tmp_path):
     calls = {}
+    db_path = tmp_path / "uk.db"
+    store_supported_exchanges(
+        db_path,
+        rows=[
+            {
+                "Code": "LSE",
+                "Name": "London",
+                "Country": "UK",
+                "Currency": "GBP",
+                "OperatingMIC": "XLON",
+                "CountryISO2": "GB",
+                "CountryISO3": "GBR",
+            }
+        ],
+    )
 
     class FakeLoader:
         def __init__(
@@ -306,18 +372,12 @@ def test_cmd_load_universe_eodhd(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "UKUniverseLoader", FakeLoader)
     monkeypatch.setattr(cli, "Config", lambda: SimpleNamespace(eodhd_api_key="KEY"))
 
-    db_path = tmp_path / "uk.db"
-
     class FakeClient:
         def __init__(self, api_key):
             calls["meta_api_key"] = api_key
 
-        def exchange_metadata(self, code):
-            return {"Name": "London", "Country": "UK", "Currency": "GBP"}
-
     monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
 
-    db_path = tmp_path / "uk.db"
     rc = cli.cmd_load_universe(
         provider="EODHD",
         database=str(db_path),
@@ -329,65 +389,647 @@ def test_cmd_load_universe_eodhd(monkeypatch, tmp_path):
 
     assert rc == 0
     assert calls["api_key"] == "KEY"
+    assert calls["meta_api_key"] == "KEY"
     assert calls["exchange_code"] == "LSE"
     assert calls["include_etfs"] is False
     assert calls["allowed_currencies"] == ["GBP"]
     assert calls["include_exchanges"] == ["LSE"]
 
 
-def test_cmd_ingest_fundamentals_bulk_uses_exchange_listings(monkeypatch, tmp_path):
+def test_cmd_refresh_supported_exchanges(monkeypatch, tmp_path):
+    calls = {}
+
+    class FakeClient:
+        def __init__(self, api_key):
+            calls["api_key"] = api_key
+
+        def list_exchanges(self):
+            calls["list_exchanges"] = calls.get("list_exchanges", 0) + 1
+            return [
+                {
+                    "Code": " lse ",
+                    "Name": " London Exchange ",
+                    "Country": " UK ",
+                    "Currency": " GBP ",
+                    "OperatingMIC": " XLON ",
+                    "CountryISO2": " GB ",
+                    "CountryISO3": " GBR ",
+                },
+                {
+                    "Code": " US ",
+                    "Name": " USA Stocks ",
+                    "Country": " USA ",
+                    "Currency": " USD ",
+                    "OperatingMIC": " XNAS, XNYS ",
+                    "CountryISO2": " US ",
+                    "CountryISO3": " USA ",
+                },
+            ]
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+
+    db_path = tmp_path / "supported-exchanges.db"
+    rc = cli.cmd_refresh_supported_exchanges(
+        provider="EODHD",
+        database=str(db_path),
+    )
+
+    assert rc == 0
+    assert calls == {"api_key": "TOKEN", "list_exchanges": 1}
+
+    repo = SupportedExchangeRepository(db_path)
+    repo.initialize_schema()
+    record = repo.fetch("eodhd", "LSE")
+    assert record is not None
+    assert record.code == "LSE"
+    assert record.name == "London Exchange"
+    assert record.country == "UK"
+    assert record.currency == "GBP"
+    assert record.operating_mic == "XLON"
+    assert record.country_iso2 == "GB"
+    assert record.country_iso3 == "GBR"
+    assert [row.code for row in repo.list_all("EODHD")] == ["LSE", "US"]
+
+
+def test_cmd_refresh_supported_tickers_filters_types_and_cleans_catalog(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "refresh-supported-tickers.db"
+    store_supported_exchanges(
+        db_path,
+        rows=[
+            {
+                "Code": "LSE",
+                "Name": "London Exchange",
+                "Country": "UK",
+                "Currency": "GBP",
+                "OperatingMIC": "XLON",
+                "CountryISO2": "GB",
+                "CountryISO3": "GBR",
+            }
+        ],
+    )
+    store_supported_tickers(
+        db_path,
+        "LSE",
+        rows=[
+            {
+                "Code": "OLD",
+                "Exchange": "LSE",
+                "Name": "Old plc",
+                "Type": "Common Stock",
+                "Currency": "GBP",
+                "ISIN": "GB00OLD",
+            },
+            {
+                "Code": "KEEP",
+                "Exchange": "LSE",
+                "Name": "Keep plc",
+                "Type": "Common Stock",
+                "Currency": "GBP",
+                "ISIN": "GB00KEEP",
+            },
+        ],
+    )
+
+    universe_repo = UniverseRepository(db_path)
+    universe_repo.initialize_schema()
+    universe_repo.replace_exchange(
+        "LSE",
+        [
+            Listing(symbol="OLD.LSE", security_name="Old plc", exchange="LSE"),
+            Listing(symbol="KEEP.LSE", security_name="Keep plc", exchange="LSE"),
+        ],
+    )
+
+    state_repo = FundamentalsFetchStateRepository(db_path)
+    state_repo.initialize_schema()
+    state_repo.mark_failure("EODHD", "OLD.LSE", "stale")
+    state_repo.mark_failure("EODHD", "KEEP.LSE", "still-listed")
+
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD",
+        "OLD.LSE",
+        {"General": {"CurrencyCode": "GBP", "Name": "Old plc"}},
+        exchange="LSE",
+    )
+
+    calls = {"listed": []}
+
+    class FakeClient:
+        def __init__(self, api_key):
+            calls["api_key"] = api_key
+
+        def list_symbols(self, exchange_code):
+            calls["listed"].append(exchange_code)
+            return [
+                {
+                    "Code": "KEEP",
+                    "Exchange": exchange_code,
+                    "Name": "Keep plc",
+                    "Type": "Common Stock",
+                    "Currency": "GBP",
+                    "ISIN": "GB00KEEP",
+                },
+                {
+                    "Code": "PREF",
+                    "Exchange": exchange_code,
+                    "Name": "Pref plc",
+                    "Type": "Preferred Stock",
+                    "Currency": "GBP",
+                    "ISIN": "GB00PREF",
+                },
+                {
+                    "Code": "ETF1",
+                    "Exchange": exchange_code,
+                    "Name": "ETF 1",
+                    "Type": "ETF",
+                    "Currency": "GBP",
+                    "ISIN": "GB00ETF1",
+                },
+            ]
+
+        def list_exchanges(self):
+            raise AssertionError("Should not refresh supported exchanges on cache hit")
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+
+    rc = cli.cmd_refresh_supported_tickers(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_code="LSE",
+        all_exchanges=False,
+    )
+
+    assert rc == 0
+    assert calls == {"api_key": "TOKEN", "listed": ["LSE"]}
+
+    ticker_repo = SupportedTickerRepository(db_path)
+    rows = ticker_repo.list_for_exchange("EODHD", "LSE")
+    assert [row.symbol for row in rows] == ["KEEP.LSE", "PREF.LSE"]
+    assert [row.security_type for row in rows] == ["Common Stock", "Preferred Stock"]
+
+    assert universe_repo.fetch_symbols_by_exchange("LSE") == ["KEEP.LSE", "PREF.LSE"]
+    assert state_repo.fetch("EODHD", "OLD.LSE") is None
+    assert state_repo.fetch("EODHD", "KEEP.LSE") is not None
+    assert fund_repo.fetch("EODHD", "OLD.LSE") is not None
+
+
+def test_cmd_refresh_supported_tickers_all_exchanges_in_code_order(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "refresh-supported-tickers-all.db"
+    store_supported_exchanges(
+        db_path,
+        rows=[
+            {
+                "Code": "US",
+                "Name": "USA Stocks",
+                "Country": "USA",
+                "Currency": "USD",
+                "OperatingMIC": "XNAS",
+                "CountryISO2": "US",
+                "CountryISO3": "USA",
+            },
+            {
+                "Code": "LSE",
+                "Name": "London Exchange",
+                "Country": "UK",
+                "Currency": "GBP",
+                "OperatingMIC": "XLON",
+                "CountryISO2": "GB",
+                "CountryISO3": "GBR",
+            },
+            {
+                "Code": "TSX",
+                "Name": "Toronto Exchange",
+                "Country": "Canada",
+                "Currency": "CAD",
+                "OperatingMIC": "XTSE",
+                "CountryISO2": "CA",
+                "CountryISO3": "CAN",
+            },
+        ],
+    )
+    calls = {"listed": []}
+
+    class FakeClient:
+        def __init__(self, api_key):
+            calls["api_key"] = api_key
+
+        def list_symbols(self, exchange_code):
+            calls["listed"].append(exchange_code)
+            return [
+                {
+                    "Code": f"{exchange_code}1",
+                    "Exchange": exchange_code,
+                    "Name": f"{exchange_code} Company",
+                    "Type": "Common Stock",
+                    "Currency": "USD",
+                }
+            ]
+
+        def list_exchanges(self):
+            raise AssertionError("Should use cached supported exchanges")
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+
+    rc = cli.cmd_refresh_supported_tickers(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_code=None,
+        all_exchanges=True,
+    )
+
+    assert rc == 0
+    assert calls["api_key"] == "TOKEN"
+    assert calls["listed"] == ["LSE", "TSX", "US"]
+
+    repo = SupportedTickerRepository(db_path)
+    assert repo.list_all_exchanges("EODHD") == ["LSE", "TSX", "US"]
+
+
+def test_cmd_load_universe_eodhd_bootstraps_supported_exchanges(monkeypatch, tmp_path):
+    calls = {}
+
+    class FakeLoader:
+        def __init__(
+            self,
+            api_key,
+            exchange_code,
+            include_etfs=False,
+            allowed_currencies=None,
+            include_exchanges=None,
+            fetcher=None,
+            session=None,
+        ):
+            calls["api_key"] = api_key
+            calls["exchange_code"] = exchange_code
+
+        def load(self):
+            return [
+                Listing(
+                    symbol="AAA.LSE",
+                    security_name="AAA plc",
+                    exchange="LSE",
+                    currency="GBP",
+                )
+            ]
+
+    class FakeClient:
+        def __init__(self, api_key):
+            calls["meta_api_key"] = api_key
+
+        def list_exchanges(self):
+            calls["list_exchanges"] = calls.get("list_exchanges", 0) + 1
+            return [
+                {
+                    "Code": "LSE",
+                    "Name": "London Exchange",
+                    "Country": "UK",
+                    "Currency": "GBP",
+                    "OperatingMIC": "XLON",
+                    "CountryISO2": "GB",
+                    "CountryISO3": "GBR",
+                }
+            ]
+
+    monkeypatch.setattr(cli, "UKUniverseLoader", FakeLoader)
+    monkeypatch.setattr(cli, "Config", lambda: SimpleNamespace(eodhd_api_key="KEY"))
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+
+    db_path = tmp_path / "bootstrap-universe.db"
+    rc = cli.cmd_load_universe(
+        provider="EODHD",
+        database=str(db_path),
+        include_etfs=False,
+        exchange_code="LSE",
+        currencies=None,
+        include_exchanges=None,
+    )
+
+    assert rc == 0
+    assert calls["list_exchanges"] == 1
+    repo = SupportedExchangeRepository(db_path)
+    repo.initialize_schema()
+    record = repo.fetch("EODHD", "LSE")
+    assert record is not None
+    assert record.country == "UK"
+
+
+def test_cmd_ingest_fundamentals_global_respects_budget_from_user_metadata(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "global-budget.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[
+            {"Code": "AAA", "Exchange": "US", "Type": "Common Stock"},
+            {"Code": "BBB", "Exchange": "US", "Type": "Stock"},
+        ],
+    )
     calls = {"fetched": []}
 
     class FakeClient:
         def __init__(self, api_key):
             calls["api_key"] = api_key
 
-        def fetch_fundamentals(self, symbol, exchange_code=None):
-            calls["fetched"].append((symbol, exchange_code))
-            return {"General": {"CurrencyCode": "USD"}}
+        def user_metadata(self):
+            return {
+                "dailyRateLimit": "25",
+                "apiRequests": "10",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
 
-        def list_symbols(self, exchange_code):
-            raise AssertionError(
-                "Should not call list_symbols for exchange listings path"
-            )
+        def fetch_fundamentals(self, symbol, exchange_code=None):
+            calls["fetched"].append(symbol)
+            return {"General": {"CurrencyCode": "USD", "Name": symbol}}
 
     monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
     monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
-
-    db_path = tmp_path / "eodhd-exchange.db"
-    universe_repo = UniverseRepository(db_path)
-    universe_repo.initialize_schema()
-    universe_repo.replace_universe(
-        [Listing(symbol="AAA.US", security_name="AAA", exchange="US")]
-    )
-    universe_repo.replace_universe(
-        [Listing(symbol="BBB.LSE", security_name="BBB", exchange="LSE")]
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_fundamentals_daily_buffer_calls=5,
+            eodhd_fundamentals_requests_per_minute=900,
+        ),
     )
 
-    rc = cli.cmd_ingest_fundamentals_bulk(
+    rc = cli.cmd_ingest_fundamentals_global(
         provider="EODHD",
         database=str(db_path),
-        rate=0,
-        exchange_code="US",
-        user_agent=None,
+        exchange_codes=None,
+        rate=None,
+        max_symbols=None,
+        max_age_days=None,
+        resume=False,
+    )
+
+    assert rc == 0
+    assert calls["api_key"] == "TOKEN"
+    assert calls["fetched"] == ["AAA.US"]
+
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    assert fund_repo.fetch("EODHD", "AAA.US") is not None
+    assert fund_repo.fetch("EODHD", "BBB.US") is None
+
+
+def test_cmd_ingest_fundamentals_global_exits_cleanly_when_budget_exhausted(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "global-no-budget.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[{"Code": "AAA", "Exchange": "US", "Type": "Common Stock"}],
+    )
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+
+        def user_metadata(self):
+            return {
+                "dailyRateLimit": "100",
+                "apiRequests": "100",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
+
+        def fetch_fundamentals(self, symbol, exchange_code=None):
+            raise AssertionError("No fetch should happen when the daily budget is 0.")
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_fundamentals_daily_buffer_calls=0,
+            eodhd_fundamentals_requests_per_minute=600,
+        ),
+    )
+
+    rc = cli.cmd_ingest_fundamentals_global(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=None,
+        rate=None,
+        max_symbols=None,
+        max_age_days=None,
+        resume=False,
+    )
+
+    assert rc == 0
+    assert "No EODHD fundamentals request budget available" in capsys.readouterr().out
+
+
+def test_cmd_ingest_fundamentals_global_rerun_fetches_remaining_missing_symbols(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "global-rerun.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[
+            {"Code": "AAA", "Exchange": "US", "Type": "Common Stock"},
+            {"Code": "BBB", "Exchange": "US", "Type": "Common Stock"},
+        ],
+    )
+    calls = {"fetched": []}
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+
+        def user_metadata(self):
+            return {
+                "dailyRateLimit": "1000",
+                "apiRequests": "0",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
+
+        def fetch_fundamentals(self, symbol, exchange_code=None):
+            calls["fetched"].append(symbol)
+            return {"General": {"CurrencyCode": "USD", "Name": symbol}}
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_fundamentals_daily_buffer_calls=0,
+            eodhd_fundamentals_requests_per_minute=600,
+        ),
+    )
+
+    rc = cli.cmd_ingest_fundamentals_global(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=None,
+        rate=None,
+        max_symbols=1,
+        max_age_days=None,
+        resume=False,
+    )
+    assert rc == 0
+    assert calls["fetched"] == ["AAA.US"]
+
+    calls["fetched"].clear()
+    rc = cli.cmd_ingest_fundamentals_global(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=None,
+        rate=None,
+        max_symbols=None,
+        max_age_days=None,
+        resume=False,
+    )
+    assert rc == 0
+    assert calls["fetched"] == ["BBB.US"]
+
+
+def test_cmd_ingest_fundamentals_global_max_age_days_refreshes_only_stale_or_missing(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "global-stale.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[
+            {"Code": "AAA", "Exchange": "US", "Type": "Common Stock"},
+            {"Code": "BBB", "Exchange": "US", "Type": "Common Stock"},
+            {"Code": "CCC", "Exchange": "US", "Type": "Common Stock"},
+        ],
+    )
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD", "AAA.US", {"General": {"CurrencyCode": "USD"}}, exchange="US"
+    )
+    fund_repo.upsert(
+        "EODHD", "BBB.US", {"General": {"CurrencyCode": "USD"}}, exchange="US"
+    )
+    with fund_repo._connect() as conn:
+        conn.execute(
+            """
+            UPDATE fundamentals_raw
+            SET fetched_at = CASE symbol
+                WHEN 'AAA.US' THEN ?
+                WHEN 'BBB.US' THEN ?
+                ELSE fetched_at
+            END
+            WHERE provider = 'EODHD'
+            """,
+            (
+                datetime.now(timezone.utc).isoformat(),
+                (datetime.now(timezone.utc) - timedelta(days=45)).isoformat(),
+            ),
+        )
+
+    calls = {"fetched": []}
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+
+        def user_metadata(self):
+            return {
+                "dailyRateLimit": "1000",
+                "apiRequests": "0",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
+
+        def fetch_fundamentals(self, symbol, exchange_code=None):
+            calls["fetched"].append(symbol)
+            return {"General": {"CurrencyCode": "USD", "Name": symbol}}
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_fundamentals_daily_buffer_calls=0,
+            eodhd_fundamentals_requests_per_minute=600,
+        ),
+    )
+
+    rc = cli.cmd_ingest_fundamentals_global(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=None,
+        rate=None,
         max_symbols=None,
         max_age_days=30,
         resume=False,
     )
 
     assert rc == 0
-    assert calls["api_key"] == "TOKEN"
-    assert calls["fetched"] == [("AAA.US", None)]
+    assert calls["fetched"] == ["CCC.US", "BBB.US"]
 
-    fund_repo = FundamentalsRepository(db_path)
-    fund_repo.initialize_schema()
-    assert fund_repo.fetch("EODHD", "AAA.US") is not None
-    with fund_repo._connect() as conn:
-        row = conn.execute(
-            "SELECT currency, exchange FROM fundamentals_raw WHERE provider='EODHD' AND symbol='AAA.US'"
-        ).fetchone()
-    assert row[0] == "USD"
-    assert row[1] == "US"
+
+def test_cmd_ingest_fundamentals_global_resume_respects_backoff(monkeypatch, tmp_path):
+    db_path = tmp_path / "global-resume.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[
+            {"Code": "AAA", "Exchange": "US", "Type": "Common Stock"},
+            {"Code": "BBB", "Exchange": "US", "Type": "Common Stock"},
+        ],
+    )
+    state_repo = FundamentalsFetchStateRepository(db_path)
+    state_repo.initialize_schema()
+    state_repo.mark_failure("EODHD", "BBB.US", "boom", base_backoff_seconds=3600)
+    calls = {"fetched": []}
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+
+        def user_metadata(self):
+            return {
+                "dailyRateLimit": "1000",
+                "apiRequests": "0",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
+
+        def fetch_fundamentals(self, symbol, exchange_code=None):
+            calls["fetched"].append(symbol)
+            return {"General": {"CurrencyCode": "USD", "Name": symbol}}
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_fundamentals_daily_buffer_calls=0,
+            eodhd_fundamentals_requests_per_minute=600,
+        ),
+    )
+
+    rc = cli.cmd_ingest_fundamentals_global(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=None,
+        rate=None,
+        max_symbols=None,
+        max_age_days=None,
+        resume=True,
+    )
+
+    assert rc == 0
+    assert calls["fetched"] == ["AAA.US"]
 
 
 def test_cmd_ingest_fundamentals_bulk_skips_fresh_and_backoff(monkeypatch, tmp_path):
@@ -405,13 +1047,13 @@ def test_cmd_ingest_fundamentals_bulk_skips_fresh_and_backoff(monkeypatch, tmp_p
     monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
 
     db_path = tmp_path / "eodhd-resume.db"
-    universe_repo = UniverseRepository(db_path)
-    universe_repo.initialize_schema()
-    universe_repo.replace_universe(
-        [
-            Listing(symbol="AAA.US", security_name="AAA", exchange="US"),
-            Listing(symbol="BBB.US", security_name="BBB", exchange="US"),
-        ]
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[
+            {"Code": "AAA", "Exchange": "US", "Type": "Common Stock"},
+            {"Code": "BBB", "Exchange": "US", "Type": "Common Stock"},
+        ],
     )
 
     fund_repo = FundamentalsRepository(db_path)

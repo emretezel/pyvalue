@@ -124,6 +124,56 @@ class UniverseRepository(SQLiteStore):
             )
         return len(payload)
 
+    def replace_exchange(self, exchange: str, listings: Sequence[Listing]) -> int:
+        """Replace all listings for a single exchange, including empty payloads."""
+
+        self.initialize_schema()
+        exchange_norm = exchange.strip().upper()
+        ingested_at = datetime.now(timezone.utc).isoformat()
+        payload: List[tuple] = []
+        for listing in listings:
+            payload.append(
+                (
+                    listing.symbol,
+                    listing.security_name,
+                    listing.exchange,
+                    listing.market_category,
+                    int(listing.is_etf),
+                    listing.status,
+                    listing.round_lot_size,
+                    listing.source,
+                    listing.isin,
+                    listing.currency,
+                    ingested_at,
+                )
+            )
+
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM listings WHERE UPPER(exchange) = ?",
+                (exchange_norm,),
+            )
+            if payload:
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO listings (
+                        symbol,
+                        security_name,
+                        exchange,
+                        market_category,
+                        is_etf,
+                        status,
+                        round_lot_size,
+                        source,
+                        isin,
+                        currency,
+                        ingested_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    payload,
+                )
+        return len(payload)
+
     def fetch_symbols_by_exchange(self, exchange: str) -> List[str]:
         """Return the list of symbols currently stored for an exchange."""
 
@@ -257,6 +307,366 @@ class FundamentalsRepository(SQLiteStore):
         return [(row[0], row[1]) for row in rows]
 
 
+@dataclass(frozen=True)
+class SupportedExchange:
+    """Persisted provider-supported exchange metadata."""
+
+    provider: str
+    code: str
+    name: Optional[str] = None
+    country: Optional[str] = None
+    currency: Optional[str] = None
+    operating_mic: Optional[str] = None
+    country_iso2: Optional[str] = None
+    country_iso3: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class SupportedExchangeRepository(SQLiteStore):
+    """Store exchange catalogs published by data providers."""
+
+    def initialize_schema(self) -> None:
+        apply_migrations(self.db_path)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS supported_exchanges (
+                    provider TEXT NOT NULL,
+                    code TEXT NOT NULL,
+                    name TEXT,
+                    country TEXT,
+                    currency TEXT,
+                    operating_mic TEXT,
+                    country_iso2 TEXT,
+                    country_iso3 TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (provider, code)
+                )
+                """
+            )
+
+    def replace_for_provider(
+        self,
+        provider: str,
+        rows: Sequence[Dict[str, Any]],
+    ) -> int:
+        """Replace the supported exchange catalog for a provider."""
+
+        self.initialize_schema()
+        provider_norm = provider.strip().upper()
+        updated_at = datetime.now(timezone.utc).isoformat()
+        payload: List[Tuple[object, ...]] = []
+        for row in rows:
+            code = self._normalize_optional_text(row.get("Code"))
+            if not code:
+                continue
+            payload.append(
+                (
+                    provider_norm,
+                    code.upper(),
+                    self._normalize_optional_text(row.get("Name")),
+                    self._normalize_optional_text(row.get("Country")),
+                    self._normalize_optional_text(row.get("Currency")),
+                    self._normalize_optional_text(row.get("OperatingMIC")),
+                    self._normalize_optional_text(row.get("CountryISO2")),
+                    self._normalize_optional_text(row.get("CountryISO3")),
+                    updated_at,
+                )
+            )
+
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM supported_exchanges WHERE UPPER(provider) = ?",
+                (provider_norm,),
+            )
+            if payload:
+                conn.executemany(
+                    """
+                    INSERT INTO supported_exchanges (
+                        provider,
+                        code,
+                        name,
+                        country,
+                        currency,
+                        operating_mic,
+                        country_iso2,
+                        country_iso3,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    payload,
+                )
+        return len(payload)
+
+    def fetch(self, provider: str, code: str) -> Optional[SupportedExchange]:
+        """Return a single supported exchange record."""
+
+        self.initialize_schema()
+        provider_norm = provider.strip().upper()
+        code_norm = code.strip().upper()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT provider, code, name, country, currency, operating_mic,
+                       country_iso2, country_iso3, updated_at
+                FROM supported_exchanges
+                WHERE UPPER(provider) = ? AND UPPER(code) = ?
+                """,
+                (provider_norm, code_norm),
+            ).fetchone()
+        return SupportedExchange(*row) if row else None
+
+    def list_all(self, provider: Optional[str] = None) -> List[SupportedExchange]:
+        """Return the supported exchange catalog ordered by provider/code."""
+
+        self.initialize_schema()
+        query = [
+            "SELECT provider, code, name, country, currency, operating_mic,",
+            "country_iso2, country_iso3, updated_at",
+            "FROM supported_exchanges",
+        ]
+        params: List[str] = []
+        if provider:
+            query.append("WHERE UPPER(provider) = ?")
+            params.append(provider.strip().upper())
+        query.append("ORDER BY provider, code")
+        sql = " ".join(query)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [SupportedExchange(*row) for row in rows]
+
+    @staticmethod
+    def _normalize_optional_text(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+
+@dataclass(frozen=True)
+class SupportedTicker:
+    """Persisted provider-supported ticker metadata."""
+
+    provider: str
+    exchange_code: str
+    symbol: str
+    code: str
+    listing_exchange: Optional[str] = None
+    security_name: Optional[str] = None
+    security_type: Optional[str] = None
+    country: Optional[str] = None
+    currency: Optional[str] = None
+    isin: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class SupportedTickerRepository(SQLiteStore):
+    """Store provider-supported ticker catalogs by exchange."""
+
+    def initialize_schema(self) -> None:
+        apply_migrations(self.db_path)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS supported_tickers (
+                    provider TEXT NOT NULL,
+                    exchange_code TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    code TEXT NOT NULL,
+                    listing_exchange TEXT,
+                    security_name TEXT,
+                    security_type TEXT,
+                    country TEXT,
+                    currency TEXT,
+                    isin TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (provider, symbol)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_supported_tickers_provider_exchange
+                ON supported_tickers(provider, exchange_code)
+                """
+            )
+
+    def replace_for_exchange(
+        self,
+        provider: str,
+        exchange_code: str,
+        rows: Sequence[Dict[str, Any]],
+    ) -> int:
+        """Replace the supported ticker catalog for one exchange."""
+
+        self.initialize_schema()
+        provider_norm = provider.strip().upper()
+        exchange_norm = exchange_code.strip().upper()
+        updated_at = datetime.now(timezone.utc).isoformat()
+        payload: List[Tuple[object, ...]] = []
+        for row in rows:
+            code = self._normalize_optional_text(row.get("Code"))
+            if not code:
+                continue
+            code_norm = code.upper()
+            symbol = (
+                code_norm
+                if code_norm.endswith(f".{exchange_norm}")
+                else f"{code_norm}.{exchange_norm}"
+            )
+            listing_exchange = self._normalize_optional_text(row.get("Exchange"))
+            if listing_exchange is not None:
+                listing_exchange = listing_exchange.upper()
+            currency = self._normalize_optional_text(row.get("Currency"))
+            if currency is not None:
+                currency = currency.upper()
+            isin = self._normalize_optional_text(
+                row.get("ISIN") or row.get("Isin") or row.get("isin")
+            )
+            payload.append(
+                (
+                    provider_norm,
+                    exchange_norm,
+                    symbol,
+                    code_norm,
+                    listing_exchange,
+                    self._normalize_optional_text(row.get("Name")),
+                    self._normalize_optional_text(row.get("Type")),
+                    self._normalize_optional_text(row.get("Country")),
+                    currency,
+                    isin,
+                    updated_at,
+                )
+            )
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                DELETE FROM supported_tickers
+                WHERE UPPER(provider) = ? AND UPPER(exchange_code) = ?
+                """,
+                (provider_norm, exchange_norm),
+            )
+            if payload:
+                conn.executemany(
+                    """
+                    INSERT INTO supported_tickers (
+                        provider,
+                        exchange_code,
+                        symbol,
+                        code,
+                        listing_exchange,
+                        security_name,
+                        security_type,
+                        country,
+                        currency,
+                        isin,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    payload,
+                )
+        return len(payload)
+
+    def list_for_exchange(
+        self, provider: str, exchange_code: str
+    ) -> List[SupportedTicker]:
+        """Return supported tickers for one exchange."""
+
+        self.initialize_schema()
+        provider_norm = provider.strip().upper()
+        exchange_norm = exchange_code.strip().upper()
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT provider, exchange_code, symbol, code, listing_exchange,
+                       security_name, security_type, country, currency, isin, updated_at
+                FROM supported_tickers
+                WHERE UPPER(provider) = ? AND UPPER(exchange_code) = ?
+                ORDER BY symbol
+                """,
+                (provider_norm, exchange_norm),
+            ).fetchall()
+        return [SupportedTicker(*row) for row in rows]
+
+    def list_all_exchanges(self, provider: str) -> List[str]:
+        """Return distinct exchange codes present in the supported ticker catalog."""
+
+        self.initialize_schema()
+        provider_norm = provider.strip().upper()
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT exchange_code
+                FROM supported_tickers
+                WHERE UPPER(provider) = ?
+                ORDER BY exchange_code
+                """,
+                (provider_norm,),
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    def list_eligible_for_fundamentals(
+        self,
+        provider: str,
+        exchange_codes: Optional[Sequence[str]] = None,
+        max_age_days: Optional[int] = None,
+        max_symbols: Optional[int] = None,
+        resume: bool = False,
+        missing_only: bool = False,
+    ) -> List[SupportedTicker]:
+        """Return ticker rows eligible for fundamentals ingestion."""
+
+        self.initialize_schema()
+        provider_norm = provider.strip().upper()
+        now = datetime.now(timezone.utc)
+        params: List[object] = [provider_norm, provider_norm, provider_norm]
+        query = [
+            "SELECT st.provider, st.exchange_code, st.symbol, st.code, st.listing_exchange,",
+            "st.security_name, st.security_type, st.country, st.currency, st.isin, st.updated_at",
+            "FROM supported_tickers st",
+            "LEFT JOIN fundamentals_raw fr ON fr.symbol = st.symbol AND fr.provider = ?",
+            "LEFT JOIN fundamentals_fetch_state fs ON fs.symbol = st.symbol AND fs.provider = ?",
+            "WHERE UPPER(st.provider) = ?",
+        ]
+        if exchange_codes:
+            normalized = sorted(
+                {code.strip().upper() for code in exchange_codes if code}
+            )
+            if normalized:
+                placeholders = ", ".join("?" for _ in normalized)
+                query.append(f"AND UPPER(st.exchange_code) IN ({placeholders})")
+                params.extend(normalized)
+        if max_age_days is None and missing_only:
+            query.append("AND fr.fetched_at IS NULL")
+        elif max_age_days is not None:
+            cutoff = (now - timedelta(days=max_age_days)).isoformat()
+            query.append("AND (fr.fetched_at IS NULL OR fr.fetched_at <= ?)")
+            params.append(cutoff)
+        if resume:
+            query.append(
+                "AND (fs.next_eligible_at IS NULL OR fs.next_eligible_at <= ?)"
+            )
+            params.append(now.isoformat())
+        query.append(
+            "ORDER BY CASE WHEN fr.fetched_at IS NULL THEN 0 ELSE 1 END, fr.fetched_at ASC, st.exchange_code ASC, st.symbol ASC"
+        )
+        if max_symbols is not None:
+            query.append("LIMIT ?")
+            params.append(max_symbols)
+        sql = " ".join(query)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [SupportedTicker(*row) for row in rows]
+
+    @staticmethod
+    def _normalize_optional_text(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+
 class FundamentalsFetchStateRepository(SQLiteStore):
     """Track fundamentals fetch status for resumable ingestion."""
 
@@ -382,6 +792,25 @@ class FundamentalsFetchStateRepository(SQLiteStore):
                     attempts,
                 ),
             )
+
+    def delete_symbols(self, provider: str, symbols: Sequence[str]) -> int:
+        """Delete fetch-state rows for the given symbols."""
+
+        self.initialize_schema()
+        normalized = [symbol.strip().upper() for symbol in symbols if symbol.strip()]
+        if not normalized:
+            return 0
+        provider_norm = provider.strip().upper()
+        placeholders = ", ".join("?" for _ in normalized)
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"""
+                DELETE FROM fundamentals_fetch_state
+                WHERE UPPER(provider) = ? AND symbol IN ({placeholders})
+                """,
+                [provider_norm, *normalized],
+            )
+        return int(cursor.rowcount or 0)
 
 
 @dataclass(frozen=True)
@@ -718,6 +1147,10 @@ class EntityMetadataRepository(SQLiteStore):
 __all__ = [
     "UniverseRepository",
     "FundamentalsRepository",
+    "SupportedExchange",
+    "SupportedExchangeRepository",
+    "SupportedTicker",
+    "SupportedTickerRepository",
     "FundamentalsFetchStateRepository",
     "FinancialFactsRepository",
     "MarketDataRepository",

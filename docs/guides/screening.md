@@ -174,6 +174,8 @@ If no symbols pass, the command prints `No symbols satisfied all criteria.` and 
 ## End-to-End Example
 
 ```bash
+pyvalue refresh-supported-exchanges --provider EODHD
+pyvalue refresh-supported-tickers --provider EODHD --exchange-code US
 pyvalue load-universe --provider EODHD --exchange-code US
 pyvalue ingest-fundamentals-bulk --provider EODHD --exchange-code US
 pyvalue normalize-fundamentals-bulk --provider EODHD --exchange-code US

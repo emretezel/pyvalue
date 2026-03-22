@@ -16,6 +16,29 @@ Key options:
 - `--currencies <codes...>` for EODHD
 - `--include-exchanges <values...>` for EODHD
 
+### `refresh-supported-exchanges`
+
+Refresh and persist the provider-supported exchange catalog.
+
+Key options:
+- `--provider {EODHD}`
+- `--database <path>`
+
+### `refresh-supported-tickers`
+
+Refresh and persist the provider-supported ticker catalog for one exchange or all stored exchanges.
+
+For `provider=EODHD`, this fetches `exchange-symbol-list/<EXCHANGE_CODE>`, keeps only
+`Common Stock`, `Preferred Stock`, and `Stock`, mirrors the result into `listings`,
+and deletes removed symbols from `fundamentals_fetch_state`. Historical fundamentals
+and derived tables are not deleted.
+
+Key options:
+- `--provider {EODHD}`
+- `--exchange-code <code>`
+- `--all-exchanges`
+- `--database <path>`
+
 ## Fundamentals Commands
 
 ### `ingest-fundamentals`
@@ -34,6 +57,8 @@ Key options:
 
 Download fundamentals in bulk for an exchange.
 
+For `provider=EODHD`, this reads from the stored `supported_tickers` catalog for the requested exchange. Run `refresh-supported-tickers` first.
+
 Key options:
 - `--provider {SEC,EODHD}`
 - `--exchange-code <code>`
@@ -42,6 +67,24 @@ Key options:
 - `--max-age-days <int>`
 - `--resume`
 - `--user-agent <value>` for SEC
+- `--database <path>`
+
+### `ingest-fundamentals-global`
+
+Download EODHD fundamentals across stored supported tickers with daily quota awareness.
+
+This command reads from the stored `supported_tickers` catalog. When `--max-age-days`
+is omitted it is bootstrap-first and selects only symbols with no stored EODHD raw
+payload. With `--max-age-days`, it selects missing symbols plus stale symbols older
+than the requested age. It stops cleanly when the run-level daily budget is exhausted.
+
+Key options:
+- `--provider {EODHD}`
+- `--exchange-codes <codes...>`
+- `--rate <float>`
+- `--max-symbols <int>`
+- `--max-age-days <int>`
+- `--resume`
 - `--database <path>`
 
 ### `normalize-fundamentals`

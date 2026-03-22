@@ -60,3 +60,64 @@ def test_apply_migrations_is_idempotent(tmp_path):
 
     assert first >= 1
     assert second == 0
+
+
+def test_migration_creates_supported_exchanges_table(tmp_path):
+    db_path = tmp_path / "supported-exchanges.sqlite"
+
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0
+
+    with sqlite3.connect(db_path) as conn:
+        info = conn.execute("PRAGMA table_info(supported_exchanges)").fetchall()
+        columns = {row[1] for row in info}
+        pk_cols = [row[1] for row in info if row[5]]
+
+    assert columns == {
+        "provider",
+        "code",
+        "name",
+        "country",
+        "currency",
+        "operating_mic",
+        "country_iso2",
+        "country_iso3",
+        "updated_at",
+    }
+    assert pk_cols == ["provider", "code"]
+
+
+def test_migration_creates_supported_tickers_table(tmp_path):
+    db_path = tmp_path / "supported-tickers.sqlite"
+
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0
+
+    with sqlite3.connect(db_path) as conn:
+        info = conn.execute("PRAGMA table_info(supported_tickers)").fetchall()
+        columns = {row[1] for row in info}
+        pk_cols = [row[1] for row in info if row[5]]
+        indexes = conn.execute("PRAGMA index_list(supported_tickers)").fetchall()
+        index_names = {row[1] for row in indexes}
+
+    assert columns == {
+        "provider",
+        "exchange_code",
+        "symbol",
+        "code",
+        "listing_exchange",
+        "security_name",
+        "security_type",
+        "country",
+        "currency",
+        "isin",
+        "updated_at",
+    }
+    assert pk_cols == ["provider", "symbol"]
+    assert "idx_supported_tickers_provider_exchange" in index_names

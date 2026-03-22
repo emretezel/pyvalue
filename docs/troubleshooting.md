@@ -49,6 +49,19 @@ Typical cause:
 Fix:
 - run `load-universe` first for the target exchange/provider
 
+## No Eligible Supported Tickers Found
+
+Typical cause:
+- you ran EODHD bulk fundamentals ingestion before refreshing the stored ticker catalog
+
+Fix:
+
+```bash
+pyvalue refresh-supported-exchanges --provider EODHD
+pyvalue refresh-supported-tickers --provider EODHD --exchange-code US
+pyvalue ingest-fundamentals-bulk --provider EODHD --exchange-code US
+```
+
 ## Market Cap Looks Wrong or Missing
 
 Typical causes:

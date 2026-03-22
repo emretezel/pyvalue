@@ -65,13 +65,24 @@ class EODHDFundamentalsClient:
             "api_token": self.api_key,
             "fmt": "json",
             "delisted": "0",
-            "type": "stock",
         }
         response = self.session.get(url, params=params, timeout=timeout)
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, list):
             raise ValueError(f"Unexpected EODHD symbols response for {code}: {payload}")
+        return payload
+
+    def user_metadata(self, timeout: int = DEFAULT_TIMEOUT) -> Dict:
+        """Return the current subscription usage metadata from EODHD."""
+
+        url = f"{BASE_URL}/user"
+        params = {"api_token": self.api_key, "fmt": "json"}
+        response = self.session.get(url, params=params, timeout=timeout)
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError(f"Unexpected EODHD user response: {payload}")
         return payload
 
     def fetch_fundamentals(
