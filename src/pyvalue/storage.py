@@ -460,6 +460,43 @@ class SupportedTicker:
     updated_at: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class IngestProgressSummary:
+    """Aggregate ingest progress for a supported-ticker scope."""
+
+    total_supported: int
+    stored: int
+    missing: int
+    stale: int
+    blocked: int
+    error_rows: int
+
+
+@dataclass(frozen=True)
+class IngestProgressExchange:
+    """Per-exchange ingest progress for a supported-ticker scope."""
+
+    exchange_code: str
+    total_supported: int
+    stored: int
+    missing: int
+    stale: int
+    blocked: int
+    error_rows: int
+
+
+@dataclass(frozen=True)
+class IngestProgressFailure:
+    """Recent ingest failure details for reporting."""
+
+    symbol: str
+    exchange_code: str
+    last_status: Optional[str] = None
+    last_error: Optional[str] = None
+    next_eligible_at: Optional[str] = None
+    attempts: int = 0
+
+
 class SupportedTickerRepository(SQLiteStore):
     """Store provider-supported ticker catalogs by exchange."""
 
@@ -659,12 +696,184 @@ class SupportedTickerRepository(SQLiteStore):
             rows = conn.execute(sql, params).fetchall()
         return [SupportedTicker(*row) for row in rows]
 
+    def progress_summary(
+        self,
+        provider: str,
+        exchange_codes: Optional[Sequence[str]] = None,
+        max_age_days: Optional[int] = None,
+        missing_only: bool = False,
+    ) -> IngestProgressSummary:
+        """Return aggregate ingest progress counts for the requested scope."""
+
+        self.initialize_schema()
+        provider_norm = provider.strip().upper()
+        now = datetime.now(timezone.utc).isoformat()
+        stale_expr = "0"
+        params: List[object] = []
+        if not missing_only and max_age_days is not None:
+            cutoff = (
+                datetime.now(timezone.utc) - timedelta(days=max_age_days)
+            ).isoformat()
+            stale_expr = (
+                "SUM(CASE WHEN fr.fetched_at IS NOT NULL AND fr.fetched_at <= ? "
+                "THEN 1 ELSE 0 END)"
+            )
+            params.append(cutoff)
+        params.extend([now, provider_norm, provider_norm, provider_norm])
+        query = [
+            "SELECT",
+            "COUNT(*) AS total_supported,",
+            "SUM(CASE WHEN fr.fetched_at IS NOT NULL THEN 1 ELSE 0 END) AS stored,",
+            "SUM(CASE WHEN fr.fetched_at IS NULL THEN 1 ELSE 0 END) AS missing,",
+            f"{stale_expr} AS stale,",
+            "SUM(CASE WHEN fs.next_eligible_at IS NOT NULL AND fs.next_eligible_at > ? THEN 1 ELSE 0 END) AS blocked,",
+            "SUM(CASE WHEN fs.last_status = 'error' THEN 1 ELSE 0 END) AS error_rows",
+            "FROM supported_tickers st",
+            "LEFT JOIN fundamentals_raw fr ON fr.symbol = st.symbol AND fr.provider = ?",
+            "LEFT JOIN fundamentals_fetch_state fs ON fs.symbol = st.symbol AND fs.provider = ?",
+            "WHERE UPPER(st.provider) = ?",
+        ]
+        normalized = self._normalized_exchange_codes(exchange_codes)
+        if normalized:
+            placeholders = ", ".join("?" for _ in normalized)
+            query.append(f"AND UPPER(st.exchange_code) IN ({placeholders})")
+            params.extend(normalized)
+        sql = " ".join(query)
+        with self._connect() as conn:
+            row = conn.execute(sql, params).fetchone()
+        return IngestProgressSummary(
+            total_supported=self._coerce_int(row["total_supported"] if row else 0),
+            stored=self._coerce_int(row["stored"] if row else 0),
+            missing=self._coerce_int(row["missing"] if row else 0),
+            stale=self._coerce_int(row["stale"] if row else 0),
+            blocked=self._coerce_int(row["blocked"] if row else 0),
+            error_rows=self._coerce_int(row["error_rows"] if row else 0),
+        )
+
+    def progress_by_exchange(
+        self,
+        provider: str,
+        exchange_codes: Optional[Sequence[str]] = None,
+        max_age_days: Optional[int] = None,
+        missing_only: bool = False,
+    ) -> List[IngestProgressExchange]:
+        """Return per-exchange ingest progress counts for the requested scope."""
+
+        self.initialize_schema()
+        provider_norm = provider.strip().upper()
+        now = datetime.now(timezone.utc).isoformat()
+        stale_expr = "0"
+        params: List[object] = []
+        if not missing_only and max_age_days is not None:
+            cutoff = (
+                datetime.now(timezone.utc) - timedelta(days=max_age_days)
+            ).isoformat()
+            stale_expr = (
+                "SUM(CASE WHEN fr.fetched_at IS NOT NULL AND fr.fetched_at <= ? "
+                "THEN 1 ELSE 0 END)"
+            )
+            params.append(cutoff)
+        params.extend([now, provider_norm, provider_norm, provider_norm])
+        query = [
+            "SELECT",
+            "st.exchange_code,",
+            "COUNT(*) AS total_supported,",
+            "SUM(CASE WHEN fr.fetched_at IS NOT NULL THEN 1 ELSE 0 END) AS stored,",
+            "SUM(CASE WHEN fr.fetched_at IS NULL THEN 1 ELSE 0 END) AS missing,",
+            f"{stale_expr} AS stale,",
+            "SUM(CASE WHEN fs.next_eligible_at IS NOT NULL AND fs.next_eligible_at > ? THEN 1 ELSE 0 END) AS blocked,",
+            "SUM(CASE WHEN fs.last_status = 'error' THEN 1 ELSE 0 END) AS error_rows",
+            "FROM supported_tickers st",
+            "LEFT JOIN fundamentals_raw fr ON fr.symbol = st.symbol AND fr.provider = ?",
+            "LEFT JOIN fundamentals_fetch_state fs ON fs.symbol = st.symbol AND fs.provider = ?",
+            "WHERE UPPER(st.provider) = ?",
+        ]
+        normalized = self._normalized_exchange_codes(exchange_codes)
+        if normalized:
+            placeholders = ", ".join("?" for _ in normalized)
+            query.append(f"AND UPPER(st.exchange_code) IN ({placeholders})")
+            params.extend(normalized)
+        query.append("GROUP BY st.exchange_code")
+        query.append("ORDER BY st.exchange_code")
+        sql = " ".join(query)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [
+            IngestProgressExchange(
+                exchange_code=row["exchange_code"],
+                total_supported=self._coerce_int(row["total_supported"]),
+                stored=self._coerce_int(row["stored"]),
+                missing=self._coerce_int(row["missing"]),
+                stale=self._coerce_int(row["stale"]),
+                blocked=self._coerce_int(row["blocked"]),
+                error_rows=self._coerce_int(row["error_rows"]),
+            )
+            for row in rows
+        ]
+
+    def recent_failures(
+        self,
+        provider: str,
+        exchange_codes: Optional[Sequence[str]] = None,
+        limit: int = 10,
+    ) -> List[IngestProgressFailure]:
+        """Return recent ingest failures for the requested scope."""
+
+        self.initialize_schema()
+        provider_norm = provider.strip().upper()
+        params: List[object] = [provider_norm, provider_norm]
+        query = [
+            "SELECT st.symbol, st.exchange_code, fs.last_status, fs.last_error,",
+            "fs.next_eligible_at, fs.attempts",
+            "FROM supported_tickers st",
+            "JOIN fundamentals_fetch_state fs ON fs.symbol = st.symbol AND fs.provider = ?",
+            "WHERE UPPER(st.provider) = ? AND fs.last_status = 'error'",
+        ]
+        normalized = self._normalized_exchange_codes(exchange_codes)
+        if normalized:
+            placeholders = ", ".join("?" for _ in normalized)
+            query.append(f"AND UPPER(st.exchange_code) IN ({placeholders})")
+            params.extend(normalized)
+        query.append(
+            "ORDER BY CASE WHEN fs.next_eligible_at IS NULL THEN 1 ELSE 0 END, fs.next_eligible_at ASC, st.symbol ASC"
+        )
+        query.append("LIMIT ?")
+        params.append(limit)
+        sql = " ".join(query)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [
+            IngestProgressFailure(
+                symbol=row["symbol"],
+                exchange_code=row["exchange_code"],
+                last_status=row["last_status"],
+                last_error=row["last_error"],
+                next_eligible_at=row["next_eligible_at"],
+                attempts=self._coerce_int(row["attempts"]),
+            )
+            for row in rows
+        ]
+
     @staticmethod
     def _normalize_optional_text(value: Any) -> Optional[str]:
         if value is None:
             return None
         text = str(value).strip()
         return text or None
+
+    @staticmethod
+    def _coerce_int(value: Any) -> int:
+        if value is None:
+            return 0
+        return int(value)
+
+    @staticmethod
+    def _normalized_exchange_codes(
+        exchange_codes: Optional[Sequence[str]],
+    ) -> List[str]:
+        if not exchange_codes:
+            return []
+        return sorted({code.strip().upper() for code in exchange_codes if code.strip()})
 
 
 class FundamentalsFetchStateRepository(SQLiteStore):
@@ -1149,6 +1358,9 @@ __all__ = [
     "FundamentalsRepository",
     "SupportedExchange",
     "SupportedExchangeRepository",
+    "IngestProgressSummary",
+    "IngestProgressExchange",
+    "IngestProgressFailure",
     "SupportedTicker",
     "SupportedTickerRepository",
     "FundamentalsFetchStateRepository",

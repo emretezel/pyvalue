@@ -320,6 +320,33 @@ def _eodhd_request_budget(
     return daily_limit, used_calls, usable_requests
 
 
+def _safe_eodhd_quota_snapshot() -> Optional[Dict[str, int]]:
+    """Return EODHD quota information when available, else None."""
+
+    config = Config()
+    api_key = getattr(config, "eodhd_api_key", None)
+    buffer_calls = max(getattr(config, "eodhd_fundamentals_daily_buffer_calls", 0), 0)
+    if not api_key:
+        return None
+    try:
+        client = EODHDFundamentalsClient(api_key=api_key)
+        user_meta = client.user_metadata()
+        daily_limit, used_calls, usable_requests = _eodhd_request_budget(
+            user_meta, buffer_calls
+        )
+    except SystemExit:
+        return None
+    except Exception as exc:  # pragma: no cover - network errors
+        LOGGER.warning("Could not fetch EODHD quota snapshot: %s", exc)
+        return None
+    return {
+        "daily_limit": daily_limit,
+        "used_calls": used_calls,
+        "buffer_calls": buffer_calls,
+        "usable_requests": usable_requests,
+    }
+
+
 def _select_exchange_listings_for_provider(
     database: str,
     provider: str,
@@ -673,6 +700,40 @@ def build_parser() -> argparse.ArgumentParser:
         "--resume",
         action="store_true",
         help="Skip symbols that are still in backoff from prior failures.",
+    )
+
+    ingest_progress = subparsers.add_parser(
+        "report-ingest-progress",
+        help="Report EODHD fundamentals ingest progress across supported tickers.",
+    )
+    ingest_progress.add_argument(
+        "--provider",
+        default="EODHD",
+        choices=["EODHD"],
+        help="Fundamentals provider to report on (default: %(default)s).",
+    )
+    ingest_progress.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
+    )
+    ingest_progress.add_argument(
+        "--exchange-codes",
+        nargs="+",
+        default=None,
+        help="Optional exchange-code filter (space or comma separated). Defaults to all stored supported tickers.",
+    )
+    ingest_progress_mode = ingest_progress.add_mutually_exclusive_group()
+    ingest_progress_mode.add_argument(
+        "--max-age-days",
+        type=int,
+        default=30,
+        help="Freshness window in days (default: %(default)s).",
+    )
+    ingest_progress_mode.add_argument(
+        "--missing-only",
+        action="store_true",
+        help="Only require that a raw fundamentals payload exists, regardless of age.",
     )
 
     normalize_fundamentals = subparsers.add_parser(
@@ -1302,6 +1363,144 @@ def cmd_ingest_fundamentals_global(
     print(
         f"Stored fundamentals for {processed} of {attempted} attempted symbols in {database}"
     )
+    return 0
+
+
+def cmd_report_ingest_progress(
+    provider: str,
+    database: str,
+    exchange_codes: Optional[Sequence[str]],
+    max_age_days: Optional[int],
+    missing_only: bool,
+) -> int:
+    """Report EODHD ingest progress across supported tickers."""
+
+    provider_norm = provider.strip().upper()
+    if provider_norm != "EODHD":
+        raise SystemExit(
+            "report-ingest-progress currently only supports provider=EODHD."
+        )
+
+    requested_exchange_codes = _parse_exchange_filters(exchange_codes)
+    selected_exchanges = (
+        sorted(requested_exchange_codes) if requested_exchange_codes else None
+    )
+    effective_max_age_days = None if missing_only else (max_age_days or 30)
+
+    ticker_repo = SupportedTickerRepository(database)
+    summary = ticker_repo.progress_summary(
+        provider=provider_norm,
+        exchange_codes=selected_exchanges,
+        max_age_days=effective_max_age_days,
+        missing_only=missing_only,
+    )
+    breakdown = ticker_repo.progress_by_exchange(
+        provider=provider_norm,
+        exchange_codes=selected_exchanges,
+        max_age_days=effective_max_age_days,
+        missing_only=missing_only,
+    )
+    failures = ticker_repo.recent_failures(
+        provider=provider_norm,
+        exchange_codes=selected_exchanges,
+        limit=10,
+    )
+    quota = _safe_eodhd_quota_snapshot()
+
+    if summary.total_supported == 0:
+        status = "INCOMPLETE"
+    elif summary.missing > 0 or summary.stale > 0:
+        status = "INCOMPLETE"
+    elif summary.blocked > 0:
+        status = "BLOCKED_BY_BACKOFF"
+    else:
+        status = "COMPLETE"
+
+    completed = max(summary.total_supported - summary.missing - summary.stale, 0)
+    percent_complete = (
+        (completed / summary.total_supported) * 100.0
+        if summary.total_supported
+        else 0.0
+    )
+    scope_label = (
+        ", ".join(selected_exchanges) if selected_exchanges else "all exchanges"
+    )
+    mode_label = (
+        "missing-only" if missing_only else f"freshness({effective_max_age_days}d)"
+    )
+
+    if summary.total_supported == 0:
+        next_action = "Refresh supported tickers first"
+    elif summary.missing > 0 or summary.stale > 0:
+        if quota is not None and quota["usable_requests"] <= 0:
+            next_action = "Wait for the next quota reset"
+        else:
+            next_action = "Run ingest-fundamentals-global now"
+    elif summary.blocked > 0:
+        next_action = "Wait for backoff to expire or rerun without --resume"
+    else:
+        next_action = "Done for current scope"
+
+    earliest_next_eligible = (
+        next(
+            (
+                item.next_eligible_at
+                for item in failures
+                if item.next_eligible_at is not None
+            ),
+            None,
+        )
+        if summary.blocked > 0
+        else None
+    )
+
+    print("EODHD ingest progress")
+    print(f"Provider: {provider_norm}")
+    print(f"Database: {database}")
+    print(f"Scope: {scope_label}")
+    print(f"Mode: {mode_label}")
+    print(f"Status: {status}")
+    print(f"Supported: {summary.total_supported}")
+    print(f"Stored: {summary.stored}")
+    print(f"Missing: {summary.missing}")
+    print(f"Stale: {summary.stale}")
+    print(f"Blocked: {summary.blocked}")
+    print(f"Error rows: {summary.error_rows}")
+    print(f"Percent complete: {percent_complete:.2f}%")
+
+    print("By exchange:")
+    if breakdown:
+        for row in breakdown:
+            print(
+                f"- {row.exchange_code}: supported={row.total_supported}, "
+                f"stored={row.stored}, missing={row.missing}, stale={row.stale}, "
+                f"blocked={row.blocked}, errors={row.error_rows}"
+            )
+    else:
+        print("- none")
+
+    print("Recent failures:")
+    print(f"- error rows: {summary.error_rows}")
+    print(f"- earliest next eligible: {earliest_next_eligible or 'n/a'}")
+    if failures:
+        for item in failures:
+            print(
+                f"- {item.symbol} [{item.exchange_code}] attempts={item.attempts} "
+                f"next={item.next_eligible_at or 'n/a'} error={item.last_error or 'n/a'}"
+            )
+    else:
+        print("- none")
+
+    print("Quota:")
+    if quota is None:
+        print("- quota unavailable")
+    else:
+        print(f"- daily limit: {quota['daily_limit']}")
+        print(f"- used today: {quota['used_calls']}")
+        print(f"- buffer calls: {quota['buffer_calls']}")
+        print(f"- usable requests left: {quota['usable_requests']}")
+
+    print(f"Next action: {next_action}")
     return 0
 
 
@@ -2929,6 +3128,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             max_symbols=args.max_symbols,
             max_age_days=args.max_age_days,
             resume=args.resume,
+        )
+    if args.command == "report-ingest-progress":
+        return cmd_report_ingest_progress(
+            provider=args.provider,
+            database=args.database,
+            exchange_codes=args.exchange_codes,
+            max_age_days=args.max_age_days,
+            missing_only=args.missing_only,
         )
     if args.command == "normalize-fundamentals":
         return cmd_normalize_fundamentals(

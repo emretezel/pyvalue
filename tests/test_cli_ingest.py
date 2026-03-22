@@ -94,6 +94,45 @@ def store_supported_tickers(
     return repo
 
 
+def test_main_dispatches_report_ingest_progress_with_default_max_age_days(
+    monkeypatch,
+):
+    calls = {}
+
+    def fake_cmd(provider, database, exchange_codes, max_age_days, missing_only):
+        calls["provider"] = provider
+        calls["database"] = database
+        calls["exchange_codes"] = exchange_codes
+        calls["max_age_days"] = max_age_days
+        calls["missing_only"] = missing_only
+        return 0
+
+    monkeypatch.setattr(cli, "setup_logging", lambda: None)
+    monkeypatch.setattr(cli, "cmd_report_ingest_progress", fake_cmd)
+
+    rc = cli.main(["report-ingest-progress"])
+
+    assert rc == 0
+    assert calls == {
+        "provider": "EODHD",
+        "database": "data/pyvalue.db",
+        "exchange_codes": None,
+        "max_age_days": 30,
+        "missing_only": False,
+    }
+
+
+def test_build_parser_report_ingest_progress_missing_only():
+    args = cli.build_parser().parse_args(
+        ["report-ingest-progress", "--exchange-codes", "US,LSE", "--missing-only"]
+    )
+
+    assert args.command == "report-ingest-progress"
+    assert args.exchange_codes == ["US,LSE"]
+    assert args.max_age_days == 30
+    assert args.missing_only is True
+
+
 def test_cmd_ingest_fundamentals_sec(monkeypatch, tmp_path):
     calls = {}
 
@@ -1030,6 +1069,389 @@ def test_cmd_ingest_fundamentals_global_resume_respects_backoff(monkeypatch, tmp
 
     assert rc == 0
     assert calls["fetched"] == ["AAA.US"]
+
+
+def test_cmd_ingest_fundamentals_global_default_mode_remains_missing_only(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "global-bootstrap-regression.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[
+            {"Code": "AAA", "Exchange": "US", "Type": "Common Stock"},
+            {"Code": "BBB", "Exchange": "US", "Type": "Common Stock"},
+        ],
+    )
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD", "AAA.US", {"General": {"CurrencyCode": "USD"}}, exchange="US"
+    )
+    with fund_repo._connect() as conn:
+        conn.execute(
+            """
+            UPDATE fundamentals_raw
+            SET fetched_at = ?
+            WHERE provider = 'EODHD' AND symbol = 'AAA.US'
+            """,
+            ((datetime.now(timezone.utc) - timedelta(days=45)).isoformat(),),
+        )
+
+    calls = {"fetched": []}
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+
+        def user_metadata(self):
+            return {
+                "dailyRateLimit": "1000",
+                "apiRequests": "0",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
+
+        def fetch_fundamentals(self, symbol, exchange_code=None):
+            calls["fetched"].append(symbol)
+            return {"General": {"CurrencyCode": "USD", "Name": symbol}}
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_fundamentals_daily_buffer_calls=0,
+            eodhd_fundamentals_requests_per_minute=600,
+        ),
+    )
+
+    rc = cli.cmd_ingest_fundamentals_global(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=None,
+        rate=None,
+        max_symbols=None,
+        max_age_days=None,
+        resume=False,
+    )
+
+    assert rc == 0
+    assert calls["fetched"] == ["BBB.US"]
+
+
+def test_cmd_report_ingest_progress_reports_complete_with_quota_snapshot(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "report-complete.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[
+            {"Code": "AAA", "Exchange": "US", "Type": "Common Stock"},
+            {"Code": "BBB", "Exchange": "US", "Type": "Common Stock"},
+        ],
+    )
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    for symbol in ["AAA.US", "BBB.US"]:
+        fund_repo.upsert(
+            "EODHD", symbol, {"General": {"CurrencyCode": "USD"}}, exchange="US"
+        )
+
+    class FakeClient:
+        def __init__(self, api_key):
+            assert api_key == "TOKEN"
+
+        def user_metadata(self):
+            return {
+                "dailyRateLimit": "100000",
+                "apiRequests": "5000",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_api_key="TOKEN",
+            eodhd_fundamentals_daily_buffer_calls=5000,
+        ),
+    )
+
+    rc = cli.cmd_report_ingest_progress(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=None,
+        max_age_days=30,
+        missing_only=False,
+    )
+
+    output = capsys.readouterr().out
+    assert rc == 0
+    assert "Mode: freshness(30d)" in output
+    assert "Status: COMPLETE" in output
+    assert "Supported: 2" in output
+    assert "Stale: 0" in output
+    assert "Quota:" in output
+    assert "- usable requests left: 9000" in output
+    assert "Next action: Done for current scope" in output
+
+
+def test_cmd_report_ingest_progress_reports_missing_and_quota_unavailable(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "report-missing.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[{"Code": "AAA", "Exchange": "US", "Type": "Common Stock"}],
+    )
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_api_key=None,
+            eodhd_fundamentals_daily_buffer_calls=5000,
+        ),
+    )
+
+    rc = cli.cmd_report_ingest_progress(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=None,
+        max_age_days=30,
+        missing_only=False,
+    )
+
+    output = capsys.readouterr().out
+    assert rc == 0
+    assert "Status: INCOMPLETE" in output
+    assert "Missing: 1" in output
+    assert "- quota unavailable" in output
+    assert "Next action: Run ingest-fundamentals-global now" in output
+
+
+def test_cmd_report_ingest_progress_default_mode_treats_old_data_as_stale(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "report-stale.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[{"Code": "AAA", "Exchange": "US", "Type": "Common Stock"}],
+    )
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD", "AAA.US", {"General": {"CurrencyCode": "USD"}}, exchange="US"
+    )
+    with fund_repo._connect() as conn:
+        conn.execute(
+            """
+            UPDATE fundamentals_raw
+            SET fetched_at = ?
+            WHERE provider = 'EODHD' AND symbol = 'AAA.US'
+            """,
+            ((datetime.now(timezone.utc) - timedelta(days=45)).isoformat(),),
+        )
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_api_key=None,
+            eodhd_fundamentals_daily_buffer_calls=0,
+        ),
+    )
+
+    rc = cli.cmd_report_ingest_progress(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=None,
+        max_age_days=30,
+        missing_only=False,
+    )
+
+    output = capsys.readouterr().out
+    assert rc == 0
+    assert "Status: INCOMPLETE" in output
+    assert "Stale: 1" in output
+    assert "Mode: freshness(30d)" in output
+
+
+def test_cmd_report_ingest_progress_missing_only_ignores_staleness(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "report-missing-only.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[{"Code": "AAA", "Exchange": "US", "Type": "Common Stock"}],
+    )
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD", "AAA.US", {"General": {"CurrencyCode": "USD"}}, exchange="US"
+    )
+    with fund_repo._connect() as conn:
+        conn.execute(
+            """
+            UPDATE fundamentals_raw
+            SET fetched_at = ?
+            WHERE provider = 'EODHD' AND symbol = 'AAA.US'
+            """,
+            ((datetime.now(timezone.utc) - timedelta(days=120)).isoformat(),),
+        )
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_api_key=None,
+            eodhd_fundamentals_daily_buffer_calls=0,
+        ),
+    )
+
+    rc = cli.cmd_report_ingest_progress(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=None,
+        max_age_days=30,
+        missing_only=True,
+    )
+
+    output = capsys.readouterr().out
+    assert rc == 0
+    assert "Mode: missing-only" in output
+    assert "Status: COMPLETE" in output
+    assert "Stale: 0" in output
+
+
+def test_cmd_report_ingest_progress_reports_blocked_by_backoff(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "report-blocked.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[{"Code": "AAA", "Exchange": "US", "Type": "Common Stock"}],
+    )
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD", "AAA.US", {"General": {"CurrencyCode": "USD"}}, exchange="US"
+    )
+    state_repo = FundamentalsFetchStateRepository(db_path)
+    state_repo.initialize_schema()
+    state_repo.mark_failure("EODHD", "AAA.US", "boom", base_backoff_seconds=3600)
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_api_key=None,
+            eodhd_fundamentals_daily_buffer_calls=0,
+        ),
+    )
+
+    rc = cli.cmd_report_ingest_progress(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=None,
+        max_age_days=30,
+        missing_only=False,
+    )
+
+    output = capsys.readouterr().out
+    assert rc == 0
+    assert "Status: BLOCKED_BY_BACKOFF" in output
+    assert "Blocked: 1" in output
+    assert "earliest next eligible: " in output
+    assert "AAA.US [US]" in output
+    assert "Next action: Wait for backoff to expire or rerun without --resume" in output
+
+
+def test_cmd_report_ingest_progress_filters_exchanges(monkeypatch, tmp_path, capsys):
+    db_path = tmp_path / "report-filtered.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[{"Code": "AAA", "Exchange": "US", "Type": "Common Stock"}],
+    )
+    store_supported_tickers(
+        db_path,
+        "LSE",
+        rows=[{"Code": "BBB", "Exchange": "LSE", "Type": "Common Stock"}],
+    )
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD", "BBB.LSE", {"General": {"CurrencyCode": "GBP"}}, exchange="LSE"
+    )
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_api_key=None,
+            eodhd_fundamentals_daily_buffer_calls=0,
+        ),
+    )
+
+    rc = cli.cmd_report_ingest_progress(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=["US"],
+        max_age_days=30,
+        missing_only=False,
+    )
+
+    output = capsys.readouterr().out
+    assert rc == 0
+    assert "Scope: US" in output
+    assert (
+        "- US: supported=1, stored=0, missing=1, stale=0, blocked=0, errors=0" in output
+    )
+    assert "- LSE:" not in output
+
+
+def test_cmd_report_ingest_progress_succeeds_when_user_api_fails(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "report-user-api-fails.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[{"Code": "AAA", "Exchange": "US", "Type": "Common Stock"}],
+    )
+
+    class FakeClient:
+        def __init__(self, api_key):
+            assert api_key == "TOKEN"
+
+        def user_metadata(self):
+            raise RuntimeError("nope")
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_api_key="TOKEN",
+            eodhd_fundamentals_daily_buffer_calls=10,
+        ),
+    )
+
+    rc = cli.cmd_report_ingest_progress(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=None,
+        max_age_days=30,
+        missing_only=False,
+    )
+
+    output = capsys.readouterr().out
+    assert rc == 0
+    assert "Quota:" in output
+    assert "- quota unavailable" in output
 
 
 def test_cmd_ingest_fundamentals_bulk_skips_fresh_and_backoff(monkeypatch, tmp_path):

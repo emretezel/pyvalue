@@ -98,6 +98,18 @@ run, subtracts the configured daily buffer, throttles by requests per minute,
 and exits cleanly when the remaining daily allowance is exhausted. Rerun it the
 next day to continue from the remaining eligible ticker set.
 
+To see whether a multi-day run is actually complete for the current scope, use:
+
+```bash
+pyvalue report-ingest-progress --provider EODHD
+```
+
+This report defaults to a 30-day freshness window. That means old
+`fundamentals_raw` rows count as incomplete by default even though
+`ingest-fundamentals-global` stays bootstrap-first when `--max-age-days` is
+omitted. Use `--missing-only` on the report if you only care whether each
+supported ticker has ever been ingested once.
+
 Successful EODHD refreshes replace the stored raw payload for the same symbol in
 `fundamentals_raw`. Older historical periods remain available through the newly
 stored payload and normalized downstream tables are refreshed only when you run

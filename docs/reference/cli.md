@@ -87,6 +87,21 @@ Key options:
 - `--resume`
 - `--database <path>`
 
+### `report-ingest-progress`
+
+Report EODHD fundamentals ingest progress across stored supported tickers.
+
+This command is strict about completion. By default it uses `--max-age-days 30`,
+so old raw payloads count as incomplete even if they were ingested in the past.
+Use `--missing-only` to switch to bootstrap semantics and ignore staleness.
+
+Key options:
+- `--provider {EODHD}`
+- `--exchange-codes <codes...>`
+- `--max-age-days <int>` default `30`
+- `--missing-only`
+- `--database <path>`
+
 ### `normalize-fundamentals`
 
 Normalize stored fundamentals for one symbol.

@@ -51,6 +51,12 @@ pyvalue ingest-fundamentals-global --provider EODHD --resume
 Re-run the global command on later days to continue from the remaining eligible
 tickers after the EODHD daily call budget resets.
 
+Check progress between runs:
+
+```bash
+pyvalue report-ingest-progress --provider EODHD
+```
+
 To refresh stale symbols later instead of only filling missing payloads:
 
 ```bash

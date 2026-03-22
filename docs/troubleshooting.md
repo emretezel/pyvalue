@@ -62,6 +62,12 @@ pyvalue refresh-supported-tickers --provider EODHD --exchange-code US
 pyvalue ingest-fundamentals-bulk --provider EODHD --exchange-code US
 ```
 
+To see whether a larger global run is done, stale, or blocked by retry backoff:
+
+```bash
+pyvalue report-ingest-progress --provider EODHD
+```
+
 ## Market Cap Looks Wrong or Missing
 
 Typical causes:
