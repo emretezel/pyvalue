@@ -9,14 +9,16 @@ This project is provided for educational and informational purposes only and doe
 ## 5-Minute Quickstart
 
 ```bash
-python -m pip install -e .[dev]
+conda create -n pyvalue python=3.12 -y
 conda activate pyvalue
+python -m pip install -e .[dev]
 pyvalue refresh-supported-exchanges --provider EODHD
 pyvalue refresh-supported-tickers --provider EODHD --exchange-codes US
 pyvalue ingest-fundamentals --provider EODHD --exchange-codes US --max-symbols 100
 pyvalue normalize-fundamentals --provider EODHD --exchange-codes US
 pyvalue update-market-data --provider EODHD --exchange-codes US
 pyvalue compute-metrics --exchange-codes US
+pyvalue run-screen screeners/value.yml --exchange-codes US --output-csv data/screen_results_value.csv
 ```
 
 Default database: `data/pyvalue.db`
