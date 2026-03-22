@@ -68,6 +68,10 @@ To see whether a larger global run is done, stale, or blocked by retry backoff:
 pyvalue report-ingest-progress --provider EODHD
 ```
 
+In that summary, `Stored` means a fundamentals payload exists in the DB, while
+`Fresh` means the ticker currently counts as complete for the selected mode and
+freshness window.
+
 ## Market Data Global Refresh Progress
 
 Typical causes:
@@ -82,6 +86,10 @@ Useful commands:
 pyvalue update-market-data-global --provider EODHD --resume
 pyvalue report-market-data-progress --provider EODHD
 ```
+
+In that summary, `Stored` means a market-data snapshot exists in the DB, while
+`Fresh` means the symbol currently counts as complete for the selected
+freshness window.
 
 ## Market Cap Looks Wrong or Missing
 

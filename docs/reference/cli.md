@@ -95,6 +95,8 @@ Report EODHD fundamentals ingest progress across stored supported tickers.
 This command is strict about completion. By default it uses `--max-age-days 30`,
 so old raw payloads count as incomplete even if they were ingested in the past.
 Use `--missing-only` to switch to bootstrap semantics and ignore staleness.
+`Stored` means a payload exists in the DB; `Fresh` means it currently counts as
+complete for the selected report mode and age window.
 
 Key options:
 - `--provider {EODHD}`
@@ -185,6 +187,8 @@ Report EODHD market-data refresh progress across stored supported tickers.
 
 This command is strict about completion. By default it uses `--max-age-days 7`,
 so symbols with only older `market_data.as_of` snapshots count as incomplete.
+`Stored` means a snapshot exists in the DB; `Fresh` means it currently counts as
+complete for the selected age window.
 
 Key options:
 - `--provider {EODHD}`

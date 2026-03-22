@@ -109,6 +109,8 @@ This report defaults to a 30-day freshness window. That means old
 `ingest-fundamentals-global` stays bootstrap-first when `--max-age-days` is
 omitted. Use `--missing-only` on the report if you only care whether each
 supported ticker has ever been ingested once.
+In the summary, `Stored` means a raw payload exists in the DB, while `Fresh`
+means the ticker currently counts as complete for the selected mode/window.
 
 Successful EODHD refreshes replace the stored raw payload for the same symbol in
 `fundamentals_raw`. Older historical periods remain available through the newly
@@ -183,6 +185,8 @@ pyvalue report-market-data-progress --provider EODHD
 This report defaults to a 7-day freshness window. A symbol is incomplete when
 its latest stored `market_data.as_of` is missing or older than the selected
 window.
+In the summary, `Stored` means a market-data snapshot exists in the DB, while
+`Fresh` means the symbol currently counts as complete for the selected window.
 
 Important global market-data options:
 - `--rate`: requests per minute, capped at the EODHD limit of `1000`

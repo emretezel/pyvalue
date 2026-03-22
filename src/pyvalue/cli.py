@@ -1515,9 +1515,9 @@ def cmd_report_ingest_progress(
     else:
         status = "COMPLETE"
 
-    completed = max(summary.total_supported - summary.missing - summary.stale, 0)
+    fresh_count = max(summary.total_supported - summary.missing - summary.stale, 0)
     percent_complete = (
-        (completed / summary.total_supported) * 100.0
+        (fresh_count / summary.total_supported) * 100.0
         if summary.total_supported
         else 0.0
     )
@@ -1563,6 +1563,7 @@ def cmd_report_ingest_progress(
     print(f"Stored: {summary.stored}")
     print(f"Missing: {summary.missing}")
     print(f"Stale: {summary.stale}")
+    print(f"Fresh: {fresh_count}")
     print(f"Blocked: {summary.blocked}")
     print(f"Error rows: {summary.error_rows}")
     print(f"Percent complete: {percent_complete:.2f}%")
@@ -1765,9 +1766,9 @@ def cmd_report_market_data_progress(
     else:
         status = "COMPLETE"
 
-    completed = max(summary.total_supported - summary.missing - summary.stale, 0)
+    fresh_count = max(summary.total_supported - summary.missing - summary.stale, 0)
     percent_complete = (
-        (completed / summary.total_supported) * 100.0
+        (fresh_count / summary.total_supported) * 100.0
         if summary.total_supported
         else 0.0
     )
@@ -1811,6 +1812,7 @@ def cmd_report_market_data_progress(
     print(f"Stored: {summary.stored}")
     print(f"Missing: {summary.missing}")
     print(f"Stale: {summary.stale}")
+    print(f"Fresh: {fresh_count}")
     print(f"Blocked: {summary.blocked}")
     print(f"Error rows: {summary.error_rows}")
     print(f"Percent complete: {percent_complete:.2f}%")

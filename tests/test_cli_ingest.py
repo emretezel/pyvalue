@@ -1262,6 +1262,7 @@ def test_cmd_report_ingest_progress_reports_complete_with_quota_snapshot(
     assert "Status: COMPLETE" in output
     assert "Supported: 2" in output
     assert "Stale: 0" in output
+    assert "Fresh: 2" in output
     assert "Quota:" in output
     assert "- usable requests left: 9000" in output
     assert "Next action: Done for current scope" in output
@@ -1297,6 +1298,7 @@ def test_cmd_report_ingest_progress_reports_missing_and_quota_unavailable(
     assert rc == 0
     assert "Status: INCOMPLETE" in output
     assert "Missing: 1" in output
+    assert "Fresh: 0" in output
     assert "- quota unavailable" in output
     assert "Next action: Run ingest-fundamentals-global now" in output
 
@@ -1345,6 +1347,7 @@ def test_cmd_report_ingest_progress_default_mode_treats_old_data_as_stale(
     assert rc == 0
     assert "Status: INCOMPLETE" in output
     assert "Stale: 1" in output
+    assert "Fresh: 0" in output
     assert "Mode: freshness(30d)" in output
 
 
@@ -1393,6 +1396,7 @@ def test_cmd_report_ingest_progress_missing_only_ignores_staleness(
     assert "Mode: missing-only" in output
     assert "Status: COMPLETE" in output
     assert "Stale: 0" in output
+    assert "Fresh: 1" in output
 
 
 def test_cmd_report_ingest_progress_reports_blocked_by_backoff(
@@ -1911,6 +1915,7 @@ def test_cmd_report_market_data_progress_reports_complete_with_quota_snapshot(
     assert "Status: COMPLETE" in output
     assert "Supported: 2" in output
     assert "Stale: 0" in output
+    assert "Fresh: 2" in output
     assert "- usable requests left: 90000" in output
     assert "Next action: Done for current scope" in output
 
@@ -1953,6 +1958,7 @@ def test_cmd_report_market_data_progress_reports_missing_and_stale(
     assert "Status: INCOMPLETE" in output
     assert "Missing: 1" in output
     assert "Stale: 1" in output
+    assert "Fresh: 0" in output
     assert "Next action: Run update-market-data-global now" in output
 
 

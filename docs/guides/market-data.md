@@ -68,10 +68,13 @@ pyvalue report-market-data-progress --provider EODHD
 
 The report defaults to the same 7-day freshness window and shows:
 - overall status: `COMPLETE`, `INCOMPLETE`, or `BLOCKED_BY_BACKOFF`
-- supported, stored, missing, stale, and blocked counts
+- supported, stored, missing, stale, fresh, and blocked counts
 - per-exchange breakdown
 - recent failures
 - remaining usable EODHD quota when available
+
+`Stored` means a snapshot exists in the DB. `Fresh` means the symbol currently
+counts as complete for the selected freshness window.
 
 ## Recalculate Market Cap
 
