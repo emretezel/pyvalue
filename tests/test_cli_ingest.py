@@ -2564,6 +2564,7 @@ def test_cmd_recalc_market_cap(tmp_path):
     )
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
+    market_repo.upsert_price("AAA.US", "2023-12-31", price=40.0, market_cap=4000.0)
     market_repo.upsert_price("AAA.US", "2024-01-01", price=50.0)
     market_repo.upsert_price("BBB.US", "2024-01-01", price=70.0)
 
@@ -2576,6 +2577,16 @@ def test_cmd_recalc_market_cap(tmp_path):
     assert rc == 0
     snapshot = market_repo.latest_snapshot("AAA.US")
     assert snapshot.market_cap == 5000.0
+    with market_repo._connect() as conn:
+        historical_cap = conn.execute(
+            """
+            SELECT market_cap
+            FROM market_data md
+            JOIN securities s ON s.security_id = md.security_id
+            WHERE s.canonical_symbol = 'AAA.US' AND md.as_of = '2023-12-31'
+            """
+        ).fetchone()[0]
+    assert historical_cap == 4000.0
     snapshot_b = market_repo.latest_snapshot("BBB.US")
     assert snapshot_b.market_cap is None
 

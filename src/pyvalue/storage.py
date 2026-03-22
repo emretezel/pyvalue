@@ -2046,8 +2046,13 @@ class MarketDataRepository(SQLiteStore):
                 UPDATE market_data
                 SET market_cap = ?, updated_at = ?
                 WHERE security_id = ?
+                  AND as_of = (
+                      SELECT MAX(as_of)
+                      FROM market_data
+                      WHERE security_id = ?
+                  )
                 """,
-                (market_cap, _utc_now_iso(), security_id),
+                (market_cap, _utc_now_iso(), security_id, security_id),
             )
         return int(cursor.rowcount or 0)
 

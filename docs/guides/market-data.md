@@ -84,7 +84,8 @@ If prices were ingested before useful share-count facts were available, recomput
 pyvalue recalc-market-cap --exchange-codes US
 ```
 
-This uses the latest price and latest normalized share count.
+This uses the latest price and latest normalized share count, and updates only
+the latest stored `market_data.as_of` row for each selected symbol.
 
 ## Operational Notes
 
