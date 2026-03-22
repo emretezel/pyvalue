@@ -5,18 +5,24 @@ from datetime import date
 from pyvalue.cli import cmd_report_metric_coverage
 from pyvalue.metrics.working_capital import WorkingCapitalMetric
 from pyvalue.metrics.current_ratio import CurrentRatioMetric
-from pyvalue.storage import FactRecord, FinancialFactsRepository, UniverseRepository
+from pyvalue.storage import (
+    FactRecord,
+    FinancialFactsRepository,
+    SupportedTickerRepository,
+)
 from pyvalue.universe import Listing
 
 
 def _seed_universe(db_path):
-    universe = UniverseRepository(db_path)
+    universe = SupportedTickerRepository(db_path)
     universe.initialize_schema()
-    universe.replace_universe(
+    universe.replace_from_listings(
+        "SEC",
+        "US",
         [
             Listing(symbol="AAA.US", security_name="AAA", exchange="NYSE"),
             Listing(symbol="BBB.US", security_name="BBB", exchange="NYSE"),
-        ]
+        ],
     )
 
 
@@ -64,7 +70,9 @@ def test_metric_coverage_counts_symbols(tmp_path, capsys):
 
     exit_code = cmd_report_metric_coverage(
         database=str(db_path),
-        exchange_code="NYSE",
+        symbols=None,
+        exchange_codes=["US"],
+        all_supported=False,
         metric_ids=[WorkingCapitalMetric.id, CurrentRatioMetric.id],
     )
 

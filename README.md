@@ -12,19 +12,18 @@ This project is provided for educational and informational purposes only and doe
 python -m pip install -e .[dev]
 conda activate pyvalue
 pyvalue refresh-supported-exchanges --provider EODHD
-pyvalue refresh-supported-tickers --provider EODHD --exchange-code US
-pyvalue load-universe --provider EODHD --exchange-code US
-pyvalue ingest-fundamentals-bulk --provider EODHD --exchange-code US
-pyvalue normalize-fundamentals-bulk --provider EODHD --exchange-code US
-pyvalue update-market-data-bulk --exchange-code US
-pyvalue compute-metrics-bulk --exchange-code US
+pyvalue refresh-supported-tickers --provider EODHD --exchange-codes US
+pyvalue ingest-fundamentals --provider EODHD --exchange-codes US --max-symbols 100
+pyvalue normalize-fundamentals --provider EODHD --exchange-codes US
+pyvalue update-market-data --provider EODHD --exchange-codes US
+pyvalue compute-metrics --exchange-codes US
 ```
 
 Default database: `data/pyvalue.db`
 
 ## What pyvalue does
 
-- Load exchange universes into SQLite.
+- Load canonical provider ticker catalogs into SQLite.
 - Ingest raw fundamentals from SEC or EODHD.
 - Normalize raw payloads into provider-agnostic financial facts.
 - Update market data and market caps.
@@ -57,12 +56,12 @@ Core pages:
 ## Short End-to-End Example
 
 ```bash
-pyvalue load-universe --provider EODHD --exchange-code LSE
-pyvalue ingest-fundamentals --provider EODHD SHEL.LSE
-pyvalue normalize-fundamentals --provider EODHD SHEL.LSE
-pyvalue update-market-data SHEL.LSE
-pyvalue compute-metrics SHEL.LSE --all
-pyvalue run-screen SHEL.LSE screeners/value.yml
+pyvalue refresh-supported-tickers --provider EODHD --exchange-codes LSE
+pyvalue ingest-fundamentals --provider EODHD --symbols SHEL.LSE
+pyvalue normalize-fundamentals --provider EODHD --symbols SHEL.LSE
+pyvalue update-market-data --symbols SHEL.LSE
+pyvalue compute-metrics --symbols SHEL.LSE
+pyvalue run-screen screeners/value.yml --symbols SHEL.LSE
 ```
 
 ## Developer Notes

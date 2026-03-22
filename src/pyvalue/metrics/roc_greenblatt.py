@@ -131,8 +131,8 @@ class ROCGreenblattMetric:
 
     def _index_by_period(
         self, records: List[FactRecord]
-    ) -> dict[tuple[str, str], FactRecord]:
-        indexed: dict[tuple[str, str], FactRecord] = {}
+    ) -> dict[tuple[Optional[str], Optional[str]], FactRecord]:
+        indexed: dict[tuple[Optional[str], Optional[str]], FactRecord] = {}
         for record in records:
             key = (record.end_date, record.fiscal_period)
             if key not in indexed:

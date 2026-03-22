@@ -16,7 +16,7 @@ from pyvalue.storage import (
     FinancialFactsRepository,
     FundamentalsRepository,
     MarketDataRepository,
-    UniverseRepository,
+    SupportedTickerRepository,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -58,8 +58,8 @@ class MarketDataService:
         self.facts_repo = RegionFactsRepository(base_facts_repo)
         self.fund_repo = FundamentalsRepository(db_path)
         self.fund_repo.initialize_schema()
-        self.universe_repo = UniverseRepository(db_path)
-        self.universe_repo.initialize_schema()
+        self.supported_ticker_repo = SupportedTickerRepository(db_path)
+        self.supported_ticker_repo.initialize_schema()
         self.provider = provider or self._default_provider()
 
     def _default_provider(self) -> MarketDataProvider:
@@ -97,7 +97,9 @@ class MarketDataService:
         fetch = fetch_symbol or symbol
         data = self.provider.latest_price(fetch)
         data.symbol = symbol.upper()
-        currency_hint = data.currency or self.universe_repo.fetch_currency(symbol)
+        currency_hint = data.currency or self.supported_ticker_repo.fetch_currency(
+            symbol
+        )
         price = data.price
         if (
             currency_hint

@@ -22,19 +22,19 @@ market_data_daily_buffer_calls = 5000
 ```
 
 Use this for:
-- `load-universe --provider EODHD`
 - `refresh-supported-exchanges --provider EODHD`
 - `refresh-supported-tickers --provider EODHD`
 - `ingest-fundamentals --provider EODHD`
-- `ingest-fundamentals-global --provider EODHD`
-- `update-market-data`
-- exchange and global EODHD workflows
+- `report-fundamentals-progress --provider EODHD`
+- `update-market-data --provider EODHD`
+- `report-market-data-progress --provider EODHD`
+- EODHD exchange-scoped and all-supported workflows
 
 Optional EODHD throttling and quota settings:
-- `fundamentals_requests_per_minute`: default `600`, capped at the EODHD limit of `1000`; used by `ingest-fundamentals-global`
-- `fundamentals_daily_buffer_calls`: default `5000`, reserved from the daily call budget so global ingestion stops early instead of consuming the full allowance
-- `market_data_requests_per_minute`: default `950`, capped at the EODHD limit of `1000`; used by `update-market-data-global`
-- `market_data_daily_buffer_calls`: default `5000`, reserved from the daily call budget so global market-data refresh stops early instead of consuming the full allowance
+- `fundamentals_requests_per_minute`: default `600`, capped at the EODHD limit of `1000`; used by `ingest-fundamentals --provider EODHD` when the scope spans many symbols
+- `fundamentals_daily_buffer_calls`: default `5000`, reserved from the shared daily call budget so fundamentals ingestion stops early instead of consuming the full allowance
+- `market_data_requests_per_minute`: default `950`, capped at the EODHD limit of `1000`; used by `update-market-data --provider EODHD`
+- `market_data_daily_buffer_calls`: default `5000`, reserved from the shared daily call budget so market-data refresh stops early instead of consuming the full allowance
 
 ## SEC User-Agent
 

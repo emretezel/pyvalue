@@ -13,19 +13,19 @@ This covers:
 ## Update One Symbol
 
 ```bash
-pyvalue update-market-data AAPL.US
+pyvalue update-market-data --symbols AAPL.US
 ```
 
 If the symbol has no suffix:
 
 ```bash
-pyvalue update-market-data AAPL --exchange-code US
+pyvalue update-market-data --symbols AAPL.US
 ```
 
-## Bulk Update an Exchange
+## Update an Exchange
 
 ```bash
-pyvalue update-market-data-bulk --exchange-code US --rate 950
+pyvalue update-market-data --provider EODHD --exchange-codes US --rate 950
 ```
 
 Use `--rate` to throttle symbols per minute.
@@ -35,7 +35,7 @@ Use `--rate` to throttle symbols per minute.
 Refresh market data across the stored EODHD `supported_tickers` catalog:
 
 ```bash
-pyvalue update-market-data-global --provider EODHD
+pyvalue update-market-data --provider EODHD --all-supported
 ```
 
 Recommended workflow for large runs:
@@ -43,7 +43,7 @@ Recommended workflow for large runs:
 ```bash
 pyvalue refresh-supported-exchanges --provider EODHD
 pyvalue refresh-supported-tickers --provider EODHD --all-exchanges
-pyvalue update-market-data-global --provider EODHD --resume
+pyvalue update-market-data --provider EODHD --all-supported --resume
 ```
 
 Important behavior:
@@ -81,7 +81,7 @@ counts as complete for the selected freshness window.
 If prices were ingested before useful share-count facts were available, recompute stored market caps later:
 
 ```bash
-pyvalue recalc-market-cap --exchange-code US
+pyvalue recalc-market-cap --exchange-codes US
 ```
 
 This uses the latest price and latest normalized share count.

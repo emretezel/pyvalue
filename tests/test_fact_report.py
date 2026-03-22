@@ -8,18 +8,24 @@ from datetime import date, timedelta
 from pyvalue.cli import cmd_report_fact_freshness
 from pyvalue.metrics.working_capital import WorkingCapitalMetric
 from pyvalue.reporting import compute_fact_coverage
-from pyvalue.storage import FactRecord, FinancialFactsRepository, UniverseRepository
+from pyvalue.storage import (
+    FactRecord,
+    FinancialFactsRepository,
+    SupportedTickerRepository,
+)
 from pyvalue.universe import Listing
 
 
 def _seed_universe(db_path):
-    universe = UniverseRepository(db_path)
+    universe = SupportedTickerRepository(db_path)
     universe.initialize_schema()
-    universe.replace_universe(
+    universe.replace_from_listings(
+        "SEC",
+        "US",
         [
             Listing(symbol="AAA.US", security_name="AAA", exchange="NYSE"),
             Listing(symbol="BBB.US", security_name="BBB", exchange="NYSE"),
-        ]
+        ],
     )
 
 
@@ -95,7 +101,9 @@ def test_cmd_report_fact_freshness_outputs_counts(tmp_path, capsys):
 
     exit_code = cmd_report_fact_freshness(
         database=str(db_path),
-        exchange_code="NYSE",
+        symbols=None,
+        exchange_codes=["US"],
+        all_supported=False,
         metric_ids=["working_capital"],
         max_age_days=365,
         output_csv=None,

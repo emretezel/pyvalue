@@ -5,11 +5,25 @@ Author: Emre Tezel
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
-from typing import Callable, List, Sequence, Union
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union, cast
 
 Migration = Callable[[sqlite3.Connection], None]
+
+_US_VENUE_CODES = {
+    "AMEX",
+    "ARCA",
+    "BATS",
+    "CBOEBZX",
+    "NASDAQ",
+    "NYSE",
+    "NYSEARCA",
+    "NYSEMKT",
+    "OTC",
+    "US",
+}
 
 
 def _ensure_migrations_table(conn: sqlite3.Connection) -> None:
@@ -34,6 +48,52 @@ def _current_version(conn: sqlite3.Connection) -> int:
 def _set_version(conn: sqlite3.Connection, version: int) -> None:
     conn.execute("DELETE FROM schema_migrations")
     conn.execute("INSERT INTO schema_migrations (version) VALUES (?)", (version,))
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    if not _table_exists(conn, table_name):
+        return set()
+    return {
+        row[1] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
+
+
+def _normalize_optional_text(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _normalize_upper(value: object) -> Optional[str]:
+    text = _normalize_optional_text(value)
+    return text.upper() if text is not None else None
+
+
+def _split_symbol(symbol: str) -> Tuple[str, Optional[str]]:
+    cleaned = symbol.strip().upper()
+    if "." not in cleaned:
+        return cleaned, None
+    ticker, exchange = cleaned.rsplit(".", 1)
+    return ticker, exchange
+
+
+def _infer_canonical_exchange(symbol: str) -> Optional[str]:
+    _, suffix = _split_symbol(symbol)
+    if suffix is None:
+        return None
+    suffix = suffix.upper().replace(" ", "")
+    if suffix in _US_VENUE_CODES:
+        return "US"
+    return suffix
 
 
 def apply_migrations(db_path: Union[str, Path]) -> int:
@@ -706,6 +766,1009 @@ def _migration_020_create_market_data_fetch_state(conn: sqlite3.Connection) -> N
     )
 
 
+def _migration_021_drop_listings_in_favor_of_supported_tickers(
+    conn: sqlite3.Connection,
+) -> None:
+    """Backfill canonical supported_tickers rows and remove listings."""
+
+    _migration_019_create_supported_tickers(conn)
+    exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='listings'"
+    ).fetchone()
+    if exists is None:
+        return
+
+    info = conn.execute("PRAGMA table_info(listings)").fetchall()
+    columns = {row[1] for row in info}
+    select_columns = [
+        "symbol",
+        "security_name",
+        "exchange",
+        "is_etf",
+        "source",
+        "ingested_at",
+    ]
+    if "isin" in columns:
+        select_columns.append("isin")
+    if "currency" in columns:
+        select_columns.append("currency")
+    rows = conn.execute(
+        f"SELECT {', '.join(select_columns)} FROM listings ORDER BY symbol"
+    ).fetchall()
+
+    payload = []
+    for row in rows:
+        symbol_raw = str(row["symbol"] or "").strip().upper()
+        if not symbol_raw:
+            continue
+        source = str(row["source"] or "").strip().lower()
+        provider = "EODHD" if source == "eodhd" else "SEC"
+        listing_exchange = str(row["exchange"] or "").strip().upper() or None
+        exchange_code = "US" if provider == "SEC" else None
+        if exchange_code is None:
+            if listing_exchange:
+                exchange_code = listing_exchange
+            elif "." in symbol_raw:
+                exchange_code = symbol_raw.split(".", 1)[1].upper()
+            else:
+                exchange_code = "US"
+        symbol = symbol_raw if "." in symbol_raw else f"{symbol_raw}.{exchange_code}"
+        security_name = str(row["security_name"] or "").strip() or None
+        security_type = "ETF" if int(row["is_etf"] or 0) else "Common Stock"
+        isin = str(row["isin"] or "").strip() if "isin" in columns else ""
+        currency = (
+            str(row["currency"] or "").strip().upper() if "currency" in columns else ""
+        )
+        updated_at = (
+            str(row["ingested_at"] or "").strip()
+            or datetime.now(timezone.utc).isoformat()
+        )
+        payload.append(
+            (
+                provider,
+                exchange_code,
+                symbol,
+                symbol.split(".", 1)[0],
+                listing_exchange,
+                security_name,
+                security_type,
+                None,
+                currency or None,
+                isin or None,
+                updated_at,
+            )
+        )
+
+    if payload:
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO supported_tickers (
+                provider,
+                exchange_code,
+                symbol,
+                code,
+                listing_exchange,
+                security_name,
+                security_type,
+                country,
+                currency,
+                isin,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            payload,
+        )
+
+    conn.execute("DROP INDEX IF EXISTS idx_listings_exchange")
+    conn.execute("DROP INDEX IF EXISTS idx_listings_region")
+    conn.execute("DROP TABLE IF EXISTS listings")
+
+
+def _migration_022_canonical_security_model(conn: sqlite3.Connection) -> None:
+    """Rebuild storage around canonical securities and provider mappings."""
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    def read_supported_exchanges() -> List[Dict[str, Optional[str]]]:
+        if not _table_exists(conn, "supported_exchanges"):
+            return []
+        columns = _table_columns(conn, "supported_exchanges")
+        if {"provider_exchange_code", "canonical_exchange_code"}.issubset(columns):
+            rows = conn.execute(
+                """
+                SELECT provider, provider_exchange_code, canonical_exchange_code, name,
+                       country, currency, operating_mic, country_iso2, country_iso3,
+                       updated_at
+                FROM supported_exchanges
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
+        rows = conn.execute(
+            """
+            SELECT provider, code AS provider_exchange_code, code AS canonical_exchange_code,
+                   name, country, currency, operating_mic, country_iso2, country_iso3,
+                   updated_at
+            FROM supported_exchanges
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def read_supported_tickers() -> List[Dict[str, Optional[str]]]:
+        if not _table_exists(conn, "supported_tickers"):
+            return []
+        columns = _table_columns(conn, "supported_tickers")
+        if {"provider_symbol", "provider_ticker", "provider_exchange_code"}.issubset(
+            columns
+        ):
+            rows = conn.execute(
+                """
+                SELECT provider, provider_symbol, provider_ticker, provider_exchange_code,
+                       listing_exchange, security_name, security_type, country, currency,
+                       isin, updated_at
+                FROM supported_tickers
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
+        rows = conn.execute(
+            """
+            SELECT provider, symbol AS provider_symbol, code AS provider_ticker,
+                   exchange_code AS provider_exchange_code, listing_exchange,
+                   security_name, security_type, country, currency, isin, updated_at
+            FROM supported_tickers
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def read_fundamentals_raw() -> List[Dict[str, Optional[str]]]:
+        if not _table_exists(conn, "fundamentals_raw"):
+            return []
+        columns = _table_columns(conn, "fundamentals_raw")
+        if {"provider_symbol", "provider_exchange_code", "security_id"}.issubset(
+            columns
+        ):
+            rows = conn.execute(
+                """
+                SELECT provider, provider_symbol, provider_exchange_code, currency, data,
+                       fetched_at
+                FROM fundamentals_raw
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
+        rows = conn.execute(
+            """
+            SELECT provider, symbol AS provider_symbol, exchange AS provider_exchange_code,
+                   currency, data, fetched_at
+            FROM fundamentals_raw
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def read_fetch_state(table_name: str) -> List[Dict[str, Optional[str]]]:
+        if not _table_exists(conn, table_name):
+            return []
+        columns = _table_columns(conn, table_name)
+        if "provider_symbol" in columns:
+            rows = conn.execute(
+                f"""
+                SELECT provider, provider_symbol, last_fetched_at, last_status, last_error,
+                       next_eligible_at, attempts
+                FROM {table_name}
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
+        rows = conn.execute(
+            f"""
+            SELECT provider, symbol AS provider_symbol, last_fetched_at, last_status,
+                   last_error, next_eligible_at, attempts
+            FROM {table_name}
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def read_financial_facts() -> List[Dict[str, object]]:
+        if not _table_exists(conn, "financial_facts"):
+            return []
+        columns = _table_columns(conn, "financial_facts")
+        if "security_id" in columns:
+            rows = conn.execute(
+                """
+                SELECT security_id, cik, concept, fiscal_period, end_date, unit, value,
+                       accn, filed, frame, start_date, accounting_standard, currency,
+                       source_provider
+                FROM financial_facts
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
+        rows = conn.execute(
+            """
+            SELECT symbol, cik, concept, fiscal_period, end_date, unit, value, accn,
+                   filed, frame, start_date, accounting_standard, currency
+            FROM financial_facts
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def read_market_data() -> List[Dict[str, object]]:
+        if not _table_exists(conn, "market_data"):
+            return []
+        columns = _table_columns(conn, "market_data")
+        if "security_id" in columns:
+            rows = conn.execute(
+                """
+                SELECT security_id, as_of, price, volume, market_cap, currency,
+                       source_provider, updated_at
+                FROM market_data
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
+        rows = conn.execute(
+            """
+            SELECT symbol, as_of, price, volume, market_cap, currency
+            FROM market_data
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def read_metrics() -> List[Dict[str, object]]:
+        if not _table_exists(conn, "metrics"):
+            return []
+        columns = _table_columns(conn, "metrics")
+        if "security_id" in columns:
+            rows = conn.execute(
+                "SELECT security_id, metric_id, value, as_of FROM metrics"
+            ).fetchall()
+            return [dict(row) for row in rows]
+        rows = conn.execute(
+            "SELECT symbol, metric_id, value, as_of FROM metrics"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def read_entity_metadata() -> List[Dict[str, Optional[str]]]:
+        if not _table_exists(conn, "entity_metadata"):
+            return []
+        columns = _table_columns(conn, "entity_metadata")
+        select_columns = ["symbol", "entity_name"]
+        if "description" in columns:
+            select_columns.append("description")
+        rows = conn.execute(
+            f"SELECT {', '.join(select_columns)} FROM entity_metadata"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    old_supported_exchanges = read_supported_exchanges()
+    old_supported_tickers = read_supported_tickers()
+    old_fundamentals_raw = read_fundamentals_raw()
+    old_fundamentals_fetch_state = read_fetch_state("fundamentals_fetch_state")
+    old_market_data_fetch_state = read_fetch_state("market_data_fetch_state")
+    old_financial_facts = read_financial_facts()
+    old_market_data = read_market_data()
+    old_metrics = read_metrics()
+    old_entity_metadata = read_entity_metadata()
+
+    exchange_records: Dict[Tuple[str, str], Dict[str, Optional[str]]] = {}
+    for row in old_supported_exchanges:
+        provider = _normalize_upper(row.get("provider"))
+        provider_exchange_code = _normalize_upper(
+            row.get("provider_exchange_code") or row.get("code")
+        )
+        if provider is None or provider_exchange_code is None:
+            continue
+        exchange_records[(provider, provider_exchange_code)] = {
+            "provider": provider,
+            "provider_exchange_code": provider_exchange_code,
+            "canonical_exchange_code": _normalize_upper(
+                row.get("canonical_exchange_code") or provider_exchange_code
+            )
+            or provider_exchange_code,
+            "name": _normalize_optional_text(row.get("name")),
+            "country": _normalize_optional_text(row.get("country")),
+            "currency": _normalize_upper(row.get("currency")),
+            "operating_mic": _normalize_optional_text(row.get("operating_mic")),
+            "country_iso2": _normalize_upper(row.get("country_iso2")),
+            "country_iso3": _normalize_upper(row.get("country_iso3")),
+            "updated_at": _normalize_optional_text(row.get("updated_at")) or now,
+        }
+
+    exchange_records[("SEC", "US")] = {
+        "provider": "SEC",
+        "provider_exchange_code": "US",
+        "canonical_exchange_code": "US",
+        "name": exchange_records.get(("SEC", "US"), {}).get("name") or "United States",
+        "country": exchange_records.get(("SEC", "US"), {}).get("country") or "US",
+        "currency": exchange_records.get(("SEC", "US"), {}).get("currency") or "USD",
+        "operating_mic": exchange_records.get(("SEC", "US"), {}).get("operating_mic"),
+        "country_iso2": exchange_records.get(("SEC", "US"), {}).get("country_iso2")
+        or "US",
+        "country_iso3": exchange_records.get(("SEC", "US"), {}).get("country_iso3")
+        or "USA",
+        "updated_at": now,
+    }
+
+    symbol_identity_map: Dict[str, Tuple[str, str]] = {}
+    security_metadata: Dict[Tuple[str, str], Dict[str, Optional[str]]] = {}
+    source_provider_by_symbol: Dict[str, str] = {}
+
+    def provider_identity(
+        provider: object,
+        symbol: object,
+        provider_exchange_code: object = None,
+    ) -> Tuple[str, str, str, str]:
+        provider_norm = _normalize_upper(provider)
+        symbol_norm = _normalize_upper(symbol)
+        if provider_norm is None or symbol_norm is None:
+            raise RuntimeError("Provider-owned symbol row is missing required identity")
+        ticker, suffix = _split_symbol(symbol_norm)
+        if provider_norm == "SEC":
+            provider_exchange_norm = "US"
+            provider_symbol = f"{ticker}.US"
+            canonical_exchange = "US"
+        else:
+            resolved_provider_exchange = (
+                _normalize_upper(provider_exchange_code) or suffix
+            )
+            if resolved_provider_exchange is None:
+                raise RuntimeError(
+                    f"Could not resolve provider exchange code for {provider_norm}:{symbol_norm}"
+                )
+            provider_exchange_norm = resolved_provider_exchange
+            provider_symbol = (
+                symbol_norm
+                if suffix is not None
+                else f"{ticker}.{provider_exchange_norm}"
+            )
+            if (provider_norm, provider_exchange_norm) not in exchange_records:
+                exchange_records[(provider_norm, provider_exchange_norm)] = {
+                    "provider": provider_norm,
+                    "provider_exchange_code": provider_exchange_norm,
+                    "canonical_exchange_code": provider_exchange_norm,
+                    "name": None,
+                    "country": None,
+                    "currency": None,
+                    "operating_mic": None,
+                    "country_iso2": None,
+                    "country_iso3": None,
+                    "updated_at": now,
+                }
+            canonical_exchange = (
+                exchange_records[(provider_norm, provider_exchange_norm)][
+                    "canonical_exchange_code"
+                ]
+                or provider_exchange_norm
+            )
+        symbol_identity_map[symbol_norm] = (ticker, canonical_exchange)
+        symbol_identity_map[provider_symbol] = (ticker, canonical_exchange)
+        if symbol_norm not in source_provider_by_symbol:
+            source_provider_by_symbol[symbol_norm] = provider_norm
+        if provider_symbol not in source_provider_by_symbol:
+            source_provider_by_symbol[provider_symbol] = provider_norm
+        return provider_symbol, ticker, provider_exchange_norm, canonical_exchange
+
+    for row in old_supported_tickers:
+        provider_symbol, provider_ticker, provider_exchange_code, canonical_exchange = (
+            provider_identity(
+                row.get("provider"),
+                row.get("provider_symbol") or row.get("symbol"),
+                row.get("provider_exchange_code") or row.get("exchange_code"),
+            )
+        )
+        key = (provider_ticker, canonical_exchange)
+        meta = security_metadata.setdefault(
+            key, {"entity_name": None, "description": None}
+        )
+        meta["entity_name"] = meta["entity_name"] or _normalize_optional_text(
+            row.get("security_name")
+        )
+
+    for row in old_fundamentals_raw:
+        provider_identity(
+            row.get("provider"),
+            row.get("provider_symbol") or row.get("symbol"),
+            row.get("provider_exchange_code") or row.get("exchange"),
+        )
+
+    for row in old_fundamentals_fetch_state:
+        provider_identity(row.get("provider"), row.get("provider_symbol"))
+
+    for row in old_market_data_fetch_state:
+        provider_identity(row.get("provider"), row.get("provider_symbol"))
+
+    def resolve_symbol_identity(symbol: object) -> Tuple[str, str]:
+        symbol_norm = _normalize_upper(symbol)
+        if symbol_norm is None:
+            raise RuntimeError("Encountered empty symbol while backfilling security_id")
+        identity = symbol_identity_map.get(symbol_norm)
+        if identity is not None:
+            return identity
+        ticker, _ = _split_symbol(symbol_norm)
+        canonical_exchange = _infer_canonical_exchange(symbol_norm)
+        if canonical_exchange is None:
+            raise RuntimeError(
+                f"Could not infer canonical exchange code for symbol {symbol_norm}"
+            )
+        symbol_identity_map[symbol_norm] = (ticker, canonical_exchange)
+        return ticker, canonical_exchange
+
+    for fact_row in old_financial_facts:
+        if "symbol" in fact_row:
+            resolve_symbol_identity(fact_row["symbol"])
+
+    for market_row in old_market_data:
+        if "symbol" in market_row:
+            resolve_symbol_identity(market_row["symbol"])
+
+    for metric_row in old_metrics:
+        if "symbol" in metric_row:
+            resolve_symbol_identity(metric_row["symbol"])
+
+    for row in old_entity_metadata:
+        ticker, canonical_exchange = resolve_symbol_identity(row.get("symbol"))
+        key = (ticker, canonical_exchange)
+        meta = security_metadata.setdefault(
+            key, {"entity_name": None, "description": None}
+        )
+        meta["entity_name"] = meta["entity_name"] or _normalize_optional_text(
+            row.get("entity_name")
+        )
+        meta["description"] = meta["description"] or _normalize_optional_text(
+            row.get("description")
+        )
+
+    security_keys = sorted(
+        {identity for identity in symbol_identity_map.values()},
+        key=lambda item: (item[1], item[0]),
+    )
+
+    for table_name in [
+        "supported_exchanges",
+        "supported_tickers",
+        "securities",
+        "fundamentals_raw",
+        "fundamentals_fetch_state",
+        "market_data_fetch_state",
+        "financial_facts",
+        "market_data",
+        "metrics",
+        "entity_metadata",
+    ]:
+        if _table_exists(conn, table_name):
+            conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+
+    conn.execute(
+        """
+        CREATE TABLE supported_exchanges (
+            provider TEXT NOT NULL,
+            provider_exchange_code TEXT NOT NULL,
+            canonical_exchange_code TEXT NOT NULL,
+            name TEXT,
+            country TEXT,
+            currency TEXT,
+            operating_mic TEXT,
+            country_iso2 TEXT,
+            country_iso3 TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (provider, provider_exchange_code)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX idx_supported_exchanges_canonical
+        ON supported_exchanges(canonical_exchange_code)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE securities (
+            security_id INTEGER PRIMARY KEY,
+            canonical_ticker TEXT NOT NULL,
+            canonical_exchange_code TEXT NOT NULL,
+            canonical_symbol TEXT NOT NULL,
+            entity_name TEXT,
+            description TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (canonical_exchange_code, canonical_ticker),
+            UNIQUE (canonical_symbol)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX idx_securities_exchange
+        ON securities(canonical_exchange_code)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE supported_tickers (
+            provider TEXT NOT NULL,
+            provider_symbol TEXT NOT NULL,
+            provider_ticker TEXT NOT NULL,
+            provider_exchange_code TEXT NOT NULL,
+            security_id INTEGER NOT NULL,
+            listing_exchange TEXT,
+            security_name TEXT,
+            security_type TEXT,
+            country TEXT,
+            currency TEXT,
+            isin TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (provider, provider_symbol)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX idx_supported_tickers_provider_exchange_ticker
+        ON supported_tickers(provider, provider_exchange_code, provider_ticker)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX idx_supported_tickers_provider_exchange
+        ON supported_tickers(provider, provider_exchange_code)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX idx_supported_tickers_security
+        ON supported_tickers(security_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE fundamentals_raw (
+            provider TEXT NOT NULL,
+            provider_symbol TEXT NOT NULL,
+            security_id INTEGER NOT NULL,
+            provider_exchange_code TEXT,
+            currency TEXT,
+            data TEXT NOT NULL,
+            fetched_at TEXT NOT NULL,
+            PRIMARY KEY (provider, provider_symbol)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX idx_fundamentals_raw_security
+        ON fundamentals_raw(security_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX idx_fundamentals_raw_provider_fetched
+        ON fundamentals_raw(provider, fetched_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE fundamentals_fetch_state (
+            provider TEXT NOT NULL,
+            provider_symbol TEXT NOT NULL,
+            last_fetched_at TEXT,
+            last_status TEXT,
+            last_error TEXT,
+            next_eligible_at TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (provider, provider_symbol)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX idx_fundamentals_fetch_next
+        ON fundamentals_fetch_state(provider, next_eligible_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE market_data_fetch_state (
+            provider TEXT NOT NULL,
+            provider_symbol TEXT NOT NULL,
+            last_fetched_at TEXT,
+            last_status TEXT,
+            last_error TEXT,
+            next_eligible_at TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (provider, provider_symbol)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX idx_market_data_fetch_next
+        ON market_data_fetch_state(provider, next_eligible_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE financial_facts (
+            security_id INTEGER NOT NULL,
+            cik TEXT,
+            concept TEXT NOT NULL,
+            fiscal_period TEXT,
+            end_date TEXT NOT NULL,
+            unit TEXT NOT NULL,
+            value REAL NOT NULL,
+            accn TEXT,
+            filed TEXT,
+            frame TEXT,
+            start_date TEXT,
+            accounting_standard TEXT,
+            currency TEXT,
+            source_provider TEXT,
+            PRIMARY KEY (security_id, concept, fiscal_period, end_date, unit, accn)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX idx_fin_facts_security_concept
+        ON financial_facts(security_id, concept)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX idx_fin_facts_concept
+        ON financial_facts(concept)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE market_data (
+            security_id INTEGER NOT NULL,
+            as_of DATE NOT NULL,
+            price REAL NOT NULL,
+            volume INTEGER,
+            market_cap REAL,
+            currency TEXT,
+            source_provider TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (security_id, as_of)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX idx_market_data_latest
+        ON market_data(security_id, as_of DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE metrics (
+            security_id INTEGER NOT NULL,
+            metric_id TEXT NOT NULL,
+            value REAL NOT NULL,
+            as_of TEXT NOT NULL,
+            PRIMARY KEY (security_id, metric_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX idx_metrics_metric_id
+        ON metrics(metric_id)
+        """
+    )
+
+    for record in sorted(
+        exchange_records.values(),
+        key=lambda item: (item["provider"], item["provider_exchange_code"]),
+    ):
+        conn.execute(
+            """
+            INSERT INTO supported_exchanges (
+                provider,
+                provider_exchange_code,
+                canonical_exchange_code,
+                name,
+                country,
+                currency,
+                operating_mic,
+                country_iso2,
+                country_iso3,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record["provider"],
+                record["provider_exchange_code"],
+                record["canonical_exchange_code"],
+                record["name"],
+                record["country"],
+                record["currency"],
+                record["operating_mic"],
+                record["country_iso2"],
+                record["country_iso3"],
+                record["updated_at"] or now,
+            ),
+        )
+
+    security_id_map: Dict[Tuple[str, str], int] = {}
+    for canonical_ticker, canonical_exchange in security_keys:
+        canonical_symbol = f"{canonical_ticker}.{canonical_exchange}"
+        meta = security_metadata.get((canonical_ticker, canonical_exchange), {})
+        conn.execute(
+            """
+            INSERT INTO securities (
+                canonical_ticker,
+                canonical_exchange_code,
+                canonical_symbol,
+                entity_name,
+                description,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                canonical_ticker,
+                canonical_exchange,
+                canonical_symbol,
+                meta.get("entity_name"),
+                meta.get("description"),
+                now,
+                now,
+            ),
+        )
+        row = conn.execute(
+            """
+            SELECT security_id
+            FROM securities
+            WHERE canonical_exchange_code = ? AND canonical_ticker = ?
+            """,
+            (canonical_exchange, canonical_ticker),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(f"Failed to backfill security_id for {canonical_symbol}")
+        security_id_map[(canonical_ticker, canonical_exchange)] = int(row[0])
+
+    supported_ticker_payload: Dict[Tuple[str, str, str], Tuple[object, ...]] = {}
+    supported_ticker_updated_at: Dict[Tuple[str, str, str], str] = {}
+    for row in old_supported_tickers:
+        provider_symbol, provider_ticker, provider_exchange_code, canonical_exchange = (
+            provider_identity(
+                row.get("provider"),
+                row.get("provider_symbol") or row.get("symbol"),
+                row.get("provider_exchange_code") or row.get("exchange_code"),
+            )
+        )
+        security_id = security_id_map[(provider_ticker, canonical_exchange)]
+        supported_ticker_key = (
+            _normalize_upper(row.get("provider")) or "",
+            provider_exchange_code,
+            provider_ticker,
+        )
+        updated_at = _normalize_optional_text(row.get("updated_at")) or now
+        if (
+            supported_ticker_key in supported_ticker_updated_at
+            and supported_ticker_updated_at[supported_ticker_key] >= updated_at
+        ):
+            continue
+        supported_ticker_updated_at[supported_ticker_key] = updated_at
+        supported_ticker_payload[supported_ticker_key] = (
+            _normalize_upper(row.get("provider")),
+            provider_symbol,
+            provider_ticker,
+            provider_exchange_code,
+            security_id,
+            _normalize_upper(row.get("listing_exchange")),
+            _normalize_optional_text(row.get("security_name")),
+            _normalize_optional_text(row.get("security_type")),
+            _normalize_optional_text(row.get("country")),
+            _normalize_upper(row.get("currency")),
+            _normalize_optional_text(row.get("isin")),
+            updated_at,
+        )
+
+    for payload in supported_ticker_payload.values():
+        conn.execute(
+            """
+            INSERT INTO supported_tickers (
+                provider,
+                provider_symbol,
+                provider_ticker,
+                provider_exchange_code,
+                security_id,
+                listing_exchange,
+                security_name,
+                security_type,
+                country,
+                currency,
+                isin,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            payload,
+        )
+
+    fundamentals_raw_payload: Dict[Tuple[str, str], Tuple[object, ...]] = {}
+    for row in old_fundamentals_raw:
+        provider_symbol, provider_ticker, provider_exchange_code, canonical_exchange = (
+            provider_identity(
+                row.get("provider"),
+                row.get("provider_symbol") or row.get("symbol"),
+                row.get("provider_exchange_code") or row.get("exchange"),
+            )
+        )
+        security_id = security_id_map[(provider_ticker, canonical_exchange)]
+        key = (_normalize_upper(row.get("provider")) or "", provider_symbol)
+        fundamentals_raw_payload[key] = (
+            _normalize_upper(row.get("provider")),
+            provider_symbol,
+            security_id,
+            provider_exchange_code,
+            _normalize_upper(row.get("currency")),
+            row.get("data"),
+            _normalize_optional_text(row.get("fetched_at")) or now,
+        )
+
+    for payload in fundamentals_raw_payload.values():
+        conn.execute(
+            """
+            INSERT INTO fundamentals_raw (
+                provider,
+                provider_symbol,
+                security_id,
+                provider_exchange_code,
+                currency,
+                data,
+                fetched_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            payload,
+        )
+
+    for table_name, rows in [
+        ("fundamentals_fetch_state", old_fundamentals_fetch_state),
+        ("market_data_fetch_state", old_market_data_fetch_state),
+    ]:
+        payload_map: Dict[Tuple[str, str], Tuple[object, ...]] = {}
+        for row in rows:
+            provider_symbol, _, _, _ = provider_identity(
+                row.get("provider"),
+                row.get("provider_symbol") or row.get("symbol"),
+            )
+            key = (_normalize_upper(row.get("provider")) or "", provider_symbol)
+            payload_map[key] = (
+                _normalize_upper(row.get("provider")),
+                provider_symbol,
+                _normalize_optional_text(row.get("last_fetched_at")),
+                _normalize_optional_text(row.get("last_status")),
+                _normalize_optional_text(row.get("last_error")),
+                _normalize_optional_text(row.get("next_eligible_at")),
+                int(row.get("attempts") or 0),
+            )
+        for payload in payload_map.values():
+            conn.execute(
+                f"""
+                INSERT INTO {table_name} (
+                    provider,
+                    provider_symbol,
+                    last_fetched_at,
+                    last_status,
+                    last_error,
+                    next_eligible_at,
+                    attempts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                payload,
+            )
+
+    for fact_row in old_financial_facts:
+        if "security_id" in fact_row:
+            security_id = int(cast(Union[str, int], fact_row["security_id"]))
+        else:
+            ticker, canonical_exchange = resolve_symbol_identity(fact_row.get("symbol"))
+            security_id = security_id_map[(ticker, canonical_exchange)]
+        source_provider = fact_row.get("source_provider")
+        if source_provider is None and "symbol" in fact_row:
+            source_provider = source_provider_by_symbol.get(
+                _normalize_upper(fact_row.get("symbol")) or ""
+            )
+        conn.execute(
+            """
+            INSERT INTO financial_facts (
+                security_id,
+                cik,
+                concept,
+                fiscal_period,
+                end_date,
+                unit,
+                value,
+                accn,
+                filed,
+                frame,
+                start_date,
+                accounting_standard,
+                currency,
+                source_provider
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                security_id,
+                _normalize_optional_text(fact_row.get("cik")),
+                _normalize_optional_text(fact_row.get("concept")),
+                _normalize_optional_text(fact_row.get("fiscal_period")),
+                _normalize_optional_text(fact_row.get("end_date")),
+                _normalize_optional_text(fact_row.get("unit")),
+                fact_row.get("value"),
+                _normalize_optional_text(fact_row.get("accn")),
+                _normalize_optional_text(fact_row.get("filed")),
+                _normalize_optional_text(fact_row.get("frame")),
+                _normalize_optional_text(fact_row.get("start_date")),
+                _normalize_optional_text(fact_row.get("accounting_standard")),
+                _normalize_upper(fact_row.get("currency")),
+                _normalize_upper(source_provider),
+            ),
+        )
+
+    for market_row in old_market_data:
+        if "security_id" in market_row:
+            security_id = int(cast(Union[str, int], market_row["security_id"]))
+            source_provider = (
+                _normalize_upper(market_row.get("source_provider")) or "EODHD"
+            )
+            updated_at = _normalize_optional_text(market_row.get("updated_at")) or now
+        else:
+            ticker, canonical_exchange = resolve_symbol_identity(
+                market_row.get("symbol")
+            )
+            security_id = security_id_map[(ticker, canonical_exchange)]
+            source_provider = "EODHD"
+            updated_at = now
+        conn.execute(
+            """
+            INSERT INTO market_data (
+                security_id,
+                as_of,
+                price,
+                volume,
+                market_cap,
+                currency,
+                source_provider,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                security_id,
+                _normalize_optional_text(market_row.get("as_of")),
+                market_row.get("price"),
+                market_row.get("volume"),
+                market_row.get("market_cap"),
+                _normalize_upper(market_row.get("currency")),
+                source_provider,
+                updated_at,
+            ),
+        )
+
+    for metric_row in old_metrics:
+        if "security_id" in metric_row:
+            security_id = int(cast(Union[str, int], metric_row["security_id"]))
+        else:
+            ticker, canonical_exchange = resolve_symbol_identity(
+                metric_row.get("symbol")
+            )
+            security_id = security_id_map[(ticker, canonical_exchange)]
+        conn.execute(
+            """
+            INSERT INTO metrics (
+                security_id,
+                metric_id,
+                value,
+                as_of
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (
+                security_id,
+                _normalize_optional_text(metric_row.get("metric_id")),
+                metric_row.get("value"),
+                _normalize_optional_text(metric_row.get("as_of")) or now,
+            ),
+        )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -727,6 +1790,8 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_018_create_supported_exchanges,
     _migration_019_create_supported_tickers,
     _migration_020_create_market_data_fetch_state,
+    _migration_021_drop_listings_in_favor_of_supported_tickers,
+    _migration_022_canonical_security_model,
 ]
 
 

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 import json
 import logging
 import re
@@ -39,10 +39,10 @@ from pyvalue.storage import (
     MarketDataRepository,
     MetricsRepository,
     SupportedExchangeRepository,
+    SupportedTicker,
     SupportedTickerRepository,
-    UniverseRepository,
 )
-from pyvalue.universe import Listing, UKUniverseLoader, USUniverseLoader
+from pyvalue.universe import USUniverseLoader
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_SCREEN_RESULTS_PREFIX = "data/screen_results"
@@ -66,10 +66,15 @@ def _resolve_database_path(database: str) -> Path:
 
 
 def _default_screen_results_path(
-    exchange_code: str, as_of: Optional[date] = None
+    provider: str,
+    exchange_code: str,
+    as_of: Optional[date] = None,
 ) -> str:
     date_label = (as_of or date.today()).strftime("%Y%m%d")
-    return f"{DEFAULT_SCREEN_RESULTS_PREFIX}_{exchange_code.upper()}_{date_label}.csv"
+    return (
+        f"{DEFAULT_SCREEN_RESULTS_PREFIX}_{provider.upper()}_"
+        f"{exchange_code.upper()}_{date_label}.csv"
+    )
 
 
 def _qualify_symbol(symbol: str, exchange: Optional[str] = None) -> str:
@@ -105,23 +110,34 @@ def _normalize_provider(provider: Optional[str]) -> str:
     return normalized
 
 
-def _symbols_for_exchange_or_raise(db_path: Path, exchange_code: str) -> List[str]:
-    """Return symbols for an exchange from listings, or raise with guidance."""
+def _catalog_bootstrap_guidance(provider: str) -> str:
+    provider_norm = provider.strip().upper()
+    if provider_norm == "SEC":
+        return "Run refresh-supported-exchanges --provider SEC and refresh-supported-tickers --provider SEC first."
+    if provider_norm == "EODHD":
+        return "Run refresh-supported-exchanges --provider EODHD and refresh-supported-tickers --provider EODHD first."
+    return "Populate supported_tickers first."
 
+
+def _symbols_for_exchange_or_raise(
+    db_path: Path,
+    provider: str,
+    exchange_code: str,
+) -> List[str]:
+    """Return canonical catalog symbols for a provider/exchange or raise."""
+
+    provider_norm = _normalize_provider(provider)
     exchange_norm = exchange_code.upper()
-    universe_repo = UniverseRepository(db_path)
-    universe_repo.initialize_schema()
-    symbols = universe_repo.fetch_symbols_by_exchange(exchange_norm)
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    symbols = ticker_repo.list_symbols_by_exchange(provider_norm, exchange_norm)
     if symbols:
         return symbols
 
-    with universe_repo._connect() as conn:
-        available_exchanges = [
-            row[0]
-            for row in conn.execute("SELECT DISTINCT exchange FROM listings").fetchall()
-        ]
+    available_exchanges = ticker_repo.available_exchanges(provider_norm)
     raise SystemExit(
-        f"No symbols found for exchange {exchange_norm}. Load a universe first. "
+        f"No supported tickers found for provider {provider_norm} on exchange {exchange_norm}. "
+        f"{_catalog_bootstrap_guidance(provider_norm)} "
         f"Available exchanges: {', '.join(available_exchanges) if available_exchanges else 'none'}. "
         f"Database: {db_path}"
     )
@@ -165,6 +181,165 @@ def _parse_exchange_filters(values: Optional[Sequence[str]]) -> Optional[set[str
             if part:
                 filters.add(part.upper())
     return filters or None
+
+
+def _parse_symbol_filters(values: Optional[Sequence[str]]) -> Optional[List[str]]:
+    if not values:
+        return None
+    symbols: List[str] = []
+    seen: set[str] = set()
+    for item in values:
+        if not item:
+            continue
+        for part in re.split(r"[,\s]+", item.strip()):
+            if not part:
+                continue
+            symbol = part.upper()
+            if symbol in seen:
+                continue
+            seen.add(symbol)
+            symbols.append(symbol)
+    return symbols or None
+
+
+def _validate_scope_selector(
+    symbols: Optional[Sequence[str]],
+    exchange_codes: Optional[Sequence[str]],
+    all_supported: bool,
+) -> Tuple[Optional[List[str]], Optional[List[str]]]:
+    symbol_filters = _parse_symbol_filters(symbols)
+    exchange_filters = _parse_exchange_filters(exchange_codes)
+    selected = sum(
+        1
+        for flag in (
+            bool(symbol_filters),
+            bool(exchange_filters),
+            bool(all_supported),
+        )
+        if flag
+    )
+    if selected != 1:
+        raise SystemExit(
+            "Exactly one scope selector is required: use one of "
+            "--symbols, --exchange-codes, or --all-supported."
+        )
+    return symbol_filters, sorted(exchange_filters) if exchange_filters else None
+
+
+def _normalize_provider_scope_symbol(provider: str, symbol: str) -> str:
+    candidate = symbol.strip().upper()
+    ticker, suffix = candidate.rsplit(".", 1) if "." in candidate else (candidate, None)
+    provider_norm = _normalize_provider(provider)
+    if provider_norm == "SEC":
+        return f"{ticker}.US"
+    if suffix is None:
+        raise SystemExit(
+            "EODHD --symbols entries must be fully qualified, for example SHEL.LSE."
+        )
+    return candidate
+
+
+def _normalize_canonical_scope_symbol(symbol: str) -> str:
+    candidate = symbol.strip().upper()
+    if "." not in candidate:
+        raise SystemExit(
+            "--symbols entries must use canonical qualified symbols, for example AAPL.US or SHEL.LSE."
+        )
+    return candidate
+
+
+def _resolve_provider_scope_rows(
+    database: str,
+    provider: str,
+    symbols: Optional[Sequence[str]],
+    exchange_codes: Optional[Sequence[str]],
+    all_supported: bool,
+) -> Tuple[List["SupportedTicker"], Optional[List[str]], Optional[List[str]]]:
+    provider_norm = _normalize_provider(provider)
+    symbol_filters, exchange_filters = _validate_scope_selector(
+        symbols, exchange_codes, all_supported
+    )
+    ticker_repo = SupportedTickerRepository(database)
+    ticker_repo.initialize_schema()
+
+    if symbol_filters:
+        normalized_symbols = [
+            _normalize_provider_scope_symbol(provider_norm, symbol)
+            for symbol in symbol_filters
+        ]
+        rows = ticker_repo.list_for_provider(
+            provider_norm,
+            provider_symbols=normalized_symbols,
+        )
+        found = {row.symbol.upper() for row in rows}
+        missing = [symbol for symbol in normalized_symbols if symbol not in found]
+        if missing:
+            raise SystemExit(
+                f"Unsupported tickers for provider {provider_norm}: {', '.join(missing)}. "
+                f"{_catalog_bootstrap_guidance(provider_norm)}"
+            )
+        return rows, normalized_symbols, None
+
+    rows = ticker_repo.list_for_provider(
+        provider_norm,
+        exchange_codes=exchange_filters,
+    )
+    if not rows:
+        scope_label = (
+            ", ".join(exchange_filters) if exchange_filters else "all supported tickers"
+        )
+        raise SystemExit(
+            f"No supported tickers found for provider {provider_norm} in scope {scope_label}. "
+            f"{_catalog_bootstrap_guidance(provider_norm)}"
+        )
+    return rows, None, exchange_filters
+
+
+def _resolve_canonical_scope_symbols(
+    database: str,
+    symbols: Optional[Sequence[str]],
+    exchange_codes: Optional[Sequence[str]],
+    all_supported: bool,
+) -> Tuple[List[str], Optional[List[str]], Optional[List[str]]]:
+    symbol_filters, exchange_filters = _validate_scope_selector(
+        symbols, exchange_codes, all_supported
+    )
+    ticker_repo = SupportedTickerRepository(database)
+    ticker_repo.initialize_schema()
+
+    if symbol_filters:
+        normalized_symbols = [
+            _normalize_canonical_scope_symbol(symbol) for symbol in symbol_filters
+        ]
+        supported = set(ticker_repo.list_canonical_symbols())
+        missing = [symbol for symbol in normalized_symbols if symbol not in supported]
+        if missing:
+            raise SystemExit(
+                f"Unsupported canonical tickers: {', '.join(missing)}. Populate supported_tickers first."
+            )
+        return normalized_symbols, normalized_symbols, None
+
+    canonical_symbols = ticker_repo.list_canonical_symbols(exchange_filters)
+    if not canonical_symbols:
+        scope_label = (
+            ", ".join(exchange_filters) if exchange_filters else "all supported tickers"
+        )
+        raise SystemExit(
+            f"No canonical supported tickers found in scope {scope_label}. Populate supported_tickers first."
+        )
+    return canonical_symbols, None, exchange_filters
+
+
+def _scope_label(
+    symbol_filters: Optional[Sequence[str]],
+    exchange_filters: Optional[Sequence[str]],
+    default_label: str = "all supported tickers",
+) -> str:
+    if symbol_filters:
+        return ", ".join(symbol_filters)
+    if exchange_filters:
+        return ", ".join(exchange_filters)
+    return default_label
 
 
 def _refresh_supported_exchanges_for_provider(
@@ -257,7 +432,7 @@ def _refresh_supported_tickers_for_exchange(
     client: EODHDFundamentalsClient,
     exchange_code: str,
 ) -> Tuple[int, int]:
-    """Refresh one exchange's supported tickers and mirror them into listings."""
+    """Refresh one exchange's supported tickers and prune stale fetch state."""
 
     provider_norm = provider.strip().upper()
     exchange_norm = exchange_code.strip().upper()
@@ -283,25 +458,6 @@ def _refresh_supported_tickers_for_exchange(
     current = ticker_repo.list_for_exchange(provider_norm, exchange_norm)
     current_symbols = {row.symbol for row in current}
     removed_symbols = sorted(existing_symbols - current_symbols)
-
-    universe_repo = UniverseRepository(database)
-    mirrored = [
-        Listing(
-            symbol=row.symbol,
-            security_name=row.security_name or row.code,
-            exchange=exchange_norm,
-            market_category=row.listing_exchange or exchange_norm,
-            is_etf=False,
-            is_test_issue=False,
-            status=None,
-            round_lot_size=None,
-            source="eodhd",
-            isin=row.isin,
-            currency=row.currency,
-        )
-        for row in current
-    ]
-    universe_repo.replace_exchange(exchange_norm, mirrored)
 
     state_repo = FundamentalsFetchStateRepository(database)
     state_repo.delete_symbols(provider_norm, removed_symbols)
@@ -366,59 +522,13 @@ def _safe_eodhd_quota_snapshot(
     }
 
 
-def _select_exchange_listings_for_provider(
+def _select_listing_symbols_by_exchange(
     database: str,
     provider: str,
     exchange_code: str,
-    max_age_days: Optional[int],
-    max_symbols: Optional[int],
-    resume: bool,
 ) -> List[str]:
-    universe_repo = UniverseRepository(database)
-    universe_repo.initialize_schema()
-
-    now = datetime.now(timezone.utc)
-    params: List[object] = [provider.upper(), provider.upper(), exchange_code.upper()]
-    query = [
-        "SELECT l.symbol, fr.fetched_at, fs.next_eligible_at",
-        "FROM listings l",
-        "LEFT JOIN fundamentals_raw fr ON fr.symbol = l.symbol AND fr.provider = ?",
-        "LEFT JOIN fundamentals_fetch_state fs ON fs.symbol = l.symbol AND fs.provider = ?",
-        "WHERE UPPER(l.exchange) = ?",
-    ]
-    if max_age_days is not None:
-        cutoff = (now - timedelta(days=max_age_days)).isoformat()
-        query.append("AND (fr.fetched_at IS NULL OR fr.fetched_at <= ?)")
-        params.append(cutoff)
-    if resume:
-        query.append("AND (fs.next_eligible_at IS NULL OR fs.next_eligible_at <= ?)")
-        params.append(now.isoformat())
-    query.append(
-        "ORDER BY CASE WHEN fr.fetched_at IS NULL THEN 0 ELSE 1 END, fr.fetched_at ASC, l.symbol ASC"
-    )
-    if max_symbols is not None:
-        query.append("LIMIT ?")
-        params.append(max_symbols)
-    sql = " ".join(query)
-    with universe_repo._connect() as conn:
-        rows = conn.execute(sql, params).fetchall()
-    return [row[0] for row in rows]
-
-
-def _select_listing_symbols_by_exchange(
-    database: str,
-    exchange_code: str,
-) -> List[str]:
-    universe_repo = UniverseRepository(database)
-    exchange_norm = exchange_code.upper()
-    if exchange_norm == "US":
-        universe_repo.initialize_schema()
-        with universe_repo._connect() as conn:
-            rows = conn.execute(
-                "SELECT symbol FROM listings WHERE symbol LIKE '%.US' ORDER BY symbol"
-            ).fetchall()
-        return [row[0] for row in rows]
-    return universe_repo.fetch_symbols_by_exchange(exchange_norm)
+    ticker_repo = SupportedTickerRepository(database)
+    return ticker_repo.list_symbols_by_exchange(provider, exchange_code)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -427,43 +537,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="pyvalue data utilities")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    load_universe = subparsers.add_parser(
-        "load-universe",
-        help="Download and persist an equity universe for the chosen provider.",
-    )
-    load_universe.add_argument(
-        "--provider",
-        default="EODHD",
-        choices=["SEC", "EODHD"],
-        help="Universe provider to use (default: %(default)s).",
-    )
-    load_universe.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file used for storage (default: %(default)s)",
-    )
-    load_universe.add_argument(
-        "--include-etfs",
-        action="store_true",
-        help="Persist ETFs alongside operating companies.",
-    )
-    load_universe.add_argument(
-        "--exchange-code",
-        default=None,
-        help="EODHD exchange code to load (required for provider=EODHD).",
-    )
-    load_universe.add_argument(
-        "--currencies",
-        nargs="+",
-        default=None,
-        help="Limit to these currency codes (space or comma separated, EODHD only).",
-    )
-    load_universe.add_argument(
-        "--include-exchanges",
-        nargs="+",
-        default=None,
-        help="Only include listings whose Exchange field matches these values (EODHD only).",
-    )
+    def add_scope_args(command_parser: argparse.ArgumentParser) -> None:
+        scope = command_parser.add_mutually_exclusive_group(required=True)
+        scope.add_argument(
+            "--symbols",
+            nargs="+",
+            default=None,
+            help="Space or comma separated list of fully qualified symbols.",
+        )
+        scope.add_argument(
+            "--exchange-codes",
+            nargs="+",
+            default=None,
+            help="Space or comma separated list of exchange codes.",
+        )
+        scope.add_argument(
+            "--all-supported",
+            action="store_true",
+            help="Select the full supported universe in the current catalog.",
+        )
 
     refresh_supported_exchanges = subparsers.add_parser(
         "refresh-supported-exchanges",
@@ -472,7 +564,7 @@ def build_parser() -> argparse.ArgumentParser:
     refresh_supported_exchanges.add_argument(
         "--provider",
         default="EODHD",
-        choices=["EODHD"],
+        choices=["SEC", "EODHD"],
         help="Supported exchange provider to refresh (default: %(default)s).",
     )
     refresh_supported_exchanges.add_argument(
@@ -488,89 +580,29 @@ def build_parser() -> argparse.ArgumentParser:
     refresh_supported_tickers.add_argument(
         "--provider",
         default="EODHD",
-        choices=["EODHD"],
+        choices=["SEC", "EODHD"],
         help="Supported ticker provider to refresh (default: %(default)s).",
     )
     refresh_supported_tickers.add_argument(
-        "--exchange-code",
-        default=None,
-        help="Refresh one exchange code from EODHD.",
-    )
-    refresh_supported_tickers.add_argument(
-        "--all-exchanges",
-        action="store_true",
-        help="Refresh every stored supported exchange in code order.",
-    )
-    refresh_supported_tickers.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file used for storage (default: %(default)s)",
-    )
-
-    bulk_market_data = subparsers.add_parser(
-        "update-market-data-bulk",
-        help="Fetch latest market data for all stored listings on an exchange.",
-    )
-    bulk_market_data.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file used for storage (default: %(default)s)",
-    )
-    bulk_market_data.add_argument(
-        "--exchange-code",
-        required=True,
-        help="Exchange code to select symbols from listings (e.g., US, LSE, NYSE).",
-    )
-    bulk_market_data.add_argument(
-        "--rate",
-        type=float,
-        default=950.0,
-        help="Throttle speed in symbols per minute (default: %(default)s)",
-    )
-
-    global_market_data = subparsers.add_parser(
-        "update-market-data-global",
-        help="Refresh EODHD market data across supported tickers with daily quota awareness.",
-    )
-    global_market_data.add_argument(
-        "--provider",
-        default="EODHD",
-        choices=["EODHD"],
-        help="Market data provider to use (default: %(default)s).",
-    )
-    global_market_data.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file used for storage (default: %(default)s)",
-    )
-    global_market_data.add_argument(
         "--exchange-codes",
         nargs="+",
         default=None,
-        help="Optional exchange-code filter (space or comma separated). Defaults to all stored supported tickers.",
+        help="Optional exchange-code subset (space or comma separated).",
     )
-    global_market_data.add_argument(
-        "--rate",
-        type=float,
-        default=None,
-        help="Throttle rate in requests per minute (defaults to eodhd.market_data_requests_per_minute).",
-    )
-    global_market_data.add_argument(
-        "--max-symbols",
-        type=int,
-        default=None,
-        help="Maximum number of symbols to attempt in this run, before quota capping.",
-    )
-    global_market_data.add_argument(
-        "--max-age-days",
-        type=int,
-        default=7,
-        help="Refresh only stale or missing market data older than this many days.",
-    )
-    global_market_data.add_argument(
-        "--resume",
+    refresh_supported_tickers.add_argument(
+        "--all-supported",
         action="store_true",
-        help="Skip symbols that are still in backoff from prior failures.",
+        help="Refresh every supported exchange for the provider.",
+    )
+    refresh_supported_tickers.add_argument(
+        "--include-etfs",
+        action="store_true",
+        help="SEC only: keep ETFs in the supported ticker catalog.",
+    )
+    refresh_supported_tickers.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
     )
 
     recalc_market_cap = subparsers.add_parser(
@@ -578,25 +610,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Recompute stored market caps using latest price and share counts.",
     )
     recalc_market_cap.add_argument(
-        "--exchange-code",
-        required=True,
-        help="Exchange code to select symbols from listings (e.g., US, LSE, NYSE).",
-    )
-    recalc_market_cap.add_argument(
         "--database",
         default="data/pyvalue.db",
         help="SQLite database file used for storage (default: %(default)s)",
     )
-
-    clear_listings = subparsers.add_parser(
-        "clear-listings",
-        help="Delete all stored listings.",
-    )
-    clear_listings.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file used for storage (default: %(default)s)",
-    )
+    add_scope_args(recalc_market_cap)
 
     clear_facts = subparsers.add_parser(
         "clear-financial-facts",
@@ -640,7 +658,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ingest_fundamentals = subparsers.add_parser(
         "ingest-fundamentals",
-        help="Download fundamentals for a ticker from a chosen provider.",
+        help="Download fundamentals for supported tickers from the chosen provider.",
     )
     ingest_fundamentals.add_argument(
         "--provider",
@@ -648,14 +666,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["SEC", "EODHD"],
         help="Fundamentals provider to use.",
     )
-    ingest_fundamentals.add_argument(
-        "symbol", help="Ticker symbol, e.g. AAPL or SHEL.LSE"
-    )
-    ingest_fundamentals.add_argument(
-        "--exchange-code",
-        default=None,
-        help="Exchange code required when the symbol has no suffix (e.g., US, LSE).",
-    )
+    add_scope_args(ingest_fundamentals)
     ingest_fundamentals.add_argument(
         "--user-agent",
         default=None,
@@ -671,130 +682,58 @@ def build_parser() -> argparse.ArgumentParser:
         default="data/pyvalue.db",
         help="SQLite database file used for storage (default: %(default)s)",
     )
-
-    ingest_fundamentals_bulk = subparsers.add_parser(
-        "ingest-fundamentals-bulk",
-        help="Download fundamentals in bulk from a chosen provider.",
-    )
-    ingest_fundamentals_bulk.add_argument(
-        "--provider",
-        required=True,
-        choices=["SEC", "EODHD"],
-        help="Fundamentals provider to use.",
-    )
-    ingest_fundamentals_bulk.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file used for storage (default: %(default)s)",
-    )
-    ingest_fundamentals_bulk.add_argument(
+    ingest_fundamentals.add_argument(
         "--rate",
         type=float,
         default=None,
         help="Throttle rate (SEC: req/sec, EODHD: symbols/min). Defaults depend on provider.",
     )
-    ingest_fundamentals_bulk.add_argument(
-        "--exchange-code",
-        required=True,
-        help="Exchange code to filter stored listings.",
-    )
-    ingest_fundamentals_bulk.add_argument(
+    ingest_fundamentals.add_argument(
         "--max-symbols",
         type=int,
         default=None,
         help="Maximum number of symbols to ingest in this run.",
     )
-    ingest_fundamentals_bulk.add_argument(
+    ingest_fundamentals.add_argument(
         "--max-age-days",
         type=int,
         default=None,
         help="Only ingest symbols with older fundamentals (days) or missing data.",
     )
-    ingest_fundamentals_bulk.add_argument(
+    ingest_fundamentals.add_argument(
         "--resume",
         action="store_true",
         help="Skip symbols that are still in backoff from prior failures.",
     )
-    ingest_fundamentals_bulk.add_argument(
-        "--user-agent",
-        default=None,
-        help="Custom User-Agent for SEC (falls back to PYVALUE_SEC_USER_AGENT).",
-    )
-
-    ingest_fundamentals_global = subparsers.add_parser(
-        "ingest-fundamentals-global",
-        help="Download EODHD fundamentals across supported tickers with daily quota awareness.",
-    )
-    ingest_fundamentals_global.add_argument(
-        "--provider",
-        default="EODHD",
-        choices=["EODHD"],
-        help="Fundamentals provider to use (default: %(default)s).",
-    )
-    ingest_fundamentals_global.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file used for storage (default: %(default)s)",
-    )
-    ingest_fundamentals_global.add_argument(
-        "--exchange-codes",
-        nargs="+",
-        default=None,
-        help="Optional exchange-code filter (space or comma separated). Defaults to all stored supported tickers.",
-    )
-    ingest_fundamentals_global.add_argument(
-        "--rate",
-        type=float,
-        default=None,
-        help="Throttle rate in requests per minute (defaults to eodhd.fundamentals_requests_per_minute).",
-    )
-    ingest_fundamentals_global.add_argument(
-        "--max-symbols",
-        type=int,
-        default=None,
-        help="Maximum number of symbols to attempt in this run, before quota capping.",
-    )
-    ingest_fundamentals_global.add_argument(
-        "--max-age-days",
-        type=int,
-        default=None,
-        help="Refresh only stale or missing payloads older than this many days.",
-    )
-    ingest_fundamentals_global.add_argument(
-        "--resume",
-        action="store_true",
-        help="Skip symbols that are still in backoff from prior failures.",
-    )
-
-    ingest_progress = subparsers.add_parser(
-        "report-ingest-progress",
+    fundamentals_progress = subparsers.add_parser(
+        "report-fundamentals-progress",
         help="Report EODHD fundamentals ingest progress across supported tickers.",
     )
-    ingest_progress.add_argument(
+    fundamentals_progress.add_argument(
         "--provider",
         default="EODHD",
         choices=["EODHD"],
         help="Fundamentals provider to report on (default: %(default)s).",
     )
-    ingest_progress.add_argument(
+    fundamentals_progress.add_argument(
         "--database",
         default="data/pyvalue.db",
         help="SQLite database file used for storage (default: %(default)s)",
     )
-    ingest_progress.add_argument(
+    fundamentals_progress.add_argument(
         "--exchange-codes",
         nargs="+",
         default=None,
         help="Optional exchange-code filter (space or comma separated). Defaults to all stored supported tickers.",
     )
-    ingest_progress_mode = ingest_progress.add_mutually_exclusive_group()
-    ingest_progress_mode.add_argument(
+    fundamentals_progress_mode = fundamentals_progress.add_mutually_exclusive_group()
+    fundamentals_progress_mode.add_argument(
         "--max-age-days",
         type=int,
         default=30,
         help="Freshness window in days (default: %(default)s).",
     )
-    ingest_progress_mode.add_argument(
+    fundamentals_progress_mode.add_argument(
         "--missing-only",
         action="store_true",
         help="Only require that a raw fundamentals payload exists, regardless of age.",
@@ -828,137 +767,58 @@ def build_parser() -> argparse.ArgumentParser:
         help="Freshness window in days (default: %(default)s).",
     )
 
-    normalize_fundamentals = subparsers.add_parser(
-        "normalize-fundamentals",
-        help="Normalize stored fundamentals for a ticker using the provider-specific ruleset.",
+    market_data = subparsers.add_parser(
+        "update-market-data",
+        help="Fetch latest market data for supported tickers and persist it.",
     )
-    normalize_fundamentals.add_argument(
+    market_data.add_argument(
         "--provider",
-        required=True,
-        choices=["SEC", "EODHD"],
-        help="Fundamentals provider to normalize.",
+        default="EODHD",
+        choices=["EODHD"],
+        help="Market data provider to use (default: %(default)s).",
     )
-    normalize_fundamentals.add_argument(
-        "symbol", help="Ticker symbol already ingested for the provider."
-    )
-    normalize_fundamentals.add_argument(
-        "--exchange-code",
-        help="Exchange code required when the symbol has no suffix (e.g., US, LSE).",
-    )
-    normalize_fundamentals.add_argument(
+    market_data.add_argument(
         "--database",
         default="data/pyvalue.db",
         help="SQLite database file used for storage (default: %(default)s)",
     )
-
-    normalize_fundamentals_bulk = subparsers.add_parser(
-        "normalize-fundamentals-bulk",
-        help="Normalize stored fundamentals in bulk for a provider.",
-    )
-    normalize_fundamentals_bulk.add_argument(
-        "--provider",
-        required=True,
-        choices=["SEC", "EODHD"],
-        help="Fundamentals provider to normalize.",
-    )
-    normalize_fundamentals_bulk.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file used for storage (default: %(default)s)",
-    )
-    normalize_fundamentals_bulk.add_argument(
-        "--exchange-code",
-        help="Exchange code to select symbols from listings.",
-    )
-
-    refresh_exchange = subparsers.add_parser(
-        "refresh-exchange",
-        help="Run universe, fundamentals, market data, normalization, and metrics in order for an exchange.",
-    )
-    refresh_exchange.add_argument(
-        "--provider",
-        required=True,
-        choices=["SEC", "EODHD"],
-        help="Fundamentals provider to use.",
-    )
-    refresh_exchange.add_argument(
-        "--exchange-code",
-        required=True,
-        help="Exchange code to select symbols from listings (e.g., US, LSE, NYSE).",
-    )
-    refresh_exchange.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file used for storage (default: %(default)s)",
-    )
-    refresh_exchange.add_argument(
-        "--include-etfs",
-        action="store_true",
-        help="Persist ETFs alongside operating companies.",
-    )
-    refresh_exchange.add_argument(
-        "--currencies",
-        nargs="+",
-        default=None,
-        help="Limit to these currency codes (EODHD only).",
-    )
-    refresh_exchange.add_argument(
-        "--include-exchanges",
-        nargs="+",
-        default=None,
-        help="Only include listings whose Exchange field matches these values (EODHD only).",
-    )
-    refresh_exchange.add_argument(
-        "--fundamentals-rate",
+    add_scope_args(market_data)
+    market_data.add_argument(
+        "--rate",
         type=float,
         default=None,
-        help="Throttle rate for fundamentals ingestion (provider defaults when omitted).",
+        help="Throttle rate in requests per minute (defaults to eodhd.market_data_requests_per_minute).",
     )
-    refresh_exchange.add_argument(
-        "--market-rate",
-        type=float,
-        default=950.0,
-        help="Throttle speed for market data updates (symbols per minute).",
-    )
-    refresh_exchange.add_argument(
+    market_data.add_argument(
         "--max-symbols",
         type=int,
         default=None,
-        help="Maximum number of symbols to ingest in this run.",
+        help="Maximum number of symbols to attempt in this run, before quota capping.",
     )
-    refresh_exchange.add_argument(
+    market_data.add_argument(
         "--max-age-days",
         type=int,
-        default=None,
-        help="Only ingest symbols with older fundamentals (days) or missing data.",
+        default=7,
+        help="Refresh only stale or missing market data older than this many days.",
     )
-    refresh_exchange.add_argument(
+    market_data.add_argument(
         "--resume",
         action="store_true",
         help="Skip symbols that are still in backoff from prior failures.",
     )
-    refresh_exchange.add_argument(
-        "--user-agent",
-        default=None,
-        help="Custom User-Agent for SEC (falls back to PYVALUE_SEC_USER_AGENT).",
-    )
-    refresh_exchange.add_argument(
-        "--metrics",
-        nargs="+",
-        default=None,
-        help="Metric identifiers to compute (default: all registered metrics).",
-    )
 
-    market_data = subparsers.add_parser(
-        "update-market-data",
-        help="Fetch latest market data for a ticker and persist it.",
+    normalize_fundamentals = subparsers.add_parser(
+        "normalize-fundamentals",
+        help="Normalize stored fundamentals across the requested supported-ticker scope.",
     )
-    market_data.add_argument("symbol", help="Ticker symbol, e.g. AAPL")
-    market_data.add_argument(
-        "--exchange-code",
-        help="Exchange code to qualify un-suffixed symbols (e.g., US, LSE).",
+    normalize_fundamentals.add_argument(
+        "--provider",
+        required=True,
+        choices=["SEC", "EODHD"],
+        help="Fundamentals provider to normalize.",
     )
-    market_data.add_argument(
+    add_scope_args(normalize_fundamentals)
+    normalize_fundamentals.add_argument(
         "--database",
         default="data/pyvalue.db",
         help="SQLite database file used for storage (default: %(default)s)",
@@ -966,65 +826,31 @@ def build_parser() -> argparse.ArgumentParser:
 
     compute_metrics = subparsers.add_parser(
         "compute-metrics",
-        help="Compute one or more metrics for a ticker and store them.",
-    )
-    compute_metrics.add_argument("symbol", help="Ticker symbol to evaluate")
-    compute_metrics.add_argument(
-        "--metrics",
-        nargs="+",
-        default=["working_capital"],
-        help="Metric identifiers to compute (default: working_capital)",
-    )
-    compute_metrics.add_argument(
-        "--all",
-        action="store_true",
-        help="Compute all registered metrics",
-    )
-    compute_metrics.add_argument(
-        "--exchange-code",
-        help="Exchange code required for unqualified symbols (e.g., US, LSE).",
+        help="Compute one or more metrics for the requested canonical ticker scope.",
     )
     compute_metrics.add_argument(
         "--database",
         default="data/pyvalue.db",
         help="SQLite database file used for storage (default: %(default)s)",
     )
-
-    bulk_metrics = subparsers.add_parser(
-        "compute-metrics-bulk",
-        help="Compute metrics for all stored listings.",
-    )
-    bulk_metrics.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file used for storage (default: %(default)s)",
-    )
-    bulk_metrics.add_argument(
-        "--exchange-code",
-        required=True,
-        help="Exchange code to select symbols from listings (e.g., US, LSE, NYSE).",
-    )
-    bulk_metrics.add_argument(
+    add_scope_args(compute_metrics)
+    compute_metrics.add_argument(
         "--metrics",
         nargs="+",
         default=None,
-        help="Metric identifiers to compute (default: all registered metrics)",
+        help="Metric identifiers to compute (default: all registered metrics).",
     )
 
     fact_report = subparsers.add_parser(
         "report-fact-freshness",
-        help="List missing or stale financial facts required by metrics for an exchange.",
+        help="List missing or stale financial facts required by metrics for the requested canonical scope.",
     )
     fact_report.add_argument(
         "--database",
         default="data/pyvalue.db",
         help="SQLite database file used for storage (default: %(default)s)",
     )
-    fact_report.add_argument(
-        "--exchange-code",
-        required=True,
-        help="Exchange code to select symbols from listings (e.g., US, LSE, NYSE).",
-    )
+    add_scope_args(fact_report)
     fact_report.add_argument(
         "--metrics",
         nargs="+",
@@ -1050,18 +876,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     metric_report = subparsers.add_parser(
         "report-metric-coverage",
-        help="Count how many symbols can compute all requested metrics for an exchange without writing results.",
+        help="Count how many symbols can compute all requested metrics for the requested canonical scope without writing results.",
     )
     metric_report.add_argument(
         "--database",
         default="data/pyvalue.db",
         help="SQLite database file used for storage (default: %(default)s)",
     )
-    metric_report.add_argument(
-        "--exchange-code",
-        required=True,
-        help="Exchange code to select symbols from listings (e.g., US, LSE, NYSE).",
-    )
+    add_scope_args(metric_report)
     metric_report.add_argument(
         "--metrics",
         nargs="+",
@@ -1071,29 +893,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     failure_report = subparsers.add_parser(
         "report-metric-failures",
-        help="Summarize warning reasons for metric computation failures on an exchange.",
+        help="Summarize warning reasons for metric computation failures on the requested canonical scope.",
     )
     failure_report.add_argument(
         "--database",
         default="data/pyvalue.db",
         help="SQLite database file used for storage (default: %(default)s)",
     )
-    failure_report.add_argument(
-        "--exchange-code",
-        required=True,
-        help="Exchange code to select symbols from listings (e.g., US, LSE, NYSE).",
-    )
+    add_scope_args(failure_report)
     failure_report.add_argument(
         "--metrics",
         nargs="+",
         default=None,
         help="Metric identifiers to include (default: all registered metrics)",
-    )
-    failure_report.add_argument(
-        "--symbols",
-        nargs="+",
-        default=None,
-        help="Optional list of symbols (space or comma separated) to evaluate instead of the full exchange list",
     )
     failure_report.add_argument(
         "--output-csv",
@@ -1103,7 +915,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     purge_nonfilers = subparsers.add_parser(
         "purge-us-nonfilers",
-        help="Remove US listings that have no 10-K/10-Q filings in stored SEC company facts.",
+        help="Remove SEC US supported tickers that have no 10-K/10-Q filings in stored SEC company facts.",
     )
     purge_nonfilers.add_argument(
         "--database",
@@ -1118,39 +930,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_screen = subparsers.add_parser(
         "run-screen",
-        help="Evaluate screening criteria for a ticker.",
+        help="Evaluate screening criteria for the requested canonical scope.",
     )
-    run_screen.add_argument("symbol", help="Ticker symbol")
     run_screen.add_argument("config", help="Path to screening config (YAML)")
     run_screen.add_argument(
-        "--exchange-code",
-        help="Exchange code required for unqualified symbols (e.g., US, LSE).",
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file (default: %(default)s)",
     )
+    add_scope_args(run_screen)
     run_screen.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file (default: %(default)s)",
-    )
-
-    run_screen_bulk = subparsers.add_parser(
-        "run-screen-bulk",
-        help="Evaluate screening criteria for all tickers in the stored universe.",
-    )
-    run_screen_bulk.add_argument("config", help="Path to screening config (YAML)")
-    run_screen_bulk.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file (default: %(default)s)",
-    )
-    run_screen_bulk.add_argument(
-        "--exchange-code",
-        required=True,
-        help="Exchange code to select symbols from listings (e.g., US, LSE, NYSE).",
-    )
-    run_screen_bulk.add_argument(
         "--output-csv",
         default=None,
-        help="Path to write passing results as CSV (default: data/screen_results_<EXCHANGE>_<YYYYMMDD>.csv)",
+        help="Optional CSV path for passing results.",
     )
 
     return parser
@@ -1170,7 +962,7 @@ def cmd_load_universe(
     currencies: Optional[Sequence[str]] = None,
     include_exchanges: Optional[Sequence[str]] = None,
 ) -> int:
-    """Load listings from the chosen provider into the universe table."""
+    """Load provider catalog data into the canonical supported_tickers table."""
 
     provider_norm = _normalize_provider(provider)
     if provider_norm == "SEC":
@@ -1180,20 +972,17 @@ def cmd_load_universe(
             )
         return cmd_load_us_universe(database=database, include_etfs=include_etfs)
 
-    if not exchange_code:
-        raise SystemExit("--exchange-code is required when provider=EODHD.")
-    exchange = exchange_code
     return cmd_load_eodhd_universe(
         database=database,
         include_etfs=include_etfs,
-        exchange_code=exchange,
+        exchange_code=exchange_code or "",
         currencies=currencies,
         include_exchanges=include_exchanges,
     )
 
 
 def cmd_load_us_universe(database: str, include_etfs: bool) -> int:
-    """Execute the US universe load command."""
+    """Load the SEC-supported US catalog into supported_tickers."""
 
     loader = USUniverseLoader()
     listings = loader.load()
@@ -1205,12 +994,11 @@ def cmd_load_us_universe(database: str, include_etfs: bool) -> int:
     ]
     LOGGER.info("Remaining listings after ETF filter: %s", len(filtered))
 
-    # Persist the normalized listings to SQLite storage.
-    repo = UniverseRepository(database)
+    repo = SupportedTickerRepository(database)
     repo.initialize_schema()
-    inserted = repo.replace_universe(filtered)
+    inserted = repo.replace_from_listings("SEC", "US", filtered)
 
-    print(f"Stored {inserted} US listings in {database}")
+    print(f"Stored {inserted} SEC supported tickers for US in {database}")
     return 0
 
 
@@ -1221,43 +1009,19 @@ def cmd_load_eodhd_universe(
     currencies: Optional[Sequence[str]] = None,
     include_exchanges: Optional[Sequence[str]] = None,
 ) -> int:
-    """Execute the EODHD exchange universe load command."""
+    """Exit with guidance because EODHD now uses refresh-supported-tickers."""
 
-    api_key = Config().eodhd_api_key
-    if not api_key:
+    if currencies or include_exchanges or include_etfs or exchange_code:
         raise SystemExit(
-            "EODHD API key missing. Add [eodhd].api_key to private/config.toml before loading an EODHD universe."
+            "load-universe --provider EODHD is deprecated. "
+            "Use `pyvalue refresh-supported-exchanges --provider EODHD` and "
+            "`pyvalue refresh-supported-tickers --provider EODHD --exchange-code <CODE>` instead."
         )
-
-    client = EODHDFundamentalsClient(api_key=api_key)
-    meta = _resolve_eodhd_exchange_metadata(database, client, exchange_code) or {}
-    region_label = (meta.get("Country") or exchange_code or "INTL").upper()
-
-    allowed_currencies = _parse_currency_codes(currencies)
-    allowed_exchanges = _parse_exchange_filters(include_exchanges)
-    currency_list = sorted(allowed_currencies) if allowed_currencies else None
-    exchange_list = sorted(allowed_exchanges) if allowed_exchanges else None
-    loader = UKUniverseLoader(
-        api_key=api_key,
-        exchange_code=exchange_code,
-        include_etfs=include_etfs,
-        allowed_currencies=currency_list,
-        include_exchanges=exchange_list,
+    raise SystemExit(
+        "load-universe --provider EODHD is deprecated. "
+        "Use `pyvalue refresh-supported-exchanges --provider EODHD` and "
+        "`pyvalue refresh-supported-tickers --provider EODHD --exchange-code <CODE>` instead."
     )
-    listings = loader.load()
-    LOGGER.info("Fetched %s listings for exchange %s", len(listings), exchange_code)
-
-    filtered = [
-        item for item in listings if _should_keep_listing(include_etfs, item.is_etf)
-    ]
-    LOGGER.info("Remaining listings after ETF filter: %s", len(filtered))
-
-    repo = UniverseRepository(database)
-    repo.initialize_schema()
-    inserted = repo.replace_universe(filtered)
-
-    print(f"Stored {inserted} listings for {region_label} in {database}")
-    return 0
 
 
 def _require_eodhd_key() -> str:
@@ -1273,17 +1037,28 @@ def cmd_refresh_supported_exchanges(provider: str, database: str) -> int:
     """Refresh the persisted supported exchange catalog."""
 
     provider_norm = provider.strip().upper()
-    if provider_norm != "EODHD":
-        raise SystemExit(
-            "refresh-supported-exchanges currently only supports provider=EODHD."
+    repo = SupportedExchangeRepository(database)
+    repo.initialize_schema()
+    if provider_norm == "SEC":
+        repo.ensure_fixed_exchange(
+            provider="SEC",
+            provider_exchange_code="US",
+            canonical_exchange_code="US",
+            name="United States",
+            country="US",
+            currency="USD",
         )
-    api_key = _require_eodhd_key()
-    client = EODHDFundamentalsClient(api_key=api_key)
-    stored = _refresh_supported_exchanges_for_provider(
-        database=database,
-        provider=provider_norm,
-        client=client,
-    )
+        stored = len(repo.list_all("SEC"))
+    elif provider_norm == "EODHD":
+        api_key = _require_eodhd_key()
+        client = EODHDFundamentalsClient(api_key=api_key)
+        stored = _refresh_supported_exchanges_for_provider(
+            database=database,
+            provider=provider_norm,
+            client=client,
+        )
+    else:
+        raise SystemExit(f"Unsupported provider: {provider}")
     print(f"Stored {stored} supported exchanges for {provider_norm} in {database}")
     return 0
 
@@ -1291,44 +1066,83 @@ def cmd_refresh_supported_exchanges(provider: str, database: str) -> int:
 def cmd_refresh_supported_tickers(
     provider: str,
     database: str,
-    exchange_code: Optional[str],
-    all_exchanges: bool,
+    exchange_codes: Optional[Sequence[str]],
+    all_supported: bool,
+    include_etfs: bool,
 ) -> int:
     """Refresh the persisted supported ticker catalog."""
 
     provider_norm = provider.strip().upper()
-    if provider_norm != "EODHD":
-        raise SystemExit(
-            "refresh-supported-tickers currently only supports provider=EODHD."
+    requested_exchanges = _parse_exchange_filters(exchange_codes)
+    if provider_norm == "SEC":
+        if requested_exchanges and requested_exchanges != {"US"}:
+            raise SystemExit("provider=SEC only supports --exchange-codes US.")
+        exchange_list = ["US"]
+        repo = SupportedExchangeRepository(database)
+        repo.initialize_schema()
+        repo.ensure_fixed_exchange(
+            provider="SEC",
+            provider_exchange_code="US",
+            canonical_exchange_code="US",
+            name="United States",
+            country="US",
+            currency="USD",
         )
-    if all_exchanges and exchange_code:
-        raise SystemExit("Use either --exchange-code or --all-exchanges, not both.")
-    if not all_exchanges and not exchange_code:
-        raise SystemExit("Either --exchange-code or --all-exchanges is required.")
+        loader = USUniverseLoader()
+        listings = loader.load()
+        filtered = [
+            item for item in listings if _should_keep_listing(include_etfs, item.is_etf)
+        ]
+        ticker_repo = SupportedTickerRepository(database)
+        ticker_repo.initialize_schema()
+        existing = ticker_repo.list_for_exchange("SEC", "US")
+        existing_symbols = {row.symbol for row in existing}
+        stored = ticker_repo.replace_from_listings("SEC", "US", filtered)
+        current = ticker_repo.list_for_exchange("SEC", "US")
+        current_symbols = {row.symbol for row in current}
+        removed_symbols = sorted(existing_symbols - current_symbols)
+        FundamentalsFetchStateRepository(database).delete_symbols(
+            "SEC", removed_symbols
+        )
+        MarketDataFetchStateRepository(database).delete_symbols("SEC", removed_symbols)
+        print(
+            f"[1/1] Stored {stored} supported tickers for US in {database} "
+            f"(removed {len(removed_symbols)} unsupported tickers)"
+        )
+        return 0
+
+    if provider_norm != "EODHD":
+        raise SystemExit(f"Unsupported provider: {provider}")
 
     api_key = _require_eodhd_key()
-    client = EODHDFundamentalsClient(api_key=api_key)
-    if all_exchanges:
-        exchange_codes = _list_eodhd_exchange_codes(database, client)
+    eodhd_client = EODHDFundamentalsClient(api_key=api_key)
+    if all_supported:
+        exchange_list = _list_eodhd_exchange_codes(database, eodhd_client)
     else:
-        exchange_norm = (exchange_code or "").strip().upper()
-        meta = _resolve_eodhd_exchange_metadata(database, client, exchange_norm)
-        if meta is None:
+        if not requested_exchanges:
             raise SystemExit(
-                f"Exchange {exchange_norm} not found in EODHD exchange list."
+                "Use --exchange-codes or --all-supported with refresh-supported-tickers."
             )
-        exchange_codes = [exchange_norm]
+        exchange_list = sorted(requested_exchanges)
+        for exchange_norm in exchange_list:
+            meta = _resolve_eodhd_exchange_metadata(
+                database, eodhd_client, exchange_norm
+            )
+            if meta is None:
+                raise SystemExit(
+                    f"Exchange {exchange_norm} not found in the EODHD exchange list."
+                )
 
-    if not exchange_codes:
+    if not exchange_list:
         print("No supported exchanges available to refresh.")
         return 0
 
-    total = len(exchange_codes)
-    for idx, code in enumerate(exchange_codes, 1):
+    total = len(exchange_list)
+    for idx, code in enumerate(exchange_list, 1):
         stored, removed = _refresh_supported_tickers_for_exchange(
             database=database,
             provider=provider_norm,
-            client=client,
+            client=eodhd_client,
             exchange_code=code,
         )
         print(
@@ -1356,12 +1170,12 @@ def cmd_ingest_fundamentals_global(
         )
 
     api_key = _require_eodhd_key()
-    client = EODHDFundamentalsClient(api_key=api_key)
+    eodhd_client = EODHDFundamentalsClient(api_key=api_key)
     config = Config()
     buffer_calls = max(config.eodhd_fundamentals_daily_buffer_calls, 0)
     rate_value = _resolve_eodhd_fundamentals_rate(rate)
     requested_exchange_codes = _parse_exchange_filters(exchange_codes)
-    user_meta = client.user_metadata()
+    user_meta = eodhd_client.user_metadata()
     daily_limit, used_calls, usable_requests = _eodhd_request_budget(
         user_meta, buffer_calls, EODHD_FUNDAMENTALS_CALL_COST
     )
@@ -1424,7 +1238,9 @@ def cmd_ingest_fundamentals_global(
             attempted += 1
             start = time.perf_counter()
             try:
-                payload = client.fetch_fundamentals(ticker.symbol, exchange_code=None)
+                payload = eodhd_client.fetch_fundamentals(
+                    ticker.symbol, exchange_code=None
+                )
                 general = payload.get("General") or {}
                 repo.upsert(
                     "EODHD",
@@ -1534,7 +1350,7 @@ def cmd_report_ingest_progress(
         if quota is not None and quota["usable_requests"] <= 0:
             next_action = "Wait for the next quota reset"
         else:
-            next_action = "Run ingest-fundamentals-global now"
+            next_action = "Run ingest-fundamentals now"
     elif summary.blocked > 0:
         next_action = "Wait for backoff to expire or rerun without --resume"
     else:
@@ -1553,7 +1369,7 @@ def cmd_report_ingest_progress(
         else None
     )
 
-    print("EODHD ingest progress")
+    print("EODHD fundamentals progress")
     print(f"Provider: {provider_norm}")
     print(f"Database: {database}")
     print(f"Scope: {scope_label}")
@@ -1783,7 +1599,7 @@ def cmd_report_market_data_progress(
         if quota is not None and quota["usable_requests"] <= 0:
             next_action = "Wait for the next quota reset"
         else:
-            next_action = "Run update-market-data-global now"
+            next_action = "Run update-market-data now"
     elif summary.blocked > 0:
         next_action = "Wait for backoff to expire or rerun without --resume"
     else:
@@ -1850,6 +1666,543 @@ def cmd_report_market_data_progress(
         print(f"- usable requests left: {quota['usable_requests']}")
 
     print(f"Next action: {next_action}")
+    return 0
+
+
+def cmd_report_fundamentals_progress(
+    provider: str,
+    database: str,
+    exchange_codes: Optional[Sequence[str]],
+    max_age_days: Optional[int],
+    missing_only: bool,
+) -> int:
+    """Public fundamentals-progress command wrapper."""
+
+    return cmd_report_ingest_progress(
+        provider=provider,
+        database=database,
+        exchange_codes=exchange_codes,
+        max_age_days=max_age_days,
+        missing_only=missing_only,
+    )
+
+
+def cmd_ingest_fundamentals_stage(
+    provider: str,
+    database: str,
+    symbols: Optional[Sequence[str]],
+    exchange_codes: Optional[Sequence[str]],
+    all_supported: bool,
+    rate: Optional[float],
+    max_symbols: Optional[int],
+    max_age_days: Optional[int],
+    resume: bool,
+    user_agent: Optional[str],
+    cik: Optional[str],
+) -> int:
+    """Unified fundamentals ingestion over symbol, exchange, or full supported scope."""
+
+    db_path = _resolve_database_path(database)
+    provider_norm = _normalize_provider(provider)
+    scope_rows, symbol_filters, resolved_exchange_codes = _resolve_provider_scope_rows(
+        str(db_path),
+        provider_norm,
+        symbols,
+        exchange_codes,
+        all_supported,
+    )
+    ticker_repo = SupportedTickerRepository(db_path)
+    scope_label = _scope_label(symbol_filters, resolved_exchange_codes)
+
+    if provider_norm == "SEC":
+        if cik and len(scope_rows) != 1:
+            raise SystemExit(
+                "--cik can only be used when ingesting exactly one SEC symbol."
+            )
+        rate_value = rate if rate is not None else 9.0
+        sec_client = SECCompanyFactsClient(user_agent=user_agent)
+        fundamentals_repo = FundamentalsRepository(db_path)
+        fundamentals_repo.initialize_schema()
+        eligible = ticker_repo.list_eligible_for_fundamentals(
+            provider=provider_norm,
+            exchange_codes=resolved_exchange_codes,
+            max_age_days=max_age_days,
+            max_symbols=max_symbols,
+            resume=resume,
+            missing_only=max_age_days is None,
+            provider_symbols=symbol_filters,
+        )
+        if not eligible:
+            print(
+                f"No eligible supported tickers found for {scope_label}. "
+                "Refresh supported tickers first or relax freshness filters."
+            )
+            return 0
+        min_interval = 1.0 / rate_value if rate_value and rate_value > 0 else 0.0
+        total = len(eligible)
+        processed = 0
+        print(
+            f"Fetching SEC company facts for {total} supported tickers across {scope_label} "
+            f"at <= {rate_value:.2f} req/s"
+        )
+        try:
+            last_fetch = 0.0
+            for idx, ticker in enumerate(eligible, 1):
+                if min_interval > 0 and last_fetch:
+                    elapsed = time.perf_counter() - last_fetch
+                    if elapsed < min_interval:
+                        time.sleep(min_interval - elapsed)
+                try:
+                    cik_value = cik
+                    if cik_value is None:
+                        info = sec_client.resolve_company(ticker.code)
+                        cik_value = info.cik
+                    payload = sec_client.fetch_company_facts(cik_value)
+                except Exception as exc:  # pragma: no cover - network errors
+                    LOGGER.error(
+                        "Failed to fetch SEC company facts for %s: %s",
+                        ticker.symbol,
+                        exc,
+                    )
+                    last_fetch = time.perf_counter()
+                    continue
+                last_fetch = time.perf_counter()
+                fundamentals_repo.upsert(
+                    "SEC",
+                    ticker.symbol,
+                    payload,
+                    exchange="US",
+                )
+                processed += 1
+                print(
+                    f"[{idx}/{total}] Stored company facts for {ticker.symbol}",
+                    flush=True,
+                )
+        except KeyboardInterrupt:
+            print(f"\nCancelled after {processed} of {total} symbols.")
+            return 1
+        print(f"Stored company facts for {processed} symbols in {db_path}")
+        return 0
+
+    api_key = _require_eodhd_key()
+    eodhd_client = EODHDFundamentalsClient(api_key=api_key)
+    config = Config()
+    buffer_calls = max(config.eodhd_fundamentals_daily_buffer_calls, 0)
+    rate_value = _resolve_eodhd_fundamentals_rate(rate)
+    user_meta = eodhd_client.user_metadata()
+    daily_limit, used_calls, usable_requests = _eodhd_request_budget(
+        user_meta, buffer_calls, EODHD_FUNDAMENTALS_CALL_COST
+    )
+    request_budget = usable_requests
+    if max_symbols is not None:
+        request_budget = min(request_budget, max_symbols)
+    if request_budget <= 0:
+        print(
+            "No EODHD fundamentals request budget available for this run "
+            f"(daily_limit={daily_limit}, used_calls={used_calls}, "
+            f"buffer_calls={buffer_calls})."
+        )
+        return 0
+    eligible = ticker_repo.list_eligible_for_fundamentals(
+        provider=provider_norm,
+        exchange_codes=resolved_exchange_codes,
+        max_age_days=max_age_days,
+        max_symbols=request_budget,
+        resume=resume,
+        missing_only=max_age_days is None,
+        provider_symbols=symbol_filters,
+    )
+    if not eligible:
+        print(
+            f"No eligible supported tickers found for {scope_label}. "
+            "Refresh supported tickers first or relax freshness filters."
+        )
+        return 0
+
+    repo = FundamentalsRepository(db_path)
+    repo.initialize_schema()
+    state_repo = FundamentalsFetchStateRepository(db_path)
+    state_repo.initialize_schema()
+    interval = 60.0 / rate_value
+    total = len(eligible)
+    processed = 0
+    attempted = 0
+    print(
+        f"Fetching EODHD fundamentals for {total} supported tickers across {scope_label} "
+        f"at <= {rate_value:.2f} req/min "
+        f"(daily_limit={daily_limit}, used_calls={used_calls}, "
+        f"buffer_calls={buffer_calls}, budget_requests={request_budget})"
+    )
+    try:
+        for idx, ticker in enumerate(eligible, 1):
+            attempted += 1
+            start = time.perf_counter()
+            try:
+                payload = eodhd_client.fetch_fundamentals(
+                    ticker.symbol, exchange_code=None
+                )
+                general = payload.get("General") or {}
+                repo.upsert(
+                    "EODHD",
+                    ticker.symbol,
+                    payload,
+                    currency=general.get("CurrencyCode") or ticker.currency,
+                    exchange=ticker.exchange_code,
+                )
+                state_repo.mark_success("EODHD", ticker.symbol)
+                processed += 1
+                print(
+                    f"[{idx}/{total}] Stored fundamentals for {ticker.symbol}",
+                    flush=True,
+                )
+            except Exception as exc:  # pragma: no cover - network errors
+                LOGGER.error(
+                    "Failed to fetch fundamentals for %s: %s", ticker.symbol, exc
+                )
+                state_repo.mark_failure("EODHD", ticker.symbol, str(exc))
+            elapsed = time.perf_counter() - start
+            if elapsed < interval:
+                time.sleep(interval - elapsed)
+    except KeyboardInterrupt:
+        print(f"\nCancelled after {attempted} attempted symbols.")
+        return 1
+    print(
+        f"Stored fundamentals for {processed} of {attempted} attempted symbols in {db_path}"
+    )
+    return 0
+
+
+def cmd_update_market_data_stage(
+    provider: str,
+    database: str,
+    symbols: Optional[Sequence[str]],
+    exchange_codes: Optional[Sequence[str]],
+    all_supported: bool,
+    rate: Optional[float],
+    max_symbols: Optional[int],
+    max_age_days: int,
+    resume: bool,
+) -> int:
+    """Unified market-data refresh over symbol, exchange, or full supported scope."""
+
+    db_path = _resolve_database_path(database)
+    provider_norm = _normalize_provider(provider)
+    if provider_norm != "EODHD":
+        raise SystemExit("update-market-data currently only supports provider=EODHD.")
+
+    _, symbol_filters, resolved_exchange_codes = _resolve_provider_scope_rows(
+        str(db_path),
+        provider_norm,
+        symbols,
+        exchange_codes,
+        all_supported,
+    )
+    scope_label = _scope_label(symbol_filters, resolved_exchange_codes)
+    config = Config()
+    buffer_calls = max(config.eodhd_market_data_daily_buffer_calls, 0)
+    rate_value = _resolve_eodhd_market_data_rate(rate)
+    api_key = _require_eodhd_key()
+    client = EODHDFundamentalsClient(api_key=api_key)
+    user_meta = client.user_metadata()
+    daily_limit, used_calls, usable_requests = _eodhd_request_budget(
+        user_meta, buffer_calls, EODHD_MARKET_DATA_CALL_COST
+    )
+    request_budget = usable_requests
+    if max_symbols is not None:
+        request_budget = min(request_budget, max_symbols)
+    if request_budget <= 0:
+        print(
+            "No EODHD market data request budget available for this run "
+            f"(daily_limit={daily_limit}, used_calls={used_calls}, "
+            f"buffer_calls={buffer_calls})."
+        )
+        return 0
+
+    ticker_repo = SupportedTickerRepository(db_path)
+    eligible = ticker_repo.list_eligible_for_market_data(
+        provider=provider_norm,
+        exchange_codes=resolved_exchange_codes,
+        max_age_days=max_age_days,
+        max_symbols=request_budget,
+        resume=resume,
+        provider_symbols=symbol_filters,
+    )
+    if not eligible:
+        print(
+            f"No eligible supported tickers found for {scope_label}. "
+            "Refresh supported tickers first or relax freshness filters."
+        )
+        return 0
+
+    service = MarketDataService(db_path=db_path, config=config)
+    state_repo = MarketDataFetchStateRepository(db_path)
+    state_repo.initialize_schema()
+    interval = 60.0 / rate_value
+    total = len(eligible)
+    processed = 0
+    attempted = 0
+    print(
+        f"Fetching EODHD market data for {total} supported tickers across {scope_label} "
+        f"at <= {rate_value:.2f} req/min "
+        f"(daily_limit={daily_limit}, used_calls={used_calls}, "
+        f"buffer_calls={buffer_calls}, budget_requests={request_budget})"
+    )
+    try:
+        for idx, ticker in enumerate(eligible, 1):
+            attempted += 1
+            start = time.perf_counter()
+            try:
+                data = service.refresh_symbol(ticker.symbol)
+                state_repo.mark_success("EODHD", ticker.symbol)
+                processed += 1
+                print(
+                    f"[{idx}/{total}] Stored market data for {data.symbol}", flush=True
+                )
+            except Exception as exc:  # pragma: no cover - network errors
+                LOGGER.error(
+                    "Failed to refresh market data for %s: %s", ticker.symbol, exc
+                )
+                state_repo.mark_failure("EODHD", ticker.symbol, str(exc))
+            elapsed = time.perf_counter() - start
+            if elapsed < interval:
+                time.sleep(interval - elapsed)
+    except KeyboardInterrupt:
+        print(f"\nCancelled after {attempted} attempted symbols.")
+        return 1
+
+    print(
+        f"Stored market data for {processed} of {attempted} attempted symbols in {db_path}"
+    )
+    return 0
+
+
+def cmd_normalize_fundamentals_stage(
+    provider: str,
+    database: str,
+    symbols: Optional[Sequence[str]],
+    exchange_codes: Optional[Sequence[str]],
+    all_supported: bool,
+) -> int:
+    """Unified fundamentals normalization over symbol, exchange, or full supported scope."""
+
+    db_path = _resolve_database_path(database)
+    provider_norm = _normalize_provider(provider)
+    scope_rows, _, _ = _resolve_provider_scope_rows(
+        str(db_path),
+        provider_norm,
+        symbols,
+        exchange_codes,
+        all_supported,
+    )
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    raw_symbols = set(fund_repo.symbols(provider_norm))
+    selected_symbols = [row.symbol for row in scope_rows if row.symbol in raw_symbols]
+    if not selected_symbols:
+        raise SystemExit(
+            f"No {provider_norm} raw fundamentals found in the requested scope. "
+            "Run ingest-fundamentals first."
+        )
+    if provider_norm == "SEC":
+        return cmd_normalize_us_facts_bulk(
+            database=str(db_path), symbols=selected_symbols
+        )
+    if provider_norm == "EODHD":
+        return cmd_normalize_eodhd_fundamentals_bulk(
+            database=str(db_path),
+            symbols=selected_symbols,
+        )
+    raise SystemExit(f"Unsupported provider: {provider}")
+
+
+def cmd_compute_metrics_stage(
+    database: str,
+    symbols: Optional[Sequence[str]],
+    exchange_codes: Optional[Sequence[str]],
+    all_supported: bool,
+    metric_ids: Optional[Sequence[str]],
+) -> int:
+    """Unified metric computation over symbol, exchange, or full supported scope."""
+
+    db_path = _resolve_database_path(database)
+    canonical_symbols, _, _ = _resolve_canonical_scope_symbols(
+        str(db_path),
+        symbols,
+        exchange_codes,
+        all_supported,
+    )
+    base_fact_repo = FinancialFactsRepository(db_path)
+    fact_repo = RegionFactsRepository(base_fact_repo)
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+    market_repo = MarketDataRepository(db_path)
+    market_repo.initialize_schema()
+    ids_to_compute = list(metric_ids) if metric_ids else list(REGISTRY.keys())
+    if not ids_to_compute:
+        raise SystemExit("No metrics specified.")
+
+    total_symbols = len(canonical_symbols)
+    print(
+        f"Computing metrics for {total_symbols} symbols ({len(ids_to_compute)} metrics each)"
+    )
+    try:
+        for idx, symbol in enumerate(canonical_symbols, 1):
+            computed = 0
+            for metric_id in ids_to_compute:
+                metric_cls = REGISTRY.get(metric_id)
+                if metric_cls is None:
+                    raise SystemExit(f"Unknown metric id: {metric_id}")
+                metric = metric_cls()
+                try:
+                    if getattr(metric, "uses_market_data", False):
+                        result = metric.compute(symbol, fact_repo, market_repo)
+                    else:
+                        result = metric.compute(symbol, fact_repo)
+                except Exception as exc:  # pragma: no cover - metric errors
+                    LOGGER.error("Metric %s failed for %s: %s", metric_id, symbol, exc)
+                    continue
+                if result is None:
+                    LOGGER.warning(
+                        "Metric %s could not be computed for %s", metric_id, symbol
+                    )
+                    continue
+                metrics_repo.upsert(
+                    result.symbol, result.metric_id, result.value, result.as_of
+                )
+                computed += 1
+            print(
+                f"[{idx}/{total_symbols}] Computed {computed} metrics for {symbol}",
+                flush=True,
+            )
+    except KeyboardInterrupt:
+        print("\nMetric computation cancelled by user.")
+        return 1
+    print(f"Computed metrics for {total_symbols} symbols in {db_path}")
+    return 0
+
+
+def cmd_run_screen_stage(
+    config_path: str,
+    database: str,
+    symbols: Optional[Sequence[str]],
+    exchange_codes: Optional[Sequence[str]],
+    all_supported: bool,
+    output_csv: Optional[str],
+) -> int:
+    """Unified screen evaluation over symbol, exchange, or full supported scope."""
+
+    db_path = _resolve_database_path(database)
+    canonical_symbols, explicit_symbols, resolved_exchange_codes = (
+        _resolve_canonical_scope_symbols(
+            str(db_path),
+            symbols,
+            exchange_codes,
+            all_supported,
+        )
+    )
+    definition = load_screen(config_path)
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+    base_fact_repo = FinancialFactsRepository(db_path)
+    fact_repo = RegionFactsRepository(base_fact_repo)
+    market_repo = MarketDataRepository(db_path)
+    market_repo.initialize_schema()
+    entity_repo = EntityMetadataRepository(db_path)
+    entity_repo.initialize_schema()
+
+    if len(canonical_symbols) == 1:
+        symbol = canonical_symbols[0]
+        entity_name = entity_repo.fetch(symbol) or symbol
+        description = entity_repo.fetch_description(symbol) or "N/A"
+        snapshot = market_repo.latest_snapshot(symbol)
+        price_label = _format_value(snapshot.price) if snapshot else "N/A"
+        print(f"Entity: {entity_name}")
+        print(f"Description: {description}")
+        print(f"Price: {price_label}")
+        results = []
+        for criterion in definition.criteria:
+            passed, left_value = evaluate_criterion_verbose(
+                criterion, symbol, metrics_repo, fact_repo, market_repo
+            )
+            results.append((criterion.name, passed, left_value))
+        passed_all = all(flag for _, flag, _ in results)
+        for name, passed, value in results:
+            value_display = _format_value(value) if value is not None else "N/A"
+            print(f"{name}: {'PASS' if passed else 'FAIL'} (value={value_display})")
+        return 0 if passed_all else 1
+
+    ticker_repo = SupportedTickerRepository(db_path)
+    universe_names = dict(
+        ticker_repo.list_canonical_symbol_name_pairs(resolved_exchange_codes)
+    )
+    entity_labels: Dict[str, str] = {}
+    passed_symbols: List[str] = []
+    criterion_values: Dict[str, Dict[str, float]] = {
+        c.name: {} for c in definition.criteria
+    }
+    for symbol in canonical_symbols:
+        symbol_passed = True
+        per_symbol_values: Dict[str, float] = {}
+        label = entity_repo.fetch(symbol) or universe_names.get(symbol) or symbol
+        entity_labels[symbol] = label
+        for criterion in definition.criteria:
+            passed, left_value = evaluate_criterion_verbose(
+                criterion, symbol, metrics_repo, fact_repo, market_repo
+            )
+            if not passed or left_value is None:
+                symbol_passed = False
+                break
+            per_symbol_values[criterion.name] = left_value
+        if symbol_passed:
+            passed_symbols.append(symbol)
+            for criterion in definition.criteria:
+                criterion_values[criterion.name][symbol] = per_symbol_values[
+                    criterion.name
+                ]
+
+    if not passed_symbols:
+        print("No symbols satisfied all criteria.")
+        if output_csv:
+            _write_screen_csv(definition.criteria, [], {}, {}, {}, {}, {}, output_csv)
+        return 1
+
+    selected_names = {
+        symbol: entity_labels.get(symbol, symbol) for symbol in passed_symbols
+    }
+    selected_descriptions: Dict[str, str] = {}
+    selected_prices: Dict[str, str] = {}
+    selected_price_currencies: Dict[str, str] = {}
+    for symbol in passed_symbols:
+        entity_description = entity_repo.fetch_description(symbol)
+        selected_descriptions[symbol] = (
+            entity_description if entity_description else "N/A"
+        )
+        snapshot = market_repo.latest_snapshot(symbol)
+        if snapshot:
+            selected_prices[symbol] = _format_value(snapshot.price)
+            selected_price_currencies[symbol] = snapshot.currency or "N/A"
+        else:
+            selected_prices[symbol] = "N/A"
+            selected_price_currencies[symbol] = "N/A"
+    _print_screen_table(
+        definition.criteria,
+        passed_symbols,
+        criterion_values,
+        selected_names,
+        selected_descriptions,
+        selected_prices,
+    )
+    if output_csv:
+        _write_screen_csv(
+            definition.criteria,
+            passed_symbols,
+            criterion_values,
+            selected_names,
+            selected_descriptions,
+            selected_prices,
+            selected_price_currencies,
+            output_csv,
+        )
     return 0
 
 
@@ -1992,12 +2345,12 @@ def cmd_ingest_fundamentals_bulk(
         fundamentals_repo = FundamentalsRepository(database)
         fundamentals_repo.initialize_schema()
 
-        universe_repo = UniverseRepository(database)
-        symbols = universe_repo.fetch_symbols_by_exchange(exchange_norm)
+        ticker_repo = SupportedTickerRepository(database)
+        symbols = ticker_repo.list_symbols_by_exchange(provider_norm, exchange_norm)
         if not symbols:
             raise SystemExit(
-                f"No universe symbols found for exchange {exchange_norm}. "
-                "Run load-universe first."
+                f"No supported tickers found for provider {provider_norm} on exchange {exchange_norm}. "
+                "Run load-universe --provider SEC first."
             )
 
         min_interval = 1.0 / rate_value if rate_value and rate_value > 0 else 0.0
@@ -2344,17 +2697,20 @@ def cmd_normalize_fundamentals_bulk(
         exchange_norm = exchange_code.upper()
     if provider_norm == "SEC" and exchange_norm != "US":
         raise SystemExit("SEC normalization only supports --exchange-code US.")
-    listings = _select_listing_symbols_by_exchange(
-        database=database, exchange_code=exchange_norm
+    symbols_for_exchange = _select_listing_symbols_by_exchange(
+        database=database,
+        provider=provider_norm,
+        exchange_code=exchange_norm,
     )
-    if not listings:
+    if not symbols_for_exchange:
         raise SystemExit(
-            f"No listings found for exchange {exchange_norm}. Run load-universe first."
+            f"No supported tickers found for provider {provider_norm} on exchange {exchange_norm}. "
+            f"{_catalog_bootstrap_guidance(provider_norm)}"
         )
     fund_repo = FundamentalsRepository(database)
     fund_repo.initialize_schema()
     raw_symbols = set(fund_repo.symbols(provider_norm))
-    symbols = [symbol for symbol in listings if symbol in raw_symbols]
+    symbols = [symbol for symbol in symbols_for_exchange if symbol in raw_symbols]
     if not symbols:
         raise SystemExit(
             f"No {provider_norm} fundamentals found for exchange {exchange_norm}. "
@@ -2382,7 +2738,7 @@ def cmd_refresh_exchange(
     user_agent: Optional[str],
     metrics: Optional[Sequence[str]],
 ) -> int:
-    """Run universe, fundamentals, market data, normalization, and metrics for an exchange."""
+    """Run catalog, fundamentals, market data, normalization, and metrics for an exchange."""
 
     provider_norm = _normalize_provider(provider)
     exchange_norm = exchange_code.upper()
@@ -2392,18 +2748,30 @@ def cmd_refresh_exchange(
         raise SystemExit(
             "--currencies/--include-exchanges are only valid with provider=EODHD."
         )
+    if provider_norm == "EODHD" and (include_etfs or currencies or include_exchanges):
+        raise SystemExit(
+            "refresh-exchange --provider EODHD no longer supports universe filtering flags. "
+            "The canonical EODHD catalog comes from refresh-supported-tickers."
+        )
 
-    load_exchange = None if provider_norm == "SEC" else exchange_norm
-
-    print("Step 1/5: load universe")
-    result = cmd_load_universe(
-        provider=provider_norm,
-        database=database,
-        include_etfs=include_etfs,
-        exchange_code=load_exchange,
-        currencies=currencies,
-        include_exchanges=include_exchanges,
-    )
+    print("Step 1/5: refresh catalog")
+    if provider_norm == "SEC":
+        result = cmd_load_universe(
+            provider=provider_norm,
+            database=database,
+            include_etfs=include_etfs,
+            exchange_code=None,
+            currencies=None,
+            include_exchanges=None,
+        )
+    else:
+        result = cmd_refresh_supported_tickers(
+            provider=provider_norm,
+            database=database,
+            exchange_codes=[exchange_norm],
+            all_supported=False,
+            include_etfs=False,
+        )
     if result != 0:
         return result
 
@@ -2423,6 +2791,7 @@ def cmd_refresh_exchange(
 
     print("Step 3/5: update market data")
     result = cmd_update_market_data_bulk(
+        provider=provider_norm,
         database=database,
         rate=market_rate,
         exchange_code=exchange_norm,
@@ -2441,6 +2810,7 @@ def cmd_refresh_exchange(
 
     print("Step 5/5: compute metrics")
     return cmd_compute_metrics_bulk(
+        provider=provider_norm,
         database=database,
         metric_ids=metrics,
         exchange_code=exchange_norm,
@@ -2469,20 +2839,25 @@ def cmd_update_market_data(
 
 
 def cmd_update_market_data_bulk(
-    database: str, rate: float, exchange_code: Optional[str]
+    provider: str,
+    database: str,
+    rate: float,
+    exchange_code: Optional[str],
 ) -> int:
-    """Fetch market data for every stored listing."""
+    """Fetch market data for every supported ticker in one provider/exchange slice."""
 
     if not exchange_code:
         raise SystemExit("--exchange-code is required for bulk market data updates.")
 
-    universe_repo = UniverseRepository(database)
-    universe_repo.initialize_schema()
+    provider_norm = _normalize_provider(provider)
+    ticker_repo = SupportedTickerRepository(database)
+    ticker_repo.initialize_schema()
     exchange_norm = exchange_code.upper()
-    listing_rows = universe_repo.fetch_symbols_by_exchange(exchange_norm)
+    listing_rows = ticker_repo.list_symbols_by_exchange(provider_norm, exchange_norm)
     if not listing_rows:
         raise SystemExit(
-            f"No symbols found for exchange {exchange_norm}. Load a universe first."
+            f"No supported tickers found for provider {provider_norm} on exchange {exchange_norm}. "
+            f"{_catalog_bootstrap_guidance(provider_norm)}"
         )
     pairs = [(symbol, exchange_norm) for symbol in listing_rows]
 
@@ -2561,23 +2936,26 @@ def cmd_compute_metrics(
 
 
 def cmd_compute_metrics_bulk(
+    provider: str,
     database: str,
     metric_ids: Optional[Sequence[str]],
     exchange_code: Optional[str],
 ) -> int:
-    """Compute metrics for all listings stored in the universe."""
+    """Compute metrics for all supported tickers in one provider/exchange slice."""
 
     db_path = _resolve_database_path(database)
-    universe_repo = UniverseRepository(db_path)
-    universe_repo.initialize_schema()
+    provider_norm = _normalize_provider(provider)
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
     if not exchange_code:
         raise SystemExit("--exchange-code is required for bulk metric computation.")
 
     exchange_norm = exchange_code.upper()
-    symbols = universe_repo.fetch_symbols_by_exchange(exchange_norm)
+    symbols = ticker_repo.list_symbols_by_exchange(provider_norm, exchange_norm)
     if not symbols:
         raise SystemExit(
-            f"No listings found for exchange {exchange_norm}. Run load-universe first."
+            f"No supported tickers found for provider {provider_norm} on exchange {exchange_norm}. "
+            f"{_catalog_bootstrap_guidance(provider_norm)}"
         )
 
     base_fact_repo = FinancialFactsRepository(db_path)
@@ -2641,32 +3019,44 @@ def cmd_compute_metrics_bulk(
 
 def cmd_report_fact_freshness(
     database: str,
-    exchange_code: str,
+    symbols: Optional[Sequence[str]],
+    exchange_codes: Optional[Sequence[str]],
+    all_supported: bool,
     metric_ids: Optional[Sequence[str]],
     max_age_days: int,
     output_csv: Optional[str],
     show_all: bool,
 ) -> int:
-    """Report missing or stale financial facts needed by metrics for an exchange."""
+    """Report missing or stale financial facts needed by metrics for a canonical scope."""
 
     db_path = _resolve_database_path(database)
-    exchange_norm = exchange_code.upper()
-    symbols = _symbols_for_exchange_or_raise(db_path, exchange_norm)
-    if not symbols:
-        raise SystemExit(f"No symbols found for exchange {exchange_norm}.")
+    selected_symbols, explicit_symbols, resolved_exchange_codes = (
+        _resolve_canonical_scope_symbols(
+            str(db_path),
+            symbols,
+            exchange_codes,
+            all_supported,
+        )
+    )
 
     metric_classes = _select_metric_classes(metric_ids)
     base_fact_repo = FinancialFactsRepository(db_path)
     fact_repo = RegionFactsRepository(base_fact_repo)
     coverage = compute_fact_coverage(
         fact_repo,
-        symbols,
+        selected_symbols,
         metric_classes,
         max_age_days=max_age_days,
     )
+    scope_label = _scope_label(
+        explicit_symbols,
+        resolved_exchange_codes,
+        "all supported tickers",
+    )
 
     print(
-        f"Fact coverage for exchange {exchange_norm} ({len(symbols)} symbols, max_age_days={max_age_days})"
+        f"Fact coverage for {scope_label} "
+        f"({len(selected_symbols)} symbols, max_age_days={max_age_days})"
     )
     for entry in coverage:
         missing_total = sum(c.missing for c in entry.concepts)
@@ -2690,16 +3080,22 @@ def cmd_report_fact_freshness(
 
 def cmd_report_metric_coverage(
     database: str,
-    exchange_code: str,
+    symbols: Optional[Sequence[str]],
+    exchange_codes: Optional[Sequence[str]],
+    all_supported: bool,
     metric_ids: Optional[Sequence[str]],
 ) -> int:
-    """Count symbols that can compute all requested metrics (without persisting results)."""
+    """Count symbols that can compute all requested metrics for a canonical scope."""
 
     db_path = _resolve_database_path(database)
-    exchange_norm = exchange_code.upper()
-    symbols = _symbols_for_exchange_or_raise(db_path, exchange_norm)
-    if not symbols:
-        raise SystemExit(f"No symbols found for exchange {exchange_norm}.")
+    selected_symbols, explicit_symbols, resolved_exchange_codes = (
+        _resolve_canonical_scope_symbols(
+            str(db_path),
+            symbols,
+            exchange_codes,
+            all_supported,
+        )
+    )
 
     metric_classes = _select_metric_classes(metric_ids)
     base_fact_repo = FinancialFactsRepository(db_path)
@@ -2713,7 +3109,7 @@ def cmd_report_metric_coverage(
     }
     all_success = 0
 
-    for symbol in symbols:
+    for symbol in selected_symbols:
         symbol_ok = True
         for metric_cls in metric_classes:
             metric = metric_cls()
@@ -2737,9 +3133,15 @@ def cmd_report_metric_coverage(
         if symbol_ok and metric_classes:
             all_success += 1
 
-    total_symbols = len(symbols)
+    total_symbols = len(selected_symbols)
+    scope_label = _scope_label(
+        explicit_symbols,
+        resolved_exchange_codes,
+        "all supported tickers",
+    )
     print(
-        f"Metric coverage for exchange {exchange_norm} (symbols={total_symbols}, metrics={len(metric_classes)})"
+        f"Metric coverage for {scope_label} "
+        f"(symbols={total_symbols}, metrics={len(metric_classes)})"
     )
     print(f"Symbols where all metrics computed: {all_success}/{total_symbols}")
     ordered = sorted(per_metric_success.items(), key=lambda item: (item[1], item[0]))
@@ -2844,38 +3246,21 @@ def cmd_report_metric_failures(
     database: str,
     metric_ids: Optional[Sequence[str]],
     symbols: Optional[Sequence[str]],
+    exchange_codes: Optional[Sequence[str]],
+    all_supported: bool,
     output_csv: Optional[str],
-    exchange_code: Optional[str],
 ) -> int:
-    """Summarize warning reasons for metric computation failures."""
+    """Summarize warning reasons for metric computation failures in a canonical scope."""
 
     db_path = _resolve_database_path(database)
-    if not exchange_code:
-        raise SystemExit("--exchange-code is required for metric failure reports.")
-    exchange_norm = exchange_code.upper()
-    universe_repo = UniverseRepository(db_path)
-    universe_repo.initialize_schema()
-    listing_symbols = universe_repo.fetch_symbols_by_exchange(exchange_norm)
-    if not listing_symbols:
-        raise SystemExit(
-            f"No symbols found for exchange {exchange_norm}. Load a universe first."
+    selected_symbols, explicit_symbols, resolved_exchange_codes = (
+        _resolve_canonical_scope_symbols(
+            str(db_path),
+            symbols,
+            exchange_codes,
+            all_supported,
         )
-    if symbols:
-        selected: List[str] = []
-        for entry in symbols:
-            for symbol in entry.split(","):
-                symbol = symbol.strip()
-                if not symbol:
-                    continue
-                selected.append(_format_market_symbol(symbol, exchange_norm))
-        requested = list(dict.fromkeys(selected))
-        symbols = [symbol for symbol in listing_symbols if symbol in requested]
-        if not symbols:
-            raise SystemExit(
-                f"No symbols found for exchange {exchange_norm} matching the provided list."
-            )
-    else:
-        symbols = listing_symbols
+    )
 
     metric_classes = _select_metric_classes(metric_ids)
     base_fact_repo = FinancialFactsRepository(db_path)
@@ -2899,7 +3284,7 @@ def cmd_report_metric_failures(
     root_logger.addHandler(handler)
 
     try:
-        for symbol in symbols:
+        for symbol in selected_symbols:
             symbol_upper = symbol.upper()
             for metric_cls in metric_classes:
                 metric_id = getattr(metric_cls, "id", metric_cls.__name__)
@@ -2936,11 +3321,15 @@ def cmd_report_metric_failures(
     finally:
         root_logger.removeHandler(handler)
 
-    total_symbols = len(symbols)
+    total_symbols = len(selected_symbols)
     metric_order = sorted(
         totals.keys(), key=lambda metric_id: (-totals.get(metric_id, 0), metric_id)
     )
-    scope_label = f"exchange {exchange_code.upper()}"
+    scope_label = _scope_label(
+        explicit_symbols,
+        resolved_exchange_codes,
+        "all supported tickers",
+    )
     print(
         f"Metric failure reasons for {scope_label} (symbols={total_symbols}, metrics={len(metric_classes)})"
     )
@@ -2980,7 +3369,11 @@ def _eligible_sec_filers(db_path: Path) -> List[str]:
     eligible: set[str] = set()
     with repo._connect() as conn:
         rows = conn.execute(
-            "SELECT symbol, data FROM fundamentals_raw WHERE provider = 'SEC'"
+            """
+            SELECT provider_symbol, data
+            FROM fundamentals_raw
+            WHERE provider = 'SEC'
+            """
         ).fetchall()
     for symbol, payload_json in rows:
         try:
@@ -3006,18 +3399,12 @@ def _eligible_sec_filers(db_path: Path) -> List[str]:
 
 
 def cmd_purge_us_nonfilers(database: str, apply: bool) -> int:
-    """Remove US listings with no 10-K/10-Q filings stored in SEC facts."""
+    """Remove SEC US supported tickers with no 10-K/10-Q filings stored in SEC facts."""
 
     db_path = _resolve_database_path(database)
-    universe_repo = UniverseRepository(db_path)
-    universe_repo.initialize_schema()
-    with universe_repo._connect() as conn:
-        us_symbols = [
-            row[0]
-            for row in conn.execute(
-                "SELECT symbol FROM listings WHERE symbol LIKE '%.US'"
-            ).fetchall()
-        ]
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    us_symbols = ticker_repo.list_symbols_by_exchange("SEC", "US")
 
     eligible = set(_eligible_sec_filers(db_path))
     to_remove = sorted([sym for sym in us_symbols if sym.upper() not in eligible])
@@ -3025,89 +3412,90 @@ def cmd_purge_us_nonfilers(database: str, apply: bool) -> int:
         print("No US non-filers found to purge.")
         return 0
 
-    print(f"Found {len(to_remove)} US listings without 10-K/10-Q filings.")
+    print(f"Found {len(to_remove)} SEC US supported tickers without 10-K/10-Q filings.")
     for sym in to_remove:
         print(f"- {sym}")
     if not apply:
-        print("Dry run only. Re-run with --apply to delete from listings.")
+        print("Dry run only. Re-run with --apply to delete from supported_tickers.")
         return 0
 
-    with universe_repo._connect() as conn:
-        conn.executemany(
-            "DELETE FROM listings WHERE symbol = ?", [(sym,) for sym in to_remove]
-        )
-    print(f"Deleted {len(to_remove)} US listings from listings table.")
+    ticker_repo.delete_symbols("SEC", to_remove)
+    print(f"Deleted {len(to_remove)} SEC US supported tickers from supported_tickers.")
     return 0
 
 
-def cmd_recalc_market_cap(database: str, exchange_code: Optional[str]) -> int:
+def cmd_recalc_market_cap(
+    database: str,
+    symbols: Optional[Sequence[str]],
+    exchange_codes: Optional[Sequence[str]],
+    all_supported: bool,
+) -> int:
     """Recompute market cap values for stored market data."""
 
-    if not exchange_code:
-        raise SystemExit("--exchange-code is required to recalc market cap.")
-    exchange_norm = exchange_code.upper()
-    market_repo = MarketDataRepository(database)
+    db_path = _resolve_database_path(database)
+    market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    base_fact_repo = FinancialFactsRepository(database)
+    base_fact_repo = FinancialFactsRepository(db_path)
     base_fact_repo.initialize_schema()
     fact_repo = RegionFactsRepository(base_fact_repo)
-    universe_repo = UniverseRepository(database)
-    universe_repo.initialize_schema()
-
-    listing_symbols = universe_repo.fetch_symbols_by_exchange(exchange_norm)
-    if not listing_symbols:
-        raise SystemExit(
-            f"No symbols found for exchange {exchange_norm}. Load a universe first."
+    selected_symbols, explicit_symbols, resolved_exchange_codes = (
+        _resolve_canonical_scope_symbols(
+            str(db_path),
+            symbols,
+            exchange_codes,
+            all_supported,
         )
-
-    with market_repo._connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT md.symbol
-            FROM market_data md
-            JOIN listings l ON md.symbol = l.symbol
-            WHERE UPPER(l.exchange) = ?
-            ORDER BY md.symbol
-            """,
-            (exchange_norm,),
-        ).fetchall()
-        symbols = [row[0] for row in rows]
-    if not symbols:
-        print(f"No market data found to update for exchange {exchange_norm}.")
+    )
+    symbols_with_market_data = [
+        symbol
+        for symbol in selected_symbols
+        if market_repo.latest_snapshot(symbol) is not None
+    ]
+    if not symbols_with_market_data:
+        scope_label = _scope_label(
+            explicit_symbols,
+            resolved_exchange_codes,
+            "all supported tickers",
+        )
+        print(f"No market data found to update for {scope_label}.")
         return 0
 
-    total = len(symbols)
+    total = len(symbols_with_market_data)
     updated_rows = 0
-    print(f"Recomputing market cap for {total} symbols on {exchange_norm}")
+    print(
+        f"Recomputing market cap for {total} symbols in "
+        f"{_scope_label(explicit_symbols, resolved_exchange_codes, 'all supported tickers')}"
+    )
     try:
-        with market_repo._connect() as conn:
-            for idx, symbol in enumerate(symbols, 1):
-                shares = latest_share_count(symbol, fact_repo)
-                if shares is None or shares <= 0:
-                    LOGGER.warning("Skipping %s due to missing share count", symbol)
-                    continue
-                cursor = conn.execute(
-                    "UPDATE market_data SET market_cap = price * ? WHERE symbol = ?",
-                    (shares, symbol),
-                )
-                updated_rows += cursor.rowcount or 0
-                print(f"[{idx}/{total}] Updated market cap for {symbol}", flush=True)
+        for idx, symbol in enumerate(symbols_with_market_data, 1):
+            shares = latest_share_count(symbol, fact_repo)
+            if shares is None or shares <= 0:
+                LOGGER.warning("Skipping %s due to missing share count", symbol)
+                continue
+            snapshot = market_repo.latest_snapshot(symbol)
+            if snapshot is None:
+                continue
+            updated_rows += market_repo.update_market_cap(
+                symbol, snapshot.price * shares
+            )
+            print(f"[{idx}/{total}] Updated market cap for {symbol}", flush=True)
     except KeyboardInterrupt:
         print("\nMarket cap recalculation cancelled by user.")
         return 1
 
-    print(f"Updated market cap for {updated_rows} rows in {database}")
+    print(f"Updated market cap for {updated_rows} rows in {db_path}")
     return 0
 
 
 def cmd_clear_listings(database: str) -> int:
-    """Delete all stored listings."""
+    """Delete the canonical supported_tickers catalog (legacy command alias)."""
 
-    repo = UniverseRepository(database)
-    with repo._connect() as conn:
-        conn.execute("DROP TABLE IF EXISTS listings")
-    repo.initialize_schema()
-    print(f"Cleared listings table in {database}")
+    repo = SupportedTickerRepository(database)
+    deleted = repo.clear()
+    print(
+        f"Deprecated command: cleared {deleted} supported_tickers rows in {database}. "
+        "Use supported_tickers as the canonical catalog."
+    )
     return 0
 
 
@@ -3201,23 +3589,28 @@ def cmd_run_screen(
 
 def cmd_run_screen_bulk(
     config_path: str,
+    provider: str,
     database: str,
     output_csv: Optional[str],
     exchange_code: Optional[str],
 ) -> int:
-    """Evaluate screening criteria for every ticker stored in the universe."""
+    """Evaluate screening criteria for every canonical catalog ticker in scope."""
 
     definition = load_screen(config_path)
-    universe_repo = UniverseRepository(database)
-    universe_repo.initialize_schema()
+    provider_norm = _normalize_provider(provider)
+    ticker_repo = SupportedTickerRepository(database)
+    ticker_repo.initialize_schema()
     if not exchange_code:
         raise SystemExit("--exchange-code is required for bulk screening.")
     exchange_norm = exchange_code.upper()
-    output_csv = output_csv or _default_screen_results_path(exchange_norm)
-    symbols = universe_repo.fetch_symbols_by_exchange(exchange_norm)
+    output_csv = output_csv or _default_screen_results_path(
+        provider_norm, exchange_norm
+    )
+    symbols = ticker_repo.list_symbols_by_exchange(provider_norm, exchange_norm)
     if not symbols:
         raise SystemExit(
-            f"No symbols found for exchange {exchange_norm}. Load a universe first."
+            f"No supported tickers found for provider {provider_norm} on exchange {exchange_norm}. "
+            f"{_catalog_bootstrap_guidance(provider_norm)}"
         )
 
     metrics_repo = MetricsRepository(database)
@@ -3229,11 +3622,9 @@ def cmd_run_screen_bulk(
     entity_repo = EntityMetadataRepository(database)
     entity_repo.initialize_schema()
 
-    with universe_repo._connect() as conn:
-        query = ["SELECT symbol, security_name FROM listings WHERE UPPER(exchange) = ?"]
-        params: List[str] = [exchange_norm]
-        sql = " ".join(query)
-        name_rows = conn.execute(sql, params).fetchall()
+    name_rows = ticker_repo.list_symbol_name_pairs_by_exchange(
+        provider_norm, exchange_norm
+    )
     universe_names = {row[0].upper(): (row[1] or row[0].upper()) for row in name_rows}
     entity_labels: Dict[str, str] = {}
     passed_symbols: List[str] = []
@@ -3427,15 +3818,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.command == "load-universe":
-        return cmd_load_universe(
-            provider=args.provider,
-            database=args.database,
-            include_etfs=args.include_etfs,
-            exchange_code=args.exchange_code,
-            currencies=args.currencies,
-            include_exchanges=args.include_exchanges,
-        )
     if args.command == "refresh-supported-exchanges":
         return cmd_refresh_supported_exchanges(
             provider=args.provider,
@@ -3445,41 +3827,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return cmd_refresh_supported_tickers(
             provider=args.provider,
             database=args.database,
-            exchange_code=args.exchange_code,
-            all_exchanges=args.all_exchanges,
+            exchange_codes=args.exchange_codes,
+            all_supported=args.all_supported,
+            include_etfs=args.include_etfs,
         )
     if args.command == "ingest-fundamentals":
-        return cmd_ingest_fundamentals(
+        return cmd_ingest_fundamentals_stage(
             provider=args.provider,
-            symbol=args.symbol,
             database=args.database,
-            exchange_code=args.exchange_code,
+            symbols=args.symbols,
+            exchange_codes=args.exchange_codes,
+            all_supported=args.all_supported,
+            rate=args.rate,
+            max_symbols=args.max_symbols,
+            max_age_days=args.max_age_days,
+            resume=args.resume,
             user_agent=args.user_agent,
             cik=args.cik,
         )
-    if args.command == "ingest-fundamentals-bulk":
-        return cmd_ingest_fundamentals_bulk(
-            provider=args.provider,
-            database=args.database,
-            rate=args.rate,
-            exchange_code=args.exchange_code,
-            user_agent=args.user_agent,
-            max_symbols=args.max_symbols,
-            max_age_days=args.max_age_days,
-            resume=args.resume,
-        )
-    if args.command == "ingest-fundamentals-global":
-        return cmd_ingest_fundamentals_global(
-            provider=args.provider,
-            database=args.database,
-            exchange_codes=args.exchange_codes,
-            rate=args.rate,
-            max_symbols=args.max_symbols,
-            max_age_days=args.max_age_days,
-            resume=args.resume,
-        )
-    if args.command == "report-ingest-progress":
-        return cmd_report_ingest_progress(
+    if args.command == "report-fundamentals-progress":
+        return cmd_report_fundamentals_progress(
             provider=args.provider,
             database=args.database,
             exchange_codes=args.exchange_codes,
@@ -3493,59 +3860,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             exchange_codes=args.exchange_codes,
             max_age_days=args.max_age_days,
         )
-    if args.command == "normalize-fundamentals":
-        return cmd_normalize_fundamentals(
-            provider=args.provider,
-            symbol=args.symbol,
-            database=args.database,
-            exchange_code=args.exchange_code,
-        )
-    if args.command == "normalize-fundamentals-bulk":
-        return cmd_normalize_fundamentals_bulk(
-            provider=args.provider,
-            database=args.database,
-            exchange_code=args.exchange_code,
-        )
-    if args.command == "refresh-exchange":
-        return cmd_refresh_exchange(
-            provider=args.provider,
-            exchange_code=args.exchange_code,
-            database=args.database,
-            include_etfs=args.include_etfs,
-            currencies=args.currencies,
-            include_exchanges=args.include_exchanges,
-            fundamentals_rate=args.fundamentals_rate,
-            market_rate=args.market_rate,
-            max_symbols=args.max_symbols,
-            max_age_days=args.max_age_days,
-            resume=args.resume,
-            user_agent=args.user_agent,
-            metrics=args.metrics,
-        )
     if args.command == "update-market-data":
-        return cmd_update_market_data(
-            symbol=args.symbol,
-            database=args.database,
-            exchange_code=args.exchange_code,
-        )
-    if args.command == "update-market-data-bulk":
-        return cmd_update_market_data_bulk(
-            database=args.database,
-            rate=args.rate,
-            exchange_code=args.exchange_code,
-        )
-    if args.command == "update-market-data-global":
-        return cmd_update_market_data_global(
+        return cmd_update_market_data_stage(
             provider=args.provider,
             database=args.database,
+            symbols=args.symbols,
             exchange_codes=args.exchange_codes,
+            all_supported=args.all_supported,
             rate=args.rate,
             max_symbols=args.max_symbols,
             max_age_days=args.max_age_days,
             resume=args.resume,
         )
-    if args.command == "clear-listings":
-        return cmd_clear_listings(database=args.database)
+    if args.command == "normalize-fundamentals":
+        return cmd_normalize_fundamentals_stage(
+            provider=args.provider,
+            database=args.database,
+            symbols=args.symbols,
+            exchange_codes=args.exchange_codes,
+            all_supported=args.all_supported,
+        )
     if args.command == "clear-financial-facts":
         return cmd_clear_financial_facts(database=args.database)
     if args.command == "clear-fundamentals-raw":
@@ -3555,23 +3889,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.command == "clear-market-data":
         return cmd_clear_market_data(database=args.database)
     if args.command == "compute-metrics":
-        return cmd_compute_metrics(
-            symbol=args.symbol,
-            metric_ids=args.metrics,
+        return cmd_compute_metrics_stage(
             database=args.database,
-            run_all=args.all,
-            exchange_code=args.exchange_code,
-        )
-    if args.command == "compute-metrics-bulk":
-        return cmd_compute_metrics_bulk(
-            database=args.database,
+            symbols=args.symbols,
+            exchange_codes=args.exchange_codes,
+            all_supported=args.all_supported,
             metric_ids=args.metrics,
-            exchange_code=args.exchange_code,
         )
     if args.command == "report-fact-freshness":
         return cmd_report_fact_freshness(
             database=args.database,
-            exchange_code=args.exchange_code,
+            symbols=args.symbols,
+            exchange_codes=args.exchange_codes,
+            all_supported=args.all_supported,
             metric_ids=args.metrics,
             max_age_days=args.max_age_days,
             output_csv=args.output_csv,
@@ -3580,7 +3910,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.command == "report-metric-coverage":
         return cmd_report_metric_coverage(
             database=args.database,
-            exchange_code=args.exchange_code,
+            symbols=args.symbols,
+            exchange_codes=args.exchange_codes,
+            all_supported=args.all_supported,
             metric_ids=args.metrics,
         )
     if args.command == "report-metric-failures":
@@ -3588,27 +3920,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             database=args.database,
             metric_ids=args.metrics,
             symbols=args.symbols,
+            exchange_codes=args.exchange_codes,
+            all_supported=args.all_supported,
             output_csv=args.output_csv,
-            exchange_code=args.exchange_code,
         )
     if args.command == "recalc-market-cap":
         return cmd_recalc_market_cap(
             database=args.database,
-            exchange_code=args.exchange_code,
+            symbols=args.symbols,
+            exchange_codes=args.exchange_codes,
+            all_supported=args.all_supported,
         )
     if args.command == "run-screen":
-        return cmd_run_screen(
-            symbol=args.symbol,
+        return cmd_run_screen_stage(
             config_path=args.config,
             database=args.database,
-            exchange_code=args.exchange_code,
-        )
-    if args.command == "run-screen-bulk":
-        return cmd_run_screen_bulk(
-            config_path=args.config,
-            database=args.database,
+            symbols=args.symbols,
+            exchange_codes=args.exchange_codes,
+            all_supported=args.all_supported,
             output_csv=args.output_csv,
-            exchange_code=args.exchange_code,
         )
     if args.command == "purge-us-nonfilers":
         return cmd_purge_us_nonfilers(database=args.database, apply=args.apply)

@@ -117,13 +117,13 @@ Screens only read stored metric rows. Compute the needed metrics before you run 
 Single symbol:
 
 ```bash
-pyvalue compute-metrics SHEL.LSE --all
+pyvalue compute-metrics --symbols SHEL.LSE
 ```
 
-Bulk:
+Exchange-scoped:
 
 ```bash
-pyvalue compute-metrics-bulk --exchange-code US
+pyvalue compute-metrics --exchange-codes US
 ```
 
 Using `--all` is the easiest way to avoid missing metric rows while learning the workflow. In production you can compute only the metric ids your screen uses.
@@ -133,13 +133,7 @@ Using `--all` is the easiest way to avoid missing metric rows while learning the
 If the symbol already includes its exchange suffix, run:
 
 ```bash
-pyvalue run-screen SHEL.LSE screeners/basic_value.yml
-```
-
-If the symbol does not include its exchange suffix, you must supply `--exchange-code`:
-
-```bash
-pyvalue run-screen SHEL screeners/basic_value.yml --exchange-code LSE
+pyvalue run-screen screeners/basic_value.yml --symbols SHEL.LSE
 ```
 
 Single-symbol output prints:
@@ -153,13 +147,13 @@ The command exits with status `0` only if all criteria pass.
 ## Run a Screen in Bulk
 
 ```bash
-pyvalue run-screen-bulk screeners/basic_value.yml --exchange-code US
+pyvalue run-screen screeners/basic_value.yml --exchange-codes US
 ```
 
 Write passing symbols to a CSV:
 
 ```bash
-pyvalue run-screen-bulk screeners/basic_value.yml --exchange-code US --output-csv data/screen_results_basic_value.csv
+pyvalue run-screen screeners/basic_value.yml --exchange-codes US --output-csv data/screen_results_basic_value.csv
 ```
 
 Bulk output shows only symbols that satisfy every criterion. The table includes:
@@ -175,13 +169,12 @@ If no symbols pass, the command prints `No symbols satisfied all criteria.` and 
 
 ```bash
 pyvalue refresh-supported-exchanges --provider EODHD
-pyvalue refresh-supported-tickers --provider EODHD --exchange-code US
-pyvalue load-universe --provider EODHD --exchange-code US
-pyvalue ingest-fundamentals-bulk --provider EODHD --exchange-code US
-pyvalue normalize-fundamentals-bulk --provider EODHD --exchange-code US
-pyvalue update-market-data-bulk --exchange-code US
-pyvalue compute-metrics-bulk --exchange-code US
-pyvalue run-screen-bulk screeners/basic_value.yml --exchange-code US --output-csv data/screen_results_basic_value.csv
+pyvalue refresh-supported-tickers --provider EODHD --exchange-codes US
+pyvalue ingest-fundamentals --provider EODHD --exchange-codes US --resume
+pyvalue normalize-fundamentals --provider EODHD --exchange-codes US
+pyvalue update-market-data --provider EODHD --exchange-codes US
+pyvalue compute-metrics --exchange-codes US
+pyvalue run-screen screeners/basic_value.yml --exchange-codes US --output-csv data/screen_results_basic_value.csv
 ```
 
 ## Why a Screen Can Return No Results
@@ -190,7 +183,7 @@ Common causes:
 
 - metrics were never computed for the symbols
 - the YAML references a wrong metric id
-- the wrong exchange was passed to `run-screen-bulk`
+- the wrong exchange scope was passed to `run-screen`
 - a metric depends on market data, but market data was not updated
 - the screen is simply too strict
 

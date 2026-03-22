@@ -22,19 +22,26 @@ Or configure it in `private/config.toml`.
 
 ## Fundamentals Ingestion
 
+Catalog refresh:
+
+```bash
+pyvalue refresh-supported-exchanges --provider SEC
+pyvalue refresh-supported-tickers --provider SEC --exchange-codes US
+```
+
 Single symbol:
 
 ```bash
-pyvalue ingest-fundamentals --provider SEC AAPL.US
+pyvalue ingest-fundamentals --provider SEC --symbols AAPL.US
 ```
 
 Optional override:
 - `--cik`: provide the exact SEC CIK if needed
 
-Bulk:
+Exchange-scoped:
 
 ```bash
-pyvalue ingest-fundamentals-bulk --provider SEC --exchange-code US
+pyvalue ingest-fundamentals --provider SEC --exchange-codes US
 ```
 
 ## Normalization
@@ -42,13 +49,13 @@ pyvalue ingest-fundamentals-bulk --provider SEC --exchange-code US
 Single symbol:
 
 ```bash
-pyvalue normalize-fundamentals --provider SEC AAPL.US
+pyvalue normalize-fundamentals --provider SEC --symbols AAPL.US
 ```
 
-Bulk:
+Exchange-scoped:
 
 ```bash
-pyvalue normalize-fundamentals-bulk --provider SEC
+pyvalue normalize-fundamentals --provider SEC --exchange-codes US
 ```
 
 ## Important Limitations

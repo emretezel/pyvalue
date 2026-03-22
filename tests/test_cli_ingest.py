@@ -22,7 +22,6 @@ from pyvalue.storage import (
     MetricsRepository,
     SupportedExchangeRepository,
     SupportedTickerRepository,
-    UniverseRepository,
 )
 from pyvalue.universe import Listing
 
@@ -95,6 +94,18 @@ def store_supported_tickers(
     return repo
 
 
+def store_catalog_listings(
+    db_path,
+    exchange_code: str,
+    listings,
+    provider: str = "SEC",
+):
+    repo = SupportedTickerRepository(db_path)
+    repo.initialize_schema()
+    repo.replace_from_listings(provider, exchange_code, listings)
+    return repo
+
+
 def store_market_data(db_path, symbol: str, as_of: str, price: float = 10.0):
     repo = MarketDataRepository(db_path)
     repo.initialize_schema()
@@ -116,9 +127,9 @@ def test_main_dispatches_report_ingest_progress_with_default_max_age_days(
         return 0
 
     monkeypatch.setattr(cli, "setup_logging", lambda: None)
-    monkeypatch.setattr(cli, "cmd_report_ingest_progress", fake_cmd)
+    monkeypatch.setattr(cli, "cmd_report_fundamentals_progress", fake_cmd)
 
-    rc = cli.main(["report-ingest-progress"])
+    rc = cli.main(["report-fundamentals-progress"])
 
     assert rc == 0
     assert calls == {
@@ -132,10 +143,10 @@ def test_main_dispatches_report_ingest_progress_with_default_max_age_days(
 
 def test_build_parser_report_ingest_progress_missing_only():
     args = cli.build_parser().parse_args(
-        ["report-ingest-progress", "--exchange-codes", "US,LSE", "--missing-only"]
+        ["report-fundamentals-progress", "--exchange-codes", "US,LSE", "--missing-only"]
     )
 
-    assert args.command == "report-ingest-progress"
+    assert args.command == "report-fundamentals-progress"
     assert args.exchange_codes == ["US,LSE"]
     assert args.max_age_days == 30
     assert args.missing_only is True
@@ -147,11 +158,21 @@ def test_main_dispatches_update_market_data_global_with_default_max_age_days(
     calls = {}
 
     def fake_cmd(
-        provider, database, exchange_codes, rate, max_symbols, max_age_days, resume
+        provider,
+        database,
+        symbols,
+        exchange_codes,
+        all_supported,
+        rate,
+        max_symbols,
+        max_age_days,
+        resume,
     ):
         calls["provider"] = provider
         calls["database"] = database
+        calls["symbols"] = symbols
         calls["exchange_codes"] = exchange_codes
+        calls["all_supported"] = all_supported
         calls["rate"] = rate
         calls["max_symbols"] = max_symbols
         calls["max_age_days"] = max_age_days
@@ -159,15 +180,17 @@ def test_main_dispatches_update_market_data_global_with_default_max_age_days(
         return 0
 
     monkeypatch.setattr(cli, "setup_logging", lambda: None)
-    monkeypatch.setattr(cli, "cmd_update_market_data_global", fake_cmd)
+    monkeypatch.setattr(cli, "cmd_update_market_data_stage", fake_cmd)
 
-    rc = cli.main(["update-market-data-global"])
+    rc = cli.main(["update-market-data", "--all-supported"])
 
     assert rc == 0
     assert calls == {
         "provider": "EODHD",
         "database": "data/pyvalue.db",
+        "symbols": None,
         "exchange_codes": None,
+        "all_supported": True,
         "rate": None,
         "max_symbols": None,
         "max_age_days": 7,
@@ -277,7 +300,11 @@ def test_cmd_ingest_fundamentals_eodhd(monkeypatch, tmp_path):
     assert payload["General"]["CurrencyCode"] == "USD"
     with repo._connect() as conn:
         row = conn.execute(
-            "SELECT currency, exchange FROM fundamentals_raw WHERE provider='EODHD' AND symbol='SHEL.LSE'"
+            """
+            SELECT currency, provider_exchange_code
+            FROM fundamentals_raw
+            WHERE provider='EODHD' AND provider_symbol='SHEL.LSE'
+            """
         ).fetchone()
     assert row[0] == "USD"
     assert row[1] == "LSE"
@@ -382,13 +409,11 @@ def test_cmd_ingest_fundamentals_bulk_eodhd_with_exchange_symbols(
 
 def test_cmd_ingest_fundamentals_bulk_sec(monkeypatch, tmp_path):
     db_path = tmp_path / "bulk.db"
-    universe_repo = UniverseRepository(db_path)
-    universe_repo.initialize_schema()
     listings = [
         Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
         Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
     ]
-    universe_repo.replace_universe(listings)
+    store_catalog_listings(db_path, "US", listings, provider="SEC")
 
     class FakeClient:
         def __init__(self, user_agent=None):
@@ -411,7 +436,7 @@ def test_cmd_ingest_fundamentals_bulk_sec(monkeypatch, tmp_path):
         provider="SEC",
         database=str(db_path),
         rate=0,
-        exchange_code="NYSE",
+        exchange_code="US",
         user_agent="UA",
         max_symbols=None,
         max_age_days=None,
@@ -425,7 +450,6 @@ def test_cmd_ingest_fundamentals_bulk_sec(monkeypatch, tmp_path):
 
 
 def test_cmd_load_universe_eodhd(monkeypatch, tmp_path):
-    calls = {}
     db_path = tmp_path / "uk.db"
     store_supported_exchanges(
         db_path,
@@ -442,65 +466,50 @@ def test_cmd_load_universe_eodhd(monkeypatch, tmp_path):
         ],
     )
 
-    class FakeLoader:
-        def __init__(
-            self,
-            api_key,
-            exchange_code,
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_load_universe(
+            provider="EODHD",
+            database=str(db_path),
             include_etfs=False,
-            allowed_currencies=None,
-            include_exchanges=None,
-            fetcher=None,
-            session=None,
-        ):
-            calls["api_key"] = api_key
-            calls["exchange_code"] = exchange_code
-            calls["include_etfs"] = include_etfs
-            calls["allowed_currencies"] = allowed_currencies
-            calls["include_exchanges"] = include_exchanges
+            exchange_code="LSE",
+            currencies=["GBP"],
+            include_exchanges=["LSE"],
+        )
 
+    assert "load-universe --provider EODHD is deprecated" in str(exc.value)
+
+
+def test_cmd_load_universe_sec_stores_supported_tickers(monkeypatch, tmp_path):
+    class FakeLoader:
         def load(self):
             return [
+                Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NASDAQ"),
                 Listing(
-                    symbol="AAA.LSE",
-                    security_name="AAA plc",
-                    exchange="LSE",
-                    currency="GBX",
-                ),
-                Listing(
-                    symbol="ETF1.LSE",
-                    security_name="ETF",
-                    exchange="LSE",
+                    symbol="ETF1.US",
+                    security_name="ETF One",
+                    exchange="NYSE Arca",
                     is_etf=True,
-                    currency="GBX",
                 ),
             ]
 
-    monkeypatch.setattr(cli, "UKUniverseLoader", FakeLoader)
-    monkeypatch.setattr(cli, "Config", lambda: SimpleNamespace(eodhd_api_key="KEY"))
+    monkeypatch.setattr(cli, "USUniverseLoader", lambda: FakeLoader())
 
-    class FakeClient:
-        def __init__(self, api_key):
-            calls["meta_api_key"] = api_key
-
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-
+    db_path = tmp_path / "sec-universe.db"
     rc = cli.cmd_load_universe(
-        provider="EODHD",
+        provider="SEC",
         database=str(db_path),
         include_etfs=False,
-        exchange_code="LSE",
-        currencies=["GBP"],
-        include_exchanges=["LSE"],
+        exchange_code=None,
+        currencies=None,
+        include_exchanges=None,
     )
 
     assert rc == 0
-    assert calls["api_key"] == "KEY"
-    assert calls["meta_api_key"] == "KEY"
-    assert calls["exchange_code"] == "LSE"
-    assert calls["include_etfs"] is False
-    assert calls["allowed_currencies"] == ["GBP"]
-    assert calls["include_exchanges"] == ["LSE"]
+    repo = SupportedTickerRepository(db_path)
+    rows = repo.list_for_exchange("SEC", "US")
+    assert [(row.symbol, row.listing_exchange, row.security_type) for row in rows] == [
+        ("AAA.US", "NASDAQ", "Common Stock")
+    ]
 
 
 def test_cmd_refresh_supported_exchanges(monkeypatch, tmp_path):
@@ -600,16 +609,6 @@ def test_cmd_refresh_supported_tickers_filters_types_and_cleans_catalog(
         ],
     )
 
-    universe_repo = UniverseRepository(db_path)
-    universe_repo.initialize_schema()
-    universe_repo.replace_exchange(
-        "LSE",
-        [
-            Listing(symbol="OLD.LSE", security_name="Old plc", exchange="LSE"),
-            Listing(symbol="KEEP.LSE", security_name="Keep plc", exchange="LSE"),
-        ],
-    )
-
     state_repo = FundamentalsFetchStateRepository(db_path)
     state_repo.initialize_schema()
     state_repo.mark_failure("EODHD", "OLD.LSE", "stale")
@@ -668,8 +667,9 @@ def test_cmd_refresh_supported_tickers_filters_types_and_cleans_catalog(
     rc = cli.cmd_refresh_supported_tickers(
         provider="EODHD",
         database=str(db_path),
-        exchange_code="LSE",
-        all_exchanges=False,
+        exchange_codes=["LSE"],
+        all_supported=False,
+        include_etfs=False,
     )
 
     assert rc == 0
@@ -679,11 +679,15 @@ def test_cmd_refresh_supported_tickers_filters_types_and_cleans_catalog(
     rows = ticker_repo.list_for_exchange("EODHD", "LSE")
     assert [row.symbol for row in rows] == ["KEEP.LSE", "PREF.LSE"]
     assert [row.security_type for row in rows] == ["Common Stock", "Preferred Stock"]
+    with ticker_repo._connect() as conn:
+        listings_table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='listings'"
+        ).fetchone()
 
-    assert universe_repo.fetch_symbols_by_exchange("LSE") == ["KEEP.LSE", "PREF.LSE"]
     assert state_repo.fetch("EODHD", "OLD.LSE") is None
     assert state_repo.fetch("EODHD", "KEEP.LSE") is not None
     assert fund_repo.fetch("EODHD", "OLD.LSE") is not None
+    assert listings_table is None
 
 
 def test_cmd_refresh_supported_tickers_all_exchanges_in_code_order(
@@ -749,8 +753,9 @@ def test_cmd_refresh_supported_tickers_all_exchanges_in_code_order(
     rc = cli.cmd_refresh_supported_tickers(
         provider="EODHD",
         database=str(db_path),
-        exchange_code=None,
-        all_exchanges=True,
+        exchange_codes=None,
+        all_supported=True,
+        include_etfs=False,
     )
 
     assert rc == 0
@@ -762,71 +767,18 @@ def test_cmd_refresh_supported_tickers_all_exchanges_in_code_order(
 
 
 def test_cmd_load_universe_eodhd_bootstraps_supported_exchanges(monkeypatch, tmp_path):
-    calls = {}
-
-    class FakeLoader:
-        def __init__(
-            self,
-            api_key,
-            exchange_code,
-            include_etfs=False,
-            allowed_currencies=None,
-            include_exchanges=None,
-            fetcher=None,
-            session=None,
-        ):
-            calls["api_key"] = api_key
-            calls["exchange_code"] = exchange_code
-
-        def load(self):
-            return [
-                Listing(
-                    symbol="AAA.LSE",
-                    security_name="AAA plc",
-                    exchange="LSE",
-                    currency="GBP",
-                )
-            ]
-
-    class FakeClient:
-        def __init__(self, api_key):
-            calls["meta_api_key"] = api_key
-
-        def list_exchanges(self):
-            calls["list_exchanges"] = calls.get("list_exchanges", 0) + 1
-            return [
-                {
-                    "Code": "LSE",
-                    "Name": "London Exchange",
-                    "Country": "UK",
-                    "Currency": "GBP",
-                    "OperatingMIC": "XLON",
-                    "CountryISO2": "GB",
-                    "CountryISO3": "GBR",
-                }
-            ]
-
-    monkeypatch.setattr(cli, "UKUniverseLoader", FakeLoader)
-    monkeypatch.setattr(cli, "Config", lambda: SimpleNamespace(eodhd_api_key="KEY"))
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-
     db_path = tmp_path / "bootstrap-universe.db"
-    rc = cli.cmd_load_universe(
-        provider="EODHD",
-        database=str(db_path),
-        include_etfs=False,
-        exchange_code="LSE",
-        currencies=None,
-        include_exchanges=None,
-    )
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_load_universe(
+            provider="EODHD",
+            database=str(db_path),
+            include_etfs=False,
+            exchange_code="LSE",
+            currencies=None,
+            include_exchanges=None,
+        )
 
-    assert rc == 0
-    assert calls["list_exchanges"] == 1
-    repo = SupportedExchangeRepository(db_path)
-    repo.initialize_schema()
-    record = repo.fetch("EODHD", "LSE")
-    assert record is not None
-    assert record.country == "UK"
+    assert "deprecated" in str(exc.value)
 
 
 def test_cmd_ingest_fundamentals_global_respects_budget_from_user_metadata(
@@ -1029,7 +981,7 @@ def test_cmd_ingest_fundamentals_global_max_age_days_refreshes_only_stale_or_mis
         conn.execute(
             """
             UPDATE fundamentals_raw
-            SET fetched_at = CASE symbol
+            SET fetched_at = CASE provider_symbol
                 WHEN 'AAA.US' THEN ?
                 WHEN 'BBB.US' THEN ?
                 ELSE fetched_at
@@ -1161,7 +1113,7 @@ def test_cmd_ingest_fundamentals_global_default_mode_remains_missing_only(
             """
             UPDATE fundamentals_raw
             SET fetched_at = ?
-            WHERE provider = 'EODHD' AND symbol = 'AAA.US'
+            WHERE provider = 'EODHD' AND provider_symbol = 'AAA.US'
             """,
             ((datetime.now(timezone.utc) - timedelta(days=45)).isoformat(),),
         )
@@ -1300,7 +1252,7 @@ def test_cmd_report_ingest_progress_reports_missing_and_quota_unavailable(
     assert "Missing: 1" in output
     assert "Fresh: 0" in output
     assert "- quota unavailable" in output
-    assert "Next action: Run ingest-fundamentals-global now" in output
+    assert "Next action: Run ingest-fundamentals now" in output
 
 
 def test_cmd_report_ingest_progress_default_mode_treats_old_data_as_stale(
@@ -1322,7 +1274,7 @@ def test_cmd_report_ingest_progress_default_mode_treats_old_data_as_stale(
             """
             UPDATE fundamentals_raw
             SET fetched_at = ?
-            WHERE provider = 'EODHD' AND symbol = 'AAA.US'
+            WHERE provider = 'EODHD' AND provider_symbol = 'AAA.US'
             """,
             ((datetime.now(timezone.utc) - timedelta(days=45)).isoformat(),),
         )
@@ -1370,7 +1322,7 @@ def test_cmd_report_ingest_progress_missing_only_ignores_staleness(
             """
             UPDATE fundamentals_raw
             SET fetched_at = ?
-            WHERE provider = 'EODHD' AND symbol = 'AAA.US'
+            WHERE provider = 'EODHD' AND provider_symbol = 'AAA.US'
             """,
             ((datetime.now(timezone.utc) - timedelta(days=120)).isoformat(),),
         )
@@ -1959,7 +1911,7 @@ def test_cmd_report_market_data_progress_reports_missing_and_stale(
     assert "Missing: 1" in output
     assert "Stale: 1" in output
     assert "Fresh: 0" in output
-    assert "Next action: Run update-market-data-global now" in output
+    assert "Next action: Run update-market-data now" in output
 
 
 def test_cmd_report_market_data_progress_reports_blocked_by_backoff(
@@ -2145,13 +2097,11 @@ def test_cmd_ingest_fundamentals_bulk_skips_fresh_and_backoff(monkeypatch, tmp_p
 
 def test_cmd_update_market_data_bulk(monkeypatch, tmp_path):
     db_path = tmp_path / "marketbulk.db"
-    universe_repo = UniverseRepository(db_path)
-    universe_repo.initialize_schema()
     listings = [
         Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
         Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
     ]
-    universe_repo.replace_universe(listings)
+    store_catalog_listings(db_path, "US", listings, provider="SEC")
 
     calls = []
 
@@ -2165,9 +2115,10 @@ def test_cmd_update_market_data_bulk(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "MarketDataService", lambda db_path: DummyService(db_path))
 
     rc = cli.cmd_update_market_data_bulk(
+        provider="SEC",
         database=str(db_path),
         rate=0,
-        exchange_code="NYSE",
+        exchange_code="US",
     )
     assert rc == 0
     assert calls == ["AAA.US", "BBB.US"]
@@ -2175,13 +2126,17 @@ def test_cmd_update_market_data_bulk(monkeypatch, tmp_path):
 
 def test_cmd_update_market_data_bulk_with_exchange(monkeypatch, tmp_path):
     db_path = tmp_path / "marketbulk_exchange.db"
-    universe_repo = UniverseRepository(db_path)
-    universe_repo.initialize_schema()
-    universe_repo.replace_universe(
-        [Listing(symbol="AAA", security_name="AAA PLC", exchange="LSE")]
+    store_catalog_listings(
+        db_path,
+        "LSE",
+        [Listing(symbol="AAA", security_name="AAA PLC", exchange="LSE")],
+        provider="EODHD",
     )
-    universe_repo.replace_universe(
-        [Listing(symbol="BBB", security_name="BBB Inc", exchange="NYSE")]
+    store_catalog_listings(
+        db_path,
+        "US",
+        [Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE")],
+        provider="SEC",
     )
 
     calls = []
@@ -2196,23 +2151,22 @@ def test_cmd_update_market_data_bulk_with_exchange(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "MarketDataService", lambda db_path: DummyService(db_path))
 
     rc = cli.cmd_update_market_data_bulk(
+        provider="EODHD",
         database=str(db_path),
         rate=0,
         exchange_code="LSE",
     )
     assert rc == 0
-    assert calls == [("AAA", "AAA.LSE")]
+    assert calls == [("AAA.LSE", "AAA.LSE")]
 
 
 def test_cmd_compute_metrics_bulk(monkeypatch, tmp_path):
     db_path = tmp_path / "metricsbulk.db"
-    universe_repo = UniverseRepository(db_path)
-    universe_repo.initialize_schema()
     listings = [
         Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
         Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
     ]
-    universe_repo.replace_universe(listings)
+    store_catalog_listings(db_path, "US", listings, provider="SEC")
 
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
@@ -2235,9 +2189,10 @@ def test_cmd_compute_metrics_bulk(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
 
     rc = cli.cmd_compute_metrics_bulk(
+        provider="SEC",
         database=str(db_path),
         metric_ids=None,
-        exchange_code="NYSE",
+        exchange_code="US",
     )
     assert rc == 0
 
@@ -2247,16 +2202,20 @@ def test_cmd_compute_metrics_bulk(monkeypatch, tmp_path):
 
 def test_cmd_compute_metrics_bulk_with_exchange(monkeypatch, tmp_path):
     db_path = tmp_path / "metrics_exchange.db"
-    universe_repo = UniverseRepository(db_path)
-    universe_repo.initialize_schema()
-    universe_repo.replace_universe(
+    store_catalog_listings(
+        db_path,
+        "US",
         [
             Listing(symbol="AAA.US", security_name="AAA Inc", exchange="US"),
             Listing(symbol="BBB.US", security_name="BBB Inc", exchange="US"),
-        ]
+        ],
+        provider="SEC",
     )
-    universe_repo.replace_universe(
-        [Listing(symbol="CCC.LSE", security_name="CCC PLC", exchange="LSE")]
+    store_catalog_listings(
+        db_path,
+        "LSE",
+        [Listing(symbol="CCC.LSE", security_name="CCC PLC", exchange="LSE")],
+        provider="EODHD",
     )
 
     class DummyMetric:
@@ -2272,6 +2231,7 @@ def test_cmd_compute_metrics_bulk_with_exchange(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
 
     rc = cli.cmd_compute_metrics_bulk(
+        provider="EODHD",
         database=str(db_path),
         metric_ids=None,
         exchange_code="LSE",
@@ -2282,13 +2242,20 @@ def test_cmd_compute_metrics_bulk_with_exchange(monkeypatch, tmp_path):
     metrics_repo.initialize_schema()
     rows = (
         metrics_repo._connect()
-        .execute("SELECT symbol FROM metrics ORDER BY symbol")
+        .execute(
+            """
+            SELECT s.canonical_symbol
+            FROM metrics m
+            JOIN securities s ON s.security_id = m.security_id
+            ORDER BY s.canonical_symbol
+            """
+        )
         .fetchall()
     )
     assert [row[0] for row in rows] == ["CCC.LSE"]
 
 
-def test_cmd_compute_metrics_bulk_requires_listings(monkeypatch, tmp_path):
+def test_cmd_compute_metrics_bulk_requires_supported_tickers(monkeypatch, tmp_path):
     db_path = tmp_path / "fundmetrics.db"
     # No listings stored; only fundamentals exist.
     fund_repo = FundamentalsRepository(db_path)
@@ -2326,11 +2293,14 @@ def test_cmd_compute_metrics_bulk_requires_listings(monkeypatch, tmp_path):
 
     with pytest.raises(SystemExit) as exc:
         cli.cmd_compute_metrics_bulk(
+            provider="EODHD",
             database=str(db_path),
             metric_ids=None,
             exchange_code="LSE",
         )
-    assert "No listings found for exchange LSE" in str(exc.value)
+    assert "No supported tickers found for provider EODHD on exchange LSE" in str(
+        exc.value
+    )
 
 
 def test_cmd_clear_fundamentals_raw(tmp_path):
@@ -2387,7 +2357,14 @@ def test_cmd_normalize_fundamentals_sec(monkeypatch, tmp_path):
     result_repo.initialize_schema()
     rows = (
         result_repo._connect()
-        .execute("SELECT concept, value FROM financial_facts WHERE symbol='AAPL.US'")
+        .execute(
+            """
+            SELECT ff.concept, ff.value
+            FROM financial_facts ff
+            JOIN securities s ON s.security_id = ff.security_id
+            WHERE s.canonical_symbol = 'AAPL.US'
+            """
+        )
         .fetchall()
     )
     assert [(row[0], row[1]) for row in rows] == [("NetIncomeLoss", 123.0)]
@@ -2398,13 +2375,14 @@ def test_cmd_normalize_fundamentals_sec(monkeypatch, tmp_path):
 
 def test_cmd_normalize_fundamentals_bulk_sec(monkeypatch, tmp_path):
     db_path = tmp_path / "facts.db"
-    universe_repo = UniverseRepository(db_path)
-    universe_repo.initialize_schema()
-    universe_repo.replace_universe(
+    store_catalog_listings(
+        db_path,
+        "US",
         [
             Listing(symbol="AAA.US", security_name="AAA Corp", exchange="NYSE"),
             Listing(symbol="BBB.US", security_name="BBB Corp", exchange="NYSE"),
-        ]
+        ],
+        provider="SEC",
     )
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
@@ -2436,7 +2414,12 @@ def test_cmd_normalize_fundamentals_bulk_sec(monkeypatch, tmp_path):
     )
     assert rc == 0
     cursor = normalization_repo._connect().execute(
-        "SELECT symbol, value FROM financial_facts ORDER BY symbol"
+        """
+        SELECT s.canonical_symbol, ff.value
+        FROM financial_facts ff
+        JOIN securities s ON s.security_id = ff.security_id
+        ORDER BY s.canonical_symbol
+        """
     )
     facts = [(row[0], row[1]) for row in cursor.fetchall()]
     assert facts == [("AAA.US", 6.0), ("BBB.US", 6.0)]
@@ -2448,17 +2431,21 @@ def test_cmd_normalize_fundamentals_bulk_sec(monkeypatch, tmp_path):
 
 def test_cmd_normalize_fundamentals_bulk_with_exchange(monkeypatch, tmp_path):
     db_path = tmp_path / "fundamentals_exchange.db"
-    universe_repo = UniverseRepository(db_path)
-    universe_repo.initialize_schema()
-    universe_repo.replace_universe(
+    store_catalog_listings(
+        db_path,
+        "US",
         [
             Listing(symbol="AAA.US", security_name="AAA Inc", exchange="US"),
             Listing(symbol="BBB.US", security_name="BBB Inc", exchange="US"),
             Listing(symbol="CCC.US", security_name="CCC Inc", exchange="US"),
-        ]
+        ],
+        provider="SEC",
     )
-    universe_repo.replace_universe(
-        [Listing(symbol="DDD.LSE", security_name="DDD PLC", exchange="LSE")]
+    store_catalog_listings(
+        db_path,
+        "LSE",
+        [Listing(symbol="DDD.LSE", security_name="DDD PLC", exchange="LSE")],
+        provider="EODHD",
     )
 
     fund_repo = FundamentalsRepository(db_path)
@@ -2487,7 +2474,14 @@ def test_cmd_normalize_fundamentals_bulk_with_exchange(monkeypatch, tmp_path):
     fact_repo.initialize_schema()
     rows = (
         fact_repo._connect()
-        .execute("SELECT symbol FROM financial_facts ORDER BY symbol")
+        .execute(
+            """
+            SELECT s.canonical_symbol
+            FROM financial_facts ff
+            JOIN securities s ON s.security_id = ff.security_id
+            ORDER BY s.canonical_symbol
+            """
+        )
         .fetchall()
     )
     assert [row[0] for row in rows] == ["AAA.US", "BBB.US"]
@@ -2528,7 +2522,14 @@ def test_cmd_normalize_fundamentals_eodhd(monkeypatch, tmp_path):
     fact_repo.initialize_schema()
     rows = (
         fact_repo._connect()
-        .execute("SELECT concept, value FROM financial_facts WHERE symbol='SHEL.LSE'")
+        .execute(
+            """
+            SELECT ff.concept, ff.value
+            FROM financial_facts ff
+            JOIN securities s ON s.security_id = ff.security_id
+            WHERE s.canonical_symbol = 'SHEL.LSE'
+            """
+        )
         .fetchall()
     )
     assert [(row[0], row[1]) for row in rows] == [("NetIncomeLoss", 10.0)]
@@ -2539,13 +2540,14 @@ def test_cmd_normalize_fundamentals_eodhd(monkeypatch, tmp_path):
 
 def test_cmd_recalc_market_cap(tmp_path):
     db_path = tmp_path / "marketcap.db"
-    universe_repo = UniverseRepository(db_path)
-    universe_repo.initialize_schema()
-    universe_repo.replace_universe(
+    store_catalog_listings(
+        db_path,
+        "US",
         [
             Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
             Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
-        ]
+        ],
+        provider="SEC",
     )
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
@@ -2565,7 +2567,12 @@ def test_cmd_recalc_market_cap(tmp_path):
     market_repo.upsert_price("AAA.US", "2024-01-01", price=50.0)
     market_repo.upsert_price("BBB.US", "2024-01-01", price=70.0)
 
-    rc = cli.cmd_recalc_market_cap(database=str(db_path), exchange_code="NYSE")
+    rc = cli.cmd_recalc_market_cap(
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=["US"],
+        all_supported=False,
+    )
     assert rc == 0
     snapshot = market_repo.latest_snapshot("AAA.US")
     assert snapshot.market_cap == 5000.0
@@ -2575,13 +2582,14 @@ def test_cmd_recalc_market_cap(tmp_path):
 
 def test_cmd_run_screen_bulk(tmp_path, capsys):
     db_path = tmp_path / "screen.db"
-    universe_repo = UniverseRepository(db_path)
-    universe_repo.initialize_schema()
-    universe_repo.replace_universe(
+    store_catalog_listings(
+        db_path,
+        "US",
         [
             Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
             Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
-        ]
+        ],
+        provider="SEC",
     )
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
@@ -2609,9 +2617,10 @@ criteria:
 
     rc = cli.cmd_run_screen_bulk(
         config_path=str(screen_path),
+        provider="SEC",
         database=str(db_path),
         output_csv=str(csv_path),
-        exchange_code="NYSE",
+        exchange_code="US",
     )
     assert rc == 0
     output = capsys.readouterr().out
@@ -2626,13 +2635,17 @@ criteria:
 
 def test_cmd_run_screen_bulk_with_exchange(tmp_path, capsys):
     db_path = tmp_path / "screen_exchange.db"
-    universe_repo = UniverseRepository(db_path)
-    universe_repo.initialize_schema()
-    universe_repo.replace_universe(
-        [Listing(symbol="AAA.LSE", security_name="AAA PLC", exchange="LSE")]
+    store_catalog_listings(
+        db_path,
+        "LSE",
+        [Listing(symbol="AAA.LSE", security_name="AAA PLC", exchange="LSE")],
+        provider="EODHD",
     )
-    universe_repo.replace_universe(
-        [Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE")]
+    store_catalog_listings(
+        db_path,
+        "US",
+        [Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE")],
+        provider="SEC",
     )
 
     metrics_repo = MetricsRepository(db_path)
@@ -2662,6 +2675,7 @@ criteria:
 
     rc = cli.cmd_run_screen_bulk(
         config_path=str(screen_path),
+        provider="EODHD",
         database=str(db_path),
         output_csv=str(csv_path),
         exchange_code="LSE",
@@ -2679,13 +2693,14 @@ criteria:
 
 def test_cmd_report_metric_failures_uses_highest_market_cap_example(tmp_path, capsys):
     db_path = tmp_path / "failures.db"
-    universe_repo = UniverseRepository(db_path)
-    universe_repo.initialize_schema()
-    universe_repo.replace_universe(
+    store_catalog_listings(
+        db_path,
+        "US",
         [
             Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
             Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
-        ]
+        ],
+        provider="SEC",
     )
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
@@ -2696,8 +2711,9 @@ def test_cmd_report_metric_failures_uses_highest_market_cap_example(tmp_path, ca
         database=str(db_path),
         metric_ids=["working_capital"],
         symbols=["AAA.US", "BBB.US"],
+        exchange_codes=None,
+        all_supported=False,
         output_csv=None,
-        exchange_code="NYSE",
     )
     assert rc == 0
     output = capsys.readouterr().out
@@ -2707,21 +2723,26 @@ def test_cmd_report_metric_failures_uses_highest_market_cap_example(tmp_path, ca
 
 def test_cmd_report_metric_failures_with_exchange(tmp_path, capsys):
     db_path = tmp_path / "failures_exchange.db"
-    universe_repo = UniverseRepository(db_path)
-    universe_repo.initialize_schema()
-    universe_repo.replace_universe(
-        [Listing(symbol="AAA.LSE", security_name="AAA PLC", exchange="LSE")]
+    store_catalog_listings(
+        db_path,
+        "LSE",
+        [Listing(symbol="AAA.LSE", security_name="AAA PLC", exchange="LSE")],
+        provider="EODHD",
     )
-    universe_repo.replace_universe(
-        [Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE")]
+    store_catalog_listings(
+        db_path,
+        "US",
+        [Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE")],
+        provider="SEC",
     )
 
     rc = cli.cmd_report_metric_failures(
         database=str(db_path),
         metric_ids=["working_capital"],
         symbols=None,
+        exchange_codes=["LSE"],
+        all_supported=False,
         output_csv=None,
-        exchange_code="LSE",
     )
     assert rc == 0
     output = capsys.readouterr().out

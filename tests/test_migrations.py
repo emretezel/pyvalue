@@ -38,15 +38,20 @@ def test_migration_updates_listings_primary_key(tmp_path):
     assert applied >= 1
 
     with sqlite3.connect(db_path) as conn:
-        info = conn.execute("PRAGMA table_info(listings)").fetchall()
-        pk_cols = [row[1] for row in info if row[5]]
-        columns = {row[1] for row in info}
-        rows = conn.execute("SELECT symbol FROM listings").fetchall()
+        listings_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='listings'"
+        ).fetchone()
+        rows = conn.execute(
+            """
+            SELECT provider, provider_exchange_code, provider_symbol, provider_ticker,
+                   listing_exchange, security_type
+            FROM supported_tickers
+            """
+        ).fetchall()
         version = conn.execute("SELECT version FROM schema_migrations").fetchone()[0]
 
-        assert pk_cols == ["symbol"]
-        assert "region" not in columns
-        assert rows == [("ABC.NYSE",)]
+        assert listings_exists is None
+        assert rows == [("SEC", "US", "ABC.US", "ABC", "NYSE", "Common Stock")]
     assert version == len(MIGRATIONS)
 
 
@@ -78,7 +83,8 @@ def test_migration_creates_supported_exchanges_table(tmp_path):
 
     assert columns == {
         "provider",
-        "code",
+        "provider_exchange_code",
+        "canonical_exchange_code",
         "name",
         "country",
         "currency",
@@ -87,7 +93,7 @@ def test_migration_creates_supported_exchanges_table(tmp_path):
         "country_iso3",
         "updated_at",
     }
-    assert pk_cols == ["provider", "code"]
+    assert pk_cols == ["provider", "provider_exchange_code"]
 
 
 def test_migration_creates_supported_tickers_table(tmp_path):
@@ -108,9 +114,10 @@ def test_migration_creates_supported_tickers_table(tmp_path):
 
     assert columns == {
         "provider",
-        "exchange_code",
-        "symbol",
-        "code",
+        "provider_symbol",
+        "provider_ticker",
+        "provider_exchange_code",
+        "security_id",
         "listing_exchange",
         "security_name",
         "security_type",
@@ -119,7 +126,7 @@ def test_migration_creates_supported_tickers_table(tmp_path):
         "isin",
         "updated_at",
     }
-    assert pk_cols == ["provider", "symbol"]
+    assert pk_cols == ["provider", "provider_symbol"]
     assert "idx_supported_tickers_provider_exchange" in index_names
 
 
@@ -141,12 +148,67 @@ def test_migration_creates_market_data_fetch_state_table(tmp_path):
 
     assert columns == {
         "provider",
-        "symbol",
+        "provider_symbol",
         "last_fetched_at",
         "last_status",
         "last_error",
         "next_eligible_at",
         "attempts",
     }
-    assert pk_cols == ["provider", "symbol"]
+    assert pk_cols == ["provider", "provider_symbol"]
     assert "idx_market_data_fetch_next" in index_names
+
+
+def test_migration_does_not_overwrite_existing_supported_tickers(tmp_path):
+    db_path = tmp_path / "supported-tickers-backfill.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        _create_legacy_listings_table(conn)
+        conn.execute(
+            """
+            CREATE TABLE supported_tickers (
+                provider TEXT NOT NULL,
+                exchange_code TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                code TEXT NOT NULL,
+                listing_exchange TEXT,
+                security_name TEXT,
+                security_type TEXT,
+                country TEXT,
+                currency TEXT,
+                isin TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (provider, symbol)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO supported_tickers (
+                provider, exchange_code, symbol, code, listing_exchange,
+                security_name, security_type, country, currency, isin, updated_at
+            ) VALUES (
+                'SEC', 'US', 'ABC.NYSE', 'ABC', 'NYSE',
+                'Preserved Name', 'ETF', NULL, NULL, NULL, '2024-01-01T00:00:00+00:00'
+            )
+            """
+        )
+        conn.execute("CREATE TABLE schema_migrations (version INTEGER NOT NULL)")
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (20)")
+
+    applied = apply_migrations(db_path)
+
+    assert applied == 2
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT security_name, security_type
+            FROM supported_tickers
+            WHERE provider = 'SEC' AND provider_symbol = 'ABC.US'
+            """
+        ).fetchone()
+        listings_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='listings'"
+        ).fetchone()
+
+    assert row == ("Preserved Name", "ETF")
+    assert listings_exists is None

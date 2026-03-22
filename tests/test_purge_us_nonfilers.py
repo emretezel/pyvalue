@@ -1,18 +1,20 @@
 """Tests for purge-us-nonfilers CLI."""
 
 from pyvalue.cli import cmd_purge_us_nonfilers
-from pyvalue.storage import FundamentalsRepository, UniverseRepository
+from pyvalue.storage import FundamentalsRepository, SupportedTickerRepository
 from pyvalue.universe import Listing
 
 
 def _seed_universe(db_path):
-    universe = UniverseRepository(db_path)
+    universe = SupportedTickerRepository(db_path)
     universe.initialize_schema()
-    universe.replace_universe(
+    universe.replace_from_listings(
+        "SEC",
+        "US",
         [
             Listing(symbol="FILER.US", security_name="Filer", exchange="NASDAQ"),
             Listing(symbol="NONFILER.US", security_name="NonFiler", exchange="NYSE"),
-        ]
+        ],
     )
 
 
@@ -53,11 +55,14 @@ def test_purge_us_nonfilers_dry_run(tmp_path, capsys):
     assert exit_code == 0
     output = capsys.readouterr().out
     assert "NONFILER.US" in output
-    # Ensure listings intact
-    universe = UniverseRepository(db_path)
+    universe = SupportedTickerRepository(db_path)
     with universe._connect() as conn:
         count = conn.execute(
-            "SELECT COUNT(*) FROM listings WHERE symbol LIKE '%.US'"
+            """
+            SELECT COUNT(*)
+            FROM supported_tickers
+            WHERE provider = 'SEC' AND provider_exchange_code = 'US'
+            """
         ).fetchone()[0]
     assert count == 2
 
@@ -70,12 +75,16 @@ def test_purge_us_nonfilers_apply(tmp_path):
     exit_code = cmd_purge_us_nonfilers(database=str(db_path), apply=True)
 
     assert exit_code == 0
-    universe = UniverseRepository(db_path)
+    universe = SupportedTickerRepository(db_path)
     with universe._connect() as conn:
         symbols = [
             row[0]
             for row in conn.execute(
-                "SELECT symbol FROM listings WHERE symbol LIKE '%.US'"
+                """
+                SELECT provider_symbol
+                FROM supported_tickers
+                WHERE provider = 'SEC' AND provider_exchange_code = 'US'
+                """
             )
         ]
     assert symbols == ["FILER.US"]

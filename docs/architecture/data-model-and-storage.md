@@ -5,8 +5,8 @@
 `pyvalue` stores operational data in SQLite.
 
 The main persisted layers are:
-- listings / universe data
 - supported exchange catalogs
+- canonical security identities
 - supported ticker catalogs
 - raw fundamentals
 - fundamentals fetch state
@@ -25,6 +25,8 @@ Purpose:
 - preserve source payloads as received
 - support re-normalization when normalization logic changes
 - separate provider-fetch concerns from metric computation
+- keep provider-local fetch keys such as `provider_symbol` and `provider_exchange_code`
+- map each raw payload to canonical `security_id`
 
 ### `supported_exchanges`
 
@@ -32,21 +34,34 @@ Provider-published exchange catalogs live here.
 
 Purpose:
 - cache provider exchange metadata such as code, country, currency, and MIC
+- map provider exchange codes to canonical exchange codes
 - avoid re-fetching exchange-list metadata on every EODHD lookup
 - support explicit catalog refreshes from the CLI
 
-### `supported_tickers`
+### `securities`
 
-Provider-published ticker catalogs live here, keyed by provider and qualified symbol.
+Canonical security identities live here.
 
 Purpose:
-- cache the EODHD exchange symbol list by exchange code
-- store the fetchable qualified ticker symbol such as `AAPL.US` or `SHEL.LSE`
-- drive exchange-level and global EODHD fundamentals ingestion without a live symbol-list call
-- mirror the currently supported EODHD equity ticker set into `listings` for exchange workflows
+- provide the provider-agnostic key used by downstream tables
+- define security identity as `canonical_ticker + canonical_exchange_code`
+- store display metadata such as `entity_name` and `description`
+- keep canonical symbol display stable even when provider-specific symbol formats differ
 
-When a provider drops a symbol, it is removed from this operational catalog and
-from mirrored `listings`, but historical raw and derived tables are retained.
+### `supported_tickers`
+
+Provider-published ticker catalogs live here, keyed by provider and provider symbol.
+
+Purpose:
+- cache provider-published symbol catalogs by provider and exchange
+- store provider-local fetch keys such as `provider_symbol`, `provider_ticker`,
+  and `provider_exchange_code`
+- link each provider row to canonical `security_id`
+- drive exchange-level and all-supported provider workflows from one operational catalog table
+- store SEC US universe membership and EODHD exchange membership in the same layer
+
+When a provider drops a symbol, it is removed from this operational catalog, but
+historical raw and derived tables are retained.
 
 ### `fundamentals_fetch_state`
 
@@ -65,6 +80,8 @@ Purpose:
 - give metrics a common input model
 - isolate metric logic from SEC vs EODHD raw schemas
 - store concept, fiscal period, end date, unit/currency, and value
+- key facts by canonical `security_id`
+- retain `source_provider` for provenance
 
 ### `market_data`
 
@@ -73,6 +90,8 @@ Stores latest quote and market-cap snapshot information.
 Purpose:
 - support market-cap and EV-based valuation metrics
 - decouple market refresh cadence from fundamentals cadence
+- store canonical rows keyed by `security_id`
+- retain `source_provider` for provenance
 
 ### `market_data_fetch_state`
 
@@ -90,19 +109,19 @@ Stores computed metric results.
 Purpose:
 - cache reusable metric outputs
 - support bulk screen runs without recomputing everything on demand
+- keep downstream computation provider-agnostic through `security_id`
 
 ## Persistence Flow
 
 A normal run looks like:
 
-1. provider catalogs refreshed into `supported_exchanges` and `supported_tickers`
-2. universe loaded or mirrored into `listings`
-3. raw payload fetched into `fundamentals_raw`
-4. provider-specific normalizer writes `financial_facts`
-5. market refresh writes `market_data`
-6. retry/backoff state updates `fundamentals_fetch_state` and `market_data_fetch_state`
-7. metric computation writes `metrics`
-8. screens read from stored metrics
+1. provider catalogs refreshed into `supported_exchanges`, `securities`, and `supported_tickers`
+2. raw fundamentals fetched into `fundamentals_raw`
+3. provider-specific normalization writes canonical `financial_facts`
+4. market refresh writes canonical `market_data`
+5. retry/backoff state updates `fundamentals_fetch_state` and `market_data_fetch_state`
+6. metric computation writes `metrics`
+7. screens read from canonical metrics
 
 ## Migration Notes
 

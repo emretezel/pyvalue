@@ -36,18 +36,19 @@ Typical causes:
 Useful commands:
 
 ```bash
-pyvalue report-fact-freshness --exchange-code US
-pyvalue report-metric-coverage --exchange-code US
-pyvalue report-metric-failures --exchange-code US
+pyvalue report-fact-freshness --exchange-codes US
+pyvalue report-metric-coverage --exchange-codes US
+pyvalue report-metric-failures --exchange-codes US
 ```
 
-## No Listings Found
+## No Supported Tickers Found
 
 Typical cause:
-- you tried a bulk workflow before loading the universe
+- you tried a provider/exchange bulk workflow before refreshing or loading the canonical catalog
 
 Fix:
-- run `load-universe` first for the target exchange/provider
+- SEC: run `refresh-supported-exchanges --provider SEC` and `refresh-supported-tickers --provider SEC --exchange-codes US`
+- EODHD: run `refresh-supported-exchanges --provider EODHD` and `refresh-supported-tickers --provider EODHD --exchange-codes <CODE>`
 
 ## No Eligible Supported Tickers Found
 
@@ -58,14 +59,14 @@ Fix:
 
 ```bash
 pyvalue refresh-supported-exchanges --provider EODHD
-pyvalue refresh-supported-tickers --provider EODHD --exchange-code US
-pyvalue ingest-fundamentals-bulk --provider EODHD --exchange-code US
+pyvalue refresh-supported-tickers --provider EODHD --exchange-codes US
+pyvalue ingest-fundamentals --provider EODHD --exchange-codes US
 ```
 
 To see whether a larger global run is done, stale, or blocked by retry backoff:
 
 ```bash
-pyvalue report-ingest-progress --provider EODHD
+pyvalue report-fundamentals-progress --provider EODHD
 ```
 
 In that summary, `Stored` means a fundamentals payload exists in the DB, while
@@ -83,7 +84,7 @@ Typical causes:
 Useful commands:
 
 ```bash
-pyvalue update-market-data-global --provider EODHD --resume
+pyvalue update-market-data --provider EODHD --all-supported --resume
 pyvalue report-market-data-progress --provider EODHD
 ```
 
@@ -100,8 +101,8 @@ Typical causes:
 Fix:
 
 ```bash
-pyvalue update-market-data-bulk --exchange-code US
-pyvalue recalc-market-cap --exchange-code US
+pyvalue update-market-data --provider EODHD --exchange-codes US
+pyvalue recalc-market-cap --exchange-codes US
 ```
 
 ## Stale Data

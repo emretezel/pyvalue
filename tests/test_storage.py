@@ -6,7 +6,6 @@ from pyvalue.storage import (
     MarketDataRepository,
     SupportedExchangeRepository,
     SupportedTickerRepository,
-    UniverseRepository,
 )
 from pyvalue.universe import Listing
 
@@ -32,45 +31,58 @@ def _listing(symbol: str, is_etf: bool = False) -> Listing:
     )
 
 
-def test_replace_universe_persists_rows(tmp_path):
-    # Persist two listings and verify that they can be read back from SQLite.
-    repo = UniverseRepository(tmp_path / "universe.db")
+def test_supported_ticker_repository_replace_from_listings_persists_rows(tmp_path):
+    repo = SupportedTickerRepository(tmp_path / "universe.db")
     repo.initialize_schema()
 
-    inserted = repo.replace_universe([_listing("AAA"), _listing("BBB", is_etf=True)])
+    inserted = repo.replace_from_listings(
+        "SEC",
+        "US",
+        [_listing("AAA"), _listing("BBB", is_etf=True)],
+    )
 
     assert inserted == 2
 
     with sqlite3.connect(tmp_path / "universe.db") as conn:
         rows = conn.execute(
-            "SELECT symbol, exchange, is_etf FROM listings ORDER BY symbol"
+            """
+            SELECT provider_symbol, provider_exchange_code, listing_exchange, security_type
+            FROM supported_tickers
+            ORDER BY provider_symbol
+            """
         ).fetchall()
 
-    assert rows == [("AAA.US", "NYSE", 0), ("BBB.US", "NYSE", 1)]
+    assert rows == [
+        ("AAA.US", "US", "NYSE", "Common Stock"),
+        ("BBB.US", "US", "NYSE", "ETF"),
+    ]
 
 
-def test_replace_universe_overwrites_previous_data(tmp_path):
-    # Insert a listing twice and ensure the second call replaces the first batch.
-    repo = UniverseRepository(tmp_path / "universe.db")
+def test_supported_ticker_repository_replace_from_listings_overwrites_exchange_slice(
+    tmp_path,
+):
+    repo = SupportedTickerRepository(tmp_path / "universe.db")
     repo.initialize_schema()
 
-    repo.replace_universe([_listing("AAA")])
-    repo.replace_universe([_listing("CCC")])
+    repo.replace_from_listings("SEC", "US", [_listing("AAA")])
+    repo.replace_from_listings("SEC", "US", [_listing("CCC")])
 
     with sqlite3.connect(tmp_path / "universe.db") as conn:
-        rows = conn.execute("SELECT symbol FROM listings ORDER BY symbol").fetchall()
+        rows = conn.execute(
+            "SELECT provider_symbol FROM supported_tickers ORDER BY provider_symbol"
+        ).fetchall()
 
     assert rows == [("CCC.US",)]
 
 
-def test_universe_repository_fetch_symbols_initializes_schema(tmp_path):
-    repo = UniverseRepository(tmp_path / "universe.db")
+def test_supported_ticker_repository_list_symbols_initializes_schema(tmp_path):
+    repo = SupportedTickerRepository(tmp_path / "universe.db")
 
-    assert repo.fetch_symbols_by_exchange("NYSE") == []
+    assert repo.list_symbols_by_exchange("SEC", "US") == []
 
 
-def test_universe_repository_normalizes_exchange(tmp_path):
-    repo = UniverseRepository(tmp_path / "universe.db")
+def test_supported_ticker_repository_normalizes_exchange_and_fetches_currency(tmp_path):
+    repo = SupportedTickerRepository(tmp_path / "universe.db")
     repo.initialize_schema()
     listing = Listing(
         symbol="FOO.LSE",
@@ -84,10 +96,11 @@ def test_universe_repository_normalizes_exchange(tmp_path):
         isin="GB00TEST",
         currency="GBP",
     )
-    repo.replace_universe([listing])
+    repo.replace_from_listings("EODHD", "LSE", [listing])
 
-    assert repo.fetch_symbols_by_exchange("LSE") == ["FOO.LSE"]
-    assert repo.fetch_symbols_by_exchange("lse") == ["FOO.LSE"]
+    assert repo.list_symbols_by_exchange("EODHD", "LSE") == ["FOO.LSE"]
+    assert repo.list_symbols_by_exchange("eodhd", "lse") == ["FOO.LSE"]
+    assert repo.fetch_currency("FOO.LSE", provider="EODHD") == "GBP"
 
 
 def test_fundamentals_repository_normalizes_provider(tmp_path):
@@ -120,10 +133,13 @@ def test_supported_exchange_repository_replaces_rows_per_provider(tmp_path):
     )
 
     assert inserted == 1
-    rows = repo.list_all()
+    rows = repo.list_all("EODHD")
     assert [(row.provider, row.code, row.name) for row in rows] == [
         ("EODHD", "LSE", "London Exchange Refreshed"),
-        ("OTHER", "TSX", "Toronto Exchange"),
+    ]
+    other_rows = repo.list_all("OTHER")
+    assert [(row.provider, row.code, row.name) for row in other_rows] == [
+        ("OTHER", "TSX", "Toronto Exchange")
     ]
 
 
