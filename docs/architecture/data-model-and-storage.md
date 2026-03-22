@@ -12,6 +12,7 @@ The main persisted layers are:
 - fundamentals fetch state
 - normalized financial facts
 - market data snapshots
+- market data fetch state
 - computed metrics
 
 ## Core Tables
@@ -73,6 +74,15 @@ Purpose:
 - support market-cap and EV-based valuation metrics
 - decouple market refresh cadence from fundamentals cadence
 
+### `market_data_fetch_state`
+
+Operational market-data refresh progress and retry backoff live here.
+
+Purpose:
+- track retry state for failed market-data fetches
+- support resumable global market-data refreshes
+- avoid repeatedly hitting symbols that are still inside backoff
+
 ### `metrics`
 
 Stores computed metric results.
@@ -90,8 +100,9 @@ A normal run looks like:
 3. raw payload fetched into `fundamentals_raw`
 4. provider-specific normalizer writes `financial_facts`
 5. market refresh writes `market_data`
-6. metric computation writes `metrics`
-7. screens read from stored metrics
+6. retry/backoff state updates `fundamentals_fetch_state` and `market_data_fetch_state`
+7. metric computation writes `metrics`
+8. screens read from stored metrics
 
 ## Migration Notes
 

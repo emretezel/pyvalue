@@ -681,6 +681,31 @@ def _migration_019_create_supported_tickers(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_020_create_market_data_fetch_state(conn: sqlite3.Connection) -> None:
+    """Track market-data fetch status for resumable ingestion."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_data_fetch_state (
+            provider TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            last_fetched_at TEXT,
+            last_status TEXT,
+            last_error TEXT,
+            next_eligible_at TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (provider, symbol)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_data_fetch_next
+        ON market_data_fetch_state(provider, next_eligible_at)
+        """
+    )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -701,6 +726,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_017_add_description_to_entity_metadata,
     _migration_018_create_supported_exchanges,
     _migration_019_create_supported_tickers,
+    _migration_020_create_market_data_fetch_state,
 ]
 
 

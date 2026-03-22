@@ -2,6 +2,8 @@ import sqlite3
 
 from pyvalue.storage import (
     FundamentalsRepository,
+    MarketDataFetchStateRepository,
+    MarketDataRepository,
     SupportedExchangeRepository,
     SupportedTickerRepository,
     UniverseRepository,
@@ -222,3 +224,58 @@ def test_supported_ticker_repository_lists_eligible_symbols(tmp_path):
     )
 
     assert [row.symbol for row in rows] == ["BBB.LSE"]
+
+
+def test_supported_ticker_repository_lists_market_data_symbols_missing_then_oldest(
+    tmp_path,
+):
+    db_path = tmp_path / "supported-market-data.db"
+    repo = SupportedTickerRepository(db_path)
+    repo.initialize_schema()
+    repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [
+            {"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock"},
+            {"Code": "BBB", "Name": "BBB Inc", "Type": "Common Stock"},
+            {"Code": "CCC", "Name": "CCC Inc", "Type": "Common Stock"},
+            {"Code": "DDD", "Name": "DDD Inc", "Type": "Common Stock"},
+        ],
+    )
+
+    market_repo = MarketDataRepository(db_path)
+    market_repo.initialize_schema()
+    market_repo.upsert_price("BBB.US", "2026-03-21", 10.0)
+    market_repo.upsert_price("CCC.US", "2026-03-01", 10.0)
+    market_repo.upsert_price("DDD.US", "2026-03-10", 10.0)
+
+    rows = repo.list_eligible_for_market_data(
+        "EODHD",
+        exchange_codes=["US"],
+        max_age_days=7,
+    )
+
+    assert [row.symbol for row in rows] == ["AAA.US", "CCC.US", "DDD.US"]
+
+
+def test_market_data_fetch_state_repository_tracks_success_and_failure(tmp_path):
+    repo = MarketDataFetchStateRepository(tmp_path / "market-state.db")
+    repo.initialize_schema()
+
+    repo.mark_failure("eodhd", "aaa.us", "boom", base_backoff_seconds=60)
+    failed = repo.fetch("EODHD", "AAA.US")
+
+    assert failed is not None
+    assert failed["last_status"] == "error"
+    assert failed["last_error"] == "boom"
+    assert failed["attempts"] == 1
+    assert failed["next_eligible_at"] is not None
+
+    repo.mark_success("EODHD", "AAA.US")
+    success = repo.fetch("eodhd", "aaa.us")
+
+    assert success is not None
+    assert success["last_status"] == "ok"
+    assert success["last_error"] is None
+    assert success["next_eligible_at"] is None
+    assert success["attempts"] == 0

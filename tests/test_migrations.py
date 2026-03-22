@@ -121,3 +121,32 @@ def test_migration_creates_supported_tickers_table(tmp_path):
     }
     assert pk_cols == ["provider", "symbol"]
     assert "idx_supported_tickers_provider_exchange" in index_names
+
+
+def test_migration_creates_market_data_fetch_state_table(tmp_path):
+    db_path = tmp_path / "market-data-fetch-state.sqlite"
+
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0
+
+    with sqlite3.connect(db_path) as conn:
+        info = conn.execute("PRAGMA table_info(market_data_fetch_state)").fetchall()
+        columns = {row[1] for row in info}
+        pk_cols = [row[1] for row in info if row[5]]
+        indexes = conn.execute("PRAGMA index_list(market_data_fetch_state)").fetchall()
+        index_names = {row[1] for row in indexes}
+
+    assert columns == {
+        "provider",
+        "symbol",
+        "last_fetched_at",
+        "last_status",
+        "last_error",
+        "next_eligible_at",
+        "attempts",
+    }
+    assert pk_cols == ["provider", "symbol"]
+    assert "idx_market_data_fetch_next" in index_names

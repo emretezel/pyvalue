@@ -527,6 +527,11 @@ class SupportedTickerRepository(SQLiteStore):
                 ON supported_tickers(provider, exchange_code)
                 """
             )
+        # Progress and eligibility queries join against these operational tables.
+        FundamentalsRepository(self.db_path).initialize_schema()
+        FundamentalsFetchStateRepository(self.db_path).initialize_schema()
+        MarketDataRepository(self.db_path).initialize_schema()
+        MarketDataFetchStateRepository(self.db_path).initialize_schema()
 
     def replace_for_exchange(
         self,
@@ -854,6 +859,204 @@ class SupportedTickerRepository(SQLiteStore):
             for row in rows
         ]
 
+    def list_eligible_for_market_data(
+        self,
+        provider: str,
+        exchange_codes: Optional[Sequence[str]] = None,
+        max_age_days: int = 7,
+        max_symbols: Optional[int] = None,
+        resume: bool = False,
+    ) -> List[SupportedTicker]:
+        """Return ticker rows eligible for market-data refresh."""
+
+        self.initialize_schema()
+        provider_norm = provider.strip().upper()
+        now = datetime.now(timezone.utc)
+        cutoff = (now.date() - timedelta(days=max_age_days)).isoformat()
+        params: List[object] = [provider_norm, provider_norm]
+        query = [
+            "SELECT st.provider, st.exchange_code, st.symbol, st.code, st.listing_exchange,",
+            "st.security_name, st.security_type, st.country, st.currency, st.isin, st.updated_at",
+            "FROM supported_tickers st",
+            "LEFT JOIN (",
+            "    SELECT symbol, MAX(as_of) AS latest_as_of",
+            "    FROM market_data",
+            "    GROUP BY symbol",
+            ") md ON md.symbol = st.symbol",
+            "LEFT JOIN market_data_fetch_state ms ON ms.symbol = st.symbol AND ms.provider = ?",
+            "WHERE UPPER(st.provider) = ?",
+        ]
+        normalized = self._normalized_exchange_codes(exchange_codes)
+        if normalized:
+            placeholders = ", ".join("?" for _ in normalized)
+            query.append(f"AND UPPER(st.exchange_code) IN ({placeholders})")
+            params.extend(normalized)
+        query.append("AND (md.latest_as_of IS NULL OR md.latest_as_of <= ?)")
+        params.append(cutoff)
+        if resume:
+            query.append(
+                "AND (ms.next_eligible_at IS NULL OR ms.next_eligible_at <= ?)"
+            )
+            params.append(now.isoformat())
+        query.append(
+            "ORDER BY CASE WHEN md.latest_as_of IS NULL THEN 0 ELSE 1 END, md.latest_as_of ASC, st.exchange_code ASC, st.symbol ASC"
+        )
+        if max_symbols is not None:
+            query.append("LIMIT ?")
+            params.append(max_symbols)
+        sql = " ".join(query)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [SupportedTicker(*row) for row in rows]
+
+    def market_data_progress_summary(
+        self,
+        provider: str,
+        exchange_codes: Optional[Sequence[str]] = None,
+        max_age_days: int = 7,
+    ) -> IngestProgressSummary:
+        """Return aggregate market-data progress counts for the requested scope."""
+
+        self.initialize_schema()
+        provider_norm = provider.strip().upper()
+        now = datetime.now(timezone.utc).isoformat()
+        cutoff = (
+            datetime.now(timezone.utc).date() - timedelta(days=max_age_days)
+        ).isoformat()
+        params: List[object] = [cutoff, now, provider_norm, provider_norm]
+        query = [
+            "SELECT",
+            "COUNT(*) AS total_supported,",
+            "SUM(CASE WHEN md.latest_as_of IS NOT NULL THEN 1 ELSE 0 END) AS stored,",
+            "SUM(CASE WHEN md.latest_as_of IS NULL THEN 1 ELSE 0 END) AS missing,",
+            "SUM(CASE WHEN md.latest_as_of IS NOT NULL AND md.latest_as_of <= ? THEN 1 ELSE 0 END) AS stale,",
+            "SUM(CASE WHEN ms.next_eligible_at IS NOT NULL AND ms.next_eligible_at > ? THEN 1 ELSE 0 END) AS blocked,",
+            "SUM(CASE WHEN ms.last_status = 'error' THEN 1 ELSE 0 END) AS error_rows",
+            "FROM supported_tickers st",
+            "LEFT JOIN (",
+            "    SELECT symbol, MAX(as_of) AS latest_as_of",
+            "    FROM market_data",
+            "    GROUP BY symbol",
+            ") md ON md.symbol = st.symbol",
+            "LEFT JOIN market_data_fetch_state ms ON ms.symbol = st.symbol AND ms.provider = ?",
+            "WHERE UPPER(st.provider) = ?",
+        ]
+        normalized = self._normalized_exchange_codes(exchange_codes)
+        if normalized:
+            placeholders = ", ".join("?" for _ in normalized)
+            query.append(f"AND UPPER(st.exchange_code) IN ({placeholders})")
+            params.extend(normalized)
+        sql = " ".join(query)
+        with self._connect() as conn:
+            row = conn.execute(sql, params).fetchone()
+        return IngestProgressSummary(
+            total_supported=self._coerce_int(row["total_supported"] if row else 0),
+            stored=self._coerce_int(row["stored"] if row else 0),
+            missing=self._coerce_int(row["missing"] if row else 0),
+            stale=self._coerce_int(row["stale"] if row else 0),
+            blocked=self._coerce_int(row["blocked"] if row else 0),
+            error_rows=self._coerce_int(row["error_rows"] if row else 0),
+        )
+
+    def market_data_progress_by_exchange(
+        self,
+        provider: str,
+        exchange_codes: Optional[Sequence[str]] = None,
+        max_age_days: int = 7,
+    ) -> List[IngestProgressExchange]:
+        """Return per-exchange market-data progress counts for the requested scope."""
+
+        self.initialize_schema()
+        provider_norm = provider.strip().upper()
+        now = datetime.now(timezone.utc).isoformat()
+        cutoff = (
+            datetime.now(timezone.utc).date() - timedelta(days=max_age_days)
+        ).isoformat()
+        params: List[object] = [cutoff, now, provider_norm, provider_norm]
+        query = [
+            "SELECT",
+            "st.exchange_code,",
+            "COUNT(*) AS total_supported,",
+            "SUM(CASE WHEN md.latest_as_of IS NOT NULL THEN 1 ELSE 0 END) AS stored,",
+            "SUM(CASE WHEN md.latest_as_of IS NULL THEN 1 ELSE 0 END) AS missing,",
+            "SUM(CASE WHEN md.latest_as_of IS NOT NULL AND md.latest_as_of <= ? THEN 1 ELSE 0 END) AS stale,",
+            "SUM(CASE WHEN ms.next_eligible_at IS NOT NULL AND ms.next_eligible_at > ? THEN 1 ELSE 0 END) AS blocked,",
+            "SUM(CASE WHEN ms.last_status = 'error' THEN 1 ELSE 0 END) AS error_rows",
+            "FROM supported_tickers st",
+            "LEFT JOIN (",
+            "    SELECT symbol, MAX(as_of) AS latest_as_of",
+            "    FROM market_data",
+            "    GROUP BY symbol",
+            ") md ON md.symbol = st.symbol",
+            "LEFT JOIN market_data_fetch_state ms ON ms.symbol = st.symbol AND ms.provider = ?",
+            "WHERE UPPER(st.provider) = ?",
+        ]
+        normalized = self._normalized_exchange_codes(exchange_codes)
+        if normalized:
+            placeholders = ", ".join("?" for _ in normalized)
+            query.append(f"AND UPPER(st.exchange_code) IN ({placeholders})")
+            params.extend(normalized)
+        query.append("GROUP BY st.exchange_code")
+        query.append("ORDER BY st.exchange_code")
+        sql = " ".join(query)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [
+            IngestProgressExchange(
+                exchange_code=row["exchange_code"],
+                total_supported=self._coerce_int(row["total_supported"]),
+                stored=self._coerce_int(row["stored"]),
+                missing=self._coerce_int(row["missing"]),
+                stale=self._coerce_int(row["stale"]),
+                blocked=self._coerce_int(row["blocked"]),
+                error_rows=self._coerce_int(row["error_rows"]),
+            )
+            for row in rows
+        ]
+
+    def recent_market_data_failures(
+        self,
+        provider: str,
+        exchange_codes: Optional[Sequence[str]] = None,
+        limit: int = 10,
+    ) -> List[IngestProgressFailure]:
+        """Return recent market-data failures for the requested scope."""
+
+        self.initialize_schema()
+        provider_norm = provider.strip().upper()
+        params: List[object] = [provider_norm, provider_norm]
+        query = [
+            "SELECT st.symbol, st.exchange_code, ms.last_status, ms.last_error,",
+            "ms.next_eligible_at, ms.attempts",
+            "FROM supported_tickers st",
+            "JOIN market_data_fetch_state ms ON ms.symbol = st.symbol AND ms.provider = ?",
+            "WHERE UPPER(st.provider) = ? AND ms.last_status = 'error'",
+        ]
+        normalized = self._normalized_exchange_codes(exchange_codes)
+        if normalized:
+            placeholders = ", ".join("?" for _ in normalized)
+            query.append(f"AND UPPER(st.exchange_code) IN ({placeholders})")
+            params.extend(normalized)
+        query.append(
+            "ORDER BY CASE WHEN ms.next_eligible_at IS NULL THEN 1 ELSE 0 END, ms.next_eligible_at ASC, st.symbol ASC"
+        )
+        query.append("LIMIT ?")
+        params.append(limit)
+        sql = " ".join(query)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [
+            IngestProgressFailure(
+                symbol=row["symbol"],
+                exchange_code=row["exchange_code"],
+                last_status=row["last_status"],
+                last_error=row["last_error"],
+                next_eligible_at=row["next_eligible_at"],
+                attempts=self._coerce_int(row["attempts"]),
+            )
+            for row in rows
+        ]
+
     @staticmethod
     def _normalize_optional_text(value: Any) -> Optional[str]:
         if value is None:
@@ -1015,6 +1218,152 @@ class FundamentalsFetchStateRepository(SQLiteStore):
             cursor = conn.execute(
                 f"""
                 DELETE FROM fundamentals_fetch_state
+                WHERE UPPER(provider) = ? AND symbol IN ({placeholders})
+                """,
+                [provider_norm, *normalized],
+            )
+        return int(cursor.rowcount or 0)
+
+
+class MarketDataFetchStateRepository(SQLiteStore):
+    """Track market-data fetch status for resumable ingestion."""
+
+    def initialize_schema(self) -> None:
+        apply_migrations(self.db_path)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS market_data_fetch_state (
+                    provider TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    last_fetched_at TEXT,
+                    last_status TEXT,
+                    last_error TEXT,
+                    next_eligible_at TEXT,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (provider, symbol)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_market_data_fetch_next
+                ON market_data_fetch_state(provider, next_eligible_at)
+                """
+            )
+
+    def fetch(
+        self, provider: str, symbol: str
+    ) -> Optional[Dict[str, Optional[str] | int]]:
+        self.initialize_schema()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT last_fetched_at, last_status, last_error, next_eligible_at, attempts
+                FROM market_data_fetch_state
+                WHERE provider = ? AND symbol = ?
+                """,
+                (provider.upper(), symbol.upper()),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "last_fetched_at": row[0],
+            "last_status": row[1],
+            "last_error": row[2],
+            "next_eligible_at": row[3],
+            "attempts": row[4],
+        }
+
+    def mark_success(
+        self,
+        provider: str,
+        symbol: str,
+        fetched_at: Optional[str] = None,
+    ) -> None:
+        timestamp = fetched_at or datetime.now(timezone.utc).isoformat()
+        self.initialize_schema()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO market_data_fetch_state (
+                    provider,
+                    symbol,
+                    last_fetched_at,
+                    last_status,
+                    last_error,
+                    next_eligible_at,
+                    attempts
+                ) VALUES (?, ?, ?, 'ok', NULL, NULL, 0)
+                ON CONFLICT(provider, symbol) DO UPDATE SET
+                    last_fetched_at = excluded.last_fetched_at,
+                    last_status = 'ok',
+                    last_error = NULL,
+                    next_eligible_at = NULL,
+                    attempts = 0
+                """,
+                (provider.upper(), symbol.upper(), timestamp),
+            )
+
+    def mark_failure(
+        self,
+        provider: str,
+        symbol: str,
+        error: str,
+        base_backoff_seconds: int = 3600,
+        max_backoff_seconds: int = 86400,
+    ) -> None:
+        self.initialize_schema()
+        state = self.fetch(provider, symbol)
+        attempts_value = state.get("attempts") if state else 0
+        attempts = int(attempts_value or 0)
+        attempts += 1
+        backoff = min(base_backoff_seconds * (2 ** (attempts - 1)), max_backoff_seconds)
+        now = datetime.now(timezone.utc)
+        next_eligible_at = (now + timedelta(seconds=backoff)).isoformat()
+        last_fetched_at = state.get("last_fetched_at") if state else None
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO market_data_fetch_state (
+                    provider,
+                    symbol,
+                    last_fetched_at,
+                    last_status,
+                    last_error,
+                    next_eligible_at,
+                    attempts
+                ) VALUES (?, ?, ?, 'error', ?, ?, ?)
+                ON CONFLICT(provider, symbol) DO UPDATE SET
+                    last_fetched_at = COALESCE(excluded.last_fetched_at, market_data_fetch_state.last_fetched_at),
+                    last_status = 'error',
+                    last_error = excluded.last_error,
+                    next_eligible_at = excluded.next_eligible_at,
+                    attempts = excluded.attempts
+                """,
+                (
+                    provider.upper(),
+                    symbol.upper(),
+                    last_fetched_at,
+                    error,
+                    next_eligible_at,
+                    attempts,
+                ),
+            )
+
+    def delete_symbols(self, provider: str, symbols: Sequence[str]) -> int:
+        """Delete fetch-state rows for the given symbols."""
+
+        self.initialize_schema()
+        normalized = [symbol.strip().upper() for symbol in symbols if symbol.strip()]
+        if not normalized:
+            return 0
+        provider_norm = provider.strip().upper()
+        placeholders = ", ".join("?" for _ in normalized)
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"""
+                DELETE FROM market_data_fetch_state
                 WHERE UPPER(provider) = ? AND symbol IN ({placeholders})
                 """,
                 [provider_norm, *normalized],
@@ -1364,6 +1713,7 @@ __all__ = [
     "SupportedTicker",
     "SupportedTickerRepository",
     "FundamentalsFetchStateRepository",
+    "MarketDataFetchStateRepository",
     "FinancialFactsRepository",
     "MarketDataRepository",
     "FactRecord",

@@ -17,6 +17,7 @@ from pyvalue.storage import (
     FundamentalsFetchStateRepository,
     FinancialFactsRepository,
     FactRecord,
+    MarketDataFetchStateRepository,
     MarketDataRepository,
     MetricsRepository,
     SupportedExchangeRepository,
@@ -94,6 +95,13 @@ def store_supported_tickers(
     return repo
 
 
+def store_market_data(db_path, symbol: str, as_of: str, price: float = 10.0):
+    repo = MarketDataRepository(db_path)
+    repo.initialize_schema()
+    repo.upsert_price(symbol, as_of, price)
+    return repo
+
+
 def test_main_dispatches_report_ingest_progress_with_default_max_age_days(
     monkeypatch,
 ):
@@ -131,6 +139,66 @@ def test_build_parser_report_ingest_progress_missing_only():
     assert args.exchange_codes == ["US,LSE"]
     assert args.max_age_days == 30
     assert args.missing_only is True
+
+
+def test_main_dispatches_update_market_data_global_with_default_max_age_days(
+    monkeypatch,
+):
+    calls = {}
+
+    def fake_cmd(
+        provider, database, exchange_codes, rate, max_symbols, max_age_days, resume
+    ):
+        calls["provider"] = provider
+        calls["database"] = database
+        calls["exchange_codes"] = exchange_codes
+        calls["rate"] = rate
+        calls["max_symbols"] = max_symbols
+        calls["max_age_days"] = max_age_days
+        calls["resume"] = resume
+        return 0
+
+    monkeypatch.setattr(cli, "setup_logging", lambda: None)
+    monkeypatch.setattr(cli, "cmd_update_market_data_global", fake_cmd)
+
+    rc = cli.main(["update-market-data-global"])
+
+    assert rc == 0
+    assert calls == {
+        "provider": "EODHD",
+        "database": "data/pyvalue.db",
+        "exchange_codes": None,
+        "rate": None,
+        "max_symbols": None,
+        "max_age_days": 7,
+        "resume": False,
+    }
+
+
+def test_main_dispatches_report_market_data_progress_with_default_max_age_days(
+    monkeypatch,
+):
+    calls = {}
+
+    def fake_cmd(provider, database, exchange_codes, max_age_days):
+        calls["provider"] = provider
+        calls["database"] = database
+        calls["exchange_codes"] = exchange_codes
+        calls["max_age_days"] = max_age_days
+        return 0
+
+    monkeypatch.setattr(cli, "setup_logging", lambda: None)
+    monkeypatch.setattr(cli, "cmd_report_market_data_progress", fake_cmd)
+
+    rc = cli.main(["report-market-data-progress"])
+
+    assert rc == 0
+    assert calls == {
+        "provider": "EODHD",
+        "database": "data/pyvalue.db",
+        "exchange_codes": None,
+        "max_age_days": 7,
+    }
 
 
 def test_cmd_ingest_fundamentals_sec(monkeypatch, tmp_path):
@@ -1446,6 +1514,557 @@ def test_cmd_report_ingest_progress_succeeds_when_user_api_fails(
         exchange_codes=None,
         max_age_days=30,
         missing_only=False,
+    )
+
+    output = capsys.readouterr().out
+    assert rc == 0
+    assert "Quota:" in output
+    assert "- quota unavailable" in output
+
+
+def test_cmd_update_market_data_global_uses_supported_tickers(monkeypatch, tmp_path):
+    db_path = tmp_path / "global-market-data.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[
+            {"Code": "AAA", "Exchange": "US", "Type": "Common Stock"},
+            {"Code": "BBB", "Exchange": "US", "Type": "Common Stock"},
+        ],
+    )
+    calls = {"refreshed": []}
+    today = date.today().isoformat()
+
+    class FakeClient:
+        def __init__(self, api_key):
+            calls["api_key"] = api_key
+
+        def user_metadata(self):
+            return {
+                "dailyRateLimit": "1000",
+                "apiRequests": "0",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
+
+    class FakeService:
+        def __init__(self, db_path, config=None):
+            self.repo = MarketDataRepository(db_path)
+            self.repo.initialize_schema()
+            calls["config"] = config
+
+        def refresh_symbol(self, symbol):
+            calls["refreshed"].append(symbol)
+            self.repo.upsert_price(symbol, today, 10.0)
+            return SimpleNamespace(symbol=symbol, as_of=today, price=10.0)
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(cli, "MarketDataService", FakeService)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_api_key="TOKEN",
+            eodhd_market_data_daily_buffer_calls=0,
+            eodhd_market_data_requests_per_minute=950,
+        ),
+    )
+
+    rc = cli.cmd_update_market_data_global(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=None,
+        rate=None,
+        max_symbols=None,
+        max_age_days=7,
+        resume=False,
+    )
+
+    assert rc == 0
+    assert calls["api_key"] == "TOKEN"
+    assert calls["refreshed"] == ["AAA.US", "BBB.US"]
+    state_repo = MarketDataFetchStateRepository(db_path)
+    assert state_repo.fetch("EODHD", "AAA.US")["last_status"] == "ok"
+    assert state_repo.fetch("EODHD", "BBB.US")["last_status"] == "ok"
+
+
+def test_cmd_update_market_data_global_prefers_missing_then_oldest_stale(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "global-market-data-order.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[
+            {"Code": "AAA", "Exchange": "US", "Type": "Common Stock"},
+            {"Code": "BBB", "Exchange": "US", "Type": "Common Stock"},
+            {"Code": "CCC", "Exchange": "US", "Type": "Common Stock"},
+            {"Code": "DDD", "Exchange": "US", "Type": "Common Stock"},
+        ],
+    )
+    store_market_data(
+        db_path,
+        "BBB.US",
+        (date.today() - timedelta(days=30)).isoformat(),
+    )
+    store_market_data(
+        db_path,
+        "CCC.US",
+        (date.today() - timedelta(days=12)).isoformat(),
+    )
+    store_market_data(
+        db_path,
+        "DDD.US",
+        (date.today() - timedelta(days=1)).isoformat(),
+    )
+    calls = {"refreshed": []}
+    today = date.today().isoformat()
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+
+        def user_metadata(self):
+            return {
+                "dailyRateLimit": "1000",
+                "apiRequests": "0",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
+
+    class FakeService:
+        def __init__(self, db_path, config=None):
+            self.repo = MarketDataRepository(db_path)
+            self.repo.initialize_schema()
+
+        def refresh_symbol(self, symbol):
+            calls["refreshed"].append(symbol)
+            self.repo.upsert_price(symbol, today, 10.0)
+            return SimpleNamespace(symbol=symbol, as_of=today, price=10.0)
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(cli, "MarketDataService", FakeService)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_api_key="TOKEN",
+            eodhd_market_data_daily_buffer_calls=0,
+            eodhd_market_data_requests_per_minute=950,
+        ),
+    )
+
+    rc = cli.cmd_update_market_data_global(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=None,
+        rate=None,
+        max_symbols=None,
+        max_age_days=7,
+        resume=False,
+    )
+
+    assert rc == 0
+    assert calls["refreshed"] == ["AAA.US", "BBB.US", "CCC.US"]
+
+
+def test_cmd_update_market_data_global_exits_cleanly_when_budget_exhausted(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "global-market-data-no-budget.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[{"Code": "AAA", "Exchange": "US", "Type": "Common Stock"}],
+    )
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+
+        def user_metadata(self):
+            return {
+                "dailyRateLimit": "100",
+                "apiRequests": "100",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
+
+    class FakeService:
+        def __init__(self, db_path, config=None):
+            raise AssertionError(
+                "No service should be created when the daily budget is 0."
+            )
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(cli, "MarketDataService", FakeService)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_api_key="TOKEN",
+            eodhd_market_data_daily_buffer_calls=0,
+            eodhd_market_data_requests_per_minute=950,
+        ),
+    )
+
+    rc = cli.cmd_update_market_data_global(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=None,
+        rate=None,
+        max_symbols=None,
+        max_age_days=7,
+        resume=False,
+    )
+
+    assert rc == 0
+    assert "No EODHD market data request budget available" in capsys.readouterr().out
+
+
+def test_cmd_update_market_data_global_rerun_fetches_remaining_missing_or_stale(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "global-market-data-rerun.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[
+            {"Code": "AAA", "Exchange": "US", "Type": "Common Stock"},
+            {"Code": "BBB", "Exchange": "US", "Type": "Common Stock"},
+        ],
+    )
+    calls = {"refreshed": []}
+    today = date.today().isoformat()
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+
+        def user_metadata(self):
+            return {
+                "dailyRateLimit": "1000",
+                "apiRequests": "0",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
+
+    class FakeService:
+        def __init__(self, db_path, config=None):
+            self.repo = MarketDataRepository(db_path)
+            self.repo.initialize_schema()
+
+        def refresh_symbol(self, symbol):
+            calls["refreshed"].append(symbol)
+            self.repo.upsert_price(symbol, today, 10.0)
+            return SimpleNamespace(symbol=symbol, as_of=today, price=10.0)
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(cli, "MarketDataService", FakeService)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_api_key="TOKEN",
+            eodhd_market_data_daily_buffer_calls=0,
+            eodhd_market_data_requests_per_minute=950,
+        ),
+    )
+
+    rc = cli.cmd_update_market_data_global(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=None,
+        rate=None,
+        max_symbols=1,
+        max_age_days=7,
+        resume=False,
+    )
+    assert rc == 0
+    assert calls["refreshed"] == ["AAA.US"]
+
+    calls["refreshed"].clear()
+    rc = cli.cmd_update_market_data_global(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=None,
+        rate=None,
+        max_symbols=None,
+        max_age_days=7,
+        resume=False,
+    )
+    assert rc == 0
+    assert calls["refreshed"] == ["BBB.US"]
+
+
+def test_cmd_update_market_data_global_resume_respects_backoff(monkeypatch, tmp_path):
+    db_path = tmp_path / "global-market-data-resume.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[
+            {"Code": "AAA", "Exchange": "US", "Type": "Common Stock"},
+            {"Code": "BBB", "Exchange": "US", "Type": "Common Stock"},
+        ],
+    )
+    state_repo = MarketDataFetchStateRepository(db_path)
+    state_repo.initialize_schema()
+    state_repo.mark_failure("EODHD", "BBB.US", "boom", base_backoff_seconds=3600)
+    calls = {"refreshed": []}
+    today = date.today().isoformat()
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+
+        def user_metadata(self):
+            return {
+                "dailyRateLimit": "1000",
+                "apiRequests": "0",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
+
+    class FakeService:
+        def __init__(self, db_path, config=None):
+            self.repo = MarketDataRepository(db_path)
+            self.repo.initialize_schema()
+
+        def refresh_symbol(self, symbol):
+            calls["refreshed"].append(symbol)
+            self.repo.upsert_price(symbol, today, 10.0)
+            return SimpleNamespace(symbol=symbol, as_of=today, price=10.0)
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(cli, "MarketDataService", FakeService)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_api_key="TOKEN",
+            eodhd_market_data_daily_buffer_calls=0,
+            eodhd_market_data_requests_per_minute=950,
+        ),
+    )
+
+    rc = cli.cmd_update_market_data_global(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=None,
+        rate=None,
+        max_symbols=None,
+        max_age_days=7,
+        resume=True,
+    )
+
+    assert rc == 0
+    assert calls["refreshed"] == ["AAA.US"]
+
+
+def test_cmd_report_market_data_progress_reports_complete_with_quota_snapshot(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "report-market-data-complete.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[
+            {"Code": "AAA", "Exchange": "US", "Type": "Common Stock"},
+            {"Code": "BBB", "Exchange": "US", "Type": "Common Stock"},
+        ],
+    )
+    today = date.today().isoformat()
+    store_market_data(db_path, "AAA.US", today)
+    store_market_data(db_path, "BBB.US", today)
+
+    class FakeClient:
+        def __init__(self, api_key):
+            assert api_key == "TOKEN"
+
+        def user_metadata(self):
+            return {
+                "dailyRateLimit": "100000",
+                "apiRequests": "5000",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_api_key="TOKEN",
+            eodhd_market_data_daily_buffer_calls=5000,
+        ),
+    )
+
+    rc = cli.cmd_report_market_data_progress(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=None,
+        max_age_days=7,
+    )
+
+    output = capsys.readouterr().out
+    assert rc == 0
+    assert "Mode: freshness(7d)" in output
+    assert "Status: COMPLETE" in output
+    assert "Supported: 2" in output
+    assert "Stale: 0" in output
+    assert "- usable requests left: 90000" in output
+    assert "Next action: Done for current scope" in output
+
+
+def test_cmd_report_market_data_progress_reports_missing_and_stale(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "report-market-data-incomplete.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[
+            {"Code": "AAA", "Exchange": "US", "Type": "Common Stock"},
+            {"Code": "BBB", "Exchange": "US", "Type": "Common Stock"},
+        ],
+    )
+    store_market_data(
+        db_path,
+        "AAA.US",
+        (date.today() - timedelta(days=30)).isoformat(),
+    )
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_api_key=None,
+            eodhd_market_data_daily_buffer_calls=0,
+        ),
+    )
+
+    rc = cli.cmd_report_market_data_progress(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=None,
+        max_age_days=7,
+    )
+
+    output = capsys.readouterr().out
+    assert rc == 0
+    assert "Status: INCOMPLETE" in output
+    assert "Missing: 1" in output
+    assert "Stale: 1" in output
+    assert "Next action: Run update-market-data-global now" in output
+
+
+def test_cmd_report_market_data_progress_reports_blocked_by_backoff(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "report-market-data-blocked.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[{"Code": "AAA", "Exchange": "US", "Type": "Common Stock"}],
+    )
+    store_market_data(db_path, "AAA.US", date.today().isoformat())
+    state_repo = MarketDataFetchStateRepository(db_path)
+    state_repo.initialize_schema()
+    state_repo.mark_failure("EODHD", "AAA.US", "boom", base_backoff_seconds=3600)
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_api_key=None,
+            eodhd_market_data_daily_buffer_calls=0,
+        ),
+    )
+
+    rc = cli.cmd_report_market_data_progress(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=None,
+        max_age_days=7,
+    )
+
+    output = capsys.readouterr().out
+    assert rc == 0
+    assert "Status: BLOCKED_BY_BACKOFF" in output
+    assert "Blocked: 1" in output
+    assert "AAA.US [US]" in output
+    assert "Next action: Wait for backoff to expire or rerun without --resume" in output
+
+
+def test_cmd_report_market_data_progress_filters_exchanges(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "report-market-data-filtered.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[{"Code": "AAA", "Exchange": "US", "Type": "Common Stock"}],
+    )
+    store_supported_tickers(
+        db_path,
+        "LSE",
+        rows=[{"Code": "BBB", "Exchange": "LSE", "Type": "Common Stock"}],
+    )
+    store_market_data(db_path, "BBB.LSE", date.today().isoformat())
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_api_key=None,
+            eodhd_market_data_daily_buffer_calls=0,
+        ),
+    )
+
+    rc = cli.cmd_report_market_data_progress(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=["US"],
+        max_age_days=7,
+    )
+
+    output = capsys.readouterr().out
+    assert rc == 0
+    assert "Scope: US" in output
+    assert (
+        "- US: supported=1, stored=0, missing=1, stale=0, blocked=0, errors=0" in output
+    )
+    assert "- LSE:" not in output
+
+
+def test_cmd_report_market_data_progress_succeeds_when_user_api_fails(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "report-market-data-user-api-fails.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[{"Code": "AAA", "Exchange": "US", "Type": "Common Stock"}],
+    )
+
+    class FakeClient:
+        def __init__(self, api_key):
+            assert api_key == "TOKEN"
+
+        def user_metadata(self):
+            raise RuntimeError("nope")
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_api_key="TOKEN",
+            eodhd_market_data_daily_buffer_calls=10,
+        ),
+    )
+
+    rc = cli.cmd_report_market_data_progress(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=None,
+        max_age_days=7,
     )
 
     output = capsys.readouterr().out

@@ -17,6 +17,8 @@ This file is gitignored and should never be committed.
 api_key = "YOUR_EOD_TOKEN"
 fundamentals_requests_per_minute = 600
 fundamentals_daily_buffer_calls = 5000
+market_data_requests_per_minute = 950
+market_data_daily_buffer_calls = 5000
 ```
 
 Use this for:
@@ -31,6 +33,8 @@ Use this for:
 Optional EODHD throttling and quota settings:
 - `fundamentals_requests_per_minute`: default `600`, capped at the EODHD limit of `1000`; used by `ingest-fundamentals-global`
 - `fundamentals_daily_buffer_calls`: default `5000`, reserved from the daily call budget so global ingestion stops early instead of consuming the full allowance
+- `market_data_requests_per_minute`: default `950`, capped at the EODHD limit of `1000`; used by `update-market-data-global`
+- `market_data_daily_buffer_calls`: default `5000`, reserved from the daily call budget so global market-data refresh stops early instead of consuming the full allowance
 
 ## SEC User-Agent
 

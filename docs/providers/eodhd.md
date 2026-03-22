@@ -43,8 +43,8 @@ pyvalue refresh-supported-tickers --provider EODHD --all-exchanges
 Ticker refresh keeps only `Common Stock`, `Preferred Stock`, and `Stock`.
 ETF, fund, and other security types are excluded from the operational catalog.
 When a ticker disappears from EODHD, it is removed from `supported_tickers`,
-mirrored `listings`, and stale fetch-state rows, but historical fundamentals and
-derived tables are kept.
+mirrored `listings`, and stale fetch-state rows, but historical fundamentals,
+market data, and derived tables are kept.
 
 Example:
 
@@ -152,6 +152,43 @@ Bulk:
 ```bash
 pyvalue update-market-data-bulk --exchange-code US
 ```
+
+Quota-aware global run across the stored supported-ticker catalog:
+
+```bash
+pyvalue update-market-data-global --provider EODHD
+```
+
+For large multi-day runs:
+
+```bash
+pyvalue refresh-supported-exchanges --provider EODHD
+pyvalue refresh-supported-tickers --provider EODHD --all-exchanges
+pyvalue update-market-data-global --provider EODHD --resume
+```
+
+`update-market-data-global` checks the EODHD user/quota endpoint before each
+run, subtracts the configured daily buffer, throttles by requests per minute,
+and exits cleanly when the remaining daily allowance is exhausted. Market-data
+requests cost one EODHD API call per symbol, so this workflow can usually move
+through the supported universe faster than fundamentals ingestion.
+
+To see whether a multi-day market-data run is actually complete for the current
+scope, use:
+
+```bash
+pyvalue report-market-data-progress --provider EODHD
+```
+
+This report defaults to a 7-day freshness window. A symbol is incomplete when
+its latest stored `market_data.as_of` is missing or older than the selected
+window.
+
+Important global market-data options:
+- `--rate`: requests per minute, capped at the EODHD limit of `1000`
+- `--max-symbols`: limit one run
+- `--max-age-days`: refresh stale or missing market data; default `7`
+- `--resume`: skip symbols still in backoff
 
 Market cap can be recalculated later from stored prices and latest share counts:
 

@@ -68,6 +68,21 @@ To see whether a larger global run is done, stale, or blocked by retry backoff:
 pyvalue report-ingest-progress --provider EODHD
 ```
 
+## Market Data Global Refresh Progress
+
+Typical causes:
+- `supported_tickers` was not refreshed first
+- old `market_data.as_of` snapshots are outside the freshness window
+- some symbols are still inside retry backoff
+- today’s EODHD quota is exhausted
+
+Useful commands:
+
+```bash
+pyvalue update-market-data-global --provider EODHD --resume
+pyvalue report-market-data-progress --provider EODHD
+```
+
 ## Market Cap Looks Wrong or Missing
 
 Typical causes:

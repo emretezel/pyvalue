@@ -30,8 +30,9 @@ Refresh and persist the provider-supported ticker catalog for one exchange or al
 
 For `provider=EODHD`, this fetches `exchange-symbol-list/<EXCHANGE_CODE>`, keeps only
 `Common Stock`, `Preferred Stock`, and `Stock`, mirrors the result into `listings`,
-and deletes removed symbols from `fundamentals_fetch_state`. Historical fundamentals
-and derived tables are not deleted.
+and deletes removed symbols from `fundamentals_fetch_state` and
+`market_data_fetch_state`. Historical fundamentals, market data, and derived tables
+are not deleted.
 
 Key options:
 - `--provider {EODHD}`
@@ -158,6 +159,37 @@ Fetch latest market data for all stored listings on an exchange.
 Key options:
 - `--exchange-code <code>`
 - `--rate <symbols-per-minute>`
+- `--database <path>`
+
+### `update-market-data-global`
+
+Refresh EODHD market data across stored supported tickers with daily quota awareness.
+
+This command reads from the stored `supported_tickers` catalog, not from `listings`.
+It is freshness-based by default and selects symbols whose latest stored
+`market_data.as_of` is missing or older than `--max-age-days` (default `7`). It
+stops cleanly when the run-level daily budget is exhausted.
+
+Key options:
+- `--provider {EODHD}`
+- `--exchange-codes <codes...>`
+- `--rate <float>`
+- `--max-symbols <int>`
+- `--max-age-days <int>` default `7`
+- `--resume`
+- `--database <path>`
+
+### `report-market-data-progress`
+
+Report EODHD market-data refresh progress across stored supported tickers.
+
+This command is strict about completion. By default it uses `--max-age-days 7`,
+so symbols with only older `market_data.as_of` snapshots count as incomplete.
+
+Key options:
+- `--provider {EODHD}`
+- `--exchange-codes <codes...>`
+- `--max-age-days <int>` default `7`
 - `--database <path>`
 
 ### `recalc-market-cap`

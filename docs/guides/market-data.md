@@ -30,6 +30,49 @@ pyvalue update-market-data-bulk --exchange-code US --rate 950
 
 Use `--rate` to throttle symbols per minute.
 
+## Global Multi-Day Update
+
+Refresh market data across the stored EODHD `supported_tickers` catalog:
+
+```bash
+pyvalue update-market-data-global --provider EODHD
+```
+
+Recommended workflow for large runs:
+
+```bash
+pyvalue refresh-supported-exchanges --provider EODHD
+pyvalue refresh-supported-tickers --provider EODHD --all-exchanges
+pyvalue update-market-data-global --provider EODHD --resume
+```
+
+Important behavior:
+- default freshness is `7` days
+- the command selects missing symbols first, then the oldest stale symbols
+- it uses the EODHD daily quota and stops cleanly when the remaining budget is exhausted
+- rerun it the next day to continue from the remaining stale or missing symbols
+
+Useful options:
+- `--exchange-codes`: limit the run to selected exchanges
+- `--max-symbols`: cap one run
+- `--max-age-days`: change the freshness window
+- `--resume`: skip symbols still inside retry backoff
+
+## Progress Reporting
+
+To see whether market data is complete for the current scope:
+
+```bash
+pyvalue report-market-data-progress --provider EODHD
+```
+
+The report defaults to the same 7-day freshness window and shows:
+- overall status: `COMPLETE`, `INCOMPLETE`, or `BLOCKED_BY_BACKOFF`
+- supported, stored, missing, stale, and blocked counts
+- per-exchange breakdown
+- recent failures
+- remaining usable EODHD quota when available
+
 ## Recalculate Market Cap
 
 If prices were ingested before useful share-count facts were available, recompute stored market caps later:

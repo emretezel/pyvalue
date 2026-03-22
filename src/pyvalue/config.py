@@ -41,6 +41,22 @@ class Config:
         )
 
     @property
+    def eodhd_market_data_requests_per_minute(self) -> int:
+        return self._get_int_value(
+            "eodhd",
+            "market_data_requests_per_minute",
+            default=950,
+        )
+
+    @property
+    def eodhd_market_data_daily_buffer_calls(self) -> int:
+        return self._get_int_value(
+            "eodhd",
+            "market_data_daily_buffer_calls",
+            default=5000,
+        )
+
+    @property
     def sec_user_agent(self) -> Optional[str]:
         return self._get_value("sec", "user_agent")
 
