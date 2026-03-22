@@ -24,7 +24,7 @@ Use this file to capture recurring mistake patterns after user corrections so fu
 - Resulting action: Recorded the distinction here and rechecked the public EODHD API Limits and User API docs before answering.
 
 - Date: 2026-03-22
-- User correction: For this EODHD account, market data and fundamentals are on separate paid plans, so their daily limits should be treated separately.
-- Recurring pattern: Assuming one provider-level quota model in implementation can be wrong when the account uses multiple paid plans/products with separate allowances.
-- Preventive rule: Before enforcing quota gates in provider-specific workflows, confirm whether the account can have multiple plan-scoped limits and avoid collapsing them into one budget unless the integration exposes a single authoritative counter for the exact workflow.
-- Resulting action: Recorded the account-specific constraint here so future quota changes distinguish plan-scoped budgets from provider-wide defaults.
+- User correction: Even with separate paid EODHD products, the practical daily limit for this setup is shared between fundamentals and market-data requests.
+- Recurring pattern: Reading plan/product wording too literally can lead to the wrong quota model if actual usage accounting still rolls up into one shared daily counter.
+- Preventive rule: For provider quota logic, prefer the authoritative runtime counter used by the integration path over marketing/billing wording unless the API exposes separate counters that can actually be enforced in code.
+- Resulting action: Corrected the lesson to treat EODHD's current integration as a shared daily-budget model until distinct quota fields are available in the API response.
