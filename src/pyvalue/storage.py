@@ -862,46 +862,108 @@ class SupportedTickerRepository(SQLiteStore):
         self.initialize_schema()
         provider_norm = provider.strip().upper()
         now = datetime.now(timezone.utc)
-        params: List[object] = [provider_norm, provider_norm, provider_norm]
-        query = [
-            "SELECT st.provider, st.provider_exchange_code, st.provider_symbol, st.provider_ticker,",
-            "st.security_id, st.listing_exchange, st.security_name, st.security_type,",
-            "st.country, st.currency, st.isin, st.updated_at",
-            "FROM supported_tickers st",
-            "LEFT JOIN fundamentals_raw fr ON fr.provider = ? AND fr.provider_symbol = st.provider_symbol",
-            "LEFT JOIN fundamentals_fetch_state fs ON fs.provider = ? AND fs.provider_symbol = st.provider_symbol",
-            "WHERE UPPER(st.provider) = ?",
-        ]
         normalized_codes = _normalized_codes(exchange_codes)
-        if normalized_codes:
-            placeholders = ", ".join("?" for _ in normalized_codes)
-            query.append(f"AND UPPER(st.provider_exchange_code) IN ({placeholders})")
-            params.extend(normalized_codes)
         normalized_symbols = _normalized_codes(provider_symbols)
-        if normalized_symbols:
-            placeholders = ", ".join("?" for _ in normalized_symbols)
-            query.append(f"AND UPPER(st.provider_symbol) IN ({placeholders})")
-            params.extend(normalized_symbols)
-        if max_age_days is None and missing_only:
-            query.append("AND fr.fetched_at IS NULL")
-        elif max_age_days is not None:
-            cutoff = (now - timedelta(days=max_age_days)).isoformat()
-            query.append("AND (fr.fetched_at IS NULL OR fr.fetched_at <= ?)")
-            params.append(cutoff)
-        if resume:
-            query.append(
-                "AND (fs.next_eligible_at IS NULL OR fs.next_eligible_at <= ?)"
-            )
-            params.append(now.isoformat())
-        query.append(
-            "ORDER BY CASE WHEN fr.fetched_at IS NULL THEN 0 ELSE 1 END, fr.fetched_at ASC, st.provider_exchange_code ASC, st.provider_symbol ASC"
+
+        def _apply_scope_filters(query: List[str], params: List[object]) -> None:
+            if normalized_codes:
+                placeholders = ", ".join("?" for _ in normalized_codes)
+                query.append(f"AND st.provider_exchange_code IN ({placeholders})")
+                params.extend(normalized_codes)
+            if normalized_symbols:
+                placeholders = ", ".join("?" for _ in normalized_symbols)
+                query.append(f"AND st.provider_symbol IN ({placeholders})")
+                params.extend(normalized_symbols)
+
+        def _fetch_missing(limit: Optional[int]) -> List[SupportedTicker]:
+            params: List[object] = [provider_norm, provider_norm]
+            query = [
+                "SELECT st.provider, st.provider_exchange_code, st.provider_symbol, st.provider_ticker,",
+                "st.security_id, st.listing_exchange, st.security_name, st.security_type,",
+                "st.country, st.currency, st.isin, st.updated_at",
+                "FROM supported_tickers st",
+                "LEFT JOIN fundamentals_fetch_state fs ON fs.provider = ? AND fs.provider_symbol = st.provider_symbol",
+                "WHERE st.provider = ?",
+                "AND fs.last_fetched_at IS NULL",
+            ]
+            _apply_scope_filters(query, params)
+            if resume:
+                query.append(
+                    "AND (fs.next_eligible_at IS NULL OR fs.next_eligible_at <= ?)"
+                )
+                params.append(now.isoformat())
+            query.append("ORDER BY st.provider_symbol ASC")
+            if limit is not None:
+                query.append("LIMIT ?")
+                params.append(limit)
+            with self._connect() as conn:
+                rows = conn.execute(" ".join(query), params).fetchall()
+            return [SupportedTicker(*row) for row in rows]
+
+        def _fetch_stale(limit: Optional[int], cutoff: str) -> List[SupportedTicker]:
+            params: List[object] = [provider_norm, provider_norm, cutoff]
+            query = [
+                "SELECT st.provider, st.provider_exchange_code, st.provider_symbol, st.provider_ticker,",
+                "st.security_id, st.listing_exchange, st.security_name, st.security_type,",
+                "st.country, st.currency, st.isin, st.updated_at",
+                "FROM fundamentals_fetch_state fs",
+                "JOIN supported_tickers st ON st.provider = fs.provider AND st.provider_symbol = fs.provider_symbol",
+                "WHERE fs.provider = ?",
+                "AND st.provider = ?",
+                "AND fs.last_fetched_at IS NOT NULL",
+                "AND fs.last_fetched_at <= ?",
+            ]
+            _apply_scope_filters(query, params)
+            if resume:
+                query.append(
+                    "AND (fs.next_eligible_at IS NULL OR fs.next_eligible_at <= ?)"
+                )
+                params.append(now.isoformat())
+            query.append("ORDER BY fs.last_fetched_at ASC, fs.provider_symbol ASC")
+            if limit is not None:
+                query.append("LIMIT ?")
+                params.append(limit)
+            with self._connect() as conn:
+                rows = conn.execute(" ".join(query), params).fetchall()
+            return [SupportedTicker(*row) for row in rows]
+
+        if max_age_days is None and not missing_only:
+            params: List[object] = [provider_norm, provider_norm]
+            query = [
+                "SELECT st.provider, st.provider_exchange_code, st.provider_symbol, st.provider_ticker,",
+                "st.security_id, st.listing_exchange, st.security_name, st.security_type,",
+                "st.country, st.currency, st.isin, st.updated_at",
+                "FROM supported_tickers st",
+                "LEFT JOIN fundamentals_fetch_state fs ON fs.provider = ? AND fs.provider_symbol = st.provider_symbol",
+                "WHERE st.provider = ?",
+            ]
+            _apply_scope_filters(query, params)
+            if resume:
+                query.append(
+                    "AND (fs.next_eligible_at IS NULL OR fs.next_eligible_at <= ?)"
+                )
+                params.append(now.isoformat())
+            query.append("ORDER BY st.provider_symbol ASC")
+            if max_symbols is not None:
+                query.append("LIMIT ?")
+                params.append(max_symbols)
+            with self._connect() as conn:
+                rows = conn.execute(" ".join(query), params).fetchall()
+            return [SupportedTicker(*row) for row in rows]
+
+        missing_rows = _fetch_missing(max_symbols)
+        if missing_only:
+            return missing_rows
+
+        assert max_age_days is not None
+        cutoff = (now - timedelta(days=max_age_days)).isoformat()
+        remaining = (
+            None if max_symbols is None else max(max_symbols - len(missing_rows), 0)
         )
-        if max_symbols is not None:
-            query.append("LIMIT ?")
-            params.append(max_symbols)
-        with self._connect() as conn:
-            rows = conn.execute(" ".join(query), params).fetchall()
-        return [SupportedTicker(*row) for row in rows]
+        if remaining == 0:
+            return missing_rows
+        stale_rows = _fetch_stale(remaining, cutoff)
+        return [*missing_rows, *stale_rows]
 
     def progress_summary(
         self,
@@ -910,48 +972,19 @@ class SupportedTickerRepository(SQLiteStore):
         max_age_days: Optional[int] = None,
         missing_only: bool = False,
     ) -> IngestProgressSummary:
-        self.initialize_schema()
-        provider_norm = provider.strip().upper()
-        now = datetime.now(timezone.utc).isoformat()
-        stale_expr = "0"
-        params: List[object] = []
-        if not missing_only and max_age_days is not None:
-            cutoff = (
-                datetime.now(timezone.utc) - timedelta(days=max_age_days)
-            ).isoformat()
-            stale_expr = (
-                "SUM(CASE WHEN fr.fetched_at IS NOT NULL AND fr.fetched_at <= ? "
-                "THEN 1 ELSE 0 END)"
-            )
-            params.append(cutoff)
-        params.extend([now, provider_norm, provider_norm, provider_norm])
-        query = [
-            "SELECT",
-            "COUNT(*) AS total_supported,",
-            "SUM(CASE WHEN fr.fetched_at IS NOT NULL THEN 1 ELSE 0 END) AS stored,",
-            "SUM(CASE WHEN fr.fetched_at IS NULL THEN 1 ELSE 0 END) AS missing,",
-            f"{stale_expr} AS stale,",
-            "SUM(CASE WHEN fs.next_eligible_at IS NOT NULL AND fs.next_eligible_at > ? THEN 1 ELSE 0 END) AS blocked,",
-            "SUM(CASE WHEN fs.last_status = 'error' THEN 1 ELSE 0 END) AS error_rows",
-            "FROM supported_tickers st",
-            "LEFT JOIN fundamentals_raw fr ON fr.provider = ? AND fr.provider_symbol = st.provider_symbol",
-            "LEFT JOIN fundamentals_fetch_state fs ON fs.provider = ? AND fs.provider_symbol = st.provider_symbol",
-            "WHERE UPPER(st.provider) = ?",
-        ]
-        normalized_codes = _normalized_codes(exchange_codes)
-        if normalized_codes:
-            placeholders = ", ".join("?" for _ in normalized_codes)
-            query.append(f"AND UPPER(st.provider_exchange_code) IN ({placeholders})")
-            params.extend(normalized_codes)
-        with self._connect() as conn:
-            row = conn.execute(" ".join(query), params).fetchone()
+        rows = self.progress_by_exchange(
+            provider=provider,
+            exchange_codes=exchange_codes,
+            max_age_days=max_age_days,
+            missing_only=missing_only,
+        )
         return IngestProgressSummary(
-            total_supported=_coerce_int(row["total_supported"] if row else 0),
-            stored=_coerce_int(row["stored"] if row else 0),
-            missing=_coerce_int(row["missing"] if row else 0),
-            stale=_coerce_int(row["stale"] if row else 0),
-            blocked=_coerce_int(row["blocked"] if row else 0),
-            error_rows=_coerce_int(row["error_rows"] if row else 0),
+            total_supported=sum(row.total_supported for row in rows),
+            stored=sum(row.stored for row in rows),
+            missing=sum(row.missing for row in rows),
+            stale=sum(row.stale for row in rows),
+            blocked=sum(row.blocked for row in rows),
+            error_rows=sum(row.error_rows for row in rows),
         )
 
     def progress_by_exchange(
@@ -971,29 +1004,28 @@ class SupportedTickerRepository(SQLiteStore):
                 datetime.now(timezone.utc) - timedelta(days=max_age_days)
             ).isoformat()
             stale_expr = (
-                "SUM(CASE WHEN fr.fetched_at IS NOT NULL AND fr.fetched_at <= ? "
+                "SUM(CASE WHEN fs.last_fetched_at IS NOT NULL AND fs.last_fetched_at <= ? "
                 "THEN 1 ELSE 0 END)"
             )
             params.append(cutoff)
-        params.extend([now, provider_norm, provider_norm, provider_norm])
+        params.extend([now, provider_norm])
+        normalized_codes = _normalized_codes(exchange_codes)
         query = [
             "SELECT",
             "st.provider_exchange_code AS exchange_code,",
             "COUNT(*) AS total_supported,",
-            "SUM(CASE WHEN fr.fetched_at IS NOT NULL THEN 1 ELSE 0 END) AS stored,",
-            "SUM(CASE WHEN fr.fetched_at IS NULL THEN 1 ELSE 0 END) AS missing,",
+            "SUM(CASE WHEN fs.last_fetched_at IS NOT NULL THEN 1 ELSE 0 END) AS stored,",
+            "SUM(CASE WHEN fs.last_fetched_at IS NULL THEN 1 ELSE 0 END) AS missing,",
             f"{stale_expr} AS stale,",
             "SUM(CASE WHEN fs.next_eligible_at IS NOT NULL AND fs.next_eligible_at > ? THEN 1 ELSE 0 END) AS blocked,",
             "SUM(CASE WHEN fs.last_status = 'error' THEN 1 ELSE 0 END) AS error_rows",
             "FROM supported_tickers st",
-            "LEFT JOIN fundamentals_raw fr ON fr.provider = ? AND fr.provider_symbol = st.provider_symbol",
-            "LEFT JOIN fundamentals_fetch_state fs ON fs.provider = ? AND fs.provider_symbol = st.provider_symbol",
-            "WHERE UPPER(st.provider) = ?",
+            "LEFT JOIN fundamentals_fetch_state fs ON fs.provider = st.provider AND fs.provider_symbol = st.provider_symbol",
+            "WHERE st.provider = ?",
         ]
-        normalized_codes = _normalized_codes(exchange_codes)
         if normalized_codes:
             placeholders = ", ".join("?" for _ in normalized_codes)
-            query.append(f"AND UPPER(st.provider_exchange_code) IN ({placeholders})")
+            query.append(f"AND st.provider_exchange_code IN ({placeholders})")
             params.extend(normalized_codes)
         query.append("GROUP BY st.provider_exchange_code")
         query.append("ORDER BY st.provider_exchange_code")
@@ -1026,12 +1058,12 @@ class SupportedTickerRepository(SQLiteStore):
             "fs.last_status, fs.last_error, fs.next_eligible_at, fs.attempts",
             "FROM supported_tickers st",
             "JOIN fundamentals_fetch_state fs ON fs.provider = ? AND fs.provider_symbol = st.provider_symbol",
-            "WHERE UPPER(st.provider) = ? AND fs.last_status = 'error'",
+            "WHERE st.provider = ? AND fs.last_status = 'error'",
         ]
         normalized_codes = _normalized_codes(exchange_codes)
         if normalized_codes:
             placeholders = ", ".join("?" for _ in normalized_codes)
-            query.append(f"AND UPPER(st.provider_exchange_code) IN ({placeholders})")
+            query.append(f"AND st.provider_exchange_code IN ({placeholders})")
             params.extend(normalized_codes)
         query.append(
             "ORDER BY CASE WHEN fs.next_eligible_at IS NULL THEN 1 ELSE 0 END, fs.next_eligible_at ASC, st.provider_symbol ASC"
@@ -1077,17 +1109,17 @@ class SupportedTickerRepository(SQLiteStore):
             "    GROUP BY security_id",
             ") md ON md.security_id = st.security_id",
             "LEFT JOIN market_data_fetch_state ms ON ms.provider = ? AND ms.provider_symbol = st.provider_symbol",
-            "WHERE UPPER(st.provider) = ?",
+            "WHERE st.provider = ?",
         ]
         normalized_codes = _normalized_codes(exchange_codes)
         if normalized_codes:
             placeholders = ", ".join("?" for _ in normalized_codes)
-            query.append(f"AND UPPER(st.provider_exchange_code) IN ({placeholders})")
+            query.append(f"AND st.provider_exchange_code IN ({placeholders})")
             params.extend(normalized_codes)
         normalized_symbols = _normalized_codes(provider_symbols)
         if normalized_symbols:
             placeholders = ", ".join("?" for _ in normalized_symbols)
-            query.append(f"AND UPPER(st.provider_symbol) IN ({placeholders})")
+            query.append(f"AND st.provider_symbol IN ({placeholders})")
             params.extend(normalized_symbols)
         query.append("AND (md.latest_as_of IS NULL OR md.latest_as_of <= ?)")
         params.append(cutoff)
@@ -1134,12 +1166,12 @@ class SupportedTickerRepository(SQLiteStore):
             "    GROUP BY security_id",
             ") md ON md.security_id = st.security_id",
             "LEFT JOIN market_data_fetch_state ms ON ms.provider = ? AND ms.provider_symbol = st.provider_symbol",
-            "WHERE UPPER(st.provider) = ?",
+            "WHERE st.provider = ?",
         ]
         normalized_codes = _normalized_codes(exchange_codes)
         if normalized_codes:
             placeholders = ", ".join("?" for _ in normalized_codes)
-            query.append(f"AND UPPER(st.provider_exchange_code) IN ({placeholders})")
+            query.append(f"AND st.provider_exchange_code IN ({placeholders})")
             params.extend(normalized_codes)
         with self._connect() as conn:
             row = conn.execute(" ".join(query), params).fetchone()
@@ -1181,12 +1213,12 @@ class SupportedTickerRepository(SQLiteStore):
             "    GROUP BY security_id",
             ") md ON md.security_id = st.security_id",
             "LEFT JOIN market_data_fetch_state ms ON ms.provider = ? AND ms.provider_symbol = st.provider_symbol",
-            "WHERE UPPER(st.provider) = ?",
+            "WHERE st.provider = ?",
         ]
         normalized_codes = _normalized_codes(exchange_codes)
         if normalized_codes:
             placeholders = ", ".join("?" for _ in normalized_codes)
-            query.append(f"AND UPPER(st.provider_exchange_code) IN ({placeholders})")
+            query.append(f"AND st.provider_exchange_code IN ({placeholders})")
             params.extend(normalized_codes)
         query.append("GROUP BY st.provider_exchange_code")
         query.append("ORDER BY st.provider_exchange_code")
@@ -1219,12 +1251,12 @@ class SupportedTickerRepository(SQLiteStore):
             "ms.last_status, ms.last_error, ms.next_eligible_at, ms.attempts",
             "FROM supported_tickers st",
             "JOIN market_data_fetch_state ms ON ms.provider = ? AND ms.provider_symbol = st.provider_symbol",
-            "WHERE UPPER(st.provider) = ? AND ms.last_status = 'error'",
+            "WHERE st.provider = ? AND ms.last_status = 'error'",
         ]
         normalized_codes = _normalized_codes(exchange_codes)
         if normalized_codes:
             placeholders = ", ".join("?" for _ in normalized_codes)
-            query.append(f"AND UPPER(st.provider_exchange_code) IN ({placeholders})")
+            query.append(f"AND st.provider_exchange_code IN ({placeholders})")
             params.extend(normalized_codes)
         query.append(
             "ORDER BY CASE WHEN ms.next_eligible_at IS NULL THEN 1 ELSE 0 END, ms.next_eligible_at ASC, st.provider_symbol ASC"
@@ -1432,6 +1464,7 @@ class FundamentalsRepository(SQLiteStore):
         )
         serialized = json.dumps(payload)
         fetched_at = _utc_now_iso()
+        provider_norm = provider.strip().upper()
         with self._connect() as conn:
             conn.execute(
                 """
@@ -1452,7 +1485,7 @@ class FundamentalsRepository(SQLiteStore):
                     fetched_at = excluded.fetched_at
                 """,
                 (
-                    provider.strip().upper(),
+                    provider_norm,
                     provider_symbol,
                     security_id,
                     provider_exchange_code,
@@ -1460,6 +1493,26 @@ class FundamentalsRepository(SQLiteStore):
                     serialized,
                     fetched_at,
                 ),
+            )
+            conn.execute(
+                """
+                INSERT INTO fundamentals_fetch_state (
+                    provider,
+                    provider_symbol,
+                    last_fetched_at,
+                    last_status,
+                    last_error,
+                    next_eligible_at,
+                    attempts
+                ) VALUES (?, ?, ?, 'ok', NULL, NULL, 0)
+                ON CONFLICT(provider, provider_symbol) DO UPDATE SET
+                    last_fetched_at = excluded.last_fetched_at,
+                    last_status = 'ok',
+                    last_error = NULL,
+                    next_eligible_at = NULL,
+                    attempts = 0
+                """,
+                (provider_norm, provider_symbol, fetched_at),
             )
 
     def fetch(self, provider: str, symbol: str) -> Optional[Dict[str, Any]]:
@@ -1702,7 +1755,7 @@ class _FetchStateRepository(SQLiteStore):
             cursor = conn.execute(
                 f"""
                 DELETE FROM {self.table_name}
-                WHERE UPPER(provider) = ? AND UPPER(provider_symbol) IN ({placeholders})
+                WHERE provider = ? AND provider_symbol IN ({placeholders})
                 """,
                 [provider.strip().upper(), *normalized],
             )

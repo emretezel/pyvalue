@@ -977,6 +977,8 @@ def test_cmd_ingest_fundamentals_global_max_age_days_refreshes_only_stale_or_mis
     fund_repo.upsert(
         "EODHD", "BBB.US", {"General": {"CurrencyCode": "USD"}}, exchange="US"
     )
+    fresh_at = datetime.now(timezone.utc).isoformat()
+    stale_at = (datetime.now(timezone.utc) - timedelta(days=45)).isoformat()
     with fund_repo._connect() as conn:
         conn.execute(
             """
@@ -988,10 +990,19 @@ def test_cmd_ingest_fundamentals_global_max_age_days_refreshes_only_stale_or_mis
             END
             WHERE provider = 'EODHD'
             """,
-            (
-                datetime.now(timezone.utc).isoformat(),
-                (datetime.now(timezone.utc) - timedelta(days=45)).isoformat(),
-            ),
+            (fresh_at, stale_at),
+        )
+        conn.execute(
+            """
+            UPDATE fundamentals_fetch_state
+            SET last_fetched_at = CASE provider_symbol
+                WHEN 'AAA.US' THEN ?
+                WHEN 'BBB.US' THEN ?
+                ELSE last_fetched_at
+            END
+            WHERE provider = 'EODHD'
+            """,
+            (fresh_at, stale_at),
         )
 
     calls = {"fetched": []}
@@ -1108,6 +1119,7 @@ def test_cmd_ingest_fundamentals_global_default_mode_remains_missing_only(
     fund_repo.upsert(
         "EODHD", "AAA.US", {"General": {"CurrencyCode": "USD"}}, exchange="US"
     )
+    stale_at = (datetime.now(timezone.utc) - timedelta(days=45)).isoformat()
     with fund_repo._connect() as conn:
         conn.execute(
             """
@@ -1115,7 +1127,15 @@ def test_cmd_ingest_fundamentals_global_default_mode_remains_missing_only(
             SET fetched_at = ?
             WHERE provider = 'EODHD' AND provider_symbol = 'AAA.US'
             """,
-            ((datetime.now(timezone.utc) - timedelta(days=45)).isoformat(),),
+            (stale_at,),
+        )
+        conn.execute(
+            """
+            UPDATE fundamentals_fetch_state
+            SET last_fetched_at = ?
+            WHERE provider = 'EODHD' AND provider_symbol = 'AAA.US'
+            """,
+            (stale_at,),
         )
 
     calls = {"fetched": []}
@@ -1269,6 +1289,7 @@ def test_cmd_report_ingest_progress_default_mode_treats_old_data_as_stale(
     fund_repo.upsert(
         "EODHD", "AAA.US", {"General": {"CurrencyCode": "USD"}}, exchange="US"
     )
+    stale_at = (datetime.now(timezone.utc) - timedelta(days=45)).isoformat()
     with fund_repo._connect() as conn:
         conn.execute(
             """
@@ -1276,7 +1297,15 @@ def test_cmd_report_ingest_progress_default_mode_treats_old_data_as_stale(
             SET fetched_at = ?
             WHERE provider = 'EODHD' AND provider_symbol = 'AAA.US'
             """,
-            ((datetime.now(timezone.utc) - timedelta(days=45)).isoformat(),),
+            (stale_at,),
+        )
+        conn.execute(
+            """
+            UPDATE fundamentals_fetch_state
+            SET last_fetched_at = ?
+            WHERE provider = 'EODHD' AND provider_symbol = 'AAA.US'
+            """,
+            (stale_at,),
         )
     monkeypatch.setattr(
         cli,
@@ -1317,6 +1346,7 @@ def test_cmd_report_ingest_progress_missing_only_ignores_staleness(
     fund_repo.upsert(
         "EODHD", "AAA.US", {"General": {"CurrencyCode": "USD"}}, exchange="US"
     )
+    stale_at = (datetime.now(timezone.utc) - timedelta(days=120)).isoformat()
     with fund_repo._connect() as conn:
         conn.execute(
             """
@@ -1324,7 +1354,15 @@ def test_cmd_report_ingest_progress_missing_only_ignores_staleness(
             SET fetched_at = ?
             WHERE provider = 'EODHD' AND provider_symbol = 'AAA.US'
             """,
-            ((datetime.now(timezone.utc) - timedelta(days=120)).isoformat(),),
+            (stale_at,),
+        )
+        conn.execute(
+            """
+            UPDATE fundamentals_fetch_state
+            SET last_fetched_at = ?
+            WHERE provider = 'EODHD' AND provider_symbol = 'AAA.US'
+            """,
+            (stale_at,),
         )
     monkeypatch.setattr(
         cli,

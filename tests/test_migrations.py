@@ -159,6 +159,23 @@ def test_migration_creates_market_data_fetch_state_table(tmp_path):
     assert "idx_market_data_fetch_next" in index_names
 
 
+def test_migration_creates_fundamentals_hot_path_indexes(tmp_path):
+    db_path = tmp_path / "fundamentals-hot-path-indexes.sqlite"
+
+    apply_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        state_indexes = conn.execute(
+            "PRAGMA index_list(fundamentals_fetch_state)"
+        ).fetchall()
+        state_index_names = {row[1] for row in state_indexes}
+
+    assert "idx_fundamentals_fetch_state_provider_fetched_symbol" in state_index_names
+    assert (
+        "idx_fundamentals_fetch_state_provider_status_next_symbol" in state_index_names
+    )
+
+
 def test_migration_does_not_overwrite_existing_supported_tickers(tmp_path):
     db_path = tmp_path / "supported-tickers-backfill.sqlite"
     with sqlite3.connect(db_path) as conn:
@@ -197,7 +214,7 @@ def test_migration_does_not_overwrite_existing_supported_tickers(tmp_path):
 
     applied = apply_migrations(db_path)
 
-    assert applied == 2
+    assert applied == 3
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
             """

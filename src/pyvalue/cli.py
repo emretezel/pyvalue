@@ -35,6 +35,8 @@ from pyvalue.storage import (
     FundamentalsRepository,
     FundamentalsFetchStateRepository,
     FinancialFactsRepository,
+    IngestProgressExchange,
+    IngestProgressSummary,
     MarketDataFetchStateRepository,
     MarketDataRepository,
     MetricsRepository,
@@ -340,6 +342,19 @@ def _scope_label(
     if exchange_filters:
         return ", ".join(exchange_filters)
     return default_label
+
+
+def _summarize_progress_breakdown(
+    rows: Sequence[IngestProgressExchange],
+) -> IngestProgressSummary:
+    return IngestProgressSummary(
+        total_supported=sum(row.total_supported for row in rows),
+        stored=sum(row.stored for row in rows),
+        missing=sum(row.missing for row in rows),
+        stale=sum(row.stale for row in rows),
+        blocked=sum(row.blocked for row in rows),
+        error_rows=sum(row.error_rows for row in rows),
+    )
 
 
 def _refresh_supported_exchanges_for_provider(
@@ -1296,22 +1311,21 @@ def cmd_report_ingest_progress(
     effective_max_age_days = None if missing_only else (max_age_days or 30)
 
     ticker_repo = SupportedTickerRepository(database)
-    summary = ticker_repo.progress_summary(
-        provider=provider_norm,
-        exchange_codes=selected_exchanges,
-        max_age_days=effective_max_age_days,
-        missing_only=missing_only,
-    )
     breakdown = ticker_repo.progress_by_exchange(
         provider=provider_norm,
         exchange_codes=selected_exchanges,
         max_age_days=effective_max_age_days,
         missing_only=missing_only,
     )
-    failures = ticker_repo.recent_failures(
-        provider=provider_norm,
-        exchange_codes=selected_exchanges,
-        limit=10,
+    summary = _summarize_progress_breakdown(breakdown)
+    failures = (
+        ticker_repo.recent_failures(
+            provider=provider_norm,
+            exchange_codes=selected_exchanges,
+            limit=10,
+        )
+        if summary.error_rows > 0
+        else []
     )
     config = Config()
     quota = _safe_eodhd_quota_snapshot(
@@ -1551,20 +1565,20 @@ def cmd_report_market_data_progress(
     effective_max_age_days = max_age_days or 7
 
     ticker_repo = SupportedTickerRepository(database)
-    summary = ticker_repo.market_data_progress_summary(
-        provider=provider_norm,
-        exchange_codes=selected_exchanges,
-        max_age_days=effective_max_age_days,
-    )
     breakdown = ticker_repo.market_data_progress_by_exchange(
         provider=provider_norm,
         exchange_codes=selected_exchanges,
         max_age_days=effective_max_age_days,
     )
-    failures = ticker_repo.recent_market_data_failures(
-        provider=provider_norm,
-        exchange_codes=selected_exchanges,
-        limit=10,
+    summary = _summarize_progress_breakdown(breakdown)
+    failures = (
+        ticker_repo.recent_market_data_failures(
+            provider=provider_norm,
+            exchange_codes=selected_exchanges,
+            limit=10,
+        )
+        if summary.error_rows > 0
+        else []
     )
     config = Config()
     quota = _safe_eodhd_quota_snapshot(

@@ -1769,6 +1769,23 @@ def _migration_022_canonical_security_model(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migration_023_optimize_fundamentals_hot_paths(conn: sqlite3.Connection) -> None:
+    """Add lightweight fetch-state indexes for fundamentals selection and reporting."""
+
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fundamentals_fetch_state_provider_fetched_symbol
+        ON fundamentals_fetch_state(provider, last_fetched_at, provider_symbol)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fundamentals_fetch_state_provider_status_next_symbol
+        ON fundamentals_fetch_state(provider, last_status, next_eligible_at, provider_symbol)
+        """
+    )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -1792,6 +1809,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_020_create_market_data_fetch_state,
     _migration_021_drop_listings_in_favor_of_supported_tickers,
     _migration_022_canonical_security_model,
+    _migration_023_optimize_fundamentals_hot_paths,
 ]
 
 

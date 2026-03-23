@@ -242,6 +242,28 @@ def test_supported_ticker_repository_lists_eligible_symbols(tmp_path):
     assert [row.symbol for row in rows] == ["BBB.LSE"]
 
 
+def test_fundamentals_repository_upsert_marks_fetch_state_success(tmp_path):
+    db_path = tmp_path / "fundamentals-fetch-state.db"
+    repo = FundamentalsRepository(db_path)
+    repo.initialize_schema()
+
+    repo.upsert("EODHD", "AAA.US", {"General": {"CurrencyCode": "USD"}}, exchange="US")
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT last_fetched_at, last_status, attempts
+            FROM fundamentals_fetch_state
+            WHERE provider = 'EODHD' AND provider_symbol = 'AAA.US'
+            """
+        ).fetchone()
+
+    assert row is not None
+    assert row[0] is not None
+    assert row[1] == "ok"
+    assert row[2] == 0
+
+
 def test_supported_ticker_repository_lists_market_data_symbols_missing_then_oldest(
     tmp_path,
 ):
