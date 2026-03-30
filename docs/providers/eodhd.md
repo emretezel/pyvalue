@@ -170,9 +170,11 @@ pyvalue update-market-data --provider EODHD --all-supported --resume
 `update-market-data --provider EODHD` checks the EODHD user/quota endpoint
 before each multi-symbol run, subtracts the configured daily buffer, throttles
 by requests per minute, and exits cleanly when the remaining daily allowance is
-exhausted. Market-data requests cost one EODHD API call per symbol, so this
-workflow can usually move through the supported universe faster than
-fundamentals ingestion.
+exhausted. Market-data refreshes use hybrid accounting: per-symbol requests
+cost one EODHD API call, while exchange-bulk refreshes cost `100` API calls for
+the exchange. Large exchange and all-supported runs can therefore move through
+the supported universe much faster than a pure per-symbol loop while staying
+quota-aware.
 
 To see whether a multi-day market-data run is actually complete for the current
 scope, use:

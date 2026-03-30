@@ -49,6 +49,7 @@ def test_eodhd_provider_parses_response():
     assert data.as_of == "2024-03-04"
     assert data.volume == 9000
     assert data.symbol == "MCD.US"
+    assert "from" in session.calls[0][1]
 
 
 def test_market_data_service_persists_prices(tmp_path):
@@ -187,3 +188,63 @@ def test_market_data_service_uses_fundamentals_shares(tmp_path):
     snapshot = repo.latest_snapshot("SHEL.LSE")
     assert snapshot is not None
     assert snapshot.market_cap == 1000.0
+
+
+def test_eodhd_provider_parses_bulk_exchange_response():
+    payload = [
+        {"code": "AAA", "close": "10.5", "date": "2024-03-04", "volume": "100"},
+        {
+            "code": "SHEL",
+            "close": "2783.5",
+            "date": "2024-03-04",
+            "volume": "200",
+        },
+    ]
+    session = DummyEODSession(payload)
+    provider = EODHDProvider(api_key="demo", session=session)  # type: ignore[arg-type]
+
+    data = provider.latest_prices_for_exchange("LSE")
+
+    assert data["AAA.LSE"].price == 10.5
+    assert data["AAA.LSE"].as_of == "2024-03-04"
+    assert data["SHEL.LSE"].price == 27.835
+    assert session.calls[0][0].endswith("/api/eod-bulk-last-day/LSE")
+
+
+def test_market_data_service_prepare_price_data_uses_currency_hint(tmp_path):
+    class DummyProvider:
+        def latest_price(self, symbol):
+            return PriceData(
+                symbol=symbol,
+                price=2783.5,
+                as_of="2024-03-04",
+                volume=100,
+                currency=None,
+            )
+
+    class DummyConfig:
+        eodhd_api_key = None
+
+    service = MarketDataService(
+        db_path=tmp_path / "hint.db",
+        provider=DummyProvider(),
+        config=DummyConfig(),
+    )
+    service.supported_ticker_repo.fetch_currency = lambda symbol: (_ for _ in ()).throw(
+        AssertionError("fetch_currency should not be used when a currency hint exists")
+    )
+
+    prepared = service.prepare_price_data(
+        "SHEL.LSE",
+        PriceData(
+            symbol="SHEL.LSE",
+            price=2783.5,
+            as_of="2024-03-04",
+            volume=100,
+            currency=None,
+        ),
+        currency_hint="GBX",
+    )
+
+    assert prepared.price == 27.835
+    assert prepared.currency == "GBP"

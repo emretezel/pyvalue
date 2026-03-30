@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import Optional, Union
 
 from pyvalue.config import Config
-from pyvalue.marketdata import EODHDProvider, MarketDataProvider, PriceData
+from pyvalue.marketdata import (
+    EODHDProvider,
+    MarketDataProvider,
+    MarketDataUpdate,
+    PriceData,
+)
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.storage import (
     FinancialFactsRepository,
@@ -91,43 +96,65 @@ class MarketDataService:
                 continue
         return None
 
+    def prepare_price_data(
+        self,
+        symbol: str,
+        data: PriceData,
+        currency_hint: Optional[str] = None,
+    ) -> PriceData:
+        normalized_symbol = symbol.upper()
+        prepared = PriceData(
+            symbol=normalized_symbol,
+            price=data.price,
+            as_of=data.as_of,
+            volume=data.volume,
+            market_cap=data.market_cap,
+            currency=data.currency,
+        )
+        effective_currency = (
+            prepared.currency
+            or currency_hint
+            or self.supported_ticker_repo.fetch_currency(normalized_symbol)
+        )
+        price = prepared.price
+        if (
+            effective_currency
+            and effective_currency.upper() in {"GBX", "GBP0.01"}
+            and price is not None
+        ):
+            price = price / 100.0
+            effective_currency = "GBP"
+        market_cap = prepared.market_cap
+        if market_cap is None and price is not None:
+            shares = latest_share_count(normalized_symbol, self.facts_repo)
+            if shares is None:
+                shares = self._shares_from_fundamentals(normalized_symbol)
+            if shares is not None:
+                market_cap = shares * price
+        prepared.price = price
+        prepared.market_cap = market_cap
+        prepared.currency = effective_currency or prepared.currency
+        return prepared
+
+    def persist_updates(self, updates: list[MarketDataUpdate]) -> None:
+        self.repo.upsert_prices(updates)
+
     def refresh_symbol(
         self, symbol: str, fetch_symbol: Optional[str] = None
     ) -> PriceData:
         fetch = fetch_symbol or symbol
         data = self.provider.latest_price(fetch)
-        data.symbol = symbol.upper()
-        currency_hint = data.currency or self.supported_ticker_repo.fetch_currency(
-            symbol
-        )
-        price = data.price
-        if (
-            currency_hint
-            and currency_hint.upper() in {"GBX", "GBP0.01"}
-            and price is not None
-        ):
-            price = price / 100.0
-            currency_hint = "GBP"
-        market_cap = data.market_cap
-        if market_cap is None and price is not None:
-            shares = latest_share_count(symbol, self.facts_repo)
-            if shares is None:
-                shares = self._shares_from_fundamentals(symbol)
-            if shares is not None:
-                market_cap = shares * price
+        prepared = self.prepare_price_data(symbol, data)
         self.repo.upsert_price(
-            symbol=data.symbol,
-            as_of=data.as_of,
-            price=price,
-            volume=data.volume,
-            currency=currency_hint or data.currency,
-            market_cap=market_cap,
+            symbol=prepared.symbol,
+            as_of=prepared.as_of,
+            price=prepared.price,
+            volume=prepared.volume,
+            currency=prepared.currency,
+            market_cap=prepared.market_cap,
         )
-        data.market_cap = market_cap
-        data.price = price
-        data.currency = currency_hint or data.currency
-        LOGGER.info("Stored market data for %s at %s", data.symbol, data.as_of)
-        return data
+        LOGGER.info("Stored market data for %s at %s", prepared.symbol, prepared.as_of)
+        return prepared
 
 
 __all__ = ["MarketDataService", "latest_share_count"]

@@ -109,7 +109,8 @@ def apply_migrations(db_path: Union[str, Path]) -> int:
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
     applied = 0
-    with sqlite3.connect(db_path) as conn:
+    conn = sqlite3.connect(db_path)
+    try:
         conn.row_factory = sqlite3.Row
         current = _current_version(conn)
         target = len(MIGRATIONS)
@@ -126,6 +127,8 @@ def apply_migrations(db_path: Union[str, Path]) -> int:
             except Exception:
                 conn.rollback()
                 raise
+    finally:
+        conn.close()
 
     return applied
 

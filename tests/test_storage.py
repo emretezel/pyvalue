@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import date, timedelta
 
 from pyvalue.storage import (
     FundamentalsRepository,
@@ -7,6 +8,7 @@ from pyvalue.storage import (
     SupportedExchangeRepository,
     SupportedTickerRepository,
 )
+from pyvalue.marketdata import MarketDataUpdate
 from pyvalue.universe import Listing
 
 
@@ -283,9 +285,15 @@ def test_supported_ticker_repository_lists_market_data_symbols_missing_then_olde
 
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    market_repo.upsert_price("BBB.US", "2026-03-21", 10.0)
-    market_repo.upsert_price("CCC.US", "2026-03-01", 10.0)
-    market_repo.upsert_price("DDD.US", "2026-03-10", 10.0)
+    market_repo.upsert_price(
+        "BBB.US", (date.today() - timedelta(days=1)).isoformat(), 10.0
+    )
+    market_repo.upsert_price(
+        "CCC.US", (date.today() - timedelta(days=30)).isoformat(), 10.0
+    )
+    market_repo.upsert_price(
+        "DDD.US", (date.today() - timedelta(days=12)).isoformat(), 10.0
+    )
 
     rows = repo.list_eligible_for_market_data(
         "EODHD",
@@ -317,3 +325,78 @@ def test_market_data_fetch_state_repository_tracks_success_and_failure(tmp_path)
     assert success["last_error"] is None
     assert success["next_eligible_at"] is None
     assert success["attempts"] == 0
+
+
+def test_market_data_repository_upsert_prices_batches_rows(tmp_path):
+    db_path = tmp_path / "market-data-batch.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [
+            {"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock"},
+            {"Code": "BBB", "Name": "BBB Inc", "Type": "Common Stock"},
+        ],
+    )
+    rows = ticker_repo.list_for_exchange("EODHD", "US")
+    by_symbol = {row.symbol: row for row in rows}
+
+    repo = MarketDataRepository(db_path)
+    repo.initialize_schema()
+    repo.upsert_prices(
+        [
+            MarketDataUpdate(
+                security_id=by_symbol["AAA.US"].security_id,
+                symbol="AAA.US",
+                as_of="2026-03-29",
+                price=10.0,
+                volume=100,
+                currency="USD",
+            ),
+            MarketDataUpdate(
+                security_id=by_symbol["BBB.US"].security_id,
+                symbol="BBB.US",
+                as_of="2026-03-29",
+                price=20.0,
+                volume=200,
+                currency="USD",
+            ),
+        ]
+    )
+
+    assert repo.latest_snapshot("AAA.US").price == 10.0
+    assert repo.latest_snapshot("BBB.US").price == 20.0
+
+
+def test_market_data_fetch_state_repository_batch_methods(tmp_path):
+    repo = MarketDataFetchStateRepository(tmp_path / "market-state-batch.db")
+    repo.initialize_schema()
+
+    repo.mark_failure_many(
+        "EODHD",
+        [("AAA.US", "boom"), ("BBB.US", "bang")],
+        base_backoff_seconds=60,
+    )
+    assert repo.fetch("EODHD", "AAA.US")["last_status"] == "error"
+    assert repo.fetch("EODHD", "BBB.US")["attempts"] == 1
+
+    repo.mark_success_many("EODHD", ["AAA.US", "BBB.US"])
+    assert repo.fetch("EODHD", "AAA.US")["last_status"] == "ok"
+    assert repo.fetch("EODHD", "BBB.US")["attempts"] == 0
+
+
+def test_sqlite_store_connect_context_closes_connection(tmp_path):
+    repo = MarketDataRepository(tmp_path / "connect-close.db")
+
+    with repo._connect() as conn:
+        conn.execute("SELECT 1")
+
+    try:
+        conn.execute("SELECT 1")
+    except sqlite3.ProgrammingError:
+        pass
+    else:  # pragma: no cover - defensive
+        raise AssertionError(
+            "SQLite connection should be closed after the context exits"
+        )

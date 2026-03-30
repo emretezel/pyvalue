@@ -137,9 +137,12 @@ Key options:
 
 Notes:
 
-- market-data requests cost one EODHD API call per symbol
+- market-data refreshes use hybrid EODHD accounting: per-symbol requests cost
+  `1`, while exchange-bulk refreshes cost `100` for the exchange
 - the command is freshness-based by default and selects missing symbols first,
   then the oldest stale symbols
+- large exchange and all-supported runs may use exchange-bulk fetches and then
+  fall back to individual symbols when needed
 - progress across multiple days is tracked through `market_data_fetch_state`
 
 ### `report-market-data-progress`

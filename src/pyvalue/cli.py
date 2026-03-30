@@ -7,17 +7,21 @@ from __future__ import annotations
 
 import argparse
 import csv
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 import json
 import logging
 import re
+from threading import Lock, local
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from pyvalue.config import Config
 from pyvalue.ingestion import EODHDFundamentalsClient, SECCompanyFactsClient
+from pyvalue.marketdata import EODHDProvider, MarketDataUpdate, PriceData
 from pyvalue.marketdata.service import MarketDataService, latest_share_count
 from pyvalue.metrics import REGISTRY
 from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS
@@ -51,7 +55,70 @@ DEFAULT_SCREEN_RESULTS_PREFIX = "data/screen_results"
 EODHD_ALLOWED_TICKER_TYPES = {"COMMON STOCK", "PREFERRED STOCK", "STOCK"}
 EODHD_FUNDAMENTALS_CALL_COST = 10
 EODHD_MARKET_DATA_CALL_COST = 1
+EODHD_MARKET_DATA_BULK_CALL_COST = 100
 EODHD_MAX_REQUESTS_PER_MINUTE = 1000.0
+MARKET_DATA_BULK_BREAK_EVEN = 100
+MARKET_DATA_BULK_WORKERS = 4
+MARKET_DATA_SYMBOL_WORKERS = 16
+MARKET_DATA_RATE_LIMIT_BURST = 2
+MARKET_DATA_WRITE_BATCH_SIZE = 100
+MARKET_DATA_WRITE_BATCH_INTERVAL_SECONDS = 0.25
+MARKET_DATA_PROGRESS_INTERVAL_SECONDS = 5.0
+MARKET_DATA_PROGRESS_SYMBOL_STEP = 250
+
+_MARKET_DATA_PROVIDER_LOCAL = local()
+
+
+@dataclass(frozen=True)
+class _MarketDataExchangeTask:
+    exchange_code: str
+    tickers: Tuple[SupportedTicker, ...]
+
+
+@dataclass(frozen=True)
+class _PlannedMarketDataRun:
+    bulk_tasks: Tuple[_MarketDataExchangeTask, ...]
+    symbol_tickers: Tuple[SupportedTicker, ...]
+    api_call_cost: int
+    http_requests: int
+
+    @property
+    def total_symbols(self) -> int:
+        return sum(len(task.tickers) for task in self.bulk_tasks) + len(
+            self.symbol_tickers
+        )
+
+
+class _RateLimiter:
+    """Token-bucket limiter shared across market-data worker threads."""
+
+    def __init__(
+        self, rate_per_minute: float, burst: int = MARKET_DATA_RATE_LIMIT_BURST
+    ):
+        self.rate_per_second = max(rate_per_minute, 0.0) / 60.0
+        self.capacity = float(max(burst, 1))
+        self.tokens = self.capacity
+        self.updated_at = time.monotonic()
+        self._lock = Lock()
+
+    def acquire(self) -> None:
+        if self.rate_per_second <= 0:
+            return
+        while True:
+            wait_time = 0.0
+            with self._lock:
+                now = time.monotonic()
+                elapsed = now - self.updated_at
+                self.tokens = min(
+                    self.capacity, self.tokens + (elapsed * self.rate_per_second)
+                )
+                self.updated_at = now
+                if self.tokens >= 1.0:
+                    self.tokens -= 1.0
+                    return
+                wait_time = (1.0 - self.tokens) / self.rate_per_second
+            if wait_time > 0:
+                time.sleep(wait_time)
 
 
 def _resolve_database_path(database: str) -> Path:
@@ -439,6 +506,138 @@ def _resolve_eodhd_market_data_rate(rate: Optional[float]) -> float:
             "--rate must be greater than 0 for EODHD global market data updates."
         )
     return min(rate_value, EODHD_MAX_REQUESTS_PER_MINUTE)
+
+
+def _get_thread_local_market_data_provider(api_key: str) -> EODHDProvider:
+    provider = getattr(_MARKET_DATA_PROVIDER_LOCAL, "provider", None)
+    current_key = getattr(_MARKET_DATA_PROVIDER_LOCAL, "api_key", None)
+    if provider is None or current_key != api_key:
+        provider = EODHDProvider(api_key=api_key)
+        _MARKET_DATA_PROVIDER_LOCAL.provider = provider
+        _MARKET_DATA_PROVIDER_LOCAL.api_key = api_key
+    return provider
+
+
+def _plan_market_data_stage_run(
+    eligible: Sequence[SupportedTicker],
+    request_budget: int,
+) -> _PlannedMarketDataRun:
+    if not eligible or request_budget <= 0:
+        return _PlannedMarketDataRun(
+            bulk_tasks=(),
+            symbol_tickers=(),
+            api_call_cost=0,
+            http_requests=0,
+        )
+
+    grouped: Dict[str, List[SupportedTicker]] = {}
+    for ticker in eligible:
+        grouped.setdefault(ticker.exchange_code, []).append(ticker)
+
+    remaining_budget = request_budget
+    exchange_mode: Dict[str, str] = {}
+    bulk_tasks: List[_MarketDataExchangeTask] = []
+    symbol_tickers: List[SupportedTicker] = []
+    bulk_symbols: set[str] = set()
+
+    for ticker in eligible:
+        exchange_code = ticker.exchange_code
+        mode = exchange_mode.get(exchange_code)
+        if mode is None:
+            exchange_rows = grouped[exchange_code]
+            if (
+                len(exchange_rows) >= MARKET_DATA_BULK_BREAK_EVEN
+                and remaining_budget >= EODHD_MARKET_DATA_BULK_CALL_COST
+            ):
+                exchange_mode[exchange_code] = "bulk"
+                bulk_tasks.append(
+                    _MarketDataExchangeTask(
+                        exchange_code=exchange_code,
+                        tickers=tuple(exchange_rows),
+                    )
+                )
+                bulk_symbols.update(row.symbol for row in exchange_rows)
+                remaining_budget -= EODHD_MARKET_DATA_BULK_CALL_COST
+                continue
+            exchange_mode[exchange_code] = "symbol"
+            mode = "symbol"
+
+        if mode == "bulk" or ticker.symbol in bulk_symbols:
+            continue
+        if remaining_budget < EODHD_MARKET_DATA_CALL_COST:
+            break
+        symbol_tickers.append(ticker)
+        remaining_budget -= EODHD_MARKET_DATA_CALL_COST
+
+    api_call_cost = (
+        len(bulk_tasks) * EODHD_MARKET_DATA_BULK_CALL_COST
+        + len(symbol_tickers) * EODHD_MARKET_DATA_CALL_COST
+    )
+    return _PlannedMarketDataRun(
+        bulk_tasks=tuple(bulk_tasks),
+        symbol_tickers=tuple(symbol_tickers),
+        api_call_cost=api_call_cost,
+        http_requests=len(bulk_tasks) + len(symbol_tickers),
+    )
+
+
+def _build_market_data_update(
+    service: MarketDataService,
+    ticker: SupportedTicker,
+    data,
+) -> MarketDataUpdate:
+    prepared = service.prepare_price_data(
+        ticker.symbol,
+        data,
+        currency_hint=ticker.currency,
+    )
+    return MarketDataUpdate(
+        security_id=ticker.security_id,
+        symbol=ticker.symbol,
+        as_of=prepared.as_of,
+        price=prepared.price,
+        volume=prepared.volume,
+        market_cap=prepared.market_cap,
+        currency=prepared.currency,
+        source_provider="EODHD",
+    )
+
+
+def _flush_market_data_batches(
+    service: MarketDataService,
+    state_repo: MarketDataFetchStateRepository,
+    success_updates: List[MarketDataUpdate],
+    failures: List[Tuple[str, str]],
+) -> None:
+    if success_updates:
+        service.persist_updates(success_updates)
+        state_repo.mark_success_many(
+            "EODHD", [update.symbol for update in success_updates]
+        )
+        success_updates.clear()
+    if failures:
+        state_repo.mark_failure_many("EODHD", failures)
+        failures.clear()
+
+
+def _fetch_exchange_market_data(
+    api_key: str,
+    limiter: _RateLimiter,
+    exchange_code: str,
+) -> Mapping[str, PriceData]:
+    provider = _get_thread_local_market_data_provider(api_key)
+    limiter.acquire()
+    return provider.latest_prices_for_exchange(exchange_code)
+
+
+def _fetch_symbol_market_data(
+    api_key: str,
+    limiter: _RateLimiter,
+    symbol: str,
+) -> PriceData:
+    provider = _get_thread_local_market_data_provider(api_key)
+    limiter.acquire()
+    return provider.latest_price(symbol)
 
 
 def _refresh_supported_tickers_for_exchange(
@@ -1922,8 +2121,6 @@ def cmd_update_market_data_stage(
         user_meta, buffer_calls, EODHD_MARKET_DATA_CALL_COST
     )
     request_budget = usable_requests
-    if max_symbols is not None:
-        request_budget = min(request_budget, max_symbols)
     if request_budget <= 0:
         print(
             "No EODHD market data request budget available for this run "
@@ -1937,7 +2134,7 @@ def cmd_update_market_data_stage(
         provider=provider_norm,
         exchange_codes=resolved_exchange_codes,
         max_age_days=max_age_days,
-        max_symbols=request_budget,
+        max_symbols=max_symbols,
         resume=resume,
         provider_symbols=symbol_filters,
     )
@@ -1948,44 +2145,176 @@ def cmd_update_market_data_stage(
         )
         return 0
 
+    plan = _plan_market_data_stage_run(eligible, request_budget)
+    if plan.total_symbols == 0:
+        print(
+            "No EODHD market data request budget available for the current eligible "
+            f"scope after planning (daily_limit={daily_limit}, used_calls={used_calls}, "
+            f"buffer_calls={buffer_calls})."
+        )
+        return 0
+
     service = MarketDataService(db_path=db_path, config=config)
     state_repo = MarketDataFetchStateRepository(db_path)
     state_repo.initialize_schema()
-    interval = 60.0 / rate_value
-    total = len(eligible)
+    limiter = _RateLimiter(rate_value)
+    total = plan.total_symbols
     processed = 0
-    attempted = 0
+    failed = 0
+    pending_updates: List[MarketDataUpdate] = []
+    pending_failures: List[Tuple[str, str]] = []
+    fallback_symbols: List[SupportedTicker] = []
+    fallback_budget = max(0, request_budget - plan.api_call_cost)
+    last_flush = time.monotonic()
+    last_report = time.monotonic()
+    last_report_count = 0
     print(
-        f"Fetching EODHD market data for {total} supported tickers across {scope_label} "
+        f"Fetching EODHD market data for {total} of {len(eligible)} eligible supported tickers across {scope_label} "
         f"at <= {rate_value:.2f} req/min "
         f"(daily_limit={daily_limit}, used_calls={used_calls}, "
-        f"buffer_calls={buffer_calls}, budget_requests={request_budget})"
+        f"buffer_calls={buffer_calls}, budget_requests={request_budget}, "
+        f"planned_api_calls={plan.api_call_cost}, planned_http_requests={plan.http_requests}, "
+        f"bulk_exchanges={len(plan.bulk_tasks)}, symbol_requests={len(plan.symbol_tickers)})"
     )
+
+    def maybe_flush(force: bool = False) -> None:
+        nonlocal last_flush
+        if not pending_updates and not pending_failures:
+            return
+        if not force:
+            elapsed = time.monotonic() - last_flush
+            buffered = len(pending_updates) + len(pending_failures)
+            if (
+                buffered < MARKET_DATA_WRITE_BATCH_SIZE
+                and elapsed < MARKET_DATA_WRITE_BATCH_INTERVAL_SECONDS
+            ):
+                return
+        _flush_market_data_batches(
+            service, state_repo, pending_updates, pending_failures
+        )
+        last_flush = time.monotonic()
+
+    def maybe_report(force: bool = False) -> None:
+        nonlocal last_report, last_report_count
+        completed = processed + failed
+        elapsed = time.monotonic() - last_report
+        if (
+            not force
+            and completed - last_report_count < MARKET_DATA_PROGRESS_SYMBOL_STEP
+        ):
+            if elapsed < MARKET_DATA_PROGRESS_INTERVAL_SECONDS:
+                return
+        print(
+            f"[progress] stored={processed} failed={failed} completed={completed}/{total}",
+            flush=True,
+        )
+        last_report = time.monotonic()
+        last_report_count = completed
+
     try:
-        for idx, ticker in enumerate(eligible, 1):
-            attempted += 1
-            start = time.perf_counter()
-            try:
-                data = service.refresh_symbol(ticker.symbol)
-                state_repo.mark_success("EODHD", ticker.symbol)
-                processed += 1
-                print(
-                    f"[{idx}/{total}] Stored market data for {data.symbol}", flush=True
-                )
-            except Exception as exc:  # pragma: no cover - network errors
-                LOGGER.error(
-                    "Failed to refresh market data for %s: %s", ticker.symbol, exc
-                )
-                state_repo.mark_failure("EODHD", ticker.symbol, str(exc))
-            elapsed = time.perf_counter() - start
-            if elapsed < interval:
-                time.sleep(interval - elapsed)
+        if plan.bulk_tasks:
+            with ThreadPoolExecutor(
+                max_workers=min(MARKET_DATA_BULK_WORKERS, len(plan.bulk_tasks))
+            ) as executor:
+                bulk_futures = {
+                    executor.submit(
+                        _fetch_exchange_market_data,
+                        api_key,
+                        limiter,
+                        task.exchange_code,
+                    ): task
+                    for task in plan.bulk_tasks
+                }
+                for future in as_completed(bulk_futures):
+                    task = bulk_futures[future]
+                    try:
+                        fetched = future.result()
+                    except Exception as exc:  # pragma: no cover - network errors
+                        LOGGER.error(
+                            "Failed to refresh bulk market data for %s: %s",
+                            task.exchange_code,
+                            exc,
+                        )
+                        pending_failures.extend(
+                            (ticker.symbol, str(exc)) for ticker in task.tickers
+                        )
+                        failed += len(task.tickers)
+                        maybe_flush(force=True)
+                        maybe_report()
+                        continue
+
+                    stored_for_exchange = 0
+                    queued_fallbacks = 0
+                    for ticker in task.tickers:
+                        bulk_data = fetched.get(ticker.symbol)
+                        if bulk_data is None:
+                            if fallback_budget > 0:
+                                fallback_symbols.append(ticker)
+                                fallback_budget -= EODHD_MARKET_DATA_CALL_COST
+                                queued_fallbacks += 1
+                            else:
+                                pending_failures.append(
+                                    (
+                                        ticker.symbol,
+                                        f"Bulk exchange response missing {ticker.symbol}",
+                                    )
+                                )
+                                failed += 1
+                            continue
+                        pending_updates.append(
+                            _build_market_data_update(service, ticker, bulk_data)
+                        )
+                        stored_for_exchange += 1
+                    processed += stored_for_exchange
+                    maybe_flush(force=True)
+                    print(
+                        f"[bulk {task.exchange_code}] stored={stored_for_exchange} "
+                        f"fallbacks={queued_fallbacks} symbols={len(task.tickers)}",
+                        flush=True,
+                    )
+                    maybe_report()
+
+        symbol_tickers = [*plan.symbol_tickers, *fallback_symbols]
+        if symbol_tickers:
+            with ThreadPoolExecutor(
+                max_workers=min(MARKET_DATA_SYMBOL_WORKERS, len(symbol_tickers))
+            ) as executor:
+                symbol_futures = {
+                    executor.submit(
+                        _fetch_symbol_market_data,
+                        api_key,
+                        limiter,
+                        ticker.symbol,
+                    ): ticker
+                    for ticker in symbol_tickers
+                }
+                for symbol_future in as_completed(symbol_futures):
+                    ticker = symbol_futures[symbol_future]
+                    try:
+                        symbol_data = symbol_future.result()
+                        pending_updates.append(
+                            _build_market_data_update(service, ticker, symbol_data)
+                        )
+                        processed += 1
+                    except Exception as exc:  # pragma: no cover - network errors
+                        LOGGER.error(
+                            "Failed to refresh market data for %s: %s",
+                            ticker.symbol,
+                            exc,
+                        )
+                        pending_failures.append((ticker.symbol, str(exc)))
+                        failed += 1
+                    maybe_flush()
+                    maybe_report()
     except KeyboardInterrupt:
-        print(f"\nCancelled after {attempted} attempted symbols.")
+        maybe_flush(force=True)
+        print(f"\nCancelled after {processed + failed} completed symbols.")
         return 1
 
+    maybe_flush(force=True)
+    maybe_report(force=True)
     print(
-        f"Stored market data for {processed} of {attempted} attempted symbols in {db_path}"
+        f"Stored market data for {processed} of {total} planned supported tickers in {db_path}"
     )
     return 0
 

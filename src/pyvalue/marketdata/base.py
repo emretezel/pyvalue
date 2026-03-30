@@ -19,6 +19,20 @@ class PriceData:
     market_cap: Optional[float] = None
 
 
+@dataclass(frozen=True)
+class MarketDataUpdate:
+    """Prepared market-data row ready for persistence."""
+
+    security_id: int
+    symbol: str
+    as_of: str
+    price: float
+    volume: Optional[int] = None
+    market_cap: Optional[float] = None
+    currency: Optional[str] = None
+    source_provider: str = "EODHD"
+
+
 class MarketDataProvider(Protocol):
     """Protocol for fetching latest price/market data."""
 

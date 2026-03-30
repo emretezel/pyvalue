@@ -20,10 +20,12 @@ from pyvalue.storage import (
     MarketDataFetchStateRepository,
     MarketDataRepository,
     MetricsRepository,
+    SupportedTicker,
     SupportedExchangeRepository,
     SupportedTickerRepository,
 )
 from pyvalue.universe import Listing
+from pyvalue.marketdata import PriceData
 
 
 def make_fact(**kwargs):
@@ -111,6 +113,29 @@ def store_market_data(db_path, symbol: str, as_of: str, price: float = 10.0):
     repo.initialize_schema()
     repo.upsert_price(symbol, as_of, price)
     return repo
+
+
+def make_supported_ticker(
+    symbol: str,
+    exchange_code: str,
+    security_id: int,
+    currency: str = "USD",
+):
+    ticker, _ = symbol.split(".")
+    return SupportedTicker(
+        provider="EODHD",
+        provider_exchange_code=exchange_code,
+        provider_symbol=symbol,
+        provider_ticker=ticker,
+        security_id=security_id,
+        listing_exchange=exchange_code,
+        security_name=symbol,
+        security_type="Common Stock",
+        country="US",
+        currency=currency,
+        isin=None,
+        updated_at=None,
+    )
 
 
 def test_main_dispatches_report_ingest_progress_with_default_max_age_days(
@@ -1580,6 +1605,216 @@ def test_cmd_update_market_data_global_uses_supported_tickers(monkeypatch, tmp_p
     state_repo = MarketDataFetchStateRepository(db_path)
     assert state_repo.fetch("EODHD", "AAA.US")["last_status"] == "ok"
     assert state_repo.fetch("EODHD", "BBB.US")["last_status"] == "ok"
+
+
+def test_plan_market_data_stage_run_uses_bulk_for_large_exchange():
+    eligible = [
+        *(make_supported_ticker(f"U{i:03d}.US", "US", i) for i in range(100)),
+        make_supported_ticker("AAA.LSE", "LSE", 1001, currency="GBP"),
+        make_supported_ticker("BBB.LSE", "LSE", 1002, currency="GBP"),
+    ]
+
+    plan = cli._plan_market_data_stage_run(eligible, request_budget=1000)
+
+    assert [task.exchange_code for task in plan.bulk_tasks] == ["US"]
+    assert [ticker.symbol for ticker in plan.symbol_tickers] == ["AAA.LSE", "BBB.LSE"]
+    assert plan.api_call_cost == 102
+    assert plan.http_requests == 3
+
+
+def test_plan_market_data_stage_run_falls_back_to_symbols_when_bulk_does_not_fit_budget():
+    eligible = [
+        *(make_supported_ticker(f"U{i:03d}.US", "US", i) for i in range(100)),
+        make_supported_ticker("AAA.LSE", "LSE", 1001, currency="GBP"),
+    ]
+
+    plan = cli._plan_market_data_stage_run(eligible, request_budget=5)
+
+    assert plan.bulk_tasks == ()
+    assert [ticker.symbol for ticker in plan.symbol_tickers] == [
+        "U000.US",
+        "U001.US",
+        "U002.US",
+        "U003.US",
+        "U004.US",
+    ]
+    assert plan.api_call_cost == 5
+
+
+def test_cmd_update_market_data_stage_uses_bulk_for_large_exchange(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "stage-market-data-bulk.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[
+            {"Code": f"U{i:03d}", "Exchange": "US", "Type": "Common Stock"}
+            for i in range(100)
+        ],
+    )
+    store_supported_tickers(
+        db_path,
+        "LSE",
+        rows=[{"Code": "SMALL", "Exchange": "LSE", "Type": "Common Stock"}],
+    )
+    calls = {"bulk": [], "symbols": []}
+    today = date.today().isoformat()
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+
+        def user_metadata(self):
+            return {
+                "dailyRateLimit": "1000",
+                "apiRequests": "0",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
+
+    class FakeProvider:
+        def __init__(self, api_key: str, session=None):
+            assert api_key == "TOKEN"
+
+        def latest_prices_for_exchange(self, exchange_code: str):
+            calls["bulk"].append(exchange_code)
+            return {
+                f"U{i:03d}.US": PriceData(
+                    symbol=f"U{i:03d}.US",
+                    price=10.0 + i,
+                    as_of=today,
+                    volume=100 + i,
+                    currency="USD",
+                )
+                for i in range(100)
+            }
+
+        def latest_price(self, symbol: str):
+            calls["symbols"].append(symbol)
+            return PriceData(
+                symbol=symbol,
+                price=20.0,
+                as_of=today,
+                volume=50,
+                currency="GBP",
+            )
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(cli, "EODHDProvider", FakeProvider)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_api_key="TOKEN",
+            eodhd_market_data_daily_buffer_calls=0,
+            eodhd_market_data_requests_per_minute=950,
+        ),
+    )
+
+    rc = cli.cmd_update_market_data_stage(
+        provider="EODHD",
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=None,
+        all_supported=True,
+        rate=None,
+        max_symbols=None,
+        max_age_days=7,
+        resume=False,
+    )
+
+    assert rc == 0
+    assert calls["bulk"] == ["US"]
+    assert calls["symbols"] == ["SMALL.LSE"]
+    state_repo = MarketDataFetchStateRepository(db_path)
+    assert state_repo.fetch("EODHD", "U000.US")["last_status"] == "ok"
+    assert state_repo.fetch("EODHD", "SMALL.LSE")["last_status"] == "ok"
+
+
+def test_cmd_update_market_data_stage_retries_missing_bulk_symbol_individually(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "stage-market-data-fallback.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[
+            {"Code": f"U{i:03d}", "Exchange": "US", "Type": "Common Stock"}
+            for i in range(100)
+        ],
+    )
+    calls = {"bulk": [], "symbols": []}
+    today = date.today().isoformat()
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+
+        def user_metadata(self):
+            return {
+                "dailyRateLimit": "1000",
+                "apiRequests": "0",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
+
+    class FakeProvider:
+        def __init__(self, api_key: str, session=None):
+            assert api_key == "TOKEN"
+
+        def latest_prices_for_exchange(self, exchange_code: str):
+            calls["bulk"].append(exchange_code)
+            return {
+                f"U{i:03d}.US": PriceData(
+                    symbol=f"U{i:03d}.US",
+                    price=10.0 + i,
+                    as_of=today,
+                    volume=100 + i,
+                    currency="USD",
+                )
+                for i in range(99)
+            }
+
+        def latest_price(self, symbol: str):
+            calls["symbols"].append(symbol)
+            return PriceData(
+                symbol=symbol,
+                price=999.0,
+                as_of=today,
+                volume=999,
+                currency="USD",
+            )
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(cli, "EODHDProvider", FakeProvider)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_api_key="TOKEN",
+            eodhd_market_data_daily_buffer_calls=0,
+            eodhd_market_data_requests_per_minute=950,
+        ),
+    )
+
+    rc = cli.cmd_update_market_data_stage(
+        provider="EODHD",
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=None,
+        all_supported=True,
+        rate=None,
+        max_symbols=None,
+        max_age_days=7,
+        resume=False,
+    )
+
+    assert rc == 0
+    assert calls["bulk"] == ["US"]
+    assert calls["symbols"] == ["U099.US"]
+    state_repo = MarketDataFetchStateRepository(db_path)
+    assert state_repo.fetch("EODHD", "U099.US")["last_status"] == "ok"
 
 
 def test_cmd_update_market_data_global_prefers_missing_then_oldest_stale(

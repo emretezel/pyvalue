@@ -10,9 +10,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
 import sqlite3
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence, Tuple, Union
 
-from pyvalue.marketdata.base import PriceData
+from pyvalue.marketdata.base import MarketDataUpdate, PriceData
 from pyvalue.migrations import apply_migrations
 from pyvalue.universe import Listing
 
@@ -47,6 +47,11 @@ def _coerce_int(value: Any) -> int:
     if value is None:
         return 0
     return int(value)
+
+
+def _batched(values: Sequence[Any], size: int) -> Iterable[Sequence[Any]]:
+    for start in range(0, len(values), size):
+        yield values[start : start + size]
 
 
 @dataclass(frozen=True)
@@ -169,6 +174,17 @@ class FactRecord:
     currency: Optional[str] = None
 
 
+class _ManagedSQLiteConnection(sqlite3.Connection):
+    """SQLite connection that closes the file handle when the context exits."""
+
+    def __exit__(self, exc_type, exc_value, traceback) -> Literal[False]:
+        try:
+            super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+        return False
+
+
 class SQLiteStore:
     """Shared helpers for repositories backed by SQLite."""
 
@@ -182,7 +198,7 @@ class SQLiteStore:
         )
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, factory=_ManagedSQLiteConnection)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -1700,6 +1716,41 @@ class _FetchStateRepository(SQLiteStore):
                 (provider.strip().upper(), symbol.strip().upper(), timestamp),
             )
 
+    def mark_success_many(
+        self,
+        provider: str,
+        symbols: Sequence[str],
+        fetched_at: Optional[str] = None,
+    ) -> None:
+        self.initialize_schema()
+        normalized = _normalized_codes(symbols)
+        if not normalized:
+            return
+        provider_norm = provider.strip().upper()
+        timestamp = fetched_at or _utc_now_iso()
+        rows = [(provider_norm, symbol, timestamp) for symbol in normalized]
+        with self._connect() as conn:
+            conn.executemany(
+                f"""
+                INSERT INTO {self.table_name} (
+                    provider,
+                    provider_symbol,
+                    last_fetched_at,
+                    last_status,
+                    last_error,
+                    next_eligible_at,
+                    attempts
+                ) VALUES (?, ?, ?, 'ok', NULL, NULL, 0)
+                ON CONFLICT(provider, provider_symbol) DO UPDATE SET
+                    last_fetched_at = excluded.last_fetched_at,
+                    last_status = 'ok',
+                    last_error = NULL,
+                    next_eligible_at = NULL,
+                    attempts = 0
+                """,
+                rows,
+            )
+
     def mark_failure(
         self,
         provider: str,
@@ -1743,6 +1794,84 @@ class _FetchStateRepository(SQLiteStore):
                     next_eligible_at,
                     attempts,
                 ),
+            )
+
+    def mark_failure_many(
+        self,
+        provider: str,
+        errors: Sequence[Tuple[str, str]],
+        base_backoff_seconds: int = 3600,
+        max_backoff_seconds: int = 86400,
+    ) -> None:
+        self.initialize_schema()
+        normalized_errors = [
+            (symbol.strip().upper(), str(error))
+            for symbol, error in errors
+            if symbol and str(error)
+        ]
+        if not normalized_errors:
+            return
+        provider_norm = provider.strip().upper()
+        symbols = [symbol for symbol, _ in normalized_errors]
+        state_by_symbol: Dict[str, Dict[str, Optional[str] | int]] = {}
+        with self._connect() as conn:
+            for chunk in _batched(symbols, 500):
+                placeholders = ", ".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""
+                    SELECT provider_symbol, last_fetched_at, attempts
+                    FROM {self.table_name}
+                    WHERE provider = ? AND provider_symbol IN ({placeholders})
+                    """,
+                    [provider_norm, *chunk],
+                ).fetchall()
+                for row in rows:
+                    state_by_symbol[row["provider_symbol"]] = {
+                        "last_fetched_at": row["last_fetched_at"],
+                        "attempts": row["attempts"],
+                    }
+
+            now = datetime.now(timezone.utc)
+            rows = []
+            for symbol, error in normalized_errors:
+                state = state_by_symbol.get(symbol)
+                attempts = int(state.get("attempts") or 0) if state else 0
+                attempts += 1
+                backoff = min(
+                    base_backoff_seconds * (2 ** (attempts - 1)),
+                    max_backoff_seconds,
+                )
+                next_eligible_at = (now + timedelta(seconds=backoff)).isoformat()
+                last_fetched_at = state.get("last_fetched_at") if state else None
+                rows.append(
+                    (
+                        provider_norm,
+                        symbol,
+                        last_fetched_at,
+                        error,
+                        next_eligible_at,
+                        attempts,
+                    )
+                )
+            conn.executemany(
+                f"""
+                INSERT INTO {self.table_name} (
+                    provider,
+                    provider_symbol,
+                    last_fetched_at,
+                    last_status,
+                    last_error,
+                    next_eligible_at,
+                    attempts
+                ) VALUES (?, ?, ?, 'error', ?, ?, ?)
+                ON CONFLICT(provider, provider_symbol) DO UPDATE SET
+                    last_fetched_at = COALESCE(excluded.last_fetched_at, {self.table_name}.last_fetched_at),
+                    last_status = 'error',
+                    last_error = excluded.last_error,
+                    next_eligible_at = excluded.next_eligible_at,
+                    attempts = excluded.attempts
+                """,
+                rows,
             )
 
     def delete_symbols(self, provider: str, symbols: Sequence[str]) -> int:
@@ -2020,8 +2149,41 @@ class MarketDataRepository(SQLiteStore):
     ) -> None:
         self.initialize_schema()
         security = self._security_repo().ensure_from_symbol(symbol)
+        self.upsert_prices(
+            [
+                MarketDataUpdate(
+                    security_id=security.security_id,
+                    symbol=symbol.strip().upper(),
+                    as_of=as_of,
+                    price=price,
+                    volume=volume,
+                    market_cap=market_cap,
+                    currency=currency,
+                    source_provider=(source_provider or "EODHD").strip().upper(),
+                )
+            ]
+        )
+
+    def upsert_prices(self, rows: Sequence[MarketDataUpdate]) -> None:
+        self.initialize_schema()
+        if not rows:
+            return
+        updated_at = _utc_now_iso()
+        payload = [
+            (
+                row.security_id,
+                row.as_of,
+                row.price,
+                row.volume,
+                row.market_cap,
+                row.currency,
+                row.source_provider.strip().upper(),
+                updated_at,
+            )
+            for row in rows
+        ]
         with self._connect() as conn:
-            conn.execute(
+            conn.executemany(
                 """
                 INSERT INTO market_data (
                     security_id,
@@ -2041,16 +2203,7 @@ class MarketDataRepository(SQLiteStore):
                     source_provider = excluded.source_provider,
                     updated_at = excluded.updated_at
                 """,
-                (
-                    security.security_id,
-                    as_of,
-                    price,
-                    volume,
-                    market_cap,
-                    currency,
-                    (source_provider or "EODHD").strip().upper(),
-                    _utc_now_iso(),
-                ),
+                payload,
             )
 
     def latest_snapshot(self, symbol: str) -> Optional[PriceData]:

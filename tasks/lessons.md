@@ -34,3 +34,9 @@ Use this file to capture recurring mistake patterns after user corrections so fu
 - Recurring pattern: Reusing a security-level update helper without checking time-series granularity can accidentally overwrite historical snapshots when the intended behavior is latest-row-only maintenance.
 - Preventive rule: For snapshot tables keyed by `(entity_id, as_of)`, verify whether maintenance commands should update one row or all rows, and add a regression test with at least two dates before shipping the change.
 - Resulting action: Narrowed `update_market_cap()` to the latest `as_of` row per security and added a regression test covering preserved historical market-cap rows.
+
+- Date: 2026-03-30
+- User correction: The accelerated `update-market-data` run crashed with `sqlite3.OperationalError: unable to open database file` after several thousand symbols.
+- Recurring pattern: Assuming `with sqlite3.connect(...)` closes the connection can leave high-frequency code paths leaking file descriptors, especially when schema checks and point lookups open fresh connections in tight loops.
+- Preventive rule: When touching SQLite performance paths, verify connection lifetime explicitly and remember that sqlite's context manager commits or rolls back but does not close; add a regression test that the repository helper closes the connection after the `with` block.
+- Resulting action: Replaced the shared storage connection helper with a `sqlite3.Connection` subclass that closes on context exit, fixed the migration runner to close its connection explicitly, and added a regression test for closed connections.

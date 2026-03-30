@@ -49,6 +49,8 @@ pyvalue update-market-data --provider EODHD --all-supported --resume
 Important behavior:
 - default freshness is `7` days
 - the command selects missing symbols first, then the oldest stale symbols
+- large exchange and all-supported runs can mix exchange-bulk fetches with
+  per-symbol fallbacks
 - it uses the EODHD daily quota and stops cleanly when the remaining budget is exhausted
 - rerun it the next day to continue from the remaining stale or missing symbols
 
@@ -90,6 +92,8 @@ the latest stored `market_data.as_of` row for each selected symbol.
 ## Operational Notes
 
 - Market-data freshness is separate from fundamentals freshness.
+- API-call accounting is hybrid on EODHD market-data refreshes: per-symbol calls
+  cost `1`, and full exchange-bulk calls cost `100`.
 - Some valuation metrics require both fresh market data and fresh normalized facts.
 - Market cap stored in `market_data` is a snapshot, not a time series of fully modeled enterprise value.
 
