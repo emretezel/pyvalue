@@ -32,12 +32,15 @@ data/pyvalue.db
 
 ## Recommended First Workflow: EODHD
 
+Commands that accept `--provider` default to `EODHD`, so the examples below
+omit it.
+
 ```bash
-pyvalue refresh-supported-exchanges --provider EODHD
-pyvalue refresh-supported-tickers --provider EODHD --exchange-codes US
-pyvalue ingest-fundamentals --provider EODHD --exchange-codes US --max-symbols 100
-pyvalue normalize-fundamentals --provider EODHD --exchange-codes US
-pyvalue update-market-data --provider EODHD --exchange-codes US
+pyvalue refresh-supported-exchanges
+pyvalue refresh-supported-tickers --exchange-codes US
+pyvalue ingest-fundamentals --exchange-codes US --max-symbols 100
+pyvalue normalize-fundamentals --exchange-codes US
+pyvalue update-market-data --exchange-codes US
 pyvalue compute-metrics --exchange-codes US
 ```
 
@@ -50,8 +53,8 @@ pyvalue run-screen screeners/value.yml --exchange-codes US
 ## Minimal Single-Symbol Workflow
 
 ```bash
-pyvalue ingest-fundamentals --provider EODHD --symbols AAPL.US
-pyvalue normalize-fundamentals --provider EODHD --symbols AAPL.US
+pyvalue ingest-fundamentals --symbols AAPL.US
+pyvalue normalize-fundamentals --symbols AAPL.US
 pyvalue update-market-data --symbols AAPL.US
 pyvalue compute-metrics --symbols AAPL.US
 ```

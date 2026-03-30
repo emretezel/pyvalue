@@ -23,6 +23,10 @@ pyvalue run-screen screeners/value.yml --exchange-codes US --output-csv data/scr
 
 Default database: `data/pyvalue.db`
 
+Default CLI behavior:
+- commands that accept `--provider` default to `EODHD`
+- commands that accept `--max-age-days` default to `30`
+
 ## What pyvalue does
 
 - Load canonical provider ticker catalogs into SQLite.

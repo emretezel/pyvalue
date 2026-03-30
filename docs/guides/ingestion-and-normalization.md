@@ -41,12 +41,12 @@ pyvalue normalize-fundamentals --provider EODHD --exchange-codes US
 pyvalue compute-metrics --exchange-codes US
 ```
 
-Typical all-exchange bootstrap over multiple days:
+Typical all-exchange refresh over multiple days:
 
 ```bash
-pyvalue refresh-supported-exchanges --provider EODHD
-pyvalue refresh-supported-tickers --provider EODHD --all-exchanges
-pyvalue ingest-fundamentals --provider EODHD --all-supported --resume
+pyvalue refresh-supported-exchanges
+pyvalue refresh-supported-tickers --all-supported
+pyvalue ingest-fundamentals --all-supported --resume
 ```
 
 Re-run the global command on later days to continue from the remaining eligible
@@ -58,10 +58,11 @@ Check progress between runs:
 pyvalue report-fundamentals-progress --provider EODHD
 ```
 
-To refresh stale symbols later instead of only filling missing payloads:
+The default `--max-age-days` window is already 30 days. Use an explicit value
+when you want a different refresh horizon:
 
 ```bash
-pyvalue ingest-fundamentals --provider EODHD --all-supported --max-age-days 30 --resume
+pyvalue ingest-fundamentals --all-supported --max-age-days 90 --resume
 ```
 
 ## What Ingestion Does

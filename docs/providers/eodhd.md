@@ -4,6 +4,9 @@
 
 EODHD is the recommended provider for most `pyvalue` workflows.
 
+CLI commands that accept `--provider` already default to `EODHD`, so the flag
+is optional unless you want to be explicit or switch to `SEC`.
+
 It covers:
 - global exchange universes
 - global fundamentals
@@ -22,20 +25,20 @@ exchange metadata lookups. Refresh it explicitly when you want the latest
 exchange list from EODHD:
 
 ```bash
-pyvalue refresh-supported-exchanges --provider EODHD
+pyvalue refresh-supported-exchanges
 ```
 
 `pyvalue` also stores a per-exchange `supported_tickers` catalog for EODHD.
 Refresh one exchange:
 
 ```bash
-pyvalue refresh-supported-tickers --provider EODHD --exchange-codes LSE
+pyvalue refresh-supported-tickers --exchange-codes LSE
 ```
 
 Refresh all stored exchanges:
 
 ```bash
-pyvalue refresh-supported-tickers --provider EODHD --all-exchanges
+pyvalue refresh-supported-tickers --all-supported
 ```
 
 Ticker refresh keeps only `Common Stock`, `Preferred Stock`, and `Stock`.
@@ -47,7 +50,7 @@ tables are kept.
 Example:
 
 ```bash
-pyvalue refresh-supported-tickers --provider EODHD --exchange-codes LSE
+pyvalue refresh-supported-tickers --exchange-codes LSE
 ```
 
 ## Fundamentals Ingestion
@@ -55,38 +58,38 @@ pyvalue refresh-supported-tickers --provider EODHD --exchange-codes LSE
 Single symbol:
 
 ```bash
-pyvalue ingest-fundamentals --provider EODHD --symbols AAPL.US
+pyvalue ingest-fundamentals --symbols AAPL.US
 ```
 
 Exchange-scoped:
 
 ```bash
-pyvalue ingest-fundamentals --provider EODHD --exchange-codes US
+pyvalue ingest-fundamentals --exchange-codes US
 ```
 
 Quota-aware all-supported run across the stored supported-ticker catalog:
 
 ```bash
-pyvalue ingest-fundamentals --provider EODHD --all-supported
+pyvalue ingest-fundamentals --all-supported
 ```
 
 EODHD ingestion always reads from stored `supported_tickers`, not from a live
 symbol-list request. Refresh the ticker catalog before running it:
 
 ```bash
-pyvalue refresh-supported-tickers --provider EODHD --exchange-codes US
-pyvalue ingest-fundamentals --provider EODHD --exchange-codes US
+pyvalue refresh-supported-tickers --exchange-codes US
+pyvalue ingest-fundamentals --exchange-codes US
 ```
 
 For large multi-day runs:
 
 ```bash
-pyvalue refresh-supported-exchanges --provider EODHD
-pyvalue refresh-supported-tickers --provider EODHD --all-exchanges
-pyvalue ingest-fundamentals --provider EODHD --all-supported --resume
+pyvalue refresh-supported-exchanges
+pyvalue refresh-supported-tickers --all-supported
+pyvalue ingest-fundamentals --all-supported --resume
 ```
 
-`ingest-fundamentals --provider EODHD` checks the EODHD user/quota endpoint
+`ingest-fundamentals` checks the EODHD user/quota endpoint
 before each multi-symbol run, subtracts the configured daily buffer, throttles
 by requests per minute, and exits cleanly when the remaining daily allowance is
 exhausted. Rerun it the next day to continue from the remaining eligible ticker
@@ -95,14 +98,15 @@ set.
 To see whether a multi-day run is actually complete for the current scope, use:
 
 ```bash
-pyvalue report-fundamentals-progress --provider EODHD
+pyvalue report-fundamentals-progress
 ```
 
 This report defaults to a 30-day freshness window. That means old
-`fundamentals_raw` rows count as incomplete by default even though
-`ingest-fundamentals --provider EODHD --all-supported` stays bootstrap-first
-when `--max-age-days` is omitted. Use `--missing-only` on the report if you
-only care whether each supported ticker has ever been ingested once.
+`fundamentals_raw` rows count as incomplete by default, and
+`ingest-fundamentals --all-supported` now uses the same
+30-day freshness window when `--max-age-days` is omitted. Use `--missing-only`
+on the report if you only care whether each supported ticker has ever been
+ingested once.
 In the summary, `Stored` means a raw payload exists in the DB, while `Fresh`
 means the ticker currently counts as complete for the selected mode/window.
 
@@ -116,8 +120,7 @@ Important fundamentals options:
 - `--symbols`, `--exchange-codes`, or `--all-supported`: choose the scope
 - `--rate`: EODHD uses symbols per minute
 - `--max-symbols`: limit one run
-- `--max-age-days`: refresh stale or missing data; when omitted on
-  `--all-supported`, only missing payloads are selected
+- `--max-age-days`: refresh stale or missing data; default `30`
 - `--resume`: skip symbols still in backoff
 
 ## Fundamentals Normalization
@@ -125,13 +128,13 @@ Important fundamentals options:
 Single symbol:
 
 ```bash
-pyvalue normalize-fundamentals --provider EODHD --symbols AAPL.US
+pyvalue normalize-fundamentals --symbols AAPL.US
 ```
 
 Exchange-scoped:
 
 ```bash
-pyvalue normalize-fundamentals --provider EODHD --exchange-codes US
+pyvalue normalize-fundamentals --exchange-codes US
 ```
 
 Normalization converts raw EODHD payloads into provider-agnostic
@@ -144,30 +147,30 @@ Market data is always fetched from EODHD.
 Single symbol:
 
 ```bash
-pyvalue update-market-data --provider EODHD --symbols AAPL.US
+pyvalue update-market-data --symbols AAPL.US
 ```
 
 Exchange-scoped:
 
 ```bash
-pyvalue update-market-data --provider EODHD --exchange-codes US
+pyvalue update-market-data --exchange-codes US
 ```
 
 Quota-aware all-supported run across the stored supported-ticker catalog:
 
 ```bash
-pyvalue update-market-data --provider EODHD --all-supported
+pyvalue update-market-data --all-supported
 ```
 
 For large multi-day runs:
 
 ```bash
-pyvalue refresh-supported-exchanges --provider EODHD
-pyvalue refresh-supported-tickers --provider EODHD --all-exchanges
-pyvalue update-market-data --provider EODHD --all-supported --resume
+pyvalue refresh-supported-exchanges
+pyvalue refresh-supported-tickers --all-supported
+pyvalue update-market-data --all-supported --resume
 ```
 
-`update-market-data --provider EODHD` checks the EODHD user/quota endpoint
+`update-market-data` checks the EODHD user/quota endpoint
 before each multi-symbol run, subtracts the configured daily buffer, throttles
 by requests per minute, and exits cleanly when the remaining daily allowance is
 exhausted. Market-data refreshes use hybrid accounting: per-symbol requests
@@ -180,10 +183,10 @@ To see whether a multi-day market-data run is actually complete for the current
 scope, use:
 
 ```bash
-pyvalue report-market-data-progress --provider EODHD
+pyvalue report-market-data-progress
 ```
 
-This report defaults to a 7-day freshness window. A symbol is incomplete when
+This report defaults to a 30-day freshness window. A symbol is incomplete when
 its latest stored `market_data.as_of` is missing or older than the selected
 window. In the summary, `Stored` means a market-data snapshot exists in the DB,
 while `Fresh` means the symbol currently counts as complete for the selected
@@ -194,7 +197,7 @@ Important market-data options:
 - `--symbols`, `--exchange-codes`, or `--all-supported`: choose the scope
 - `--rate`: requests per minute, capped at the EODHD limit of `1000`
 - `--max-symbols`: limit one run
-- `--max-age-days`: refresh stale or missing market data; default `7`
+- `--max-age-days`: refresh stale or missing market data; default `30`
 - `--resume`: skip symbols still in backoff
 
 Market cap can be recalculated later from stored prices and latest share counts:

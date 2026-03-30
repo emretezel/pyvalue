@@ -4,6 +4,9 @@
 
 Market data in `pyvalue` always comes from EODHD.
 
+Commands that accept `--provider` already default to `EODHD`, so the examples
+below only include it when the extra clarity helps.
+
 This covers:
 - latest prices
 - stored market-cap snapshots
@@ -25,7 +28,7 @@ pyvalue update-market-data --symbols AAPL.US
 ## Update an Exchange
 
 ```bash
-pyvalue update-market-data --provider EODHD --exchange-codes US --rate 950
+pyvalue update-market-data --exchange-codes US --rate 950
 ```
 
 Use `--rate` to throttle symbols per minute.
@@ -35,19 +38,19 @@ Use `--rate` to throttle symbols per minute.
 Refresh market data across the stored EODHD `supported_tickers` catalog:
 
 ```bash
-pyvalue update-market-data --provider EODHD --all-supported
+pyvalue update-market-data --all-supported
 ```
 
 Recommended workflow for large runs:
 
 ```bash
-pyvalue refresh-supported-exchanges --provider EODHD
-pyvalue refresh-supported-tickers --provider EODHD --all-exchanges
-pyvalue update-market-data --provider EODHD --all-supported --resume
+pyvalue refresh-supported-exchanges
+pyvalue refresh-supported-tickers --all-supported
+pyvalue update-market-data --all-supported --resume
 ```
 
 Important behavior:
-- default freshness is `7` days
+- default freshness is `30` days
 - the command selects missing symbols first, then the oldest stale symbols
 - large exchange and all-supported runs can mix exchange-bulk fetches with
   per-symbol fallbacks
@@ -65,10 +68,10 @@ Useful options:
 To see whether market data is complete for the current scope:
 
 ```bash
-pyvalue report-market-data-progress --provider EODHD
+pyvalue report-market-data-progress
 ```
 
-The report defaults to the same 7-day freshness window and shows:
+The report defaults to the same 30-day freshness window and shows:
 - overall status: `COMPLETE`, `INCOMPLETE`, or `BLOCKED_BY_BACKOFF`
 - supported, stored, missing, stale, fresh, and blocked counts
 - per-exchange breakdown

@@ -17,7 +17,7 @@ Provider rules:
 
 - `refresh-supported-exchanges`, `refresh-supported-tickers`,
   `ingest-fundamentals`, `normalize-fundamentals`, and `update-market-data`
-  require `--provider`
+  accept `--provider` and default it to `EODHD`
 - `compute-metrics`, `run-screen`, `report-fact-freshness`,
   `report-metric-coverage`, `report-metric-failures`, and `recalc-market-cap`
   are provider-agnostic and operate on canonical symbols
@@ -31,6 +31,7 @@ Refresh and persist the provider-supported exchange catalog.
 Key options:
 
 - `--provider {SEC,EODHD}`
+- default provider: `EODHD`
 - `--database <path>`
 
 Notes:
@@ -46,6 +47,7 @@ Refresh and persist the provider-supported ticker catalog.
 Key options:
 
 - `--provider {SEC,EODHD}`
+- default provider: `EODHD`
 - `--exchange-codes <codes...>`
 - `--all-supported`
 - `--include-etfs` for SEC only
@@ -69,12 +71,13 @@ Download fundamentals for supported tickers from the chosen provider.
 Key options:
 
 - `--provider {SEC,EODHD}`
+- default provider: `EODHD`
 - scope selector: `--symbols`, `--exchange-codes`, or `--all-supported`
 - `--user-agent <value>` for SEC
 - `--cik <10-digit-cik>` optional SEC override
 - `--rate <float>`
 - `--max-symbols <int>`
-- `--max-age-days <int>`
+- `--max-age-days <int>` default `30`
 - `--resume`
 - `--database <path>`
 
@@ -84,8 +87,8 @@ Notes:
 - `EODHD` rate is symbols per minute
 - `EODHD` uses the stored supported-ticker catalog plus daily quota checks and
   retry backoff for multi-day runs
-- when `--max-age-days` is omitted, EODHD ingestion is bootstrap-first and
-  prefers symbols with no stored raw fundamentals
+- omitted `--max-age-days` now means the same 30-day freshness window used by
+  the other CLI freshness filters
 
 ### `report-fundamentals-progress`
 
@@ -115,6 +118,7 @@ Normalize stored fundamentals into canonical `financial_facts`.
 Key options:
 
 - `--provider {SEC,EODHD}`
+- default provider: `EODHD`
 - scope selector: `--symbols`, `--exchange-codes`, or `--all-supported`
 - `--database <path>`
 
@@ -131,7 +135,7 @@ Key options:
 - scope selector: `--symbols`, `--exchange-codes`, or `--all-supported`
 - `--rate <float>`
 - `--max-symbols <int>`
-- `--max-age-days <int>` default `7`
+- `--max-age-days <int>` default `30`
 - `--resume`
 - `--database <path>`
 
@@ -153,7 +157,7 @@ Key options:
 
 - `--provider {EODHD}`
 - `--exchange-codes <codes...>`
-- `--max-age-days <int>` default `7`
+- `--max-age-days <int>` default `30`
 - `--database <path>`
 
 Notes:
@@ -193,7 +197,7 @@ Key options:
 
 - scope selector: `--symbols`, `--exchange-codes`, or `--all-supported`
 - `--metrics <metric-ids...>`
-- `--max-age-days <int>` default `365`
+- `--max-age-days <int>` default `30`
 - `--output-csv <path>`
 - `--show-all`
 - `--database <path>`

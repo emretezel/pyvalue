@@ -177,6 +177,68 @@ def test_build_parser_report_ingest_progress_missing_only():
     assert args.missing_only is True
 
 
+def test_main_dispatches_ingest_fundamentals_with_default_provider_and_max_age_days(
+    monkeypatch,
+):
+    calls = {}
+
+    def fake_cmd(
+        provider,
+        database,
+        symbols,
+        exchange_codes,
+        all_supported,
+        rate,
+        max_symbols,
+        max_age_days,
+        resume,
+        user_agent,
+        cik,
+    ):
+        calls["provider"] = provider
+        calls["database"] = database
+        calls["symbols"] = symbols
+        calls["exchange_codes"] = exchange_codes
+        calls["all_supported"] = all_supported
+        calls["rate"] = rate
+        calls["max_symbols"] = max_symbols
+        calls["max_age_days"] = max_age_days
+        calls["resume"] = resume
+        calls["user_agent"] = user_agent
+        calls["cik"] = cik
+        return 0
+
+    monkeypatch.setattr(cli, "setup_logging", lambda: None)
+    monkeypatch.setattr(cli, "cmd_ingest_fundamentals_stage", fake_cmd)
+
+    rc = cli.main(["ingest-fundamentals", "--symbols", "AAPL.US"])
+
+    assert rc == 0
+    assert calls == {
+        "provider": "EODHD",
+        "database": "data/pyvalue.db",
+        "symbols": ["AAPL.US"],
+        "exchange_codes": None,
+        "all_supported": False,
+        "rate": None,
+        "max_symbols": None,
+        "max_age_days": 30,
+        "resume": False,
+        "user_agent": None,
+        "cik": None,
+    }
+
+
+def test_build_parser_normalize_fundamentals_defaults_provider():
+    args = cli.build_parser().parse_args(
+        ["normalize-fundamentals", "--symbols", "AAPL.US"]
+    )
+
+    assert args.command == "normalize-fundamentals"
+    assert args.provider == "EODHD"
+    assert args.symbols == ["AAPL.US"]
+
+
 def test_main_dispatches_update_market_data_global_with_default_max_age_days(
     monkeypatch,
 ):
@@ -218,7 +280,7 @@ def test_main_dispatches_update_market_data_global_with_default_max_age_days(
         "all_supported": True,
         "rate": None,
         "max_symbols": None,
-        "max_age_days": 7,
+        "max_age_days": 30,
         "resume": False,
     }
 
@@ -245,8 +307,17 @@ def test_main_dispatches_report_market_data_progress_with_default_max_age_days(
         "provider": "EODHD",
         "database": "data/pyvalue.db",
         "exchange_codes": None,
-        "max_age_days": 7,
+        "max_age_days": 30,
     }
+
+
+def test_build_parser_report_fact_freshness_defaults_max_age_days():
+    args = cli.build_parser().parse_args(
+        ["report-fact-freshness", "--symbols", "AAPL.US"]
+    )
+
+    assert args.command == "report-fact-freshness"
+    assert args.max_age_days == 30
 
 
 def test_cmd_ingest_fundamentals_sec(monkeypatch, tmp_path):

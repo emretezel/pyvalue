@@ -24,7 +24,6 @@ from pyvalue.ingestion import EODHDFundamentalsClient, SECCompanyFactsClient
 from pyvalue.marketdata import EODHDProvider, MarketDataUpdate, PriceData
 from pyvalue.marketdata.service import MarketDataService, latest_share_count
 from pyvalue.metrics import REGISTRY
-from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS
 from pyvalue.normalization import EODHDFactsNormalizer, SECFactsNormalizer
 from pyvalue.reporting import MetricCoverage, compute_fact_coverage
 from pyvalue.screening import (
@@ -876,9 +875,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ingest_fundamentals.add_argument(
         "--provider",
-        required=True,
+        default="EODHD",
         choices=["SEC", "EODHD"],
-        help="Fundamentals provider to use.",
+        help="Fundamentals provider to use (default: %(default)s).",
     )
     add_scope_args(ingest_fundamentals)
     ingest_fundamentals.add_argument(
@@ -911,8 +910,11 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_fundamentals.add_argument(
         "--max-age-days",
         type=int,
-        default=None,
-        help="Only ingest symbols with older fundamentals (days) or missing data.",
+        default=30,
+        help=(
+            "Only ingest symbols with older fundamentals (days) or missing "
+            "data (default: %(default)s)."
+        ),
     )
     ingest_fundamentals.add_argument(
         "--resume",
@@ -977,7 +979,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_data_progress.add_argument(
         "--max-age-days",
         type=int,
-        default=7,
+        default=30,
         help="Freshness window in days (default: %(default)s).",
     )
 
@@ -1012,8 +1014,11 @@ def build_parser() -> argparse.ArgumentParser:
     market_data.add_argument(
         "--max-age-days",
         type=int,
-        default=7,
-        help="Refresh only stale or missing market data older than this many days.",
+        default=30,
+        help=(
+            "Refresh only stale or missing market data older than this many "
+            "days (default: %(default)s)."
+        ),
     )
     market_data.add_argument(
         "--resume",
@@ -1027,9 +1032,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     normalize_fundamentals.add_argument(
         "--provider",
-        required=True,
+        default="EODHD",
         choices=["SEC", "EODHD"],
-        help="Fundamentals provider to normalize.",
+        help="Fundamentals provider to normalize (default: %(default)s).",
     )
     add_scope_args(normalize_fundamentals)
     normalize_fundamentals.add_argument(
@@ -1074,7 +1079,7 @@ def build_parser() -> argparse.ArgumentParser:
     fact_report.add_argument(
         "--max-age-days",
         type=int,
-        default=MAX_FACT_AGE_DAYS,
+        default=30,
         help="Fact freshness window in days (default: %(default)s)",
     )
     fact_report.add_argument(
