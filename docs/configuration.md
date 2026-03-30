@@ -15,7 +15,7 @@ This file is gitignored and should never be committed.
 ```toml
 [eodhd]
 api_key = "YOUR_EOD_TOKEN"
-fundamentals_requests_per_minute = 600
+fundamentals_requests_per_minute = 950
 fundamentals_daily_buffer_calls = 5000
 market_data_requests_per_minute = 950
 market_data_daily_buffer_calls = 5000
@@ -31,7 +31,7 @@ Use this for:
 - EODHD exchange-scoped and all-supported workflows
 
 Optional EODHD throttling and quota settings:
-- `fundamentals_requests_per_minute`: default `600`, capped at the EODHD limit of `1000`; used by `ingest-fundamentals --provider EODHD` when the scope spans many symbols
+- `fundamentals_requests_per_minute`: default `950`, capped at the EODHD limit of `1000`; used by `ingest-fundamentals --provider EODHD` when the scope spans many symbols
 - `fundamentals_daily_buffer_calls`: default `5000`, reserved from the shared daily call budget so fundamentals ingestion stops early instead of consuming the full allowance
 - `market_data_requests_per_minute`: default `950`, capped at the EODHD limit of `1000`; used by `update-market-data --provider EODHD` across both exchange-bulk and per-symbol market-data requests
 - `market_data_daily_buffer_calls`: default `5000`, reserved from the shared daily call budget so market-data refresh stops early instead of consuming the full allowance

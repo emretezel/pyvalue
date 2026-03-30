@@ -174,6 +174,18 @@ class FactRecord:
     currency: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class FundamentalsUpdate:
+    """Raw fundamentals payload prepared for batch persistence."""
+
+    security_id: int
+    provider_symbol: str
+    provider_exchange_code: Optional[str]
+    currency: Optional[str]
+    data: str
+    fetched_at: str
+
+
 class _ManagedSQLiteConnection(sqlite3.Connection):
     """SQLite connection that closes the file handle when the context exits."""
 
@@ -1478,11 +1490,55 @@ class FundamentalsRepository(SQLiteStore):
         provider_symbol, provider_exchange_code, security_id = self._resolve_security(
             provider, symbol, exchange
         )
-        serialized = json.dumps(payload)
-        fetched_at = _utc_now_iso()
         provider_norm = provider.strip().upper()
+        fetched_at = _utc_now_iso()
+        self.upsert_many(
+            provider_norm,
+            [
+                FundamentalsUpdate(
+                    security_id=int(security_id or 0),
+                    provider_symbol=str(provider_symbol or ""),
+                    provider_exchange_code=provider_exchange_code,
+                    currency=_normalize_optional_text(
+                        currency.upper() if currency else None
+                    ),
+                    data=json.dumps(payload),
+                    fetched_at=fetched_at,
+                )
+            ],
+        )
+        FundamentalsFetchStateRepository(self.db_path).mark_success(
+            provider_norm,
+            str(provider_symbol or ""),
+            fetched_at=fetched_at,
+        )
+
+    def upsert_many(
+        self,
+        provider: str,
+        updates: Sequence[FundamentalsUpdate],
+    ) -> None:
+        self.initialize_schema()
+        provider_norm = provider.strip().upper()
+        rows = [
+            (
+                provider_norm,
+                update.provider_symbol.strip().upper(),
+                int(update.security_id),
+                _normalize_optional_text(update.provider_exchange_code),
+                _normalize_optional_text(
+                    update.currency.upper() if update.currency else None
+                ),
+                update.data,
+                update.fetched_at,
+            )
+            for update in updates
+            if update.provider_symbol and update.security_id
+        ]
+        if not rows:
+            return
         with self._connect() as conn:
-            conn.execute(
+            conn.executemany(
                 """
                 INSERT INTO fundamentals_raw (
                     provider,
@@ -1500,35 +1556,7 @@ class FundamentalsRepository(SQLiteStore):
                     data = excluded.data,
                     fetched_at = excluded.fetched_at
                 """,
-                (
-                    provider_norm,
-                    provider_symbol,
-                    security_id,
-                    provider_exchange_code,
-                    _normalize_optional_text(currency.upper() if currency else None),
-                    serialized,
-                    fetched_at,
-                ),
-            )
-            conn.execute(
-                """
-                INSERT INTO fundamentals_fetch_state (
-                    provider,
-                    provider_symbol,
-                    last_fetched_at,
-                    last_status,
-                    last_error,
-                    next_eligible_at,
-                    attempts
-                ) VALUES (?, ?, ?, 'ok', NULL, NULL, 0)
-                ON CONFLICT(provider, provider_symbol) DO UPDATE SET
-                    last_fetched_at = excluded.last_fetched_at,
-                    last_status = 'ok',
-                    last_error = NULL,
-                    next_eligible_at = NULL,
-                    attempts = 0
-                """,
-                (provider_norm, provider_symbol, fetched_at),
+                rows,
             )
 
     def fetch(self, provider: str, symbol: str) -> Optional[Dict[str, Any]]:

@@ -92,8 +92,11 @@ pyvalue ingest-fundamentals --all-supported --resume
 `ingest-fundamentals` checks the EODHD user/quota endpoint
 before each multi-symbol run, subtracts the configured daily buffer, throttles
 by requests per minute, and exits cleanly when the remaining daily allowance is
-exhausted. Rerun it the next day to continue from the remaining eligible ticker
-set.
+exhausted. Multi-symbol EODHD runs now use concurrent fetch workers with a
+single batched SQLite writer, so exchange and all-supported runs can get much
+closer to the configured request ceiling without relying on the Extended
+Fundamentals bulk API. Rerun it the next day to continue from the remaining
+eligible ticker set.
 
 To see whether a multi-day run is actually complete for the current scope, use:
 
@@ -118,7 +121,7 @@ refreshed only when you run normalization again.
 Important fundamentals options:
 
 - `--symbols`, `--exchange-codes`, or `--all-supported`: choose the scope
-- `--rate`: EODHD uses symbols per minute
+- `--rate`: EODHD uses symbols per minute; default `950`, capped at `1000`
 - `--max-symbols`: limit one run
 - `--max-age-days`: refresh stale or missing data; default `30`
 - `--resume`: skip symbols still in backoff

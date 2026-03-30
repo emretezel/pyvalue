@@ -2,6 +2,7 @@ import sqlite3
 from datetime import date, timedelta
 
 from pyvalue.storage import (
+    FundamentalsUpdate,
     FundamentalsRepository,
     MarketDataFetchStateRepository,
     MarketDataRepository,
@@ -264,6 +265,94 @@ def test_fundamentals_repository_upsert_marks_fetch_state_success(tmp_path):
     assert row[0] is not None
     assert row[1] == "ok"
     assert row[2] == 0
+
+
+def test_fundamentals_repository_upsert_many_uses_resolved_metadata_and_overwrites(
+    tmp_path,
+):
+    db_path = tmp_path / "fundamentals-batch.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [
+            {"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock"},
+            {"Code": "BBB", "Name": "BBB Inc", "Type": "Common Stock"},
+        ],
+    )
+    tickers = {row.symbol: row for row in ticker_repo.list_for_exchange("EODHD", "US")}
+
+    repo = FundamentalsRepository(db_path)
+    repo.initialize_schema()
+    original_resolve_security = repo._resolve_security
+    repo._resolve_security = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("upsert_many should not resolve securities per symbol")
+    )
+
+    repo.upsert_many(
+        "EODHD",
+        [
+            FundamentalsUpdate(
+                security_id=tickers["AAA.US"].security_id,
+                provider_symbol="AAA.US",
+                provider_exchange_code="US",
+                currency="USD",
+                data='{"General": {"CurrencyCode": "USD", "Name": "AAA"}}',
+                fetched_at="2026-03-30T00:00:00+00:00",
+            ),
+            FundamentalsUpdate(
+                security_id=tickers["BBB.US"].security_id,
+                provider_symbol="BBB.US",
+                provider_exchange_code="US",
+                currency="USD",
+                data='{"General": {"CurrencyCode": "USD", "Name": "BBB"}}',
+                fetched_at="2026-03-30T00:00:00+00:00",
+            ),
+        ],
+    )
+    repo.upsert_many(
+        "EODHD",
+        [
+            FundamentalsUpdate(
+                security_id=tickers["AAA.US"].security_id,
+                provider_symbol="AAA.US",
+                provider_exchange_code="US",
+                currency="USD",
+                data='{"General": {"CurrencyCode": "USD", "Name": "AAA Updated"}}',
+                fetched_at="2026-03-31T00:00:00+00:00",
+            )
+        ],
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT provider_symbol, security_id, provider_exchange_code, currency, fetched_at
+            FROM fundamentals_raw
+            ORDER BY provider_symbol
+            """
+        ).fetchall()
+
+    assert rows == [
+        (
+            "AAA.US",
+            tickers["AAA.US"].security_id,
+            "US",
+            "USD",
+            "2026-03-31T00:00:00+00:00",
+        ),
+        (
+            "BBB.US",
+            tickers["BBB.US"].security_id,
+            "US",
+            "USD",
+            "2026-03-30T00:00:00+00:00",
+        ),
+    ]
+    repo._resolve_security = original_resolve_security
+    assert repo.fetch("EODHD", "AAA.US")["General"]["Name"] == "AAA Updated"
+    assert repo.fetch("EODHD", "BBB.US")["General"]["Name"] == "BBB"
 
 
 def test_supported_ticker_repository_lists_market_data_symbols_missing_then_oldest(

@@ -26,6 +26,8 @@ Default database: `data/pyvalue.db`
 Default CLI behavior:
 - commands that accept `--provider` default to `EODHD`
 - commands that accept `--max-age-days` default to `30`
+- multi-symbol EODHD fundamentals ingestion defaults to `950 req/min` and runs
+  through concurrent fetch workers with batched SQLite writes
 
 ## What pyvalue does
 

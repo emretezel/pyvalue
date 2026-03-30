@@ -17,7 +17,7 @@ from threading import Lock, local
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from pyvalue.config import Config
 from pyvalue.ingestion import EODHDFundamentalsClient, SECCompanyFactsClient
@@ -35,6 +35,7 @@ from pyvalue.logging_utils import setup_logging
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.storage import (
     EntityMetadataRepository,
+    FundamentalsUpdate,
     FundamentalsRepository,
     FundamentalsFetchStateRepository,
     FinancialFactsRepository,
@@ -56,6 +57,12 @@ EODHD_FUNDAMENTALS_CALL_COST = 10
 EODHD_MARKET_DATA_CALL_COST = 1
 EODHD_MARKET_DATA_BULK_CALL_COST = 100
 EODHD_MAX_REQUESTS_PER_MINUTE = 1000.0
+FUNDAMENTALS_WORKERS = 16
+FUNDAMENTALS_RATE_LIMIT_BURST = 2
+FUNDAMENTALS_WRITE_BATCH_SIZE = 25
+FUNDAMENTALS_WRITE_BATCH_INTERVAL_SECONDS = 0.25
+FUNDAMENTALS_PROGRESS_INTERVAL_SECONDS = 5.0
+FUNDAMENTALS_PROGRESS_SYMBOL_STEP = 250
 MARKET_DATA_BULK_BREAK_EVEN = 100
 MARKET_DATA_BULK_WORKERS = 4
 MARKET_DATA_SYMBOL_WORKERS = 16
@@ -66,6 +73,7 @@ MARKET_DATA_PROGRESS_INTERVAL_SECONDS = 5.0
 MARKET_DATA_PROGRESS_SYMBOL_STEP = 250
 
 _MARKET_DATA_PROVIDER_LOCAL = local()
+_FUNDAMENTALS_CLIENT_LOCAL = local()
 
 
 @dataclass(frozen=True)
@@ -88,8 +96,18 @@ class _PlannedMarketDataRun:
         )
 
 
+@dataclass(frozen=True)
+class _PreparedFundamentalsRun:
+    rate_value: float
+    daily_limit: int
+    used_calls: int
+    buffer_calls: int
+    request_budget: int
+    eligible: Tuple[SupportedTicker, ...]
+
+
 class _RateLimiter:
-    """Token-bucket limiter shared across market-data worker threads."""
+    """Token-bucket limiter shared across concurrent EODHD worker threads."""
 
     def __init__(
         self, rate_per_minute: float, burst: int = MARKET_DATA_RATE_LIMIT_BURST
@@ -492,7 +510,9 @@ def _resolve_eodhd_fundamentals_rate(rate: Optional[float]) -> float:
     configured = float(config.eodhd_fundamentals_requests_per_minute)
     rate_value = configured if rate is None else rate
     if rate_value is None or rate_value <= 0:
-        raise SystemExit("--rate must be greater than 0 for EODHD global ingestion.")
+        raise SystemExit(
+            "--rate must be greater than 0 for EODHD fundamentals ingestion."
+        )
     return min(rate_value, EODHD_MAX_REQUESTS_PER_MINUTE)
 
 
@@ -515,6 +535,283 @@ def _get_thread_local_market_data_provider(api_key: str) -> EODHDProvider:
         _MARKET_DATA_PROVIDER_LOCAL.provider = provider
         _MARKET_DATA_PROVIDER_LOCAL.api_key = api_key
     return provider
+
+
+def _get_thread_local_eodhd_fundamentals_client(
+    api_key: str,
+) -> EODHDFundamentalsClient:
+    client = getattr(_FUNDAMENTALS_CLIENT_LOCAL, "client", None)
+    current_key = getattr(_FUNDAMENTALS_CLIENT_LOCAL, "api_key", None)
+    if client is None or current_key != api_key:
+        client = EODHDFundamentalsClient(api_key=api_key)
+        _FUNDAMENTALS_CLIENT_LOCAL.client = client
+        _FUNDAMENTALS_CLIENT_LOCAL.api_key = api_key
+    return client
+
+
+def _resolve_eodhd_stage_scope(
+    database: str,
+    symbols: Optional[Sequence[str]],
+    exchange_codes: Optional[Sequence[str]],
+    all_supported: bool,
+) -> Tuple[str, Optional[List[str]], Optional[List[str]]]:
+    symbol_filters, resolved_exchange_codes = _validate_scope_selector(
+        symbols, exchange_codes, all_supported
+    )
+    ticker_repo = SupportedTickerRepository(database)
+    ticker_repo.initialize_schema()
+    if symbol_filters:
+        normalized_symbols = [
+            _normalize_provider_scope_symbol("EODHD", symbol)
+            for symbol in symbol_filters
+        ]
+        rows = ticker_repo.list_for_provider(
+            "EODHD", provider_symbols=normalized_symbols
+        )
+        found = {row.symbol.upper() for row in rows}
+        missing = [symbol for symbol in normalized_symbols if symbol not in found]
+        if missing:
+            raise SystemExit(
+                f"Unsupported tickers for provider EODHD: {', '.join(missing)}. "
+                f"{_catalog_bootstrap_guidance('EODHD')}"
+            )
+        return _scope_label(normalized_symbols, None), normalized_symbols, None
+
+    available_exchanges = ticker_repo.available_exchanges("EODHD")
+    if resolved_exchange_codes:
+        missing_exchanges = [
+            code for code in resolved_exchange_codes if code not in available_exchanges
+        ]
+        if missing_exchanges:
+            raise SystemExit(
+                f"No supported tickers found for provider EODHD in scope {', '.join(missing_exchanges)}. "
+                f"{_catalog_bootstrap_guidance('EODHD')}"
+            )
+    elif not available_exchanges:
+        raise SystemExit(
+            "No supported tickers found for provider EODHD in scope all supported tickers. "
+            f"{_catalog_bootstrap_guidance('EODHD')}"
+        )
+    return (
+        _scope_label(None, resolved_exchange_codes),
+        None,
+        resolved_exchange_codes,
+    )
+
+
+def _prepare_eodhd_fundamentals_run(
+    database: Union[str, Path],
+    api_key: str,
+    exchange_codes: Optional[Sequence[str]],
+    provider_symbols: Optional[Sequence[str]],
+    rate: Optional[float],
+    max_symbols: Optional[int],
+    max_age_days: Optional[int],
+    resume: bool,
+    missing_only: bool,
+) -> _PreparedFundamentalsRun:
+    eodhd_client = EODHDFundamentalsClient(api_key=api_key)
+    config = Config()
+    buffer_calls = max(config.eodhd_fundamentals_daily_buffer_calls, 0)
+    rate_value = _resolve_eodhd_fundamentals_rate(rate)
+    user_meta = eodhd_client.user_metadata()
+    daily_limit, used_calls, usable_requests = _eodhd_request_budget(
+        user_meta, buffer_calls, EODHD_FUNDAMENTALS_CALL_COST
+    )
+    request_budget = usable_requests
+    if max_symbols is not None:
+        request_budget = min(request_budget, max_symbols)
+    if request_budget <= 0:
+        return _PreparedFundamentalsRun(
+            rate_value=rate_value,
+            daily_limit=daily_limit,
+            used_calls=used_calls,
+            buffer_calls=buffer_calls,
+            request_budget=request_budget,
+            eligible=(),
+        )
+
+    ticker_repo = SupportedTickerRepository(database)
+    eligible = ticker_repo.list_eligible_for_fundamentals(
+        provider="EODHD",
+        exchange_codes=exchange_codes,
+        max_age_days=max_age_days,
+        max_symbols=request_budget,
+        resume=resume,
+        missing_only=missing_only,
+        provider_symbols=provider_symbols,
+    )
+    return _PreparedFundamentalsRun(
+        rate_value=rate_value,
+        daily_limit=daily_limit,
+        used_calls=used_calls,
+        buffer_calls=buffer_calls,
+        request_budget=request_budget,
+        eligible=tuple(eligible),
+    )
+
+
+def _build_fundamentals_update(
+    ticker: SupportedTicker,
+    payload: Dict[str, object],
+) -> FundamentalsUpdate:
+    general = payload.get("General")
+    currency = ticker.currency
+    if isinstance(general, Mapping):
+        currency = (
+            str(general.get("CurrencyCode") or ticker.currency or "").strip()
+            or ticker.currency
+        )
+    return FundamentalsUpdate(
+        security_id=ticker.security_id,
+        provider_symbol=ticker.symbol,
+        provider_exchange_code=ticker.exchange_code,
+        currency=currency,
+        data=json.dumps(payload),
+        fetched_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+def _flush_fundamentals_batches(
+    repo: FundamentalsRepository,
+    state_repo: FundamentalsFetchStateRepository,
+    success_updates: List[FundamentalsUpdate],
+    failures: List[Tuple[str, str]],
+) -> None:
+    if success_updates:
+        repo.upsert_many("EODHD", success_updates)
+        state_repo.mark_success_many(
+            "EODHD",
+            [update.provider_symbol for update in success_updates],
+        )
+        success_updates.clear()
+    if failures:
+        state_repo.mark_failure_many("EODHD", failures)
+        failures.clear()
+
+
+def _fetch_symbol_fundamentals(
+    api_key: str,
+    limiter: _RateLimiter,
+    symbol: str,
+) -> Dict[str, object]:
+    client = _get_thread_local_eodhd_fundamentals_client(api_key)
+    limiter.acquire()
+    return client.fetch_fundamentals(symbol, exchange_code=None)
+
+
+def _run_eodhd_fundamentals_ingestion(
+    database: Union[str, Path],
+    api_key: str,
+    scope_label: str,
+    prepared: _PreparedFundamentalsRun,
+) -> int:
+    if prepared.request_budget <= 0:
+        print(
+            "No EODHD fundamentals request budget available for this run "
+            f"(daily_limit={prepared.daily_limit}, used_calls={prepared.used_calls}, "
+            f"buffer_calls={prepared.buffer_calls})."
+        )
+        return 0
+    if not prepared.eligible:
+        print(
+            f"No eligible supported tickers found for {scope_label}. "
+            "Refresh supported tickers first or relax freshness filters."
+        )
+        return 0
+
+    db_path = _resolve_database_path(str(database))
+    repo = FundamentalsRepository(db_path)
+    repo.initialize_schema()
+    state_repo = FundamentalsFetchStateRepository(db_path)
+    state_repo.initialize_schema()
+    limiter = _RateLimiter(prepared.rate_value, burst=FUNDAMENTALS_RATE_LIMIT_BURST)
+    total = len(prepared.eligible)
+    processed = 0
+    failed = 0
+    pending_updates: List[FundamentalsUpdate] = []
+    pending_failures: List[Tuple[str, str]] = []
+    last_flush = time.monotonic()
+    last_report = time.monotonic()
+    last_report_count = 0
+    print(
+        f"Fetching EODHD fundamentals for {total} supported tickers across {scope_label} "
+        f"at <= {prepared.rate_value:.2f} req/min "
+        f"(daily_limit={prepared.daily_limit}, used_calls={prepared.used_calls}, "
+        f"buffer_calls={prepared.buffer_calls}, budget_requests={prepared.request_budget})"
+    )
+
+    def maybe_flush(force: bool = False) -> None:
+        nonlocal last_flush
+        if not pending_updates and not pending_failures:
+            return
+        if not force:
+            elapsed = time.monotonic() - last_flush
+            buffered = len(pending_updates) + len(pending_failures)
+            if (
+                buffered < FUNDAMENTALS_WRITE_BATCH_SIZE
+                and elapsed < FUNDAMENTALS_WRITE_BATCH_INTERVAL_SECONDS
+            ):
+                return
+        _flush_fundamentals_batches(repo, state_repo, pending_updates, pending_failures)
+        last_flush = time.monotonic()
+
+    def maybe_report(force: bool = False) -> None:
+        nonlocal last_report, last_report_count
+        completed = processed + failed
+        elapsed = time.monotonic() - last_report
+        if (
+            not force
+            and completed - last_report_count < FUNDAMENTALS_PROGRESS_SYMBOL_STEP
+            and elapsed < FUNDAMENTALS_PROGRESS_INTERVAL_SECONDS
+        ):
+            return
+        print(
+            f"[progress] stored={processed} failed={failed} completed={completed}/{total}",
+            flush=True,
+        )
+        last_report = time.monotonic()
+        last_report_count = completed
+
+    executor = ThreadPoolExecutor(max_workers=min(FUNDAMENTALS_WORKERS, total))
+    interrupted = False
+    try:
+        futures = {
+            executor.submit(
+                _fetch_symbol_fundamentals, api_key, limiter, ticker.symbol
+            ): ticker
+            for ticker in prepared.eligible
+        }
+        for future in as_completed(futures):
+            ticker = futures[future]
+            try:
+                payload = future.result()
+                pending_updates.append(_build_fundamentals_update(ticker, payload))
+                processed += 1
+            except Exception as exc:  # pragma: no cover - network errors
+                LOGGER.error(
+                    "Failed to fetch fundamentals for %s: %s", ticker.symbol, exc
+                )
+                pending_failures.append((ticker.symbol, str(exc)))
+                failed += 1
+            maybe_flush()
+            maybe_report()
+    except KeyboardInterrupt:
+        interrupted = True
+        executor.shutdown(wait=False, cancel_futures=True)
+        maybe_flush(force=True)
+        print(f"\nCancelled after {processed + failed} completed symbols.")
+        return 1
+    finally:
+        if not interrupted:
+            executor.shutdown(wait=True)
+
+    maybe_flush(force=True)
+    maybe_report(force=True)
+    print(
+        f"Stored fundamentals for {processed} of {total} planned supported tickers in {db_path}"
+    )
+    return 0
 
 
 def _plan_market_data_stage_run(
@@ -1388,109 +1685,32 @@ def cmd_ingest_fundamentals_global(
             "ingest-fundamentals-global currently only supports provider=EODHD."
         )
 
-    api_key = _require_eodhd_key()
-    eodhd_client = EODHDFundamentalsClient(api_key=api_key)
-    config = Config()
-    buffer_calls = max(config.eodhd_fundamentals_daily_buffer_calls, 0)
-    rate_value = _resolve_eodhd_fundamentals_rate(rate)
     requested_exchange_codes = _parse_exchange_filters(exchange_codes)
-    user_meta = eodhd_client.user_metadata()
-    daily_limit, used_calls, usable_requests = _eodhd_request_budget(
-        user_meta, buffer_calls, EODHD_FUNDAMENTALS_CALL_COST
-    )
-    request_budget = usable_requests
-    if max_symbols is not None:
-        request_budget = min(request_budget, max_symbols)
-    if request_budget <= 0:
-        print(
-            "No EODHD fundamentals request budget available for this run "
-            f"(daily_limit={daily_limit}, used_calls={used_calls}, "
-            f"buffer_calls={buffer_calls})."
-        )
-        return 0
-
-    ticker_repo = SupportedTickerRepository(database)
-    eligible = ticker_repo.list_eligible_for_fundamentals(
-        provider=provider_norm,
+    api_key = _require_eodhd_key()
+    prepared = _prepare_eodhd_fundamentals_run(
+        database=database,
+        api_key=api_key,
         exchange_codes=sorted(requested_exchange_codes)
         if requested_exchange_codes
         else None,
+        provider_symbols=None,
+        rate=rate,
+        max_symbols=max_symbols,
         max_age_days=max_age_days,
-        max_symbols=request_budget,
         resume=resume,
         missing_only=max_age_days is None,
     )
-    if not eligible:
-        scope = (
-            ", ".join(sorted(requested_exchange_codes))
-            if requested_exchange_codes
-            else "all exchanges"
-        )
-        print(
-            f"No eligible supported tickers found for {scope}. "
-            "Run refresh-supported-tickers first or relax freshness filters."
-        )
-        return 0
-
-    repo = FundamentalsRepository(database)
-    repo.initialize_schema()
-    state_repo = FundamentalsFetchStateRepository(database)
-    state_repo.initialize_schema()
-    interval = 60.0 / rate_value
-    total = len(eligible)
-    processed = 0
-    attempted = 0
     scope_label = (
         ", ".join(sorted(requested_exchange_codes))
         if requested_exchange_codes
         else "all exchanges"
     )
-    print(
-        f"Fetching EODHD fundamentals for {total} supported tickers across {scope_label} "
-        f"at <= {rate_value:.2f} req/min "
-        f"(daily_limit={daily_limit}, used_calls={used_calls}, "
-        f"buffer_calls={buffer_calls}, budget_requests={request_budget})"
+    return _run_eodhd_fundamentals_ingestion(
+        database=database,
+        api_key=api_key,
+        scope_label=scope_label,
+        prepared=prepared,
     )
-
-    try:
-        for idx, ticker in enumerate(eligible, 1):
-            attempted += 1
-            start = time.perf_counter()
-            try:
-                payload = eodhd_client.fetch_fundamentals(
-                    ticker.symbol, exchange_code=None
-                )
-                general = payload.get("General") or {}
-                repo.upsert(
-                    "EODHD",
-                    ticker.symbol,
-                    payload,
-                    currency=general.get("CurrencyCode") or ticker.currency,
-                    exchange=ticker.exchange_code,
-                )
-                state_repo.mark_success("EODHD", ticker.symbol)
-                processed += 1
-                print(
-                    f"[{idx}/{total}] Stored fundamentals for {ticker.symbol}",
-                    flush=True,
-                )
-            except Exception as exc:  # pragma: no cover - network errors
-                LOGGER.error(
-                    "Failed to fetch fundamentals for %s: %s", ticker.symbol, exc
-                )
-                state_repo.mark_failure("EODHD", ticker.symbol, str(exc))
-
-            elapsed = time.perf_counter() - start
-            if elapsed < interval:
-                time.sleep(interval - elapsed)
-    except KeyboardInterrupt:
-        print(f"\nCancelled after {attempted} attempted symbols.")
-        return 1
-
-    print(
-        f"Stored fundamentals for {processed} of {attempted} attempted symbols in {database}"
-    )
-    return 0
 
 
 def cmd_report_ingest_progress(
@@ -1922,17 +2142,19 @@ def cmd_ingest_fundamentals_stage(
 
     db_path = _resolve_database_path(database)
     provider_norm = _normalize_provider(provider)
-    scope_rows, symbol_filters, resolved_exchange_codes = _resolve_provider_scope_rows(
-        str(db_path),
-        provider_norm,
-        symbols,
-        exchange_codes,
-        all_supported,
-    )
-    ticker_repo = SupportedTickerRepository(db_path)
-    scope_label = _scope_label(symbol_filters, resolved_exchange_codes)
 
     if provider_norm == "SEC":
+        scope_rows, symbol_filters, resolved_exchange_codes = (
+            _resolve_provider_scope_rows(
+                str(db_path),
+                provider_norm,
+                symbols,
+                exchange_codes,
+                all_supported,
+            )
+        )
+        ticker_repo = SupportedTickerRepository(db_path)
+        scope_label = _scope_label(symbol_filters, resolved_exchange_codes)
         if cik and len(scope_rows) != 1:
             raise SystemExit(
                 "--cik can only be used when ingesting exactly one SEC symbol."
@@ -2003,91 +2225,29 @@ def cmd_ingest_fundamentals_stage(
         return 0
 
     api_key = _require_eodhd_key()
-    eodhd_client = EODHDFundamentalsClient(api_key=api_key)
-    config = Config()
-    buffer_calls = max(config.eodhd_fundamentals_daily_buffer_calls, 0)
-    rate_value = _resolve_eodhd_fundamentals_rate(rate)
-    user_meta = eodhd_client.user_metadata()
-    daily_limit, used_calls, usable_requests = _eodhd_request_budget(
-        user_meta, buffer_calls, EODHD_FUNDAMENTALS_CALL_COST
+    scope_label, symbol_filters, resolved_exchange_codes = _resolve_eodhd_stage_scope(
+        str(db_path),
+        symbols,
+        exchange_codes,
+        all_supported,
     )
-    request_budget = usable_requests
-    if max_symbols is not None:
-        request_budget = min(request_budget, max_symbols)
-    if request_budget <= 0:
-        print(
-            "No EODHD fundamentals request budget available for this run "
-            f"(daily_limit={daily_limit}, used_calls={used_calls}, "
-            f"buffer_calls={buffer_calls})."
-        )
-        return 0
-    eligible = ticker_repo.list_eligible_for_fundamentals(
-        provider=provider_norm,
+    prepared = _prepare_eodhd_fundamentals_run(
+        database=db_path,
+        api_key=api_key,
         exchange_codes=resolved_exchange_codes,
+        provider_symbols=symbol_filters,
+        rate=rate,
+        max_symbols=max_symbols,
         max_age_days=max_age_days,
-        max_symbols=request_budget,
         resume=resume,
         missing_only=max_age_days is None,
-        provider_symbols=symbol_filters,
     )
-    if not eligible:
-        print(
-            f"No eligible supported tickers found for {scope_label}. "
-            "Refresh supported tickers first or relax freshness filters."
-        )
-        return 0
-
-    repo = FundamentalsRepository(db_path)
-    repo.initialize_schema()
-    state_repo = FundamentalsFetchStateRepository(db_path)
-    state_repo.initialize_schema()
-    interval = 60.0 / rate_value
-    total = len(eligible)
-    processed = 0
-    attempted = 0
-    print(
-        f"Fetching EODHD fundamentals for {total} supported tickers across {scope_label} "
-        f"at <= {rate_value:.2f} req/min "
-        f"(daily_limit={daily_limit}, used_calls={used_calls}, "
-        f"buffer_calls={buffer_calls}, budget_requests={request_budget})"
+    return _run_eodhd_fundamentals_ingestion(
+        database=db_path,
+        api_key=api_key,
+        scope_label=scope_label,
+        prepared=prepared,
     )
-    try:
-        for idx, ticker in enumerate(eligible, 1):
-            attempted += 1
-            start = time.perf_counter()
-            try:
-                payload = eodhd_client.fetch_fundamentals(
-                    ticker.symbol, exchange_code=None
-                )
-                general = payload.get("General") or {}
-                repo.upsert(
-                    "EODHD",
-                    ticker.symbol,
-                    payload,
-                    currency=general.get("CurrencyCode") or ticker.currency,
-                    exchange=ticker.exchange_code,
-                )
-                state_repo.mark_success("EODHD", ticker.symbol)
-                processed += 1
-                print(
-                    f"[{idx}/{total}] Stored fundamentals for {ticker.symbol}",
-                    flush=True,
-                )
-            except Exception as exc:  # pragma: no cover - network errors
-                LOGGER.error(
-                    "Failed to fetch fundamentals for %s: %s", ticker.symbol, exc
-                )
-                state_repo.mark_failure("EODHD", ticker.symbol, str(exc))
-            elapsed = time.perf_counter() - start
-            if elapsed < interval:
-                time.sleep(interval - elapsed)
-    except KeyboardInterrupt:
-        print(f"\nCancelled after {attempted} attempted symbols.")
-        return 1
-    print(
-        f"Stored fundamentals for {processed} of {attempted} attempted symbols in {db_path}"
-    )
-    return 0
 
 
 def cmd_update_market_data_stage(
@@ -2751,77 +2911,25 @@ def cmd_ingest_fundamentals_bulk(
         print(f"Stored company facts for {processed} symbols in {database}")
         return 0
     if provider_norm == "EODHD":
-        rate_value = rate if rate is not None else 600.0
         exchange_norm = exchange_code.upper()
-        ticker_repo = SupportedTickerRepository(database)
-        tickers = ticker_repo.list_eligible_for_fundamentals(
-            provider=provider_norm,
+        api_key = _require_eodhd_key()
+        prepared = _prepare_eodhd_fundamentals_run(
+            database=database,
+            api_key=api_key,
             exchange_codes=[exchange_norm],
-            max_age_days=max_age_days,
+            provider_symbols=None,
+            rate=rate,
             max_symbols=max_symbols,
+            max_age_days=max_age_days,
             resume=resume,
             missing_only=False,
         )
-        if not tickers:
-            print(
-                f"No eligible supported tickers found for exchange {exchange_norm}. "
-                "Run refresh-supported-tickers first."
-            )
-            return 0
-
-        api_key = _require_eodhd_key()
-        eodhd_client = EODHDFundamentalsClient(api_key=api_key)
-        repo = FundamentalsRepository(database)
-        repo.initialize_schema()
-        state_repo = FundamentalsFetchStateRepository(database)
-        state_repo.initialize_schema()
-
-        interval = 60.0 / rate_value if rate_value and rate_value > 0 else 0.0
-        total = len(tickers)
-        processed = 0
-        print(
-            f"Fetching EODHD fundamentals for {total} supported tickers on {exchange_norm} "
-            f"at <= {rate_value:.2f} per minute"
+        return _run_eodhd_fundamentals_ingestion(
+            database=database,
+            api_key=api_key,
+            scope_label=exchange_norm,
+            prepared=prepared,
         )
-
-        try:
-            for idx, ticker in enumerate(tickers, 1):
-                start = time.perf_counter()
-                try:
-                    payload = eodhd_client.fetch_fundamentals(
-                        ticker.symbol, exchange_code=None
-                    )
-                    general = payload.get("General") or {}
-                    repo.upsert(
-                        "EODHD",
-                        ticker.symbol,
-                        payload,
-                        currency=general.get("CurrencyCode") or ticker.currency,
-                        exchange=ticker.exchange_code,
-                    )
-                    state_repo.mark_success("EODHD", ticker.symbol)
-                    processed += 1
-                    print(
-                        f"[{idx}/{total}] Stored fundamentals for {ticker.symbol}",
-                        flush=True,
-                    )
-                except Exception as exc:  # pragma: no cover - network errors
-                    LOGGER.error(
-                        "Failed to fetch fundamentals for %s: %s",
-                        ticker.symbol,
-                        exc,
-                    )
-                    state_repo.mark_failure("EODHD", ticker.symbol, str(exc))
-
-                elapsed = time.perf_counter() - start
-                if interval > 0 and elapsed < interval:
-                    time.sleep(interval - elapsed)
-        except KeyboardInterrupt:
-            print(f"\nCancelled after {processed} of {total} symbols.")
-            return 1
-
-        print(f"Stored fundamentals for {processed} symbols in {database}")
-        return 0
     raise SystemExit(f"Unsupported provider: {provider}")
 
 

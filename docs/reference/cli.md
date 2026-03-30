@@ -85,8 +85,10 @@ Notes:
 
 - `SEC` rate is requests per second
 - `EODHD` rate is symbols per minute
-- `EODHD` uses the stored supported-ticker catalog plus daily quota checks and
-  retry backoff for multi-day runs
+- `EODHD` uses the stored supported-ticker catalog plus daily quota checks,
+  a concurrent worker pool, and retry backoff for multi-day runs
+- the default EODHD fundamentals rate is `950 req/min`, leaving a small buffer
+  under the `1000 req/min` provider limit
 - omitted `--max-age-days` now means the same 30-day freshness window used by
   the other CLI freshness filters
 

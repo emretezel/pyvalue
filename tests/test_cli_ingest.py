@@ -3,6 +3,8 @@
 Author: Emre Tezel
 """
 
+import threading
+import time
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -427,6 +429,13 @@ def test_cmd_ingest_fundamentals_bulk_eodhd_with_exchange(monkeypatch, tmp_path)
                 "Bulk EODHD fundamentals should use stored supported_tickers."
             )
 
+        def user_metadata(self):
+            return {
+                "dailyRateLimit": "100000",
+                "apiRequests": "0",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
+
         def fetch_fundamentals(self, symbol, exchange_code=None):
             calls["fetched"].append((symbol, exchange_code))
             return {"General": {"CurrencyCode": "USD", "Name": symbol}}
@@ -437,7 +446,7 @@ def test_cmd_ingest_fundamentals_bulk_eodhd_with_exchange(monkeypatch, tmp_path)
     rc = cli.cmd_ingest_fundamentals_bulk(
         provider="EODHD",
         database=str(db_path),
-        rate=0,
+        rate=None,
         exchange_code="LSE",
         user_agent=None,
         max_symbols=None,
@@ -477,6 +486,13 @@ def test_cmd_ingest_fundamentals_bulk_eodhd_with_exchange_symbols(
                 "Bulk EODHD fundamentals should use stored supported_tickers."
             )
 
+        def user_metadata(self):
+            return {
+                "dailyRateLimit": "100000",
+                "apiRequests": "0",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
+
         def fetch_fundamentals(self, symbol, exchange_code=None):
             calls["fetched"].append((symbol, exchange_code))
             return {"General": {"CurrencyCode": "USD", "Name": symbol}}
@@ -487,7 +503,7 @@ def test_cmd_ingest_fundamentals_bulk_eodhd_with_exchange_symbols(
     rc = cli.cmd_ingest_fundamentals_bulk(
         provider="EODHD",
         database=str(db_path),
-        rate=0,
+        rate=None,
         exchange_code="US",
         user_agent=None,
         max_symbols=None,
@@ -1140,7 +1156,7 @@ def test_cmd_ingest_fundamentals_global_max_age_days_refreshes_only_stale_or_mis
     )
 
     assert rc == 0
-    assert calls["fetched"] == ["CCC.US", "BBB.US"]
+    assert set(calls["fetched"]) == {"BBB.US", "CCC.US"}
 
 
 def test_cmd_ingest_fundamentals_global_resume_respects_backoff(monkeypatch, tmp_path):
@@ -1274,6 +1290,237 @@ def test_cmd_ingest_fundamentals_global_default_mode_remains_missing_only(
 
     assert rc == 0
     assert calls["fetched"] == ["BBB.US"]
+
+
+def test_rate_limiter_respects_burst_and_waits(monkeypatch):
+    now = {"value": 0.0}
+    sleeps = []
+
+    def fake_monotonic():
+        return now["value"]
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        now["value"] += seconds
+
+    monkeypatch.setattr(cli.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(cli.time, "sleep", fake_sleep)
+
+    limiter = cli._RateLimiter(rate_per_minute=60.0, burst=2)
+    limiter.acquire()
+    limiter.acquire()
+    limiter.acquire()
+    limiter.acquire()
+
+    assert sleeps == [1.0, 1.0]
+
+
+def test_cmd_ingest_fundamentals_global_uses_concurrent_workers(monkeypatch, tmp_path):
+    db_path = tmp_path / "global-concurrent.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[
+            {"Code": "AAA", "Exchange": "US", "Type": "Common Stock"},
+            {"Code": "BBB", "Exchange": "US", "Type": "Common Stock"},
+            {"Code": "CCC", "Exchange": "US", "Type": "Common Stock"},
+            {"Code": "DDD", "Exchange": "US", "Type": "Common Stock"},
+        ],
+    )
+    calls = {"in_flight": 0, "max_in_flight": 0, "fetched": []}
+    lock = threading.Lock()
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+
+        def user_metadata(self):
+            return {
+                "dailyRateLimit": "100000",
+                "apiRequests": "0",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
+
+        def fetch_fundamentals(self, symbol, exchange_code=None):
+            with lock:
+                calls["in_flight"] += 1
+                calls["max_in_flight"] = max(calls["max_in_flight"], calls["in_flight"])
+            try:
+                time.sleep(0.05)
+                calls["fetched"].append(symbol)
+                return {"General": {"CurrencyCode": "USD", "Name": symbol}}
+            finally:
+                with lock:
+                    calls["in_flight"] -= 1
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_fundamentals_daily_buffer_calls=0,
+            eodhd_fundamentals_requests_per_minute=950,
+        ),
+    )
+
+    rc = cli.cmd_ingest_fundamentals_global(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=None,
+        rate=None,
+        max_symbols=None,
+        max_age_days=None,
+        resume=False,
+    )
+
+    assert rc == 0
+    assert set(calls["fetched"]) == {"AAA.US", "BBB.US", "CCC.US", "DDD.US"}
+    assert calls["max_in_flight"] > 1
+
+
+def test_cmd_ingest_fundamentals_global_batches_success_state_updates(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "global-batch-state.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[
+            {"Code": "AAA", "Exchange": "US", "Type": "Common Stock"},
+            {"Code": "BBB", "Exchange": "US", "Type": "Common Stock"},
+        ],
+    )
+    success_batches = []
+    original_mark_success_many = FundamentalsFetchStateRepository.mark_success_many
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+
+        def user_metadata(self):
+            return {
+                "dailyRateLimit": "100000",
+                "apiRequests": "0",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
+
+        def fetch_fundamentals(self, symbol, exchange_code=None):
+            return {"General": {"CurrencyCode": "USD", "Name": symbol}}
+
+    def fail_mark_success(self, provider, symbol, fetched_at=None):
+        raise AssertionError("multi-symbol ingestion should not call mark_success")
+
+    def track_mark_success_many(self, provider, symbols, fetched_at=None):
+        success_batches.append(list(symbols))
+        return original_mark_success_many(
+            self, provider, symbols, fetched_at=fetched_at
+        )
+
+    def fail_single_upsert(
+        self, provider, symbol, payload, currency=None, exchange=None
+    ):
+        raise AssertionError("multi-symbol ingestion should not call upsert")
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_fundamentals_daily_buffer_calls=0,
+            eodhd_fundamentals_requests_per_minute=950,
+        ),
+    )
+    monkeypatch.setattr(
+        FundamentalsFetchStateRepository, "mark_success", fail_mark_success
+    )
+    monkeypatch.setattr(
+        FundamentalsFetchStateRepository,
+        "mark_success_many",
+        track_mark_success_many,
+    )
+    monkeypatch.setattr(FundamentalsRepository, "upsert", fail_single_upsert)
+
+    rc = cli.cmd_ingest_fundamentals_global(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=None,
+        rate=None,
+        max_symbols=None,
+        max_age_days=None,
+        resume=False,
+    )
+
+    assert rc == 0
+    assert len(success_batches) == 1
+    assert set(success_batches[0]) == {"AAA.US", "BBB.US"}
+
+    state_repo = FundamentalsFetchStateRepository(db_path)
+    assert state_repo.fetch("EODHD", "AAA.US")["last_status"] == "ok"
+    assert state_repo.fetch("EODHD", "BBB.US")["last_status"] == "ok"
+
+
+def test_cmd_ingest_fundamentals_global_flushes_batches_on_keyboard_interrupt(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "global-interrupt.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[
+            {"Code": "AAA", "Exchange": "US", "Type": "Common Stock"},
+            {"Code": "BBB", "Exchange": "US", "Type": "Common Stock"},
+        ],
+    )
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+
+        def user_metadata(self):
+            return {
+                "dailyRateLimit": "100000",
+                "apiRequests": "0",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
+
+        def fetch_fundamentals(self, symbol, exchange_code=None):
+            return {"General": {"CurrencyCode": "USD", "Name": symbol}}
+
+    def interrupting_as_completed(futures):
+        yielded = False
+        for future in futures:
+            if not yielded:
+                yielded = True
+                yield future
+                raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_fundamentals_daily_buffer_calls=0,
+            eodhd_fundamentals_requests_per_minute=950,
+        ),
+    )
+    monkeypatch.setattr(cli, "as_completed", interrupting_as_completed)
+
+    rc = cli.cmd_ingest_fundamentals_global(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=None,
+        rate=None,
+        max_symbols=None,
+        max_age_days=None,
+        resume=False,
+    )
+
+    assert rc == 1
+    fund_repo = FundamentalsRepository(db_path)
+    assert fund_repo.fetch("EODHD", "AAA.US") is not None
 
 
 def test_cmd_report_ingest_progress_reports_complete_with_quota_snapshot(
@@ -2382,6 +2629,13 @@ def test_cmd_ingest_fundamentals_bulk_skips_fresh_and_backoff(monkeypatch, tmp_p
         def __init__(self, api_key):
             calls["api_key"] = api_key
 
+        def user_metadata(self):
+            return {
+                "dailyRateLimit": "100000",
+                "apiRequests": "0",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
+
         def fetch_fundamentals(self, symbol, exchange_code=None):
             calls["fetched"].append((symbol, exchange_code))
             return {"General": {"CurrencyCode": "USD"}}
@@ -2412,7 +2666,7 @@ def test_cmd_ingest_fundamentals_bulk_skips_fresh_and_backoff(monkeypatch, tmp_p
     rc = cli.cmd_ingest_fundamentals_bulk(
         provider="EODHD",
         database=str(db_path),
-        rate=0,
+        rate=None,
         exchange_code="US",
         user_agent=None,
         max_symbols=None,
@@ -2427,7 +2681,7 @@ def test_cmd_ingest_fundamentals_bulk_skips_fresh_and_backoff(monkeypatch, tmp_p
     rc = cli.cmd_ingest_fundamentals_bulk(
         provider="EODHD",
         database=str(db_path),
-        rate=0,
+        rate=None,
         exchange_code="US",
         user_agent=None,
         max_symbols=None,

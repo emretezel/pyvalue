@@ -29,7 +29,7 @@ class Config:
         return self._get_int_value(
             "eodhd",
             "fundamentals_requests_per_minute",
-            default=600,
+            default=950,
         )
 
     @property

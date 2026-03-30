@@ -40,3 +40,9 @@ Use this file to capture recurring mistake patterns after user corrections so fu
 - Recurring pattern: Assuming `with sqlite3.connect(...)` closes the connection can leave high-frequency code paths leaking file descriptors, especially when schema checks and point lookups open fresh connections in tight loops.
 - Preventive rule: When touching SQLite performance paths, verify connection lifetime explicitly and remember that sqlite's context manager commits or rolls back but does not close; add a regression test that the repository helper closes the connection after the `with` block.
 - Resulting action: Replaced the shared storage connection helper with a `sqlite3.Connection` subclass that closes on context exit, fixed the migration runner to close its connection explicitly, and added a regression test for closed connections.
+
+- Date: 2026-03-30
+- User correction: This repo should use `main` by default for commit and push operations, not a `codex/*` branch.
+- Recurring pattern: Blindly applying the app's default branch workflow can conflict with a repo-specific policy the user has already stated in the thread.
+- Preventive rule: Before any commit or push in this repo, assume `main` is the default target unless the user explicitly asks for a separate branch, and treat that repo-specific rule as overriding the generic app default.
+- Resulting action: Recorded the repo-specific branch policy here and will use `main` for future commit/push requests in `pyvalue` unless instructed otherwise.
