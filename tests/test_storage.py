@@ -4,6 +4,8 @@ from datetime import date, timedelta
 from pyvalue.storage import (
     FundamentalsUpdate,
     FundamentalsRepository,
+    FinancialFactsRepository,
+    FactRecord,
     MarketDataFetchStateRepository,
     MarketDataRepository,
     SupportedExchangeRepository,
@@ -243,6 +245,136 @@ def test_supported_ticker_repository_lists_eligible_symbols(tmp_path):
     )
 
     assert [row.symbol for row in rows] == ["BBB.LSE"]
+
+
+def test_financial_facts_repository_replace_fact_rows_matches_replace_facts(tmp_path):
+    db_path = tmp_path / "financial-facts.db"
+    repo = FinancialFactsRepository(db_path)
+    repo.initialize_schema()
+
+    inserted = repo.replace_facts(
+        "AAA.US",
+        [
+            FactRecord(
+                symbol="AAA.US",
+                concept="Assets",
+                fiscal_period="FY",
+                end_date="2024-12-31",
+                unit="USD",
+                value=100.0,
+                currency="USD",
+            )
+        ],
+    )
+
+    assert inserted == 1
+
+    replaced = repo.replace_fact_rows(
+        "AAA.US",
+        [
+            (
+                None,
+                "Liabilities",
+                "FY",
+                "2024-12-31",
+                "USD",
+                40.0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "USD",
+            )
+        ],
+    )
+
+    assert replaced == 1
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT s.canonical_symbol, ff.concept, ff.value
+            FROM financial_facts ff
+            JOIN securities s ON s.security_id = ff.security_id
+            ORDER BY ff.concept
+            """
+        ).fetchall()
+
+    assert rows == [("AAA.US", "Liabilities", 40.0)]
+
+
+def test_financial_facts_repository_replace_fact_rows_replaces_symbol_slice(tmp_path):
+    db_path = tmp_path / "financial-facts-replace.db"
+    repo = FinancialFactsRepository(db_path)
+    repo.initialize_schema()
+
+    repo.replace_fact_rows(
+        "AAA.US",
+        [
+            (
+                None,
+                "Assets",
+                "FY",
+                "2024-12-31",
+                "USD",
+                100.0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "USD",
+            ),
+            (
+                None,
+                "Liabilities",
+                "FY",
+                "2024-12-31",
+                "USD",
+                55.0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "USD",
+            ),
+        ],
+    )
+
+    repo.replace_fact_rows(
+        "AAA.US",
+        [
+            (
+                None,
+                "StockholdersEquity",
+                "FY",
+                "2024-12-31",
+                "USD",
+                45.0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "USD",
+            )
+        ],
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT ff.concept, ff.value
+            FROM financial_facts ff
+            JOIN securities s ON s.security_id = ff.security_id
+            WHERE s.canonical_symbol = 'AAA.US'
+            ORDER BY ff.concept
+            """
+        ).fetchall()
+
+    assert rows == [("StockholdersEquity", 45.0)]
 
 
 def test_fundamentals_repository_upsert_marks_fetch_state_success(tmp_path):

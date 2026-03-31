@@ -6,9 +6,12 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from pyvalue.storage import FactRecord
+
+FactKey = tuple[str, str, str]
+FactIndex = Dict[str, Dict[FactKey, FactRecord]]
 
 EPS_PREFERRED_CONCEPTS = (
     "EarningsPerShareDiluted",
@@ -243,54 +246,65 @@ class EODHDFactsNormalizer:
         records.extend(
             self._normalize_earnings_eps(payload, symbol, accounting_standard)
         )
-        records = self._extend_with_override(
+        indexed = self._index_records(records)
+        self._merge_derived_records(
             records,
-            self._derive_eps_alias(records),
+            indexed,
+            self._derive_eps_alias(indexed),
             "EarningsPerShare",
         )
-        records = self._extend_with_override(
+        self._merge_derived_records(
             records,
-            self._derive_intangibles_excluding_goodwill(records),
+            indexed,
+            self._derive_intangibles_excluding_goodwill(indexed),
             "IntangibleAssetsNetExcludingGoodwill",
         )
-        records = self._extend_with_override(
+        self._merge_derived_records(
             records,
-            self._derive_equity_alias(records),
+            indexed,
+            self._derive_equity_alias(indexed),
             "StockholdersEquity",
         )
-        records = self._extend_with_override(
+        self._merge_derived_records(
             records,
-            self._derive_shares_alias(records),
+            indexed,
+            self._derive_shares_alias(indexed),
             "CommonStockSharesOutstanding",
         )
-        records = self._extend_with_override(
+        self._merge_derived_records(
             records,
-            self._derive_operating_cash_flow_alias(records),
+            indexed,
+            self._derive_operating_cash_flow_alias(indexed),
             "NetCashProvidedByUsedInOperatingActivities",
         )
-        records = self._extend_with_override(
+        self._merge_derived_records(
             records,
-            self._derive_capex_alias(records),
+            indexed,
+            self._derive_capex_alias(indexed),
             "CapitalExpenditures",
         )
-        records = self._extend_with_override(
+        self._merge_derived_records(
             records,
-            self._derive_ebit_alias(records),
+            indexed,
+            self._derive_ebit_alias(indexed),
             "OperatingIncomeLoss",
         )
-        records = self._extend_with_override(
+        self._merge_derived_records(
             records,
-            self._derive_ppe_alias(records),
+            indexed,
+            self._derive_ppe_alias(indexed),
             "PropertyPlantAndEquipmentNet",
         )
-        records = self._extend_with_override(
+        self._merge_derived_records(
             records,
-            self._derive_net_income_available_to_common(records),
+            indexed,
+            self._derive_net_income_available_to_common(indexed),
             "NetIncomeLossAvailableToCommonStockholdersBasic",
         )
-        records = self._extend_with_override(
+        self._merge_derived_records(
             records,
-            self._derive_common_stockholders_equity(records),
+            indexed,
+            self._derive_common_stockholders_equity(indexed),
             "CommonStockholdersEquity",
         )
         return records
@@ -307,6 +321,7 @@ class EODHDFactsNormalizer:
         for frequency, fiscal_period in (("yearly", "FY"), ("quarterly", None)):
             entries = self._iter_entries(statement_payload.get(frequency))
             for entry in entries:
+                lowered = self._build_case_insensitive_entry(entry)
                 end_date = self._extract_date(entry)
                 if not end_date:
                     continue
@@ -318,9 +333,11 @@ class EODHDFactsNormalizer:
                 period_code = fiscal_period or self._infer_quarter(entry)
                 frame = self._build_frame(end_date, period_code)
                 total_liab = self._extract_value(
-                    entry, ["totalLiabilities", "totalLiab"]
+                    entry, ["totalLiabilities", "totalLiab"], lowered
                 )
-                current_liab = self._extract_value(entry, ["totalCurrentLiabilities"])
+                current_liab = self._extract_value(
+                    entry, ["totalCurrentLiabilities"], lowered
+                )
                 derived_debt = None
                 if total_liab is not None and current_liab is not None:
                     candidate = total_liab - current_liab
@@ -329,9 +346,9 @@ class EODHDFactsNormalizer:
 
                 derived_current_assets = None
                 if "AssetsCurrent" in field_map:
-                    total_assets = self._extract_value(entry, ["totalAssets"])
+                    total_assets = self._extract_value(entry, ["totalAssets"], lowered)
                     noncurrent_assets = self._extract_value(
-                        entry, ["nonCurrentAssetsTotal"]
+                        entry, ["nonCurrentAssetsTotal"], lowered
                     )
                     if total_assets is not None and noncurrent_assets is not None:
                         candidate = total_assets - noncurrent_assets
@@ -339,20 +356,22 @@ class EODHDFactsNormalizer:
                             derived_current_assets = candidate
                     if derived_current_assets is None:
                         cash_bucket = self._extract_value(
-                            entry, ["cashAndShortTermInvestments"]
+                            entry, ["cashAndShortTermInvestments"], lowered
                         )
                         short_term_investments = None
                         if cash_bucket is None:
                             short_term_investments = self._extract_value(
-                                entry, ["shortTermInvestments"]
+                                entry, ["shortTermInvestments"], lowered
                             )
                             cash_bucket = self._extract_value(
-                                entry, ["cashAndEquivalents", "cash"]
+                                entry, ["cashAndEquivalents", "cash"], lowered
                             )
-                        receivables = self._extract_value(entry, ["netReceivables"])
-                        inventory = self._extract_value(entry, ["inventory"])
+                        receivables = self._extract_value(
+                            entry, ["netReceivables"], lowered
+                        )
+                        inventory = self._extract_value(entry, ["inventory"], lowered)
                         other_current = self._extract_value(
-                            entry, ["otherCurrentAssets"]
+                            entry, ["otherCurrentAssets"], lowered
                         )
                         components = [
                             cash_bucket,
@@ -369,7 +388,7 @@ class EODHDFactsNormalizer:
                 derived_current_liab = None
                 if "LiabilitiesCurrent" in field_map:
                     noncurrent_liab = self._extract_value(
-                        entry, ["nonCurrentLiabilitiesTotal"]
+                        entry, ["nonCurrentLiabilitiesTotal"], lowered
                     )
                     if total_liab is not None and noncurrent_liab is not None:
                         candidate = total_liab - noncurrent_liab
@@ -377,17 +396,21 @@ class EODHDFactsNormalizer:
                             derived_current_liab = candidate
                     if derived_current_liab is None:
                         accounts_payable = self._extract_value(
-                            entry, ["accountsPayable"]
+                            entry, ["accountsPayable"], lowered
                         )
-                        other_current = self._extract_value(entry, ["otherCurrentLiab"])
+                        other_current = self._extract_value(
+                            entry, ["otherCurrentLiab"], lowered
+                        )
                         deferred_revenue = self._extract_value(
-                            entry, ["currentDeferredRevenue"]
+                            entry, ["currentDeferredRevenue"], lowered
                         )
-                        short_term_debt = self._extract_value(entry, ["shortTermDebt"])
+                        short_term_debt = self._extract_value(
+                            entry, ["shortTermDebt"], lowered
+                        )
                         short_long_term_debt = None
                         if short_term_debt is None:
                             short_long_term_debt = self._extract_value(
-                                entry, ["shortLongTermDebt"]
+                                entry, ["shortLongTermDebt"], lowered
                             )
                         components = [
                             accounts_payable,
@@ -404,10 +427,10 @@ class EODHDFactsNormalizer:
                 derived_ppe = None
                 if "PropertyPlantAndEquipmentNet" in field_map:
                     gross = self._extract_value(
-                        entry, ["propertyPlantAndEquipmentGross"]
+                        entry, ["propertyPlantAndEquipmentGross"], lowered
                     )
                     accumulated = self._extract_value(
-                        entry, ["accumulatedDepreciation"]
+                        entry, ["accumulatedDepreciation"], lowered
                     )
                     if gross is not None and accumulated is not None:
                         candidate = gross - accumulated
@@ -416,9 +439,15 @@ class EODHDFactsNormalizer:
 
                 derived_operating_income = None
                 if "OperatingIncomeLoss" in field_map:
-                    income_before_tax = self._extract_value(entry, ["incomeBeforeTax"])
-                    interest_expense = self._extract_value(entry, ["interestExpense"])
-                    interest_income = self._extract_value(entry, ["interestIncome"])
+                    income_before_tax = self._extract_value(
+                        entry, ["incomeBeforeTax"], lowered
+                    )
+                    interest_expense = self._extract_value(
+                        entry, ["interestExpense"], lowered
+                    )
+                    interest_income = self._extract_value(
+                        entry, ["interestIncome"], lowered
+                    )
                     if income_before_tax is not None and interest_expense is not None:
                         derived_operating_income = (
                             income_before_tax
@@ -426,9 +455,11 @@ class EODHDFactsNormalizer:
                             - (interest_income or 0.0)
                         )
                     if derived_operating_income is None:
-                        total_revenue = self._extract_value(entry, ["totalRevenue"])
+                        total_revenue = self._extract_value(
+                            entry, ["totalRevenue"], lowered
+                        )
                         total_operating_expenses = self._extract_value(
-                            entry, ["totalOperatingExpenses"]
+                            entry, ["totalOperatingExpenses"], lowered
                         )
                         if (
                             total_revenue is not None
@@ -440,9 +471,11 @@ class EODHDFactsNormalizer:
 
                 derived_interest_expense_from_net_interest_income = None
                 if "InterestExpenseFromNetInterestIncome" in field_map:
-                    interest_income = self._extract_value(entry, ["interestIncome"])
+                    interest_income = self._extract_value(
+                        entry, ["interestIncome"], lowered
+                    )
                     net_interest_income = self._extract_value(
-                        entry, ["netInterestIncome"]
+                        entry, ["netInterestIncome"], lowered
                     )
                     if interest_income is not None and net_interest_income is not None:
                         candidate = interest_income - net_interest_income
@@ -454,24 +487,28 @@ class EODHDFactsNormalizer:
                 derived_capex = None
                 if "CapitalExpenditures" in field_map:
                     operating_cash = self._extract_value(
-                        entry, ["totalCashFromOperatingActivities"]
+                        entry, ["totalCashFromOperatingActivities"], lowered
                     )
-                    free_cash_flow = self._extract_value(entry, ["freeCashFlow"])
+                    free_cash_flow = self._extract_value(
+                        entry, ["freeCashFlow"], lowered
+                    )
                     if operating_cash is not None and free_cash_flow is not None:
                         derived_capex = operating_cash - free_cash_flow
 
                 derived_operating_cash = None
                 if "NetCashProvidedByUsedInOperatingActivities" in field_map:
-                    free_cash_flow = self._extract_value(entry, ["freeCashFlow"])
+                    free_cash_flow = self._extract_value(
+                        entry, ["freeCashFlow"], lowered
+                    )
                     capex_value = self._extract_value(
-                        entry, ["capitalExpenditures", "capex"]
+                        entry, ["capitalExpenditures", "capex"], lowered
                     )
                     if free_cash_flow is not None and capex_value is not None:
                         derived_operating_cash = free_cash_flow + capex_value
                 for concept, keys in field_map.items():
                     if concept not in self.concepts:
                         continue
-                    value = self._extract_value(entry, keys)
+                    value = self._extract_value(entry, keys, lowered)
                     if value is None and concept == "AssetsCurrent":
                         value = derived_current_assets
                     if value is None and concept == "LiabilitiesCurrent":
@@ -780,10 +817,11 @@ class EODHDFactsNormalizer:
     def _build_net_income_map(self, entries) -> Dict[str, float]:
         net_income: Dict[str, float] = {}
         for key, entry in self._iter_entries_with_keys(entries):
+            lowered = self._build_case_insensitive_entry(entry)
             date_str = self._extract_entry_date_keyed(key, entry)
             if not date_str:
                 continue
-            value = self._extract_value(entry, list(NET_INCOME_KEYS))
+            value = self._extract_value(entry, NET_INCOME_KEYS, lowered)
             if value is None:
                 continue
             net_income[date_str] = value
@@ -792,10 +830,11 @@ class EODHDFactsNormalizer:
     def _build_income_statement_shares_map(self, entries) -> Dict[str, float]:
         shares: Dict[str, float] = {}
         for key, entry in self._iter_entries_with_keys(entries):
+            lowered = self._build_case_insensitive_entry(entry)
             date_str = self._extract_entry_date_keyed(key, entry)
             if not date_str:
                 continue
-            value = self._extract_value(entry, list(INCOME_STATEMENT_SHARES_KEYS))
+            value = self._extract_value(entry, INCOME_STATEMENT_SHARES_KEYS, lowered)
             if value is None:
                 continue
             shares[date_str] = value
@@ -804,10 +843,11 @@ class EODHDFactsNormalizer:
     def _collect_statement_eps_dates(self, entries) -> set[str]:
         dates: set[str] = set()
         for key, entry in self._iter_entries_with_keys(entries):
+            lowered = self._build_case_insensitive_entry(entry)
             date_str = self._extract_entry_date_keyed(key, entry)
             if not date_str:
                 continue
-            value = self._extract_value(entry, list(EPS_STATEMENT_KEYS))
+            value = self._extract_value(entry, EPS_STATEMENT_KEYS, lowered)
             if value is None:
                 continue
             dates.add(date_str)
@@ -816,10 +856,11 @@ class EODHDFactsNormalizer:
     def _build_balance_sheet_shares_map(self, entries) -> Dict[str, float]:
         shares: Dict[str, float] = {}
         for key, entry in self._iter_entries_with_keys(entries):
+            lowered = self._build_case_insensitive_entry(entry)
             date_str = self._extract_entry_date_keyed(key, entry)
             if not date_str:
                 continue
-            value = self._extract_value(entry, list(BALANCE_SHEET_SHARES_KEYS))
+            value = self._extract_value(entry, BALANCE_SHEET_SHARES_KEYS, lowered)
             if value is None:
                 continue
             shares[date_str] = value
@@ -1184,12 +1225,13 @@ class EODHDFactsNormalizer:
             return 1.0
         return None
 
-    def _index_records(
-        self, records: List[FactRecord]
-    ) -> Dict[str, Dict[tuple[str, str, str], FactRecord]]:
-        indexed: Dict[str, Dict[tuple[str, str, str], FactRecord]] = {}
+    def _record_key(self, record: FactRecord) -> FactKey:
+        return (record.end_date, record.fiscal_period or "", record.unit)
+
+    def _index_records(self, records: List[FactRecord]) -> FactIndex:
+        indexed: FactIndex = {}
         for record in records:
-            key = (record.end_date, record.fiscal_period or "", record.unit)
+            key = self._record_key(record)
             bucket = indexed.setdefault(record.concept, {})
             if key not in bucket:
                 bucket[key] = record
@@ -1198,34 +1240,38 @@ class EODHDFactsNormalizer:
     def _should_override(self, concept: str) -> bool:
         return concept in self.derived_overrides
 
-    def _extend_with_override(
+    def _merge_derived_records(
         self,
         records: List[FactRecord],
+        indexed: FactIndex,
         derived: List[FactRecord],
         concept: str,
-    ) -> List[FactRecord]:
+    ) -> None:
         if not derived:
-            return records
+            return
         if self._should_override(concept):
-            derived_keys = {
-                (rec.end_date, rec.fiscal_period or "", rec.unit) for rec in derived
-            }
-            records = [
+            derived_keys = {self._record_key(rec) for rec in derived}
+            records[:] = [
                 rec
                 for rec in records
                 if not (
-                    rec.concept == concept
-                    and (rec.end_date, rec.fiscal_period or "", rec.unit)
-                    in derived_keys
+                    rec.concept == concept and self._record_key(rec) in derived_keys
                 )
             ]
+            bucket = indexed.get(concept)
+            if bucket is not None:
+                for key in derived_keys:
+                    bucket.pop(key, None)
+                if not bucket:
+                    indexed.pop(concept, None)
         records.extend(derived)
-        return records
+        bucket = indexed.setdefault(concept, {})
+        for record in derived:
+            bucket.setdefault(self._record_key(record), record)
 
-    def _derive_eps_alias(self, records: List[FactRecord]) -> List[FactRecord]:
-        indexed = self._index_records(records)
+    def _derive_eps_alias(self, indexed: FactIndex) -> List[FactRecord]:
         existing = indexed.get("EarningsPerShare", {})
-        candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
+        candidate_keys: set[FactKey] = set(existing.keys())
         for concept in EPS_PREFERRED_CONCEPTS:
             candidate_keys.update(indexed.get(concept, {}).keys())
 
@@ -1245,11 +1291,10 @@ class EODHDFactsNormalizer:
         return derived
 
     def _derive_intangibles_excluding_goodwill(
-        self, records: List[FactRecord]
+        self, indexed: FactIndex
     ) -> List[FactRecord]:
-        indexed = self._index_records(records)
         existing = indexed.get("IntangibleAssetsNetExcludingGoodwill", {})
-        candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
+        candidate_keys: set[FactKey] = set(existing.keys())
         for concept in INTANGIBLE_EXCL_GOODWILL_FALLBACK:
             candidate_keys.update(indexed.get(concept, {}).keys())
         net_tangible = indexed.get("NetTangibleAssets", {})
@@ -1312,10 +1357,9 @@ class EODHDFactsNormalizer:
                     )
         return derived
 
-    def _derive_equity_alias(self, records: List[FactRecord]) -> List[FactRecord]:
-        indexed = self._index_records(records)
+    def _derive_equity_alias(self, indexed: FactIndex) -> List[FactRecord]:
         existing = indexed.get("StockholdersEquity", {})
-        candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
+        candidate_keys: set[FactKey] = set(existing.keys())
         assets = indexed.get("Assets", {})
         liabilities = indexed.get("Liabilities", {})
         candidate_keys.update(assets.keys())
@@ -1369,10 +1413,9 @@ class EODHDFactsNormalizer:
             derived_keys.add(key)
         return derived
 
-    def _derive_shares_alias(self, records: List[FactRecord]) -> List[FactRecord]:
-        indexed = self._index_records(records)
+    def _derive_shares_alias(self, indexed: FactIndex) -> List[FactRecord]:
         existing = indexed.get("CommonStockSharesOutstanding", {})
-        candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
+        candidate_keys: set[FactKey] = set(existing.keys())
         for concept in SHARES_FALLBACK_CONCEPTS:
             candidate_keys.update(indexed.get(concept, {}).keys())
 
@@ -1391,12 +1434,9 @@ class EODHDFactsNormalizer:
             derived.append(self._alias_record(base, "CommonStockSharesOutstanding"))
         return derived
 
-    def _derive_operating_cash_flow_alias(
-        self, records: List[FactRecord]
-    ) -> List[FactRecord]:
-        indexed = self._index_records(records)
+    def _derive_operating_cash_flow_alias(self, indexed: FactIndex) -> List[FactRecord]:
         existing = indexed.get("NetCashProvidedByUsedInOperatingActivities", {})
-        candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
+        candidate_keys: set[FactKey] = set(existing.keys())
         for concept in OPERATING_CASH_FLOW_FALLBACK:
             candidate_keys.update(indexed.get(concept, {}).keys())
 
@@ -1417,10 +1457,9 @@ class EODHDFactsNormalizer:
             )
         return derived
 
-    def _derive_capex_alias(self, records: List[FactRecord]) -> List[FactRecord]:
-        indexed = self._index_records(records)
+    def _derive_capex_alias(self, indexed: FactIndex) -> List[FactRecord]:
         existing = indexed.get("CapitalExpenditures", {})
-        candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
+        candidate_keys: set[FactKey] = set(existing.keys())
         for concept in CAPEX_FALLBACK_CONCEPTS:
             candidate_keys.update(indexed.get(concept, {}).keys())
 
@@ -1439,10 +1478,9 @@ class EODHDFactsNormalizer:
             derived.append(self._alias_record(base, "CapitalExpenditures"))
         return derived
 
-    def _derive_ebit_alias(self, records: List[FactRecord]) -> List[FactRecord]:
-        indexed = self._index_records(records)
+    def _derive_ebit_alias(self, indexed: FactIndex) -> List[FactRecord]:
         existing = indexed.get("OperatingIncomeLoss", {})
-        candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
+        candidate_keys: set[FactKey] = set(existing.keys())
         for concept in EBIT_FALLBACK_CONCEPTS:
             candidate_keys.update(indexed.get(concept, {}).keys())
 
@@ -1461,10 +1499,9 @@ class EODHDFactsNormalizer:
             derived.append(self._alias_record(base, "OperatingIncomeLoss"))
         return derived
 
-    def _derive_ppe_alias(self, records: List[FactRecord]) -> List[FactRecord]:
-        indexed = self._index_records(records)
+    def _derive_ppe_alias(self, indexed: FactIndex) -> List[FactRecord]:
         existing = indexed.get("PropertyPlantAndEquipmentNet", {})
-        candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
+        candidate_keys: set[FactKey] = set(existing.keys())
         for concept in PPE_FALLBACK_CONCEPTS:
             candidate_keys.update(indexed.get(concept, {}).keys())
 
@@ -1484,11 +1521,10 @@ class EODHDFactsNormalizer:
         return derived
 
     def _derive_net_income_available_to_common(
-        self, records: List[FactRecord]
+        self, indexed: FactIndex
     ) -> List[FactRecord]:
-        indexed = self._index_records(records)
         existing = indexed.get("NetIncomeLossAvailableToCommonStockholdersBasic", {})
-        candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
+        candidate_keys: set[FactKey] = set(existing.keys())
         for concept in INCOME_AVAILABLE_TO_COMMON_FALLBACK:
             candidate_keys.update(indexed.get(concept, {}).keys())
 
@@ -1533,9 +1569,8 @@ class EODHDFactsNormalizer:
         return derived
 
     def _derive_common_stockholders_equity(
-        self, records: List[FactRecord]
+        self, indexed: FactIndex
     ) -> List[FactRecord]:
-        indexed = self._index_records(records)
         existing = indexed.get("CommonStockholdersEquity", {})
         stockholders_equity = indexed.get("StockholdersEquity", {})
         noncontrolling = indexed.get("NoncontrollingInterestInConsolidatedEntity", {})
@@ -1594,15 +1629,25 @@ class EODHDFactsNormalizer:
             currency=base.currency,
         )
 
-    def _extract_value(self, entry: Dict, keys: List[str]) -> Optional[float]:
-        lowered = {k.lower(): entry[k] for k in entry.keys() if isinstance(k, str)}
+    def _build_case_insensitive_entry(self, entry: Dict) -> Dict[str, Any]:
+        return {
+            key.lower(): value for key, value in entry.items() if isinstance(key, str)
+        }
+
+    def _extract_value(
+        self,
+        entry: Dict,
+        keys: Sequence[str],
+        lowered: Optional[Mapping[str, Any]] = None,
+    ) -> Optional[float]:
+        if lowered is None:
+            lowered = self._build_case_insensitive_entry(entry)
         for key in keys:
             if key in entry:
                 value = _to_float(entry.get(key))
-            elif key.lower() in lowered:
-                value = _to_float(lowered[key.lower()])
             else:
-                value = None
+                lowered_value = lowered.get(key.lower())
+                value = _to_float(lowered_value)
             if value is not None:
                 return value
         return None

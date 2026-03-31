@@ -5,6 +5,7 @@ Author: Emre Tezel
 
 import threading
 import time
+from concurrent.futures import Future
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -3134,6 +3135,321 @@ def test_cmd_normalize_fundamentals_eodhd(monkeypatch, tmp_path):
     entity_repo = EntityMetadataRepository(db_path)
     entity_repo.initialize_schema()
     assert entity_repo.fetch("SHEL.LSE") == "Shell PLC"
+
+
+def test_cmd_normalize_fundamentals_stage_all_supported_filters_to_raw_symbols(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "normalize-stage-all.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[
+            {"Code": "AAA", "Exchange": "US", "Type": "Common Stock"},
+            {"Code": "BBB", "Exchange": "US", "Type": "Common Stock"},
+        ],
+        provider="EODHD",
+    )
+    store_supported_tickers(
+        db_path,
+        "LSE",
+        rows=[
+            {"Code": "CCC", "Exchange": "LSE", "Type": "Common Stock"},
+            {"Code": "DDD", "Exchange": "LSE", "Type": "Common Stock"},
+        ],
+        provider="EODHD",
+    )
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD",
+        "AAA.US",
+        {"General": {"Name": "AAA"}, "Financials": {}},
+        exchange="US",
+    )
+    fund_repo.upsert(
+        "EODHD",
+        "CCC.LSE",
+        {"General": {"Name": "CCC"}, "Financials": {}},
+        exchange="LSE",
+    )
+    captured = {}
+
+    def fake_bulk(database, symbols=None):
+        captured["database"] = database
+        captured["symbols"] = list(symbols or [])
+        return 0
+
+    monkeypatch.setattr(cli, "cmd_normalize_eodhd_fundamentals_bulk", fake_bulk)
+
+    rc = cli.cmd_normalize_fundamentals_stage(
+        provider="EODHD",
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=None,
+        all_supported=True,
+    )
+
+    assert rc == 0
+    assert captured["database"] == str(db_path)
+    assert sorted(captured["symbols"]) == ["AAA.US", "CCC.LSE"]
+
+
+def test_cmd_normalize_eodhd_fundamentals_bulk_continues_after_symbol_failure_with_inline_executor(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "normalize-eodhd-failure.db"
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    for symbol in ("AAA.US", "BBB.US", "CCC.US"):
+        fund_repo.upsert(
+            "EODHD",
+            symbol,
+            {"General": {"Name": symbol}, "Financials": {}},
+            exchange="US",
+        )
+
+    class FakeNormalizer:
+        def normalize(self, payload, symbol, accounting_standard=None):
+            if symbol == "BBB.US":
+                raise ValueError("boom")
+            return [
+                make_fact(
+                    symbol=symbol,
+                    concept="Dummy",
+                    end_date="2023-12-31",
+                    value=1.0,
+                )
+            ]
+
+    monkeypatch.setattr(cli, "EODHDFactsNormalizer", FakeNormalizer)
+    monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 3)
+
+    class InlineExecutor:
+        def submit(self, fn, *args, **kwargs):
+            future = Future()
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except Exception as exc:
+                future.set_exception(exc)
+            return future
+
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
+
+    monkeypatch.setattr(
+        cli,
+        "_create_normalization_executor",
+        lambda max_workers: InlineExecutor(),
+    )
+
+    rc = cli.cmd_normalize_eodhd_fundamentals_bulk(
+        database=str(db_path),
+        symbols=["AAA.US", "BBB.US", "CCC.US"],
+    )
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "failed=1" in output
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    rows = (
+        fact_repo._connect()
+        .execute(
+            """
+            SELECT s.canonical_symbol
+            FROM financial_facts ff
+            JOIN securities s ON s.security_id = ff.security_id
+            ORDER BY s.canonical_symbol
+            """
+        )
+        .fetchall()
+    )
+    assert [row[0] for row in rows] == ["AAA.US", "CCC.US"]
+
+
+def test_cmd_normalize_sec_facts_bulk_with_inline_executor(monkeypatch, tmp_path):
+    db_path = tmp_path / "normalize-sec-inline.db"
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    for symbol in ("AAA.US", "BBB.US"):
+        fund_repo.upsert("SEC", symbol, {"entityName": symbol, "facts": {}})
+
+    class FakeNormalizer:
+        def normalize(self, payload, symbol, cik=None):
+            return [
+                make_fact(
+                    symbol=symbol,
+                    cik=cik,
+                    concept="Dummy",
+                    end_date="2023-12-31",
+                    value=len(symbol),
+                )
+            ]
+
+    class InlineExecutor:
+        def submit(self, fn, *args, **kwargs):
+            future = Future()
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except Exception as exc:
+                future.set_exception(exc)
+            return future
+
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
+
+    monkeypatch.setattr(cli, "SECFactsNormalizer", FakeNormalizer)
+    monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 2)
+    monkeypatch.setattr(
+        cli,
+        "_create_normalization_executor",
+        lambda max_workers: InlineExecutor(),
+    )
+
+    rc = cli.cmd_normalize_us_facts_bulk(
+        database=str(db_path),
+        symbols=["AAA.US", "BBB.US"],
+    )
+
+    assert rc == 0
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    rows = (
+        fact_repo._connect()
+        .execute(
+            """
+            SELECT s.canonical_symbol, ff.value
+            FROM financial_facts ff
+            JOIN securities s ON s.security_id = ff.security_id
+            ORDER BY s.canonical_symbol
+            """
+        )
+        .fetchall()
+    )
+    assert [(row[0], row[1]) for row in rows] == [
+        ("AAA.US", 6.0),
+        ("BBB.US", 6.0),
+    ]
+
+
+def test_cmd_normalize_eodhd_fundamentals_bulk_process_pool_smoke(
+    monkeypatch, tmp_path
+):
+    if cli.os.name != "posix":
+        pytest.skip("requires POSIX fork support")
+
+    db_path = tmp_path / "normalize-eodhd-process.db"
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    for symbol in ("AAA.US", "BBB.US"):
+        fund_repo.upsert(
+            "EODHD",
+            symbol,
+            {
+                "General": {"Name": symbol, "CurrencyCode": "USD"},
+                "Financials": {
+                    "Balance_Sheet": {
+                        "yearly": [
+                            {
+                                "date": "2024-12-31",
+                                "totalAssets": 100.0,
+                                "currency_symbol": "USD",
+                            }
+                        ]
+                    }
+                },
+            },
+            exchange="US",
+        )
+
+    monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 2)
+
+    rc = cli.cmd_normalize_eodhd_fundamentals_bulk(
+        database=str(db_path),
+        symbols=["AAA.US", "BBB.US"],
+    )
+
+    assert rc == 0
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    rows = (
+        fact_repo._connect()
+        .execute(
+            """
+            SELECT s.canonical_symbol, ff.concept, ff.value
+            FROM financial_facts ff
+            JOIN securities s ON s.security_id = ff.security_id
+            WHERE ff.concept = 'Assets'
+            ORDER BY s.canonical_symbol
+            """
+        )
+        .fetchall()
+    )
+    assert [(row[0], row[1], row[2]) for row in rows] == [
+        ("AAA.US", "Assets", 100.0),
+        ("BBB.US", "Assets", 100.0),
+    ]
+
+
+def test_cmd_normalize_sec_facts_bulk_process_pool_smoke(monkeypatch, tmp_path):
+    if cli.os.name != "posix":
+        pytest.skip("requires POSIX fork support")
+
+    db_path = tmp_path / "normalize-sec-process.db"
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    payload = {
+        "entityName": "Test Corp",
+        "facts": {
+            "us-gaap": {
+                "NetIncomeLoss": {
+                    "units": {
+                        "USD": [
+                            {
+                                "val": 123.0,
+                                "fy": 2024,
+                                "fp": "FY",
+                                "end": "2024-12-31",
+                                "filed": "2025-02-01",
+                                "form": "10-K",
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+    }
+    for symbol in ("AAA.US", "BBB.US"):
+        fund_repo.upsert("SEC", symbol, payload)
+
+    monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 2)
+
+    rc = cli.cmd_normalize_us_facts_bulk(
+        database=str(db_path),
+        symbols=["AAA.US", "BBB.US"],
+    )
+
+    assert rc == 0
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    rows = (
+        fact_repo._connect()
+        .execute(
+            """
+            SELECT s.canonical_symbol, ff.concept, ff.value
+            FROM financial_facts ff
+            JOIN securities s ON s.security_id = ff.security_id
+            WHERE ff.concept = 'NetIncomeLoss'
+            ORDER BY s.canonical_symbol
+            """
+        )
+        .fetchall()
+    )
+    assert [(row[0], row[1], row[2]) for row in rows] == [
+        ("AAA.US", "NetIncomeLoss", 123.0),
+        ("BBB.US", "NetIncomeLoss", 123.0),
+    ]
 
 
 def test_cmd_recalc_market_cap(tmp_path):

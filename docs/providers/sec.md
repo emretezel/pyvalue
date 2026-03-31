@@ -58,6 +58,14 @@ Exchange-scoped:
 pyvalue normalize-fundamentals --provider SEC --exchange-codes US
 ```
 
+All-supported:
+
+```bash
+pyvalue normalize-fundamentals --provider SEC --all-supported
+```
+
+Exchange and all-supported normalization runs parallelize automatically.
+
 ## Important Limitations
 
 Compared with EODHD:

@@ -85,6 +85,10 @@ facts in `financial_facts`, keyed by canonical `security_id`.
 
 That gives metrics a stable input model regardless of whether facts came from SEC or EODHD.
 
+Bulk normalization runs over `--exchange-codes` or `--all-supported`
+parallelize automatically. The stage normalizes only symbols that already have
+stored raw fundamentals in `fundamentals_raw`.
+
 ## Re-Normalization Behavior
 
 Re-normalizing a symbol replaces any previously normalized facts for that
@@ -108,6 +112,9 @@ Re-run normalization when:
 - raw payloads changed
 - normalization rules changed
 - you added new normalized concepts or fallback logic
+
+For large EODHD or SEC refreshes, `pyvalue normalize-fundamentals --all-supported`
+is the fastest way to reprocess every stored raw payload in the catalog.
 
 ## Related Docs
 

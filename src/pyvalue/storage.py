@@ -174,6 +174,22 @@ class FactRecord:
     currency: Optional[str] = None
 
 
+StoredFactRow = Tuple[
+    Optional[str],
+    str,
+    Optional[str],
+    str,
+    str,
+    float,
+    Optional[str],
+    Optional[str],
+    Optional[str],
+    Optional[str],
+    Optional[str],
+    Optional[str],
+]
+
+
 @dataclass(frozen=True)
 class FundamentalsUpdate:
     """Raw fundamentals payload prepared for batch persistence."""
@@ -1980,11 +1996,8 @@ class FinancialFactsRepository(SQLiteStore):
         records: Iterable[FactRecord],
         source_provider: Optional[str] = None,
     ) -> int:
-        self.initialize_schema()
-        security = self._security_repo().ensure_from_symbol(symbol)
         rows = [
             (
-                security.security_id,
                 record.cik,
                 record.concept,
                 record.fiscal_period,
@@ -1997,16 +2010,62 @@ class FinancialFactsRepository(SQLiteStore):
                 getattr(record, "start_date", None),
                 getattr(record, "accounting_standard", None),
                 getattr(record, "currency", None),
-                source_provider.strip().upper() if source_provider else None,
             )
             for record in records
+        ]
+        return self.replace_fact_rows(
+            symbol=symbol,
+            rows=rows,
+            source_provider=source_provider,
+        )
+
+    def replace_fact_rows(
+        self,
+        symbol: str,
+        rows: Iterable[StoredFactRow],
+        source_provider: Optional[str] = None,
+    ) -> int:
+        self.initialize_schema()
+        security = self._security_repo().ensure_from_symbol(symbol)
+        provider = source_provider.strip().upper() if source_provider else None
+        prepared_rows = [
+            (
+                security.security_id,
+                cik,
+                concept,
+                fiscal_period,
+                end_date,
+                unit,
+                value,
+                accn,
+                filed,
+                frame,
+                start_date,
+                accounting_standard,
+                currency,
+                provider,
+            )
+            for (
+                cik,
+                concept,
+                fiscal_period,
+                end_date,
+                unit,
+                value,
+                accn,
+                filed,
+                frame,
+                start_date,
+                accounting_standard,
+                currency,
+            ) in rows
         ]
         with self._connect() as conn:
             conn.execute(
                 "DELETE FROM financial_facts WHERE security_id = ?",
                 (security.security_id,),
             )
-            if rows:
+            if prepared_rows:
                 conn.executemany(
                     """
                     INSERT OR REPLACE INTO financial_facts (
@@ -2015,9 +2074,9 @@ class FinancialFactsRepository(SQLiteStore):
                         currency, source_provider
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    rows,
+                    prepared_rows,
                 )
-        return len(rows)
+        return len(prepared_rows)
 
     def latest_fact(
         self,

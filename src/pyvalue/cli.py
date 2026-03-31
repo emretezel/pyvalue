@@ -7,17 +7,19 @@ from __future__ import annotations
 
 import argparse
 import csv
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 import json
 import logging
+import multiprocessing as mp
+import os
 import re
 from threading import Lock, local
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from pyvalue.config import Config
 from pyvalue.ingestion import EODHDFundamentalsClient, SECCompanyFactsClient
@@ -39,11 +41,13 @@ from pyvalue.storage import (
     FundamentalsRepository,
     FundamentalsFetchStateRepository,
     FinancialFactsRepository,
+    FactRecord,
     IngestProgressExchange,
     IngestProgressSummary,
     MarketDataFetchStateRepository,
     MarketDataRepository,
     MetricsRepository,
+    StoredFactRow,
     SupportedExchangeRepository,
     SupportedTicker,
     SupportedTickerRepository,
@@ -71,6 +75,7 @@ MARKET_DATA_WRITE_BATCH_SIZE = 100
 MARKET_DATA_WRITE_BATCH_INTERVAL_SECONDS = 0.25
 MARKET_DATA_PROGRESS_INTERVAL_SECONDS = 5.0
 MARKET_DATA_PROGRESS_SYMBOL_STEP = 250
+NORMALIZATION_MAX_WORKERS = 16
 
 _MARKET_DATA_PROVIDER_LOCAL = local()
 _FUNDAMENTALS_CLIENT_LOCAL = local()
@@ -104,6 +109,14 @@ class _PreparedFundamentalsRun:
     buffer_calls: int
     request_budget: int
     eligible: Tuple[SupportedTicker, ...]
+
+
+@dataclass(frozen=True)
+class _NormalizedFactsResult:
+    symbol: str
+    rows: Tuple[StoredFactRow, ...]
+    entity_name: Optional[str] = None
+    entity_description: Optional[str] = None
 
 
 class _RateLimiter:
@@ -1325,7 +1338,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     normalize_fundamentals = subparsers.add_parser(
         "normalize-fundamentals",
-        help="Normalize stored fundamentals across the requested supported-ticker scope.",
+        help=(
+            "Normalize stored fundamentals across the requested supported-ticker "
+            "scope. Bulk runs parallelize automatically."
+        ),
     )
     normalize_fundamentals.add_argument(
         "--provider",
@@ -2962,14 +2978,10 @@ def cmd_normalize_us_facts(symbol: str, database: str) -> int:
 def cmd_normalize_us_facts_bulk(
     database: str, symbols: Optional[Sequence[str]] = None
 ) -> int:
-    """Normalize raw SEC facts for every stored ticker."""
+    """Normalize raw SEC facts for every stored ticker in parallel."""
 
     fund_repo = FundamentalsRepository(database)
     fund_repo.initialize_schema()
-    normalization_repo = FinancialFactsRepository(database)
-    normalization_repo.initialize_schema()
-    entity_repo = EntityMetadataRepository(database)
-    entity_repo.initialize_schema()
 
     if symbols is None:
         symbols = fund_repo.symbols("SEC")
@@ -2982,29 +2994,12 @@ def cmd_normalize_us_facts_bulk(
         if not symbols:
             raise SystemExit("No symbols provided for SEC normalization.")
 
-    normalizer = SECFactsNormalizer()
-    total = len(symbols)
-    print(f"Normalizing SEC facts for {total} symbols")
-    try:
-        for idx, symbol in enumerate(symbols, 1):
-            payload = fund_repo.fetch("SEC", symbol)
-            if payload is None:
-                continue
-            records = normalizer.normalize(payload, symbol=symbol)
-            entity_name = payload.get("entityName")
-            if entity_name:
-                entity_repo.upsert(symbol, entity_name)
-            stored = normalization_repo.replace_facts(symbol, records)
-            print(
-                f"[{idx}/{total}] Stored {stored} normalized facts for {symbol}",
-                flush=True,
-            )
-    except KeyboardInterrupt:
-        print("\nBulk normalization cancelled by user.")
-        return 1
-
-    print(f"Normalized SEC facts for {total} symbols into {database}")
-    return 0
+    return _run_bulk_normalization(
+        database=database,
+        provider="SEC",
+        symbols=symbols,
+        worker=_normalize_sec_symbol_worker,
+    )
 
 
 def _extract_entity_name_from_eodhd(payload: Dict) -> Optional[str]:
@@ -3015,6 +3010,209 @@ def _extract_entity_name_from_eodhd(payload: Dict) -> Optional[str]:
 def _extract_entity_description_from_eodhd(payload: Dict) -> Optional[str]:
     general = payload.get("General") or {}
     return general.get("Description")
+
+
+def _normalization_worker_count(total_symbols: int) -> int:
+    """Return an automatic worker count for bulk normalization."""
+
+    if total_symbols <= 0:
+        return 1
+    cpu_bound = max(os.cpu_count() or 1, 1)
+    return max(1, min(total_symbols, min(cpu_bound, NORMALIZATION_MAX_WORKERS)))
+
+
+def _normalization_record_to_row(record: FactRecord) -> StoredFactRow:
+    return (
+        record.cik,
+        record.concept,
+        record.fiscal_period,
+        record.end_date,
+        record.unit,
+        record.value,
+        record.accn,
+        record.filed,
+        record.frame,
+        getattr(record, "start_date", None),
+        getattr(record, "accounting_standard", None),
+        getattr(record, "currency", None),
+    )
+
+
+def _normalization_mp_context() -> Optional[mp.context.BaseContext]:
+    if os.name != "posix":
+        return None
+    try:
+        return mp.get_context("fork")
+    except ValueError:
+        return None
+
+
+def _create_normalization_executor(max_workers: int) -> ProcessPoolExecutor:
+    mp_context = _normalization_mp_context()
+    if mp_context is None:
+        return ProcessPoolExecutor(max_workers=max_workers)
+    return ProcessPoolExecutor(max_workers=max_workers, mp_context=mp_context)
+
+
+def _normalize_sec_symbol_worker(
+    database: Union[str, Path], symbol: str
+) -> Optional[_NormalizedFactsResult]:
+    """Normalize one stored SEC payload and return facts plus metadata."""
+
+    fund_repo = FundamentalsRepository(database)
+    payload = fund_repo.fetch("SEC", symbol)
+    if payload is None:
+        return None
+    normalizer = SECFactsNormalizer()
+    rows = tuple(
+        _normalization_record_to_row(record)
+        for record in normalizer.normalize(payload, symbol=symbol)
+    )
+    return _NormalizedFactsResult(
+        symbol=symbol,
+        rows=rows,
+        entity_name=payload.get("entityName"),
+    )
+
+
+def _normalize_eodhd_symbol_worker(
+    database: Union[str, Path], symbol: str
+) -> Optional[_NormalizedFactsResult]:
+    """Normalize one stored EODHD payload and return facts plus metadata."""
+
+    fund_repo = FundamentalsRepository(database)
+    payload = fund_repo.fetch("EODHD", symbol)
+    if payload is None:
+        return None
+    normalizer = EODHDFactsNormalizer()
+    rows = tuple(
+        _normalization_record_to_row(record)
+        for record in normalizer.normalize(payload, symbol=symbol)
+    )
+    return _NormalizedFactsResult(
+        symbol=symbol,
+        rows=rows,
+        entity_name=_extract_entity_name_from_eodhd(payload),
+        entity_description=_extract_entity_description_from_eodhd(payload),
+    )
+
+
+def _run_bulk_normalization(
+    database: Union[str, Path],
+    provider: str,
+    symbols: Sequence[str],
+    worker: Callable[[Union[str, Path], str], Optional[_NormalizedFactsResult]],
+) -> int:
+    """Normalize many stored payloads while serializing SQLite writes."""
+
+    db_path = _resolve_database_path(str(database))
+    selected_symbols = [symbol.upper() for symbol in symbols]
+    if not selected_symbols:
+        raise SystemExit(f"No symbols provided for {provider} normalization.")
+
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    entity_repo = EntityMetadataRepository(db_path)
+    entity_repo.initialize_schema()
+
+    total = len(selected_symbols)
+    workers = _normalization_worker_count(total)
+    processed = 0
+    failed = 0
+    print(
+        f"Normalizing {provider} fundamentals for {total} symbols "
+        f"with {workers} workers"
+    )
+
+    if workers <= 1:
+        for idx, symbol in enumerate(selected_symbols, 1):
+            try:
+                result = worker(str(db_path), symbol)
+                if result is None:
+                    LOGGER.warning(
+                        "Skipping %s due to missing raw %s fundamentals",
+                        symbol,
+                        provider,
+                    )
+                    failed += 1
+                    continue
+                if result.entity_name or result.entity_description:
+                    entity_repo.upsert(
+                        symbol,
+                        result.entity_name,
+                        description=result.entity_description,
+                    )
+                stored = fact_repo.replace_fact_rows(symbol, result.rows)
+                processed += 1
+                print(
+                    f"[{idx}/{total}] Stored {stored} normalized facts for {symbol}",
+                    flush=True,
+                )
+            except Exception as exc:
+                LOGGER.error(
+                    "Failed to normalize %s fundamentals for %s: %s",
+                    provider,
+                    symbol,
+                    exc,
+                )
+                failed += 1
+    else:
+        executor = _create_normalization_executor(workers)
+        interrupted = False
+        try:
+            futures = {
+                executor.submit(worker, str(db_path), symbol): symbol
+                for symbol in selected_symbols
+            }
+            for idx, future in enumerate(as_completed(futures), 1):
+                symbol = futures[future]
+                try:
+                    result = future.result()
+                    if result is None:
+                        LOGGER.warning(
+                            "Skipping %s due to missing raw %s fundamentals",
+                            symbol,
+                            provider,
+                        )
+                        failed += 1
+                        continue
+                    if result.entity_name or result.entity_description:
+                        entity_repo.upsert(
+                            symbol,
+                            result.entity_name,
+                            description=result.entity_description,
+                        )
+                    stored = fact_repo.replace_fact_rows(symbol, result.rows)
+                    processed += 1
+                    print(
+                        f"[{idx}/{total}] Stored {stored} normalized facts for {symbol}",
+                        flush=True,
+                    )
+                except Exception as exc:
+                    LOGGER.error(
+                        "Failed to normalize %s fundamentals for %s: %s",
+                        provider,
+                        symbol,
+                        exc,
+                    )
+                    failed += 1
+        except KeyboardInterrupt:
+            interrupted = True
+            executor.shutdown(wait=False, cancel_futures=True)
+            print(
+                "\nBulk normalization cancelled by user after "
+                f"{processed + failed} completed symbols."
+            )
+            return 1
+        finally:
+            if not interrupted:
+                executor.shutdown(wait=True)
+
+    print(
+        f"Normalized {provider} fundamentals for {processed} of {total} "
+        f"symbols into {db_path} (failed={failed})"
+    )
+    return 0
 
 
 def cmd_normalize_eodhd_fundamentals(symbol: str, database: str) -> int:
@@ -3047,7 +3245,7 @@ def cmd_normalize_eodhd_fundamentals(symbol: str, database: str) -> int:
 def cmd_normalize_eodhd_fundamentals_bulk(
     database: str, symbols: Optional[Sequence[str]] = None
 ) -> int:
-    """Normalize all stored EODHD fundamentals."""
+    """Normalize all stored EODHD fundamentals in parallel."""
 
     fund_repo = FundamentalsRepository(database)
     if symbols is None:
@@ -3061,35 +3259,12 @@ def cmd_normalize_eodhd_fundamentals_bulk(
         if not symbols:
             raise SystemExit("No symbols provided for EODHD normalization.")
 
-    normalizer = EODHDFactsNormalizer()
-    fact_repo = FinancialFactsRepository(database)
-    fact_repo.initialize_schema()
-    entity_repo = EntityMetadataRepository(database)
-    entity_repo.initialize_schema()
-
-    total = len(symbols)
-    print(f"Normalizing EODHD fundamentals for {total} symbols")
-    try:
-        for idx, symbol in enumerate(symbols, 1):
-            payload = fund_repo.fetch("EODHD", symbol)
-            if payload is None:
-                continue
-            records = normalizer.normalize(payload, symbol=symbol)
-            entity_name = _extract_entity_name_from_eodhd(payload)
-            entity_description = _extract_entity_description_from_eodhd(payload)
-            if entity_name or entity_description:
-                entity_repo.upsert(symbol, entity_name, description=entity_description)
-            stored = fact_repo.replace_facts(symbol, records)
-            print(
-                f"[{idx}/{total}] Stored {stored} normalized facts for {symbol}",
-                flush=True,
-            )
-    except KeyboardInterrupt:
-        print("\nBulk normalization cancelled by user.")
-        return 1
-
-    print(f"Normalized EODHD fundamentals for {total} symbols into {database}")
-    return 0
+    return _run_bulk_normalization(
+        database=database,
+        provider="EODHD",
+        symbols=symbols,
+        worker=_normalize_eodhd_symbol_worker,
+    )
 
 
 def cmd_normalize_fundamentals(

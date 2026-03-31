@@ -140,8 +140,15 @@ Exchange-scoped:
 pyvalue normalize-fundamentals --exchange-codes US
 ```
 
+All-supported:
+
+```bash
+pyvalue normalize-fundamentals --all-supported
+```
+
 Normalization converts raw EODHD payloads into provider-agnostic
 `financial_facts` records keyed by canonical `security_id`.
+Exchange and all-supported normalization runs parallelize automatically.
 
 ## Market Data
 

@@ -124,6 +124,11 @@ Key options:
 - scope selector: `--symbols`, `--exchange-codes`, or `--all-supported`
 - `--database <path>`
 
+Notes:
+
+- bulk runs over `--exchange-codes` or `--all-supported` parallelize automatically
+- only symbols with stored raw fundamentals are normalized
+
 ## Market Data Commands
 
 ### `update-market-data`

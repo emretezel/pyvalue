@@ -835,3 +835,68 @@ def test_eodhd_normalizes_stock_based_compensation():
     assert derived, "StockBasedCompensation should map from stockBasedCompensation"
     assert derived[0].value == 18.0
     assert derived[0].fiscal_period == "Q4"
+
+
+def test_eodhd_extract_value_reuses_case_insensitive_lookup():
+    normalizer = EODHDFactsNormalizer()
+    entry = {
+        "totalAssets": "10.0",
+        "TOTALLIABILITIES": "7.0",
+    }
+    lowered = normalizer._build_case_insensitive_entry(entry)
+
+    assert normalizer._extract_value(entry, ["totalAssets"], lowered) == 10.0
+    assert normalizer._extract_value(entry, ["totalLiabilities"], lowered) == 7.0
+
+
+def test_eodhd_normalizes_mixed_case_statement_keys():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Balance_Sheet": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "TotalAssets": 250.0,
+                        "TOTALCURRENTLIABILITIES": 80.0,
+                        "totalLiabilities": 120.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+    concepts = {record.concept: record.value for record in records}
+
+    assert concepts["Assets"] == 250.0
+    assert concepts["Liabilities"] == 120.0
+    assert concepts["LiabilitiesCurrent"] == 80.0
+
+
+def test_eodhd_common_stockholders_equity_override_replaces_base_record():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Balance_Sheet": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "totalStockholderEquity": 100.0,
+                        "commonStockTotalEquity": 95.0,
+                        "preferredStockTotalEquity": 10.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+    derived = [r for r in records if r.concept == "CommonStockholdersEquity"]
+
+    assert len(derived) == 1
+    assert derived[0].value == 90.0
