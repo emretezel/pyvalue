@@ -24,7 +24,7 @@ from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Uni
 from pyvalue.config import Config
 from pyvalue.ingestion import EODHDFundamentalsClient, SECCompanyFactsClient
 from pyvalue.marketdata import EODHDProvider, MarketDataUpdate, PriceData
-from pyvalue.marketdata.service import MarketDataService, latest_share_count
+from pyvalue.marketdata.service import MarketDataService
 from pyvalue.metrics import REGISTRY
 from pyvalue.normalization import EODHDFactsNormalizer, SECFactsNormalizer
 from pyvalue.reporting import MetricCoverage, compute_fact_coverage
@@ -4065,10 +4065,7 @@ def cmd_recalc_market_cap(
 
     db_path = _resolve_database_path(database)
     market_repo = MarketDataRepository(db_path)
-    market_repo.initialize_schema()
     base_fact_repo = FinancialFactsRepository(db_path)
-    base_fact_repo.initialize_schema()
-    fact_repo = RegionFactsRepository(base_fact_repo)
     selected_symbols, explicit_symbols, resolved_exchange_codes = (
         _resolve_canonical_scope_symbols(
             str(db_path),
@@ -4077,38 +4074,67 @@ def cmd_recalc_market_cap(
             all_supported,
         )
     )
+    scope_label = _scope_label(
+        explicit_symbols,
+        resolved_exchange_codes,
+        "all supported tickers",
+    )
+    print(
+        f"Preparing market cap recalculation for {scope_label} "
+        f"(selected={len(selected_symbols)})",
+        flush=True,
+    )
+    print(
+        f"Loading latest market data for {len(selected_symbols)} symbols",
+        flush=True,
+    )
+    snapshots_by_symbol = market_repo.latest_snapshots_many(selected_symbols)
     symbols_with_market_data = [
-        symbol
-        for symbol in selected_symbols
-        if market_repo.latest_snapshot(symbol) is not None
+        symbol for symbol in selected_symbols if symbol in snapshots_by_symbol
     ]
     if not symbols_with_market_data:
-        scope_label = _scope_label(
-            explicit_symbols,
-            resolved_exchange_codes,
-            "all supported tickers",
-        )
         print(f"No market data found to update for {scope_label}.")
         return 0
 
     total = len(symbols_with_market_data)
-    updated_rows = 0
     print(
-        f"Recomputing market cap for {total} symbols in "
-        f"{_scope_label(explicit_symbols, resolved_exchange_codes, 'all supported tickers')}"
+        f"Recomputing market cap for {total} symbols in {scope_label}",
+        flush=True,
     )
     try:
+        print(
+            f"Loading latest share counts for {total} symbols",
+            flush=True,
+        )
+        share_counts = base_fact_repo.latest_share_counts_many(
+            symbols_with_market_data,
+            security_ids_by_symbol={
+                symbol: snapshots_by_symbol[symbol].security_id
+                for symbol in symbols_with_market_data
+            },
+        )
+        print(
+            f"Loaded latest share counts for {len(share_counts)} symbols",
+            flush=True,
+        )
+        pending_updates: List[Tuple[int, str, float]] = []
+        updated_symbols: List[Tuple[int, str]] = []
         for idx, symbol in enumerate(symbols_with_market_data, 1):
-            shares = latest_share_count(symbol, fact_repo)
+            shares = share_counts.get(symbol)
             if shares is None or shares <= 0:
                 LOGGER.warning("Skipping %s due to missing share count", symbol)
                 continue
-            snapshot = market_repo.latest_snapshot(symbol)
-            if snapshot is None:
-                continue
-            updated_rows += market_repo.update_market_cap(
-                symbol, snapshot.price * shares
+            snapshot = snapshots_by_symbol[symbol]
+            pending_updates.append(
+                (snapshot.security_id, snapshot.as_of, snapshot.price * shares)
             )
+            updated_symbols.append((idx, symbol))
+        print(
+            f"Applying market cap updates for {len(pending_updates)} symbols",
+            flush=True,
+        )
+        updated_rows = market_repo.update_market_caps_many(pending_updates)
+        for idx, symbol in updated_symbols:
             print(f"[{idx}/{total}] Updated market cap for {symbol}", flush=True)
     except KeyboardInterrupt:
         print("\nMarket cap recalculation cancelled by user.")

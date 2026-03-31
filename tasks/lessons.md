@@ -46,3 +46,9 @@ Use this file to capture recurring mistake patterns after user corrections so fu
 - Recurring pattern: Blindly applying the app's default branch workflow can conflict with a repo-specific policy the user has already stated in the thread.
 - Preventive rule: Before any commit or push in this repo, assume `main` is the default target unless the user explicitly asks for a separate branch, and treat that repo-specific rule as overriding the generic app default.
 - Resulting action: Recorded the repo-specific branch policy here and will use `main` for future commit/push requests in `pyvalue` unless instructed otherwise.
+
+- Date: 2026-03-31
+- User correction: `recalc-market-cap --all-supported` crashed with `sqlite3.OperationalError: database is locked` after I added a performance index in the facts schema path.
+- Recurring pattern: Adding opportunistic DDL to a repository `initialize_schema()` method can turn a read-mostly runtime command into a write-locking code path and crash against a busy SQLite database.
+- Preventive rule: Treat new indexes for hot paths as optional performance work unless the command truly depends on them; avoid explicit schema initialization in read-mostly commands, and make non-critical index creation tolerate a busy SQLite database.
+- Resulting action: Removed the eager schema init from `recalc-market-cap`, made the new facts performance index best-effort when the DB is locked, and recorded the rule here.

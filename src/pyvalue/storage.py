@@ -10,7 +10,18 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
 import sqlite3
-from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence, Tuple, Union
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 from pyvalue.marketdata.base import MarketDataUpdate, PriceData
 from pyvalue.migrations import apply_migrations
@@ -171,6 +182,19 @@ class FactRecord:
     frame: Optional[str] = None
     start_date: Optional[str] = None
     accounting_standard: Optional[str] = None
+    currency: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class MarketSnapshotRecord:
+    """Stored latest market-data row keyed to a canonical security."""
+
+    security_id: int
+    symbol: str
+    as_of: str
+    price: float
+    volume: Optional[int] = None
+    market_cap: Optional[float] = None
     currency: Optional[str] = None
 
 
@@ -401,6 +425,42 @@ class SecurityRepository(SQLiteStore):
     def resolve_id(self, symbol: str) -> Optional[int]:
         security = self.fetch_by_symbol(symbol)
         return security.security_id if security else None
+
+    def resolve_ids_many(
+        self,
+        symbols: Sequence[str],
+        chunk_size: int = 500,
+    ) -> Dict[str, int]:
+        self.initialize_schema()
+        normalized = _normalized_codes(symbols)
+        if not normalized:
+            return {}
+
+        resolved: Dict[str, int] = {}
+        uncached: List[str] = []
+        for symbol in normalized:
+            cached = self._by_symbol.get(symbol)
+            if cached is not None:
+                resolved[symbol] = cached.security_id
+            else:
+                uncached.append(symbol)
+        if not uncached:
+            return resolved
+
+        with self._connect() as conn:
+            for chunk in _batched(uncached, chunk_size):
+                placeholders = ", ".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""
+                    SELECT security_id, canonical_symbol
+                    FROM securities
+                    WHERE canonical_symbol IN ({placeholders})
+                    """,
+                    list(chunk),
+                ).fetchall()
+                for row in rows:
+                    resolved[row["canonical_symbol"]] = row["security_id"]
+        return resolved
 
     def canonical_symbol(self, security_id: int) -> Optional[str]:
         security = self.fetch(security_id)
@@ -1989,6 +2049,19 @@ class FinancialFactsRepository(SQLiteStore):
                 ON financial_facts(concept)
                 """
             )
+            try:
+                # This index is a performance optimization for bulk latest-fact reads.
+                # If another process holds the database open, keep the command path
+                # working and try again on a later initialize_schema() call.
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_fin_facts_security_concept_latest
+                    ON financial_facts(security_id, concept, end_date DESC, filed DESC)
+                    """
+                )
+            except sqlite3.OperationalError as exc:
+                if "database is locked" not in str(exc).lower():
+                    raise
 
     def replace_facts(
         self,
@@ -2134,6 +2207,190 @@ class FinancialFactsRepository(SQLiteStore):
         with self._connect() as conn:
             rows = conn.execute(" ".join(query), params).fetchall()
         return [FactRecord(*row) for row in rows]
+
+    def latest_numeric_values_for_concept_many(
+        self,
+        symbols: Sequence[str],
+        concept: str,
+        chunk_size: int = 500,
+    ) -> Dict[str, float]:
+        self.initialize_schema()
+        normalized = _normalized_codes(symbols)
+        if not normalized:
+            return {}
+        security_ids_by_symbol = self._security_repo().resolve_ids_many(
+            normalized,
+            chunk_size=chunk_size,
+        )
+        with self._connect() as conn:
+            self._populate_temp_selected_securities(
+                conn,
+                security_ids_by_symbol,
+                chunk_size=chunk_size,
+            )
+            return self._latest_numeric_values_for_temp_selected_securities(
+                conn,
+                concept,
+            )
+
+    def _populate_temp_selected_securities(
+        self,
+        conn: sqlite3.Connection,
+        security_ids_by_symbol: Mapping[str, int],
+        chunk_size: int = 500,
+    ) -> None:
+        conn.execute("DROP TABLE IF EXISTS temp_selected_securities")
+        conn.execute(
+            """
+            CREATE TEMP TABLE temp_selected_securities (
+                security_id INTEGER PRIMARY KEY,
+                canonical_symbol TEXT NOT NULL
+            )
+            """
+        )
+        rows = [
+            (security_id, symbol)
+            for symbol, security_id in security_ids_by_symbol.items()
+            if security_id is not None
+        ]
+        for chunk in _batched(rows, chunk_size):
+            conn.executemany(
+                """
+                INSERT INTO temp_selected_securities (security_id, canonical_symbol)
+                VALUES (?, ?)
+                """,
+                list(chunk),
+            )
+
+    def _latest_numeric_values_for_temp_selected_securities(
+        self,
+        conn: sqlite3.Connection,
+        concept: str,
+    ) -> Dict[str, float]:
+        values: Dict[str, float] = {}
+        rows = conn.execute(
+            """
+            SELECT
+                selected.canonical_symbol,
+                (
+                    SELECT ff.value
+                    FROM financial_facts ff INDEXED BY idx_fin_facts_security_concept_latest
+                    WHERE ff.security_id = selected.security_id
+                      AND ff.concept = ?
+                    ORDER BY ff.end_date DESC, ff.filed DESC
+                    LIMIT 1
+                ) AS value
+            FROM temp_selected_securities selected
+            """,
+            (concept,),
+        ).fetchall()
+        for row in rows:
+            try:
+                if row["value"] is None:
+                    continue
+                values[row["canonical_symbol"]] = float(row["value"])
+            except (TypeError, ValueError):
+                continue
+        return values
+
+    def _latest_share_counts_for_temp_selected_securities(
+        self,
+        conn: sqlite3.Connection,
+        primary_concept: str,
+        fallback_concept: str,
+    ) -> Dict[str, float]:
+        counts: Dict[str, float] = {}
+        rows = conn.execute(
+            """
+            SELECT
+                selected.canonical_symbol,
+                COALESCE(
+                    (
+                        SELECT ff.value
+                        FROM financial_facts ff INDEXED BY idx_fin_facts_security_concept_latest
+                        WHERE ff.security_id = selected.security_id
+                          AND ff.concept = ?
+                        ORDER BY ff.end_date DESC, ff.filed DESC
+                        LIMIT 1
+                    ),
+                    (
+                        SELECT ff.value
+                        FROM financial_facts ff INDEXED BY idx_fin_facts_security_concept_latest
+                        WHERE ff.security_id = selected.security_id
+                          AND ff.concept = ?
+                        ORDER BY ff.end_date DESC, ff.filed DESC
+                        LIMIT 1
+                    )
+                ) AS value
+            FROM temp_selected_securities selected
+            """,
+            (primary_concept, fallback_concept),
+        ).fetchall()
+        for row in rows:
+            try:
+                if row["value"] is None:
+                    continue
+                counts[row["canonical_symbol"]] = float(row["value"])
+            except (TypeError, ValueError):
+                continue
+        return counts
+
+    def latest_share_counts_many(
+        self,
+        symbols: Sequence[str],
+        concepts: Optional[Sequence[str]] = None,
+        chunk_size: int = 500,
+        security_ids_by_symbol: Optional[Mapping[str, int]] = None,
+    ) -> Dict[str, float]:
+        normalized = _normalized_codes(symbols)
+        if not normalized:
+            return {}
+        normalized_set = set(normalized)
+
+        if security_ids_by_symbol is None:
+            selected_security_ids = self._security_repo().resolve_ids_many(
+                normalized,
+                chunk_size=chunk_size,
+            )
+        else:
+            selected_security_ids = {
+                symbol: security_id
+                for symbol, security_id in security_ids_by_symbol.items()
+                if symbol in normalized_set and security_id is not None
+            }
+
+        counts: Dict[str, float] = {}
+        concept_order = list(concepts or ())
+        if not concept_order:
+            concept_order = [
+                "EntityCommonStockSharesOutstanding",
+                "CommonStockSharesOutstanding",
+            ]
+        with self._connect() as conn:
+            self._populate_temp_selected_securities(
+                conn,
+                selected_security_ids,
+                chunk_size=chunk_size,
+            )
+            if concept_order == [
+                "EntityCommonStockSharesOutstanding",
+                "CommonStockSharesOutstanding",
+            ]:
+                return self._latest_share_counts_for_temp_selected_securities(
+                    conn,
+                    primary_concept=concept_order[0],
+                    fallback_concept=concept_order[1],
+                )
+            for concept in concept_order:
+                latest_values = (
+                    self._latest_numeric_values_for_temp_selected_securities(
+                        conn,
+                        concept,
+                    )
+                )
+                for symbol, value in latest_values.items():
+                    counts.setdefault(symbol, value)
+        return counts
 
 
 class MetricsRepository(SQLiteStore):
@@ -2328,6 +2585,64 @@ class MarketDataRepository(SQLiteStore):
             return None
         return snapshot.as_of, snapshot.price
 
+    def latest_snapshots_many(
+        self,
+        symbols: Sequence[str],
+        chunk_size: int = 500,
+    ) -> Dict[str, MarketSnapshotRecord]:
+        self.initialize_schema()
+        normalized = _normalized_codes(symbols)
+        if not normalized:
+            return {}
+
+        snapshots: Dict[str, MarketSnapshotRecord] = {}
+        with self._connect() as conn:
+            for chunk in _batched(normalized, chunk_size):
+                placeholders = ", ".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""
+                    SELECT
+                        ranked.security_id,
+                        ranked.canonical_symbol,
+                        ranked.as_of,
+                        ranked.price,
+                        ranked.volume,
+                        ranked.market_cap,
+                        ranked.currency
+                    FROM (
+                        SELECT
+                            s.security_id,
+                            s.canonical_symbol,
+                            md.as_of,
+                            md.price,
+                            md.volume,
+                            md.market_cap,
+                            md.currency,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY md.security_id
+                                ORDER BY md.as_of DESC
+                            ) AS row_num
+                        FROM market_data md
+                        JOIN securities s ON s.security_id = md.security_id
+                        WHERE s.canonical_symbol IN ({placeholders})
+                    ) ranked
+                    WHERE ranked.row_num = 1
+                    ORDER BY ranked.canonical_symbol
+                    """,
+                    list(chunk),
+                ).fetchall()
+                for row in rows:
+                    snapshots[row["canonical_symbol"]] = MarketSnapshotRecord(
+                        security_id=row["security_id"],
+                        symbol=row["canonical_symbol"],
+                        as_of=row["as_of"],
+                        price=row["price"],
+                        volume=row["volume"],
+                        market_cap=row["market_cap"],
+                        currency=row["currency"],
+                    )
+        return snapshots
+
     def update_market_cap(self, symbol: str, market_cap: float) -> int:
         self.initialize_schema()
         security_id = self._security_repo().resolve_id(symbol)
@@ -2348,6 +2663,30 @@ class MarketDataRepository(SQLiteStore):
                 (market_cap, _utc_now_iso(), security_id, security_id),
             )
         return int(cursor.rowcount or 0)
+
+    def update_market_caps_many(
+        self,
+        rows: Sequence[Tuple[int, str, float]],
+    ) -> int:
+        self.initialize_schema()
+        if not rows:
+            return 0
+        updated_at = _utc_now_iso()
+        payload = [
+            (market_cap, updated_at, security_id, as_of)
+            for security_id, as_of, market_cap in rows
+        ]
+        with self._connect() as conn:
+            before = conn.total_changes
+            conn.executemany(
+                """
+                UPDATE market_data
+                SET market_cap = ?, updated_at = ?
+                WHERE security_id = ? AND as_of = ?
+                """,
+                payload,
+            )
+            return int(conn.total_changes - before)
 
 
 class EntityMetadataRepository(SQLiteStore):
@@ -2408,6 +2747,7 @@ __all__ = [
     "FinancialFactsRepository",
     "MarketDataRepository",
     "FactRecord",
+    "MarketSnapshotRecord",
     "MetricsRepository",
     "EntityMetadataRepository",
 ]

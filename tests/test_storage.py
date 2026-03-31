@@ -1,6 +1,7 @@
 import sqlite3
 from datetime import date, timedelta
 
+import pyvalue.storage as storage
 from pyvalue.storage import (
     FundamentalsUpdate,
     FundamentalsRepository,
@@ -12,6 +13,7 @@ from pyvalue.storage import (
     SupportedTickerRepository,
 )
 from pyvalue.marketdata import MarketDataUpdate
+from pyvalue.marketdata.service import latest_share_count
 from pyvalue.universe import Listing
 
 
@@ -377,6 +379,30 @@ def test_financial_facts_repository_replace_fact_rows_replaces_symbol_slice(tmp_
     assert rows == [("StockholdersEquity", 45.0)]
 
 
+def test_financial_facts_repository_initialize_schema_ignores_locked_perf_index(
+    monkeypatch, tmp_path
+):
+    repo = FinancialFactsRepository(tmp_path / "locked-index.db")
+    monkeypatch.setattr(storage, "apply_migrations", lambda db_path: None)
+    monkeypatch.setattr(repo._security_repo(), "initialize_schema", lambda: None)
+
+    class FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def execute(self, sql, params=()):
+            if "idx_fin_facts_security_concept_latest" in sql:
+                raise sqlite3.OperationalError("database is locked")
+            return None
+
+    monkeypatch.setattr(repo, "_connect", lambda: FakeConn())
+
+    repo.initialize_schema()
+
+
 def test_fundamentals_repository_upsert_marks_fetch_state_success(tmp_path):
     db_path = tmp_path / "fundamentals-fetch-state.db"
     repo = FundamentalsRepository(db_path)
@@ -605,6 +631,203 @@ def test_market_data_fetch_state_repository_batch_methods(tmp_path):
     repo.mark_success_many("EODHD", ["AAA.US", "BBB.US"])
     assert repo.fetch("EODHD", "AAA.US")["last_status"] == "ok"
     assert repo.fetch("EODHD", "BBB.US")["attempts"] == 0
+
+
+def test_market_data_repository_latest_snapshots_many_matches_single_lookup(tmp_path):
+    db_path = tmp_path / "market-snapshots-many.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [
+            {"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock"},
+            {"Code": "BBB", "Name": "BBB Inc", "Type": "Common Stock"},
+        ],
+    )
+    rows = ticker_repo.list_for_exchange("EODHD", "US")
+    by_symbol = {row.symbol: row for row in rows}
+
+    repo = MarketDataRepository(db_path)
+    repo.initialize_schema()
+    repo.upsert_prices(
+        [
+            MarketDataUpdate(
+                security_id=by_symbol["AAA.US"].security_id,
+                symbol="AAA.US",
+                as_of="2026-03-28",
+                price=9.0,
+                volume=90,
+                currency="USD",
+                market_cap=900.0,
+            ),
+            MarketDataUpdate(
+                security_id=by_symbol["AAA.US"].security_id,
+                symbol="AAA.US",
+                as_of="2026-03-29",
+                price=10.0,
+                volume=100,
+                currency="USD",
+                market_cap=1000.0,
+            ),
+            MarketDataUpdate(
+                security_id=by_symbol["BBB.US"].security_id,
+                symbol="BBB.US",
+                as_of="2026-03-29",
+                price=20.0,
+                volume=200,
+                currency="USD",
+                market_cap=2000.0,
+            ),
+        ]
+    )
+
+    snapshots = repo.latest_snapshots_many(["AAA.US", "BBB.US", "CCC.US"])
+
+    assert set(snapshots) == {"AAA.US", "BBB.US"}
+    assert snapshots["AAA.US"].security_id == by_symbol["AAA.US"].security_id
+    assert snapshots["AAA.US"].as_of == repo.latest_snapshot("AAA.US").as_of
+    assert snapshots["AAA.US"].price == repo.latest_snapshot("AAA.US").price
+    assert snapshots["AAA.US"].market_cap == repo.latest_snapshot("AAA.US").market_cap
+    assert snapshots["BBB.US"].as_of == repo.latest_snapshot("BBB.US").as_of
+    assert snapshots["BBB.US"].price == repo.latest_snapshot("BBB.US").price
+
+
+def test_financial_facts_repository_latest_share_counts_many_matches_single_lookup(
+    tmp_path,
+):
+    db_path = tmp_path / "share-counts-many.db"
+    repo = FinancialFactsRepository(db_path)
+    repo.initialize_schema()
+    repo.replace_facts(
+        "AAA.US",
+        [
+            FactRecord(
+                symbol="AAA.US",
+                concept="EntityCommonStockSharesOutstanding",
+                fiscal_period="FY",
+                end_date="2024-12-31",
+                unit="shares",
+                value=111.0,
+            ),
+            FactRecord(
+                symbol="AAA.US",
+                concept="CommonStockSharesOutstanding",
+                fiscal_period="FY",
+                end_date="2024-12-31",
+                unit="shares",
+                value=222.0,
+            ),
+        ],
+    )
+    repo.replace_facts(
+        "BBB.US",
+        [
+            FactRecord(
+                symbol="BBB.US",
+                concept="CommonStockSharesOutstanding",
+                fiscal_period="FY",
+                end_date="2023-12-31",
+                unit="shares",
+                value=300.0,
+            ),
+            FactRecord(
+                symbol="BBB.US",
+                concept="CommonStockSharesOutstanding",
+                fiscal_period="FY",
+                end_date="2024-12-31",
+                unit="shares",
+                value=333.0,
+            ),
+        ],
+    )
+
+    counts = repo.latest_share_counts_many(["AAA.US", "BBB.US", "CCC.US"])
+    security_ids = repo._security_repo().resolve_ids_many(
+        ["AAA.US", "BBB.US", "CCC.US"]
+    )
+    counts_with_security_ids = repo.latest_share_counts_many(
+        ["AAA.US", "BBB.US", "CCC.US"],
+        security_ids_by_symbol=security_ids,
+    )
+
+    assert counts["AAA.US"] == latest_share_count("AAA.US", repo)
+    assert counts["BBB.US"] == latest_share_count("BBB.US", repo)
+    assert counts["AAA.US"] == 111.0
+    assert counts["BBB.US"] == 333.0
+    assert counts_with_security_ids == counts
+    assert "CCC.US" not in counts
+
+
+def test_market_data_repository_update_market_caps_many_matches_single_update(tmp_path):
+    db_path = tmp_path / "market-cap-updates-many.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [
+            {"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock"},
+            {"Code": "BBB", "Name": "BBB Inc", "Type": "Common Stock"},
+        ],
+    )
+    rows = ticker_repo.list_for_exchange("EODHD", "US")
+    by_symbol = {row.symbol: row for row in rows}
+
+    repo = MarketDataRepository(db_path)
+    repo.initialize_schema()
+    repo.upsert_prices(
+        [
+            MarketDataUpdate(
+                security_id=by_symbol["AAA.US"].security_id,
+                symbol="AAA.US",
+                as_of="2026-03-28",
+                price=9.0,
+                volume=90,
+                currency="USD",
+                market_cap=900.0,
+            ),
+            MarketDataUpdate(
+                security_id=by_symbol["AAA.US"].security_id,
+                symbol="AAA.US",
+                as_of="2026-03-29",
+                price=10.0,
+                volume=100,
+                currency="USD",
+                market_cap=1000.0,
+            ),
+            MarketDataUpdate(
+                security_id=by_symbol["BBB.US"].security_id,
+                symbol="BBB.US",
+                as_of="2026-03-29",
+                price=20.0,
+                volume=200,
+                currency="USD",
+                market_cap=2000.0,
+            ),
+        ]
+    )
+
+    updated = repo.update_market_caps_many(
+        [
+            (by_symbol["AAA.US"].security_id, "2026-03-29", 1500.0),
+            (by_symbol["BBB.US"].security_id, "2026-03-29", 2500.0),
+        ]
+    )
+
+    assert updated == 2
+    assert repo.latest_snapshot("AAA.US").market_cap == 1500.0
+    assert repo.latest_snapshot("BBB.US").market_cap == 2500.0
+    with sqlite3.connect(db_path) as conn:
+        historical = conn.execute(
+            """
+            SELECT market_cap
+            FROM market_data md
+            JOIN securities s ON s.security_id = md.security_id
+            WHERE s.canonical_symbol = 'AAA.US' AND md.as_of = '2026-03-28'
+            """
+        ).fetchone()[0]
+    assert historical == 900.0
 
 
 def test_sqlite_store_connect_context_closes_connection(tmp_path):
