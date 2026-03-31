@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
 import sqlite3
+import time
 from typing import (
     Any,
     Dict,
@@ -26,6 +27,11 @@ from typing import (
 from pyvalue.marketdata.base import MarketDataUpdate, PriceData
 from pyvalue.migrations import apply_migrations
 from pyvalue.universe import Listing
+
+
+SQLITE_BUSY_TIMEOUT_MS = 30000
+SQLITE_LOCK_RETRY_ATTEMPTS = 5
+SQLITE_LOCK_RETRY_SLEEP_SECONDS = 0.5
 
 
 def _utc_now_iso() -> str:
@@ -213,6 +219,8 @@ StoredFactRow = Tuple[
     Optional[str],
 ]
 
+StoredMetricRow = Tuple[str, str, float, str]
+
 
 @dataclass(frozen=True)
 class FundamentalsUpdate:
@@ -250,9 +258,49 @@ class SQLiteStore:
         )
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, factory=_ManagedSQLiteConnection)
+        conn = sqlite3.connect(
+            self.db_path,
+            timeout=SQLITE_BUSY_TIMEOUT_MS / 1000.0,
+            factory=_ManagedSQLiteConnection,
+        )
         conn.row_factory = sqlite3.Row
+        conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
         return conn
+
+    def current_journal_mode(self) -> str:
+        with self._connect() as conn:
+            row = conn.execute("PRAGMA journal_mode").fetchone()
+        return str(row[0]).lower() if row is not None else ""
+
+    def enable_wal_mode(self) -> str:
+        def _enable() -> str:
+            with self._connect() as conn:
+                row = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+            return str(row[0]).lower() if row is not None else ""
+
+        return self._run_with_locked_retry(_enable)
+
+    @staticmethod
+    def _is_locked_error(exc: sqlite3.OperationalError) -> bool:
+        return "database is locked" in str(exc).lower()
+
+    def _run_with_locked_retry(self, operation: Any) -> Any:
+        last_exc: Optional[sqlite3.OperationalError] = None
+        for attempt in range(SQLITE_LOCK_RETRY_ATTEMPTS):
+            try:
+                return operation()
+            except sqlite3.OperationalError as exc:
+                if not self._is_locked_error(exc):
+                    raise
+                last_exc = exc
+                if attempt >= SQLITE_LOCK_RETRY_ATTEMPTS - 1:
+                    break
+                time.sleep(SQLITE_LOCK_RETRY_SLEEP_SECONDS * (attempt + 1))
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError(
+            "SQLite retry loop exited without a result"
+        )  # pragma: no cover
 
     def _security_repo(self) -> SecurityRepository:
         if self._security_repo_cache is None:
@@ -2208,6 +2256,26 @@ class FinancialFactsRepository(SQLiteStore):
             rows = conn.execute(" ".join(query), params).fetchall()
         return [FactRecord(*row) for row in rows]
 
+    def facts_for_symbol(self, symbol: str) -> List[FactRecord]:
+        self.initialize_schema()
+        security_id = self._security_repo().resolve_id(symbol)
+        if security_id is None:
+            return []
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT s.canonical_symbol, ff.cik, ff.concept, ff.fiscal_period,
+                       ff.end_date, ff.unit, ff.value, ff.accn, ff.filed, ff.frame,
+                       ff.start_date, ff.accounting_standard, ff.currency
+                FROM financial_facts ff
+                JOIN securities s ON s.security_id = ff.security_id
+                WHERE ff.security_id = ?
+                ORDER BY ff.concept, ff.end_date DESC, ff.filed DESC
+                """,
+                (security_id,),
+            ).fetchall()
+        return [FactRecord(*row) for row in rows]
+
     def latest_numeric_values_for_concept_many(
         self,
         symbols: Sequence[str],
@@ -2419,19 +2487,59 @@ class MetricsRepository(SQLiteStore):
             )
 
     def upsert(self, symbol: str, metric_id: str, value: float, as_of: str) -> None:
+        self.upsert_many([(symbol, metric_id, value, as_of)])
+
+    def upsert_many(
+        self,
+        rows: Iterable[StoredMetricRow],
+    ) -> int:
         self.initialize_schema()
-        security = self._security_repo().ensure_from_symbol(symbol)
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO metrics (security_id, metric_id, value, as_of)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(security_id, metric_id) DO UPDATE SET
-                    value = excluded.value,
-                    as_of = excluded.as_of
-                """,
-                (security.security_id, metric_id, value, as_of),
+        metric_rows = list(rows)
+        if not metric_rows:
+            return 0
+
+        unique_symbols = []
+        seen_symbols = set()
+        for symbol, _, _, _ in metric_rows:
+            if symbol in seen_symbols:
+                continue
+            seen_symbols.add(symbol)
+            unique_symbols.append(symbol)
+
+        security_ids = self._security_repo().resolve_ids_many(unique_symbols)
+        for symbol in unique_symbols:
+            if symbol in security_ids:
+                continue
+            security = self._security_repo().ensure_from_symbol(symbol)
+            security_ids[symbol] = security.security_id
+        persisted_rows = [
+            (
+                security_ids[symbol],
+                metric_id,
+                value,
+                as_of,
             )
+            for symbol, metric_id, value, as_of in metric_rows
+            if symbol in security_ids
+        ]
+        if not persisted_rows:
+            return 0
+
+        def _persist() -> None:
+            with self._connect() as conn:
+                conn.executemany(
+                    """
+                    INSERT INTO metrics (security_id, metric_id, value, as_of)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(security_id, metric_id) DO UPDATE SET
+                        value = excluded.value,
+                        as_of = excluded.as_of
+                    """,
+                    persisted_rows,
+                )
+
+        self._run_with_locked_retry(_persist)
+        return len(persisted_rows)
 
     def fetch(self, symbol: str, metric_id: str) -> Optional[Tuple[float, str]]:
         self.initialize_schema()

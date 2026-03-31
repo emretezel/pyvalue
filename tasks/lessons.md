@@ -52,3 +52,21 @@ Use this file to capture recurring mistake patterns after user corrections so fu
 - Recurring pattern: Adding opportunistic DDL to a repository `initialize_schema()` method can turn a read-mostly runtime command into a write-locking code path and crash against a busy SQLite database.
 - Preventive rule: Treat new indexes for hot paths as optional performance work unless the command truly depends on them; avoid explicit schema initialization in read-mostly commands, and make non-critical index creation tolerate a busy SQLite database.
 - Resulting action: Removed the eager schema init from `recalc-market-cap`, made the new facts performance index best-effort when the DB is locked, and recorded the rule here.
+
+- Date: 2026-03-31
+- User correction: Process-based `compute-metrics` runs failed with `database is locked` for many symbols.
+- Recurring pattern: Reusing normal repository read methods inside child processes can silently reintroduce migrations and `CREATE TABLE/INDEX` work on every worker, which collides with the parent writer on SQLite even when the worker is conceptually read-only.
+- Preventive rule: Before parallelizing a SQLite read path with processes, warm the required schema once in the parent and route workers through schema-ready read repositories that never run migrations or DDL.
+- Resulting action: Added parent-side schema warmup for `compute-metrics`, switched worker reads to schema-ready repositories, and added a regression that fails if worker-side schema initialization is needed.
+
+- Date: 2026-03-31
+- User correction: `compute-metrics` was still slow even after the symbol-level cache refactor.
+- Recurring pattern: Treating a fast single-symbol microbenchmark as proof that the full command is fast can miss SQLite writer contention, especially when the parent still commits one small batch at a time in parallel mode.
+- Preventive rule: After accelerating a CPU/read path on SQLite, benchmark the full end-to-end command with writes enabled and inspect journal mode plus transaction batching before claiming the runtime is fixed.
+- Resulting action: Measured clean per-symbol compute separately from full-run behavior, identified parent-side write contention on a `DELETE`-journal DB, and added WAL enablement plus batched metric writes with serial fallback when WAL is unavailable.
+
+- Date: 2026-03-31
+- User correction: `compute-metrics` still crashed in serial fallback because one transient SQLite lock during a batched metric write aborted the whole run.
+- Recurring pattern: Improving concurrency strategy without adding retry/backoff on the remaining write path leaves SQLite commands brittle whenever WAL setup is delayed or another short-lived connection briefly holds the lock.
+- Preventive rule: For long-running SQLite batch commands, add retry/backoff to the final write path and verify transient `database is locked` errors do not abort the command.
+- Resulting action: Added connection busy-timeout settings plus locked-error retry for WAL enablement and metric batch upserts, and added a regression for transient locked writes.

@@ -15,6 +15,7 @@ import logging
 import multiprocessing as mp
 import os
 import re
+import sqlite3
 from threading import Lock, local
 import time
 from collections import Counter
@@ -47,7 +48,9 @@ from pyvalue.storage import (
     MarketDataFetchStateRepository,
     MarketDataRepository,
     MetricsRepository,
+    SecurityRepository,
     StoredFactRow,
+    StoredMetricRow,
     SupportedExchangeRepository,
     SupportedTicker,
     SupportedTickerRepository,
@@ -75,6 +78,9 @@ MARKET_DATA_WRITE_BATCH_SIZE = 100
 MARKET_DATA_WRITE_BATCH_INTERVAL_SECONDS = 0.25
 MARKET_DATA_PROGRESS_INTERVAL_SECONDS = 5.0
 MARKET_DATA_PROGRESS_SYMBOL_STEP = 250
+METRICS_MAX_WORKERS = 16
+METRICS_WRITE_BATCH_SIZE = 25
+METRICS_WRITE_BATCH_INTERVAL_SECONDS = 0.25
 NORMALIZATION_MAX_WORKERS = 16
 
 _MARKET_DATA_PROVIDER_LOCAL = local()
@@ -117,6 +123,13 @@ class _NormalizedFactsResult:
     rows: Tuple[StoredFactRow, ...]
     entity_name: Optional[str] = None
     entity_description: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class _ComputedMetricsResult:
+    symbol: str
+    rows: Tuple[StoredMetricRow, ...]
+    computed_count: int
 
 
 class _RateLimiter:
@@ -2539,6 +2552,414 @@ def cmd_normalize_fundamentals_stage(
     raise SystemExit(f"Unsupported provider: {provider}")
 
 
+class _CachedRegionFactsRepository(RegionFactsRepository):
+    """Serve one symbol's facts from memory while preserving the repo interface."""
+
+    def __init__(
+        self,
+        repo: FinancialFactsRepository,
+        symbol: str,
+        records: Sequence[FactRecord],
+    ) -> None:
+        super().__init__(repo)
+        self._symbol = symbol.strip().upper()
+        self._latest_by_concept: Dict[str, FactRecord] = {}
+        self._facts_by_concept: Dict[str, Tuple[FactRecord, ...]] = {}
+        facts_by_concept: Dict[str, List[FactRecord]] = {}
+        facts_by_concept_period: Dict[Tuple[str, str], List[FactRecord]] = {}
+
+        for record in records:
+            facts_by_concept.setdefault(record.concept, []).append(record)
+            if record.fiscal_period:
+                facts_by_concept_period.setdefault(
+                    (record.concept, record.fiscal_period), []
+                ).append(record)
+            self._latest_by_concept.setdefault(record.concept, record)
+
+        self._facts_by_concept = {
+            concept: tuple(concept_records)
+            for concept, concept_records in facts_by_concept.items()
+        }
+        self._facts_by_concept_period = {
+            key: tuple(concept_records)
+            for key, concept_records in facts_by_concept_period.items()
+        }
+
+    def latest_fact(
+        self,
+        symbol: str,
+        concept: str,
+    ) -> Optional[FactRecord]:
+        if symbol.strip().upper() != self._symbol:
+            return super().latest_fact(symbol, concept)
+        return self._latest_by_concept.get(concept)
+
+    def facts_for_concept(
+        self,
+        symbol: str,
+        concept: str,
+        fiscal_period: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> list[FactRecord]:
+        if symbol.strip().upper() != self._symbol:
+            return super().facts_for_concept(
+                symbol,
+                concept,
+                fiscal_period=fiscal_period,
+                limit=limit,
+            )
+
+        if fiscal_period is None:
+            records = self._facts_by_concept.get(concept, ())
+        else:
+            records = self._facts_by_concept_period.get((concept, fiscal_period), ())
+
+        selected = list(records)
+        if limit is not None:
+            selected = selected[:limit]
+        return selected
+
+
+class _SchemaReadySecurityRepository(SecurityRepository):
+    """Read-only security repository for metric workers on an initialized DB."""
+
+    def initialize_schema(self) -> None:
+        return
+
+
+class _SchemaReadyFinancialFactsRepository(FinancialFactsRepository):
+    """Read-only facts repository that skips schema work in metric workers."""
+
+    def __init__(self, db_path: Union[str, Path]) -> None:
+        super().__init__(db_path)
+        self._security_repo_cache = _SchemaReadySecurityRepository(self.db_path)
+
+    def initialize_schema(self) -> None:
+        return
+
+
+class _SchemaReadyMarketDataRepository(MarketDataRepository):
+    """Read-only market-data repository that skips schema work in workers."""
+
+    def __init__(self, db_path: Union[str, Path]) -> None:
+        super().__init__(db_path)
+        self._security_repo_cache = _SchemaReadySecurityRepository(self.db_path)
+
+    def initialize_schema(self) -> None:
+        return
+
+
+class _SchemaReadyMetricsRepository(MetricsRepository):
+    """Metrics writer that assumes the schema is already initialized."""
+
+    def __init__(self, db_path: Union[str, Path]) -> None:
+        super().__init__(db_path)
+        self._security_repo_cache = _SchemaReadySecurityRepository(self.db_path)
+
+    def initialize_schema(self) -> None:
+        return
+
+
+class _CachedMarketDataRepository:
+    """Serve one symbol's latest market snapshot from memory."""
+
+    def __init__(self, repo: MarketDataRepository, symbol: str) -> None:
+        self._repo = repo
+        self._symbol = symbol.strip().upper()
+        self._snapshot_loaded = False
+        self._snapshot: Optional[PriceData] = None
+
+    def _load_snapshot(self) -> None:
+        if self._snapshot_loaded:
+            return
+        self._snapshot = self._repo.latest_snapshot(self._symbol)
+        self._snapshot_loaded = True
+
+    def latest_snapshot(self, symbol: str):
+        if symbol.strip().upper() != self._symbol:
+            return self._repo.latest_snapshot(symbol)
+        self._load_snapshot()
+        return self._snapshot
+
+    def latest_price(self, symbol: str) -> Optional[Tuple[str, float]]:
+        snapshot = self.latest_snapshot(symbol)
+        if snapshot is None:
+            return None
+        return snapshot.as_of, snapshot.price
+
+    def __getattr__(self, name: str):
+        return getattr(self._repo, name)
+
+
+def _validated_metric_ids(metric_ids: Optional[Sequence[str]]) -> List[str]:
+    ids_to_compute = list(metric_ids) if metric_ids else list(REGISTRY.keys())
+    if not ids_to_compute:
+        raise SystemExit("No metrics specified.")
+    unknown = [metric_id for metric_id in ids_to_compute if metric_id not in REGISTRY]
+    if unknown:
+        if len(unknown) == 1:
+            raise SystemExit(f"Unknown metric id: {unknown[0]}")
+        raise SystemExit(f"Unknown metric ids: {', '.join(unknown)}")
+    return ids_to_compute
+
+
+def _metrics_use_market_data(metric_ids: Sequence[str]) -> bool:
+    return any(
+        getattr(REGISTRY[metric_id], "uses_market_data", False)
+        for metric_id in metric_ids
+    )
+
+
+def _metric_worker_count(total_symbols: int) -> int:
+    """Return an automatic worker count for bulk metric computation."""
+
+    if total_symbols <= 0:
+        return 1
+    cpu_bound = max(os.cpu_count() or 1, 1)
+    return max(1, min(total_symbols, min(cpu_bound, METRICS_MAX_WORKERS)))
+
+
+def _initialize_metric_read_schema(
+    db_path: Path,
+    include_market_data: bool,
+) -> None:
+    """Ensure worker-read tables exist before process workers start reading."""
+
+    FinancialFactsRepository(db_path).initialize_schema()
+    if include_market_data:
+        MarketDataRepository(db_path).initialize_schema()
+
+
+def _ensure_metrics_wal_mode(metrics_repo: MetricsRepository) -> str:
+    """Best-effort switch to WAL so metric workers can read during parent writes."""
+
+    try:
+        return metrics_repo.enable_wal_mode()
+    except sqlite3.OperationalError as exc:
+        LOGGER.warning(
+            "Could not enable WAL mode for metric computation on %s: %s",
+            metrics_repo.db_path,
+            exc,
+        )
+        try:
+            return metrics_repo.current_journal_mode()
+        except sqlite3.OperationalError:
+            return "unknown"
+
+
+def _flush_metric_write_batch(
+    metrics_repo: MetricsRepository,
+    pending_rows: List[StoredMetricRow],
+    pending_messages: List[str],
+) -> None:
+    """Persist one buffered metric batch and then emit its progress lines."""
+
+    metrics_repo.upsert_many(pending_rows)
+    pending_rows.clear()
+    for message in pending_messages:
+        print(message, flush=True)
+    pending_messages.clear()
+
+
+def _compute_metrics_for_symbol(
+    symbol: str,
+    metric_ids: Sequence[str],
+    fact_repo: FinancialFactsRepository,
+    market_repo: Optional[MarketDataRepository] = None,
+) -> _ComputedMetricsResult:
+    symbol_upper = symbol.strip().upper()
+    cached_fact_repo = _CachedRegionFactsRepository(
+        fact_repo,
+        symbol_upper,
+        fact_repo.facts_for_symbol(symbol_upper),
+    )
+    cached_market_repo = (
+        _CachedMarketDataRepository(market_repo, symbol_upper)
+        if market_repo is not None
+        else None
+    )
+
+    rows: List[StoredMetricRow] = []
+    computed = 0
+    for metric_id in metric_ids:
+        metric_cls = REGISTRY[metric_id]
+        metric = metric_cls()
+        try:
+            if getattr(metric, "uses_market_data", False):
+                if cached_market_repo is None:  # pragma: no cover - defensive
+                    raise RuntimeError(
+                        f"Metric {metric_id} requires market data but no market repo was provided."
+                    )
+                result = metric.compute(
+                    symbol_upper, cached_fact_repo, cached_market_repo
+                )
+            else:
+                result = metric.compute(symbol_upper, cached_fact_repo)
+        except Exception as exc:  # pragma: no cover - metric errors
+            LOGGER.error("Metric %s failed for %s: %s", metric_id, symbol_upper, exc)
+            continue
+        if result is None:
+            LOGGER.warning(
+                "Metric %s could not be computed for %s", metric_id, symbol_upper
+            )
+            continue
+        rows.append((result.symbol, result.metric_id, result.value, result.as_of))
+        computed += 1
+
+    return _ComputedMetricsResult(
+        symbol=symbol_upper,
+        rows=tuple(rows),
+        computed_count=computed,
+    )
+
+
+def _compute_metrics_for_symbol_worker(
+    database: Union[str, Path],
+    symbol: str,
+    metric_ids: Sequence[str],
+) -> _ComputedMetricsResult:
+    """Compute all requested metrics for one symbol using symbol-scoped caches."""
+
+    fact_repo = _SchemaReadyFinancialFactsRepository(database)
+    market_repo = (
+        _SchemaReadyMarketDataRepository(database)
+        if _metrics_use_market_data(metric_ids)
+        else None
+    )
+    return _compute_metrics_for_symbol(symbol, metric_ids, fact_repo, market_repo)
+
+
+def _run_metric_computation(
+    database: str,
+    symbols: Sequence[str],
+    metric_ids: Sequence[str],
+    cancelled_message: str,
+) -> int:
+    db_path = _resolve_database_path(database)
+    selected_symbols = [symbol.upper() for symbol in symbols]
+    total_symbols = len(selected_symbols)
+
+    include_market_data = _metrics_use_market_data(metric_ids)
+    base_metrics_repo = MetricsRepository(db_path)
+    base_metrics_repo.initialize_schema()
+    _initialize_metric_read_schema(db_path, include_market_data)
+    journal_mode = _ensure_metrics_wal_mode(base_metrics_repo)
+    metrics_repo = _SchemaReadyMetricsRepository(db_path)
+
+    print(
+        f"Computing metrics for {total_symbols} symbols ({len(metric_ids)} metrics each)"
+    )
+
+    workers = _metric_worker_count(total_symbols)
+    if workers > 1 and journal_mode != "wal":
+        print(
+            f"SQLite journal mode is {journal_mode or 'unknown'}; "
+            "falling back to serial metric computation to avoid lock contention.",
+            flush=True,
+        )
+        workers = 1
+
+    pending_rows: List[StoredMetricRow] = []
+    pending_messages: List[str] = []
+    buffered_symbols = 0
+    last_flush_at = time.monotonic()
+
+    def buffer_result(message: str, rows: Sequence[StoredMetricRow]) -> None:
+        nonlocal buffered_symbols, last_flush_at
+        pending_rows.extend(rows)
+        pending_messages.append(message)
+        buffered_symbols += 1
+        elapsed = time.monotonic() - last_flush_at
+        if (
+            buffered_symbols < METRICS_WRITE_BATCH_SIZE
+            and elapsed < METRICS_WRITE_BATCH_INTERVAL_SECONDS
+        ):
+            return
+        _flush_metric_write_batch(metrics_repo, pending_rows, pending_messages)
+        buffered_symbols = 0
+        last_flush_at = time.monotonic()
+
+    def flush_pending(force: bool = False) -> None:
+        nonlocal buffered_symbols, last_flush_at
+        if not pending_rows and not pending_messages:
+            return
+        if not force:
+            elapsed = time.monotonic() - last_flush_at
+            if (
+                buffered_symbols < METRICS_WRITE_BATCH_SIZE
+                and elapsed < METRICS_WRITE_BATCH_INTERVAL_SECONDS
+            ):
+                return
+        _flush_metric_write_batch(metrics_repo, pending_rows, pending_messages)
+        buffered_symbols = 0
+        last_flush_at = time.monotonic()
+
+    if workers <= 1:
+        fact_repo = _SchemaReadyFinancialFactsRepository(db_path)
+        market_repo = (
+            _SchemaReadyMarketDataRepository(db_path) if include_market_data else None
+        )
+        try:
+            for idx, symbol in enumerate(selected_symbols, 1):
+                result = _compute_metrics_for_symbol(
+                    symbol,
+                    metric_ids,
+                    fact_repo,
+                    market_repo,
+                )
+                buffer_result(
+                    f"[{idx}/{total_symbols}] Computed {result.computed_count} metrics for {result.symbol}",
+                    result.rows,
+                )
+        except KeyboardInterrupt:
+            flush_pending(force=True)
+            print(cancelled_message)
+            return 1
+        flush_pending(force=True)
+        print(f"Computed metrics for {total_symbols} symbols in {db_path}")
+        return 0
+
+    executor = _create_normalization_executor(workers)
+    interrupted = False
+    try:
+        futures = {
+            executor.submit(
+                _compute_metrics_for_symbol_worker,
+                str(db_path),
+                symbol,
+                tuple(metric_ids),
+            ): symbol
+            for symbol in selected_symbols
+        }
+        for idx, future in enumerate(as_completed(futures), 1):
+            symbol = futures[future]
+            try:
+                result = future.result()
+                buffer_result(
+                    f"[{idx}/{total_symbols}] Computed {result.computed_count} metrics for {result.symbol}",
+                    result.rows,
+                )
+            except Exception as exc:  # pragma: no cover - worker crashes
+                LOGGER.error("Failed to compute metrics for %s: %s", symbol, exc)
+                buffer_result(
+                    f"[{idx}/{total_symbols}] Computed 0 metrics for {symbol}",
+                    (),
+                )
+    except KeyboardInterrupt:
+        interrupted = True
+        executor.shutdown(wait=False, cancel_futures=True)
+        flush_pending(force=True)
+        print(cancelled_message)
+        return 1
+    finally:
+        if not interrupted:
+            executor.shutdown(wait=True)
+
+    flush_pending(force=True)
+    print(f"Computed metrics for {total_symbols} symbols in {db_path}")
+    return 0
+
+
 def cmd_compute_metrics_stage(
     database: str,
     symbols: Optional[Sequence[str]],
@@ -2555,54 +2976,13 @@ def cmd_compute_metrics_stage(
         exchange_codes,
         all_supported,
     )
-    base_fact_repo = FinancialFactsRepository(db_path)
-    fact_repo = RegionFactsRepository(base_fact_repo)
-    metrics_repo = MetricsRepository(db_path)
-    metrics_repo.initialize_schema()
-    market_repo = MarketDataRepository(db_path)
-    market_repo.initialize_schema()
-    ids_to_compute = list(metric_ids) if metric_ids else list(REGISTRY.keys())
-    if not ids_to_compute:
-        raise SystemExit("No metrics specified.")
-
-    total_symbols = len(canonical_symbols)
-    print(
-        f"Computing metrics for {total_symbols} symbols ({len(ids_to_compute)} metrics each)"
+    ids_to_compute = _validated_metric_ids(metric_ids)
+    return _run_metric_computation(
+        database=str(db_path),
+        symbols=canonical_symbols,
+        metric_ids=ids_to_compute,
+        cancelled_message="\nMetric computation cancelled by user.",
     )
-    try:
-        for idx, symbol in enumerate(canonical_symbols, 1):
-            computed = 0
-            for metric_id in ids_to_compute:
-                metric_cls = REGISTRY.get(metric_id)
-                if metric_cls is None:
-                    raise SystemExit(f"Unknown metric id: {metric_id}")
-                metric = metric_cls()
-                try:
-                    if getattr(metric, "uses_market_data", False):
-                        result = metric.compute(symbol, fact_repo, market_repo)
-                    else:
-                        result = metric.compute(symbol, fact_repo)
-                except Exception as exc:  # pragma: no cover - metric errors
-                    LOGGER.error("Metric %s failed for %s: %s", metric_id, symbol, exc)
-                    continue
-                if result is None:
-                    LOGGER.warning(
-                        "Metric %s could not be computed for %s", metric_id, symbol
-                    )
-                    continue
-                metrics_repo.upsert(
-                    result.symbol, result.metric_id, result.value, result.as_of
-                )
-                computed += 1
-            print(
-                f"[{idx}/{total_symbols}] Computed {computed} metrics for {symbol}",
-                flush=True,
-            )
-    except KeyboardInterrupt:
-        print("\nMetric computation cancelled by user.")
-        return 1
-    print(f"Computed metrics for {total_symbols} symbols in {db_path}")
-    return 0
 
 
 def cmd_run_screen_stage(
@@ -3529,11 +3909,6 @@ def cmd_compute_metrics(
     """Compute one or more metrics and store the results."""
 
     db_path = _resolve_database_path(database)
-    base_fact_repo = FinancialFactsRepository(db_path)
-    fact_repo = RegionFactsRepository(base_fact_repo)
-    metrics_repo = MetricsRepository(db_path)
-    metrics_repo.initialize_schema()
-    computed = 0
     symbol_upper = symbol.strip().upper()
     if "." not in symbol_upper:
         if not exchange_code:
@@ -3541,28 +3916,26 @@ def cmd_compute_metrics(
                 "--exchange-code is required when symbol has no exchange suffix (e.g., AAPL.US)."
             )
         symbol_upper = _format_market_symbol(symbol_upper, exchange_code)
-    market_repo: Optional[MarketDataRepository] = None
-    ids_to_compute = list(REGISTRY.keys()) if run_all else list(metric_ids)
-    for metric_id in ids_to_compute:
-        metric_cls = REGISTRY.get(metric_id)
-        if metric_cls is None:
-            raise SystemExit(f"Unknown metric id: {metric_id}")
-        metric = metric_cls()
-        if getattr(metric, "uses_market_data", False):
-            if market_repo is None:
-                market_repo = MarketDataRepository(db_path)
-                market_repo.initialize_schema()
-            result = metric.compute(symbol_upper, fact_repo, market_repo)
-        else:
-            result = metric.compute(symbol_upper, fact_repo)
-        if result is None:
-            LOGGER.warning(
-                "Metric %s could not be computed for %s", metric_id, symbol_upper
-            )
-            continue
-        metrics_repo.upsert(result.symbol, result.metric_id, result.value, result.as_of)
-        computed += 1
-    print(f"Computed {computed} metrics for {symbol_upper} in {database}")
+    ids_to_compute = _validated_metric_ids(
+        list(REGISTRY.keys()) if run_all else list(metric_ids)
+    )
+
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+    fact_repo = FinancialFactsRepository(db_path)
+    market_repo = (
+        MarketDataRepository(db_path)
+        if _metrics_use_market_data(ids_to_compute)
+        else None
+    )
+    result = _compute_metrics_for_symbol(
+        symbol_upper,
+        ids_to_compute,
+        fact_repo,
+        market_repo,
+    )
+    metrics_repo.upsert_many(result.rows)
+    print(f"Computed {result.computed_count} metrics for {symbol_upper} in {database}")
     return 0
 
 
@@ -3589,63 +3962,13 @@ def cmd_compute_metrics_bulk(
             f"{_catalog_bootstrap_guidance(provider_norm)}"
         )
 
-    base_fact_repo = FinancialFactsRepository(db_path)
-    fact_repo = RegionFactsRepository(base_fact_repo)
-    metrics_repo = MetricsRepository(db_path)
-    metrics_repo.initialize_schema()
-    market_repo = MarketDataRepository(db_path)
-    market_repo.initialize_schema()
-
-    ids_to_compute = list(metric_ids) if metric_ids else list(REGISTRY.keys())
-    if not ids_to_compute:
-        raise SystemExit("No metrics specified.")
-
-    total_symbols = len(symbols)
-    print(
-        f"Computing metrics for {total_symbols} symbols ({len(ids_to_compute)} metrics each)"
+    ids_to_compute = _validated_metric_ids(metric_ids)
+    return _run_metric_computation(
+        database=str(db_path),
+        symbols=symbols,
+        metric_ids=ids_to_compute,
+        cancelled_message="\nBulk metric computation cancelled by user.",
     )
-
-    try:
-        for idx, symbol in enumerate(symbols, 1):
-            symbol_upper = symbol.upper()
-            computed = 0
-            for metric_id in ids_to_compute:
-                metric_cls = REGISTRY.get(metric_id)
-                if metric_cls is None:
-                    LOGGER.warning("Unknown metric id: %s", metric_id)
-                    continue
-                metric = metric_cls()
-                try:
-                    if getattr(metric, "uses_market_data", False):
-                        result = metric.compute(symbol_upper, fact_repo, market_repo)
-                    else:
-                        result = metric.compute(symbol_upper, fact_repo)
-                except Exception as exc:  # pragma: no cover - metric errors
-                    LOGGER.error(
-                        "Metric %s failed for %s: %s", metric_id, symbol_upper, exc
-                    )
-                    continue
-                if result is None:
-                    LOGGER.warning(
-                        "Metric %s could not be computed for %s",
-                        metric_id,
-                        symbol_upper,
-                    )
-                    continue
-                metrics_repo.upsert(
-                    result.symbol, result.metric_id, result.value, result.as_of
-                )
-                computed += 1
-            print(
-                f"[{idx}/{total_symbols}] Computed {computed} metrics for {symbol_upper}",
-                flush=True,
-            )
-    except KeyboardInterrupt:
-        print("\nBulk metric computation cancelled by user.")
-        return 1
-
-    print(f"Computed metrics for {total_symbols} symbols in {database}")
-    return 0
 
 
 def cmd_report_fact_freshness(

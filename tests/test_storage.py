@@ -9,6 +9,7 @@ from pyvalue.storage import (
     FactRecord,
     MarketDataFetchStateRepository,
     MarketDataRepository,
+    MetricsRepository,
     SupportedExchangeRepository,
     SupportedTickerRepository,
 )
@@ -844,3 +845,64 @@ def test_sqlite_store_connect_context_closes_connection(tmp_path):
         raise AssertionError(
             "SQLite connection should be closed after the context exits"
         )
+
+
+def test_sqlite_store_enable_wal_mode(tmp_path):
+    repo = MarketDataRepository(tmp_path / "wal-mode.db")
+    repo.initialize_schema()
+
+    mode = repo.enable_wal_mode()
+
+    assert mode == "wal"
+    assert repo.current_journal_mode() == "wal"
+
+
+def test_metrics_repository_upsert_many_matches_single_upsert(tmp_path):
+    db_path = tmp_path / "metrics-upsert-many.db"
+    repo = MetricsRepository(db_path)
+    repo.initialize_schema()
+
+    repo.upsert("AAA.US", "metric_one", 1.0, "2024-01-01")
+    updated = repo.upsert_many(
+        [
+            ("AAA.US", "metric_one", 2.0, "2024-02-01"),
+            ("AAA.US", "metric_two", 3.0, "2024-02-01"),
+            ("BBB.US", "metric_one", 4.0, "2024-02-01"),
+        ]
+    )
+
+    assert updated == 3
+    assert repo.fetch("AAA.US", "metric_one") == (2.0, "2024-02-01")
+    assert repo.fetch("AAA.US", "metric_two") == (3.0, "2024-02-01")
+    assert repo.fetch("BBB.US", "metric_one") == (4.0, "2024-02-01")
+
+
+def test_metrics_repository_upsert_many_retries_transient_locked_error(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "metrics-upsert-retry.db"
+    repo = MetricsRepository(db_path)
+    repo.initialize_schema()
+    monkeypatch.setattr(repo, "initialize_schema", lambda: None)
+
+    original_connect = repo._connect
+    attempts = {"count": 0}
+
+    class LockedOnceConnection:
+        def __enter__(self):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise sqlite3.OperationalError("database is locked")
+            self._conn = original_connect()
+            return self._conn.__enter__()
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return self._conn.__exit__(exc_type, exc_value, traceback)
+
+    monkeypatch.setattr(repo, "_connect", lambda: LockedOnceConnection())
+
+    updated = repo.upsert_many([("AAA.US", "metric_one", 2.0, "2024-02-01")])
+
+    assert attempts["count"] == 2
+    assert updated == 1
+    assert repo.fetch("AAA.US", "metric_one") == (2.0, "2024-02-01")

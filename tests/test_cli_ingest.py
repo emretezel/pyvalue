@@ -3,6 +3,7 @@
 Author: Emre Tezel
 """
 
+import sqlite3
 import threading
 import time
 from concurrent.futures import Future
@@ -12,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from pyvalue import cli
+from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics import REGISTRY
 from pyvalue.metrics.base import MetricResult
 from pyvalue.storage import (
@@ -2900,6 +2902,767 @@ def test_cmd_compute_metrics_bulk_requires_supported_tickers(monkeypatch, tmp_pa
     assert "No supported tickers found for provider EODHD on exchange LSE" in str(
         exc.value
     )
+
+
+def test_compute_metrics_for_symbol_reuses_fact_and_market_cache(monkeypatch, tmp_path):
+    db_path = tmp_path / "metric-cache.db"
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    fact_repo.replace_facts(
+        "AAA.US",
+        [
+            make_fact(concept="AssetsCurrent", end_date="2024-12-31", value=500.0),
+            make_fact(
+                concept="AssetsCurrent",
+                end_date="2023-12-31",
+                value=450.0,
+            ),
+            make_fact(
+                concept="EarningsPerShare",
+                fiscal_period="FY",
+                end_date="2024-12-31",
+                value=2.0,
+            ),
+            make_fact(
+                concept="EarningsPerShare",
+                fiscal_period="FY",
+                end_date="2023-12-31",
+                value=1.5,
+            ),
+        ],
+    )
+    market_repo = MarketDataRepository(db_path)
+    market_repo.initialize_schema()
+    market_repo.upsert_price("AAA.US", "2024-12-31", price=25.0)
+
+    fact_calls = {"count": 0}
+    market_calls = {"count": 0}
+    original_facts_for_symbol = FinancialFactsRepository.facts_for_symbol
+    original_latest_snapshot = MarketDataRepository.latest_snapshot
+
+    def counting_facts_for_symbol(self, symbol):
+        fact_calls["count"] += 1
+        return original_facts_for_symbol(self, symbol)
+
+    def counting_latest_snapshot(self, symbol):
+        market_calls["count"] += 1
+        return original_latest_snapshot(self, symbol)
+
+    monkeypatch.setattr(
+        FinancialFactsRepository,
+        "facts_for_symbol",
+        counting_facts_for_symbol,
+    )
+    monkeypatch.setattr(
+        MarketDataRepository,
+        "latest_snapshot",
+        counting_latest_snapshot,
+    )
+
+    class RepeatedFactsMetric:
+        id = "repeat_facts"
+        required_concepts = ("AssetsCurrent",)
+        uses_market_data = False
+
+        def compute(self, symbol, repo):
+            latest_a = repo.latest_fact(symbol, "AssetsCurrent")
+            latest_b = repo.latest_fact(symbol, "AssetsCurrent")
+            series_a = repo.facts_for_concept(symbol, "EarningsPerShare", "FY")
+            series_b = repo.facts_for_concept(symbol, "EarningsPerShare", "FY")
+            return MetricResult(
+                symbol=symbol,
+                metric_id=self.id,
+                value=latest_a.value + latest_b.value + len(series_a) + len(series_b),
+                as_of=latest_a.end_date,
+            )
+
+    class RepeatedMarketMetric:
+        id = "repeat_market"
+        required_concepts = ()
+        uses_market_data = True
+
+        def compute(self, symbol, repo, market_repo):
+            snapshot_a = market_repo.latest_snapshot(symbol)
+            snapshot_b = market_repo.latest_snapshot(symbol)
+            price = market_repo.latest_price(symbol)
+            return MetricResult(
+                symbol=symbol,
+                metric_id=self.id,
+                value=snapshot_a.price + snapshot_b.price + price[1],
+                as_of=snapshot_a.as_of,
+            )
+
+    monkeypatch.setattr(
+        cli,
+        "REGISTRY",
+        {
+            RepeatedFactsMetric.id: RepeatedFactsMetric,
+            RepeatedMarketMetric.id: RepeatedMarketMetric,
+        },
+    )
+
+    result = cli._compute_metrics_for_symbol(
+        "AAA.US",
+        [RepeatedFactsMetric.id, RepeatedMarketMetric.id],
+        FinancialFactsRepository(db_path),
+        MarketDataRepository(db_path),
+    )
+
+    assert result.computed_count == 2
+    assert fact_calls["count"] == 1
+    assert market_calls["count"] == 1
+
+
+def test_compute_metrics_for_symbol_matches_real_metrics(tmp_path):
+    db_path = tmp_path / "metric-correctness.db"
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    recent = (date.today() - timedelta(days=15)).isoformat()
+    current_year = date.today().year
+    fact_repo.replace_facts(
+        "AAA.US",
+        [
+            make_fact(concept="AssetsCurrent", end_date=recent, value=500.0),
+            make_fact(
+                concept="LiabilitiesCurrent",
+                end_date=recent,
+                value=200.0,
+            ),
+            make_fact(
+                concept="EarningsPerShare",
+                fiscal_period="FY",
+                end_date=f"{current_year - 6}-12-31",
+                value=1.0,
+                frame=f"CY{current_year - 6}",
+            ),
+            make_fact(
+                concept="EarningsPerShare",
+                fiscal_period="FY",
+                end_date=f"{current_year - 5}-12-31",
+                value=1.1,
+                frame=f"CY{current_year - 5}",
+            ),
+            make_fact(
+                concept="EarningsPerShare",
+                fiscal_period="FY",
+                end_date=f"{current_year - 4}-12-31",
+                value=1.2,
+                frame=f"CY{current_year - 4}",
+            ),
+            make_fact(
+                concept="EarningsPerShare",
+                fiscal_period="FY",
+                end_date=f"{current_year - 3}-12-31",
+                value=1.3,
+                frame=f"CY{current_year - 3}",
+            ),
+            make_fact(
+                concept="EarningsPerShare",
+                fiscal_period="FY",
+                end_date=f"{current_year - 2}-12-31",
+                value=1.4,
+                frame=f"CY{current_year - 2}",
+            ),
+            make_fact(
+                concept="EarningsPerShare",
+                fiscal_period="FY",
+                end_date=f"{current_year - 1}-12-31",
+                value=1.5,
+                frame=f"CY{current_year - 1}",
+            ),
+        ],
+    )
+    market_repo = MarketDataRepository(db_path)
+    market_repo.initialize_schema()
+    market_repo.upsert_price("AAA.US", recent, price=25.0, market_cap=2500.0)
+
+    metric_ids = ["working_capital", "market_cap", "eps_6y_avg"]
+    expected = {}
+    plain_fact_repo = RegionFactsRepository(FinancialFactsRepository(db_path))
+    plain_market_repo = MarketDataRepository(db_path)
+    for metric_id in metric_ids:
+        metric = REGISTRY[metric_id]()
+        if getattr(metric, "uses_market_data", False):
+            result = metric.compute("AAA.US", plain_fact_repo, plain_market_repo)
+        else:
+            result = metric.compute("AAA.US", plain_fact_repo)
+        expected[metric_id] = (result.value, result.as_of)
+
+    computed = cli._compute_metrics_for_symbol(
+        "AAA.US",
+        metric_ids,
+        FinancialFactsRepository(db_path),
+        MarketDataRepository(db_path),
+    )
+
+    assert computed.computed_count == 3
+    assert {
+        metric_id: (value, as_of) for _, metric_id, value, as_of in computed.rows
+    } == expected
+
+
+def test_cmd_compute_metrics_stage_symbol_scope(monkeypatch, tmp_path):
+    db_path = tmp_path / "metric-stage-symbol.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+
+    class DummyMetric:
+        id = "dummy_metric"
+        required_concepts = ()
+        uses_market_data = False
+
+        def compute(self, symbol, repo):
+            return MetricResult(
+                symbol=symbol,
+                metric_id=self.id,
+                value=float(len(symbol)),
+                as_of="2024-01-01",
+            )
+
+    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
+
+    rc = cli.cmd_compute_metrics_stage(
+        database=str(db_path),
+        symbols=["BBB.US"],
+        exchange_codes=None,
+        all_supported=False,
+        metric_ids=None,
+    )
+
+    assert rc == 0
+    repo = MetricsRepository(db_path)
+    repo.initialize_schema()
+    assert repo.fetch("AAA.US", "dummy_metric") is None
+    assert repo.fetch("BBB.US", "dummy_metric") == (6.0, "2024-01-01")
+
+
+def test_cmd_compute_metrics_stage_exchange_scope(monkeypatch, tmp_path):
+    db_path = tmp_path / "metric-stage-exchange.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
+        provider="SEC",
+    )
+    store_catalog_listings(
+        db_path,
+        "LSE",
+        [Listing(symbol="BBB.LSE", security_name="BBB PLC", exchange="LSE")],
+        provider="EODHD",
+    )
+
+    class DummyMetric:
+        id = "dummy_metric"
+        required_concepts = ()
+        uses_market_data = False
+
+        def compute(self, symbol, repo):
+            return MetricResult(
+                symbol=symbol, metric_id=self.id, value=1.0, as_of="2024-01-01"
+            )
+
+    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
+
+    rc = cli.cmd_compute_metrics_stage(
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=["LSE"],
+        all_supported=False,
+        metric_ids=None,
+    )
+
+    assert rc == 0
+    repo = MetricsRepository(db_path)
+    repo.initialize_schema()
+    assert repo.fetch("AAA.US", "dummy_metric") is None
+    assert repo.fetch("BBB.LSE", "dummy_metric") == (1.0, "2024-01-01")
+
+
+def test_cmd_compute_metrics_stage_all_supported_scope(monkeypatch, tmp_path):
+    db_path = tmp_path / "metric-stage-all-supported.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
+        provider="SEC",
+    )
+    store_catalog_listings(
+        db_path,
+        "LSE",
+        [Listing(symbol="BBB.LSE", security_name="BBB PLC", exchange="LSE")],
+        provider="EODHD",
+    )
+
+    class DummyMetric:
+        id = "dummy_metric"
+        required_concepts = ()
+        uses_market_data = False
+
+        def compute(self, symbol, repo):
+            return MetricResult(
+                symbol=symbol, metric_id=self.id, value=2.0, as_of="2024-01-01"
+            )
+
+    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
+
+    rc = cli.cmd_compute_metrics_stage(
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=None,
+        all_supported=True,
+        metric_ids=None,
+    )
+
+    assert rc == 0
+    repo = MetricsRepository(db_path)
+    repo.initialize_schema()
+    assert repo.fetch("AAA.US", "dummy_metric") == (2.0, "2024-01-01")
+    assert repo.fetch("BBB.LSE", "dummy_metric") == (2.0, "2024-01-01")
+
+
+def test_cmd_compute_metrics_stage_parallel_with_inline_executor(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "metric-stage-inline.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+
+    class DummyMetric:
+        id = "dummy_metric"
+        required_concepts = ()
+        uses_market_data = False
+
+        def compute(self, symbol, repo):
+            return MetricResult(
+                symbol=symbol, metric_id=self.id, value=1.0, as_of="2024-01-01"
+            )
+
+    class InlineExecutor:
+        def submit(self, fn, *args, **kwargs):
+            future = Future()
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except Exception as exc:
+                future.set_exception(exc)
+            return future
+
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
+
+    def reverse_as_completed(futures):
+        return [
+            future
+            for future, _ in sorted(
+                futures.items(), key=lambda item: item[1], reverse=True
+            )
+        ]
+
+    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
+    monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 2)
+    monkeypatch.setattr(
+        cli,
+        "_create_normalization_executor",
+        lambda max_workers: InlineExecutor(),
+    )
+    monkeypatch.setattr(cli, "as_completed", reverse_as_completed)
+
+    rc = cli.cmd_compute_metrics_stage(
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=["US"],
+        all_supported=False,
+        metric_ids=None,
+    )
+
+    assert rc == 0
+    output_lines = [
+        line for line in capsys.readouterr().out.splitlines() if line.startswith("[")
+    ]
+    assert output_lines == [
+        "[1/2] Computed 1 metrics for BBB.US",
+        "[2/2] Computed 1 metrics for AAA.US",
+    ]
+
+
+def test_cmd_compute_metrics_stage_parallel_partial_failure(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "metric-stage-inline-failure.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+
+    class InlineExecutor:
+        def submit(self, fn, *args, **kwargs):
+            future = Future()
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except Exception as exc:
+                future.set_exception(exc)
+            return future
+
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
+
+    def fake_worker(database, symbol, metric_ids):
+        if symbol == "BBB.US":
+            raise ValueError("boom")
+        return cli._ComputedMetricsResult(
+            symbol=symbol,
+            rows=((symbol, "dummy_metric", 1.0, "2024-01-01"),),
+            computed_count=1,
+        )
+
+    class DummyMetric:
+        id = "dummy_metric"
+        uses_market_data = False
+
+    monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 2)
+    monkeypatch.setattr(
+        cli,
+        "_create_normalization_executor",
+        lambda max_workers: InlineExecutor(),
+    )
+    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
+    monkeypatch.setattr(cli, "_compute_metrics_for_symbol_worker", fake_worker)
+
+    rc = cli._run_metric_computation(
+        database=str(db_path),
+        symbols=["AAA.US", "BBB.US"],
+        metric_ids=["dummy_metric"],
+        cancelled_message="\nMetric computation cancelled by user.",
+    )
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "Computed 1 metrics for AAA.US" in output
+    assert "Computed 0 metrics for BBB.US" in output
+    repo = MetricsRepository(db_path)
+    repo.initialize_schema()
+    assert repo.fetch("AAA.US", "dummy_metric") == (1.0, "2024-01-01")
+    assert repo.fetch("BBB.US", "dummy_metric") is None
+
+
+def test_cmd_compute_metrics_stage_falls_back_to_serial_without_wal(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "metric-stage-no-wal.db"
+    recent_date = (date.today() - timedelta(days=1)).isoformat()
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    fact_repo.replace_facts(
+        "AAA.US",
+        [
+            make_fact(
+                symbol="AAA.US",
+                concept="AssetsCurrent",
+                end_date=recent_date,
+                value=10.0,
+            ),
+            make_fact(
+                symbol="AAA.US",
+                concept="LiabilitiesCurrent",
+                end_date=recent_date,
+                value=3.0,
+            ),
+        ],
+    )
+    fact_repo.replace_facts(
+        "BBB.US",
+        [
+            make_fact(
+                symbol="BBB.US",
+                concept="AssetsCurrent",
+                end_date=recent_date,
+                value=8.0,
+            ),
+            make_fact(
+                symbol="BBB.US",
+                concept="LiabilitiesCurrent",
+                end_date=recent_date,
+                value=2.0,
+            ),
+        ],
+    )
+
+    monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 2)
+    monkeypatch.setattr(cli, "_ensure_metrics_wal_mode", lambda repo: "delete")
+
+    def fail_executor(max_workers):
+        raise AssertionError("process executor should not be used without WAL")
+
+    monkeypatch.setattr(cli, "_create_normalization_executor", fail_executor)
+
+    rc = cli.cmd_compute_metrics_stage(
+        database=str(db_path),
+        symbols=["AAA.US", "BBB.US"],
+        exchange_codes=None,
+        all_supported=False,
+        metric_ids=["working_capital"],
+    )
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "falling back to serial metric computation" in output
+    repo = MetricsRepository(db_path)
+    repo.initialize_schema()
+    assert repo.fetch("AAA.US", "working_capital") == (7.0, recent_date)
+    assert repo.fetch("BBB.US", "working_capital") == (6.0, recent_date)
+
+
+def test_run_metric_computation_batches_metric_writes(monkeypatch, tmp_path):
+    db_path = tmp_path / "metric-stage-batched.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+            Listing(symbol="CCC.US", security_name="CCC Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+
+    class DummyMetric:
+        id = "dummy_metric"
+        uses_market_data = False
+
+    class InlineExecutor:
+        def submit(self, fn, *args, **kwargs):
+            future = Future()
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except Exception as exc:
+                future.set_exception(exc)
+            return future
+
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
+
+    def fake_worker(database, symbol, metric_ids):
+        return cli._ComputedMetricsResult(
+            symbol=symbol,
+            rows=((symbol, "dummy_metric", float(len(symbol)), "2024-01-01"),),
+            computed_count=1,
+        )
+
+    batch_sizes = []
+    original_upsert_many = MetricsRepository.upsert_many
+
+    def recording_upsert_many(self, rows):
+        materialized = list(rows)
+        batch_sizes.append(len(materialized))
+        return original_upsert_many(self, materialized)
+
+    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
+    monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 2)
+    monkeypatch.setattr(cli, "_ensure_metrics_wal_mode", lambda repo: "wal")
+    monkeypatch.setattr(
+        cli,
+        "_create_normalization_executor",
+        lambda max_workers: InlineExecutor(),
+    )
+    monkeypatch.setattr(cli, "_compute_metrics_for_symbol_worker", fake_worker)
+    monkeypatch.setattr(cli, "METRICS_WRITE_BATCH_SIZE", 2)
+    monkeypatch.setattr(cli, "METRICS_WRITE_BATCH_INTERVAL_SECONDS", 999.0)
+    monkeypatch.setattr(MetricsRepository, "upsert_many", recording_upsert_many)
+
+    rc = cli._run_metric_computation(
+        database=str(db_path),
+        symbols=["AAA.US", "BBB.US", "CCC.US"],
+        metric_ids=["dummy_metric"],
+        cancelled_message="\nMetric computation cancelled by user.",
+    )
+
+    assert rc == 0
+    assert batch_sizes == [2, 1]
+    repo = MetricsRepository(db_path)
+    repo.initialize_schema()
+    assert repo.fetch("AAA.US", "dummy_metric") == (6.0, "2024-01-01")
+    assert repo.fetch("BBB.US", "dummy_metric") == (6.0, "2024-01-01")
+    assert repo.fetch("CCC.US", "dummy_metric") == (6.0, "2024-01-01")
+
+
+def test_cmd_compute_metrics_stage_parallel_workers_skip_schema_init(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "metric-stage-worker-schema.db"
+    recent_date = (date.today() - timedelta(days=1)).isoformat()
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    fact_repo.replace_facts(
+        "AAA.US",
+        [
+            make_fact(
+                symbol="AAA.US",
+                concept="AssetsCurrent",
+                end_date=recent_date,
+                value=10.0,
+            ),
+            make_fact(
+                symbol="AAA.US",
+                concept="LiabilitiesCurrent",
+                end_date=recent_date,
+                value=3.0,
+            ),
+        ],
+    )
+    fact_repo.replace_facts(
+        "BBB.US",
+        [
+            make_fact(
+                symbol="BBB.US",
+                concept="AssetsCurrent",
+                end_date=recent_date,
+                value=8.0,
+            ),
+            make_fact(
+                symbol="BBB.US",
+                concept="LiabilitiesCurrent",
+                end_date=recent_date,
+                value=2.0,
+            ),
+        ],
+    )
+    market_repo = MarketDataRepository(db_path)
+    market_repo.initialize_schema()
+    market_repo.upsert_price("AAA.US", recent_date, 12.0, market_cap=120.0)
+    market_repo.upsert_price("BBB.US", recent_date, 9.0, market_cap=90.0)
+
+    class InlineExecutor:
+        def submit(self, fn, *args, **kwargs):
+            future = Future()
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except Exception as exc:
+                future.set_exception(exc)
+            return future
+
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
+
+    monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 2)
+    monkeypatch.setattr(
+        cli,
+        "_create_normalization_executor",
+        lambda max_workers: InlineExecutor(),
+    )
+    monkeypatch.setattr(
+        cli, "_initialize_metric_read_schema", lambda *args, **kwargs: None
+    )
+
+    def locked_initialize_schema(self):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(
+        FinancialFactsRepository,
+        "initialize_schema",
+        locked_initialize_schema,
+    )
+    monkeypatch.setattr(
+        MarketDataRepository,
+        "initialize_schema",
+        locked_initialize_schema,
+    )
+
+    rc = cli._run_metric_computation(
+        database=str(db_path),
+        symbols=["AAA.US", "BBB.US"],
+        metric_ids=["working_capital", "market_cap"],
+        cancelled_message="\nMetric computation cancelled by user.",
+    )
+
+    assert rc == 0
+    repo = MetricsRepository(db_path)
+    repo.initialize_schema()
+    assert repo.fetch("AAA.US", "working_capital") == (7.0, recent_date)
+    assert repo.fetch("BBB.US", "working_capital") == (6.0, recent_date)
+    assert repo.fetch("AAA.US", "market_cap") == (120.0, recent_date)
+    assert repo.fetch("BBB.US", "market_cap") == (90.0, recent_date)
+
+
+def test_cmd_compute_metrics_stage_process_pool_smoke(monkeypatch, tmp_path):
+    if cli.os.name != "posix":
+        pytest.skip("requires POSIX fork support")
+
+    db_path = tmp_path / "metric-stage-process.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+
+    class DummyMetric:
+        id = "dummy_metric"
+        required_concepts = ()
+        uses_market_data = False
+
+        def compute(self, symbol, repo):
+            return MetricResult(
+                symbol=symbol,
+                metric_id=self.id,
+                value=float(len(symbol)),
+                as_of="2024-01-01",
+            )
+
+    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
+    monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 2)
+
+    rc = cli.cmd_compute_metrics_stage(
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=["US"],
+        all_supported=False,
+        metric_ids=None,
+    )
+
+    assert rc == 0
+    repo = MetricsRepository(db_path)
+    repo.initialize_schema()
+    assert repo.fetch("AAA.US", "dummy_metric") == (6.0, "2024-01-01")
+    assert repo.fetch("BBB.US", "dummy_metric") == (6.0, "2024-01-01")
 
 
 def test_cmd_clear_fundamentals_raw(tmp_path):
