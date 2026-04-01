@@ -3,9 +3,11 @@
 Author: Emre Tezel
 """
 
+import logging
 import sqlite3
 import threading
 import time
+import concurrent.futures.thread as thread_futures
 from concurrent.futures import Future
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -18,6 +20,7 @@ from pyvalue.metrics import REGISTRY
 from pyvalue.metrics.base import MetricResult
 from pyvalue.storage import (
     EntityMetadataRepository,
+    FundamentalsNormalizationStateRepository,
     FundamentalsRepository,
     FundamentalsFetchStateRepository,
     FinancialFactsRepository,
@@ -49,6 +52,13 @@ def make_fact(**kwargs):
     }
     base.update(kwargs)
     return FactRecord(**base)
+
+
+def clear_root_logging_handlers():
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+        handler.close()
 
 
 def store_supported_exchanges(
@@ -242,6 +252,88 @@ def test_build_parser_normalize_fundamentals_defaults_provider():
     assert args.command == "normalize-fundamentals"
     assert args.provider == "EODHD"
     assert args.symbols == ["AAPL.US"]
+    assert args.force is False
+
+    forced = cli.build_parser().parse_args(
+        ["normalize-fundamentals", "--symbols", "AAPL.US", "--force"]
+    )
+    assert forced.force is True
+
+
+def test_main_dispatches_normalize_fundamentals_stage_with_force(monkeypatch):
+    calls = {}
+
+    def fake_cmd(provider, database, symbols, exchange_codes, all_supported, force):
+        calls["provider"] = provider
+        calls["database"] = database
+        calls["symbols"] = symbols
+        calls["exchange_codes"] = exchange_codes
+        calls["all_supported"] = all_supported
+        calls["force"] = force
+        return 0
+
+    monkeypatch.setattr(cli, "setup_logging", lambda: None)
+    monkeypatch.setattr(cli, "cmd_normalize_fundamentals_stage", fake_cmd)
+
+    rc = cli.main(["normalize-fundamentals", "--symbols", "AAPL.US", "--force"])
+
+    assert rc == 0
+    assert calls == {
+        "provider": "EODHD",
+        "database": "data/pyvalue.db",
+        "symbols": ["AAPL.US"],
+        "exchange_codes": None,
+        "all_supported": False,
+        "force": True,
+    }
+
+
+def test_build_parser_compute_metrics_warning_flag_defaults_to_suppressed():
+    args = cli.build_parser().parse_args(["compute-metrics", "--symbols", "AAPL.US"])
+
+    assert args.command == "compute-metrics"
+    assert args.show_metric_warnings is False
+
+    args = cli.build_parser().parse_args(
+        ["compute-metrics", "--symbols", "AAPL.US", "--show-metric-warnings"]
+    )
+
+    assert args.show_metric_warnings is True
+
+
+def test_main_dispatches_compute_metrics_stage_with_warning_flag(monkeypatch):
+    calls = {}
+
+    def fake_cmd(
+        database,
+        symbols,
+        exchange_codes,
+        all_supported,
+        metric_ids,
+        show_metric_warnings,
+    ):
+        calls["database"] = database
+        calls["symbols"] = symbols
+        calls["exchange_codes"] = exchange_codes
+        calls["all_supported"] = all_supported
+        calls["metric_ids"] = metric_ids
+        calls["show_metric_warnings"] = show_metric_warnings
+        return 0
+
+    monkeypatch.setattr(cli, "setup_logging", lambda: None)
+    monkeypatch.setattr(cli, "cmd_compute_metrics_stage", fake_cmd)
+
+    rc = cli.main(["compute-metrics", "--symbols", "AAPL.US", "--show-metric-warnings"])
+
+    assert rc == 0
+    assert calls == {
+        "database": "data/pyvalue.db",
+        "symbols": ["AAPL.US"],
+        "exchange_codes": None,
+        "all_supported": False,
+        "metric_ids": None,
+        "show_metric_warnings": True,
+    }
 
 
 def test_main_dispatches_update_market_data_global_with_default_max_age_days(
@@ -288,6 +380,20 @@ def test_main_dispatches_update_market_data_global_with_default_max_age_days(
         "max_age_days": 30,
         "resume": False,
     }
+
+
+def test_main_returns_cleanly_on_uncaught_keyboard_interrupt(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "setup_logging", lambda: None)
+
+    def raising_cmd(provider, database):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "cmd_refresh_supported_exchanges", raising_cmd)
+
+    rc = cli.main(["refresh-supported-exchanges"])
+
+    assert rc == 1
+    assert capsys.readouterr().out.splitlines() == ["Cancelled by user."]
 
 
 def test_main_dispatches_report_market_data_progress_with_default_max_age_days(
@@ -1465,7 +1571,7 @@ def test_cmd_ingest_fundamentals_global_batches_success_state_updates(
 
 
 def test_cmd_ingest_fundamentals_global_flushes_batches_on_keyboard_interrupt(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, capsys
 ):
     db_path = tmp_path / "global-interrupt.db"
     store_supported_tickers(
@@ -1510,6 +1616,12 @@ def test_cmd_ingest_fundamentals_global_flushes_batches_on_keyboard_interrupt(
         ),
     )
     monkeypatch.setattr(cli, "as_completed", interrupting_as_completed)
+    shutdown_calls = []
+    monkeypatch.setattr(
+        cli,
+        "_shutdown_executor_now",
+        lambda executor: shutdown_calls.append(executor),
+    )
 
     rc = cli.cmd_ingest_fundamentals_global(
         provider="EODHD",
@@ -1522,8 +1634,33 @@ def test_cmd_ingest_fundamentals_global_flushes_batches_on_keyboard_interrupt(
     )
 
     assert rc == 1
+    output = capsys.readouterr().out
+    assert "Cancelled after 1 completed symbols." in output
+    assert "Stored fundamentals for" not in output
+    assert len(shutdown_calls) == 1
     fund_repo = FundamentalsRepository(db_path)
     assert fund_repo.fetch("EODHD", "AAA.US") is not None
+
+
+def test_interruptible_thread_executor_workers_skip_python_exit_registry():
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_task():
+        started.set()
+        release.wait(timeout=1.0)
+
+    executor = cli._create_interruptible_thread_executor(max_workers=1)
+    try:
+        executor.submit(blocking_task)
+        assert started.wait(timeout=1.0)
+        threads = list(executor._threads)
+        assert threads
+        assert all(thread.daemon for thread in threads)
+        assert all(thread not in thread_futures._threads_queues for thread in threads)
+    finally:
+        release.set()
+        executor.shutdown(wait=True)
 
 
 def test_cmd_report_ingest_progress_reports_complete_with_quota_snapshot(
@@ -2136,6 +2273,104 @@ def test_cmd_update_market_data_stage_retries_missing_bulk_symbol_individually(
     assert calls["symbols"] == ["U099.US"]
     state_repo = MarketDataFetchStateRepository(db_path)
     assert state_repo.fetch("EODHD", "U099.US")["last_status"] == "ok"
+
+
+def test_cmd_update_market_data_stage_interrupts_cleanly_in_symbol_phase(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "stage-market-data-interrupt.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[
+            {"Code": "AAA", "Exchange": "US", "Type": "Common Stock"},
+            {"Code": "BBB", "Exchange": "US", "Type": "Common Stock"},
+        ],
+    )
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+
+        def user_metadata(self):
+            return {
+                "dailyRateLimit": "1000",
+                "apiRequests": "0",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
+
+    class InlineExecutor:
+        def __init__(self):
+            self.shutdown_calls = []
+
+        def submit(self, fn, *args, **kwargs):
+            future = Future()
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except Exception as exc:
+                future.set_exception(exc)
+            return future
+
+        def shutdown(self, wait=True, cancel_futures=False):
+            self.shutdown_calls.append((wait, cancel_futures))
+
+    def interrupting_as_completed(futures):
+        yielded = False
+        for future in futures:
+            if not yielded:
+                yielded = True
+                yield future
+                raise KeyboardInterrupt
+
+    executor = InlineExecutor()
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_api_key="TOKEN",
+            eodhd_market_data_daily_buffer_calls=0,
+            eodhd_market_data_requests_per_minute=950,
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_create_interruptible_thread_executor",
+        lambda max_workers: executor,
+    )
+    monkeypatch.setattr(
+        cli,
+        "_fetch_symbol_market_data",
+        lambda api_key, limiter, symbol: PriceData(
+            symbol=symbol,
+            price=10.0,
+            as_of="2024-01-01",
+            volume=100,
+            currency="USD",
+        ),
+    )
+    monkeypatch.setattr(cli, "as_completed", interrupting_as_completed)
+
+    rc = cli.cmd_update_market_data_stage(
+        provider="EODHD",
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=None,
+        all_supported=True,
+        rate=None,
+        max_symbols=None,
+        max_age_days=7,
+        resume=False,
+    )
+
+    assert rc == 1
+    output = capsys.readouterr().out
+    assert "Cancelled after 1 completed symbols." in output
+    assert "Stored market data for" not in output
+    assert executor.shutdown_calls == [(False, True)]
+    state_repo = MarketDataFetchStateRepository(db_path)
+    assert state_repo.fetch("EODHD", "AAA.US")["last_status"] == "ok"
 
 
 def test_cmd_update_market_data_global_prefers_missing_then_oldest_stale(
@@ -3101,6 +3336,122 @@ def test_compute_metrics_for_symbol_matches_real_metrics(tmp_path):
     } == expected
 
 
+def test_suppress_console_metric_warnings_filters_only_metric_noise(tmp_path, capsys):
+    log_dir = tmp_path / "logs"
+    clear_root_logging_handlers()
+    cli.setup_logging(log_dir=log_dir)
+    try:
+        with cli.suppress_console_metric_warnings(True):
+            logging.getLogger("pyvalue.metrics.test").warning("metric noise")
+            logging.getLogger("pyvalue.cli").warning(
+                "Metric %s could not be computed for %s",
+                "dummy_metric",
+                "AAA.US",
+            )
+            logging.getLogger("pyvalue.cli").warning("Operational warning")
+
+        captured = capsys.readouterr()
+        assert "metric noise" not in captured.err
+        assert (
+            "Metric dummy_metric could not be computed for AAA.US" not in captured.err
+        )
+        assert "Operational warning" in captured.err
+
+        log_text = (log_dir / "pyvalue.log").read_text(encoding="utf-8")
+        assert "metric noise" in log_text
+        assert "Metric dummy_metric could not be computed for AAA.US" in log_text
+        assert "Operational warning" in log_text
+    finally:
+        clear_root_logging_handlers()
+
+
+def test_cmd_compute_metrics_stage_suppresses_metric_warnings_by_default(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "metric-stage-suppressed.db"
+    log_dir = tmp_path / "logs"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
+        provider="SEC",
+    )
+
+    class DummyMetric:
+        id = "dummy_metric"
+        required_concepts = ()
+        uses_market_data = False
+
+        def compute(self, symbol, repo):
+            return None
+
+    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
+    monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 1)
+    monkeypatch.setattr(cli, "METRICS_PROGRESS_INTERVAL_SECONDS", 0.0)
+    clear_root_logging_handlers()
+    cli.setup_logging(log_dir=log_dir)
+    try:
+        rc = cli.cmd_compute_metrics_stage(
+            database=str(db_path),
+            symbols=["AAA.US"],
+            exchange_codes=None,
+            all_supported=False,
+            metric_ids=None,
+        )
+    finally:
+        clear_root_logging_handlers()
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "could not be computed" not in captured.err
+    assert "Progress: 1/1 symbols complete (100.0%)" in captured.out
+    log_text = (log_dir / "pyvalue.log").read_text(encoding="utf-8")
+    assert "Metric dummy_metric could not be computed for AAA.US" in log_text
+
+
+def test_cmd_compute_metrics_stage_can_show_metric_warnings_on_console(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "metric-stage-show-warnings.db"
+    log_dir = tmp_path / "logs"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
+        provider="SEC",
+    )
+
+    class DummyMetric:
+        id = "dummy_metric"
+        required_concepts = ()
+        uses_market_data = False
+
+        def compute(self, symbol, repo):
+            return None
+
+    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
+    monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 1)
+    clear_root_logging_handlers()
+    cli.setup_logging(log_dir=log_dir)
+    try:
+        rc = cli.cmd_compute_metrics_stage(
+            database=str(db_path),
+            symbols=["AAA.US"],
+            exchange_codes=None,
+            all_supported=False,
+            metric_ids=None,
+            show_metric_warnings=True,
+        )
+    finally:
+        clear_root_logging_handlers()
+
+    assert rc == 0
+    assert (
+        "Metric dummy_metric could not be computed for AAA.US"
+        in capsys.readouterr().err
+    )
+
+
 def test_cmd_compute_metrics_stage_symbol_scope(monkeypatch, tmp_path):
     db_path = tmp_path / "metric-stage-symbol.db"
     store_catalog_listings(
@@ -3279,6 +3630,7 @@ def test_cmd_compute_metrics_stage_parallel_with_inline_executor(
         lambda max_workers: InlineExecutor(),
     )
     monkeypatch.setattr(cli, "as_completed", reverse_as_completed)
+    monkeypatch.setattr(cli, "METRICS_PROGRESS_INTERVAL_SECONDS", 0.0)
 
     rc = cli.cmd_compute_metrics_stage(
         database=str(db_path),
@@ -3289,13 +3641,12 @@ def test_cmd_compute_metrics_stage_parallel_with_inline_executor(
     )
 
     assert rc == 0
-    output_lines = [
-        line for line in capsys.readouterr().out.splitlines() if line.startswith("[")
+    output_lines = capsys.readouterr().out.splitlines()
+    assert [line for line in output_lines if line.startswith("Progress:")] == [
+        "Progress: 1/2 symbols complete (50.0%)",
+        "Progress: 2/2 symbols complete (100.0%)",
     ]
-    assert output_lines == [
-        "[1/2] Computed 1 metrics for BBB.US",
-        "[2/2] Computed 1 metrics for AAA.US",
-    ]
+    assert not any(line.startswith("[") for line in output_lines)
 
 
 def test_cmd_compute_metrics_stage_parallel_partial_failure(
@@ -3345,6 +3696,7 @@ def test_cmd_compute_metrics_stage_parallel_partial_failure(
     )
     monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
     monkeypatch.setattr(cli, "_compute_metrics_for_symbol_worker", fake_worker)
+    monkeypatch.setattr(cli, "METRICS_PROGRESS_INTERVAL_SECONDS", 0.0)
 
     rc = cli._run_metric_computation(
         database=str(db_path),
@@ -3354,9 +3706,80 @@ def test_cmd_compute_metrics_stage_parallel_partial_failure(
     )
 
     assert rc == 0
-    output = capsys.readouterr().out
-    assert "Computed 1 metrics for AAA.US" in output
-    assert "Computed 0 metrics for BBB.US" in output
+    output_lines = capsys.readouterr().out.splitlines()
+    assert [line for line in output_lines if line.startswith("Progress:")] == [
+        "Progress: 1/2 symbols complete (50.0%)",
+        "Progress: 2/2 symbols complete (100.0%)",
+    ]
+    repo = MetricsRepository(db_path)
+    repo.initialize_schema()
+    assert repo.fetch("AAA.US", "dummy_metric") == (1.0, "2024-01-01")
+    assert repo.fetch("BBB.US", "dummy_metric") is None
+
+
+def test_run_metric_computation_interrupts_cleanly(monkeypatch, tmp_path, capsys):
+    db_path = tmp_path / "metric-stage-interrupt.db"
+
+    class DummyMetric:
+        id = "dummy_metric"
+        uses_market_data = False
+
+    class InlineExecutor:
+        def __init__(self):
+            self.shutdown_calls = []
+
+        def submit(self, fn, *args, **kwargs):
+            future = Future()
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except Exception as exc:
+                future.set_exception(exc)
+            return future
+
+        def shutdown(self, wait=True, cancel_futures=False):
+            self.shutdown_calls.append((wait, cancel_futures))
+
+    def fake_worker(database, symbol, metric_ids):
+        return cli._ComputedMetricsResult(
+            symbol=symbol,
+            rows=((symbol, "dummy_metric", 1.0, "2024-01-01"),),
+            computed_count=1,
+        )
+
+    def interrupting_as_completed(futures):
+        yielded = False
+        for future in futures:
+            if not yielded:
+                yielded = True
+                yield future
+                raise KeyboardInterrupt
+
+    executor = InlineExecutor()
+    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
+    monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 2)
+    monkeypatch.setattr(cli, "_ensure_metrics_wal_mode", lambda repo: "wal")
+    monkeypatch.setattr(
+        cli,
+        "_create_normalization_executor",
+        lambda max_workers: executor,
+    )
+    monkeypatch.setattr(cli, "_compute_metrics_for_symbol_worker", fake_worker)
+    monkeypatch.setattr(cli, "as_completed", interrupting_as_completed)
+    monkeypatch.setattr(cli, "METRICS_PROGRESS_INTERVAL_SECONDS", 0.0)
+
+    rc = cli._run_metric_computation(
+        database=str(db_path),
+        symbols=["AAA.US", "BBB.US"],
+        metric_ids=["dummy_metric"],
+        cancelled_message="\nMetric computation cancelled by user.",
+    )
+
+    assert rc == 1
+    output_lines = capsys.readouterr().out.splitlines()
+    assert "Metric computation cancelled by user." in output_lines
+    assert "Computed metrics for 2 symbols in" not in "\n".join(output_lines)
+    assert any(line.startswith("Progress: 1/2") for line in output_lines)
+    assert executor.shutdown_calls == [(False, True)]
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
     assert repo.fetch("AAA.US", "dummy_metric") == (1.0, "2024-01-01")
@@ -3416,6 +3839,7 @@ def test_cmd_compute_metrics_stage_falls_back_to_serial_without_wal(
 
     monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 2)
     monkeypatch.setattr(cli, "_ensure_metrics_wal_mode", lambda repo: "delete")
+    monkeypatch.setattr(cli, "METRICS_PROGRESS_INTERVAL_SECONDS", 0.0)
 
     def fail_executor(max_workers):
         raise AssertionError("process executor should not be used without WAL")
@@ -3431,8 +3855,15 @@ def test_cmd_compute_metrics_stage_falls_back_to_serial_without_wal(
     )
 
     assert rc == 0
-    output = capsys.readouterr().out
-    assert "falling back to serial metric computation" in output
+    output_lines = capsys.readouterr().out.splitlines()
+    assert any(
+        "falling back to serial metric computation" in line for line in output_lines
+    )
+    assert [line for line in output_lines if line.startswith("Progress:")] == [
+        "Progress: 1/2 symbols complete (50.0%)",
+        "Progress: 2/2 symbols complete (100.0%)",
+    ]
+    assert not any(line.startswith("[") for line in output_lines)
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
     assert repo.fetch("AAA.US", "working_capital") == (7.0, recent_date)
@@ -3670,15 +4101,74 @@ def test_cmd_clear_fundamentals_raw(tmp_path):
     repo = FundamentalsRepository(db_path)
     repo.initialize_schema()
     repo.upsert("SEC", "AAA.US", {"facts": {}})
+    state_repo = FundamentalsNormalizationStateRepository(db_path)
+    security_id = repo._security_repo().ensure_from_symbol("AAA.US").security_id
+    state_repo.mark_success(
+        "SEC",
+        "AAA.US",
+        security_id=security_id,
+        raw_fetched_at="2024-01-01T00:00:00+00:00",
+    )
 
     with repo._connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM fundamentals_raw").fetchone()[0] == 1
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM fundamentals_normalization_state"
+            ).fetchone()[0]
+            == 1
+        )
 
     rc = cli.cmd_clear_fundamentals_raw(str(db_path))
     assert rc == 0
 
     with repo._connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM fundamentals_raw").fetchone()[0] == 0
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM fundamentals_normalization_state"
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_cmd_clear_financial_facts_clears_normalization_state(tmp_path):
+    db_path = tmp_path / "clearfacts.db"
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    fact_repo.replace_facts(
+        "AAA.US",
+        [
+            make_fact(
+                symbol="AAA.US",
+                concept="Assets",
+                end_date="2024-12-31",
+                unit="USD",
+                value=10.0,
+            )
+        ],
+        source_provider="SEC",
+    )
+    state_repo = FundamentalsNormalizationStateRepository(db_path)
+    security_id = fact_repo._security_repo().ensure_from_symbol("AAA.US").security_id
+    state_repo.mark_success(
+        "SEC",
+        "AAA.US",
+        security_id=security_id,
+        raw_fetched_at="2024-01-01T00:00:00+00:00",
+    )
+
+    rc = cli.cmd_clear_financial_facts(str(db_path))
+    assert rc == 0
+
+    with fact_repo._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM financial_facts").fetchone()[0] == 0
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM fundamentals_normalization_state"
+            ).fetchone()[0]
+            == 0
+        )
 
 
 def test_cmd_normalize_fundamentals_sec(monkeypatch, tmp_path):
@@ -3721,7 +4211,7 @@ def test_cmd_normalize_fundamentals_sec(monkeypatch, tmp_path):
         result_repo._connect()
         .execute(
             """
-            SELECT ff.concept, ff.value
+            SELECT ff.concept, ff.value, ff.source_provider
             FROM financial_facts ff
             JOIN securities s ON s.security_id = ff.security_id
             WHERE s.canonical_symbol = 'AAPL.US'
@@ -3729,10 +4219,111 @@ def test_cmd_normalize_fundamentals_sec(monkeypatch, tmp_path):
         )
         .fetchall()
     )
-    assert [(row[0], row[1]) for row in rows] == [("NetIncomeLoss", 123.0)]
+    assert [(row[0], row[1], row[2]) for row in rows] == [
+        ("NetIncomeLoss", 123.0, "SEC")
+    ]
     entity_repo = EntityMetadataRepository(db_path)
     entity_repo.initialize_schema()
     assert entity_repo.fetch("AAPL.US") == "Apple Inc"
+    state_repo = FundamentalsNormalizationStateRepository(db_path)
+    state = state_repo.fetch("SEC", "AAPL.US")
+    assert state is not None
+    assert state["raw_fetched_at"] is not None
+    assert state["last_normalized_at"] is not None
+
+
+def test_cmd_normalize_fundamentals_sec_skips_when_up_to_date(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "facts-skip.db"
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert("SEC", "AAPL.US", {"entityName": "Apple Inc", "facts": {}})
+    calls = []
+
+    class FakeNormalizer:
+        def normalize(self, payload, symbol, cik=None):
+            calls.append(symbol)
+            return [
+                make_fact(
+                    symbol=symbol,
+                    cik=cik,
+                    concept="NetIncomeLoss",
+                    end_date="2023-09-30",
+                    value=123.0,
+                )
+            ]
+
+    monkeypatch.setattr(cli, "SECFactsNormalizer", lambda: FakeNormalizer())
+
+    assert (
+        cli.cmd_normalize_fundamentals(
+            provider="SEC",
+            symbol="AAPL",
+            database=str(db_path),
+            exchange_code="US",
+        )
+        == 0
+    )
+    assert (
+        cli.cmd_normalize_fundamentals(
+            provider="SEC",
+            symbol="AAPL",
+            database=str(db_path),
+            exchange_code="US",
+        )
+        == 0
+    )
+
+    assert calls == ["AAPL.US"]
+    assert "already up to date" in capsys.readouterr().out
+
+
+def test_cmd_normalize_fundamentals_sec_force_reprocesses_up_to_date_symbol(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "facts-force.db"
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert("SEC", "AAPL.US", {"entityName": "Apple Inc", "facts": {}})
+    calls = []
+
+    class FakeNormalizer:
+        def normalize(self, payload, symbol, cik=None):
+            calls.append(symbol)
+            return [
+                make_fact(
+                    symbol=symbol,
+                    cik=cik,
+                    concept="NetIncomeLoss",
+                    end_date="2023-09-30",
+                    value=float(len(calls)),
+                )
+            ]
+
+    monkeypatch.setattr(cli, "SECFactsNormalizer", lambda: FakeNormalizer())
+
+    assert (
+        cli.cmd_normalize_fundamentals(
+            provider="SEC",
+            symbol="AAPL",
+            database=str(db_path),
+            exchange_code="US",
+        )
+        == 0
+    )
+    assert (
+        cli.cmd_normalize_fundamentals(
+            provider="SEC",
+            symbol="AAPL",
+            database=str(db_path),
+            exchange_code="US",
+            force=True,
+        )
+        == 0
+    )
+
+    assert calls == ["AAPL.US", "AAPL.US"]
 
 
 def test_cmd_normalize_fundamentals_bulk_sec(monkeypatch, tmp_path):
@@ -3765,6 +4356,7 @@ def test_cmd_normalize_fundamentals_bulk_sec(monkeypatch, tmp_path):
 
     normalization_repo = FinancialFactsRepository(db_path)
     normalization_repo.initialize_schema()
+    monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 1)
 
     normalizer = DummyNormalizer()
     monkeypatch.setattr(cli, "SECFactsNormalizer", lambda: normalizer)
@@ -3789,6 +4381,79 @@ def test_cmd_normalize_fundamentals_bulk_sec(monkeypatch, tmp_path):
     entity_repo.initialize_schema()
     assert entity_repo.fetch("AAA.US") == "AAA Corp"
     assert entity_repo.fetch("BBB.US") == "BBB Corp"
+
+
+def test_cmd_normalize_fundamentals_bulk_sec_reprocesses_only_stale_symbols(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "facts-bulk-stale.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Corp", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Corp", exchange="NYSE"),
+            Listing(symbol="CCC.US", security_name="CCC Corp", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    for symbol in ("AAA.US", "BBB.US", "CCC.US"):
+        fund_repo.upsert("SEC", symbol, {"entityName": symbol, "facts": {}})
+
+    calls = []
+
+    class DummyNormalizer:
+        def normalize(self, payload, symbol, cik=None):
+            calls.append(symbol)
+            return [
+                make_fact(
+                    symbol=symbol,
+                    cik=cik,
+                    concept="Dummy",
+                    end_date="2023-12-31",
+                    value=len(symbol),
+                )
+            ]
+
+    monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 1)
+    monkeypatch.setattr(cli, "SECFactsNormalizer", lambda: DummyNormalizer())
+
+    assert (
+        cli.cmd_normalize_fundamentals_bulk(
+            provider="SEC",
+            database=str(db_path),
+            exchange_code="US",
+        )
+        == 0
+    )
+    assert calls == ["AAA.US", "BBB.US", "CCC.US"]
+
+    assert (
+        cli.cmd_normalize_fundamentals_bulk(
+            provider="SEC",
+            database=str(db_path),
+            exchange_code="US",
+        )
+        == 0
+    )
+    assert calls == ["AAA.US", "BBB.US", "CCC.US"]
+
+    fund_repo.upsert("SEC", "BBB.US", {"entityName": "BBB.US", "facts": {}})
+
+    assert (
+        cli.cmd_normalize_fundamentals_bulk(
+            provider="SEC",
+            database=str(db_path),
+            exchange_code="US",
+        )
+        == 0
+    )
+    assert calls == ["AAA.US", "BBB.US", "CCC.US", "BBB.US"]
+    output = capsys.readouterr().out
+    assert "already up to date" in output
+    assert "skipped=2" in output
 
 
 def test_cmd_normalize_fundamentals_bulk_with_exchange(monkeypatch, tmp_path):
@@ -3886,7 +4551,7 @@ def test_cmd_normalize_fundamentals_eodhd(monkeypatch, tmp_path):
         fact_repo._connect()
         .execute(
             """
-            SELECT ff.concept, ff.value
+            SELECT ff.concept, ff.value, ff.source_provider
             FROM financial_facts ff
             JOIN securities s ON s.security_id = ff.security_id
             WHERE s.canonical_symbol = 'SHEL.LSE'
@@ -3894,10 +4559,132 @@ def test_cmd_normalize_fundamentals_eodhd(monkeypatch, tmp_path):
         )
         .fetchall()
     )
-    assert [(row[0], row[1]) for row in rows] == [("NetIncomeLoss", 10.0)]
+    assert [(row[0], row[1], row[2]) for row in rows] == [
+        ("NetIncomeLoss", 10.0, "EODHD")
+    ]
     entity_repo = EntityMetadataRepository(db_path)
     entity_repo.initialize_schema()
     assert entity_repo.fetch("SHEL.LSE") == "Shell PLC"
+
+
+def test_cmd_normalize_fundamentals_eodhd_zero_row_normalization_records_state(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "funds-zero.db"
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD",
+        "SHEL.LSE",
+        {"General": {"Name": "Shell PLC"}, "Financials": {}},
+    )
+    calls = []
+
+    class FakeNormalizer:
+        def normalize(self, payload, symbol, accounting_standard=None):
+            calls.append(symbol)
+            return []
+
+    monkeypatch.setattr(cli, "EODHDFactsNormalizer", lambda: FakeNormalizer())
+
+    assert (
+        cli.cmd_normalize_fundamentals(
+            provider="EODHD",
+            symbol="SHEL.LSE",
+            database=str(db_path),
+            exchange_code=None,
+        )
+        == 0
+    )
+    assert (
+        cli.cmd_normalize_fundamentals(
+            provider="EODHD",
+            symbol="SHEL.LSE",
+            database=str(db_path),
+            exchange_code=None,
+        )
+        == 0
+    )
+
+    state_repo = FundamentalsNormalizationStateRepository(db_path)
+    assert state_repo.fetch("EODHD", "SHEL.LSE") is not None
+    assert calls == ["SHEL.LSE"]
+    assert "already up to date" in capsys.readouterr().out
+
+
+def test_cmd_normalize_fundamentals_cross_provider_reruns_when_facts_owned_by_other_provider(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "funds-cross-provider.db"
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD",
+        "AAA.US",
+        {"General": {"Name": "AAA"}, "Financials": {}},
+        exchange="US",
+    )
+    fund_repo.upsert("SEC", "AAA.US", {"entityName": "AAA", "facts": {}})
+    eodhd_calls = []
+    sec_calls = []
+
+    class FakeEODHDNormalizer:
+        def normalize(self, payload, symbol, accounting_standard=None):
+            eodhd_calls.append(symbol)
+            return [
+                make_fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    end_date="2023-12-31",
+                    value=10.0,
+                )
+            ]
+
+    class FakeSECNormalizer:
+        def normalize(self, payload, symbol, cik=None):
+            sec_calls.append(symbol)
+            return [
+                make_fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    end_date="2024-12-31",
+                    value=20.0,
+                )
+            ]
+
+    monkeypatch.setattr(cli, "EODHDFactsNormalizer", lambda: FakeEODHDNormalizer())
+    monkeypatch.setattr(cli, "SECFactsNormalizer", lambda: FakeSECNormalizer())
+
+    assert (
+        cli.cmd_normalize_fundamentals(
+            provider="EODHD",
+            symbol="AAA.US",
+            database=str(db_path),
+            exchange_code=None,
+        )
+        == 0
+    )
+    assert (
+        cli.cmd_normalize_fundamentals(
+            provider="SEC",
+            symbol="AAA.US",
+            database=str(db_path),
+            exchange_code="US",
+        )
+        == 0
+    )
+    assert (
+        cli.cmd_normalize_fundamentals(
+            provider="EODHD",
+            symbol="AAA.US",
+            database=str(db_path),
+            exchange_code=None,
+        )
+        == 0
+    )
+
+    assert eodhd_calls == ["AAA.US", "AAA.US"]
+    assert sec_calls == ["AAA.US"]
 
 
 def test_cmd_normalize_fundamentals_stage_all_supported_filters_to_raw_symbols(
@@ -3938,9 +4725,10 @@ def test_cmd_normalize_fundamentals_stage_all_supported_filters_to_raw_symbols(
     )
     captured = {}
 
-    def fake_bulk(database, symbols=None):
+    def fake_bulk(database, symbols=None, force=False):
         captured["database"] = database
         captured["symbols"] = list(symbols or [])
+        captured["force"] = force
         return 0
 
     monkeypatch.setattr(cli, "cmd_normalize_eodhd_fundamentals_bulk", fake_bulk)
@@ -3956,6 +4744,38 @@ def test_cmd_normalize_fundamentals_stage_all_supported_filters_to_raw_symbols(
     assert rc == 0
     assert captured["database"] == str(db_path)
     assert sorted(captured["symbols"]) == ["AAA.US", "CCC.LSE"]
+    assert captured["force"] is False
+
+
+def test_cmd_normalize_eodhd_fundamentals_bulk_reports_freshness_scan(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "normalize-eodhd-status.db"
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    for symbol in ("AAA.US", "BBB.US"):
+        fund_repo.upsert(
+            "EODHD",
+            symbol,
+            {"General": {"Name": symbol}, "Financials": {}},
+            exchange="US",
+        )
+
+    monkeypatch.setattr(
+        cli,
+        "_plan_normalization_selection",
+        lambda **kwargs: ([], {}, len(kwargs["symbols"])),
+    )
+
+    rc = cli.cmd_normalize_eodhd_fundamentals_bulk(
+        database=str(db_path),
+        symbols=["AAA.US", "BBB.US"],
+    )
+
+    assert rc == 0
+    output_lines = capsys.readouterr().out.splitlines()
+    assert output_lines[0] == "Checking EODHD normalization freshness for 2 symbols"
+    assert "already up to date" in output_lines[-1]
 
 
 def test_cmd_normalize_eodhd_fundamentals_bulk_continues_after_symbol_failure_with_inline_executor(
@@ -4029,6 +4849,91 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_continues_after_symbol_failure_wi
         .fetchall()
     )
     assert [row[0] for row in rows] == ["AAA.US", "CCC.US"]
+
+
+def test_cmd_normalize_eodhd_fundamentals_bulk_interrupts_cleanly(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "normalize-eodhd-interrupt.db"
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    for symbol in ("AAA.US", "BBB.US"):
+        fund_repo.upsert(
+            "EODHD",
+            symbol,
+            {"General": {"Name": symbol}, "Financials": {}},
+            exchange="US",
+        )
+
+    class FakeNormalizer:
+        def normalize(self, payload, symbol, accounting_standard=None):
+            return [
+                make_fact(
+                    symbol=symbol,
+                    concept="Dummy",
+                    end_date="2023-12-31",
+                    value=1.0,
+                )
+            ]
+
+    class InlineExecutor:
+        def __init__(self):
+            self.shutdown_calls = []
+
+        def submit(self, fn, *args, **kwargs):
+            future = Future()
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except Exception as exc:
+                future.set_exception(exc)
+            return future
+
+        def shutdown(self, wait=True, cancel_futures=False):
+            self.shutdown_calls.append((wait, cancel_futures))
+
+    def interrupting_as_completed(futures):
+        yielded = False
+        for future in futures:
+            if not yielded:
+                yielded = True
+                yield future
+                raise KeyboardInterrupt
+
+    executor = InlineExecutor()
+    monkeypatch.setattr(cli, "EODHDFactsNormalizer", FakeNormalizer)
+    monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 2)
+    monkeypatch.setattr(
+        cli,
+        "_create_normalization_executor",
+        lambda max_workers: executor,
+    )
+    monkeypatch.setattr(cli, "as_completed", interrupting_as_completed)
+
+    rc = cli.cmd_normalize_eodhd_fundamentals_bulk(
+        database=str(db_path),
+        symbols=["AAA.US", "BBB.US"],
+    )
+
+    assert rc == 1
+    output = capsys.readouterr().out
+    assert "Bulk normalization cancelled by user after 1 completed symbols." in output
+    assert "Normalized EODHD fundamentals for" not in output
+    assert executor.shutdown_calls == [(False, True)]
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    rows = (
+        fact_repo._connect()
+        .execute(
+            """
+            SELECT s.canonical_symbol
+            FROM financial_facts ff
+            JOIN securities s ON s.security_id = ff.security_id
+            ORDER BY s.canonical_symbol
+            """
+        )
+        .fetchall()
+    )
+    assert [row[0] for row in rows] == ["AAA.US"]
 
 
 def test_cmd_normalize_sec_facts_bulk_with_inline_executor(monkeypatch, tmp_path):
@@ -4445,6 +5350,40 @@ def test_cmd_recalc_market_cap_reports_loaded_share_counts(tmp_path, capsys):
     assert rc == 0
     output = capsys.readouterr().out
     assert "Loaded latest share counts for 1 symbols" in output
+
+
+def test_cmd_recalc_market_cap_interrupts_cleanly(monkeypatch, tmp_path, capsys):
+    db_path = tmp_path / "recalc-market-cap-interrupt.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
+        provider="SEC",
+    )
+    market_repo = MarketDataRepository(db_path)
+    market_repo.initialize_schema()
+    market_repo.upsert_price("AAA.US", "2024-01-01", 10.0, market_cap=100.0)
+
+    def interrupting_latest_share_counts_many(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        FinancialFactsRepository,
+        "latest_share_counts_many",
+        interrupting_latest_share_counts_many,
+    )
+
+    rc = cli.cmd_recalc_market_cap(
+        database=str(db_path),
+        symbols=["AAA.US"],
+        exchange_codes=None,
+        all_supported=False,
+    )
+
+    assert rc == 1
+    output = capsys.readouterr().out
+    assert "Market cap recalculation cancelled by user." in output
+    assert "Updated market cap for" not in output
 
 
 def test_cmd_run_screen_bulk(tmp_path, capsys):

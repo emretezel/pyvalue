@@ -5,10 +5,11 @@ Author: Emre Tezel
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import logging
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
-from typing import Union
+from typing import Iterator, Union
 
 
 def setup_logging(
@@ -47,4 +48,43 @@ def setup_logging(
     logging.getLogger("requests").setLevel(logging.WARNING)
 
 
-__all__ = ["setup_logging"]
+class _ConsoleMetricWarningFilter(logging.Filter):
+    """Suppress noisy metric warnings on console while keeping file logging intact."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno != logging.WARNING:
+            return True
+        if record.name.startswith("pyvalue.metrics"):
+            return False
+        return not (
+            record.name == "pyvalue.cli"
+            and record.msg == "Metric %s could not be computed for %s"
+        )
+
+
+@contextmanager
+def suppress_console_metric_warnings(enabled: bool = True) -> Iterator[None]:
+    """Hide metric warning noise from console handlers only."""
+
+    if not enabled:
+        yield
+        return
+
+    root = logging.getLogger()
+    console_handlers = [
+        handler
+        for handler in root.handlers
+        if isinstance(handler, logging.StreamHandler)
+        and not isinstance(handler, logging.FileHandler)
+    ]
+    warning_filter = _ConsoleMetricWarningFilter()
+    for handler in console_handlers:
+        handler.addFilter(warning_filter)
+    try:
+        yield
+    finally:
+        for handler in console_handlers:
+            handler.removeFilter(warning_filter)
+
+
+__all__ = ["setup_logging", "suppress_console_metric_warnings"]

@@ -72,6 +72,16 @@ Purpose:
 - support resumable bulk ingestion
 - avoid repeatedly hitting symbols that are still inside backoff
 
+### `fundamentals_normalization_state`
+
+Successful normalization watermarks live here.
+
+Purpose:
+- track which raw payload timestamp was last normalized for each
+  `(provider, provider_symbol)`
+- support incremental `normalize-fundamentals` runs that skip unchanged raw payloads
+- keep provider-local normalization state even though `financial_facts` are canonical
+
 ### `financial_facts`
 
 Normalized provider-agnostic facts live here.

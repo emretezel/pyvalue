@@ -70,3 +70,9 @@ Use this file to capture recurring mistake patterns after user corrections so fu
 - Recurring pattern: Improving concurrency strategy without adding retry/backoff on the remaining write path leaves SQLite commands brittle whenever WAL setup is delayed or another short-lived connection briefly holds the lock.
 - Preventive rule: For long-running SQLite batch commands, add retry/backoff to the final write path and verify transient `database is locked` errors do not abort the command.
 - Resulting action: Added connection busy-timeout settings plus locked-error retry for WAL enablement and metric batch upserts, and added a regression for transient locked writes.
+
+- Date: 2026-04-01
+- User correction: `compute-metrics` warning suppression should be the default console behavior, not an opt-in flag.
+- Recurring pattern: Turning a requested CLI noise reduction into an opt-in switch without confirming the desired default can invert the intended UX even when the underlying feature is correct.
+- Preventive rule: When adding CLI output controls, explicitly decide whether the requested behavior is default-on or opt-in before naming flags, and prefer opt-out flags when the user asks for quieter default output.
+- Resulting action: Switched `compute-metrics` to suppress metric warnings on the console by default, added `--show-metric-warnings` as the opt-out, and recorded the console-vs-log contract in tests and docs.

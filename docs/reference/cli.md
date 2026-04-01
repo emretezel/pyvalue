@@ -122,12 +122,15 @@ Key options:
 - `--provider {SEC,EODHD}`
 - default provider: `EODHD`
 - scope selector: `--symbols`, `--exchange-codes`, or `--all-supported`
+- `--force` to re-normalize even when stored raw fundamentals are already up to date
 - `--database <path>`
 
 Notes:
 
 - bulk runs over `--exchange-codes` or `--all-supported` parallelize automatically
 - only symbols with stored raw fundamentals are normalized
+- by default, normalization skips symbols whose raw `fundamentals_raw.fetched_at`
+  has not changed since the last successful normalization for that provider
 
 ## Market Data Commands
 
@@ -191,6 +194,9 @@ Key options:
 
 - scope selector: `--symbols`, `--exchange-codes`, or `--all-supported`
 - `--metrics <metric-ids...>` default all registered metrics
+- console output defaults to periodic symbol progress like `Progress: 1234/75848 symbols complete (1.6%)`
+- metric/data-quality warnings are suppressed on the console by default but still written to `data/logs/pyvalue.log`
+- `--show-metric-warnings` to show metric/data-quality warnings on the console again
 - `--database <path>`
 
 ## Reporting Commands

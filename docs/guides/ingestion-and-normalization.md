@@ -97,6 +97,11 @@ canonical security, regardless of provider.
 That means:
 - metrics always consume the latest normalized facts
 - switching providers for the same canonical symbol overwrites normalized facts for that security
+- default normalization is incremental: a symbol is skipped unless its raw
+  `fundamentals_raw.fetched_at` is newer than the last successful
+  normalization for that provider, or the current facts are owned by a
+  different provider
+- use `pyvalue normalize-fundamentals --force ...` to bypass that skip logic
 
 ## When to Re-Run Each Stage
 
@@ -114,7 +119,9 @@ Re-run normalization when:
 - you added new normalized concepts or fallback logic
 
 For large EODHD or SEC refreshes, `pyvalue normalize-fundamentals --all-supported`
-is the fastest way to reprocess every stored raw payload in the catalog.
+is the fastest way to reprocess every stale stored raw payload in the catalog.
+Add `--force` if you want to reprocess every stored raw payload regardless of
+freshness.
 
 ## Related Docs
 

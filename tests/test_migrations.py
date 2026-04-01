@@ -214,7 +214,7 @@ def test_migration_does_not_overwrite_existing_supported_tickers(tmp_path):
 
     applied = apply_migrations(db_path)
 
-    assert applied == 3
+    assert applied == 4
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
             """

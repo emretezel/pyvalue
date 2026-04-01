@@ -1789,6 +1789,31 @@ def _migration_023_optimize_fundamentals_hot_paths(conn: sqlite3.Connection) -> 
     )
 
 
+def _migration_024_create_fundamentals_normalization_state(
+    conn: sqlite3.Connection,
+) -> None:
+    """Track successful normalization watermarks for raw fundamentals payloads."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fundamentals_normalization_state (
+            provider TEXT NOT NULL,
+            provider_symbol TEXT NOT NULL,
+            security_id INTEGER NOT NULL,
+            raw_fetched_at TEXT NOT NULL,
+            last_normalized_at TEXT NOT NULL,
+            PRIMARY KEY (provider, provider_symbol)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fundamentals_norm_state_security
+        ON fundamentals_normalization_state(security_id)
+        """
+    )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -1813,6 +1838,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_021_drop_listings_in_favor_of_supported_tickers,
     _migration_022_canonical_security_model,
     _migration_023_optimize_fundamentals_hot_paths,
+    _migration_024_create_fundamentals_normalization_state,
 ]
 
 

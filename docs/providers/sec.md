@@ -65,6 +65,9 @@ pyvalue normalize-fundamentals --provider SEC --all-supported
 ```
 
 Exchange and all-supported normalization runs parallelize automatically.
+By default, normalization skips symbols whose raw payload has not changed since
+the last successful SEC normalization. Add `--force` to re-normalize the full
+requested scope anyway.
 
 ## Important Limitations
 

@@ -234,6 +234,18 @@ class FundamentalsUpdate:
     fetched_at: str
 
 
+@dataclass(frozen=True)
+class FundamentalsNormalizationCandidate:
+    """Normalization freshness inputs for one stored raw fundamentals payload."""
+
+    provider_symbol: str
+    security_id: int
+    raw_fetched_at: str
+    normalized_raw_fetched_at: Optional[str] = None
+    last_normalized_at: Optional[str] = None
+    current_source_provider: Optional[str] = None
+
+
 class _ManagedSQLiteConnection(sqlite3.Connection):
     """SQLite connection that closes the file handle when the context exits."""
 
@@ -1724,6 +1736,28 @@ class FundamentalsRepository(SQLiteStore):
             return None
         return row[0], row[1], json.loads(row[2])
 
+    def fetch_payload_with_fetched_at(
+        self, provider: str, symbol: str
+    ) -> Optional[Tuple[Dict[str, Any], str]]:
+        self.initialize_schema()
+        provider_symbol, _, _ = self._resolve_security(
+            provider, symbol, None, create=False
+        )
+        if provider_symbol is None:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT data, fetched_at
+                FROM fundamentals_raw
+                WHERE provider = ? AND provider_symbol = ?
+                """,
+                (provider.strip().upper(), provider_symbol),
+            ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row["data"]), str(row["fetched_at"])
+
     def symbols(self, provider: str) -> List[str]:
         self.initialize_schema()
         with self._connect() as conn:
@@ -1751,6 +1785,157 @@ class FundamentalsRepository(SQLiteStore):
                 (provider.strip().upper(),),
             ).fetchall()
         return [(row[0], row[1]) for row in rows]
+
+    def normalization_candidates(
+        self,
+        provider: str,
+        symbols: Sequence[str],
+        chunk_size: int = 500,
+    ) -> Dict[str, FundamentalsNormalizationCandidate]:
+        self.initialize_schema()
+        provider_norm = provider.strip().upper()
+        normalized = _normalized_codes(symbols)
+        if not normalized:
+            return {}
+        if len(normalized) > chunk_size * 4:
+            return self._normalization_candidates_for_provider_scan(
+                provider_norm,
+                requested_symbols=set(normalized),
+                chunk_size=chunk_size,
+            )
+
+        candidates: Dict[str, FundamentalsNormalizationCandidate] = {}
+        with self._connect() as conn:
+            for chunk in _batched(normalized, chunk_size):
+                candidates.update(
+                    self._build_normalization_candidates_for_rows(
+                        conn,
+                        rows=self._normalization_candidate_rows_for_chunk(
+                            conn, provider_norm, chunk
+                        ),
+                    )
+                )
+        return candidates
+
+    def _normalization_candidate_rows_for_chunk(
+        self,
+        conn: sqlite3.Connection,
+        provider: str,
+        symbols: Sequence[str],
+    ) -> List[sqlite3.Row]:
+        placeholders = ", ".join("?" for _ in symbols)
+        return conn.execute(
+            f"""
+            SELECT
+                fr.provider_symbol,
+                fr.security_id,
+                fr.fetched_at,
+                ns.raw_fetched_at AS normalized_raw_fetched_at,
+                ns.last_normalized_at
+            FROM fundamentals_raw fr
+            LEFT JOIN fundamentals_normalization_state ns
+              ON ns.provider = fr.provider
+             AND ns.provider_symbol = fr.provider_symbol
+            WHERE fr.provider = ? AND fr.provider_symbol IN ({placeholders})
+            """,
+            [provider, *symbols],
+        ).fetchall()
+
+    def _build_normalization_candidates_for_rows(
+        self,
+        conn: sqlite3.Connection,
+        rows: Sequence[sqlite3.Row],
+        chunk_size: int = 500,
+    ) -> Dict[str, FundamentalsNormalizationCandidate]:
+        rows_by_symbol: Dict[str, sqlite3.Row] = {}
+        security_ids_needing_provider: List[int] = []
+        for row in rows:
+            symbol_key = str(row["provider_symbol"])
+            rows_by_symbol[symbol_key] = row
+            normalized_raw_fetched_at = _normalize_optional_text(
+                row["normalized_raw_fetched_at"]
+            )
+            raw_fetched_at = str(row["fetched_at"])
+            if (
+                normalized_raw_fetched_at is not None
+                and raw_fetched_at <= normalized_raw_fetched_at
+            ):
+                security_ids_needing_provider.append(int(row["security_id"]))
+
+        source_provider_by_security: Dict[int, str] = {}
+        if security_ids_needing_provider:
+            for security_chunk in _batched(
+                sorted(set(security_ids_needing_provider)), chunk_size
+            ):
+                provider_placeholders = ", ".join("?" for _ in security_chunk)
+                provider_rows = conn.execute(
+                    f"""
+                    SELECT
+                        security_id,
+                        MAX(source_provider) AS current_source_provider
+                    FROM financial_facts
+                    WHERE security_id IN ({provider_placeholders})
+                    GROUP BY security_id
+                    """,
+                    list(security_chunk),
+                ).fetchall()
+                source_provider_by_security.update(
+                    {
+                        int(provider_row["security_id"]): str(
+                            provider_row["current_source_provider"]
+                        )
+                        for provider_row in provider_rows
+                        if provider_row["current_source_provider"] is not None
+                    }
+                )
+
+        return {
+            symbol_key: FundamentalsNormalizationCandidate(
+                provider_symbol=symbol_key,
+                security_id=int(row["security_id"]),
+                raw_fetched_at=str(row["fetched_at"]),
+                normalized_raw_fetched_at=_normalize_optional_text(
+                    row["normalized_raw_fetched_at"]
+                ),
+                last_normalized_at=_normalize_optional_text(row["last_normalized_at"]),
+                current_source_provider=source_provider_by_security.get(
+                    int(row["security_id"])
+                ),
+            )
+            for symbol_key, row in rows_by_symbol.items()
+        }
+
+    def _normalization_candidates_for_provider_scan(
+        self,
+        provider: str,
+        requested_symbols: set[str],
+        chunk_size: int = 500,
+    ) -> Dict[str, FundamentalsNormalizationCandidate]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    fr.provider_symbol,
+                    fr.security_id,
+                    fr.fetched_at,
+                    ns.raw_fetched_at AS normalized_raw_fetched_at,
+                    ns.last_normalized_at
+                FROM fundamentals_raw fr
+                LEFT JOIN fundamentals_normalization_state ns
+                  ON ns.provider = fr.provider
+                 AND ns.provider_symbol = fr.provider_symbol
+                WHERE fr.provider = ?
+                """,
+                (provider,),
+            ).fetchall()
+            filtered_rows = [
+                row for row in rows if str(row["provider_symbol"]) in requested_symbols
+            ]
+            return self._build_normalization_candidates_for_rows(
+                conn,
+                rows=filtered_rows,
+                chunk_size=chunk_size,
+            )
 
     def _resolve_security(
         self,
@@ -2055,6 +2240,102 @@ class MarketDataFetchStateRepository(_FetchStateRepository):
 
     table_name = "market_data_fetch_state"
     index_name = "idx_market_data_fetch_next"
+
+
+class FundamentalsNormalizationStateRepository(SQLiteStore):
+    """Track successful normalization watermarks for stored raw fundamentals."""
+
+    def initialize_schema(self) -> None:
+        apply_migrations(self.db_path)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS fundamentals_normalization_state (
+                    provider TEXT NOT NULL,
+                    provider_symbol TEXT NOT NULL,
+                    security_id INTEGER NOT NULL,
+                    raw_fetched_at TEXT NOT NULL,
+                    last_normalized_at TEXT NOT NULL,
+                    PRIMARY KEY (provider, provider_symbol)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_fundamentals_norm_state_security
+                ON fundamentals_normalization_state(security_id)
+                """
+            )
+
+    def fetch(
+        self, provider: str, symbol: str
+    ) -> Optional[Dict[str, Optional[str] | int]]:
+        self.initialize_schema()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT security_id, raw_fetched_at, last_normalized_at
+                FROM fundamentals_normalization_state
+                WHERE provider = ? AND provider_symbol = ?
+                """,
+                (provider.strip().upper(), symbol.strip().upper()),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "security_id": int(row["security_id"]),
+            "raw_fetched_at": row["raw_fetched_at"],
+            "last_normalized_at": row["last_normalized_at"],
+        }
+
+    def mark_success(
+        self,
+        provider: str,
+        symbol: str,
+        security_id: int,
+        raw_fetched_at: str,
+        normalized_at: Optional[str] = None,
+    ) -> None:
+        self.initialize_schema()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO fundamentals_normalization_state (
+                    provider,
+                    provider_symbol,
+                    security_id,
+                    raw_fetched_at,
+                    last_normalized_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(provider, provider_symbol) DO UPDATE SET
+                    security_id = excluded.security_id,
+                    raw_fetched_at = excluded.raw_fetched_at,
+                    last_normalized_at = excluded.last_normalized_at
+                """,
+                (
+                    provider.strip().upper(),
+                    symbol.strip().upper(),
+                    int(security_id),
+                    raw_fetched_at,
+                    normalized_at or _utc_now_iso(),
+                ),
+            )
+
+    def delete_symbols(self, provider: str, symbols: Sequence[str]) -> int:
+        self.initialize_schema()
+        normalized = _normalized_codes(symbols)
+        if not normalized:
+            return 0
+        placeholders = ", ".join("?" for _ in normalized)
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"""
+                DELETE FROM fundamentals_normalization_state
+                WHERE provider = ? AND provider_symbol IN ({placeholders})
+                """,
+                [provider.strip().upper(), *normalized],
+            )
+        return int(cursor.rowcount or 0)
 
 
 class FinancialFactsRepository(SQLiteStore):

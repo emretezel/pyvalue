@@ -3,8 +3,10 @@ from datetime import date, timedelta
 
 import pyvalue.storage as storage
 from pyvalue.storage import (
+    FundamentalsNormalizationStateRepository,
     FundamentalsUpdate,
     FundamentalsRepository,
+    FundamentalsNormalizationCandidate,
     FinancialFactsRepository,
     FactRecord,
     MarketDataFetchStateRepository,
@@ -297,14 +299,182 @@ def test_financial_facts_repository_replace_fact_rows_matches_replace_facts(tmp_
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute(
             """
-            SELECT s.canonical_symbol, ff.concept, ff.value
+            SELECT s.canonical_symbol, ff.concept, ff.value, ff.source_provider
             FROM financial_facts ff
             JOIN securities s ON s.security_id = ff.security_id
             ORDER BY ff.concept
             """
         ).fetchall()
 
-    assert rows == [("AAA.US", "Liabilities", 40.0)]
+    assert rows == [("AAA.US", "Liabilities", 40.0, None)]
+
+
+def test_financial_facts_repository_replace_fact_rows_persists_source_provider(
+    tmp_path,
+):
+    db_path = tmp_path / "financial-facts-source-provider.db"
+    repo = FinancialFactsRepository(db_path)
+    repo.initialize_schema()
+
+    inserted = repo.replace_fact_rows(
+        "AAA.US",
+        [
+            (
+                None,
+                "Assets",
+                "FY",
+                "2024-12-31",
+                "USD",
+                100.0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "USD",
+            )
+        ],
+        source_provider="SEC",
+    )
+
+    assert inserted == 1
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT ff.source_provider
+            FROM financial_facts ff
+            JOIN securities s ON s.security_id = ff.security_id
+            WHERE s.canonical_symbol = 'AAA.US'
+            """
+        ).fetchone()
+
+    assert row == ("SEC",)
+
+
+def test_fundamentals_repository_normalization_candidates_match_state_and_facts(
+    tmp_path,
+):
+    db_path = tmp_path / "normalization-candidates.db"
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    state_repo = FundamentalsNormalizationStateRepository(db_path)
+    state_repo.initialize_schema()
+
+    fund_repo.upsert("SEC", "AAA.US", {"entityName": "AAA", "facts": {}})
+    fund_repo.upsert("SEC", "BBB.US", {"entityName": "BBB", "facts": {}})
+    fund_repo.upsert("SEC", "CCC.US", {"entityName": "CCC", "facts": {}})
+
+    aaa_security_id = (
+        fund_repo._security_repo().ensure_from_symbol("AAA.US").security_id
+    )
+    bbb_security_id = (
+        fund_repo._security_repo().ensure_from_symbol("BBB.US").security_id
+    )
+
+    aaa_record = fund_repo.fetch_payload_with_fetched_at("SEC", "AAA.US")
+    assert aaa_record is not None
+    _, aaa_fetched_at = aaa_record
+    bbb_record = fund_repo.fetch_payload_with_fetched_at("SEC", "BBB.US")
+    assert bbb_record is not None
+    _, bbb_fetched_at = bbb_record
+
+    state_repo.mark_success("SEC", "AAA.US", aaa_security_id, aaa_fetched_at)
+    state_repo.mark_success("SEC", "BBB.US", bbb_security_id, bbb_fetched_at)
+    fact_repo.replace_facts(
+        "AAA.US",
+        [
+            FactRecord(
+                symbol="AAA.US",
+                concept="Assets",
+                fiscal_period="FY",
+                end_date="2024-12-31",
+                unit="USD",
+                value=100.0,
+            )
+        ],
+        source_provider="SEC",
+    )
+    fact_repo.replace_facts(
+        "BBB.US",
+        [
+            FactRecord(
+                symbol="BBB.US",
+                concept="Assets",
+                fiscal_period="FY",
+                end_date="2024-12-31",
+                unit="USD",
+                value=200.0,
+            )
+        ],
+        source_provider="EODHD",
+    )
+
+    candidates = fund_repo.normalization_candidates(
+        "SEC",
+        ["AAA.US", "BBB.US", "CCC.US"],
+    )
+
+    assert candidates["AAA.US"] == FundamentalsNormalizationCandidate(
+        provider_symbol="AAA.US",
+        security_id=aaa_security_id,
+        raw_fetched_at=aaa_fetched_at,
+        normalized_raw_fetched_at=aaa_fetched_at,
+        last_normalized_at=candidates["AAA.US"].last_normalized_at,
+        current_source_provider="SEC",
+    )
+    assert candidates["BBB.US"].current_source_provider == "EODHD"
+    assert candidates["BBB.US"].normalized_raw_fetched_at == bbb_fetched_at
+    assert candidates["CCC.US"].normalized_raw_fetched_at is None
+
+
+def test_fundamentals_repository_normalization_candidates_skip_facts_scan_without_state(
+    tmp_path,
+):
+    db_path = tmp_path / "normalization-candidates-no-state.db"
+
+    class _LoggingConnection:
+        def __init__(self, conn, seen_sql):
+            self._conn = conn
+            self._seen_sql = seen_sql
+
+        def __enter__(self):
+            self._conn.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return self._conn.__exit__(exc_type, exc_value, traceback)
+
+        def execute(self, sql, parameters=()):
+            self._seen_sql.append(" ".join(str(sql).split()))
+            return self._conn.execute(sql, parameters)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    class LoggingFundamentalsRepository(FundamentalsRepository):
+        def __init__(self, db_path, seen_sql):
+            super().__init__(db_path)
+            self._seen_sql = seen_sql
+
+        def _connect(self):
+            return _LoggingConnection(super()._connect(), self._seen_sql)
+
+    seen_sql = []
+    fund_repo = LoggingFundamentalsRepository(db_path, seen_sql)
+    fund_repo.initialize_schema()
+    fund_repo.upsert("EODHD", "AAA.US", {"General": {"Name": "AAA"}}, exchange="US")
+    fund_repo.upsert("EODHD", "BBB.US", {"General": {"Name": "BBB"}}, exchange="US")
+
+    candidates = fund_repo.normalization_candidates("EODHD", ["AAA.US", "BBB.US"])
+
+    assert sorted(candidates) == ["AAA.US", "BBB.US"]
+    assert all(
+        candidate.normalized_raw_fetched_at is None for candidate in candidates.values()
+    )
+    assert not any("FROM financial_facts" in sql for sql in seen_sql)
 
 
 def test_financial_facts_repository_replace_fact_rows_replaces_symbol_slice(tmp_path):

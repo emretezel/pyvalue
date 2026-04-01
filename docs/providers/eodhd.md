@@ -146,9 +146,17 @@ All-supported:
 pyvalue normalize-fundamentals --all-supported
 ```
 
+Force re-normalization:
+
+```bash
+pyvalue normalize-fundamentals --all-supported --force
+```
+
 Normalization converts raw EODHD payloads into provider-agnostic
 `financial_facts` records keyed by canonical `security_id`.
 Exchange and all-supported normalization runs parallelize automatically.
+By default, normalization skips symbols whose raw payload has not changed since
+the last successful EODHD normalization.
 
 ## Market Data
 

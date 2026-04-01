@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import concurrent.futures.thread as _thread_futures
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -16,11 +17,12 @@ import multiprocessing as mp
 import os
 import re
 import sqlite3
-from threading import Lock, local
+from threading import Lock, Thread, local
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union, cast
+import weakref
 
 from pyvalue.config import Config
 from pyvalue.ingestion import EODHDFundamentalsClient, SECCompanyFactsClient
@@ -34,10 +36,12 @@ from pyvalue.screening import (
     load_screen,
     evaluate_criterion_verbose,
 )
-from pyvalue.logging_utils import setup_logging
+from pyvalue.logging_utils import setup_logging, suppress_console_metric_warnings
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.storage import (
     EntityMetadataRepository,
+    FundamentalsNormalizationCandidate,
+    FundamentalsNormalizationStateRepository,
     FundamentalsUpdate,
     FundamentalsRepository,
     FundamentalsFetchStateRepository,
@@ -79,6 +83,7 @@ MARKET_DATA_WRITE_BATCH_INTERVAL_SECONDS = 0.25
 MARKET_DATA_PROGRESS_INTERVAL_SECONDS = 5.0
 MARKET_DATA_PROGRESS_SYMBOL_STEP = 250
 METRICS_MAX_WORKERS = 16
+METRICS_PROGRESS_INTERVAL_SECONDS = 5.0
 METRICS_WRITE_BATCH_SIZE = 25
 METRICS_WRITE_BATCH_INTERVAL_SECONDS = 0.25
 NORMALIZATION_MAX_WORKERS = 16
@@ -121,6 +126,7 @@ class _PreparedFundamentalsRun:
 class _NormalizedFactsResult:
     symbol: str
     rows: Tuple[StoredFactRow, ...]
+    raw_fetched_at: str
     entity_name: Optional[str] = None
     entity_description: Optional[str] = None
 
@@ -162,6 +168,92 @@ class _RateLimiter:
                 wait_time = (1.0 - self.tokens) / self.rate_per_second
             if wait_time > 0:
                 time.sleep(wait_time)
+
+
+class _InterruptibleThreadPoolExecutor(ThreadPoolExecutor):
+    """Thread pool whose workers do not block interpreter shutdown on Ctrl+C."""
+
+    def _adjust_thread_count(self) -> None:
+        if self._idle_semaphore.acquire(timeout=0):
+            return
+
+        def weakref_cb(_, q=self._work_queue):
+            q.put(None)
+
+        num_threads = len(self._threads)
+        if num_threads < self._max_workers:
+            thread_name = "%s_%d" % (self._thread_name_prefix or self, num_threads)
+            thread = Thread(
+                name=thread_name,
+                target=_thread_futures._worker,
+                args=(
+                    weakref.ref(self, weakref_cb),
+                    self._work_queue,
+                    self._initializer,
+                    self._initargs,
+                ),
+                daemon=True,
+            )
+            thread.start()
+            cast(set[Thread], self._threads).add(thread)
+
+
+def _create_interruptible_thread_executor(
+    max_workers: int,
+) -> _InterruptibleThreadPoolExecutor:
+    """Return a thread pool that can be abandoned promptly on Ctrl+C."""
+
+    return _InterruptibleThreadPoolExecutor(max_workers=max_workers)
+
+
+def _terminate_process_pool_workers(executor: ProcessPoolExecutor) -> None:
+    """Best-effort terminate running process workers without waiting for them."""
+
+    processes = getattr(executor, "_processes", None)
+    if not isinstance(processes, dict):
+        return
+    for process in list(processes.values()):
+        if process is None:
+            continue
+        try:
+            if process.is_alive():
+                process.terminate()
+        except Exception:  # pragma: no cover - defensive cleanup path
+            continue
+
+
+def _shutdown_executor_now(executor: object) -> None:
+    """Stop an executor without waiting for outstanding work to finish."""
+
+    if isinstance(executor, ProcessPoolExecutor):
+        _terminate_process_pool_workers(executor)
+    shutdown = getattr(executor, "shutdown", None)
+    if shutdown is None:
+        return
+    try:
+        shutdown(wait=False, cancel_futures=True)
+    except TypeError:
+        shutdown(wait=False)
+
+
+def _cancel_cli_command(
+    message: str,
+    *,
+    executors: Sequence[object] = (),
+    flushers: Sequence[Callable[[], None]] = (),
+) -> int:
+    """Flush parent state, stop workers, and exit a command cleanly."""
+
+    for executor in executors:
+        if executor is not None:
+            _shutdown_executor_now(executor)
+    for flusher in flushers:
+        try:
+            flusher()
+        except Exception as exc:  # pragma: no cover - defensive cleanup path
+            LOGGER.error("Failed to flush pending state during cancellation: %s", exc)
+    print(message, flush=True)
+    return 1
 
 
 def _resolve_database_path(database: str) -> Path:
@@ -799,7 +891,9 @@ def _run_eodhd_fundamentals_ingestion(
         last_report = time.monotonic()
         last_report_count = completed
 
-    executor = ThreadPoolExecutor(max_workers=min(FUNDAMENTALS_WORKERS, total))
+    executor = _create_interruptible_thread_executor(
+        max_workers=min(FUNDAMENTALS_WORKERS, total)
+    )
     interrupted = False
     try:
         futures = {
@@ -824,10 +918,14 @@ def _run_eodhd_fundamentals_ingestion(
             maybe_report()
     except KeyboardInterrupt:
         interrupted = True
-        executor.shutdown(wait=False, cancel_futures=True)
-        maybe_flush(force=True)
-        print(f"\nCancelled after {processed + failed} completed symbols.")
-        return 1
+        return _cancel_cli_command(
+            f"\nCancelled after {processed + failed} completed symbols.",
+            executors=[executor],
+            flushers=[
+                lambda: maybe_flush(force=True),
+                lambda: maybe_report(force=True),
+            ],
+        )
     finally:
         if not interrupted:
             executor.shutdown(wait=True)
@@ -1368,6 +1466,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="data/pyvalue.db",
         help="SQLite database file used for storage (default: %(default)s)",
     )
+    normalize_fundamentals.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-normalize even when stored raw fundamentals are already up to date.",
+    )
 
     compute_metrics = subparsers.add_parser(
         "compute-metrics",
@@ -1384,6 +1487,11 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         default=None,
         help="Metric identifiers to compute (default: all registered metrics).",
+    )
+    compute_metrics.add_argument(
+        "--show-metric-warnings",
+        action="store_true",
+        help="Show metric/data-quality warnings on the console (default: suppressed).",
     )
 
     fact_report = subparsers.add_parser(
@@ -1988,8 +2096,7 @@ def cmd_update_market_data_global(
             if elapsed < interval:
                 time.sleep(interval - elapsed)
     except KeyboardInterrupt:
-        print(f"\nCancelled after {attempted} attempted symbols.")
-        return 1
+        return _cancel_cli_command(f"\nCancelled after {attempted} attempted symbols.")
 
     print(
         f"Stored market data for {processed} of {attempted} attempted symbols in {database}"
@@ -2248,8 +2355,9 @@ def cmd_ingest_fundamentals_stage(
                     flush=True,
                 )
         except KeyboardInterrupt:
-            print(f"\nCancelled after {processed} of {total} symbols.")
-            return 1
+            return _cancel_cli_command(
+                f"\nCancelled after {processed} of {total} symbols."
+            )
         print(f"Stored company facts for {processed} symbols in {db_path}")
         return 0
 
@@ -2405,105 +2513,120 @@ def cmd_update_market_data_stage(
         last_report = time.monotonic()
         last_report_count = completed
 
+    bulk_executor: Optional[ThreadPoolExecutor] = None
+    symbol_executor: Optional[ThreadPoolExecutor] = None
+    interrupted = False
     try:
         if plan.bulk_tasks:
-            with ThreadPoolExecutor(
+            bulk_executor = _create_interruptible_thread_executor(
                 max_workers=min(MARKET_DATA_BULK_WORKERS, len(plan.bulk_tasks))
-            ) as executor:
-                bulk_futures = {
-                    executor.submit(
-                        _fetch_exchange_market_data,
-                        api_key,
-                        limiter,
+            )
+            bulk_futures = {
+                bulk_executor.submit(
+                    _fetch_exchange_market_data,
+                    api_key,
+                    limiter,
+                    task.exchange_code,
+                ): task
+                for task in plan.bulk_tasks
+            }
+            for future in as_completed(bulk_futures):
+                task = bulk_futures[future]
+                try:
+                    fetched = future.result()
+                except Exception as exc:  # pragma: no cover - network errors
+                    LOGGER.error(
+                        "Failed to refresh bulk market data for %s: %s",
                         task.exchange_code,
-                    ): task
-                    for task in plan.bulk_tasks
-                }
-                for future in as_completed(bulk_futures):
-                    task = bulk_futures[future]
-                    try:
-                        fetched = future.result()
-                    except Exception as exc:  # pragma: no cover - network errors
-                        LOGGER.error(
-                            "Failed to refresh bulk market data for %s: %s",
-                            task.exchange_code,
-                            exc,
-                        )
-                        pending_failures.extend(
-                            (ticker.symbol, str(exc)) for ticker in task.tickers
-                        )
-                        failed += len(task.tickers)
-                        maybe_flush(force=True)
-                        maybe_report()
-                        continue
-
-                    stored_for_exchange = 0
-                    queued_fallbacks = 0
-                    for ticker in task.tickers:
-                        bulk_data = fetched.get(ticker.symbol)
-                        if bulk_data is None:
-                            if fallback_budget > 0:
-                                fallback_symbols.append(ticker)
-                                fallback_budget -= EODHD_MARKET_DATA_CALL_COST
-                                queued_fallbacks += 1
-                            else:
-                                pending_failures.append(
-                                    (
-                                        ticker.symbol,
-                                        f"Bulk exchange response missing {ticker.symbol}",
-                                    )
-                                )
-                                failed += 1
-                            continue
-                        pending_updates.append(
-                            _build_market_data_update(service, ticker, bulk_data)
-                        )
-                        stored_for_exchange += 1
-                    processed += stored_for_exchange
-                    maybe_flush(force=True)
-                    print(
-                        f"[bulk {task.exchange_code}] stored={stored_for_exchange} "
-                        f"fallbacks={queued_fallbacks} symbols={len(task.tickers)}",
-                        flush=True,
+                        exc,
                     )
+                    pending_failures.extend(
+                        (ticker.symbol, str(exc)) for ticker in task.tickers
+                    )
+                    failed += len(task.tickers)
+                    maybe_flush(force=True)
                     maybe_report()
+                    continue
+
+                stored_for_exchange = 0
+                queued_fallbacks = 0
+                for ticker in task.tickers:
+                    bulk_data = fetched.get(ticker.symbol)
+                    if bulk_data is None:
+                        if fallback_budget > 0:
+                            fallback_symbols.append(ticker)
+                            fallback_budget -= EODHD_MARKET_DATA_CALL_COST
+                            queued_fallbacks += 1
+                        else:
+                            pending_failures.append(
+                                (
+                                    ticker.symbol,
+                                    f"Bulk exchange response missing {ticker.symbol}",
+                                )
+                            )
+                            failed += 1
+                        continue
+                    pending_updates.append(
+                        _build_market_data_update(service, ticker, bulk_data)
+                    )
+                    stored_for_exchange += 1
+                processed += stored_for_exchange
+                maybe_flush(force=True)
+                print(
+                    f"[bulk {task.exchange_code}] stored={stored_for_exchange} "
+                    f"fallbacks={queued_fallbacks} symbols={len(task.tickers)}",
+                    flush=True,
+                )
+                maybe_report()
 
         symbol_tickers = [*plan.symbol_tickers, *fallback_symbols]
         if symbol_tickers:
-            with ThreadPoolExecutor(
+            symbol_executor = _create_interruptible_thread_executor(
                 max_workers=min(MARKET_DATA_SYMBOL_WORKERS, len(symbol_tickers))
-            ) as executor:
-                symbol_futures = {
-                    executor.submit(
-                        _fetch_symbol_market_data,
-                        api_key,
-                        limiter,
+            )
+            symbol_futures = {
+                symbol_executor.submit(
+                    _fetch_symbol_market_data,
+                    api_key,
+                    limiter,
+                    ticker.symbol,
+                ): ticker
+                for ticker in symbol_tickers
+            }
+            for symbol_future in as_completed(symbol_futures):
+                ticker = symbol_futures[symbol_future]
+                try:
+                    symbol_data = symbol_future.result()
+                    pending_updates.append(
+                        _build_market_data_update(service, ticker, symbol_data)
+                    )
+                    processed += 1
+                except Exception as exc:  # pragma: no cover - network errors
+                    LOGGER.error(
+                        "Failed to refresh market data for %s: %s",
                         ticker.symbol,
-                    ): ticker
-                    for ticker in symbol_tickers
-                }
-                for symbol_future in as_completed(symbol_futures):
-                    ticker = symbol_futures[symbol_future]
-                    try:
-                        symbol_data = symbol_future.result()
-                        pending_updates.append(
-                            _build_market_data_update(service, ticker, symbol_data)
-                        )
-                        processed += 1
-                    except Exception as exc:  # pragma: no cover - network errors
-                        LOGGER.error(
-                            "Failed to refresh market data for %s: %s",
-                            ticker.symbol,
-                            exc,
-                        )
-                        pending_failures.append((ticker.symbol, str(exc)))
-                        failed += 1
-                    maybe_flush()
-                    maybe_report()
+                        exc,
+                    )
+                    pending_failures.append((ticker.symbol, str(exc)))
+                    failed += 1
+                maybe_flush()
+                maybe_report()
     except KeyboardInterrupt:
-        maybe_flush(force=True)
-        print(f"\nCancelled after {processed + failed} completed symbols.")
-        return 1
+        interrupted = True
+        return _cancel_cli_command(
+            f"\nCancelled after {processed + failed} completed symbols.",
+            executors=[symbol_executor, bulk_executor],
+            flushers=[
+                lambda: maybe_flush(force=True),
+                lambda: maybe_report(force=True),
+            ],
+        )
+    finally:
+        if not interrupted:
+            if symbol_executor is not None:
+                symbol_executor.shutdown(wait=True)
+            if bulk_executor is not None:
+                bulk_executor.shutdown(wait=True)
 
     maybe_flush(force=True)
     maybe_report(force=True)
@@ -2519,6 +2642,7 @@ def cmd_normalize_fundamentals_stage(
     symbols: Optional[Sequence[str]],
     exchange_codes: Optional[Sequence[str]],
     all_supported: bool,
+    force: bool = False,
 ) -> int:
     """Unified fundamentals normalization over symbol, exchange, or full supported scope."""
 
@@ -2542,14 +2666,71 @@ def cmd_normalize_fundamentals_stage(
         )
     if provider_norm == "SEC":
         return cmd_normalize_us_facts_bulk(
-            database=str(db_path), symbols=selected_symbols
+            database=str(db_path), symbols=selected_symbols, force=force
         )
     if provider_norm == "EODHD":
         return cmd_normalize_eodhd_fundamentals_bulk(
             database=str(db_path),
             symbols=selected_symbols,
+            force=force,
         )
     raise SystemExit(f"Unsupported provider: {provider}")
+
+
+def _normalization_required(
+    candidate: FundamentalsNormalizationCandidate,
+    provider: str,
+) -> bool:
+    provider_norm = provider.strip().upper()
+    if candidate.normalized_raw_fetched_at is None:
+        return True
+    if candidate.raw_fetched_at > candidate.normalized_raw_fetched_at:
+        return True
+    if candidate.current_source_provider is None:
+        return False
+    return candidate.current_source_provider != provider_norm
+
+
+def _plan_normalization_selection(
+    database: Union[str, Path],
+    provider: str,
+    symbols: Sequence[str],
+    force: bool = False,
+) -> Tuple[List[str], Dict[str, FundamentalsNormalizationCandidate], int]:
+    db_path = _resolve_database_path(str(database))
+    provider_norm = _normalize_provider(provider)
+    selected_symbols = [symbol.upper() for symbol in symbols]
+    fund_repo = FundamentalsRepository(db_path)
+    candidates = fund_repo.normalization_candidates(provider_norm, selected_symbols)
+    if force:
+        return (
+            [symbol for symbol in selected_symbols if symbol in candidates],
+            candidates,
+            0,
+        )
+
+    to_normalize: List[str] = []
+    skipped = 0
+    for symbol in selected_symbols:
+        candidate = candidates.get(symbol)
+        if candidate is None:
+            continue
+        if _normalization_required(candidate, provider_norm):
+            to_normalize.append(symbol)
+        else:
+            skipped += 1
+    return to_normalize, candidates, skipped
+
+
+def _print_normalization_up_to_date(
+    provider: str,
+    database: Union[str, Path],
+) -> None:
+    db_path = _resolve_database_path(str(database))
+    print(
+        f"{provider.strip().upper()} fundamentals are already up to date in {db_path}; "
+        "use --force to re-normalize."
+    )
 
 
 class _CachedRegionFactsRepository(RegionFactsRepository):
@@ -2750,15 +2931,24 @@ def _ensure_metrics_wal_mode(metrics_repo: MetricsRepository) -> str:
 def _flush_metric_write_batch(
     metrics_repo: MetricsRepository,
     pending_rows: List[StoredMetricRow],
-    pending_messages: List[str],
 ) -> None:
-    """Persist one buffered metric batch and then emit its progress lines."""
+    """Persist one buffered metric batch."""
 
     metrics_repo.upsert_many(pending_rows)
     pending_rows.clear()
-    for message in pending_messages:
-        print(message, flush=True)
-    pending_messages.clear()
+
+
+def _print_metric_progress(completed_symbols: int, total_symbols: int) -> None:
+    """Print symbol-level percent progress for metric computation."""
+
+    if total_symbols <= 0:
+        percent = 100.0
+    else:
+        percent = (completed_symbols / total_symbols) * 100.0
+    print(
+        f"Progress: {completed_symbols}/{total_symbols} symbols complete ({percent:.1f}%)",
+        flush=True,
+    )
 
 
 def _compute_metrics_for_symbol(
@@ -2834,6 +3024,7 @@ def _run_metric_computation(
     symbols: Sequence[str],
     metric_ids: Sequence[str],
     cancelled_message: str,
+    suppress_metric_warnings: bool = True,
 ) -> int:
     db_path = _resolve_database_path(database)
     selected_symbols = [symbol.upper() for symbol in symbols]
@@ -2860,14 +3051,15 @@ def _run_metric_computation(
         workers = 1
 
     pending_rows: List[StoredMetricRow] = []
-    pending_messages: List[str] = []
     buffered_symbols = 0
     last_flush_at = time.monotonic()
+    completed_symbols = 0
+    last_progress_at = time.monotonic()
+    last_reported_completed = -1
 
-    def buffer_result(message: str, rows: Sequence[StoredMetricRow]) -> None:
+    def buffer_result(rows: Sequence[StoredMetricRow]) -> None:
         nonlocal buffered_symbols, last_flush_at
         pending_rows.extend(rows)
-        pending_messages.append(message)
         buffered_symbols += 1
         elapsed = time.monotonic() - last_flush_at
         if (
@@ -2875,13 +3067,13 @@ def _run_metric_computation(
             and elapsed < METRICS_WRITE_BATCH_INTERVAL_SECONDS
         ):
             return
-        _flush_metric_write_batch(metrics_repo, pending_rows, pending_messages)
+        _flush_metric_write_batch(metrics_repo, pending_rows)
         buffered_symbols = 0
         last_flush_at = time.monotonic()
 
     def flush_pending(force: bool = False) -> None:
         nonlocal buffered_symbols, last_flush_at
-        if not pending_rows and not pending_messages:
+        if not pending_rows:
             return
         if not force:
             elapsed = time.monotonic() - last_flush_at
@@ -2890,74 +3082,98 @@ def _run_metric_computation(
                 and elapsed < METRICS_WRITE_BATCH_INTERVAL_SECONDS
             ):
                 return
-        _flush_metric_write_batch(metrics_repo, pending_rows, pending_messages)
+        _flush_metric_write_batch(metrics_repo, pending_rows)
         buffered_symbols = 0
         last_flush_at = time.monotonic()
 
-    if workers <= 1:
-        fact_repo = _SchemaReadyFinancialFactsRepository(db_path)
-        market_repo = (
-            _SchemaReadyMarketDataRepository(db_path) if include_market_data else None
-        )
-        try:
-            for idx, symbol in enumerate(selected_symbols, 1):
-                result = _compute_metrics_for_symbol(
-                    symbol,
-                    metric_ids,
-                    fact_repo,
-                    market_repo,
+    def maybe_report_progress(force: bool = False) -> None:
+        nonlocal last_progress_at, last_reported_completed
+        if total_symbols <= 0:
+            if force and last_reported_completed != 0:
+                _print_metric_progress(0, 0)
+                last_reported_completed = 0
+                last_progress_at = time.monotonic()
+            return
+        if completed_symbols == last_reported_completed:
+            return
+        elapsed = time.monotonic() - last_progress_at
+        if not force and elapsed < METRICS_PROGRESS_INTERVAL_SECONDS:
+            return
+        _print_metric_progress(completed_symbols, total_symbols)
+        last_reported_completed = completed_symbols
+        last_progress_at = time.monotonic()
+
+    with suppress_console_metric_warnings(suppress_metric_warnings):
+        if workers <= 1:
+            fact_repo = _SchemaReadyFinancialFactsRepository(db_path)
+            market_repo = (
+                _SchemaReadyMarketDataRepository(db_path)
+                if include_market_data
+                else None
+            )
+            try:
+                for symbol in selected_symbols:
+                    result = _compute_metrics_for_symbol(
+                        symbol,
+                        metric_ids,
+                        fact_repo,
+                        market_repo,
+                    )
+                    buffer_result(result.rows)
+                    completed_symbols += 1
+                    maybe_report_progress()
+            except KeyboardInterrupt:
+                return _cancel_cli_command(
+                    cancelled_message,
+                    flushers=[
+                        lambda: flush_pending(force=True),
+                        lambda: maybe_report_progress(force=True),
+                    ],
                 )
-                buffer_result(
-                    f"[{idx}/{total_symbols}] Computed {result.computed_count} metrics for {result.symbol}",
-                    result.rows,
-                )
-        except KeyboardInterrupt:
             flush_pending(force=True)
-            print(cancelled_message)
-            return 1
+            maybe_report_progress(force=True)
+            print(f"Computed metrics for {total_symbols} symbols in {db_path}")
+            return 0
+
+        executor = _create_normalization_executor(workers)
+        interrupted = False
+        try:
+            futures = {
+                executor.submit(
+                    _compute_metrics_for_symbol_worker,
+                    str(db_path),
+                    symbol,
+                    tuple(metric_ids),
+                ): symbol
+                for symbol in selected_symbols
+            }
+            for future in as_completed(futures):
+                symbol = futures[future]
+                try:
+                    result = future.result()
+                    buffer_result(result.rows)
+                except Exception as exc:  # pragma: no cover - worker crashes
+                    LOGGER.error("Failed to compute metrics for %s: %s", symbol, exc)
+                completed_symbols += 1
+                maybe_report_progress()
+        except KeyboardInterrupt:
+            interrupted = True
+            return _cancel_cli_command(
+                cancelled_message,
+                executors=[executor],
+                flushers=[
+                    lambda: flush_pending(force=True),
+                    lambda: maybe_report_progress(force=True),
+                ],
+            )
+        finally:
+            if not interrupted:
+                executor.shutdown(wait=True)
+
         flush_pending(force=True)
+        maybe_report_progress(force=True)
         print(f"Computed metrics for {total_symbols} symbols in {db_path}")
         return 0
-
-    executor = _create_normalization_executor(workers)
-    interrupted = False
-    try:
-        futures = {
-            executor.submit(
-                _compute_metrics_for_symbol_worker,
-                str(db_path),
-                symbol,
-                tuple(metric_ids),
-            ): symbol
-            for symbol in selected_symbols
-        }
-        for idx, future in enumerate(as_completed(futures), 1):
-            symbol = futures[future]
-            try:
-                result = future.result()
-                buffer_result(
-                    f"[{idx}/{total_symbols}] Computed {result.computed_count} metrics for {result.symbol}",
-                    result.rows,
-                )
-            except Exception as exc:  # pragma: no cover - worker crashes
-                LOGGER.error("Failed to compute metrics for %s: %s", symbol, exc)
-                buffer_result(
-                    f"[{idx}/{total_symbols}] Computed 0 metrics for {symbol}",
-                    (),
-                )
-    except KeyboardInterrupt:
-        interrupted = True
-        executor.shutdown(wait=False, cancel_futures=True)
-        flush_pending(force=True)
-        print(cancelled_message)
-        return 1
-    finally:
-        if not interrupted:
-            executor.shutdown(wait=True)
-
-    flush_pending(force=True)
-    print(f"Computed metrics for {total_symbols} symbols in {db_path}")
-    return 0
 
 
 def cmd_compute_metrics_stage(
@@ -2966,6 +3182,7 @@ def cmd_compute_metrics_stage(
     exchange_codes: Optional[Sequence[str]],
     all_supported: bool,
     metric_ids: Optional[Sequence[str]],
+    show_metric_warnings: bool = False,
 ) -> int:
     """Unified metric computation over symbol, exchange, or full supported scope."""
 
@@ -2982,6 +3199,7 @@ def cmd_compute_metrics_stage(
         symbols=canonical_symbols,
         metric_ids=ids_to_compute,
         cancelled_message="\nMetric computation cancelled by user.",
+        suppress_metric_warnings=not show_metric_warnings,
     )
 
 
@@ -3301,8 +3519,9 @@ def cmd_ingest_fundamentals_bulk(
                     f"[{idx}/{total}] Stored company facts for {qualified}", flush=True
                 )
         except KeyboardInterrupt:
-            print(f"\\nCancelled after {processed} of {total} symbols.")
-            return 1
+            return _cancel_cli_command(
+                f"\nCancelled after {processed} of {total} symbols."
+            )
 
         print(f"Stored company facts for {processed} symbols in {database}")
         return 0
@@ -3329,17 +3548,32 @@ def cmd_ingest_fundamentals_bulk(
     raise SystemExit(f"Unsupported provider: {provider}")
 
 
-def cmd_normalize_us_facts(symbol: str, database: str) -> int:
+def cmd_normalize_us_facts(
+    symbol: str,
+    database: str,
+    force: bool = False,
+) -> int:
     """Normalize previously ingested SEC facts for downstream metrics."""
 
     symbol = _qualify_symbol(symbol, exchange="US")
     fund_repo = FundamentalsRepository(database)
     fund_repo.initialize_schema()
-    payload = fund_repo.fetch("SEC", symbol.upper())
-    if payload is None:
+    candidates_to_normalize, candidate_map, skipped = _plan_normalization_selection(
+        database=database,
+        provider="SEC",
+        symbols=[symbol.upper()],
+        force=force,
+    )
+    payload_record = fund_repo.fetch_payload_with_fetched_at("SEC", symbol.upper())
+    if payload_record is None:
         raise SystemExit(
             f"No raw SEC payload found for {symbol}. Run ingest-fundamentals --provider SEC before normalization."
         )
+    if skipped and not candidates_to_normalize:
+        _print_normalization_up_to_date("SEC", database)
+        return 0
+
+    payload, raw_fetched_at = payload_record
     normalizer = SECFactsNormalizer()
     records = normalizer.normalize(payload, symbol=symbol.upper())
 
@@ -3347,16 +3581,31 @@ def cmd_normalize_us_facts(symbol: str, database: str) -> int:
     fact_repo.initialize_schema()
     entity_repo = EntityMetadataRepository(database)
     entity_repo.initialize_schema()
+    state_repo = FundamentalsNormalizationStateRepository(database)
+    state_repo.initialize_schema()
     entity_name = payload.get("entityName")
     if entity_name:
         entity_repo.upsert(symbol.upper(), entity_name)
-    stored = fact_repo.replace_facts(symbol.upper(), records)
+    stored = fact_repo.replace_facts(
+        symbol.upper(),
+        records,
+        source_provider="SEC",
+    )
+    candidate = candidate_map.get(symbol.upper())
+    security_id = (
+        candidate.security_id
+        if candidate is not None
+        else fact_repo._security_repo().ensure_from_symbol(symbol.upper()).security_id
+    )
+    state_repo.mark_success("SEC", symbol.upper(), security_id, raw_fetched_at)
     print(f"Stored {stored} normalized facts for {symbol.upper()} in {database}")
     return 0
 
 
 def cmd_normalize_us_facts_bulk(
-    database: str, symbols: Optional[Sequence[str]] = None
+    database: str,
+    symbols: Optional[Sequence[str]] = None,
+    force: bool = False,
 ) -> int:
     """Normalize raw SEC facts for every stored ticker in parallel."""
 
@@ -3374,11 +3623,29 @@ def cmd_normalize_us_facts_bulk(
         if not symbols:
             raise SystemExit("No symbols provided for SEC normalization.")
 
-    return _run_bulk_normalization(
+    requested_total = len(symbols)
+    print(
+        f"Checking SEC normalization freshness for {requested_total} symbols",
+        flush=True,
+    )
+    symbols_to_normalize, candidates, skipped = _plan_normalization_selection(
         database=database,
         provider="SEC",
         symbols=symbols,
+        force=force,
+    )
+    if not symbols_to_normalize:
+        _print_normalization_up_to_date("SEC", database)
+        return 0
+
+    return _run_bulk_normalization(
+        database=database,
+        provider="SEC",
+        symbols=symbols_to_normalize,
         worker=_normalize_sec_symbol_worker,
+        candidate_map=candidates,
+        requested_total=requested_total,
+        skipped=skipped,
     )
 
 
@@ -3440,9 +3707,10 @@ def _normalize_sec_symbol_worker(
     """Normalize one stored SEC payload and return facts plus metadata."""
 
     fund_repo = FundamentalsRepository(database)
-    payload = fund_repo.fetch("SEC", symbol)
-    if payload is None:
+    payload_record = fund_repo.fetch_payload_with_fetched_at("SEC", symbol)
+    if payload_record is None:
         return None
+    payload, raw_fetched_at = payload_record
     normalizer = SECFactsNormalizer()
     rows = tuple(
         _normalization_record_to_row(record)
@@ -3451,6 +3719,7 @@ def _normalize_sec_symbol_worker(
     return _NormalizedFactsResult(
         symbol=symbol,
         rows=rows,
+        raw_fetched_at=raw_fetched_at,
         entity_name=payload.get("entityName"),
     )
 
@@ -3461,9 +3730,10 @@ def _normalize_eodhd_symbol_worker(
     """Normalize one stored EODHD payload and return facts plus metadata."""
 
     fund_repo = FundamentalsRepository(database)
-    payload = fund_repo.fetch("EODHD", symbol)
-    if payload is None:
+    payload_record = fund_repo.fetch_payload_with_fetched_at("EODHD", symbol)
+    if payload_record is None:
         return None
+    payload, raw_fetched_at = payload_record
     normalizer = EODHDFactsNormalizer()
     rows = tuple(
         _normalization_record_to_row(record)
@@ -3472,6 +3742,7 @@ def _normalize_eodhd_symbol_worker(
     return _NormalizedFactsResult(
         symbol=symbol,
         rows=rows,
+        raw_fetched_at=raw_fetched_at,
         entity_name=_extract_entity_name_from_eodhd(payload),
         entity_description=_extract_entity_description_from_eodhd(payload),
     )
@@ -3482,6 +3753,9 @@ def _run_bulk_normalization(
     provider: str,
     symbols: Sequence[str],
     worker: Callable[[Union[str, Path], str], Optional[_NormalizedFactsResult]],
+    candidate_map: Optional[Mapping[str, FundamentalsNormalizationCandidate]] = None,
+    requested_total: Optional[int] = None,
+    skipped: int = 0,
 ) -> int:
     """Normalize many stored payloads while serializing SQLite writes."""
 
@@ -3494,15 +3768,24 @@ def _run_bulk_normalization(
     fact_repo.initialize_schema()
     entity_repo = EntityMetadataRepository(db_path)
     entity_repo.initialize_schema()
+    state_repo = FundamentalsNormalizationStateRepository(db_path)
+    state_repo.initialize_schema()
 
     total = len(selected_symbols)
+    requested = requested_total if requested_total is not None else total
     workers = _normalization_worker_count(total)
     processed = 0
     failed = 0
-    print(
-        f"Normalizing {provider} fundamentals for {total} symbols "
-        f"with {workers} workers"
-    )
+    if skipped:
+        print(
+            f"Normalizing {provider} fundamentals for {total} of {requested} symbols "
+            f"with {workers} workers (skipped={skipped})"
+        )
+    else:
+        print(
+            f"Normalizing {provider} fundamentals for {total} symbols "
+            f"with {workers} workers"
+        )
 
     if workers <= 1:
         for idx, symbol in enumerate(selected_symbols, 1):
@@ -3522,7 +3805,27 @@ def _run_bulk_normalization(
                         result.entity_name,
                         description=result.entity_description,
                     )
-                stored = fact_repo.replace_fact_rows(symbol, result.rows)
+                stored = fact_repo.replace_fact_rows(
+                    symbol,
+                    result.rows,
+                    source_provider=provider,
+                )
+                candidate = (
+                    candidate_map.get(symbol) if candidate_map is not None else None
+                )
+                security_id = (
+                    candidate.security_id
+                    if candidate is not None
+                    else fact_repo._security_repo()
+                    .ensure_from_symbol(symbol)
+                    .security_id
+                )
+                state_repo.mark_success(
+                    provider,
+                    symbol,
+                    security_id,
+                    result.raw_fetched_at,
+                )
                 processed += 1
                 print(
                     f"[{idx}/{total}] Stored {stored} normalized facts for {symbol}",
@@ -3562,7 +3865,27 @@ def _run_bulk_normalization(
                             result.entity_name,
                             description=result.entity_description,
                         )
-                    stored = fact_repo.replace_fact_rows(symbol, result.rows)
+                    stored = fact_repo.replace_fact_rows(
+                        symbol,
+                        result.rows,
+                        source_provider=provider,
+                    )
+                    candidate = (
+                        candidate_map.get(symbol) if candidate_map is not None else None
+                    )
+                    security_id = (
+                        candidate.security_id
+                        if candidate is not None
+                        else fact_repo._security_repo()
+                        .ensure_from_symbol(symbol)
+                        .security_id
+                    )
+                    state_repo.mark_success(
+                        provider,
+                        symbol,
+                        security_id,
+                        result.raw_fetched_at,
+                    )
                     processed += 1
                     print(
                         f"[{idx}/{total}] Stored {stored} normalized facts for {symbol}",
@@ -3578,52 +3901,82 @@ def _run_bulk_normalization(
                     failed += 1
         except KeyboardInterrupt:
             interrupted = True
-            executor.shutdown(wait=False, cancel_futures=True)
-            print(
+            return _cancel_cli_command(
                 "\nBulk normalization cancelled by user after "
-                f"{processed + failed} completed symbols."
+                f"{processed + failed} completed symbols.",
+                executors=[executor],
             )
-            return 1
         finally:
             if not interrupted:
                 executor.shutdown(wait=True)
 
     print(
-        f"Normalized {provider} fundamentals for {processed} of {total} "
-        f"symbols into {db_path} (failed={failed})"
+        f"Normalized {provider} fundamentals for {processed} of {requested} "
+        f"requested symbols into {db_path} (skipped={skipped}, failed={failed})"
     )
     return 0
 
 
-def cmd_normalize_eodhd_fundamentals(symbol: str, database: str) -> int:
+def cmd_normalize_eodhd_fundamentals(
+    symbol: str,
+    database: str,
+    force: bool = False,
+) -> int:
     """Normalize stored EODHD fundamentals for downstream metrics."""
 
     fund_repo = FundamentalsRepository(database)
-    payload = fund_repo.fetch("EODHD", symbol.upper())
-    if payload is None:
+    symbol_upper = symbol.upper()
+    candidates_to_normalize, candidate_map, skipped = _plan_normalization_selection(
+        database=database,
+        provider="EODHD",
+        symbols=[symbol_upper],
+        force=force,
+    )
+    payload_record = fund_repo.fetch_payload_with_fetched_at("EODHD", symbol_upper)
+    if payload_record is None:
         raise SystemExit(
             f"No EODHD fundamentals found for {symbol}. Run ingest-fundamentals --provider EODHD first."
         )
+    if skipped and not candidates_to_normalize:
+        _print_normalization_up_to_date("EODHD", database)
+        return 0
+
+    payload, raw_fetched_at = payload_record
 
     normalizer = EODHDFactsNormalizer()
-    records = normalizer.normalize(payload, symbol=symbol.upper())
+    records = normalizer.normalize(payload, symbol=symbol_upper)
 
     fact_repo = FinancialFactsRepository(database)
     fact_repo.initialize_schema()
     entity_repo = EntityMetadataRepository(database)
     entity_repo.initialize_schema()
+    state_repo = FundamentalsNormalizationStateRepository(database)
+    state_repo.initialize_schema()
     entity_name = _extract_entity_name_from_eodhd(payload)
     entity_description = _extract_entity_description_from_eodhd(payload)
     if entity_name or entity_description:
-        entity_repo.upsert(symbol.upper(), entity_name, description=entity_description)
+        entity_repo.upsert(symbol_upper, entity_name, description=entity_description)
 
-    stored = fact_repo.replace_facts(symbol.upper(), records)
-    print(f"Stored {stored} normalized facts for {symbol.upper()} in {database}")
+    stored = fact_repo.replace_facts(
+        symbol_upper,
+        records,
+        source_provider="EODHD",
+    )
+    candidate = candidate_map.get(symbol_upper)
+    security_id = (
+        candidate.security_id
+        if candidate is not None
+        else fact_repo._security_repo().ensure_from_symbol(symbol_upper).security_id
+    )
+    state_repo.mark_success("EODHD", symbol_upper, security_id, raw_fetched_at)
+    print(f"Stored {stored} normalized facts for {symbol_upper} in {database}")
     return 0
 
 
 def cmd_normalize_eodhd_fundamentals_bulk(
-    database: str, symbols: Optional[Sequence[str]] = None
+    database: str,
+    symbols: Optional[Sequence[str]] = None,
+    force: bool = False,
 ) -> int:
     """Normalize all stored EODHD fundamentals in parallel."""
 
@@ -3639,11 +3992,29 @@ def cmd_normalize_eodhd_fundamentals_bulk(
         if not symbols:
             raise SystemExit("No symbols provided for EODHD normalization.")
 
-    return _run_bulk_normalization(
+    requested_total = len(symbols)
+    print(
+        f"Checking EODHD normalization freshness for {requested_total} symbols",
+        flush=True,
+    )
+    symbols_to_normalize, candidates, skipped = _plan_normalization_selection(
         database=database,
         provider="EODHD",
         symbols=symbols,
+        force=force,
+    )
+    if not symbols_to_normalize:
+        _print_normalization_up_to_date("EODHD", database)
+        return 0
+
+    return _run_bulk_normalization(
+        database=database,
+        provider="EODHD",
+        symbols=symbols_to_normalize,
         worker=_normalize_eodhd_symbol_worker,
+        candidate_map=candidates,
+        requested_total=requested_total,
+        skipped=skipped,
     )
 
 
@@ -3652,6 +4023,7 @@ def cmd_normalize_fundamentals(
     symbol: str,
     database: str,
     exchange_code: Optional[str],
+    force: bool = False,
 ) -> int:
     """Normalize stored fundamentals for a ticker using the provider-specific ruleset."""
 
@@ -3672,7 +4044,7 @@ def cmd_normalize_fundamentals(
                 )
             if exchange_code.upper() != "US":
                 raise SystemExit("SEC normalization only supports --exchange-code US.")
-        return cmd_normalize_us_facts(symbol=symbol, database=database)
+        return cmd_normalize_us_facts(symbol=symbol, database=database, force=force)
     if provider_norm == "EODHD":
         symbol_upper = symbol.strip().upper()
         inferred_exchange = None
@@ -3687,12 +4059,19 @@ def cmd_normalize_fundamentals(
         qualified = (
             _qualify_symbol(base_symbol, exch_code) if exch_code else symbol_upper
         )
-        return cmd_normalize_eodhd_fundamentals(symbol=qualified, database=database)
+        return cmd_normalize_eodhd_fundamentals(
+            symbol=qualified,
+            database=database,
+            force=force,
+        )
     raise SystemExit(f"Unsupported provider: {provider}")
 
 
 def cmd_normalize_fundamentals_bulk(
-    provider: str, database: str, exchange_code: Optional[str]
+    provider: str,
+    database: str,
+    exchange_code: Optional[str],
+    force: bool = False,
 ) -> int:
     """Normalize stored fundamentals in bulk for the specified provider."""
 
@@ -3728,9 +4107,17 @@ def cmd_normalize_fundamentals_bulk(
             "Run ingest-fundamentals-bulk first."
         )
     if provider_norm == "SEC":
-        return cmd_normalize_us_facts_bulk(database=database, symbols=symbols)
+        return cmd_normalize_us_facts_bulk(
+            database=database,
+            symbols=symbols,
+            force=force,
+        )
     if provider_norm == "EODHD":
-        return cmd_normalize_eodhd_fundamentals_bulk(database=database, symbols=symbols)
+        return cmd_normalize_eodhd_fundamentals_bulk(
+            database=database,
+            symbols=symbols,
+            force=force,
+        )
     raise SystemExit(f"Unsupported provider: {provider}")
 
 
@@ -3892,8 +4279,7 @@ def cmd_update_market_data_bulk(
             if interval > 0 and elapsed < interval:
                 time.sleep(interval - elapsed)
     except KeyboardInterrupt:
-        print(f"\nCancelled after {processed} of {total} symbols.")
-        return 1
+        return _cancel_cli_command(f"\nCancelled after {processed} of {total} symbols.")
 
     print(f"Stored market data for {processed} symbols in {database}")
     return 0
@@ -3905,6 +4291,7 @@ def cmd_compute_metrics(
     database: str,
     run_all: bool,
     exchange_code: Optional[str],
+    show_metric_warnings: bool = False,
 ) -> int:
     """Compute one or more metrics and store the results."""
 
@@ -3928,12 +4315,13 @@ def cmd_compute_metrics(
         if _metrics_use_market_data(ids_to_compute)
         else None
     )
-    result = _compute_metrics_for_symbol(
-        symbol_upper,
-        ids_to_compute,
-        fact_repo,
-        market_repo,
-    )
+    with suppress_console_metric_warnings(not show_metric_warnings):
+        result = _compute_metrics_for_symbol(
+            symbol_upper,
+            ids_to_compute,
+            fact_repo,
+            market_repo,
+        )
     metrics_repo.upsert_many(result.rows)
     print(f"Computed {result.computed_count} metrics for {symbol_upper} in {database}")
     return 0
@@ -3944,6 +4332,7 @@ def cmd_compute_metrics_bulk(
     database: str,
     metric_ids: Optional[Sequence[str]],
     exchange_code: Optional[str],
+    show_metric_warnings: bool = False,
 ) -> int:
     """Compute metrics for all supported tickers in one provider/exchange slice."""
 
@@ -3968,6 +4357,7 @@ def cmd_compute_metrics_bulk(
         symbols=symbols,
         metric_ids=ids_to_compute,
         cancelled_message="\nBulk metric computation cancelled by user.",
+        suppress_metric_warnings=not show_metric_warnings,
     )
 
 
@@ -4460,8 +4850,7 @@ def cmd_recalc_market_cap(
         for idx, symbol in updated_symbols:
             print(f"[{idx}/{total}] Updated market cap for {symbol}", flush=True)
     except KeyboardInterrupt:
-        print("\nMarket cap recalculation cancelled by user.")
-        return 1
+        return _cancel_cli_command("\nMarket cap recalculation cancelled by user.")
 
     print(f"Updated market cap for {updated_rows} rows in {db_path}")
     return 0
@@ -4483,9 +4872,12 @@ def cmd_clear_financial_facts(database: str) -> int:
     """Delete all normalized financial facts."""
 
     repo = FinancialFactsRepository(database)
+    state_repo = FundamentalsNormalizationStateRepository(database)
     with repo._connect() as conn:
         conn.execute("DROP TABLE IF EXISTS financial_facts")
+        conn.execute("DROP TABLE IF EXISTS fundamentals_normalization_state")
     repo.initialize_schema()
+    state_repo.initialize_schema()
     print(f"Cleared financial_facts table in {database}")
     return 0
 
@@ -4494,9 +4886,12 @@ def cmd_clear_fundamentals_raw(database: str) -> int:
     """Delete all stored raw fundamentals."""
 
     repo = FundamentalsRepository(database)
+    state_repo = FundamentalsNormalizationStateRepository(database)
     with repo._connect() as conn:
         conn.execute("DROP TABLE IF EXISTS fundamentals_raw")
+        conn.execute("DROP TABLE IF EXISTS fundamentals_normalization_state")
     repo.initialize_schema()
+    state_repo.initialize_schema()
     print(f"Cleared fundamentals_raw table in {database}")
     return 0
 
@@ -4796,135 +5191,140 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     setup_logging()
     parser = build_parser()
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
 
-    if args.command == "refresh-supported-exchanges":
-        return cmd_refresh_supported_exchanges(
-            provider=args.provider,
-            database=args.database,
-        )
-    if args.command == "refresh-supported-tickers":
-        return cmd_refresh_supported_tickers(
-            provider=args.provider,
-            database=args.database,
-            exchange_codes=args.exchange_codes,
-            all_supported=args.all_supported,
-            include_etfs=args.include_etfs,
-        )
-    if args.command == "ingest-fundamentals":
-        return cmd_ingest_fundamentals_stage(
-            provider=args.provider,
-            database=args.database,
-            symbols=args.symbols,
-            exchange_codes=args.exchange_codes,
-            all_supported=args.all_supported,
-            rate=args.rate,
-            max_symbols=args.max_symbols,
-            max_age_days=args.max_age_days,
-            resume=args.resume,
-            user_agent=args.user_agent,
-            cik=args.cik,
-        )
-    if args.command == "report-fundamentals-progress":
-        return cmd_report_fundamentals_progress(
-            provider=args.provider,
-            database=args.database,
-            exchange_codes=args.exchange_codes,
-            max_age_days=args.max_age_days,
-            missing_only=args.missing_only,
-        )
-    if args.command == "report-market-data-progress":
-        return cmd_report_market_data_progress(
-            provider=args.provider,
-            database=args.database,
-            exchange_codes=args.exchange_codes,
-            max_age_days=args.max_age_days,
-        )
-    if args.command == "update-market-data":
-        return cmd_update_market_data_stage(
-            provider=args.provider,
-            database=args.database,
-            symbols=args.symbols,
-            exchange_codes=args.exchange_codes,
-            all_supported=args.all_supported,
-            rate=args.rate,
-            max_symbols=args.max_symbols,
-            max_age_days=args.max_age_days,
-            resume=args.resume,
-        )
-    if args.command == "normalize-fundamentals":
-        return cmd_normalize_fundamentals_stage(
-            provider=args.provider,
-            database=args.database,
-            symbols=args.symbols,
-            exchange_codes=args.exchange_codes,
-            all_supported=args.all_supported,
-        )
-    if args.command == "clear-financial-facts":
-        return cmd_clear_financial_facts(database=args.database)
-    if args.command == "clear-fundamentals-raw":
-        return cmd_clear_fundamentals_raw(database=args.database)
-    if args.command == "clear-metrics":
-        return cmd_clear_metrics(database=args.database)
-    if args.command == "clear-market-data":
-        return cmd_clear_market_data(database=args.database)
-    if args.command == "compute-metrics":
-        return cmd_compute_metrics_stage(
-            database=args.database,
-            symbols=args.symbols,
-            exchange_codes=args.exchange_codes,
-            all_supported=args.all_supported,
-            metric_ids=args.metrics,
-        )
-    if args.command == "report-fact-freshness":
-        return cmd_report_fact_freshness(
-            database=args.database,
-            symbols=args.symbols,
-            exchange_codes=args.exchange_codes,
-            all_supported=args.all_supported,
-            metric_ids=args.metrics,
-            max_age_days=args.max_age_days,
-            output_csv=args.output_csv,
-            show_all=args.show_all,
-        )
-    if args.command == "report-metric-coverage":
-        return cmd_report_metric_coverage(
-            database=args.database,
-            symbols=args.symbols,
-            exchange_codes=args.exchange_codes,
-            all_supported=args.all_supported,
-            metric_ids=args.metrics,
-        )
-    if args.command == "report-metric-failures":
-        return cmd_report_metric_failures(
-            database=args.database,
-            metric_ids=args.metrics,
-            symbols=args.symbols,
-            exchange_codes=args.exchange_codes,
-            all_supported=args.all_supported,
-            output_csv=args.output_csv,
-        )
-    if args.command == "recalc-market-cap":
-        return cmd_recalc_market_cap(
-            database=args.database,
-            symbols=args.symbols,
-            exchange_codes=args.exchange_codes,
-            all_supported=args.all_supported,
-        )
-    if args.command == "run-screen":
-        return cmd_run_screen_stage(
-            config_path=args.config,
-            database=args.database,
-            symbols=args.symbols,
-            exchange_codes=args.exchange_codes,
-            all_supported=args.all_supported,
-            output_csv=args.output_csv,
-        )
-    if args.command == "purge-us-nonfilers":
-        return cmd_purge_us_nonfilers(database=args.database, apply=args.apply)
+        if args.command == "refresh-supported-exchanges":
+            return cmd_refresh_supported_exchanges(
+                provider=args.provider,
+                database=args.database,
+            )
+        if args.command == "refresh-supported-tickers":
+            return cmd_refresh_supported_tickers(
+                provider=args.provider,
+                database=args.database,
+                exchange_codes=args.exchange_codes,
+                all_supported=args.all_supported,
+                include_etfs=args.include_etfs,
+            )
+        if args.command == "ingest-fundamentals":
+            return cmd_ingest_fundamentals_stage(
+                provider=args.provider,
+                database=args.database,
+                symbols=args.symbols,
+                exchange_codes=args.exchange_codes,
+                all_supported=args.all_supported,
+                rate=args.rate,
+                max_symbols=args.max_symbols,
+                max_age_days=args.max_age_days,
+                resume=args.resume,
+                user_agent=args.user_agent,
+                cik=args.cik,
+            )
+        if args.command == "report-fundamentals-progress":
+            return cmd_report_fundamentals_progress(
+                provider=args.provider,
+                database=args.database,
+                exchange_codes=args.exchange_codes,
+                max_age_days=args.max_age_days,
+                missing_only=args.missing_only,
+            )
+        if args.command == "report-market-data-progress":
+            return cmd_report_market_data_progress(
+                provider=args.provider,
+                database=args.database,
+                exchange_codes=args.exchange_codes,
+                max_age_days=args.max_age_days,
+            )
+        if args.command == "update-market-data":
+            return cmd_update_market_data_stage(
+                provider=args.provider,
+                database=args.database,
+                symbols=args.symbols,
+                exchange_codes=args.exchange_codes,
+                all_supported=args.all_supported,
+                rate=args.rate,
+                max_symbols=args.max_symbols,
+                max_age_days=args.max_age_days,
+                resume=args.resume,
+            )
+        if args.command == "normalize-fundamentals":
+            return cmd_normalize_fundamentals_stage(
+                provider=args.provider,
+                database=args.database,
+                symbols=args.symbols,
+                exchange_codes=args.exchange_codes,
+                all_supported=args.all_supported,
+                force=args.force,
+            )
+        if args.command == "clear-financial-facts":
+            return cmd_clear_financial_facts(database=args.database)
+        if args.command == "clear-fundamentals-raw":
+            return cmd_clear_fundamentals_raw(database=args.database)
+        if args.command == "clear-metrics":
+            return cmd_clear_metrics(database=args.database)
+        if args.command == "clear-market-data":
+            return cmd_clear_market_data(database=args.database)
+        if args.command == "compute-metrics":
+            return cmd_compute_metrics_stage(
+                database=args.database,
+                symbols=args.symbols,
+                exchange_codes=args.exchange_codes,
+                all_supported=args.all_supported,
+                metric_ids=args.metrics,
+                show_metric_warnings=args.show_metric_warnings,
+            )
+        if args.command == "report-fact-freshness":
+            return cmd_report_fact_freshness(
+                database=args.database,
+                symbols=args.symbols,
+                exchange_codes=args.exchange_codes,
+                all_supported=args.all_supported,
+                metric_ids=args.metrics,
+                max_age_days=args.max_age_days,
+                output_csv=args.output_csv,
+                show_all=args.show_all,
+            )
+        if args.command == "report-metric-coverage":
+            return cmd_report_metric_coverage(
+                database=args.database,
+                symbols=args.symbols,
+                exchange_codes=args.exchange_codes,
+                all_supported=args.all_supported,
+                metric_ids=args.metrics,
+            )
+        if args.command == "report-metric-failures":
+            return cmd_report_metric_failures(
+                database=args.database,
+                metric_ids=args.metrics,
+                symbols=args.symbols,
+                exchange_codes=args.exchange_codes,
+                all_supported=args.all_supported,
+                output_csv=args.output_csv,
+            )
+        if args.command == "recalc-market-cap":
+            return cmd_recalc_market_cap(
+                database=args.database,
+                symbols=args.symbols,
+                exchange_codes=args.exchange_codes,
+                all_supported=args.all_supported,
+            )
+        if args.command == "run-screen":
+            return cmd_run_screen_stage(
+                config_path=args.config,
+                database=args.database,
+                symbols=args.symbols,
+                exchange_codes=args.exchange_codes,
+                all_supported=args.all_supported,
+                output_csv=args.output_csv,
+            )
+        if args.command == "purge-us-nonfilers":
+            return cmd_purge_us_nonfilers(database=args.database, apply=args.apply)
 
-    parser.error(f"Unknown command: {args.command}")
-    return 2
+        parser.error(f"Unknown command: {args.command}")
+        return 2
+    except KeyboardInterrupt:
+        return _cancel_cli_command("Cancelled by user.")
 
 
 if __name__ == "__main__":  # pragma: no cover - manual execution helper
