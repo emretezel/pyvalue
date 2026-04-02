@@ -4595,7 +4595,8 @@ def _write_metric_failure_report_csv(
     metric_order: Sequence[str],
     path: str,
 ) -> None:
-    with open(path, "w", newline="") as handle:
+    output_path = _prepare_output_csv_path(path)
+    with output_path.open("w", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(
             [
@@ -5154,6 +5155,12 @@ def _format_value(value: float) -> str:
     return formatted or "0"
 
 
+def _prepare_output_csv_path(path: str) -> Path:
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    return output_path
+
+
 def _write_screen_csv(
     criteria: Sequence[Criterion],
     symbols: Sequence[str],
@@ -5164,7 +5171,8 @@ def _write_screen_csv(
     price_currencies: Dict[str, str],
     path: str,
 ) -> None:
-    with open(path, "w", newline="") as handle:
+    output_path = _prepare_output_csv_path(path)
+    with output_path.open("w", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(["Criterion", *symbols])
         writer.writerow(
@@ -5189,7 +5197,8 @@ def _write_screen_csv(
 
 
 def _write_fact_report_csv(report: Sequence[MetricCoverage], path: str) -> None:
-    with open(path, "w", newline="") as handle:
+    output_path = _prepare_output_csv_path(path)
+    with output_path.open("w", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(
             [

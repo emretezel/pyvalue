@@ -76,3 +76,9 @@ Use this file to capture recurring mistake patterns after user corrections so fu
 - Recurring pattern: Turning a requested CLI noise reduction into an opt-in switch without confirming the desired default can invert the intended UX even when the underlying feature is correct.
 - Preventive rule: When adding CLI output controls, explicitly decide whether the requested behavior is default-on or opt-in before naming flags, and prefer opt-out flags when the user asks for quieter default output.
 - Resulting action: Switched `compute-metrics` to suppress metric warnings on the console by default, added `--show-metric-warnings` as the opt-out, and recorded the console-vs-log contract in tests and docs.
+
+- Date: 2026-04-02
+- User correction: `run-screen --output-csv data/output/...` failed because the parent folder was missing.
+- Recurring pattern: Adding CLI file output paths without exercising a missing-parent-directory case leaves commands brittle and pushes path setup work onto the user.
+- Preventive rule: For every CLI option that writes a file, create parent directories in the shared write helper and add a regression test for both non-empty and empty-result branches using a nested output path.
+- Resulting action: Added a shared output-path preparation helper for CLI CSV writers, fixed `run-screen` nested output paths, and added regression coverage for passing and no-pass screen CSV writes.

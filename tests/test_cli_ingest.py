@@ -5878,6 +5878,62 @@ criteria:
     assert any("AAA.US" in line for line in output_lines)
 
 
+def test_cmd_run_screen_stage_creates_output_csv_parent_dirs_for_passing_results(
+    tmp_path, capsys
+):
+    db_path = tmp_path / "screen-stage-output-pass.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+    metrics_repo.upsert("AAA.US", "working_capital", 100.0, "2023-12-31")
+    metrics_repo.upsert("BBB.US", "working_capital", 50.0, "2023-12-31")
+    entity_repo = EntityMetadataRepository(db_path)
+    entity_repo.initialize_schema()
+    entity_repo.upsert("AAA.US", "AAA Inc", description="AAA description")
+    entity_repo.upsert("BBB.US", "BBB Inc", description="BBB description")
+
+    screen_path = tmp_path / "screen.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Working capital minimum"
+    left:
+      metric: working_capital
+    operator: ">="
+    right:
+      value: 75
+"""
+    )
+
+    csv_path = tmp_path / "nested" / "output" / "results.csv"
+
+    rc = cli.cmd_run_screen_stage(
+        config_path=str(screen_path),
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=["US"],
+        all_supported=False,
+        output_csv=str(csv_path),
+    )
+
+    assert rc == 0
+    assert csv_path.exists()
+    csv_contents = csv_path.read_text().strip().splitlines()
+    assert csv_contents[0] == "Criterion,AAA.US"
+    assert csv_contents[1].startswith("Entity,AAA Inc")
+    assert csv_contents[2].startswith("Description,AAA description")
+    assert csv_contents[3] == "Price,N/A"
+    assert "AAA.US" in capsys.readouterr().out
+
+
 def test_cmd_run_screen_stage_reports_progress_when_no_symbols_pass(
     monkeypatch, tmp_path, capsys
 ):
@@ -5927,6 +5983,58 @@ criteria:
         "Progress: 2/2 symbols complete (100.0%)",
     ]
     assert output_lines[-1] == "No symbols satisfied all criteria."
+
+
+def test_cmd_run_screen_stage_creates_output_csv_parent_dirs_when_no_symbols_pass(
+    tmp_path, capsys
+):
+    db_path = tmp_path / "screen-stage-output-empty.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+    metrics_repo.upsert("AAA.US", "working_capital", 50.0, "2023-12-31")
+    metrics_repo.upsert("BBB.US", "working_capital", 60.0, "2023-12-31")
+
+    screen_path = tmp_path / "screen.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Working capital minimum"
+    left:
+      metric: working_capital
+    operator: ">="
+    right:
+      value: 75
+"""
+    )
+
+    csv_path = tmp_path / "nested" / "output" / "empty-results.csv"
+
+    rc = cli.cmd_run_screen_stage(
+        config_path=str(screen_path),
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=["US"],
+        all_supported=False,
+        output_csv=str(csv_path),
+    )
+
+    assert rc == 1
+    assert csv_path.exists()
+    csv_contents = csv_path.read_text().strip().splitlines()
+    assert csv_contents[0] == "Criterion"
+    assert csv_contents[1] == "Entity"
+    assert csv_contents[2] == "Description"
+    assert csv_contents[3] == "Price"
+    assert "No symbols satisfied all criteria." in capsys.readouterr().out
 
 
 def test_cmd_report_metric_failures_uses_highest_market_cap_example(tmp_path, capsys):
