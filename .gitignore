@@ -79,6 +79,8 @@ private/
 .env.*
 secret*/
 data/logs/
+data/output/*
+!data/output/.gitkeep
 data/screen_results*.csv
 data/*.db-journal
 data/*.db-wal

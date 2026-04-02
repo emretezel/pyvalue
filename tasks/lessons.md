@@ -82,3 +82,9 @@ Use this file to capture recurring mistake patterns after user corrections so fu
 - Recurring pattern: Adding CLI file output paths without exercising a missing-parent-directory case leaves commands brittle and pushes path setup work onto the user.
 - Preventive rule: For every CLI option that writes a file, create parent directories in the shared write helper and add a regression test for both non-empty and empty-result branches using a nested output path.
 - Resulting action: Added a shared output-path preparation helper for CLI CSV writers, fixed `run-screen` nested output paths, and added regression coverage for passing and no-pass screen CSV writes.
+
+- Date: 2026-04-02
+- User correction: `data/output/` was a user-kept directory for saved screen results, not disposable scratch output.
+- Recurring pattern: Treating untracked generated artifacts as safe to delete during cleanup can destroy user-owned local outputs when the repo intentionally keeps result files outside git.
+- Preventive rule: Before deleting untracked files or directories in this repo, distinguish disposable test artifacts from user-kept local outputs; never remove a populated results directory such as `data/output/` just to clean the worktree unless the user explicitly asks.
+- Resulting action: Recorded the rule here and will preserve local result directories even when they are untracked or generated.
