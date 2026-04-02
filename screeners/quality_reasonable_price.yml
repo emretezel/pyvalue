@@ -1,11 +1,4 @@
 criteria:
-  - name: "Minimum market cap"
-    left:
-      metric: market_cap
-    operator: ">"
-    right:
-      value: 2000000000
-
   - name: "ROIC median (10Y) >= 10%"
     left:
       metric: roic_10y_median

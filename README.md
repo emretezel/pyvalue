@@ -18,7 +18,7 @@ pyvalue ingest-fundamentals --provider EODHD --exchange-codes US --max-symbols 1
 pyvalue normalize-fundamentals --provider EODHD --exchange-codes US
 pyvalue update-market-data --provider EODHD --exchange-codes US
 pyvalue compute-metrics --exchange-codes US
-pyvalue run-screen screeners/value.yml --exchange-codes US --output-csv data/screen_results_value.csv
+pyvalue run-screen --config screeners/value.yml --exchange-codes US --output-csv data/screen_results_value.csv
 ```
 
 Default database: `data/pyvalue.db`
@@ -69,7 +69,7 @@ pyvalue ingest-fundamentals --provider EODHD --symbols SHEL.LSE
 pyvalue normalize-fundamentals --provider EODHD --symbols SHEL.LSE
 pyvalue update-market-data --symbols SHEL.LSE
 pyvalue compute-metrics --symbols SHEL.LSE
-pyvalue run-screen screeners/value.yml --symbols SHEL.LSE
+pyvalue run-screen --config screeners/value.yml --symbols SHEL.LSE
 ```
 
 ## Developer Notes

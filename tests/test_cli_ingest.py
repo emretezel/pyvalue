@@ -206,7 +206,7 @@ def test_main_dispatches_ingest_fundamentals_with_default_provider_and_max_age_d
         rate,
         max_symbols,
         max_age_days,
-        resume,
+        respect_backoff,
         user_agent,
         cik,
     ):
@@ -218,7 +218,7 @@ def test_main_dispatches_ingest_fundamentals_with_default_provider_and_max_age_d
         calls["rate"] = rate
         calls["max_symbols"] = max_symbols
         calls["max_age_days"] = max_age_days
-        calls["resume"] = resume
+        calls["respect_backoff"] = respect_backoff
         calls["user_agent"] = user_agent
         calls["cik"] = cik
         return 0
@@ -238,13 +238,32 @@ def test_main_dispatches_ingest_fundamentals_with_default_provider_and_max_age_d
         "rate": None,
         "max_symbols": None,
         "max_age_days": 30,
-        "resume": False,
+        "respect_backoff": True,
         "user_agent": None,
         "cik": None,
     }
 
+    args = cli.build_parser().parse_args(
+        ["ingest-fundamentals", "--symbols", "AAPL.US", "--retry-failed-now"]
+    )
+    assert args.retry_failed_now is True
+
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(
+            ["ingest-fundamentals", "--symbols", "AAPL.US", "--resume"]
+        )
+
 
 def test_build_parser_normalize_fundamentals_defaults_provider():
+    args = cli.build_parser().parse_args(["normalize-fundamentals"])
+
+    assert args.command == "normalize-fundamentals"
+    assert args.provider == "EODHD"
+    assert args.symbols is None
+    assert args.exchange_codes is None
+    assert args.all_supported is False
+    assert args.force is False
+
     args = cli.build_parser().parse_args(
         ["normalize-fundamentals", "--symbols", "AAPL.US"]
     )
@@ -289,6 +308,14 @@ def test_main_dispatches_normalize_fundamentals_stage_with_force(monkeypatch):
 
 
 def test_build_parser_compute_metrics_warning_flag_defaults_to_suppressed():
+    args = cli.build_parser().parse_args(["compute-metrics"])
+
+    assert args.command == "compute-metrics"
+    assert args.symbols is None
+    assert args.exchange_codes is None
+    assert args.all_supported is False
+    assert args.show_metric_warnings is False
+
     args = cli.build_parser().parse_args(["compute-metrics", "--symbols", "AAPL.US"])
 
     assert args.command == "compute-metrics"
@@ -336,6 +363,84 @@ def test_main_dispatches_compute_metrics_stage_with_warning_flag(monkeypatch):
     }
 
 
+def test_build_parser_run_screen_requires_config_and_defaults_warning_flag():
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["run-screen", "--symbols", "AAPL.US"])
+
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["run-screen", "screeners/value.yml"])
+
+    args = cli.build_parser().parse_args(
+        ["run-screen", "--config", "screeners/value.yml", "--symbols", "AAPL.US"]
+    )
+
+    assert args.command == "run-screen"
+    assert args.config == "screeners/value.yml"
+    assert args.show_metric_warnings is False
+
+    args = cli.build_parser().parse_args(
+        [
+            "run-screen",
+            "--config",
+            "screeners/value.yml",
+            "--symbols",
+            "AAPL.US",
+            "--show-metric-warnings",
+        ]
+    )
+
+    assert args.show_metric_warnings is True
+
+
+def test_main_dispatches_run_screen_stage_with_warning_flag(monkeypatch):
+    calls = {}
+
+    def fake_cmd(
+        config_path,
+        database,
+        symbols,
+        exchange_codes,
+        all_supported,
+        output_csv,
+        show_metric_warnings,
+    ):
+        calls["config_path"] = config_path
+        calls["database"] = database
+        calls["symbols"] = symbols
+        calls["exchange_codes"] = exchange_codes
+        calls["all_supported"] = all_supported
+        calls["output_csv"] = output_csv
+        calls["show_metric_warnings"] = show_metric_warnings
+        return 0
+
+    monkeypatch.setattr(cli, "setup_logging", lambda: None)
+    monkeypatch.setattr(cli, "cmd_run_screen_stage", fake_cmd)
+
+    rc = cli.main(
+        [
+            "run-screen",
+            "--config",
+            "screeners/value.yml",
+            "--symbols",
+            "AAPL.US",
+            "--output-csv",
+            "data/out.csv",
+            "--show-metric-warnings",
+        ]
+    )
+
+    assert rc == 0
+    assert calls == {
+        "config_path": "screeners/value.yml",
+        "database": "data/pyvalue.db",
+        "symbols": ["AAPL.US"],
+        "exchange_codes": None,
+        "all_supported": False,
+        "output_csv": "data/out.csv",
+        "show_metric_warnings": True,
+    }
+
+
 def test_main_dispatches_update_market_data_global_with_default_max_age_days(
     monkeypatch,
 ):
@@ -350,7 +455,7 @@ def test_main_dispatches_update_market_data_global_with_default_max_age_days(
         rate,
         max_symbols,
         max_age_days,
-        resume,
+        respect_backoff,
     ):
         calls["provider"] = provider
         calls["database"] = database
@@ -360,7 +465,7 @@ def test_main_dispatches_update_market_data_global_with_default_max_age_days(
         calls["rate"] = rate
         calls["max_symbols"] = max_symbols
         calls["max_age_days"] = max_age_days
-        calls["resume"] = resume
+        calls["respect_backoff"] = respect_backoff
         return 0
 
     monkeypatch.setattr(cli, "setup_logging", lambda: None)
@@ -378,7 +483,63 @@ def test_main_dispatches_update_market_data_global_with_default_max_age_days(
         "rate": None,
         "max_symbols": None,
         "max_age_days": 30,
-        "resume": False,
+        "respect_backoff": True,
+    }
+
+    args = cli.build_parser().parse_args(
+        ["update-market-data", "--all-supported", "--retry-failed-now"]
+    )
+    assert args.retry_failed_now is True
+
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(
+            ["update-market-data", "--all-supported", "--resume"]
+        )
+
+
+def test_main_dispatches_update_market_data_without_scope_as_default_universe(
+    monkeypatch,
+):
+    calls = {}
+
+    def fake_cmd(
+        provider,
+        database,
+        symbols,
+        exchange_codes,
+        all_supported,
+        rate,
+        max_symbols,
+        max_age_days,
+        respect_backoff,
+    ):
+        calls["provider"] = provider
+        calls["database"] = database
+        calls["symbols"] = symbols
+        calls["exchange_codes"] = exchange_codes
+        calls["all_supported"] = all_supported
+        calls["rate"] = rate
+        calls["max_symbols"] = max_symbols
+        calls["max_age_days"] = max_age_days
+        calls["respect_backoff"] = respect_backoff
+        return 0
+
+    monkeypatch.setattr(cli, "setup_logging", lambda: None)
+    monkeypatch.setattr(cli, "cmd_update_market_data_stage", fake_cmd)
+
+    rc = cli.main(["update-market-data"])
+
+    assert rc == 0
+    assert calls == {
+        "provider": "EODHD",
+        "database": "data/pyvalue.db",
+        "symbols": None,
+        "exchange_codes": None,
+        "all_supported": False,
+        "rate": None,
+        "max_symbols": None,
+        "max_age_days": 30,
+        "respect_backoff": True,
     }
 
 
@@ -560,7 +721,7 @@ def test_cmd_ingest_fundamentals_bulk_eodhd_with_exchange(monkeypatch, tmp_path)
         user_agent=None,
         max_symbols=None,
         max_age_days=None,
-        resume=False,
+        respect_backoff=True,
     )
     assert rc == 0
     assert set(calls["fetched"]) == {("AAA.LSE", None), ("CCC.LSE", None)}
@@ -617,7 +778,7 @@ def test_cmd_ingest_fundamentals_bulk_eodhd_with_exchange_symbols(
         user_agent=None,
         max_symbols=None,
         max_age_days=None,
-        resume=False,
+        respect_backoff=True,
     )
     assert rc == 0
     assert set(calls["fetched"]) == {("AAA.US", None), ("BBB.US", None)}
@@ -661,7 +822,7 @@ def test_cmd_ingest_fundamentals_bulk_sec(monkeypatch, tmp_path):
         user_agent="UA",
         max_symbols=None,
         max_age_days=None,
-        resume=False,
+        respect_backoff=True,
     )
     assert rc == 0
     assert fake_client.calls == ["CIKAAA", "CIKBBB"]
@@ -987,6 +1148,68 @@ def test_cmd_refresh_supported_tickers_all_exchanges_in_code_order(
     assert repo.list_all_exchanges("EODHD") == ["LSE", "TSX", "US"]
 
 
+def test_cmd_refresh_supported_tickers_defaults_to_all_supported(monkeypatch, tmp_path):
+    db_path = tmp_path / "refresh-supported-tickers-default-all.db"
+    store_supported_exchanges(
+        db_path,
+        rows=[
+            {
+                "Code": "US",
+                "Name": "USA Stocks",
+                "Country": "USA",
+                "Currency": "USD",
+                "OperatingMIC": "XNAS",
+                "CountryISO2": "US",
+                "CountryISO3": "USA",
+            },
+            {
+                "Code": "LSE",
+                "Name": "London Exchange",
+                "Country": "UK",
+                "Currency": "GBP",
+                "OperatingMIC": "XLON",
+                "CountryISO2": "GB",
+                "CountryISO3": "GBR",
+            },
+        ],
+    )
+    calls = {"listed": []}
+
+    class FakeClient:
+        def __init__(self, api_key):
+            calls["api_key"] = api_key
+
+        def list_symbols(self, exchange_code):
+            calls["listed"].append(exchange_code)
+            return [
+                {
+                    "Code": f"{exchange_code}1",
+                    "Exchange": exchange_code,
+                    "Name": f"{exchange_code} Company",
+                    "Type": "Common Stock",
+                    "Currency": "USD",
+                }
+            ]
+
+        def list_exchanges(self):
+            raise AssertionError("Should use cached supported exchanges")
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+
+    rc = cli.cmd_refresh_supported_tickers(
+        provider="EODHD",
+        database=str(db_path),
+        exchange_codes=None,
+        all_supported=False,
+        include_etfs=False,
+    )
+
+    assert rc == 0
+    assert calls["api_key"] == "TOKEN"
+    assert calls["listed"] == ["LSE", "US"]
+
+
 def test_cmd_load_universe_eodhd_bootstraps_supported_exchanges(monkeypatch, tmp_path):
     db_path = tmp_path / "bootstrap-universe.db"
     with pytest.raises(SystemExit) as exc:
@@ -1049,7 +1272,7 @@ def test_cmd_ingest_fundamentals_global_respects_budget_from_user_metadata(
         rate=None,
         max_symbols=None,
         max_age_days=None,
-        resume=False,
+        respect_backoff=True,
     )
 
     assert rc == 0
@@ -1104,7 +1327,7 @@ def test_cmd_ingest_fundamentals_global_exits_cleanly_when_budget_exhausted(
         rate=None,
         max_symbols=None,
         max_age_days=None,
-        resume=False,
+        respect_backoff=True,
     )
 
     assert rc == 0
@@ -1158,7 +1381,7 @@ def test_cmd_ingest_fundamentals_global_rerun_fetches_remaining_missing_symbols(
         rate=None,
         max_symbols=1,
         max_age_days=None,
-        resume=False,
+        respect_backoff=True,
     )
     assert rc == 0
     assert calls["fetched"] == ["AAA.US"]
@@ -1171,7 +1394,7 @@ def test_cmd_ingest_fundamentals_global_rerun_fetches_remaining_missing_symbols(
         rate=None,
         max_symbols=None,
         max_age_days=None,
-        resume=False,
+        respect_backoff=True,
     )
     assert rc == 0
     assert calls["fetched"] == ["BBB.US"]
@@ -1261,15 +1484,17 @@ def test_cmd_ingest_fundamentals_global_max_age_days_refreshes_only_stale_or_mis
         rate=None,
         max_symbols=None,
         max_age_days=30,
-        resume=False,
+        respect_backoff=True,
     )
 
     assert rc == 0
     assert set(calls["fetched"]) == {"BBB.US", "CCC.US"}
 
 
-def test_cmd_ingest_fundamentals_global_resume_respects_backoff(monkeypatch, tmp_path):
-    db_path = tmp_path / "global-resume.db"
+def test_cmd_ingest_fundamentals_global_respects_backoff_by_default(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "global-respect-backoff.db"
     store_supported_tickers(
         db_path,
         "US",
@@ -1316,7 +1541,7 @@ def test_cmd_ingest_fundamentals_global_resume_respects_backoff(monkeypatch, tmp
         rate=None,
         max_symbols=None,
         max_age_days=None,
-        resume=True,
+        respect_backoff=True,
     )
 
     assert rc == 0
@@ -1394,7 +1619,7 @@ def test_cmd_ingest_fundamentals_global_default_mode_remains_missing_only(
         rate=None,
         max_symbols=None,
         max_age_days=None,
-        resume=False,
+        respect_backoff=True,
     )
 
     assert rc == 0
@@ -1480,7 +1705,7 @@ def test_cmd_ingest_fundamentals_global_uses_concurrent_workers(monkeypatch, tmp
         rate=None,
         max_symbols=None,
         max_age_days=None,
-        resume=False,
+        respect_backoff=True,
     )
 
     assert rc == 0
@@ -1558,7 +1783,7 @@ def test_cmd_ingest_fundamentals_global_batches_success_state_updates(
         rate=None,
         max_symbols=None,
         max_age_days=None,
-        resume=False,
+        respect_backoff=True,
     )
 
     assert rc == 0
@@ -1630,7 +1855,7 @@ def test_cmd_ingest_fundamentals_global_flushes_batches_on_keyboard_interrupt(
         rate=None,
         max_symbols=None,
         max_age_days=None,
-        resume=False,
+        respect_backoff=True,
     )
 
     assert rc == 1
@@ -1912,7 +2137,10 @@ def test_cmd_report_ingest_progress_reports_blocked_by_backoff(
     assert "Blocked: 1" in output
     assert "earliest next eligible: " in output
     assert "AAA.US [US]" in output
-    assert "Next action: Wait for backoff to expire or rerun without --resume" in output
+    assert (
+        "Next action: Wait for backoff to expire or rerun with --retry-failed-now"
+        in output
+    )
 
 
 def test_cmd_report_ingest_progress_filters_exchanges(monkeypatch, tmp_path, capsys):
@@ -2054,7 +2282,7 @@ def test_cmd_update_market_data_global_uses_supported_tickers(monkeypatch, tmp_p
         rate=None,
         max_symbols=None,
         max_age_days=7,
-        resume=False,
+        respect_backoff=True,
     )
 
     assert rc == 0
@@ -2179,7 +2407,7 @@ def test_cmd_update_market_data_stage_uses_bulk_for_large_exchange(
         rate=None,
         max_symbols=None,
         max_age_days=7,
-        resume=False,
+        respect_backoff=True,
     )
 
     assert rc == 0
@@ -2265,7 +2493,7 @@ def test_cmd_update_market_data_stage_retries_missing_bulk_symbol_individually(
         rate=None,
         max_symbols=None,
         max_age_days=7,
-        resume=False,
+        respect_backoff=True,
     )
 
     assert rc == 0
@@ -2361,7 +2589,7 @@ def test_cmd_update_market_data_stage_interrupts_cleanly_in_symbol_phase(
         rate=None,
         max_symbols=None,
         max_age_days=7,
-        resume=False,
+        respect_backoff=True,
     )
 
     assert rc == 1
@@ -2446,7 +2674,7 @@ def test_cmd_update_market_data_global_prefers_missing_then_oldest_stale(
         rate=None,
         max_symbols=None,
         max_age_days=7,
-        resume=False,
+        respect_backoff=True,
     )
 
     assert rc == 0
@@ -2500,7 +2728,7 @@ def test_cmd_update_market_data_global_exits_cleanly_when_budget_exhausted(
         rate=None,
         max_symbols=None,
         max_age_days=7,
-        resume=False,
+        respect_backoff=True,
     )
 
     assert rc == 0
@@ -2563,7 +2791,7 @@ def test_cmd_update_market_data_global_rerun_fetches_remaining_missing_or_stale(
         rate=None,
         max_symbols=1,
         max_age_days=7,
-        resume=False,
+        respect_backoff=True,
     )
     assert rc == 0
     assert calls["refreshed"] == ["AAA.US"]
@@ -2576,14 +2804,16 @@ def test_cmd_update_market_data_global_rerun_fetches_remaining_missing_or_stale(
         rate=None,
         max_symbols=None,
         max_age_days=7,
-        resume=False,
+        respect_backoff=True,
     )
     assert rc == 0
     assert calls["refreshed"] == ["BBB.US"]
 
 
-def test_cmd_update_market_data_global_resume_respects_backoff(monkeypatch, tmp_path):
-    db_path = tmp_path / "global-market-data-resume.db"
+def test_cmd_update_market_data_global_respects_backoff_by_default(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "global-market-data-respect-backoff.db"
     store_supported_tickers(
         db_path,
         "US",
@@ -2639,7 +2869,7 @@ def test_cmd_update_market_data_global_resume_respects_backoff(monkeypatch, tmp_
         rate=None,
         max_symbols=None,
         max_age_days=7,
-        resume=True,
+        respect_backoff=True,
     )
 
     assert rc == 0
@@ -2777,7 +3007,10 @@ def test_cmd_report_market_data_progress_reports_blocked_by_backoff(
     assert "Status: BLOCKED_BY_BACKOFF" in output
     assert "Blocked: 1" in output
     assert "AAA.US [US]" in output
-    assert "Next action: Wait for backoff to expire or rerun without --resume" in output
+    assert (
+        "Next action: Wait for backoff to expire or rerun with --retry-failed-now"
+        in output
+    )
 
 
 def test_cmd_report_market_data_progress_filters_exchanges(
@@ -2909,7 +3142,7 @@ def test_cmd_ingest_fundamentals_bulk_skips_fresh_and_backoff(monkeypatch, tmp_p
         user_agent=None,
         max_symbols=None,
         max_age_days=30,
-        resume=True,
+        respect_backoff=True,
     )
 
     assert rc == 0
@@ -2924,7 +3157,7 @@ def test_cmd_ingest_fundamentals_bulk_skips_fresh_and_backoff(monkeypatch, tmp_p
         user_agent=None,
         max_symbols=None,
         max_age_days=30,
-        resume=False,
+        respect_backoff=False,
     )
 
     assert rc == 0
@@ -3449,6 +3682,100 @@ def test_cmd_compute_metrics_stage_can_show_metric_warnings_on_console(
     assert (
         "Metric dummy_metric could not be computed for AAA.US"
         in capsys.readouterr().err
+    )
+
+
+def test_cmd_run_screen_stage_suppresses_metric_warnings_on_console_by_default(
+    tmp_path, capsys
+):
+    db_path = tmp_path / "screen-stage-suppressed.db"
+    log_dir = tmp_path / "logs"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
+        provider="SEC",
+    )
+
+    screen_path = tmp_path / "screen.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Working capital minimum"
+    left:
+      metric: working_capital
+    operator: ">="
+    right:
+      value: 75
+"""
+    )
+
+    clear_root_logging_handlers()
+    cli.setup_logging(log_dir=log_dir)
+    try:
+        rc = cli.cmd_run_screen_stage(
+            config_path=str(screen_path),
+            database=str(db_path),
+            symbols=["AAA.US"],
+            exchange_codes=None,
+            all_supported=False,
+            output_csv=None,
+        )
+    finally:
+        clear_root_logging_handlers()
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "run compute-metrics first" not in captured.err
+    assert "Progress:" not in captured.out
+    log_text = (log_dir / "pyvalue.log").read_text(encoding="utf-8")
+    assert (
+        "Metric working_capital missing for AAA.US; run compute-metrics first"
+        in log_text
+    )
+
+
+def test_cmd_run_screen_stage_can_show_metric_warnings_on_console(tmp_path, capsys):
+    db_path = tmp_path / "screen-stage-show-warnings.db"
+    log_dir = tmp_path / "logs"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
+        provider="SEC",
+    )
+
+    screen_path = tmp_path / "screen.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Working capital minimum"
+    left:
+      metric: working_capital
+    operator: ">="
+    right:
+      value: 75
+"""
+    )
+
+    clear_root_logging_handlers()
+    cli.setup_logging(log_dir=log_dir)
+    try:
+        rc = cli.cmd_run_screen_stage(
+            config_path=str(screen_path),
+            database=str(db_path),
+            symbols=["AAA.US"],
+            exchange_codes=None,
+            all_supported=False,
+            output_csv=None,
+            show_metric_warnings=True,
+        )
+    finally:
+        clear_root_logging_handlers()
+
+    assert rc == 1
+    assert "Metric working_capital missing for AAA.US; run compute-metrics first" in (
+        capsys.readouterr().err
     )
 
 
@@ -5495,6 +5822,111 @@ criteria:
     assert csv_contents[1].startswith("Entity,AAA PLC")
     assert csv_contents[2].startswith("Description,AAA description")
     assert csv_contents[3] == "Price,N/A"
+
+
+def test_cmd_run_screen_stage_reports_progress_for_multi_symbol_scope(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "screen-stage-progress.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+    metrics_repo.upsert("AAA.US", "working_capital", 100.0, "2023-12-31")
+    entity_repo = EntityMetadataRepository(db_path)
+    entity_repo.initialize_schema()
+    entity_repo.upsert("AAA.US", "AAA Inc", description="AAA description")
+    entity_repo.upsert("BBB.US", "BBB Inc", description="BBB description")
+
+    screen_path = tmp_path / "screen.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Working capital minimum"
+    left:
+      metric: working_capital
+    operator: ">="
+    right:
+      value: 75
+"""
+    )
+
+    monkeypatch.setattr(cli, "SCREEN_PROGRESS_INTERVAL_SECONDS", 0.0)
+
+    rc = cli.cmd_run_screen_stage(
+        config_path=str(screen_path),
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=["US"],
+        all_supported=False,
+        output_csv=None,
+    )
+
+    assert rc == 0
+    output_lines = capsys.readouterr().out.splitlines()
+    assert [line for line in output_lines if line.startswith("Progress:")] == [
+        "Progress: 1/2 symbols complete (50.0%)",
+        "Progress: 2/2 symbols complete (100.0%)",
+    ]
+    assert any("AAA.US" in line for line in output_lines)
+
+
+def test_cmd_run_screen_stage_reports_progress_when_no_symbols_pass(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "screen-stage-no-pass.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+    metrics_repo.upsert("AAA.US", "working_capital", 50.0, "2023-12-31")
+    metrics_repo.upsert("BBB.US", "working_capital", 60.0, "2023-12-31")
+
+    screen_path = tmp_path / "screen.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Working capital minimum"
+    left:
+      metric: working_capital
+    operator: ">="
+    right:
+      value: 75
+"""
+    )
+
+    monkeypatch.setattr(cli, "SCREEN_PROGRESS_INTERVAL_SECONDS", 0.0)
+
+    rc = cli.cmd_run_screen_stage(
+        config_path=str(screen_path),
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=["US"],
+        all_supported=False,
+        output_csv=None,
+    )
+
+    assert rc == 1
+    output_lines = capsys.readouterr().out.splitlines()
+    assert [line for line in output_lines if line.startswith("Progress:")] == [
+        "Progress: 1/2 symbols complete (50.0%)",
+        "Progress: 2/2 symbols complete (100.0%)",
+    ]
+    assert output_lines[-1] == "No symbols satisfied all criteria."
 
 
 def test_cmd_report_metric_failures_uses_highest_market_cap_example(tmp_path, capsys):

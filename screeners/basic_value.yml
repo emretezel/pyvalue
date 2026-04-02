@@ -1,11 +1,4 @@
 criteria:
-  - name: "Minimum market cap"
-    left:
-      metric: market_cap
-    operator: ">"
-    right:
-      value: 750000000
-
   - name: "Current ratio floor"
     left:
       metric: current_ratio

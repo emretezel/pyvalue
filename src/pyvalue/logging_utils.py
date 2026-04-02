@@ -49,12 +49,17 @@ def setup_logging(
 
 
 class _ConsoleMetricWarningFilter(logging.Filter):
-    """Suppress noisy metric warnings on console while keeping file logging intact."""
+    """Suppress noisy metric and screen warnings on console only."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         if record.levelno != logging.WARNING:
             return True
         if record.name.startswith("pyvalue.metrics"):
+            return False
+        if (
+            record.name == "pyvalue.screening"
+            and record.msg == "Metric %s missing for %s; run compute-metrics first"
+        ):
             return False
         return not (
             record.name == "pyvalue.cli"

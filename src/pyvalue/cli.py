@@ -84,6 +84,7 @@ MARKET_DATA_PROGRESS_INTERVAL_SECONDS = 5.0
 MARKET_DATA_PROGRESS_SYMBOL_STEP = 250
 METRICS_MAX_WORKERS = 16
 METRICS_PROGRESS_INTERVAL_SECONDS = 5.0
+SCREEN_PROGRESS_INTERVAL_SECONDS = 5.0
 METRICS_WRITE_BATCH_SIZE = 25
 METRICS_WRITE_BATCH_INTERVAL_SECONDS = 0.25
 NORMALIZATION_MAX_WORKERS = 16
@@ -422,9 +423,11 @@ def _validate_scope_selector(
         )
         if flag
     )
+    if selected == 0:
+        return None, None
     if selected != 1:
         raise SystemExit(
-            "Exactly one scope selector is required: use one of "
+            "At most one scope selector may be provided: use one of "
             "--symbols, --exchange-codes, or --all-supported."
         )
     return symbol_filters, sorted(exchange_filters) if exchange_filters else None
@@ -725,7 +728,7 @@ def _prepare_eodhd_fundamentals_run(
     rate: Optional[float],
     max_symbols: Optional[int],
     max_age_days: Optional[int],
-    resume: bool,
+    respect_backoff: bool,
     missing_only: bool,
 ) -> _PreparedFundamentalsRun:
     eodhd_client = EODHDFundamentalsClient(api_key=api_key)
@@ -755,7 +758,7 @@ def _prepare_eodhd_fundamentals_run(
         exchange_codes=exchange_codes,
         max_age_days=max_age_days,
         max_symbols=request_budget,
-        resume=resume,
+        respect_backoff=respect_backoff,
         missing_only=missing_only,
         provider_symbols=provider_symbols,
     )
@@ -1172,18 +1175,24 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     def add_scope_args(command_parser: argparse.ArgumentParser) -> None:
-        scope = command_parser.add_mutually_exclusive_group(required=True)
+        scope = command_parser.add_mutually_exclusive_group(required=False)
         scope.add_argument(
             "--symbols",
             nargs="+",
             default=None,
-            help="Space or comma separated list of fully qualified symbols.",
+            help=(
+                "Space or comma separated list of fully qualified symbols. "
+                "Defaults to the full supported universe when omitted."
+            ),
         )
         scope.add_argument(
             "--exchange-codes",
             nargs="+",
             default=None,
-            help="Space or comma separated list of exchange codes.",
+            help=(
+                "Space or comma separated list of exchange codes. "
+                "Defaults to the full supported universe when omitted."
+            ),
         )
         scope.add_argument(
             "--all-supported",
@@ -1338,9 +1347,9 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     ingest_fundamentals.add_argument(
-        "--resume",
+        "--retry-failed-now",
         action="store_true",
-        help="Skip symbols that are still in backoff from prior failures.",
+        help="Ignore retry backoff and retry previously failed symbols immediately.",
     )
     fundamentals_progress = subparsers.add_parser(
         "report-fundamentals-progress",
@@ -1442,9 +1451,9 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     market_data.add_argument(
-        "--resume",
+        "--retry-failed-now",
         action="store_true",
-        help="Skip symbols that are still in backoff from prior failures.",
+        help="Ignore retry backoff and retry previously failed symbols immediately.",
     )
 
     normalize_fundamentals = subparsers.add_parser(
@@ -1585,13 +1594,22 @@ def build_parser() -> argparse.ArgumentParser:
         "run-screen",
         help="Evaluate screening criteria for the requested canonical scope.",
     )
-    run_screen.add_argument("config", help="Path to screening config (YAML)")
+    run_screen.add_argument(
+        "--config",
+        required=True,
+        help="Path to screening config (YAML)",
+    )
     run_screen.add_argument(
         "--database",
         default="data/pyvalue.db",
         help="SQLite database file (default: %(default)s)",
     )
     add_scope_args(run_screen)
+    run_screen.add_argument(
+        "--show-metric-warnings",
+        action="store_true",
+        help="Show metric/data-quality warnings on the console (default: suppressed).",
+    )
     run_screen.add_argument(
         "--output-csv",
         default=None,
@@ -1769,13 +1787,9 @@ def cmd_refresh_supported_tickers(
 
     api_key = _require_eodhd_key()
     eodhd_client = EODHDFundamentalsClient(api_key=api_key)
-    if all_supported:
+    if all_supported or not requested_exchanges:
         exchange_list = _list_eodhd_exchange_codes(database, eodhd_client)
     else:
-        if not requested_exchanges:
-            raise SystemExit(
-                "Use --exchange-codes or --all-supported with refresh-supported-tickers."
-            )
         exchange_list = sorted(requested_exchanges)
         for exchange_norm in exchange_list:
             meta = _resolve_eodhd_exchange_metadata(
@@ -1812,7 +1826,7 @@ def cmd_ingest_fundamentals_global(
     rate: Optional[float],
     max_symbols: Optional[int],
     max_age_days: Optional[int],
-    resume: bool,
+    respect_backoff: bool,
 ) -> int:
     """Fetch EODHD fundamentals across supported tickers with quota awareness."""
 
@@ -1834,7 +1848,7 @@ def cmd_ingest_fundamentals_global(
         rate=rate,
         max_symbols=max_symbols,
         max_age_days=max_age_days,
-        resume=resume,
+        respect_backoff=respect_backoff,
         missing_only=max_age_days is None,
     )
     scope_label = (
@@ -1927,7 +1941,7 @@ def cmd_report_ingest_progress(
         else:
             next_action = "Run ingest-fundamentals now"
     elif summary.blocked > 0:
-        next_action = "Wait for backoff to expire or rerun without --resume"
+        next_action = "Wait for backoff to expire or rerun with --retry-failed-now"
     else:
         next_action = "Done for current scope"
 
@@ -2002,7 +2016,7 @@ def cmd_update_market_data_global(
     rate: Optional[float],
     max_symbols: Optional[int],
     max_age_days: int,
-    resume: bool,
+    respect_backoff: bool,
 ) -> int:
     """Refresh EODHD market data across supported tickers with quota awareness."""
 
@@ -2041,7 +2055,7 @@ def cmd_update_market_data_global(
         else None,
         max_age_days=max_age_days,
         max_symbols=request_budget,
-        resume=resume,
+        respect_backoff=respect_backoff,
     )
     if not eligible:
         scope = (
@@ -2175,7 +2189,7 @@ def cmd_report_market_data_progress(
         else:
             next_action = "Run update-market-data now"
     elif summary.blocked > 0:
-        next_action = "Wait for backoff to expire or rerun without --resume"
+        next_action = "Wait for backoff to expire or rerun with --retry-failed-now"
     else:
         next_action = "Done for current scope"
 
@@ -2270,7 +2284,7 @@ def cmd_ingest_fundamentals_stage(
     rate: Optional[float],
     max_symbols: Optional[int],
     max_age_days: Optional[int],
-    resume: bool,
+    respect_backoff: bool,
     user_agent: Optional[str],
     cik: Optional[str],
 ) -> int:
@@ -2304,7 +2318,7 @@ def cmd_ingest_fundamentals_stage(
             exchange_codes=resolved_exchange_codes,
             max_age_days=max_age_days,
             max_symbols=max_symbols,
-            resume=resume,
+            respect_backoff=respect_backoff,
             missing_only=max_age_days is None,
             provider_symbols=symbol_filters,
         )
@@ -2376,7 +2390,7 @@ def cmd_ingest_fundamentals_stage(
         rate=rate,
         max_symbols=max_symbols,
         max_age_days=max_age_days,
-        resume=resume,
+        respect_backoff=respect_backoff,
         missing_only=max_age_days is None,
     )
     return _run_eodhd_fundamentals_ingestion(
@@ -2396,7 +2410,7 @@ def cmd_update_market_data_stage(
     rate: Optional[float],
     max_symbols: Optional[int],
     max_age_days: int,
-    resume: bool,
+    respect_backoff: bool,
 ) -> int:
     """Unified market-data refresh over symbol, exchange, or full supported scope."""
 
@@ -2437,7 +2451,7 @@ def cmd_update_market_data_stage(
         exchange_codes=resolved_exchange_codes,
         max_age_days=max_age_days,
         max_symbols=max_symbols,
-        resume=resume,
+        respect_backoff=respect_backoff,
         provider_symbols=symbol_filters,
     )
     if not eligible:
@@ -2938,8 +2952,8 @@ def _flush_metric_write_batch(
     pending_rows.clear()
 
 
-def _print_metric_progress(completed_symbols: int, total_symbols: int) -> None:
-    """Print symbol-level percent progress for metric computation."""
+def _print_symbol_progress(completed_symbols: int, total_symbols: int) -> None:
+    """Print symbol-level percent progress for long-running CLI commands."""
 
     if total_symbols <= 0:
         percent = 100.0
@@ -3090,7 +3104,7 @@ def _run_metric_computation(
         nonlocal last_progress_at, last_reported_completed
         if total_symbols <= 0:
             if force and last_reported_completed != 0:
-                _print_metric_progress(0, 0)
+                _print_symbol_progress(0, 0)
                 last_reported_completed = 0
                 last_progress_at = time.monotonic()
             return
@@ -3099,7 +3113,7 @@ def _run_metric_computation(
         elapsed = time.monotonic() - last_progress_at
         if not force and elapsed < METRICS_PROGRESS_INTERVAL_SECONDS:
             return
-        _print_metric_progress(completed_symbols, total_symbols)
+        _print_symbol_progress(completed_symbols, total_symbols)
         last_reported_completed = completed_symbols
         last_progress_at = time.monotonic()
 
@@ -3210,11 +3224,12 @@ def cmd_run_screen_stage(
     exchange_codes: Optional[Sequence[str]],
     all_supported: bool,
     output_csv: Optional[str],
+    show_metric_warnings: bool = False,
 ) -> int:
     """Unified screen evaluation over symbol, exchange, or full supported scope."""
 
     db_path = _resolve_database_path(database)
-    canonical_symbols, explicit_symbols, resolved_exchange_codes = (
+    canonical_symbols, _explicit_symbols, resolved_exchange_codes = (
         _resolve_canonical_scope_symbols(
             str(db_path),
             symbols,
@@ -3232,100 +3247,130 @@ def cmd_run_screen_stage(
     entity_repo = EntityMetadataRepository(db_path)
     entity_repo.initialize_schema()
 
-    if len(canonical_symbols) == 1:
-        symbol = canonical_symbols[0]
-        entity_name = entity_repo.fetch(symbol) or symbol
-        description = entity_repo.fetch_description(symbol) or "N/A"
-        snapshot = market_repo.latest_snapshot(symbol)
-        price_label = _format_value(snapshot.price) if snapshot else "N/A"
-        print(f"Entity: {entity_name}")
-        print(f"Description: {description}")
-        print(f"Price: {price_label}")
-        results = []
-        for criterion in definition.criteria:
-            passed, left_value = evaluate_criterion_verbose(
-                criterion, symbol, metrics_repo, fact_repo, market_repo
-            )
-            results.append((criterion.name, passed, left_value))
-        passed_all = all(flag for _, flag, _ in results)
-        for name, passed, value in results:
-            value_display = _format_value(value) if value is not None else "N/A"
-            print(f"{name}: {'PASS' if passed else 'FAIL'} (value={value_display})")
-        return 0 if passed_all else 1
-
-    ticker_repo = SupportedTickerRepository(db_path)
-    universe_names = dict(
-        ticker_repo.list_canonical_symbol_name_pairs(resolved_exchange_codes)
-    )
-    entity_labels: Dict[str, str] = {}
-    passed_symbols: List[str] = []
-    criterion_values: Dict[str, Dict[str, float]] = {
-        c.name: {} for c in definition.criteria
-    }
-    for symbol in canonical_symbols:
-        symbol_passed = True
-        per_symbol_values: Dict[str, float] = {}
-        label = entity_repo.fetch(symbol) or universe_names.get(symbol) or symbol
-        entity_labels[symbol] = label
-        for criterion in definition.criteria:
-            passed, left_value = evaluate_criterion_verbose(
-                criterion, symbol, metrics_repo, fact_repo, market_repo
-            )
-            if not passed or left_value is None:
-                symbol_passed = False
-                break
-            per_symbol_values[criterion.name] = left_value
-        if symbol_passed:
-            passed_symbols.append(symbol)
+    with suppress_console_metric_warnings(not show_metric_warnings):
+        if len(canonical_symbols) == 1:
+            symbol = canonical_symbols[0]
+            entity_name = entity_repo.fetch(symbol) or symbol
+            description = entity_repo.fetch_description(symbol) or "N/A"
+            snapshot = market_repo.latest_snapshot(symbol)
+            price_label = _format_value(snapshot.price) if snapshot else "N/A"
+            print(f"Entity: {entity_name}")
+            print(f"Description: {description}")
+            print(f"Price: {price_label}")
+            results = []
             for criterion in definition.criteria:
-                criterion_values[criterion.name][symbol] = per_symbol_values[
-                    criterion.name
-                ]
+                passed, left_value = evaluate_criterion_verbose(
+                    criterion, symbol, metrics_repo, fact_repo, market_repo
+                )
+                results.append((criterion.name, passed, left_value))
+            passed_all = all(flag for _, flag, _ in results)
+            for name, passed, value in results:
+                value_display = _format_value(value) if value is not None else "N/A"
+                print(f"{name}: {'PASS' if passed else 'FAIL'} (value={value_display})")
+            return 0 if passed_all else 1
 
-    if not passed_symbols:
-        print("No symbols satisfied all criteria.")
-        if output_csv:
-            _write_screen_csv(definition.criteria, [], {}, {}, {}, {}, {}, output_csv)
-        return 1
-
-    selected_names = {
-        symbol: entity_labels.get(symbol, symbol) for symbol in passed_symbols
-    }
-    selected_descriptions: Dict[str, str] = {}
-    selected_prices: Dict[str, str] = {}
-    selected_price_currencies: Dict[str, str] = {}
-    for symbol in passed_symbols:
-        entity_description = entity_repo.fetch_description(symbol)
-        selected_descriptions[symbol] = (
-            entity_description if entity_description else "N/A"
+        ticker_repo = SupportedTickerRepository(db_path)
+        universe_names = dict(
+            ticker_repo.list_canonical_symbol_name_pairs(resolved_exchange_codes)
         )
-        snapshot = market_repo.latest_snapshot(symbol)
-        if snapshot:
-            selected_prices[symbol] = _format_value(snapshot.price)
-            selected_price_currencies[symbol] = snapshot.currency or "N/A"
-        else:
-            selected_prices[symbol] = "N/A"
-            selected_price_currencies[symbol] = "N/A"
-    _print_screen_table(
-        definition.criteria,
-        passed_symbols,
-        criterion_values,
-        selected_names,
-        selected_descriptions,
-        selected_prices,
-    )
-    if output_csv:
-        _write_screen_csv(
+        entity_labels: Dict[str, str] = {}
+        passed_symbols: List[str] = []
+        criterion_values: Dict[str, Dict[str, float]] = {
+            c.name: {} for c in definition.criteria
+        }
+        completed_symbols = 0
+        total_symbols = len(canonical_symbols)
+        last_progress_at = time.monotonic()
+        last_reported_completed = -1
+
+        def maybe_report_progress(force: bool = False) -> None:
+            nonlocal last_progress_at, last_reported_completed
+            if completed_symbols == last_reported_completed:
+                return
+            elapsed = time.monotonic() - last_progress_at
+            if not force and elapsed < SCREEN_PROGRESS_INTERVAL_SECONDS:
+                return
+            _print_symbol_progress(completed_symbols, total_symbols)
+            last_reported_completed = completed_symbols
+            last_progress_at = time.monotonic()
+
+        for symbol in canonical_symbols:
+            symbol_passed = True
+            per_symbol_values: Dict[str, float] = {}
+            label = entity_repo.fetch(symbol) or universe_names.get(symbol) or symbol
+            entity_labels[symbol] = label
+            for criterion in definition.criteria:
+                passed, left_value = evaluate_criterion_verbose(
+                    criterion, symbol, metrics_repo, fact_repo, market_repo
+                )
+                if not passed or left_value is None:
+                    symbol_passed = False
+                    break
+                per_symbol_values[criterion.name] = left_value
+            if symbol_passed:
+                passed_symbols.append(symbol)
+                for criterion in definition.criteria:
+                    criterion_values[criterion.name][symbol] = per_symbol_values[
+                        criterion.name
+                    ]
+            completed_symbols += 1
+            maybe_report_progress()
+
+        maybe_report_progress(force=True)
+
+        if not passed_symbols:
+            print("No symbols satisfied all criteria.")
+            if output_csv:
+                _write_screen_csv(
+                    definition.criteria,
+                    [],
+                    {},
+                    {},
+                    {},
+                    {},
+                    {},
+                    output_csv,
+                )
+            return 1
+
+        selected_names = {
+            symbol: entity_labels.get(symbol, symbol) for symbol in passed_symbols
+        }
+        selected_descriptions: Dict[str, str] = {}
+        selected_prices: Dict[str, str] = {}
+        selected_price_currencies: Dict[str, str] = {}
+        for symbol in passed_symbols:
+            entity_description = entity_repo.fetch_description(symbol)
+            selected_descriptions[symbol] = (
+                entity_description if entity_description else "N/A"
+            )
+            snapshot = market_repo.latest_snapshot(symbol)
+            if snapshot:
+                selected_prices[symbol] = _format_value(snapshot.price)
+                selected_price_currencies[symbol] = snapshot.currency or "N/A"
+            else:
+                selected_prices[symbol] = "N/A"
+                selected_price_currencies[symbol] = "N/A"
+        _print_screen_table(
             definition.criteria,
             passed_symbols,
             criterion_values,
             selected_names,
             selected_descriptions,
             selected_prices,
-            selected_price_currencies,
-            output_csv,
         )
-    return 0
+        if output_csv:
+            _write_screen_csv(
+                definition.criteria,
+                passed_symbols,
+                criterion_values,
+                selected_names,
+                selected_descriptions,
+                selected_prices,
+                selected_price_currencies,
+                output_csv,
+            )
+        return 0
 
 
 def cmd_ingest_eodhd_fundamentals(
@@ -3381,7 +3426,7 @@ def cmd_ingest_eodhd_fundamentals_bulk(
         user_agent=None,
         max_symbols=None,
         max_age_days=None,
-        resume=False,
+        respect_backoff=True,
     )
 
 
@@ -3453,7 +3498,7 @@ def cmd_ingest_fundamentals_bulk(
     user_agent: Optional[str],
     max_symbols: Optional[int],
     max_age_days: Optional[int],
-    resume: bool,
+    respect_backoff: bool,
 ) -> int:
     """Fetch fundamentals in bulk for the specified provider."""
 
@@ -3536,7 +3581,7 @@ def cmd_ingest_fundamentals_bulk(
             rate=rate,
             max_symbols=max_symbols,
             max_age_days=max_age_days,
-            resume=resume,
+            respect_backoff=respect_backoff,
             missing_only=False,
         )
         return _run_eodhd_fundamentals_ingestion(
@@ -4132,7 +4177,7 @@ def cmd_refresh_exchange(
     market_rate: float,
     max_symbols: Optional[int],
     max_age_days: Optional[int],
-    resume: bool,
+    respect_backoff: bool,
     user_agent: Optional[str],
     metrics: Optional[Sequence[str]],
 ) -> int:
@@ -4182,7 +4227,7 @@ def cmd_refresh_exchange(
         user_agent=user_agent,
         max_symbols=max_symbols,
         max_age_days=max_age_days,
-        resume=resume,
+        respect_backoff=respect_backoff,
     )
     if result != 0:
         return result
@@ -5217,7 +5262,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 rate=args.rate,
                 max_symbols=args.max_symbols,
                 max_age_days=args.max_age_days,
-                resume=args.resume,
+                respect_backoff=not args.retry_failed_now,
                 user_agent=args.user_agent,
                 cik=args.cik,
             )
@@ -5246,7 +5291,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 rate=args.rate,
                 max_symbols=args.max_symbols,
                 max_age_days=args.max_age_days,
-                resume=args.resume,
+                respect_backoff=not args.retry_failed_now,
             )
         if args.command == "normalize-fundamentals":
             return cmd_normalize_fundamentals_stage(
@@ -5317,6 +5362,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 exchange_codes=args.exchange_codes,
                 all_supported=args.all_supported,
                 output_csv=args.output_csv,
+                show_metric_warnings=args.show_metric_warnings,
             )
         if args.command == "purge-us-nonfilers":
             return cmd_purge_us_nonfilers(database=args.database, apply=args.apply)

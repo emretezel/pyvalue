@@ -33,7 +33,9 @@ data/pyvalue.db
 ## Recommended First Workflow: EODHD
 
 Commands that accept `--provider` default to `EODHD`, so the examples below
-omit it.
+omit it. Commands that accept `--symbols`, `--exchange-codes`, or
+`--all-supported` also default to the full supported universe when you omit all
+three selectors.
 
 ```bash
 pyvalue refresh-supported-exchanges
@@ -47,7 +49,7 @@ pyvalue compute-metrics --exchange-codes US
 Then inspect screens or run a screen config:
 
 ```bash
-pyvalue run-screen screeners/value.yml --exchange-codes US
+pyvalue run-screen --config screeners/value.yml --exchange-codes US
 ```
 
 ## Minimal Single-Symbol Workflow

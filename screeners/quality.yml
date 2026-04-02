@@ -1,11 +1,4 @@
 criteria:
-  - name: "Minimum market cap (investable liquidity floor)"
-    left:
-      metric: market_cap
-    operator: ">"
-    right:
-      value: 2000000000
-
   - name: "Positive trailing EPS (avoid structurally loss-making)"
     left:
       metric: eps_ttm

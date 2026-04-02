@@ -5,7 +5,8 @@ All commands default to `data/pyvalue.db` unless `--database` is provided.
 ## Scope Model
 
 The stage commands from fundamentals ingestion onward use one shared scope model.
-Exactly one of these selectors is required:
+If you omit all scope selectors, the command defaults to the full supported
+universe. When you do provide a selector, provide at most one of:
 
 - `--symbols <symbols...>`: one or more fully qualified symbols such as `AAPL.US`
   or `SHEL.LSE`
@@ -55,6 +56,8 @@ Key options:
 
 Notes:
 
+- omitting both `--exchange-codes` and `--all-supported` defaults to the full
+  supported exchange catalog for the provider
 - `EODHD` reads `exchange-symbol-list/<EXCHANGE_CODE>` and keeps only
   `Common Stock`, `Preferred Stock`, and `Stock`
 - `SEC` reads Nasdaq Trader symbol directories and materializes provider symbols
@@ -72,13 +75,14 @@ Key options:
 
 - `--provider {SEC,EODHD}`
 - default provider: `EODHD`
-- scope selector: `--symbols`, `--exchange-codes`, or `--all-supported`
+- optional scope selector: `--symbols`, `--exchange-codes`, or
+  `--all-supported` (defaults to the full supported universe)
 - `--user-agent <value>` for SEC
 - `--cik <10-digit-cik>` optional SEC override
 - `--rate <float>`
 - `--max-symbols <int>`
 - `--max-age-days <int>` default `30`
-- `--resume`
+- `--retry-failed-now`
 - `--database <path>`
 
 Notes:
@@ -87,6 +91,7 @@ Notes:
 - `EODHD` rate is symbols per minute
 - `EODHD` uses the stored supported-ticker catalog plus daily quota checks,
   a concurrent worker pool, and retry backoff for multi-day runs
+- retry backoff is respected by default; use `--retry-failed-now` to ignore it
 - the default EODHD fundamentals rate is `950 req/min`, leaving a small buffer
   under the `1000 req/min` provider limit
 - omitted `--max-age-days` now means the same 30-day freshness window used by
@@ -121,7 +126,8 @@ Key options:
 
 - `--provider {SEC,EODHD}`
 - default provider: `EODHD`
-- scope selector: `--symbols`, `--exchange-codes`, or `--all-supported`
+- optional scope selector: `--symbols`, `--exchange-codes`, or
+  `--all-supported` (defaults to the full supported universe)
 - `--force` to re-normalize even when stored raw fundamentals are already up to date
 - `--database <path>`
 
@@ -142,11 +148,12 @@ Fetch latest market data for supported tickers and write directly into canonical
 Key options:
 
 - `--provider {EODHD}`
-- scope selector: `--symbols`, `--exchange-codes`, or `--all-supported`
+- optional scope selector: `--symbols`, `--exchange-codes`, or
+  `--all-supported` (defaults to the full supported universe)
 - `--rate <float>`
 - `--max-symbols <int>`
 - `--max-age-days <int>` default `30`
-- `--resume`
+- `--retry-failed-now`
 - `--database <path>`
 
 Notes:
@@ -155,6 +162,7 @@ Notes:
   `1`, while exchange-bulk refreshes cost `100` for the exchange
 - the command is freshness-based by default and selects missing symbols first,
   then the oldest stale symbols
+- retry backoff is respected by default; use `--retry-failed-now` to ignore it
 - large exchange and all-supported runs may use exchange-bulk fetches and then
   fall back to individual symbols when needed
 - progress across multiple days is tracked through `market_data_fetch_state`
@@ -181,7 +189,8 @@ Recompute stored market caps using the latest price and latest share-count facts
 
 Key options:
 
-- scope selector: `--symbols`, `--exchange-codes`, or `--all-supported`
+- optional scope selector: `--symbols`, `--exchange-codes`, or
+  `--all-supported` (defaults to the full supported universe)
 - `--database <path>`
 
 ## Metric Commands
@@ -192,7 +201,8 @@ Compute one or more metrics for a canonical ticker scope.
 
 Key options:
 
-- scope selector: `--symbols`, `--exchange-codes`, or `--all-supported`
+- optional scope selector: `--symbols`, `--exchange-codes`, or
+  `--all-supported` (defaults to the full supported universe)
 - `--metrics <metric-ids...>` default all registered metrics
 - console output defaults to periodic symbol progress like `Progress: 1234/75848 symbols complete (1.6%)`
 - metric/data-quality warnings are suppressed on the console by default but still written to `data/logs/pyvalue.log`
@@ -208,7 +218,8 @@ canonical scope.
 
 Key options:
 
-- scope selector: `--symbols`, `--exchange-codes`, or `--all-supported`
+- optional scope selector: `--symbols`, `--exchange-codes`, or
+  `--all-supported` (defaults to the full supported universe)
 - `--metrics <metric-ids...>`
 - `--max-age-days <int>` default `30`
 - `--output-csv <path>`
@@ -221,7 +232,8 @@ Count how many symbols can compute all requested metrics without writing results
 
 Key options:
 
-- scope selector: `--symbols`, `--exchange-codes`, or `--all-supported`
+- optional scope selector: `--symbols`, `--exchange-codes`, or
+  `--all-supported` (defaults to the full supported universe)
 - `--metrics <metric-ids...>`
 - `--database <path>`
 
@@ -232,7 +244,8 @@ canonical scope.
 
 Key options:
 
-- scope selector: `--symbols`, `--exchange-codes`, or `--all-supported`
+- optional scope selector: `--symbols`, `--exchange-codes`, or
+  `--all-supported` (defaults to the full supported universe)
 - `--metrics <metric-ids...>`
 - `--output-csv <path>`
 - `--database <path>`
@@ -245,8 +258,12 @@ Evaluate a YAML screen against a canonical ticker scope.
 
 Key options:
 
-- positional `config`
-- scope selector: `--symbols`, `--exchange-codes`, or `--all-supported`
+- `--config <path>` required
+- optional scope selector: `--symbols`, `--exchange-codes`, or
+  `--all-supported` (defaults to the full supported universe)
+- console output defaults to periodic symbol progress like `Progress: 1234/75848 symbols complete (1.6%)`
+- metric/data-quality warnings are suppressed on the console by default but still written to `data/logs/pyvalue.log`
+- `--show-metric-warnings` to show metric/data-quality warnings on the console again
 - `--output-csv <path>`
 - `--database <path>`
 

@@ -1,11 +1,4 @@
 criteria:
-  - name: "Minimum market cap (avoid microcaps)"
-    left:
-      metric: market_cap
-    operator: ">"
-    right:
-      value: 2000000000
-
   - name: "Positive owner earnings yield on EV (normalised) >= 5%"
     left:
       metric: oey_ev_norm

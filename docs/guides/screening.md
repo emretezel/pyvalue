@@ -75,13 +75,6 @@ The beginner example looks like this:
 
 ```yaml
 criteria:
-  - name: "Minimum market cap"
-    left:
-      metric: market_cap
-    operator: ">"
-    right:
-      value: 750000000
-
   - name: "Current ratio floor"
     left:
       metric: current_ratio
@@ -133,7 +126,7 @@ Using `--all` is the easiest way to avoid missing metric rows while learning the
 If the symbol already includes its exchange suffix, run:
 
 ```bash
-pyvalue run-screen screeners/basic_value.yml --symbols SHEL.LSE
+pyvalue run-screen --config screeners/basic_value.yml --symbols SHEL.LSE
 ```
 
 Single-symbol output prints:
@@ -147,13 +140,13 @@ The command exits with status `0` only if all criteria pass.
 ## Run a Screen in Bulk
 
 ```bash
-pyvalue run-screen screeners/basic_value.yml --exchange-codes US
+pyvalue run-screen --config screeners/basic_value.yml --exchange-codes US
 ```
 
 Write passing symbols to a CSV:
 
 ```bash
-pyvalue run-screen screeners/basic_value.yml --exchange-codes US --output-csv data/screen_results_basic_value.csv
+pyvalue run-screen --config screeners/basic_value.yml --exchange-codes US --output-csv data/screen_results_basic_value.csv
 ```
 
 Bulk output shows only symbols that satisfy every criterion. The table includes:
@@ -170,11 +163,11 @@ If no symbols pass, the command prints `No symbols satisfied all criteria.` and 
 ```bash
 pyvalue refresh-supported-exchanges --provider EODHD
 pyvalue refresh-supported-tickers --provider EODHD --exchange-codes US
-pyvalue ingest-fundamentals --provider EODHD --exchange-codes US --resume
+pyvalue ingest-fundamentals --provider EODHD --exchange-codes US
 pyvalue normalize-fundamentals --provider EODHD --exchange-codes US
 pyvalue update-market-data --provider EODHD --exchange-codes US
 pyvalue compute-metrics --exchange-codes US
-pyvalue run-screen screeners/basic_value.yml --exchange-codes US --output-csv data/screen_results_basic_value.csv
+pyvalue run-screen --config screeners/basic_value.yml --exchange-codes US --output-csv data/screen_results_basic_value.csv
 ```
 
 ## Why a Screen Can Return No Results
