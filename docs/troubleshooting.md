@@ -84,7 +84,7 @@ Typical causes:
 Useful commands:
 
 ```bash
-pyvalue update-market-data --provider EODHD --all-supported --resume
+pyvalue update-market-data --provider EODHD --all-supported
 pyvalue report-market-data-progress --provider EODHD
 ```
 

@@ -36,7 +36,7 @@ Typical exchange-level run:
 ```bash
 pyvalue refresh-supported-exchanges --provider EODHD
 pyvalue refresh-supported-tickers --provider EODHD --exchange-codes US
-pyvalue ingest-fundamentals --provider EODHD --exchange-codes US --resume
+pyvalue ingest-fundamentals --provider EODHD --exchange-codes US
 pyvalue normalize-fundamentals --provider EODHD --exchange-codes US
 pyvalue compute-metrics --exchange-codes US
 ```
@@ -46,7 +46,7 @@ Typical all-exchange refresh over multiple days:
 ```bash
 pyvalue refresh-supported-exchanges
 pyvalue refresh-supported-tickers --all-supported
-pyvalue ingest-fundamentals --all-supported --resume
+pyvalue ingest-fundamentals --all-supported
 ```
 
 Re-run the global command on later days to continue from the remaining eligible
@@ -62,7 +62,7 @@ The default `--max-age-days` window is already 30 days. Use an explicit value
 when you want a different refresh horizon:
 
 ```bash
-pyvalue ingest-fundamentals --all-supported --max-age-days 90 --resume
+pyvalue ingest-fundamentals --all-supported --max-age-days 90
 ```
 
 ## What Ingestion Does

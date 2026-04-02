@@ -46,7 +46,7 @@ Recommended workflow for large runs:
 ```bash
 pyvalue refresh-supported-exchanges
 pyvalue refresh-supported-tickers --all-supported
-pyvalue update-market-data --all-supported --resume
+pyvalue update-market-data --all-supported
 ```
 
 Important behavior:
@@ -61,7 +61,7 @@ Useful options:
 - `--exchange-codes`: limit the run to selected exchanges
 - `--max-symbols`: cap one run
 - `--max-age-days`: change the freshness window
-- `--resume`: skip symbols still inside retry backoff
+- retry backoff is respected by default; use `--retry-failed-now` to bypass it
 
 ## Progress Reporting
 

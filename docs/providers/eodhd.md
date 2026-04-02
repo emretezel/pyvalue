@@ -86,7 +86,7 @@ For large multi-day runs:
 ```bash
 pyvalue refresh-supported-exchanges
 pyvalue refresh-supported-tickers --all-supported
-pyvalue ingest-fundamentals --all-supported --resume
+pyvalue ingest-fundamentals --all-supported
 ```
 
 `ingest-fundamentals` checks the EODHD user/quota endpoint
@@ -124,7 +124,7 @@ Important fundamentals options:
 - `--rate`: EODHD uses symbols per minute; default `950`, capped at `1000`
 - `--max-symbols`: limit one run
 - `--max-age-days`: refresh stale or missing data; default `30`
-- `--resume`: skip symbols still in backoff
+- retry backoff is respected by default; use `--retry-failed-now` to bypass it
 
 ## Fundamentals Normalization
 
@@ -185,7 +185,7 @@ For large multi-day runs:
 ```bash
 pyvalue refresh-supported-exchanges
 pyvalue refresh-supported-tickers --all-supported
-pyvalue update-market-data --all-supported --resume
+pyvalue update-market-data --all-supported
 ```
 
 `update-market-data` checks the EODHD user/quota endpoint
@@ -216,7 +216,7 @@ Important market-data options:
 - `--rate`: requests per minute, capped at the EODHD limit of `1000`
 - `--max-symbols`: limit one run
 - `--max-age-days`: refresh stale or missing market data; default `30`
-- `--resume`: skip symbols still in backoff
+- retry backoff is respected by default; use `--retry-failed-now` to bypass it
 
 Market cap can be recalculated later from stored prices and latest share counts:
 

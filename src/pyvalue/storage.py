@@ -1019,7 +1019,7 @@ class SupportedTickerRepository(SQLiteStore):
         exchange_codes: Optional[Sequence[str]] = None,
         max_age_days: Optional[int] = None,
         max_symbols: Optional[int] = None,
-        resume: bool = False,
+        respect_backoff: bool = True,
         missing_only: bool = False,
         provider_symbols: Optional[Sequence[str]] = None,
     ) -> List[SupportedTicker]:
@@ -1051,7 +1051,7 @@ class SupportedTickerRepository(SQLiteStore):
                 "AND fs.last_fetched_at IS NULL",
             ]
             _apply_scope_filters(query, params)
-            if resume:
+            if respect_backoff:
                 query.append(
                     "AND (fs.next_eligible_at IS NULL OR fs.next_eligible_at <= ?)"
                 )
@@ -1078,7 +1078,7 @@ class SupportedTickerRepository(SQLiteStore):
                 "AND fs.last_fetched_at <= ?",
             ]
             _apply_scope_filters(query, params)
-            if resume:
+            if respect_backoff:
                 query.append(
                     "AND (fs.next_eligible_at IS NULL OR fs.next_eligible_at <= ?)"
                 )
@@ -1102,7 +1102,7 @@ class SupportedTickerRepository(SQLiteStore):
                 "WHERE st.provider = ?",
             ]
             _apply_scope_filters(query, params)
-            if resume:
+            if respect_backoff:
                 query.append(
                     "AND (fs.next_eligible_at IS NULL OR fs.next_eligible_at <= ?)"
                 )
@@ -1254,7 +1254,7 @@ class SupportedTickerRepository(SQLiteStore):
         exchange_codes: Optional[Sequence[str]] = None,
         max_age_days: int = 7,
         max_symbols: Optional[int] = None,
-        resume: bool = False,
+        respect_backoff: bool = True,
         provider_symbols: Optional[Sequence[str]] = None,
     ) -> List[SupportedTicker]:
         self.initialize_schema()
@@ -1287,7 +1287,7 @@ class SupportedTickerRepository(SQLiteStore):
             params.extend(normalized_symbols)
         query.append("AND (md.latest_as_of IS NULL OR md.latest_as_of <= ?)")
         params.append(cutoff)
-        if resume:
+        if respect_backoff:
             query.append(
                 "AND (ms.next_eligible_at IS NULL OR ms.next_eligible_at <= ?)"
             )
