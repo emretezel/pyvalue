@@ -305,6 +305,27 @@ Notes:
 - when the scope is a single symbol, output includes entity details and
   criterion-by-criterion pass/fail rows
 - when the scope contains multiple symbols, output lists only passing symbols
+- if the screen YAML defines a `ranking` block, multi-symbol output also adds
+  ranking rows such as `qarp_rank` and `qarp_score`, and sorts passing symbols
+  by the configured ranking rules
+
+### `refresh-security-metadata`
+
+Refresh canonical security metadata from stored raw fundamentals without
+rewriting normalized facts.
+
+Key options:
+
+- optional scope selector: `--symbols`, `--exchange-codes`, or
+  `--all-supported` (defaults to the full supported universe)
+- `--database <path>`
+
+Notes:
+
+- offline only; makes no network requests
+- updates canonical `securities` metadata such as entity name, description,
+  sector, and industry
+- intended for metadata backfills after ingesting raw fundamentals
 
 ## Maintenance Commands
 

@@ -3,6 +3,7 @@ from datetime import date, timedelta
 
 import pyvalue.storage as storage
 from pyvalue.storage import (
+    EntityMetadataRepository,
     FundamentalsNormalizationStateRepository,
     FundamentalsUpdate,
     FundamentalsRepository,
@@ -12,6 +13,8 @@ from pyvalue.storage import (
     MarketDataFetchStateRepository,
     MarketDataRepository,
     MetricsRepository,
+    SecurityMetadataUpdate,
+    SecurityRepository,
     SupportedExchangeRepository,
     SupportedTickerRepository,
 )
@@ -1076,3 +1079,134 @@ def test_metrics_repository_upsert_many_retries_transient_locked_error(
     assert attempts["count"] == 2
     assert updated == 1
     assert repo.fetch("AAA.US", "metric_one") == (2.0, "2024-02-01")
+
+
+def test_security_repository_upserts_sector_and_industry_metadata(tmp_path):
+    repo = SecurityRepository(tmp_path / "security-metadata.db")
+    repo.initialize_schema()
+
+    repo.upsert_metadata(
+        "AAA.US",
+        entity_name="AAA Corp",
+        description="AAA description",
+        sector="Technology",
+        industry="Software",
+    )
+
+    security = repo.fetch_by_symbol("AAA.US")
+
+    assert security is not None
+    assert security.entity_name == "AAA Corp"
+    assert security.description == "AAA description"
+    assert security.sector == "Technology"
+    assert security.industry == "Software"
+
+
+def test_entity_metadata_repository_fetch_many_returns_security_records(tmp_path):
+    repo = EntityMetadataRepository(tmp_path / "entity-metadata.db")
+    repo.initialize_schema()
+    repo.upsert("AAA.US", sector="Technology", industry="Software")
+    repo.upsert("BBB.US", sector="Industrials", industry="Machinery")
+
+    rows = repo.fetch_many(["AAA.US", "BBB.US"])
+
+    assert rows["AAA.US"].sector == "Technology"
+    assert rows["AAA.US"].industry == "Software"
+    assert rows["BBB.US"].sector == "Industrials"
+    assert rows["BBB.US"].industry == "Machinery"
+
+
+def test_security_repository_upsert_metadata_many_updates_existing_rows(tmp_path):
+    repo = SecurityRepository(tmp_path / "security-metadata-batch.db")
+    repo.initialize_schema()
+    aaa = repo.ensure_from_symbol("AAA.US", entity_name="AAA Corp")
+    bbb = repo.ensure_from_symbol(
+        "BBB.US",
+        entity_name="BBB Corp",
+        description="BBB description",
+    )
+
+    updated = repo.upsert_metadata_many(
+        [
+            SecurityMetadataUpdate(
+                security_id=aaa.security_id,
+                sector="Technology",
+                industry="Software",
+            ),
+            SecurityMetadataUpdate(
+                security_id=bbb.security_id,
+                description="BBB refreshed",
+                sector="Industrials",
+            ),
+        ]
+    )
+
+    assert updated == 2
+    aaa_row = repo.fetch_by_symbol("AAA.US")
+    bbb_row = repo.fetch_by_symbol("BBB.US")
+    assert aaa_row is not None
+    assert aaa_row.entity_name == "AAA Corp"
+    assert aaa_row.sector == "Technology"
+    assert aaa_row.industry == "Software"
+    assert bbb_row is not None
+    assert bbb_row.entity_name == "BBB Corp"
+    assert bbb_row.description == "BBB refreshed"
+    assert bbb_row.sector == "Industrials"
+
+
+def test_fundamentals_repository_fetch_metadata_candidates_extracts_fields(tmp_path):
+    db_path = tmp_path / "fundamentals-metadata-candidates.db"
+    repo = FundamentalsRepository(db_path)
+    repo.initialize_schema()
+    repo.upsert(
+        "EODHD",
+        "AAA.US",
+        {
+            "General": {
+                "Name": "AAA Holdings",
+                "Description": "AAA business",
+                "Sector": "Technology",
+                "Industry": "Software",
+            }
+        },
+        exchange="US",
+    )
+    repo.upsert("SEC", "AAA.US", {"entityName": "AAA SEC Name", "facts": {}})
+    repo.upsert("SEC", "BBB.US", {"entityName": "BBB SEC Name", "facts": {}})
+
+    security_repo = SecurityRepository(db_path)
+    security_repo.ensure_from_symbol("CCC.US")
+    security_ids = security_repo.resolve_ids_many(["AAA.US", "BBB.US", "CCC.US"])
+    rows = repo.fetch_metadata_candidates(list(security_ids.values()))
+
+    assert rows[security_ids["AAA.US"]].entity_name == "AAA Holdings"
+    assert rows[security_ids["AAA.US"]].description == "AAA business"
+    assert rows[security_ids["AAA.US"]].sector == "Technology"
+    assert rows[security_ids["AAA.US"]].industry == "Software"
+    assert rows[security_ids["BBB.US"]].entity_name == "BBB SEC Name"
+    assert rows[security_ids["BBB.US"]].sector is None
+    assert security_ids["CCC.US"] not in rows
+
+
+def test_fundamentals_repository_fetch_many_returns_payloads_by_symbol(tmp_path):
+    db_path = tmp_path / "fundamentals-fetch-many.db"
+    repo = FundamentalsRepository(db_path)
+    repo.initialize_schema()
+    repo.upsert(
+        "EODHD",
+        "AAA.US",
+        {"General": {"Name": "AAA", "Sector": "Technology"}},
+        exchange="US",
+    )
+    repo.upsert(
+        "EODHD",
+        "BBB.US",
+        {"General": {"Name": "BBB", "Sector": "Industrials"}},
+        exchange="US",
+    )
+
+    rows = repo.fetch_many("EODHD", ["AAA.US", "BBB.US", "CCC.US"])
+
+    assert rows["AAA.US"]["General"]["Sector"] == "Technology"
+    assert rows["BBB.US"]["General"]["Sector"] == "Industrials"
+    assert "CCC.US" not in rows

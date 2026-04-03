@@ -16,6 +16,7 @@ pyvalue refresh-supported-exchanges --provider EODHD
 pyvalue refresh-supported-tickers --provider EODHD --exchange-codes US
 pyvalue ingest-fundamentals --provider EODHD --exchange-codes US --max-symbols 100
 pyvalue normalize-fundamentals --provider EODHD --exchange-codes US
+pyvalue refresh-security-metadata --exchange-codes US
 pyvalue update-market-data --provider EODHD --exchange-codes US
 pyvalue compute-metrics --exchange-codes US
 pyvalue run-screen --config screeners/value.yml --exchange-codes US --output-csv data/screen_results_value.csv
@@ -35,9 +36,12 @@ Default CLI behavior:
 - Load canonical provider ticker catalogs into SQLite.
 - Ingest raw fundamentals from SEC or EODHD.
 - Normalize raw payloads into provider-agnostic financial facts.
+- Refresh canonical security metadata such as sector and industry from stored
+  raw fundamentals.
 - Update market data and market caps.
 - Compute value and quality metrics.
-- Run YAML-based stock screens against stored data.
+- Run YAML-based stock screens against stored data, including ranked QARP
+  output for passing symbols.
 
 ## Supported Providers
 

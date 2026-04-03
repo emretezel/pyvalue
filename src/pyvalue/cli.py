@@ -30,6 +30,7 @@ from pyvalue.marketdata import EODHDProvider, MarketDataUpdate, PriceData
 from pyvalue.marketdata.service import MarketDataService
 from pyvalue.metrics import REGISTRY
 from pyvalue.normalization import EODHDFactsNormalizer, SECFactsNormalizer
+from pyvalue.ranking import compute_screen_ranking
 from pyvalue.reporting import MetricCoverage, compute_fact_coverage
 from pyvalue.screening import (
     Criterion,
@@ -37,6 +38,7 @@ from pyvalue.screening import (
     evaluate_criterion_detail,
     evaluate_criterion_verbose,
     load_screen,
+    ranking_metric_ids,
     screen_metric_ids,
 )
 from pyvalue.logging_utils import setup_logging, suppress_console_metric_warnings
@@ -56,6 +58,7 @@ from pyvalue.storage import (
     MarketDataRepository,
     MetricsRepository,
     SecurityRepository,
+    SecurityMetadataUpdate,
     StoredFactRow,
     StoredMetricRow,
     SupportedExchangeRepository,
@@ -87,6 +90,8 @@ MARKET_DATA_PROGRESS_INTERVAL_SECONDS = 5.0
 MARKET_DATA_PROGRESS_SYMBOL_STEP = 250
 METRICS_MAX_WORKERS = 16
 METRICS_PROGRESS_INTERVAL_SECONDS = 5.0
+SECURITY_METADATA_CHUNK_SIZE = 500
+SECURITY_METADATA_PROGRESS_INTERVAL_SECONDS = 5.0
 SCREEN_PROGRESS_INTERVAL_SECONDS = 5.0
 METRICS_WRITE_BATCH_SIZE = 25
 METRICS_WRITE_BATCH_INTERVAL_SECONDS = 0.25
@@ -133,6 +138,8 @@ class _NormalizedFactsResult:
     raw_fetched_at: str
     entity_name: Optional[str] = None
     entity_description: Optional[str] = None
+    entity_sector: Optional[str] = None
+    entity_industry: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -1664,6 +1671,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional CSV path for passing results.",
     )
+
+    refresh_security_metadata = subparsers.add_parser(
+        "refresh-security-metadata",
+        help="Refresh canonical security metadata from stored raw fundamentals without rewriting normalized facts.",
+    )
+    refresh_security_metadata.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file (default: %(default)s)",
+    )
+    add_scope_args(refresh_security_metadata)
 
     return parser
 
@@ -3266,6 +3284,171 @@ def cmd_compute_metrics_stage(
     )
 
 
+def _evaluate_screen_scope(
+    definition,
+    symbols: Sequence[str],
+    metrics_repo: MetricsRepository,
+    fact_repo: RegionFactsRepository,
+    market_repo: MarketDataRepository,
+    entity_repo: EntityMetadataRepository,
+    universe_names: Mapping[str, Optional[str]],
+    *,
+    report_progress: bool,
+) -> tuple[List[str], Dict[str, Dict[str, float]], Dict[str, str]]:
+    entity_labels: Dict[str, str] = {}
+    passed_symbols: List[str] = []
+    criterion_values: Dict[str, Dict[str, float]] = {
+        criterion.name: {} for criterion in definition.criteria
+    }
+    completed_symbols = 0
+    total_symbols = len(symbols)
+    last_progress_at = time.monotonic()
+    last_reported_completed = -1
+
+    def maybe_report_progress(force: bool = False) -> None:
+        nonlocal last_progress_at, last_reported_completed
+        if not report_progress:
+            return
+        if completed_symbols == last_reported_completed:
+            return
+        elapsed = time.monotonic() - last_progress_at
+        if not force and elapsed < SCREEN_PROGRESS_INTERVAL_SECONDS:
+            return
+        _print_symbol_progress(completed_symbols, total_symbols)
+        last_reported_completed = completed_symbols
+        last_progress_at = time.monotonic()
+
+    for symbol in symbols:
+        symbol_passed = True
+        per_symbol_values: Dict[str, float] = {}
+        label = entity_repo.fetch(symbol) or universe_names.get(symbol) or symbol
+        entity_labels[symbol] = label
+        for criterion in definition.criteria:
+            passed, left_value = evaluate_criterion_verbose(
+                criterion, symbol, metrics_repo, fact_repo, market_repo
+            )
+            if not passed or left_value is None:
+                symbol_passed = False
+                break
+            per_symbol_values[criterion.name] = left_value
+        if symbol_passed:
+            passed_symbols.append(symbol)
+            for criterion in definition.criteria:
+                criterion_values[criterion.name][symbol] = per_symbol_values[
+                    criterion.name
+                ]
+        completed_symbols += 1
+        maybe_report_progress()
+
+    maybe_report_progress(force=True)
+    return passed_symbols, criterion_values, entity_labels
+
+
+def _rank_screen_passers(
+    definition,
+    passed_symbols: Sequence[str],
+    metrics_repo: MetricsRepository,
+    entity_repo: EntityMetadataRepository,
+) -> tuple[List[str], List[tuple[str, Dict[str, object]]]]:
+    if definition.ranking is None or not passed_symbols:
+        return list(passed_symbols), []
+
+    metric_ids = ranking_metric_ids(definition)
+    for tie_breaker in definition.ranking.tie_breakers:
+        if tie_breaker.metric_id in {"canonical_symbol", "symbol", "ticker", "id"}:
+            continue
+        if tie_breaker.metric_id not in metric_ids:
+            metric_ids.append(tie_breaker.metric_id)
+    metric_values: Dict[str, Dict[str, float]] = {
+        metric_id: {} for metric_id in metric_ids
+    }
+    for symbol in passed_symbols:
+        for metric_id in metric_ids:
+            record = metrics_repo.fetch(symbol, metric_id)
+            if record is None:
+                continue
+            metric_values[metric_id][symbol] = record[0]
+
+    metadata = entity_repo.fetch_many(passed_symbols)
+    sectors = {
+        symbol: security.sector if security is not None else None
+        for symbol, security in (
+            (symbol, metadata.get(symbol)) for symbol in passed_symbols
+        )
+    }
+    ranking_result = compute_screen_ranking(
+        passed_symbols,
+        definition.ranking,
+        metric_values,
+        sectors,
+    )
+    return list(ranking_result.ordered_symbols), [
+        (
+            "qarp_rank",
+            {
+                symbol: ranking_result.ranks[symbol]
+                for symbol in ranking_result.ordered_symbols
+            },
+        ),
+        (
+            "qarp_score",
+            {
+                symbol: ranking_result.scores[symbol]
+                for symbol in ranking_result.ordered_symbols
+            },
+        ),
+    ]
+
+
+def _emit_screen_results(
+    criteria: Sequence[Criterion],
+    symbols: Sequence[str],
+    values: Dict[str, Dict[str, float]],
+    entity_labels: Mapping[str, str],
+    entity_repo: EntityMetadataRepository,
+    market_repo: MarketDataRepository,
+    output_csv: Optional[str],
+    extra_rows: Optional[Sequence[tuple[str, Dict[str, object]]]] = None,
+) -> None:
+    selected_names = {symbol: entity_labels.get(symbol, symbol) for symbol in symbols}
+    selected_descriptions: Dict[str, str] = {}
+    selected_prices: Dict[str, str] = {}
+    selected_price_currencies: Dict[str, str] = {}
+    for symbol in symbols:
+        entity_description = entity_repo.fetch_description(symbol)
+        selected_descriptions[symbol] = (
+            entity_description if entity_description else "N/A"
+        )
+        snapshot = market_repo.latest_snapshot(symbol)
+        if snapshot:
+            selected_prices[symbol] = _format_value(snapshot.price)
+            selected_price_currencies[symbol] = snapshot.currency or "N/A"
+        else:
+            selected_prices[symbol] = "N/A"
+            selected_price_currencies[symbol] = "N/A"
+    _print_screen_table(
+        criteria,
+        symbols,
+        values,
+        selected_names,
+        selected_descriptions,
+        selected_prices,
+        extra_rows=extra_rows,
+    )
+    if output_csv:
+        _write_screen_csv(
+            criteria,
+            symbols,
+            values,
+            selected_names,
+            selected_descriptions,
+            selected_prices,
+            selected_price_currencies,
+            output_csv,
+            extra_rows=extra_rows,
+        )
+
+
 def cmd_run_screen_stage(
     config_path: str,
     database: str,
@@ -3322,50 +3505,16 @@ def cmd_run_screen_stage(
         universe_names = dict(
             ticker_repo.list_canonical_symbol_name_pairs(resolved_exchange_codes)
         )
-        entity_labels: Dict[str, str] = {}
-        passed_symbols: List[str] = []
-        criterion_values: Dict[str, Dict[str, float]] = {
-            c.name: {} for c in definition.criteria
-        }
-        completed_symbols = 0
-        total_symbols = len(canonical_symbols)
-        last_progress_at = time.monotonic()
-        last_reported_completed = -1
-
-        def maybe_report_progress(force: bool = False) -> None:
-            nonlocal last_progress_at, last_reported_completed
-            if completed_symbols == last_reported_completed:
-                return
-            elapsed = time.monotonic() - last_progress_at
-            if not force and elapsed < SCREEN_PROGRESS_INTERVAL_SECONDS:
-                return
-            _print_symbol_progress(completed_symbols, total_symbols)
-            last_reported_completed = completed_symbols
-            last_progress_at = time.monotonic()
-
-        for symbol in canonical_symbols:
-            symbol_passed = True
-            per_symbol_values: Dict[str, float] = {}
-            label = entity_repo.fetch(symbol) or universe_names.get(symbol) or symbol
-            entity_labels[symbol] = label
-            for criterion in definition.criteria:
-                passed, left_value = evaluate_criterion_verbose(
-                    criterion, symbol, metrics_repo, fact_repo, market_repo
-                )
-                if not passed or left_value is None:
-                    symbol_passed = False
-                    break
-                per_symbol_values[criterion.name] = left_value
-            if symbol_passed:
-                passed_symbols.append(symbol)
-                for criterion in definition.criteria:
-                    criterion_values[criterion.name][symbol] = per_symbol_values[
-                        criterion.name
-                    ]
-            completed_symbols += 1
-            maybe_report_progress()
-
-        maybe_report_progress(force=True)
+        passed_symbols, criterion_values, entity_labels = _evaluate_screen_scope(
+            definition,
+            canonical_symbols,
+            metrics_repo,
+            fact_repo,
+            market_repo,
+            entity_repo,
+            universe_names,
+            report_progress=True,
+        )
 
         if not passed_symbols:
             print("No symbols satisfied all criteria.")
@@ -3382,43 +3531,22 @@ def cmd_run_screen_stage(
                 )
             return 1
 
-        selected_names = {
-            symbol: entity_labels.get(symbol, symbol) for symbol in passed_symbols
-        }
-        selected_descriptions: Dict[str, str] = {}
-        selected_prices: Dict[str, str] = {}
-        selected_price_currencies: Dict[str, str] = {}
-        for symbol in passed_symbols:
-            entity_description = entity_repo.fetch_description(symbol)
-            selected_descriptions[symbol] = (
-                entity_description if entity_description else "N/A"
-            )
-            snapshot = market_repo.latest_snapshot(symbol)
-            if snapshot:
-                selected_prices[symbol] = _format_value(snapshot.price)
-                selected_price_currencies[symbol] = snapshot.currency or "N/A"
-            else:
-                selected_prices[symbol] = "N/A"
-                selected_price_currencies[symbol] = "N/A"
-        _print_screen_table(
-            definition.criteria,
+        ordered_symbols, extra_rows = _rank_screen_passers(
+            definition,
             passed_symbols,
-            criterion_values,
-            selected_names,
-            selected_descriptions,
-            selected_prices,
+            metrics_repo,
+            entity_repo,
         )
-        if output_csv:
-            _write_screen_csv(
-                definition.criteria,
-                passed_symbols,
-                criterion_values,
-                selected_names,
-                selected_descriptions,
-                selected_prices,
-                selected_price_currencies,
-                output_csv,
-            )
+        _emit_screen_results(
+            definition.criteria,
+            ordered_symbols,
+            criterion_values,
+            entity_labels,
+            entity_repo,
+            market_repo,
+            output_csv,
+            extra_rows=extra_rows,
+        )
         return 0
 
 
@@ -3753,6 +3881,23 @@ def _extract_entity_description_from_eodhd(payload: Dict) -> Optional[str]:
     return general.get("Description")
 
 
+def _extract_entity_sector_from_eodhd(payload: Dict) -> Optional[str]:
+    general = payload.get("General") or {}
+    sector = str(general.get("Sector") or "").strip()
+    return sector or None
+
+
+def _extract_entity_industry_from_eodhd(payload: Dict) -> Optional[str]:
+    general = payload.get("General") or {}
+    industry = str(general.get("Industry") or "").strip()
+    return industry or None
+
+
+def _extract_entity_name_from_sec(payload: Dict) -> Optional[str]:
+    entity_name = str(payload.get("entityName") or "").strip()
+    return entity_name or None
+
+
 def _normalization_worker_count(total_symbols: int) -> int:
     """Return an automatic worker count for bulk normalization."""
 
@@ -3814,7 +3959,7 @@ def _normalize_sec_symbol_worker(
         symbol=symbol,
         rows=rows,
         raw_fetched_at=raw_fetched_at,
-        entity_name=payload.get("entityName"),
+        entity_name=_extract_entity_name_from_sec(payload),
     )
 
 
@@ -3839,6 +3984,8 @@ def _normalize_eodhd_symbol_worker(
         raw_fetched_at=raw_fetched_at,
         entity_name=_extract_entity_name_from_eodhd(payload),
         entity_description=_extract_entity_description_from_eodhd(payload),
+        entity_sector=_extract_entity_sector_from_eodhd(payload),
+        entity_industry=_extract_entity_industry_from_eodhd(payload),
     )
 
 
@@ -3893,11 +4040,18 @@ def _run_bulk_normalization(
                     )
                     failed += 1
                     continue
-                if result.entity_name or result.entity_description:
+                if (
+                    result.entity_name
+                    or result.entity_description
+                    or result.entity_sector
+                    or result.entity_industry
+                ):
                     entity_repo.upsert(
                         symbol,
                         result.entity_name,
                         description=result.entity_description,
+                        sector=result.entity_sector,
+                        industry=result.entity_industry,
                     )
                 stored = fact_repo.replace_fact_rows(
                     symbol,
@@ -3953,11 +4107,18 @@ def _run_bulk_normalization(
                         )
                         failed += 1
                         continue
-                    if result.entity_name or result.entity_description:
+                    if (
+                        result.entity_name
+                        or result.entity_description
+                        or result.entity_sector
+                        or result.entity_industry
+                    ):
                         entity_repo.upsert(
                             symbol,
                             result.entity_name,
                             description=result.entity_description,
+                            sector=result.entity_sector,
+                            industry=result.entity_industry,
                         )
                     stored = fact_repo.replace_fact_rows(
                         symbol,
@@ -4048,8 +4209,16 @@ def cmd_normalize_eodhd_fundamentals(
     state_repo.initialize_schema()
     entity_name = _extract_entity_name_from_eodhd(payload)
     entity_description = _extract_entity_description_from_eodhd(payload)
-    if entity_name or entity_description:
-        entity_repo.upsert(symbol_upper, entity_name, description=entity_description)
+    entity_sector = _extract_entity_sector_from_eodhd(payload)
+    entity_industry = _extract_entity_industry_from_eodhd(payload)
+    if entity_name or entity_description or entity_sector or entity_industry:
+        entity_repo.upsert(
+            symbol_upper,
+            entity_name,
+            description=entity_description,
+            sector=entity_sector,
+            industry=entity_industry,
+        )
 
     stored = fact_repo.replace_facts(
         symbol_upper,
@@ -5420,38 +5589,16 @@ def cmd_run_screen_bulk(
         provider_norm, exchange_norm
     )
     universe_names = {row[0].upper(): (row[1] or row[0].upper()) for row in name_rows}
-    entity_labels: Dict[str, str] = {}
-    passed_symbols: List[str] = []
-    criterion_values: Dict[str, Dict[str, float]] = {
-        c.name: {} for c in definition.criteria
-    }
-
-    for symbol in symbols:
-        symbol_upper = symbol.upper()
-        symbol_passed = True
-        per_symbol_values: Dict[str, float] = {}
-        label = entity_labels.get(symbol_upper)
-        if label is None:
-            label = (
-                entity_repo.fetch(symbol_upper)
-                or universe_names.get(symbol_upper)
-                or symbol_upper
-            )
-            entity_labels[symbol_upper] = label
-        for criterion in definition.criteria:
-            passed, left_value = evaluate_criterion_verbose(
-                criterion, symbol_upper, metrics_repo, fact_repo, market_repo
-            )
-            if not passed or left_value is None:
-                symbol_passed = False
-                break
-            per_symbol_values[criterion.name] = left_value
-        if symbol_passed:
-            passed_symbols.append(symbol_upper)
-            for criterion in definition.criteria:
-                criterion_values[criterion.name][symbol_upper] = per_symbol_values[
-                    criterion.name
-                ]
+    passed_symbols, criterion_values, entity_labels = _evaluate_screen_scope(
+        definition,
+        [symbol.upper() for symbol in symbols],
+        metrics_repo,
+        fact_repo,
+        market_repo,
+        entity_repo,
+        universe_names,
+        report_progress=False,
+    )
 
     if not passed_symbols:
         print("No symbols satisfied all criteria.")
@@ -5459,41 +5606,185 @@ def cmd_run_screen_bulk(
             _write_screen_csv(definition.criteria, [], {}, {}, {}, {}, {}, output_csv)
         return 1
 
-    selected_names = {
-        symbol: entity_labels.get(symbol, symbol) for symbol in passed_symbols
-    }
-    selected_descriptions: Dict[str, str] = {}
-    selected_prices: Dict[str, str] = {}
-    selected_price_currencies: Dict[str, str] = {}
-    for symbol in passed_symbols:
-        description = entity_repo.fetch_description(symbol)
-        selected_descriptions[symbol] = description if description else "N/A"
-        snapshot = market_repo.latest_snapshot(symbol)
-        if snapshot:
-            selected_prices[symbol] = _format_value(snapshot.price)
-            selected_price_currencies[symbol] = snapshot.currency or "N/A"
-        else:
-            selected_prices[symbol] = "N/A"
-            selected_price_currencies[symbol] = "N/A"
-    _print_screen_table(
-        definition.criteria,
+    ordered_symbols, extra_rows = _rank_screen_passers(
+        definition,
         passed_symbols,
-        criterion_values,
-        selected_names,
-        selected_descriptions,
-        selected_prices,
+        metrics_repo,
+        entity_repo,
     )
-    if output_csv:
-        _write_screen_csv(
-            definition.criteria,
-            passed_symbols,
-            criterion_values,
-            selected_names,
-            selected_descriptions,
-            selected_prices,
-            selected_price_currencies,
-            output_csv,
+    _emit_screen_results(
+        definition.criteria,
+        ordered_symbols,
+        criterion_values,
+        entity_labels,
+        entity_repo,
+        market_repo,
+        output_csv,
+        extra_rows=extra_rows,
+    )
+    return 0
+
+
+def _metadata_update_from_raw_payloads(
+    eodhd_payload: Optional[Dict],
+    sec_payload: Optional[Dict],
+) -> Dict[str, Optional[str]]:
+    entity_name = (
+        _extract_entity_name_from_eodhd(eodhd_payload) if eodhd_payload else None
+    )
+    if entity_name is None and sec_payload is not None:
+        entity_name = _extract_entity_name_from_sec(sec_payload)
+    return {
+        "entity_name": entity_name,
+        "description": (
+            _extract_entity_description_from_eodhd(eodhd_payload)
+            if eodhd_payload
+            else None
+        ),
+        "sector": (
+            _extract_entity_sector_from_eodhd(eodhd_payload) if eodhd_payload else None
+        ),
+        "industry": (
+            _extract_entity_industry_from_eodhd(eodhd_payload)
+            if eodhd_payload
+            else None
+        ),
+    }
+
+
+def cmd_refresh_security_metadata(
+    database: str,
+    symbols: Optional[Sequence[str]],
+    exchange_codes: Optional[Sequence[str]],
+    all_supported: bool,
+) -> int:
+    """Refresh canonical security metadata from stored raw fundamentals only."""
+
+    db_path = _resolve_database_path(database)
+    canonical_symbols, _, _ = _resolve_canonical_scope_symbols(
+        str(db_path),
+        symbols,
+        exchange_codes,
+        all_supported,
+    )
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    entity_repo = EntityMetadataRepository(db_path)
+    entity_repo.initialize_schema()
+    security_repo = SecurityRepository(db_path)
+    security_repo.initialize_schema()
+    security_ids_by_symbol = security_repo.resolve_ids_many(
+        canonical_symbols,
+        chunk_size=SECURITY_METADATA_CHUNK_SIZE,
+    )
+    scoped_rows = [
+        (symbol, security_ids_by_symbol.get(symbol)) for symbol in canonical_symbols
+    ]
+
+    updated = 0
+    skipped_no_raw = 0
+    skipped_no_metadata = 0
+    unchanged = 0
+    completed_symbols = 0
+    total_symbols = len(canonical_symbols)
+    last_progress_at = time.monotonic()
+    last_reported_completed = -1
+    pending_updates: List[SecurityMetadataUpdate] = []
+
+    def maybe_report_progress(force: bool = False) -> None:
+        nonlocal last_progress_at, last_reported_completed
+        if total_symbols <= 0:
+            return
+        if completed_symbols == last_reported_completed:
+            return
+        elapsed = time.monotonic() - last_progress_at
+        if not force and elapsed < SECURITY_METADATA_PROGRESS_INTERVAL_SECONDS:
+            return
+        _print_symbol_progress(completed_symbols, total_symbols)
+        last_reported_completed = completed_symbols
+        last_progress_at = time.monotonic()
+
+    def flush_pending() -> None:
+        nonlocal updated
+        if not pending_updates:
+            return
+        updated += entity_repo.upsert_many(pending_updates)
+        pending_updates.clear()
+
+    try:
+        for start in range(0, len(scoped_rows), SECURITY_METADATA_CHUNK_SIZE):
+            chunk = scoped_rows[start : start + SECURITY_METADATA_CHUNK_SIZE]
+            chunk_symbols = [
+                symbol for symbol, security_id in chunk if security_id is not None
+            ]
+            existing_metadata = entity_repo.fetch_many(chunk_symbols)
+            extracted_metadata = fund_repo.fetch_metadata_candidates(
+                [
+                    int(security_id)
+                    for _, security_id in chunk
+                    if security_id is not None
+                ],
+                chunk_size=SECURITY_METADATA_CHUNK_SIZE,
+            )
+
+            for symbol, security_id in chunk:
+                if security_id is None:
+                    skipped_no_raw += 1
+                    completed_symbols += 1
+                    maybe_report_progress()
+                    continue
+
+                metadata_candidate = extracted_metadata.get(int(security_id))
+                if metadata_candidate is None:
+                    skipped_no_raw += 1
+                    completed_symbols += 1
+                    maybe_report_progress()
+                    continue
+
+                update = metadata_candidate.to_update_fields()
+                if not update:
+                    skipped_no_metadata += 1
+                    completed_symbols += 1
+                    maybe_report_progress()
+                    continue
+
+                current = existing_metadata.get(symbol)
+                if current is not None and all(
+                    getattr(current, field_name) == field_value
+                    for field_name, field_value in update.items()
+                ):
+                    unchanged += 1
+                    completed_symbols += 1
+                    maybe_report_progress()
+                    continue
+
+                pending_updates.append(
+                    SecurityMetadataUpdate(
+                        security_id=int(security_id),
+                        entity_name=metadata_candidate.entity_name,
+                        description=metadata_candidate.description,
+                        sector=metadata_candidate.sector,
+                        industry=metadata_candidate.industry,
+                    )
+                )
+                completed_symbols += 1
+                maybe_report_progress()
+
+            flush_pending()
+    except KeyboardInterrupt:
+        return _cancel_cli_command(
+            "\nSecurity metadata refresh cancelled by user after "
+            f"{completed_symbols} of {total_symbols} symbols.",
+            flushers=[flush_pending, lambda: maybe_report_progress(force=True)],
         )
+
+    flush_pending()
+    maybe_report_progress(force=True)
+    print(f"Scanned {len(canonical_symbols)} symbols.")
+    print(f"Updated metadata for {updated} symbols.")
+    print(f"Skipped with no raw payload: {skipped_no_raw}")
+    print(f"Skipped with no extractable metadata: {skipped_no_metadata}")
+    print(f"No metadata changes needed: {unchanged}")
     return 0
 
 
@@ -5504,6 +5795,7 @@ def _print_screen_table(
     entity_names: Dict[str, str],
     descriptions: Dict[str, str],
     prices: Dict[str, str],
+    extra_rows: Optional[Sequence[tuple[str, Dict[str, object]]]] = None,
 ) -> None:
     header = ["Criterion"] + list(symbols)
     rows: List[List[str]] = [header]
@@ -5512,6 +5804,12 @@ def _print_screen_table(
         ["Description"] + [descriptions.get(symbol, "N/A") for symbol in symbols]
     )
     rows.append(["Price"] + [prices.get(symbol, "N/A") for symbol in symbols])
+    for row_name, row_values in extra_rows or ():
+        row = [row_name]
+        for symbol in symbols:
+            value = row_values.get(symbol)
+            row.append("N/A" if value is None else _format_output_cell(value))
+        rows.append(row)
     for criterion in criteria:
         row = [criterion.name]
         for symbol in symbols:
@@ -5526,6 +5824,12 @@ def _print_screen_table(
 def _format_value(value: float) -> str:
     formatted = f"{value:,.4f}".rstrip("0").rstrip(".")
     return formatted or "0"
+
+
+def _format_output_cell(value: object) -> str:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return _format_value(float(value))
+    return str(value)
 
 
 def _prepare_output_csv_path(path: str) -> Path:
@@ -5543,6 +5847,7 @@ def _write_screen_csv(
     prices: Dict[str, str],
     price_currencies: Dict[str, str],
     path: str,
+    extra_rows: Optional[Sequence[tuple[str, Dict[str, object]]]] = None,
 ) -> None:
     output_path = _prepare_output_csv_path(path)
     with output_path.open("w", newline="") as handle:
@@ -5561,6 +5866,18 @@ def _write_screen_csv(
                 *[price_currencies.get(symbol, "N/A") for symbol in symbols],
             ]
         )
+        for row_name, row_values in extra_rows or ():
+            writer.writerow(
+                [
+                    row_name,
+                    *[
+                        ""
+                        if row_values.get(symbol) is None
+                        else _format_output_cell(row_values[symbol])
+                        for symbol in symbols
+                    ],
+                ]
+            )
         for criterion in criteria:
             row = [criterion.name]
             for symbol in symbols:
@@ -5754,6 +6071,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 all_supported=args.all_supported,
                 output_csv=args.output_csv,
                 show_metric_warnings=args.show_metric_warnings,
+            )
+        if args.command == "refresh-security-metadata":
+            return cmd_refresh_security_metadata(
+                database=args.database,
+                symbols=args.symbols,
+                exchange_codes=args.exchange_codes,
+                all_supported=args.all_supported,
             )
         if args.command == "purge-us-nonfilers":
             return cmd_purge_us_nonfilers(database=args.database, apply=args.apply)

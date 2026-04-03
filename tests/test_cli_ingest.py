@@ -441,6 +441,48 @@ def test_main_dispatches_run_screen_stage_with_warning_flag(monkeypatch):
     }
 
 
+def test_build_parser_refresh_security_metadata_uses_scope_selectors():
+    args = cli.build_parser().parse_args(
+        ["refresh-security-metadata", "--exchange-codes", "US"]
+    )
+
+    assert args.command == "refresh-security-metadata"
+    assert args.exchange_codes == ["US"]
+    assert args.database == "data/pyvalue.db"
+
+
+def test_main_dispatches_refresh_security_metadata(monkeypatch):
+    calls = {}
+
+    def fake_cmd(database, symbols, exchange_codes, all_supported):
+        calls["database"] = database
+        calls["symbols"] = symbols
+        calls["exchange_codes"] = exchange_codes
+        calls["all_supported"] = all_supported
+        return 0
+
+    monkeypatch.setattr(cli, "setup_logging", lambda: None)
+    monkeypatch.setattr(cli, "cmd_refresh_security_metadata", fake_cmd)
+
+    rc = cli.main(
+        [
+            "refresh-security-metadata",
+            "--exchange-codes",
+            "US",
+            "--database",
+            "data/custom.db",
+        ]
+    )
+
+    assert rc == 0
+    assert calls == {
+        "database": "data/custom.db",
+        "symbols": None,
+        "exchange_codes": ["US"],
+        "all_supported": False,
+    }
+
+
 def test_build_parser_report_screen_failures_requires_config():
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args(
@@ -4914,7 +4956,14 @@ def test_cmd_normalize_fundamentals_eodhd(monkeypatch, tmp_path):
     fund_repo.upsert(
         "EODHD",
         "SHEL.LSE",
-        {"General": {"Name": "Shell PLC"}, "Financials": {}},
+        {
+            "General": {
+                "Name": "Shell PLC",
+                "Sector": "Energy",
+                "Industry": "Oil & Gas Integrated",
+            },
+            "Financials": {},
+        },
     )
 
     class FakeNormalizer:
@@ -4958,6 +5007,8 @@ def test_cmd_normalize_fundamentals_eodhd(monkeypatch, tmp_path):
     entity_repo = EntityMetadataRepository(db_path)
     entity_repo.initialize_schema()
     assert entity_repo.fetch("SHEL.LSE") == "Shell PLC"
+    assert entity_repo.fetch_sector("SHEL.LSE") == "Energy"
+    assert entity_repo.fetch_industry("SHEL.LSE") == "Oil & Gas Integrated"
 
 
 def test_cmd_normalize_fundamentals_eodhd_zero_row_normalization_records_state(
@@ -5779,6 +5830,309 @@ def test_cmd_recalc_market_cap_interrupts_cleanly(monkeypatch, tmp_path, capsys)
     assert "Updated market cap for" not in output
 
 
+def test_cmd_refresh_security_metadata_backfills_eodhd_fields_and_sec_name_fallback(
+    tmp_path, capsys
+):
+    db_path = tmp_path / "refresh-security-metadata.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+            Listing(symbol="CCC.US", security_name="CCC Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD",
+        "AAA.US",
+        {
+            "General": {
+                "Name": "AAA Holdings",
+                "Description": "AAA business",
+                "Sector": "Technology",
+                "Industry": "Software",
+            }
+        },
+        exchange="US",
+    )
+    fund_repo.upsert("SEC", "BBB.US", {"entityName": "BBB SEC Name", "facts": {}})
+
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    fact_repo.replace_facts(
+        "AAA.US",
+        [
+            make_fact(
+                symbol="AAA.US", concept="Assets", end_date="2024-12-31", value=1.0
+            )
+        ],
+        source_provider="EODHD",
+    )
+    fact_count_before = (
+        fact_repo._connect()
+        .execute("SELECT COUNT(*) FROM financial_facts")
+        .fetchone()[0]
+    )
+
+    rc = cli.cmd_refresh_security_metadata(
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=["US"],
+        all_supported=False,
+    )
+
+    assert rc == 0
+    entity_repo = EntityMetadataRepository(db_path)
+    entity_repo.initialize_schema()
+    assert entity_repo.fetch("AAA.US") == "AAA Holdings"
+    assert entity_repo.fetch_description("AAA.US") == "AAA business"
+    assert entity_repo.fetch_sector("AAA.US") == "Technology"
+    assert entity_repo.fetch_industry("AAA.US") == "Software"
+    assert entity_repo.fetch("BBB.US") == "BBB SEC Name"
+    assert entity_repo.fetch_sector("BBB.US") is None
+    fact_count_after = (
+        fact_repo._connect()
+        .execute("SELECT COUNT(*) FROM financial_facts")
+        .fetchone()[0]
+    )
+    assert fact_count_after == fact_count_before
+
+    output = capsys.readouterr().out.splitlines()
+    assert output == [
+        "Progress: 3/3 symbols complete (100.0%)",
+        "Scanned 3 symbols.",
+        "Updated metadata for 2 symbols.",
+        "Skipped with no raw payload: 1",
+        "Skipped with no extractable metadata: 0",
+        "No metadata changes needed: 0",
+    ]
+
+    rc = cli.cmd_refresh_security_metadata(
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=["US"],
+        all_supported=False,
+    )
+
+    assert rc == 0
+    output = capsys.readouterr().out.splitlines()
+    assert output == [
+        "Progress: 3/3 symbols complete (100.0%)",
+        "Scanned 3 symbols.",
+        "Updated metadata for 0 symbols.",
+        "Skipped with no raw payload: 1",
+        "Skipped with no extractable metadata: 0",
+        "No metadata changes needed: 2",
+    ]
+
+
+def test_cmd_refresh_security_metadata_respects_symbol_scope(tmp_path, capsys):
+    db_path = tmp_path / "refresh-security-metadata-scope.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD",
+        "AAA.US",
+        {"General": {"Sector": "Technology", "Industry": "Software"}},
+        exchange="US",
+    )
+    fund_repo.upsert(
+        "EODHD",
+        "BBB.US",
+        {"General": {"Sector": "Industrials", "Industry": "Machinery"}},
+        exchange="US",
+    )
+
+    rc = cli.cmd_refresh_security_metadata(
+        database=str(db_path),
+        symbols=["AAA.US"],
+        exchange_codes=None,
+        all_supported=False,
+    )
+
+    assert rc == 0
+    entity_repo = EntityMetadataRepository(db_path)
+    entity_repo.initialize_schema()
+    assert entity_repo.fetch_sector("AAA.US") == "Technology"
+    assert entity_repo.fetch_sector("BBB.US") is None
+    assert capsys.readouterr().out.splitlines() == [
+        "Progress: 1/1 symbols complete (100.0%)",
+        "Scanned 1 symbols.",
+        "Updated metadata for 1 symbols.",
+        "Skipped with no raw payload: 0",
+        "Skipped with no extractable metadata: 0",
+        "No metadata changes needed: 0",
+    ]
+
+
+def test_cmd_refresh_security_metadata_does_not_use_full_payload_fetch(
+    tmp_path, capsys, monkeypatch
+):
+    db_path = tmp_path / "refresh-security-metadata-no-fetch-many.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
+        provider="SEC",
+    )
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD",
+        "AAA.US",
+        {"General": {"Sector": "Technology", "Industry": "Software"}},
+        exchange="US",
+    )
+
+    monkeypatch.setattr(
+        FundamentalsRepository,
+        "fetch_many",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("refresh-security-metadata should not call fetch_many")
+        ),
+    )
+
+    rc = cli.cmd_refresh_security_metadata(
+        database=str(db_path),
+        symbols=["AAA.US"],
+        exchange_codes=None,
+        all_supported=False,
+    )
+
+    assert rc == 0
+    assert "Updated metadata for 1 symbols." in capsys.readouterr().out
+
+
+def test_cmd_refresh_security_metadata_reports_progress(tmp_path, capsys, monkeypatch):
+    db_path = tmp_path / "refresh-security-metadata-progress.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD",
+        "AAA.US",
+        {"General": {"Sector": "Technology", "Industry": "Software"}},
+        exchange="US",
+    )
+    fund_repo.upsert(
+        "EODHD",
+        "BBB.US",
+        {"General": {"Sector": "Industrials", "Industry": "Machinery"}},
+        exchange="US",
+    )
+    monkeypatch.setattr(cli, "SECURITY_METADATA_PROGRESS_INTERVAL_SECONDS", 0.0)
+
+    rc = cli.cmd_refresh_security_metadata(
+        database=str(db_path),
+        symbols=["AAA.US", "BBB.US"],
+        exchange_codes=None,
+        all_supported=False,
+    )
+
+    assert rc == 0
+    output_lines = capsys.readouterr().out.splitlines()
+    assert [line for line in output_lines if line.startswith("Progress:")] == [
+        "Progress: 1/2 symbols complete (50.0%)",
+        "Progress: 2/2 symbols complete (100.0%)",
+    ]
+    assert output_lines[-5:] == [
+        "Scanned 2 symbols.",
+        "Updated metadata for 2 symbols.",
+        "Skipped with no raw payload: 0",
+        "Skipped with no extractable metadata: 0",
+        "No metadata changes needed: 0",
+    ]
+
+
+def test_cmd_refresh_security_metadata_cancels_cleanly(tmp_path, capsys, monkeypatch):
+    db_path = tmp_path / "refresh-security-metadata-cancel.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD",
+        "AAA.US",
+        {"General": {"Sector": "Technology", "Industry": "Software"}},
+        exchange="US",
+    )
+    fund_repo.upsert(
+        "EODHD",
+        "BBB.US",
+        {"General": {"Sector": "Industrials", "Industry": "Machinery"}},
+        exchange="US",
+    )
+
+    call_count = 0
+
+    real_fetch_metadata_candidates = FundamentalsRepository.fetch_metadata_candidates
+
+    def interrupting_fetch_metadata_candidates(self, security_ids, chunk_size=500):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise KeyboardInterrupt
+        return real_fetch_metadata_candidates(self, security_ids, chunk_size)
+
+    monkeypatch.setattr(
+        FundamentalsRepository,
+        "fetch_metadata_candidates",
+        interrupting_fetch_metadata_candidates,
+    )
+    monkeypatch.setattr(cli, "SECURITY_METADATA_PROGRESS_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(cli, "SECURITY_METADATA_CHUNK_SIZE", 1)
+
+    rc = cli.cmd_refresh_security_metadata(
+        database=str(db_path),
+        symbols=["AAA.US", "BBB.US"],
+        exchange_codes=None,
+        all_supported=False,
+    )
+
+    assert rc == 1
+    entity_repo = EntityMetadataRepository(db_path)
+    entity_repo.initialize_schema()
+    assert entity_repo.fetch_sector("AAA.US") == "Technology"
+    assert entity_repo.fetch_sector("BBB.US") is None
+    output_lines = capsys.readouterr().out.splitlines()
+    assert (
+        "Security metadata refresh cancelled by user after 1 of 2 symbols."
+        in output_lines
+    )
+    assert [line for line in output_lines if line.startswith("Progress:")] == [
+        "Progress: 1/2 symbols complete (50.0%)",
+    ]
+    assert "Scanned 2 symbols." not in output_lines
+
+
 def test_cmd_run_screen_bulk(tmp_path, capsys):
     db_path = tmp_path / "screen.db"
     store_catalog_listings(
@@ -5998,6 +6352,90 @@ criteria:
     assert csv_contents[2].startswith("Description,AAA description")
     assert csv_contents[3] == "Price,N/A"
     assert "AAA.US" in capsys.readouterr().out
+
+
+def test_cmd_run_screen_stage_adds_ranked_output_rows_and_sorts_passers(
+    tmp_path, capsys
+):
+    db_path = tmp_path / "screen-stage-ranked.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+            Listing(symbol="CCC.US", security_name="CCC Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+    for symbol in ("AAA.US", "BBB.US", "CCC.US"):
+        metrics_repo.upsert(symbol, "working_capital", 100.0, "2023-12-31")
+    metrics_repo.upsert("AAA.US", "primary_score", 10.0, "2023-12-31")
+    metrics_repo.upsert("BBB.US", "primary_score", 10.0, "2023-12-31")
+    metrics_repo.upsert("CCC.US", "primary_score", 5.0, "2023-12-31")
+    metrics_repo.upsert("AAA.US", "oey_ev_norm", 0.05, "2023-12-31")
+    metrics_repo.upsert("BBB.US", "oey_ev_norm", 0.07, "2023-12-31")
+    metrics_repo.upsert("CCC.US", "oey_ev_norm", 0.09, "2023-12-31")
+    metrics_repo.upsert("AAA.US", "net_debt_to_ebitda", 1.5, "2023-12-31")
+    metrics_repo.upsert("BBB.US", "net_debt_to_ebitda", 1.5, "2023-12-31")
+    metrics_repo.upsert("CCC.US", "net_debt_to_ebitda", 0.5, "2023-12-31")
+    entity_repo = EntityMetadataRepository(db_path)
+    entity_repo.initialize_schema()
+    entity_repo.upsert("AAA.US", "AAA Inc", description="AAA description")
+    entity_repo.upsert("BBB.US", "BBB Inc", description="BBB description")
+    entity_repo.upsert("CCC.US", "CCC Inc", description="CCC description")
+
+    screen_path = tmp_path / "ranked-screen.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Working capital minimum"
+    left:
+      metric: working_capital
+    operator: ">="
+    right:
+      value: 75
+ranking:
+  peer_group: sector
+  min_sector_peers: 10
+  winsorize:
+    lower_percentile: 5
+    upper_percentile: 95
+  metrics:
+    - metric: primary_score
+      weight: 1.0
+      direction: higher
+  tie_breakers:
+    - metric: oey_ev_norm
+      direction: descending
+    - metric: net_debt_to_ebitda
+      direction: ascending
+    - metric: canonical_symbol
+      direction: ascending
+"""
+    )
+    csv_path = tmp_path / "ranked-results.csv"
+
+    rc = cli.cmd_run_screen_stage(
+        config_path=str(screen_path),
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=["US"],
+        all_supported=False,
+        output_csv=str(csv_path),
+    )
+
+    assert rc == 0
+    csv_contents = csv_path.read_text().strip().splitlines()
+    assert csv_contents[0] == "Criterion,BBB.US,AAA.US,CCC.US"
+    assert csv_contents[5] == "qarp_rank,1,2,3"
+    assert csv_contents[6].startswith("qarp_score,66.6667,66.6667,16.6667")
+    output = capsys.readouterr().out.splitlines()
+    assert any(
+        line.lstrip().startswith("Criterion") and "BBB.US" in line for line in output
+    )
 
 
 def test_cmd_run_screen_stage_reports_progress_when_no_symbols_pass(

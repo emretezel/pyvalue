@@ -94,3 +94,9 @@ Use this file to capture recurring mistake patterns after user corrections so fu
 - Recurring pattern: Updating one instruction mirror file while assuming the other will stay aligned creates silent drift in agent guidance and leaves different assistants following different rules.
 - Preventive rule: In this repo, whenever `AGENTS.md` changes, update `CLAUDE.md` in the same change and verify the two files are identical before finishing.
 - Resulting action: Added the mirror rule to `AGENTS.md`, synced `CLAUDE.md` to match it exactly, and recorded the rule here.
+
+- Date: 2026-04-03
+- User correction: `refresh-security-metadata` was still effectively unusable because the earlier fix added progress output only after an expensive full-universe raw-payload preload.
+- Recurring pattern: Improving visible loop progress without measuring the pre-loop setup can miss the true hot path and leave CLI startup latency unchanged.
+- Preventive rule: For slow CLI commands, benchmark each major phase on the real data path before optimizing UX, and do not treat progress output as a performance fix unless the expensive pre-loop work has also been profiled or removed.
+- Resulting action: Profiled `refresh-security-metadata` against the real SQLite DB, identified `FundamentalsRepository.fetch_many(...)` plus eager `json.loads(...)` as the startup bottleneck, and replaced that path with chunked extracted metadata reads and batched writes.

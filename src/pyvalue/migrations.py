@@ -1814,6 +1814,21 @@ def _migration_024_create_fundamentals_normalization_state(
     )
 
 
+def _migration_025_add_sector_industry_to_securities(
+    conn: sqlite3.Connection,
+) -> None:
+    """Add sector and industry columns to canonical securities."""
+
+    if not _table_exists(conn, "securities"):
+        return
+
+    columns = _table_columns(conn, "securities")
+    if "sector" not in columns:
+        conn.execute("ALTER TABLE securities ADD COLUMN sector TEXT")
+    if "industry" not in columns:
+        conn.execute("ALTER TABLE securities ADD COLUMN industry TEXT")
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -1839,6 +1854,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_022_canonical_security_model,
     _migration_023_optimize_fundamentals_hot_paths,
     _migration_024_create_fundamentals_normalization_state,
+    _migration_025_add_sector_industry_to_securities,
 ]
 
 

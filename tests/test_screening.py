@@ -11,6 +11,7 @@ from pyvalue.screening import (
     evaluate_criterion,
     evaluate_criterion_detail,
     load_screen,
+    ranking_metric_ids,
     screen_metric_ids,
 )
 from pyvalue.storage import FinancialFactsRepository, MetricsRepository
@@ -173,3 +174,37 @@ def test_load_screen_parses_quality_reasonable_price_example():
     assert definition.criteria[3].left.metric == "cfo_to_ni_ttm"
     assert definition.criteria[4].left.metric == "oey_ev_norm"
     assert definition.criteria[5].left.metric == "share_count_cagr_10y"
+    assert definition.ranking is not None
+    assert definition.ranking.peer_group == "sector"
+    assert definition.ranking.min_sector_peers == 10
+    assert definition.ranking.winsor_lower_percentile == 0.05
+    assert definition.ranking.winsor_upper_percentile == 0.95
+    assert definition.ranking.metrics[0].metric_id == "oey_ev_norm"
+    assert definition.ranking.metrics[0].weight == 0.30
+    assert definition.ranking.metrics[0].direction == "higher"
+    assert definition.ranking.metrics[4].metric_id == "cfo_to_ni_ttm"
+    assert definition.ranking.metrics[4].cap == 1.5
+    assert definition.ranking.tie_breakers[0].metric_id == "oey_ev_norm"
+    assert definition.ranking.tie_breakers[1].direction == "ascending"
+    assert definition.ranking.tie_breakers[2].metric_id == "canonical_symbol"
+
+
+def test_ranking_metric_ids_preserve_first_seen_order():
+    definition = load_screen(
+        Path(__file__).resolve().parents[1]
+        / "screeners"
+        / "quality_reasonable_price.yml"
+    )
+
+    assert ranking_metric_ids(definition) == [
+        "oey_ev_norm",
+        "ev_to_ebit",
+        "graham_multiplier",
+        "roic_10y_median",
+        "cfo_to_ni_ttm",
+        "opm_10y_std",
+        "net_debt_to_ebitda",
+        "interest_coverage",
+        "share_count_cagr_10y",
+        "net_buyback_yield",
+    ]

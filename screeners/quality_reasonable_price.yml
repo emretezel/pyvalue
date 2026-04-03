@@ -40,3 +40,50 @@ criteria:
     operator: "<="
     right:
       value: 0.01
+
+ranking:
+  peer_group: sector
+  min_sector_peers: 10
+  winsorize:
+    lower_percentile: 5
+    upper_percentile: 95
+  metrics:
+    - metric: oey_ev_norm
+      weight: 0.30
+      direction: higher
+    - metric: ev_to_ebit
+      weight: 0.10
+      direction: lower
+    - metric: graham_multiplier
+      weight: 0.05
+      direction: lower
+    - metric: roic_10y_median
+      weight: 0.20
+      direction: higher
+    - metric: cfo_to_ni_ttm
+      weight: 0.10
+      direction: higher
+      cap: 1.5
+    - metric: opm_10y_std
+      weight: 0.10
+      direction: lower
+    - metric: net_debt_to_ebitda
+      weight: 0.10
+      direction: lower
+    - metric: interest_coverage
+      weight: 0.05
+      direction: higher
+      cap: 20
+    - metric: share_count_cagr_10y
+      weight: 0.05
+      direction: lower
+    - metric: net_buyback_yield
+      weight: 0.05
+      direction: higher
+  tie_breakers:
+    - metric: oey_ev_norm
+      direction: descending
+    - metric: net_debt_to_ebitda
+      direction: ascending
+    - metric: canonical_symbol
+      direction: ascending

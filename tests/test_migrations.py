@@ -130,6 +130,58 @@ def test_migration_creates_supported_tickers_table(tmp_path):
     assert "idx_supported_tickers_provider_exchange" in index_names
 
 
+def test_migration_adds_sector_and_industry_to_securities(tmp_path):
+    db_path = tmp_path / "securities-sector-industry.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE securities (
+                security_id INTEGER PRIMARY KEY,
+                canonical_ticker TEXT NOT NULL,
+                canonical_exchange_code TEXT NOT NULL,
+                canonical_symbol TEXT NOT NULL,
+                entity_name TEXT,
+                description TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (canonical_exchange_code, canonical_ticker),
+                UNIQUE (canonical_symbol)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO securities (
+                security_id, canonical_ticker, canonical_exchange_code, canonical_symbol,
+                entity_name, description, created_at, updated_at
+            ) VALUES (
+                1, 'AAA', 'US', 'AAA.US', 'AAA Corp', 'AAA description',
+                '2024-01-01T00:00:00+00:00', '2024-01-01T00:00:00+00:00'
+            )
+            """
+        )
+        conn.execute("CREATE TABLE schema_migrations (version INTEGER NOT NULL)")
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (24)")
+
+    applied = apply_migrations(db_path)
+
+    assert applied == 1
+    with sqlite3.connect(db_path) as conn:
+        info = conn.execute("PRAGMA table_info(securities)").fetchall()
+        columns = {row[1] for row in info}
+        row = conn.execute(
+            """
+            SELECT entity_name, description, sector, industry
+            FROM securities
+            WHERE canonical_symbol = 'AAA.US'
+            """
+        ).fetchone()
+
+    assert "sector" in columns
+    assert "industry" in columns
+    assert row == ("AAA Corp", "AAA description", None, None)
+
+
 def test_migration_creates_market_data_fetch_state_table(tmp_path):
     db_path = tmp_path / "market-data-fetch-state.sqlite"
 
@@ -214,7 +266,7 @@ def test_migration_does_not_overwrite_existing_supported_tickers(tmp_path):
 
     applied = apply_migrations(db_path)
 
-    assert applied == 4
+    assert applied == 5
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
             """

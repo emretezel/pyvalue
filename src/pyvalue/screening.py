@@ -40,6 +40,37 @@ class Criterion:
 @dataclass
 class ScreenDefinition:
     criteria: List[Criterion]
+    ranking: Optional["RankingDefinition"] = None
+
+
+@dataclass(frozen=True)
+class RankingMetric:
+    """One metric that contributes to a screen ranking score."""
+
+    metric_id: str
+    weight: float
+    direction: str
+    cap: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class RankingTieBreaker:
+    """Secondary ordering rule after the final ranking score."""
+
+    metric_id: str
+    direction: str
+
+
+@dataclass(frozen=True)
+class RankingDefinition:
+    """Optional ranking rules applied after pass/fail screening."""
+
+    peer_group: str
+    min_sector_peers: int
+    winsor_lower_percentile: float
+    winsor_upper_percentile: float
+    metrics: tuple[RankingMetric, ...]
+    tie_breakers: tuple[RankingTieBreaker, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -77,7 +108,8 @@ def load_screen(path: str | Path) -> ScreenDefinition:
                 right=Term(**entry["right"]),
             )
         )
-    return ScreenDefinition(criteria=criteria)
+    ranking = _load_ranking_definition(data.get("ranking"))
+    return ScreenDefinition(criteria=criteria, ranking=ranking)
 
 
 def screen_metric_ids(definition: ScreenDefinition) -> List[str]:
@@ -91,6 +123,21 @@ def screen_metric_ids(definition: ScreenDefinition) -> List[str]:
                 continue
             seen.add(term.metric)
             metric_ids.append(term.metric)
+    return metric_ids
+
+
+def ranking_metric_ids(definition: ScreenDefinition) -> List[str]:
+    """Return unique ranking metric ids in first-seen order."""
+
+    if definition.ranking is None:
+        return []
+    metric_ids: List[str] = []
+    seen: set[str] = set()
+    for metric in definition.ranking.metrics:
+        if metric.metric_id in seen:
+            continue
+        seen.add(metric.metric_id)
+        metric_ids.append(metric.metric_id)
     return metric_ids
 
 
@@ -252,3 +299,53 @@ def _dedupe_missing_metric_ids(*metric_ids: Optional[str]) -> tuple[str, ...]:
         seen.add(metric_id)
         ordered.append(metric_id)
     return tuple(ordered)
+
+
+def _load_ranking_definition(data: object) -> Optional[RankingDefinition]:
+    if not isinstance(data, dict):
+        return None
+    winsorize = data.get("winsorize")
+    winsorize_data = winsorize if isinstance(winsorize, dict) else {}
+    metrics = tuple(
+        RankingMetric(
+            metric_id=str(entry.get("metric") or entry.get("metric_id") or "").strip(),
+            weight=float(entry.get("weight") or 0.0),
+            direction=str(entry.get("direction") or "higher").strip().lower(),
+            cap=(
+                float(entry["cap"])
+                if entry.get("cap") is not None and str(entry.get("cap")).strip() != ""
+                else None
+            ),
+        )
+        for entry in data.get("metrics", [])
+        if isinstance(entry, dict)
+        and str(entry.get("metric") or entry.get("metric_id") or "").strip()
+    )
+    tie_breakers = tuple(
+        RankingTieBreaker(
+            metric_id=str(entry.get("metric") or entry.get("metric_id") or "").strip(),
+            direction=str(entry.get("direction") or "ascending").strip().lower(),
+        )
+        for entry in data.get("tie_breakers", [])
+        if isinstance(entry, dict)
+        and str(entry.get("metric") or entry.get("metric_id") or "").strip()
+    )
+    return RankingDefinition(
+        peer_group=str(data.get("peer_group") or "sector").strip().lower(),
+        min_sector_peers=int(data.get("min_sector_peers") or 10),
+        winsor_lower_percentile=_normalize_percentile_threshold(
+            winsorize_data.get("lower_percentile", 0.05)
+        ),
+        winsor_upper_percentile=_normalize_percentile_threshold(
+            winsorize_data.get("upper_percentile", 0.95)
+        ),
+        metrics=metrics,
+        tie_breakers=tie_breakers,
+    )
+
+
+def _normalize_percentile_threshold(value: object) -> float:
+    if not isinstance(value, (int, float, str)):
+        raise TypeError("Percentile threshold must be numeric")
+    numeric = float(value)
+    return numeric / 100.0 if numeric > 1.0 else numeric

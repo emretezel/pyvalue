@@ -81,6 +81,8 @@ class Security:
     canonical_symbol: str
     entity_name: Optional[str] = None
     description: Optional[str] = None
+    sector: Optional[str] = None
+    industry: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -235,6 +237,41 @@ class FundamentalsUpdate:
 
 
 @dataclass(frozen=True)
+class SecurityMetadataCandidate:
+    """Canonical metadata extracted from stored raw fundamentals."""
+
+    entity_name: Optional[str] = None
+    description: Optional[str] = None
+    sector: Optional[str] = None
+    industry: Optional[str] = None
+
+    def to_update_fields(self) -> Dict[str, str]:
+        """Return only metadata fields that should overwrite canonicals."""
+
+        update_fields: Dict[str, str] = {}
+        if self.entity_name is not None:
+            update_fields["entity_name"] = self.entity_name
+        if self.description is not None:
+            update_fields["description"] = self.description
+        if self.sector is not None:
+            update_fields["sector"] = self.sector
+        if self.industry is not None:
+            update_fields["industry"] = self.industry
+        return update_fields
+
+
+@dataclass(frozen=True)
+class SecurityMetadataUpdate:
+    """Canonical security metadata prepared for batched persistence."""
+
+    security_id: int
+    entity_name: Optional[str] = None
+    description: Optional[str] = None
+    sector: Optional[str] = None
+    industry: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class FundamentalsNormalizationCandidate:
     """Normalization freshness inputs for one stored raw fundamentals payload."""
 
@@ -347,6 +384,8 @@ class SecurityRepository(SQLiteStore):
                     canonical_symbol TEXT NOT NULL,
                     entity_name TEXT,
                     description TEXT,
+                    sector TEXT,
+                    industry TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE (canonical_exchange_code, canonical_ticker),
@@ -367,6 +406,8 @@ class SecurityRepository(SQLiteStore):
         canonical_exchange_code: str,
         entity_name: Optional[str] = None,
         description: Optional[str] = None,
+        sector: Optional[str] = None,
+        industry: Optional[str] = None,
     ) -> Security:
         self.initialize_schema()
         ticker = _normalize_required_text(canonical_ticker, "canonical_ticker").upper()
@@ -376,6 +417,8 @@ class SecurityRepository(SQLiteStore):
         canonical_symbol = f"{ticker}.{exchange_code}"
         entity_name = _normalize_optional_text(entity_name)
         description = _normalize_optional_text(description)
+        sector = _normalize_optional_text(sector)
+        industry = _normalize_optional_text(industry)
         now = _utc_now_iso()
         with self._connect() as conn:
             conn.execute(
@@ -386,12 +429,16 @@ class SecurityRepository(SQLiteStore):
                     canonical_symbol,
                     entity_name,
                     description,
+                    sector,
+                    industry,
                     created_at,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(canonical_exchange_code, canonical_ticker) DO UPDATE SET
                     entity_name = COALESCE(excluded.entity_name, securities.entity_name),
                     description = COALESCE(excluded.description, securities.description),
+                    sector = COALESCE(excluded.sector, securities.sector),
+                    industry = COALESCE(excluded.industry, securities.industry),
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -400,6 +447,8 @@ class SecurityRepository(SQLiteStore):
                     canonical_symbol,
                     entity_name,
                     description,
+                    sector,
+                    industry,
                     now,
                     now,
                 ),
@@ -407,7 +456,8 @@ class SecurityRepository(SQLiteStore):
             row = conn.execute(
                 """
                 SELECT security_id, canonical_ticker, canonical_exchange_code,
-                       canonical_symbol, entity_name, description, created_at, updated_at
+                       canonical_symbol, entity_name, description, sector, industry,
+                       created_at, updated_at
                 FROM securities
                 WHERE canonical_exchange_code = ? AND canonical_ticker = ?
                 """,
@@ -425,6 +475,8 @@ class SecurityRepository(SQLiteStore):
         exchange_code: Optional[str] = None,
         entity_name: Optional[str] = None,
         description: Optional[str] = None,
+        sector: Optional[str] = None,
+        industry: Optional[str] = None,
     ) -> Security:
         ticker, suffix = _normalize_symbol_base(symbol)
         canonical_exchange = (exchange_code or suffix or "").strip().upper()
@@ -437,6 +489,8 @@ class SecurityRepository(SQLiteStore):
             canonical_exchange,
             entity_name=entity_name,
             description=description,
+            sector=sector,
+            industry=industry,
         )
 
     def fetch_by_symbol(self, symbol: str) -> Optional[Security]:
@@ -449,7 +503,8 @@ class SecurityRepository(SQLiteStore):
             row = conn.execute(
                 """
                 SELECT security_id, canonical_ticker, canonical_exchange_code,
-                       canonical_symbol, entity_name, description, created_at, updated_at
+                       canonical_symbol, entity_name, description, sector, industry,
+                       created_at, updated_at
                 FROM securities
                 WHERE canonical_symbol = ?
                 """,
@@ -470,7 +525,8 @@ class SecurityRepository(SQLiteStore):
             row = conn.execute(
                 """
                 SELECT security_id, canonical_ticker, canonical_exchange_code,
-                       canonical_symbol, entity_name, description, created_at, updated_at
+                       canonical_symbol, entity_name, description, sector, industry,
+                       created_at, updated_at
                 FROM securities
                 WHERE security_id = ?
                 """,
@@ -522,6 +578,88 @@ class SecurityRepository(SQLiteStore):
                     resolved[row["canonical_symbol"]] = row["security_id"]
         return resolved
 
+    def fetch_many_by_symbol(
+        self,
+        symbols: Sequence[str],
+        chunk_size: int = 500,
+    ) -> Dict[str, Security]:
+        self.initialize_schema()
+        normalized = _normalized_codes(symbols)
+        if not normalized:
+            return {}
+
+        resolved: Dict[str, Security] = {}
+        uncached: List[str] = []
+        for symbol in normalized:
+            cached = self._by_symbol.get(symbol)
+            if cached is not None:
+                resolved[symbol] = cached
+            else:
+                uncached.append(symbol)
+        if not uncached:
+            return resolved
+
+        with self._connect() as conn:
+            for chunk in _batched(uncached, chunk_size):
+                placeholders = ", ".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""
+                    SELECT security_id, canonical_ticker, canonical_exchange_code,
+                           canonical_symbol, entity_name, description, sector,
+                           industry, created_at, updated_at
+                    FROM securities
+                    WHERE canonical_symbol IN ({placeholders})
+                    """,
+                    list(chunk),
+                ).fetchall()
+                for row in rows:
+                    security = Security(*row)
+                    resolved[security.canonical_symbol] = security
+                    self._remember(security)
+        return resolved
+
+    def fetch_many_by_id(
+        self,
+        security_ids: Sequence[int],
+        chunk_size: int = 500,
+    ) -> Dict[int, Security]:
+        self.initialize_schema()
+        normalized = sorted(
+            {int(security_id) for security_id in security_ids if security_id}
+        )
+        if not normalized:
+            return {}
+
+        resolved: Dict[int, Security] = {}
+        uncached: List[int] = []
+        for security_id in normalized:
+            cached = self._by_id.get(security_id)
+            if cached is not None:
+                resolved[security_id] = cached
+            else:
+                uncached.append(security_id)
+        if not uncached:
+            return resolved
+
+        with self._connect() as conn:
+            for chunk in _batched(uncached, chunk_size):
+                placeholders = ", ".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""
+                    SELECT security_id, canonical_ticker, canonical_exchange_code,
+                           canonical_symbol, entity_name, description, sector,
+                           industry, created_at, updated_at
+                    FROM securities
+                    WHERE security_id IN ({placeholders})
+                    """,
+                    list(chunk),
+                ).fetchall()
+                for row in rows:
+                    security = Security(*row)
+                    resolved[security.security_id] = security
+                    self._remember(security)
+        return resolved
+
     def canonical_symbol(self, security_id: int) -> Optional[str]:
         security = self.fetch(security_id)
         return security.canonical_symbol if security else None
@@ -531,13 +669,72 @@ class SecurityRepository(SQLiteStore):
         symbol: str,
         entity_name: Optional[str] = None,
         description: Optional[str] = None,
+        sector: Optional[str] = None,
+        industry: Optional[str] = None,
     ) -> None:
-        if not entity_name and not description:
+        if not entity_name and not description and not sector and not industry:
             return
         security = self.ensure_from_symbol(
-            symbol, entity_name=entity_name, description=description
+            symbol,
+            entity_name=entity_name,
+            description=description,
+            sector=sector,
+            industry=industry,
         )
         self._remember(security)
+
+    def upsert_metadata_many(
+        self,
+        updates: Sequence[SecurityMetadataUpdate],
+    ) -> int:
+        """Persist many canonical metadata updates in one transaction."""
+
+        self.initialize_schema()
+        now = _utc_now_iso()
+        rows = [
+            (
+                _normalize_optional_text(update.entity_name),
+                _normalize_optional_text(update.description),
+                _normalize_optional_text(update.sector),
+                _normalize_optional_text(update.industry),
+                now,
+                int(update.security_id),
+            )
+            for update in updates
+            if update.security_id
+            and (
+                update.entity_name is not None
+                or update.description is not None
+                or update.sector is not None
+                or update.industry is not None
+            )
+        ]
+        if not rows:
+            return 0
+
+        security_ids = [row[-1] for row in rows]
+        with self._connect() as conn:
+            before = conn.total_changes
+            conn.executemany(
+                """
+                UPDATE securities
+                SET entity_name = COALESCE(?, entity_name),
+                    description = COALESCE(?, description),
+                    sector = COALESCE(?, sector),
+                    industry = COALESCE(?, industry),
+                    updated_at = ?
+                WHERE security_id = ?
+                """,
+                rows,
+            )
+            updated = int(conn.total_changes - before)
+
+        for security_id in security_ids:
+            cached = self._by_id.pop(security_id, None)
+            if cached is not None:
+                self._by_symbol.pop(cached.canonical_symbol, None)
+        self.fetch_many_by_id(security_ids)
+        return updated
 
     def fetch_name(self, symbol: str) -> Optional[str]:
         security = self.fetch_by_symbol(symbol)
@@ -546,6 +743,14 @@ class SecurityRepository(SQLiteStore):
     def fetch_description(self, symbol: str) -> Optional[str]:
         security = self.fetch_by_symbol(symbol)
         return security.description if security else None
+
+    def fetch_sector(self, symbol: str) -> Optional[str]:
+        security = self.fetch_by_symbol(symbol)
+        return security.sector if security else None
+
+    def fetch_industry(self, symbol: str) -> Optional[str]:
+        security = self.fetch_by_symbol(symbol)
+        return security.industry if security else None
 
     def list_supported_symbols(
         self,
@@ -1713,6 +1918,112 @@ class FundamentalsRepository(SQLiteStore):
         if row is None:
             return None
         return json.loads(row[0])
+
+    def fetch_many(
+        self,
+        provider: str,
+        symbols: Sequence[str],
+        chunk_size: int = 500,
+    ) -> Dict[str, Dict[str, Any]]:
+        self.initialize_schema()
+        normalized = _normalized_codes(symbols)
+        if not normalized:
+            return {}
+        security_ids_by_symbol = self._security_repo().resolve_ids_many(
+            normalized,
+            chunk_size=chunk_size,
+        )
+        results: Dict[str, Dict[str, Any]] = {}
+        provider_norm = provider.strip().upper()
+        with self._connect() as conn:
+            for chunk in _batched(list(security_ids_by_symbol.items()), chunk_size):
+                rows = [
+                    (symbol, security_id)
+                    for symbol, security_id in chunk
+                    if security_id
+                ]
+                if not rows:
+                    continue
+                placeholders = ", ".join("?" for _ in rows)
+                query_params: List[object] = [
+                    provider_norm,
+                    *[security_id for _, security_id in rows],
+                ]
+                query_rows = conn.execute(
+                    f"""
+                    SELECT s.canonical_symbol, fr.data
+                    FROM fundamentals_raw fr
+                    JOIN securities s ON s.security_id = fr.security_id
+                    WHERE fr.provider = ? AND fr.security_id IN ({placeholders})
+                    """,
+                    query_params,
+                ).fetchall()
+                for row in query_rows:
+                    results[row["canonical_symbol"]] = json.loads(row["data"])
+        return results
+
+    def fetch_metadata_candidates(
+        self,
+        security_ids: Sequence[int],
+        chunk_size: int = 500,
+    ) -> Dict[int, SecurityMetadataCandidate]:
+        """Extract canonical metadata fields from stored raw fundamentals."""
+
+        self.initialize_schema()
+        normalized_ids = sorted(
+            {int(security_id) for security_id in security_ids if security_id}
+        )
+        if not normalized_ids:
+            return {}
+
+        results: Dict[int, SecurityMetadataCandidate] = {}
+        with self._connect() as conn:
+            for chunk in _batched(normalized_ids, chunk_size):
+                placeholders = ", ".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""
+                    SELECT fr.security_id, fr.provider, fr.data
+                    FROM fundamentals_raw fr
+                    WHERE fr.security_id IN ({placeholders})
+                    ORDER BY fr.security_id
+                    """,
+                    list(chunk),
+                ).fetchall()
+                for row in rows:
+                    provider = str(row["provider"]).upper()
+                    if provider not in {"EODHD", "SEC"}:
+                        continue
+
+                    security_id = int(row["security_id"])
+                    payload = json.loads(row["data"])
+                    current = results.get(security_id) or SecurityMetadataCandidate()
+
+                    if provider == "EODHD":
+                        general = payload.get("General") or {}
+                        eodhd_entity_name = _normalize_optional_text(
+                            general.get("Name")
+                        )
+                        results[security_id] = SecurityMetadataCandidate(
+                            entity_name=eodhd_entity_name or current.entity_name,
+                            description=_normalize_optional_text(
+                                general.get("Description")
+                            ),
+                            sector=_normalize_optional_text(general.get("Sector")),
+                            industry=_normalize_optional_text(general.get("Industry")),
+                        )
+                        continue
+
+                    sec_entity_name = _normalize_optional_text(
+                        payload.get("entityName")
+                    )
+                    if current.entity_name is None and sec_entity_name is not None:
+                        results[security_id] = SecurityMetadataCandidate(
+                            entity_name=sec_entity_name,
+                            description=current.description,
+                            sector=current.sector,
+                            industry=current.industry,
+                        )
+        return results
 
     def fetch_record(
         self, provider: str, symbol: str
@@ -3089,18 +3400,34 @@ class EntityMetadataRepository(SQLiteStore):
         symbol: str,
         entity_name: Optional[str] = None,
         description: Optional[str] = None,
+        sector: Optional[str] = None,
+        industry: Optional[str] = None,
     ) -> None:
         self._security_repo().upsert_metadata(
             symbol,
             entity_name=entity_name,
             description=description,
+            sector=sector,
+            industry=industry,
         )
+
+    def upsert_many(self, updates: Sequence[SecurityMetadataUpdate]) -> int:
+        return self._security_repo().upsert_metadata_many(updates)
 
     def fetch(self, symbol: str) -> Optional[str]:
         return self._security_repo().fetch_name(symbol)
 
     def fetch_description(self, symbol: str) -> Optional[str]:
         return self._security_repo().fetch_description(symbol)
+
+    def fetch_sector(self, symbol: str) -> Optional[str]:
+        return self._security_repo().fetch_sector(symbol)
+
+    def fetch_industry(self, symbol: str) -> Optional[str]:
+        return self._security_repo().fetch_industry(symbol)
+
+    def fetch_many(self, symbols: Sequence[str]) -> Dict[str, Security]:
+        return self._security_repo().fetch_many_by_symbol(symbols)
 
 
 def _normalized_codes(values: Optional[Sequence[str]]) -> List[str]:
@@ -3122,6 +3449,8 @@ def _normalized_codes(values: Optional[Sequence[str]]) -> List[str]:
 
 __all__ = [
     "Security",
+    "SecurityMetadataCandidate",
+    "SecurityMetadataUpdate",
     "SecurityRepository",
     "FundamentalsRepository",
     "SupportedExchange",

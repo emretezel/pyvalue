@@ -69,7 +69,7 @@ This repo ships several example screens:
 - [`screeners/value.yml`](../../screeners/value.yml): larger opinionated value screen
 - [`screeners/value_normalized.yml`](../../screeners/value_normalized.yml): compact value screen using normalized owner earnings and EV/EBIT
 - [`screeners/quality.yml`](../../screeners/quality.yml): quality-focused screen with durability and balance-sheet checks
-- [`screeners/quality_reasonable_price.yml`](../../screeners/quality_reasonable_price.yml): quality at a reasonable price screen combining durability with valuation discipline
+- [`screeners/quality_reasonable_price.yml`](../../screeners/quality_reasonable_price.yml): quality at a reasonable price screen combining durability with valuation discipline, plus post-screen `qarp_score` and `qarp_rank` output for passing symbols
 
 The beginner example looks like this:
 
@@ -156,6 +156,16 @@ Bulk output shows only symbols that satisfy every criterion. The table includes:
 - price
 - one row per criterion with the left-side metric value
 
+Some screens also define a post-screen ranking block. In those cases:
+
+- pass/fail behavior stays unchanged
+- only passing symbols are ranked
+- extra `qarp_rank` and `qarp_score` rows are added before the criterion rows
+- passing symbols are ordered best to worst in the console table and CSV
+
+The bundled QARP screen uses sector-relative percentile subscores when enough
+same-sector passers exist, and otherwise falls back to the full passing set.
+
 If no symbols pass, the command prints `No symbols satisfied all criteria.` and exits non-zero.
 
 ## Diagnose Screen Fallout
@@ -189,9 +199,10 @@ pyvalue refresh-supported-exchanges --provider EODHD
 pyvalue refresh-supported-tickers --provider EODHD --exchange-codes US
 pyvalue ingest-fundamentals --provider EODHD --exchange-codes US
 pyvalue normalize-fundamentals --provider EODHD --exchange-codes US
+pyvalue refresh-security-metadata --exchange-codes US
 pyvalue update-market-data --provider EODHD --exchange-codes US
 pyvalue compute-metrics --exchange-codes US
-pyvalue run-screen --config screeners/basic_value.yml --exchange-codes US --output-csv data/screen_results_basic_value.csv
+pyvalue run-screen --config screeners/quality_reasonable_price.yml --exchange-codes US --output-csv data/screen_results_qarp_US.csv
 ```
 
 ## Why a Screen Can Return No Results
