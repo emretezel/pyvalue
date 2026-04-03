@@ -52,6 +52,12 @@ Then inspect screens or run a screen config:
 pyvalue run-screen --config screeners/value.yml --exchange-codes US
 ```
 
+If a bulk screen returns few or no hits, inspect the fallout:
+
+```bash
+pyvalue report-screen-failures --config screeners/value.yml --exchange-codes US
+```
+
 ## Minimal Single-Symbol Workflow
 
 ```bash

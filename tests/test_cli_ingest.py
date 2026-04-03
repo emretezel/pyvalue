@@ -441,6 +441,72 @@ def test_main_dispatches_run_screen_stage_with_warning_flag(monkeypatch):
     }
 
 
+def test_build_parser_report_screen_failures_requires_config():
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(
+            ["report-screen-failures", "--symbols", "AAPL.US"]
+        )
+
+    args = cli.build_parser().parse_args(
+        [
+            "report-screen-failures",
+            "--config",
+            "screeners/value.yml",
+            "--symbols",
+            "AAPL.US",
+        ]
+    )
+
+    assert args.command == "report-screen-failures"
+    assert args.config == "screeners/value.yml"
+    assert args.output_csv is None
+
+
+def test_main_dispatches_report_screen_failures(monkeypatch):
+    calls = {}
+
+    def fake_cmd(
+        config_path,
+        database,
+        symbols,
+        exchange_codes,
+        all_supported,
+        output_csv,
+    ):
+        calls["config_path"] = config_path
+        calls["database"] = database
+        calls["symbols"] = symbols
+        calls["exchange_codes"] = exchange_codes
+        calls["all_supported"] = all_supported
+        calls["output_csv"] = output_csv
+        return 0
+
+    monkeypatch.setattr(cli, "setup_logging", lambda: None)
+    monkeypatch.setattr(cli, "cmd_report_screen_failures", fake_cmd)
+
+    rc = cli.main(
+        [
+            "report-screen-failures",
+            "--config",
+            "screeners/value.yml",
+            "--exchange-codes",
+            "US",
+            "--output-csv",
+            "data/out.csv",
+        ]
+    )
+
+    assert rc == 0
+    assert calls == {
+        "config_path": "screeners/value.yml",
+        "database": "data/pyvalue.db",
+        "symbols": None,
+        "exchange_codes": ["US"],
+        "all_supported": False,
+        "output_csv": "data/out.csv",
+    }
+
+
 def test_main_dispatches_update_market_data_global_with_default_max_age_days(
     monkeypatch,
 ):
@@ -6095,6 +6161,142 @@ def test_cmd_report_metric_failures_with_exchange(tmp_path, capsys):
     assert "symbols=1" in output
     assert "example=AAA.LSE" in output
     assert "BBB.US" not in output
+
+
+def test_cmd_report_screen_failures_dedupes_metric_na_counts(tmp_path, capsys):
+    db_path = tmp_path / "screen_failures.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    as_of = (date.today() - timedelta(days=5)).isoformat()
+    fact_repo.replace_facts(
+        "BBB.US",
+        [
+            make_fact(
+                symbol="BBB.US",
+                concept="AssetsCurrent",
+                end_date=as_of,
+                value=100.0,
+            ),
+            make_fact(
+                symbol="BBB.US",
+                concept="LiabilitiesCurrent",
+                end_date=as_of,
+                value=20.0,
+            ),
+        ],
+    )
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+    metrics_repo.upsert("AAA.US", "working_capital", 10.0, as_of)
+    market_repo = MarketDataRepository(db_path)
+    market_repo.initialize_schema()
+    market_repo.upsert_price("BBB.US", as_of, price=10.0, market_cap=250.0)
+
+    screen_path = tmp_path / "screen.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Working capital >= 20"
+    left:
+      metric: working_capital
+    operator: ">="
+    right:
+      value: 20
+
+  - name: "Working capital >= 50"
+    left:
+      metric: working_capital
+    operator: ">="
+    right:
+      value: 50
+"""
+    )
+    csv_path = tmp_path / "reports" / "screen_failures.csv"
+
+    rc = cli.cmd_report_screen_failures(
+        config_path=str(screen_path),
+        database=str(db_path),
+        symbols=["AAA.US", "BBB.US"],
+        exchange_codes=None,
+        all_supported=False,
+        output_csv=str(csv_path),
+    )
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "Passed all criteria: 0/2" in output
+    assert "Metric NA impact" in output
+    assert "- working_capital: missing=1 symbols, affects=2 criteria" in output
+    assert "stored_missing_but_computable_now: 1 (example=BBB.US" in output
+    assert "Criterion fallout" in output
+    assert "Working capital >= 20: fails=2/2, na_fails=1, threshold_fails=1" in output
+    assert "Working capital >= 50: fails=2/2, na_fails=1, threshold_fails=1" in output
+    assert "missing_metrics: working_capital=1" in output
+    csv_lines = csv_path.read_text().strip().splitlines()
+    assert csv_lines[0] == (
+        "metric_id,missing_symbols,affected_criteria_count,"
+        "affected_criteria,root_cause,root_cause_count,example_symbol,example_market_cap"
+    )
+    assert "working_capital,1,2," in csv_lines[1]
+    assert "stored_missing_but_computable_now,1,BBB.US,250.0" in csv_lines[1]
+
+
+def test_cmd_report_screen_failures_reports_metric_exceptions(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    db_path = tmp_path / "screen_failure_exception.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
+        provider="SEC",
+    )
+    screen_path = tmp_path / "screen.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Exploding metric"
+    left:
+      metric: exploding_metric
+    operator: ">"
+    right:
+      value: 0
+"""
+    )
+
+    class ExplodingMetric:
+        id = "exploding_metric"
+        required_concepts = ()
+
+        def compute(self, symbol, repo):
+            raise RuntimeError("boom")
+
+    monkeypatch.setitem(cli.REGISTRY, "exploding_metric", ExplodingMetric)
+
+    rc = cli.cmd_report_screen_failures(
+        config_path=str(screen_path),
+        database=str(db_path),
+        symbols=["AAA.US"],
+        exchange_codes=None,
+        all_supported=False,
+        output_csv=None,
+    )
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "- exploding_metric: missing=1 symbols, affects=1 criteria" in output
+    assert "exception: RuntimeError: 1" in output
 
 
 def test_cmd_compute_metrics(tmp_path):

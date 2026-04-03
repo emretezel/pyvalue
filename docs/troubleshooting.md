@@ -39,6 +39,7 @@ Useful commands:
 pyvalue report-fact-freshness --exchange-codes US
 pyvalue report-metric-coverage --exchange-codes US
 pyvalue report-metric-failures --exchange-codes US
+pyvalue report-screen-failures --config screeners/value.yml --exchange-codes US
 ```
 
 ## No Supported Tickers Found

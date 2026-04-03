@@ -158,6 +158,30 @@ Bulk output shows only symbols that satisfy every criterion. The table includes:
 
 If no symbols pass, the command prints `No symbols satisfied all criteria.` and exits non-zero.
 
+## Diagnose Screen Fallout
+
+If a bulk screen returns very few hits, run the dedicated diagnostics command on
+the same scope:
+
+```bash
+pyvalue report-screen-failures --config screeners/basic_value.yml --exchange-codes US
+```
+
+The report separates two different problems:
+
+- `Metric NA impact`: which metric ids are missing for the largest number of
+  symbols, plus recompute-time root causes such as missing history, missing
+  market data, unknown metric ids, or metrics that could be computed now
+- `Criterion fallout`: which criteria eliminate the most symbols, split into
+  `na_fails` versus `threshold_fails`
+
+Use this when you want to decide whether to:
+
+- relax a threshold that is filtering out too many otherwise-computable symbols
+- amend a metric calculation so it returns non-`NA` for more symbols
+- fix a wrong metric id in the YAML
+- recompute metrics or refresh missing market data
+
 ## End-to-End Example
 
 ```bash
@@ -181,6 +205,12 @@ Common causes:
 - the screen is simply too strict
 
 Remember that a missing metric row causes that criterion to fail.
+
+To see which criteria or missing metrics are doing the most damage, run:
+
+```bash
+pyvalue report-screen-failures --config screeners/basic_value.yml --exchange-codes US
+```
 
 ## Related Docs
 

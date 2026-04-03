@@ -20,7 +20,8 @@ Provider rules:
   `ingest-fundamentals`, `normalize-fundamentals`, and `update-market-data`
   accept `--provider` and default it to `EODHD`
 - `compute-metrics`, `run-screen`, `report-fact-freshness`,
-  `report-metric-coverage`, `report-metric-failures`, and `recalc-market-cap`
+  `report-metric-coverage`, `report-metric-failures`,
+  `report-screen-failures`, and `recalc-market-cap`
   are provider-agnostic and operate on canonical symbols
 
 ## Catalog Commands
@@ -249,6 +250,37 @@ Key options:
 - `--metrics <metric-ids...>`
 - `--output-csv <path>`
 - `--database <path>`
+
+### `report-screen-failures`
+
+Rank which screen criteria and missing metrics exclude the most symbols for the
+requested canonical scope.
+
+Key options:
+
+- `--config <path>` required
+- optional scope selector: `--symbols`, `--exchange-codes`, or
+  `--all-supported` (defaults to the full supported universe)
+- `--output-csv <path>`
+- `--database <path>`
+
+Notes:
+
+- evaluates every criterion for every symbol, so criterion ranking is not biased
+  by YAML order
+- metric NA counts are deduplicated by `(symbol, metric_id)`, even when the same
+  metric appears in multiple criteria
+- the console report has two sections:
+  - `Metric NA impact`: missing stored metrics ranked by affected-symbol count,
+    with recompute-time root-cause buckets
+  - `Criterion fallout`: per-criterion fail counts split into `na_fails` versus
+    `threshold_fails`
+- if a stored metric row is missing, the command recomputes only that metric for
+  the affected symbols to distinguish:
+  - `stored_missing_but_computable_now`
+  - warning-driven `None` results
+  - `exception: <type>`
+  - `unknown_metric_id` when the screen references an unregistered metric
 
 ## Screening Commands
 

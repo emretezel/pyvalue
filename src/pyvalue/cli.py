@@ -9,7 +9,7 @@ import argparse
 import csv
 import concurrent.futures.thread as _thread_futures
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 import json
 import logging
@@ -33,8 +33,11 @@ from pyvalue.normalization import EODHDFactsNormalizer, SECFactsNormalizer
 from pyvalue.reporting import MetricCoverage, compute_fact_coverage
 from pyvalue.screening import (
     Criterion,
-    load_screen,
+    CriterionEvaluation,
+    evaluate_criterion_detail,
     evaluate_criterion_verbose,
+    load_screen,
+    screen_metric_ids,
 )
 from pyvalue.logging_utils import setup_logging, suppress_console_metric_warnings
 from pyvalue.facts import RegionFactsRepository
@@ -137,6 +140,31 @@ class _ComputedMetricsResult:
     symbol: str
     rows: Tuple[StoredMetricRow, ...]
     computed_count: int
+
+
+@dataclass
+class _ScreenMetricImpactSummary:
+    """Aggregated NA impact for one metric referenced by a screen."""
+
+    metric_id: str
+    missing_symbols: set[str] = field(default_factory=set)
+    affected_criteria: set[str] = field(default_factory=set)
+
+
+@dataclass
+class _CriterionFailureSummary:
+    """Aggregated fallout counts for one screen criterion."""
+
+    index: int
+    criterion: Criterion
+    fail_count: int = 0
+    na_fail_count: int = 0
+    threshold_fail_count: int = 0
+    missing_metric_symbols: Dict[str, set[str]] = field(default_factory=dict)
+
+    @property
+    def label(self) -> str:
+        return f"{self.index + 1}. {self.criterion.name}"
 
 
 class _RateLimiter:
@@ -1573,6 +1601,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-csv",
         default=None,
         help="Optional CSV path for metric failure reasons.",
+    )
+
+    screen_failure_report = subparsers.add_parser(
+        "report-screen-failures",
+        help="Rank which screen criteria and missing metrics exclude the most symbols for the requested canonical scope.",
+    )
+    screen_failure_report.add_argument(
+        "--config",
+        required=True,
+        help="Path to screening config (YAML)",
+    )
+    screen_failure_report.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
+    )
+    add_scope_args(screen_failure_report)
+    screen_failure_report.add_argument(
+        "--output-csv",
+        default=None,
+        help="Optional CSV path for metric-level screen failure reasons.",
     )
 
     purge_nonfilers = subparsers.add_parser(
@@ -4632,6 +4681,213 @@ def _write_metric_failure_report_csv(
                 )
 
 
+def _write_screen_failure_report_csv(
+    impacts: Sequence[_ScreenMetricImpactSummary],
+    failures: Dict[str, Counter],
+    examples: Dict[str, Dict[str, tuple[str, Optional[float]]]],
+    path: str,
+) -> None:
+    output_path = _prepare_output_csv_path(path)
+    with output_path.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "metric_id",
+                "missing_symbols",
+                "affected_criteria_count",
+                "affected_criteria",
+                "root_cause",
+                "root_cause_count",
+                "example_symbol",
+                "example_market_cap",
+            ]
+        )
+        for impact in impacts:
+            counter = failures.get(impact.metric_id, Counter())
+            criteria = sorted(impact.affected_criteria)
+            if not counter:
+                writer.writerow(
+                    [
+                        impact.metric_id,
+                        len(impact.missing_symbols),
+                        len(criteria),
+                        "; ".join(criteria),
+                        "",
+                        0,
+                        "",
+                        "",
+                    ]
+                )
+                continue
+            for reason, count in counter.most_common():
+                example = examples.get(impact.metric_id, {}).get(reason)
+                example_symbol = example[0] if example else ""
+                example_cap = example[1] if example else None
+                writer.writerow(
+                    [
+                        impact.metric_id,
+                        len(impact.missing_symbols),
+                        len(criteria),
+                        "; ".join(criteria),
+                        reason,
+                        count,
+                        example_symbol,
+                        example_cap if example_cap is not None else "",
+                    ]
+                )
+
+
+def _metric_market_cap(
+    market_repo: MarketDataRepository,
+    market_caps: Dict[str, Optional[float]],
+    symbol: str,
+) -> Optional[float]:
+    cap = market_caps.get(symbol)
+    if symbol in market_caps:
+        return cap
+    snapshot = market_repo.latest_snapshot(symbol)
+    cap = snapshot.market_cap if snapshot else None
+    market_caps[symbol] = cap
+    return cap
+
+
+def _record_failure_example(
+    examples: Dict[str, Dict[str, tuple[str, Optional[float]]]],
+    metric_id: str,
+    reason: str,
+    symbol: str,
+    market_cap: Optional[float],
+) -> None:
+    current = examples[metric_id].get(reason)
+    if current is None:
+        examples[metric_id][reason] = (symbol, market_cap)
+        return
+    current_cap = current[1]
+    if market_cap is not None and (current_cap is None or market_cap > current_cap):
+        examples[metric_id][reason] = (symbol, market_cap)
+
+
+def _recompute_missing_screen_metrics(
+    metric_impacts: Mapping[str, _ScreenMetricImpactSummary],
+    fact_repo: RegionFactsRepository,
+    market_repo: MarketDataRepository,
+) -> tuple[Dict[str, Counter], Dict[str, Dict[str, tuple[str, Optional[float]]]]]:
+    failures: Dict[str, Counter] = {
+        metric_id: Counter() for metric_id in metric_impacts.keys()
+    }
+    examples: Dict[str, Dict[str, tuple[str, Optional[float]]]] = {
+        metric_id: {} for metric_id in metric_impacts.keys()
+    }
+    market_caps: Dict[str, Optional[float]] = {}
+    handler = _MetricWarningCollector()
+    root_logger = logging.getLogger()
+    root_logger.addHandler(handler)
+
+    try:
+        for metric_id, impact in metric_impacts.items():
+            symbols = sorted(impact.missing_symbols)
+            if not symbols:
+                continue
+            metric_cls = REGISTRY.get(metric_id)
+            if metric_cls is None:
+                reason = "unknown_metric_id"
+                failures[metric_id][reason] += len(symbols)
+                for symbol in symbols:
+                    cap = _metric_market_cap(market_repo, market_caps, symbol)
+                    _record_failure_example(examples, metric_id, reason, symbol, cap)
+                continue
+
+            metric = metric_cls()
+            for symbol in symbols:
+                handler.clear()
+                try:
+                    if getattr(metric, "uses_market_data", False):
+                        result = metric.compute(symbol, fact_repo, market_repo)
+                    else:
+                        result = metric.compute(symbol, fact_repo)
+                except Exception as exc:  # pragma: no cover - defensive
+                    reason = f"exception: {exc.__class__.__name__}"
+                else:
+                    if result is not None:
+                        reason = "stored_missing_but_computable_now"
+                    else:
+                        reason = _format_failure_reason(handler.records, symbol)
+                failures[metric_id][reason] += 1
+                cap = _metric_market_cap(market_repo, market_caps, symbol)
+                _record_failure_example(examples, metric_id, reason, symbol, cap)
+    finally:
+        root_logger.removeHandler(handler)
+
+    return failures, examples
+
+
+def _print_screen_metric_na_impact(
+    impacts: Sequence[_ScreenMetricImpactSummary],
+    failures: Dict[str, Counter],
+    examples: Dict[str, Dict[str, tuple[str, Optional[float]]]],
+) -> None:
+    print("Metric NA impact")
+    if not impacts:
+        print("- none")
+        return
+    for impact in impacts:
+        print(
+            f"- {impact.metric_id}: missing={len(impact.missing_symbols)} symbols, "
+            f"affects={len(impact.affected_criteria)} criteria"
+        )
+        counter = failures.get(impact.metric_id, Counter())
+        if not counter:
+            continue
+        for reason, count in counter.most_common():
+            example = examples.get(impact.metric_id, {}).get(reason)
+            if example:
+                example_symbol, example_cap = example
+                cap_display = (
+                    _format_value(example_cap) if example_cap is not None else "N/A"
+                )
+                print(
+                    f"    {reason}: {count} "
+                    f"(example={example_symbol}, market_cap={cap_display})"
+                )
+            else:
+                print(f"    {reason}: {count}")
+
+
+def _print_screen_criterion_fallout(
+    summaries: Sequence[_CriterionFailureSummary],
+    total_symbols: int,
+) -> None:
+    print("Criterion fallout")
+    if not summaries:
+        print("- none")
+        return
+    for summary in summaries:
+        print(
+            f"- {summary.criterion.name}: fails={summary.fail_count}/{total_symbols}, "
+            f"na_fails={summary.na_fail_count}, "
+            f"threshold_fails={summary.threshold_fail_count}"
+        )
+        metric_details: List[str] = []
+        if summary.criterion.left.metric:
+            metric_details.append(f"left_metric={summary.criterion.left.metric}")
+        if summary.criterion.right.metric:
+            metric_details.append(f"right_metric={summary.criterion.right.metric}")
+        if metric_details:
+            print(f"    {', '.join(metric_details)}")
+        if summary.missing_metric_symbols:
+            missing_counts = sorted(
+                (
+                    (metric_id, len(symbols))
+                    for metric_id, symbols in summary.missing_metric_symbols.items()
+                ),
+                key=lambda item: (-item[1], item[0]),
+            )
+            display = ", ".join(
+                f"{metric_id}={count}" for metric_id, count in missing_counts
+            )
+            print(f"    missing_metrics: {display}")
+
+
 def cmd_report_metric_failures(
     database: str,
     metric_ids: Optional[Sequence[str]],
@@ -4747,6 +5003,123 @@ def cmd_report_metric_failures(
             failures, examples, total_symbols, metric_order, output_csv
         )
         print(f"Wrote metric failure reasons to {output_csv}")
+    return 0
+
+
+def cmd_report_screen_failures(
+    config_path: str,
+    database: str,
+    symbols: Optional[Sequence[str]],
+    exchange_codes: Optional[Sequence[str]],
+    all_supported: bool,
+    output_csv: Optional[str],
+) -> int:
+    """Rank which criteria and missing metrics eliminate the most symbols."""
+
+    db_path = _resolve_database_path(database)
+    selected_symbols, explicit_symbols, resolved_exchange_codes = (
+        _resolve_canonical_scope_symbols(
+            str(db_path),
+            symbols,
+            exchange_codes,
+            all_supported,
+        )
+    )
+    definition = load_screen(config_path)
+    metric_ids = screen_metric_ids(definition)
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+    base_fact_repo = FinancialFactsRepository(db_path)
+    base_fact_repo.initialize_schema()
+    fact_repo = RegionFactsRepository(base_fact_repo)
+    market_repo = MarketDataRepository(db_path)
+    market_repo.initialize_schema()
+
+    criterion_summaries = [
+        _CriterionFailureSummary(index=index, criterion=criterion)
+        for index, criterion in enumerate(definition.criteria)
+    ]
+    metric_impacts: Dict[str, _ScreenMetricImpactSummary] = {
+        metric_id: _ScreenMetricImpactSummary(metric_id=metric_id)
+        for metric_id in metric_ids
+    }
+    passed_all = 0
+
+    for symbol in selected_symbols:
+        symbol_upper = symbol.upper()
+        symbol_passed = True
+        for summary in criterion_summaries:
+            evaluation: CriterionEvaluation = evaluate_criterion_detail(
+                summary.criterion,
+                symbol_upper,
+                metrics_repo,
+                fact_repo,
+                market_repo,
+                log_missing_metrics=False,
+            )
+            if evaluation.passed:
+                continue
+            symbol_passed = False
+            summary.fail_count += 1
+            if evaluation.failure_kind == "comparison_failed":
+                summary.threshold_fail_count += 1
+                continue
+            summary.na_fail_count += 1
+            for metric_id in evaluation.missing_metric_ids:
+                impact = metric_impacts.setdefault(
+                    metric_id,
+                    _ScreenMetricImpactSummary(metric_id=metric_id),
+                )
+                impact.missing_symbols.add(symbol_upper)
+                impact.affected_criteria.add(summary.label)
+                summary.missing_metric_symbols.setdefault(metric_id, set()).add(
+                    symbol_upper
+                )
+        if symbol_passed:
+            passed_all += 1
+
+    failures, examples = _recompute_missing_screen_metrics(
+        metric_impacts,
+        fact_repo,
+        market_repo,
+    )
+
+    ordered_impacts = sorted(
+        (impact for impact in metric_impacts.values() if impact.missing_symbols),
+        key=lambda impact: (-len(impact.missing_symbols), impact.metric_id),
+    )
+    ordered_criteria = sorted(
+        criterion_summaries,
+        key=lambda summary: (-summary.fail_count, summary.index),
+    )
+
+    total_symbols = len(selected_symbols)
+    scope_label = _scope_label(
+        explicit_symbols,
+        resolved_exchange_codes,
+        "all supported tickers",
+    )
+    print(
+        f"Screen failure analysis for {scope_label} "
+        f"(symbols={total_symbols}, criteria={len(definition.criteria)}, "
+        f"unique_metrics={len(metric_ids)})"
+    )
+    print(f"Passed all criteria: {passed_all}/{total_symbols}")
+    print(
+        f"Failed at least one criterion: {total_symbols - passed_all}/{total_symbols}"
+    )
+    _print_screen_metric_na_impact(ordered_impacts, failures, examples)
+    _print_screen_criterion_fallout(ordered_criteria, total_symbols)
+
+    if output_csv:
+        _write_screen_failure_report_csv(
+            ordered_impacts,
+            failures,
+            examples,
+            output_csv,
+        )
+        print(f"Wrote screen failure reasons to {output_csv}")
+
     return 0
 
 
@@ -5351,6 +5724,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_report_metric_failures(
                 database=args.database,
                 metric_ids=args.metrics,
+                symbols=args.symbols,
+                exchange_codes=args.exchange_codes,
+                all_supported=args.all_supported,
+                output_csv=args.output_csv,
+            )
+        if args.command == "report-screen-failures":
+            return cmd_report_screen_failures(
+                config_path=args.config,
+                database=args.database,
                 symbols=args.symbols,
                 exchange_codes=args.exchange_codes,
                 all_supported=args.all_supported,

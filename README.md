@@ -19,6 +19,7 @@ pyvalue normalize-fundamentals --provider EODHD --exchange-codes US
 pyvalue update-market-data --provider EODHD --exchange-codes US
 pyvalue compute-metrics --exchange-codes US
 pyvalue run-screen --config screeners/value.yml --exchange-codes US --output-csv data/screen_results_value.csv
+pyvalue report-screen-failures --config screeners/value.yml --exchange-codes US
 ```
 
 Default database: `data/pyvalue.db`
