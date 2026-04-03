@@ -43,9 +43,9 @@ Use this file to capture recurring mistake patterns after user corrections so fu
 
 - Date: 2026-03-30
 - User correction: This repo should use `main` by default for commit and push operations, not a `codex/*` branch.
-- Recurring pattern: Blindly applying the app's default branch workflow can conflict with a repo-specific policy the user has already stated in the thread.
-- Preventive rule: Before any commit or push in this repo, assume `main` is the default target unless the user explicitly asks for a separate branch, and treat that repo-specific rule as overriding the generic app default.
-- Resulting action: Recorded the repo-specific branch policy here and will use `main` for future commit/push requests in `pyvalue` unless instructed otherwise.
+- Recurring pattern: Blindly applying the app's default branch workflow can conflict with a repo-specific policy the user has already stated in the thread, and that mistake can happen before commit time if work starts on a feature branch at all.
+- Preventive rule: In this repo, do not create feature branches. Start and stay on `main` for all work unless the user explicitly asks for another branch, and treat that repo-specific rule as overriding the generic app default.
+- Resulting action: Recorded the repo-specific branch policy here, updated `AGENTS.md`, and will use `main` for all future work in `pyvalue` unless instructed otherwise.
 
 - Date: 2026-03-31
 - User correction: `recalc-market-cap --all-supported` crashed with `sqlite3.OperationalError: database is locked` after I added a performance index in the facts schema path.
@@ -88,3 +88,9 @@ Use this file to capture recurring mistake patterns after user corrections so fu
 - Recurring pattern: Treating untracked generated artifacts as safe to delete during cleanup can destroy user-owned local outputs when the repo intentionally keeps result files outside git.
 - Preventive rule: Before deleting untracked files or directories in this repo, distinguish disposable test artifacts from user-kept local outputs; never remove a populated results directory such as `data/output/` just to clean the worktree unless the user explicitly asks.
 - Resulting action: Recorded the rule here and will preserve local result directories even when they are untracked or generated.
+
+- Date: 2026-04-03
+- User correction: `CLAUDE.md` must stay as an exact copy of `AGENTS.md`, and updating `AGENTS.md` without syncing `CLAUDE.md` is a repo-specific mistake.
+- Recurring pattern: Updating one instruction mirror file while assuming the other will stay aligned creates silent drift in agent guidance and leaves different assistants following different rules.
+- Preventive rule: In this repo, whenever `AGENTS.md` changes, update `CLAUDE.md` in the same change and verify the two files are identical before finishing.
+- Resulting action: Added the mirror rule to `AGENTS.md`, synced `CLAUDE.md` to match it exactly, and recorded the rule here.

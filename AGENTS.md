@@ -10,6 +10,8 @@ pyvalue is a Python toolkit for ingesting, normalizing, and screening fundamenta
 - Use subagents liberally to keep the main context window clean.
 - Offload research, exploration, and parallel analysis to subagents.
 - Give each subagent exactly one focused task.
+- Don't create feature branches. Always work on `main` unless the user explicitly instructs otherwise.
+- Keep `CLAUDE.md` as an exact copy of `AGENTS.md`. Whenever you update `AGENTS.md`, update `CLAUDE.md` in the same change.
 - When you notice a repeatable mistake pattern, write a preventive rule for yourself.
 - Never mark a task complete without proving it works.
 - For non-trivial changes, pause and ask whether there is a more elegant solution.
