@@ -1081,6 +1081,38 @@ def test_metrics_repository_upsert_many_retries_transient_locked_error(
     assert repo.fetch("AAA.US", "metric_one") == (2.0, "2024-02-01")
 
 
+def test_metrics_repository_fetch_many_for_symbols_returns_requested_metrics(
+    tmp_path,
+):
+    db_path = tmp_path / "metrics-fetch-many.db"
+    repo = MetricsRepository(db_path)
+    repo.initialize_schema()
+    repo.upsert_many(
+        [
+            ("AAA.US", "metric_one", 1.0, "2024-01-01"),
+            ("AAA.US", "metric_two", 2.0, "2024-01-02"),
+            ("BBB.US", "metric_one", 3.0, "2024-01-03"),
+            ("CCC.US", "metric_three", 4.0, "2024-01-04"),
+        ]
+    )
+
+    fetched = repo.fetch_many_for_symbols(
+        ["AAA.US", "BBB.US", "CCC.US", "DDD.US"],
+        ["metric_one", "metric_two"],
+        chunk_size=1,
+    )
+
+    assert fetched == {
+        "AAA.US": {
+            "metric_one": (1.0, "2024-01-01"),
+            "metric_two": (2.0, "2024-01-02"),
+        },
+        "BBB.US": {
+            "metric_one": (3.0, "2024-01-03"),
+        },
+    }
+
+
 def test_security_repository_upserts_sector_and_industry_metadata(tmp_path):
     repo = SecurityRepository(tmp_path / "security-metadata.db")
     repo.initialize_schema()

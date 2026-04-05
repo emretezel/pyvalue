@@ -106,3 +106,27 @@ Use this file to capture recurring mistake patterns after user corrections so fu
 - Recurring pattern: Treating database performance as an implementation detail instead of a default design constraint makes it too easy to accept weak schema, index, and query choices until they fail at scale.
 - Preventive rule: In this repo, treat database and SQL performance as the default priority for schema and query design, and explicitly reason about access patterns, keys, indexes, scaling behavior, and trade-offs whenever touching persistence code.
 - Resulting action: Added a dedicated `Database and SQL Design` section to both `AGENTS.md` and `CLAUDE.md` and kept the two files identical.
+
+- Date: 2026-04-05
+- User correction: "Follow AGENTS.md strictly" needed to be stated explicitly before this optimization task.
+- Recurring pattern: After doing the technical investigation correctly, it is still easy to drift on repo-specific process rules unless they are re-applied consciously at the start of implementation.
+- Preventive rule: For any non-trivial pyvalue task, restate the AGENTS-driven workflow before coding: keep a live plan, use measured evidence, prefer subagents for exploration, and do not treat prior analysis as permission to skip the repo process.
+- Resulting action: Recorded this rule here and applied the implementation workflow with an explicit plan, measured bottlenecks, targeted tests, and end-to-end verification.
+
+- Date: 2026-04-05
+- User correction: `report-screen-failures` should suppress live warning spam and its progress indicator should reflect screened symbols, not a later internal recomputation phase.
+- Recurring pattern: Reusing generic progress and logging behavior in a diagnostic CLI command can expose internal phases instead of the unit of work the user actually cares about.
+- Preventive rule: For long-running CLI diagnostics, make progress track the primary user-visible unit of work and suppress incidental console warning noise unless the warnings are themselves the intended output.
+- Resulting action: Scoped warning suppression to `report-screen-failures`, switched its progress display to a screening-only progress bar, and added regressions for both behaviors.
+
+- Date: 2026-04-05
+- User correction: A progress bar that starts only after the first unit completes is effectively invisible on commands with expensive setup or a slow first item.
+- Recurring pattern: Time-throttled progress helpers are not enough on their own; if the first visible update depends on finishing work, the command still feels hung and users will interrupt it.
+- Preventive rule: For long-running CLI commands where users expect live feedback, print an immediate `0/N` progress state before expensive pre-work and always force a final `N/N` update at the end of the primary phase.
+- Resulting action: `report-screen-failures` now prints `0/N` immediately before metric preloading and always prints a final `100%` screening update, with tests covering both fast and throttled runs.
+
+- Date: 2026-04-05
+- User correction: A single progress bar that reaches `100%` before a long recomputation phase is misleading even if the first phase itself is implemented correctly.
+- Recurring pattern: Treating one visible phase as the whole command can hide expensive downstream analysis and make a CLI look hung after reporting completion.
+- Preventive rule: For multi-phase CLI work, either keep the visible progress bar below `100%` until all expensive phases are done or expose the later expensive phase with its own explicit progress indicator.
+- Resulting action: `report-screen-failures` now shows a second progress phase for missing-symbol root-cause analysis after screening completes, so the command no longer appears finished while recomputation is still running.

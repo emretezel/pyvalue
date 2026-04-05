@@ -32,6 +32,7 @@ from pyvalue.universe import Listing
 SQLITE_BUSY_TIMEOUT_MS = 30000
 SQLITE_LOCK_RETRY_ATTEMPTS = 5
 SQLITE_LOCK_RETRY_SLEEP_SECONDS = 0.5
+SQLITE_MAX_BOUND_PARAMETERS = 999
 
 
 def _utc_now_iso() -> str:
@@ -3150,6 +3151,77 @@ class MetricsRepository(SQLiteStore):
         if row is None:
             return None
         return row[0], row[1]
+
+    def fetch_many_for_symbols(
+        self,
+        symbols: Sequence[str],
+        metric_ids: Sequence[str],
+        chunk_size: int = 500,
+    ) -> Dict[str, Dict[str, Tuple[float, str]]]:
+        """Fetch requested stored metrics for a symbol scope with chunked indexed reads."""
+
+        self.initialize_schema()
+        normalized_symbols = _normalized_codes(symbols)
+        requested_metric_ids = sorted(
+            {
+                str(metric_id).strip()
+                for metric_id in metric_ids
+                if str(metric_id).strip()
+            }
+        )
+        if not normalized_symbols or not requested_metric_ids:
+            return {}
+
+        security_ids_by_symbol = self._security_repo().resolve_ids_many(
+            normalized_symbols,
+            chunk_size=chunk_size,
+        )
+        if not security_ids_by_symbol:
+            return {}
+
+        symbol_by_security_id = {
+            security_id: symbol
+            for symbol, security_id in security_ids_by_symbol.items()
+        }
+        metric_rows_by_symbol: Dict[str, Dict[str, Tuple[float, str]]] = {}
+
+        metric_chunk_size = max(
+            1,
+            min(len(requested_metric_ids), SQLITE_MAX_BOUND_PARAMETERS // 2),
+        )
+        security_ids = sorted(symbol_by_security_id.keys())
+
+        with self._connect() as conn:
+            for metric_chunk in _batched(requested_metric_ids, metric_chunk_size):
+                security_chunk_size = max(
+                    1,
+                    min(
+                        chunk_size,
+                        SQLITE_MAX_BOUND_PARAMETERS - len(metric_chunk),
+                    ),
+                )
+                for security_chunk in _batched(security_ids, security_chunk_size):
+                    security_placeholders = ", ".join("?" for _ in security_chunk)
+                    metric_placeholders = ", ".join("?" for _ in metric_chunk)
+                    rows = conn.execute(
+                        f"""
+                        SELECT security_id, metric_id, value, as_of
+                        FROM metrics
+                        WHERE security_id IN ({security_placeholders})
+                          AND metric_id IN ({metric_placeholders})
+                        """,
+                        list(security_chunk) + list(metric_chunk),
+                    ).fetchall()
+                    for row in rows:
+                        symbol = symbol_by_security_id[row["security_id"]]
+                        metric_rows_by_symbol.setdefault(symbol, {})[
+                            row["metric_id"]
+                        ] = (
+                            row["value"],
+                            row["as_of"],
+                        )
+
+        return metric_rows_by_symbol
 
 
 class MarketDataRepository(SQLiteStore):

@@ -56,6 +56,7 @@ from pyvalue.storage import (
     IngestProgressSummary,
     MarketDataFetchStateRepository,
     MarketDataRepository,
+    MarketSnapshotRecord,
     MetricsRepository,
     SecurityRepository,
     SecurityMetadataUpdate,
@@ -93,6 +94,8 @@ METRICS_PROGRESS_INTERVAL_SECONDS = 5.0
 SECURITY_METADATA_CHUNK_SIZE = 500
 SECURITY_METADATA_PROGRESS_INTERVAL_SECONDS = 5.0
 SCREEN_PROGRESS_INTERVAL_SECONDS = 5.0
+SCREEN_FAILURE_METRIC_LOAD_CHUNK_SIZE = 1000
+SCREEN_FAILURE_PROGRESS_INTERVAL_SECONDS = 1.0
 METRICS_WRITE_BATCH_SIZE = 25
 METRICS_WRITE_BATCH_INTERVAL_SECONDS = 0.25
 NORMALIZATION_MAX_WORKERS = 16
@@ -2922,14 +2925,41 @@ class _SchemaReadyMetricsRepository(MetricsRepository):
         return
 
 
+class _PreloadedMetricsRepository(_SchemaReadyMetricsRepository):
+    """Serve stored metric values from memory for a fixed symbol scope."""
+
+    def __init__(
+        self,
+        db_path: Union[str, Path],
+        metric_rows_by_symbol: Mapping[str, Mapping[str, Tuple[float, str]]],
+    ) -> None:
+        super().__init__(db_path)
+        self._metric_rows_by_symbol = {
+            symbol.strip().upper(): dict(metric_rows)
+            for symbol, metric_rows in metric_rows_by_symbol.items()
+        }
+
+    def fetch(self, symbol: str, metric_id: str) -> Optional[Tuple[float, str]]:
+        return self._metric_rows_by_symbol.get(symbol.strip().upper(), {}).get(
+            metric_id
+        )
+
+
 class _CachedMarketDataRepository:
     """Serve one symbol's latest market snapshot from memory."""
 
-    def __init__(self, repo: MarketDataRepository, symbol: str) -> None:
+    def __init__(
+        self,
+        repo: MarketDataRepository,
+        symbol: str,
+        *,
+        snapshot: Optional[PriceData] = None,
+        snapshot_loaded: bool = False,
+    ) -> None:
         self._repo = repo
         self._symbol = symbol.strip().upper()
-        self._snapshot_loaded = False
-        self._snapshot: Optional[PriceData] = None
+        self._snapshot_loaded = snapshot_loaded
+        self._snapshot: Optional[PriceData] = snapshot
 
     def _load_snapshot(self) -> None:
         if self._snapshot_loaded:
@@ -2951,6 +2981,49 @@ class _CachedMarketDataRepository:
 
     def __getattr__(self, name: str):
         return getattr(self._repo, name)
+
+
+def _price_data_from_snapshot_record(record: MarketSnapshotRecord) -> PriceData:
+    """Convert a stored latest-snapshot row into the PriceData interface."""
+
+    return PriceData(
+        symbol=record.symbol,
+        price=record.price,
+        as_of=record.as_of,
+        currency=record.currency,
+        volume=record.volume,
+        market_cap=record.market_cap,
+    )
+
+
+def _make_symbol_progress_reporter(
+    total_symbols: int,
+    interval_seconds: float,
+    printer: Optional[Callable[[int, int], None]] = None,
+    start_immediately: bool = False,
+) -> Callable[[int, bool], None]:
+    """Return a throttled symbol-progress reporter."""
+
+    progress_printer = printer or _print_symbol_progress
+    last_progress_at = time.monotonic()
+    last_reported_completed = -1
+    if start_immediately and total_symbols > 0:
+        progress_printer(0, total_symbols)
+        last_reported_completed = 0
+
+    def maybe_report_progress(completed_symbols: int, force: bool = False) -> None:
+        nonlocal last_progress_at, last_reported_completed
+        if total_symbols <= 0 or completed_symbols == last_reported_completed:
+            return
+        now = time.monotonic()
+        elapsed = now - last_progress_at
+        if not force and elapsed < interval_seconds:
+            return
+        progress_printer(completed_symbols, total_symbols)
+        last_progress_at = now
+        last_reported_completed = completed_symbols
+
+    return maybe_report_progress
 
 
 def _validated_metric_ids(metric_ids: Optional[Sequence[str]]) -> List[str]:
@@ -3028,6 +3101,40 @@ def _print_symbol_progress(completed_symbols: int, total_symbols: int) -> None:
         percent = (completed_symbols / total_symbols) * 100.0
     print(
         f"Progress: {completed_symbols}/{total_symbols} symbols complete ({percent:.1f}%)",
+        flush=True,
+    )
+
+
+def _print_screen_progress_bar(completed_symbols: int, total_symbols: int) -> None:
+    """Print a compact ASCII bar for screen-evaluation progress."""
+
+    if total_symbols <= 0:
+        percent = 100.0
+    else:
+        percent = (completed_symbols / total_symbols) * 100.0
+    bar_width = 20
+    filled_width = min(bar_width, max(0, round((percent / 100.0) * bar_width)))
+    bar = "#" * filled_width + "-" * (bar_width - filled_width)
+    print(
+        f"Progress: [{bar}] {completed_symbols}/{total_symbols} symbols screened ({percent:.1f}%)",
+        flush=True,
+    )
+
+
+def _print_recompute_progress_bar(completed_symbols: int, total_symbols: int) -> None:
+    """Print a compact ASCII bar for missing-metric root-cause analysis progress."""
+
+    if total_symbols <= 0:
+        percent = 100.0
+    else:
+        percent = (completed_symbols / total_symbols) * 100.0
+    bar_width = 20
+    filled_width = min(bar_width, max(0, round((percent / 100.0) * bar_width)))
+    bar = "#" * filled_width + "-" * (bar_width - filled_width)
+    print(
+        "Progress: "
+        f"[{bar}] {completed_symbols}/{total_symbols} missing symbols analyzed "
+        f"({percent:.1f}%)",
         flush=True,
     )
 
@@ -4938,8 +5045,9 @@ def _record_failure_example(
 
 def _recompute_missing_screen_metrics(
     metric_impacts: Mapping[str, _ScreenMetricImpactSummary],
-    fact_repo: RegionFactsRepository,
+    fact_repo: FinancialFactsRepository,
     market_repo: MarketDataRepository,
+    progress_interval_seconds: Optional[float] = None,
 ) -> tuple[Dict[str, Counter], Dict[str, Dict[str, tuple[str, Optional[float]]]]]:
     failures: Dict[str, Counter] = {
         metric_id: Counter() for metric_id in metric_impacts.keys()
@@ -4947,46 +5055,119 @@ def _recompute_missing_screen_metrics(
     examples: Dict[str, Dict[str, tuple[str, Optional[float]]]] = {
         metric_id: {} for metric_id in metric_impacts.keys()
     }
-    market_caps: Dict[str, Optional[float]] = {}
+    metric_ids_by_symbol: Dict[str, List[str]] = {}
+    for metric_id, impact in metric_impacts.items():
+        for symbol in impact.missing_symbols:
+            metric_ids_by_symbol.setdefault(symbol, []).append(metric_id)
+
+    symbols_to_recompute = sorted(metric_ids_by_symbol.keys())
+    if not symbols_to_recompute:
+        return failures, examples
+
+    maybe_report_progress = (
+        _make_symbol_progress_reporter(
+            len(symbols_to_recompute),
+            progress_interval_seconds,
+            printer=_print_recompute_progress_bar,
+            start_immediately=True,
+        )
+        if progress_interval_seconds is not None
+        else None
+    )
+
+    snapshots_by_symbol = {
+        symbol: _price_data_from_snapshot_record(snapshot)
+        for symbol, snapshot in market_repo.latest_snapshots_many(
+            symbols_to_recompute
+        ).items()
+    }
+    market_caps: Dict[str, Optional[float]] = {
+        symbol: None for symbol in symbols_to_recompute
+    }
+    for symbol, snapshot in snapshots_by_symbol.items():
+        market_caps[symbol] = snapshot.market_cap
+
+    metrics_by_id = {
+        metric_id: (REGISTRY[metric_id]() if metric_id in REGISTRY else None)
+        for metric_id in metric_impacts.keys()
+    }
     handler = _MetricWarningCollector()
     root_logger = logging.getLogger()
     root_logger.addHandler(handler)
 
     try:
-        for metric_id, impact in metric_impacts.items():
-            symbols = sorted(impact.missing_symbols)
-            if not symbols:
-                continue
-            metric_cls = REGISTRY.get(metric_id)
-            if metric_cls is None:
-                reason = "unknown_metric_id"
-                failures[metric_id][reason] += len(symbols)
-                for symbol in symbols:
-                    cap = _metric_market_cap(market_repo, market_caps, symbol)
-                    _record_failure_example(examples, metric_id, reason, symbol, cap)
-                continue
+        completed_symbols = 0
+        for symbol in symbols_to_recompute:
+            metrics_for_symbol = metric_ids_by_symbol[symbol]
+            cached_fact_repo: Optional[_CachedRegionFactsRepository] = None
+            cached_market_repo: Optional[_CachedMarketDataRepository] = None
+            if any(
+                metrics_by_id[metric_id] is not None for metric_id in metrics_for_symbol
+            ):
+                cached_fact_repo = _CachedRegionFactsRepository(
+                    fact_repo,
+                    symbol,
+                    fact_repo.facts_for_symbol(symbol),
+                )
 
-            metric = metric_cls()
-            for symbol in symbols:
+            if any(
+                getattr(metrics_by_id[metric_id], "uses_market_data", False)
+                for metric_id in metrics_for_symbol
+                if metrics_by_id[metric_id] is not None
+            ):
+                cached_market_repo = _CachedMarketDataRepository(
+                    market_repo,
+                    symbol,
+                    snapshot=snapshots_by_symbol.get(symbol),
+                    snapshot_loaded=True,
+                )
+
+            for metric_id in metrics_for_symbol:
                 handler.clear()
-                try:
-                    if getattr(metric, "uses_market_data", False):
-                        result = metric.compute(symbol, fact_repo, market_repo)
-                    else:
-                        result = metric.compute(symbol, fact_repo)
-                except Exception as exc:  # pragma: no cover - defensive
-                    reason = f"exception: {exc.__class__.__name__}"
+                metric = metrics_by_id.get(metric_id)
+                if metric is None:
+                    reason = "unknown_metric_id"
                 else:
-                    if result is not None:
-                        reason = "stored_missing_but_computable_now"
+                    if cached_fact_repo is None:  # pragma: no cover - defensive
+                        cached_fact_repo = _CachedRegionFactsRepository(
+                            fact_repo,
+                            symbol,
+                            fact_repo.facts_for_symbol(symbol),
+                        )
+                    try:
+                        if getattr(metric, "uses_market_data", False):
+                            if cached_market_repo is None:
+                                cached_market_repo = _CachedMarketDataRepository(
+                                    market_repo,
+                                    symbol,
+                                    snapshot=snapshots_by_symbol.get(symbol),
+                                    snapshot_loaded=True,
+                                )
+                            result = metric.compute(
+                                symbol,
+                                cached_fact_repo,
+                                cached_market_repo,
+                            )
+                        else:
+                            result = metric.compute(symbol, cached_fact_repo)
+                    except Exception as exc:  # pragma: no cover - defensive
+                        reason = f"exception: {exc.__class__.__name__}"
                     else:
-                        reason = _format_failure_reason(handler.records, symbol)
+                        if result is not None:
+                            reason = "stored_missing_but_computable_now"
+                        else:
+                            reason = _format_failure_reason(handler.records, symbol)
                 failures[metric_id][reason] += 1
                 cap = _metric_market_cap(market_repo, market_caps, symbol)
                 _record_failure_example(examples, metric_id, reason, symbol, cap)
+            completed_symbols += 1
+            if maybe_report_progress is not None:
+                maybe_report_progress(completed_symbols, False)
     finally:
         root_logger.removeHandler(handler)
 
+    if maybe_report_progress is not None:
+        maybe_report_progress(len(symbols_to_recompute), True)
     return failures, examples
 
 
@@ -5194,15 +5375,37 @@ def cmd_report_screen_failures(
             all_supported,
         )
     )
+    selected_symbols = [symbol.upper() for symbol in selected_symbols]
+    total_symbols = len(selected_symbols)
+    completed_symbols = 0
+    last_progress_at = time.monotonic()
+    last_reported_completed = 0 if total_symbols > 0 else -1
+
+    if total_symbols > 0:
+        _print_screen_progress_bar(0, total_symbols)
+
+    def maybe_report_progress(force: bool = False) -> None:
+        nonlocal last_progress_at, last_reported_completed
+        if total_symbols <= 0 or completed_symbols == last_reported_completed:
+            return
+        elapsed = time.monotonic() - last_progress_at
+        if not force and elapsed < SCREEN_PROGRESS_INTERVAL_SECONDS:
+            return
+        _print_screen_progress_bar(completed_symbols, total_symbols)
+        last_reported_completed = completed_symbols
+        last_progress_at = time.monotonic()
+
     definition = load_screen(config_path)
     metric_ids = screen_metric_ids(definition)
-    metrics_repo = MetricsRepository(db_path)
-    metrics_repo.initialize_schema()
-    base_fact_repo = FinancialFactsRepository(db_path)
-    base_fact_repo.initialize_schema()
-    fact_repo = RegionFactsRepository(base_fact_repo)
-    market_repo = MarketDataRepository(db_path)
-    market_repo.initialize_schema()
+    MetricsRepository(db_path).initialize_schema()
+    _initialize_metric_read_schema(db_path, include_market_data=True)
+    metrics_repo = _SchemaReadyMetricsRepository(db_path)
+    fact_repo = _SchemaReadyFinancialFactsRepository(db_path)
+    market_repo = _SchemaReadyMarketDataRepository(db_path)
+    evaluation_metrics_repo = _PreloadedMetricsRepository(
+        db_path,
+        metrics_repo.fetch_many_for_symbols(selected_symbols, metric_ids),
+    )
 
     criterion_summaries = [
         _CriterionFailureSummary(index=index, criterion=criterion)
@@ -5214,44 +5417,48 @@ def cmd_report_screen_failures(
     }
     passed_all = 0
 
-    for symbol in selected_symbols:
-        symbol_upper = symbol.upper()
-        symbol_passed = True
-        for summary in criterion_summaries:
-            evaluation: CriterionEvaluation = evaluate_criterion_detail(
-                summary.criterion,
-                symbol_upper,
-                metrics_repo,
-                fact_repo,
-                market_repo,
-                log_missing_metrics=False,
-            )
-            if evaluation.passed:
-                continue
-            symbol_passed = False
-            summary.fail_count += 1
-            if evaluation.failure_kind == "comparison_failed":
-                summary.threshold_fail_count += 1
-                continue
-            summary.na_fail_count += 1
-            for metric_id in evaluation.missing_metric_ids:
-                impact = metric_impacts.setdefault(
-                    metric_id,
-                    _ScreenMetricImpactSummary(metric_id=metric_id),
+    with suppress_console_metric_warnings(True):
+        for symbol in selected_symbols:
+            symbol_passed = True
+            for summary in criterion_summaries:
+                evaluation: CriterionEvaluation = evaluate_criterion_detail(
+                    summary.criterion,
+                    symbol,
+                    evaluation_metrics_repo,
+                    fact_repo,
+                    market_repo,
+                    log_missing_metrics=False,
                 )
-                impact.missing_symbols.add(symbol_upper)
-                impact.affected_criteria.add(summary.label)
-                summary.missing_metric_symbols.setdefault(metric_id, set()).add(
-                    symbol_upper
-                )
-        if symbol_passed:
-            passed_all += 1
+                if evaluation.passed:
+                    continue
+                symbol_passed = False
+                summary.fail_count += 1
+                if evaluation.failure_kind == "comparison_failed":
+                    summary.threshold_fail_count += 1
+                    continue
+                summary.na_fail_count += 1
+                for metric_id in evaluation.missing_metric_ids:
+                    impact = metric_impacts.setdefault(
+                        metric_id,
+                        _ScreenMetricImpactSummary(metric_id=metric_id),
+                    )
+                    impact.missing_symbols.add(symbol)
+                    impact.affected_criteria.add(summary.label)
+                    summary.missing_metric_symbols.setdefault(metric_id, set()).add(
+                        symbol
+                    )
+            if symbol_passed:
+                passed_all += 1
+            completed_symbols += 1
+            maybe_report_progress(False)
 
-    failures, examples = _recompute_missing_screen_metrics(
-        metric_impacts,
-        fact_repo,
-        market_repo,
-    )
+        maybe_report_progress(True)
+
+        failures, examples = _recompute_missing_screen_metrics(
+            metric_impacts,
+            fact_repo,
+            market_repo,
+        )
 
     ordered_impacts = sorted(
         (impact for impact in metric_impacts.values() if impact.missing_symbols),
@@ -5262,7 +5469,6 @@ def cmd_report_screen_failures(
         key=lambda summary: (-summary.fail_count, summary.index),
     )
 
-    total_symbols = len(selected_symbols)
     scope_label = _scope_label(
         explicit_symbols,
         resolved_exchange_codes,

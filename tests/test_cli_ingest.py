@@ -6671,6 +6671,15 @@ criteria:
 
     assert rc == 0
     output = capsys.readouterr().out
+    assert "Progress: [--------------------] 0/2 symbols screened (0.0%)" in output
+    assert "Progress: [####################] 2/2 symbols screened (100.0%)" in output
+    assert (
+        "Progress: [--------------------] 0/1 missing symbols analyzed (0.0%)" in output
+    )
+    assert (
+        "Progress: [####################] 1/1 missing symbols analyzed (100.0%)"
+        in output
+    )
     assert "Passed all criteria: 0/2" in output
     assert "Metric NA impact" in output
     assert "- working_capital: missing=1 symbols, affects=2 criteria" in output
@@ -6686,6 +6695,372 @@ criteria:
     )
     assert "working_capital,1,2," in csv_lines[1]
     assert "stored_missing_but_computable_now,1,BBB.US,250.0" in csv_lines[1]
+
+
+def test_cmd_report_screen_failures_reports_progress_by_phase(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    db_path = tmp_path / "screen_failures_progress.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    as_of = (date.today() - timedelta(days=5)).isoformat()
+    fact_repo.replace_facts(
+        "BBB.US",
+        [
+            make_fact(
+                symbol="BBB.US",
+                concept="AssetsCurrent",
+                end_date=as_of,
+                value=100.0,
+            ),
+            make_fact(
+                symbol="BBB.US",
+                concept="LiabilitiesCurrent",
+                end_date=as_of,
+                value=20.0,
+            ),
+        ],
+    )
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+    metrics_repo.upsert("AAA.US", "working_capital", 10.0, as_of)
+    market_repo = MarketDataRepository(db_path)
+    market_repo.initialize_schema()
+    market_repo.upsert_price("BBB.US", as_of, price=10.0, market_cap=250.0)
+
+    screen_path = tmp_path / "screen.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Working capital >= 20"
+    left:
+      metric: working_capital
+    operator: ">="
+    right:
+      value: 20
+
+  - name: "Working capital >= 50"
+    left:
+      metric: working_capital
+    operator: ">="
+    right:
+      value: 50
+"""
+    )
+    monkeypatch.setattr(cli, "SCREEN_PROGRESS_INTERVAL_SECONDS", 0.0)
+
+    rc = cli.cmd_report_screen_failures(
+        config_path=str(screen_path),
+        database=str(db_path),
+        symbols=["AAA.US", "BBB.US"],
+        exchange_codes=None,
+        all_supported=False,
+        output_csv=None,
+    )
+
+    assert rc == 0
+    output_lines = capsys.readouterr().out.splitlines()
+    assert (
+        "Progress: [--------------------] 0/2 symbols screened (0.0%)" in output_lines
+    )
+    assert (
+        "Progress: [##########----------] 1/2 symbols screened (50.0%)" in output_lines
+    )
+    assert (
+        "Progress: [####################] 2/2 symbols screened (100.0%)" in output_lines
+    )
+    assert (
+        "Progress: [--------------------] 0/1 missing symbols analyzed (0.0%)"
+        in output_lines
+    )
+    assert (
+        "Progress: [####################] 1/1 missing symbols analyzed (100.0%)"
+        in output_lines
+    )
+
+
+def test_cmd_report_screen_failures_avoids_point_metric_fetches(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    db_path = tmp_path / "screen_failures_preloaded_metrics.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    as_of = (date.today() - timedelta(days=5)).isoformat()
+    fact_repo.replace_facts(
+        "BBB.US",
+        [
+            make_fact(
+                symbol="BBB.US",
+                concept="AssetsCurrent",
+                end_date=as_of,
+                value=100.0,
+            ),
+            make_fact(
+                symbol="BBB.US",
+                concept="LiabilitiesCurrent",
+                end_date=as_of,
+                value=20.0,
+            ),
+        ],
+    )
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+    metrics_repo.upsert("AAA.US", "working_capital", 10.0, as_of)
+    screen_path = tmp_path / "screen.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Working capital >= 20"
+    left:
+      metric: working_capital
+    operator: ">="
+    right:
+      value: 20
+"""
+    )
+
+    def fail_point_fetch(self, symbol, metric_id):
+        raise AssertionError("point metric fetch should not be used")
+
+    monkeypatch.setattr(MetricsRepository, "fetch", fail_point_fetch)
+
+    rc = cli.cmd_report_screen_failures(
+        config_path=str(screen_path),
+        database=str(db_path),
+        symbols=["AAA.US", "BBB.US"],
+        exchange_codes=None,
+        all_supported=False,
+        output_csv=None,
+    )
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "- working_capital: missing=1 symbols, affects=1 criteria" in output
+
+
+def test_cmd_report_screen_failures_recompute_uses_symbol_caches(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    db_path = tmp_path / "screen_failures_symbol_cache.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
+        provider="SEC",
+    )
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    fact_repo.replace_facts(
+        "AAA.US",
+        [
+            make_fact(concept="AssetsCurrent", end_date="2024-12-31", value=500.0),
+            make_fact(
+                concept="EarningsPerShare",
+                fiscal_period="FY",
+                end_date="2024-12-31",
+                value=2.0,
+            ),
+            make_fact(
+                concept="EarningsPerShare",
+                fiscal_period="FY",
+                end_date="2023-12-31",
+                value=1.5,
+            ),
+        ],
+    )
+    market_repo = MarketDataRepository(db_path)
+    market_repo.initialize_schema()
+    market_repo.upsert_price("AAA.US", "2024-12-31", price=25.0, market_cap=1000.0)
+
+    fact_calls = {"count": 0}
+    snapshot_batch_calls = {"count": 0}
+    original_facts_for_symbol = FinancialFactsRepository.facts_for_symbol
+    original_latest_snapshots_many = MarketDataRepository.latest_snapshots_many
+
+    def counting_facts_for_symbol(self, symbol):
+        fact_calls["count"] += 1
+        return original_facts_for_symbol(self, symbol)
+
+    def counting_latest_snapshots_many(self, symbols, chunk_size=500):
+        snapshot_batch_calls["count"] += 1
+        return original_latest_snapshots_many(self, symbols, chunk_size=chunk_size)
+
+    def fail_latest_snapshot(self, symbol):
+        raise AssertionError("expected report-screen-failures to use bulk snapshots")
+
+    monkeypatch.setattr(
+        FinancialFactsRepository,
+        "facts_for_symbol",
+        counting_facts_for_symbol,
+    )
+    monkeypatch.setattr(
+        MarketDataRepository,
+        "latest_snapshots_many",
+        counting_latest_snapshots_many,
+    )
+    monkeypatch.setattr(MarketDataRepository, "latest_snapshot", fail_latest_snapshot)
+
+    class RepeatedFactsMetric:
+        id = "repeat_facts"
+        required_concepts = ("AssetsCurrent",)
+        uses_market_data = False
+
+        def compute(self, symbol, repo):
+            latest_a = repo.latest_fact(symbol, "AssetsCurrent")
+            latest_b = repo.latest_fact(symbol, "AssetsCurrent")
+            series_a = repo.facts_for_concept(symbol, "EarningsPerShare", "FY")
+            series_b = repo.facts_for_concept(symbol, "EarningsPerShare", "FY")
+            return MetricResult(
+                symbol=symbol,
+                metric_id=self.id,
+                value=latest_a.value + latest_b.value + len(series_a) + len(series_b),
+                as_of=latest_a.end_date,
+            )
+
+    class RepeatedMarketMetric:
+        id = "repeat_market"
+        required_concepts = ()
+        uses_market_data = True
+
+        def compute(self, symbol, repo, market_repo):
+            snapshot_a = market_repo.latest_snapshot(symbol)
+            snapshot_b = market_repo.latest_snapshot(symbol)
+            latest_price = market_repo.latest_price(symbol)
+            return MetricResult(
+                symbol=symbol,
+                metric_id=self.id,
+                value=snapshot_a.price + snapshot_b.price + latest_price[1],
+                as_of=snapshot_a.as_of,
+            )
+
+    monkeypatch.setattr(
+        cli,
+        "REGISTRY",
+        {
+            RepeatedFactsMetric.id: RepeatedFactsMetric,
+            RepeatedMarketMetric.id: RepeatedMarketMetric,
+        },
+    )
+
+    screen_path = tmp_path / "screen.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Repeated facts > 0"
+    left:
+      metric: repeat_facts
+    operator: ">"
+    right:
+      value: 0
+
+  - name: "Repeated market > 0"
+    left:
+      metric: repeat_market
+    operator: ">"
+    right:
+      value: 0
+"""
+    )
+
+    rc = cli.cmd_report_screen_failures(
+        config_path=str(screen_path),
+        database=str(db_path),
+        symbols=["AAA.US"],
+        exchange_codes=None,
+        all_supported=False,
+        output_csv=None,
+    )
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "- repeat_facts: missing=1 symbols, affects=1 criteria" in output
+    assert "- repeat_market: missing=1 symbols, affects=1 criteria" in output
+    assert "stored_missing_but_computable_now: 1 (example=AAA.US" in output
+    assert fact_calls["count"] == 1
+    assert snapshot_batch_calls["count"] == 1
+
+
+def test_cmd_report_screen_failures_suppresses_console_metric_warnings(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    clear_root_logging_handlers()
+    cli.setup_logging(log_dir=tmp_path / "logs")
+    try:
+        db_path = tmp_path / "screen_failures_warning_suppression.db"
+        store_catalog_listings(
+            db_path,
+            "US",
+            [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
+            provider="SEC",
+        )
+        screen_path = tmp_path / "screen.yml"
+        screen_path.write_text(
+            """
+criteria:
+  - name: "Noisy metric"
+    left:
+      metric: noisy_metric
+    operator: ">"
+    right:
+      value: 0
+"""
+        )
+
+        class NoisyMetric:
+            id = "noisy_metric"
+            required_concepts = ()
+
+            def compute(self, symbol, repo):
+                logging.getLogger("pyvalue.metrics.noisy").warning(
+                    "Console-only warning for %s", symbol
+                )
+                return None
+
+        monkeypatch.setitem(cli.REGISTRY, "noisy_metric", NoisyMetric)
+
+        rc = cli.cmd_report_screen_failures(
+            config_path=str(screen_path),
+            database=str(db_path),
+            symbols=["AAA.US"],
+            exchange_codes=None,
+            all_supported=False,
+            output_csv=None,
+        )
+
+        assert rc == 0
+        output = capsys.readouterr().out
+        assert "WARNING Console-only warning for AAA.US" not in output
+        assert "Console-only warning for <symbol>: 1" in output
+        log_text = (tmp_path / "logs" / "pyvalue.log").read_text()
+        assert "Console-only warning for AAA.US" in log_text
+    finally:
+        clear_root_logging_handlers()
 
 
 def test_cmd_report_screen_failures_reports_metric_exceptions(
