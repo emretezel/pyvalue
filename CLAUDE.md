@@ -29,6 +29,44 @@ pyvalue is a Python toolkit for ingesting, normalizing, and screening fundamenta
 - For UK stocks and UK exchanges, explicitly guard against mixing GBP and GBX.
 - If a field value looks suspiciously small or large, flag it to the user.
 
+## Database and SQL Design
+When writing code involving databases, schema design, or SQL, treat performance as the highest priority unless the user explicitly says otherwise.
+
+### Core Rules
+- Start with access patterns: how the data will be filtered, joined, grouped, sorted, inserted, and updated.
+- Design tables for the fastest expected production queries, not just for conceptual neatness.
+- Choose data types carefully and keep rows as narrow as practical.
+- Define primary keys, foreign keys, and uniqueness constraints deliberately.
+- Propose and justify indexes based on actual query patterns.
+- Avoid over-indexing, but do not leave important query paths unindexed.
+- Be explicit about trade-offs between read speed, write speed, storage, and complexity.
+- For large tables, consider partitioning, clustering, materialized summaries, or denormalization when they materially improve the expected workload.
+- Avoid ORM-generated inefficiencies in performance-critical paths.
+
+### Query Rules
+- Write SQL for performance, not just correctness.
+- Avoid `SELECT *` in production code.
+- Minimize full table scans, unnecessary sorts, repeated subqueries, and N+1 query patterns.
+- Use joins, filters, aggregations, and pagination in ways that scale well.
+- Check whether each important query can use an index efficiently.
+- Call out queries that are likely to become slow at scale.
+
+### Review Expectations
+- If an existing schema, index strategy, or query design is inefficient, say so clearly.
+- Report weak designs proactively, including missing or weak primary keys, wrong key choices, missing indexes, unused or redundant indexes, inefficient joins, wide or poorly typed columns, normalization or denormalization mistakes, and queries that do not match the schema design.
+- Do not silently preserve a bad database design just because it already exists.
+- When suggesting improvements, explain why they should be faster and what trade-offs they introduce.
+
+### Output Expectations
+When proposing database changes, include:
+1. recommended schema design
+2. key and index recommendations
+3. expected query patterns
+4. performance risks
+5. better alternatives if the current design is weak
+
+Performance-first database thinking is mandatory.
+
 ## Project Structure & Module Organization
 - `src/pyvalue/`: core package. `ingestion/`, `normalization/`, `marketdata/`, `metrics/`, and `universe/` hold domain logic; `cli.py` wires the CLI; `storage.py` and `migrations.py` manage SQLite.
 - `tests/`: pytest suite.

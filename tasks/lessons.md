@@ -100,3 +100,9 @@ Use this file to capture recurring mistake patterns after user corrections so fu
 - Recurring pattern: Improving visible loop progress without measuring the pre-loop setup can miss the true hot path and leave CLI startup latency unchanged.
 - Preventive rule: For slow CLI commands, benchmark each major phase on the real data path before optimizing UX, and do not treat progress output as a performance fix unless the expensive pre-loop work has also been profiled or removed.
 - Resulting action: Profiled `refresh-security-metadata` against the real SQLite DB, identified `FundamentalsRepository.fetch_many(...)` plus eager `json.loads(...)` as the startup bottleneck, and replaced that path with chunked extracted metadata reads and batched writes.
+
+- Date: 2026-04-05
+- User correction: Database and SQL work needs an explicit repo-level performance-first rule, not just ad hoc fixes when a slow query shows up.
+- Recurring pattern: Treating database performance as an implementation detail instead of a default design constraint makes it too easy to accept weak schema, index, and query choices until they fail at scale.
+- Preventive rule: In this repo, treat database and SQL performance as the default priority for schema and query design, and explicitly reason about access patterns, keys, indexes, scaling behavior, and trade-offs whenever touching persistence code.
+- Resulting action: Added a dedicated `Database and SQL Design` section to both `AGENTS.md` and `CLAUDE.md` and kept the two files identical.
