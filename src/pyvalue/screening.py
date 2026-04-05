@@ -6,20 +6,31 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
+from functools import lru_cache
 from pathlib import Path
 from typing import List, Optional
 import logging
 
 import yaml  # type: ignore[import-untyped]
 
+from pyvalue.currency import (
+    MetricUnitKind,
+    is_monetary_unit_kind,
+    normalize_currency_code,
+)
 from pyvalue.facts import RegionFactsRepository
+from pyvalue.fx import FXService
 from pyvalue.storage import (
     FinancialFactsRepository,
     MarketDataRepository,
+    MetricRecord,
     MetricsRepository,
 )
 
+
 LOGGER = logging.getLogger(__name__)
+_RATIO_LIKE_UNIT_KINDS = frozenset({"ratio", "percent"})
 
 
 @dataclass
@@ -27,6 +38,7 @@ class Term:
     metric: Optional[str] = None
     multiplier: float = 1.0
     value: Optional[float] = None
+    currency: Optional[str] = None
 
 
 @dataclass
@@ -51,6 +63,7 @@ class RankingMetric:
     weight: float
     direction: str
     cap: Optional[float] = None
+    currency: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -59,6 +72,7 @@ class RankingTieBreaker:
 
     metric_id: str
     direction: str
+    currency: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -79,6 +93,10 @@ class ResolvedTerm:
 
     metric_id: Optional[str]
     value: Optional[float]
+    unit_kind: Optional[MetricUnitKind] = None
+    currency: Optional[str] = None
+    unit_label: Optional[str] = None
+    as_of: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -199,26 +217,48 @@ def evaluate_criterion_detail(
         right.metric_id if right.value is None else None,
     )
     if left.value is None or right.value is None:
+        missing_failure_kind: str
         if left.value is None and right.value is None:
-            failure_kind = "both_missing"
+            missing_failure_kind = "both_missing"
         elif left.value is None:
-            failure_kind = "left_missing"
+            missing_failure_kind = "left_missing"
         else:
-            failure_kind = "right_missing"
+            missing_failure_kind = "right_missing"
         return CriterionEvaluation(
             passed=False,
             left_value=left.value,
             right_value=right.value,
             lhs=None,
             rhs=None,
-            failure_kind=failure_kind,
+            failure_kind=missing_failure_kind,
             missing_metric_ids=missing_metric_ids,
             left_metric_id=left.metric_id,
             right_metric_id=right.metric_id,
         )
 
-    lhs = left.value
-    rhs = right.value * criterion.right.multiplier
+    lhs: Optional[float]
+    rhs: Optional[float]
+    failure_kind: Optional[str]
+    lhs, rhs, failure_kind = _align_comparison_values(
+        symbol,
+        criterion,
+        left,
+        right,
+        metrics_repo,
+    )
+    if failure_kind is not None or lhs is None or rhs is None:
+        return CriterionEvaluation(
+            passed=False,
+            left_value=left.value,
+            right_value=right.value,
+            lhs=lhs,
+            rhs=rhs,
+            failure_kind=failure_kind or "comparison_unavailable",
+            missing_metric_ids=missing_metric_ids,
+            left_metric_id=left.metric_id,
+            right_metric_id=right.metric_id,
+        )
+
     if criterion.operator == "<=":
         passed = lhs <= rhs
     elif criterion.operator == ">=":
@@ -245,6 +285,191 @@ def evaluate_criterion_detail(
     )
 
 
+def _align_comparison_values(
+    symbol: str,
+    criterion: Criterion,
+    left: ResolvedTerm,
+    right: ResolvedTerm,
+    metrics_repo: MetricsRepository,
+) -> tuple[Optional[float], Optional[float], Optional[str]]:
+    left_value = left.value
+    right_value = right.value
+    if left_value is None or right_value is None:
+        return None, None, "comparison_unavailable"
+
+    anchor = _comparison_anchor(left, right)
+    if anchor is None:
+        if not _non_monetary_terms_compatible(left, right):
+            LOGGER.warning(
+                "Screen unit mismatch | symbol=%s criterion=%s left_kind=%s right_kind=%s",
+                symbol,
+                criterion.name,
+                left.unit_kind,
+                right.unit_kind,
+            )
+            return None, None, "unit_mismatch"
+        lhs = left_value
+        rhs = right_value * criterion.right.multiplier
+        return lhs, rhs, None
+
+    if is_monetary_unit_kind(anchor.unit_kind):
+        if anchor.currency is None:
+            LOGGER.warning(
+                "Missing metric currency during screen evaluation | symbol=%s criterion=%s anchor_metric=%s",
+                symbol,
+                criterion.name,
+                anchor.metric_id,
+            )
+            return None, None, "currency_missing"
+        fx_service = _fx_service_for_db(metrics_repo.db_path)
+        left_aligned, left_error = _convert_term_to_anchor(
+            left,
+            anchor,
+            symbol=symbol,
+            criterion_name=criterion.name,
+            side="left",
+            fx_service=fx_service,
+        )
+        if left_error is not None:
+            return None, None, left_error
+        if left_aligned is None:
+            return None, None, "comparison_unavailable"
+        right_aligned, right_error = _convert_term_to_anchor(
+            right,
+            anchor,
+            symbol=symbol,
+            criterion_name=criterion.name,
+            side="right",
+            fx_service=fx_service,
+        )
+        if right_error is not None:
+            return None, None, right_error
+        if right_aligned is None:
+            return None, None, "comparison_unavailable"
+        return left_aligned, right_aligned * criterion.right.multiplier, None
+
+    if not _non_monetary_terms_compatible(left, right):
+        LOGGER.warning(
+            "Screen unit mismatch | symbol=%s criterion=%s left_kind=%s right_kind=%s",
+            symbol,
+            criterion.name,
+            left.unit_kind,
+            right.unit_kind,
+        )
+        return None, None, "unit_mismatch"
+    if left.currency is not None or right.currency is not None:
+        LOGGER.warning(
+            "Unexpected currency on non-monetary screen term | symbol=%s criterion=%s left_currency=%s right_currency=%s",
+            symbol,
+            criterion.name,
+            left.currency,
+            right.currency,
+        )
+        return None, None, "unit_mismatch"
+    return left_value, right_value * criterion.right.multiplier, None
+
+
+def _comparison_anchor(
+    left: ResolvedTerm, right: ResolvedTerm
+) -> Optional[ResolvedTerm]:
+    for term in (left, right):
+        if term.metric_id is None:
+            continue
+        if term.unit_kind is None:
+            continue
+        return term
+    return None
+
+
+def _non_monetary_terms_compatible(left: ResolvedTerm, right: ResolvedTerm) -> bool:
+    left_kind = left.unit_kind
+    right_kind = right.unit_kind
+    if left_kind is None or right_kind is None:
+        return True
+    if left_kind == right_kind:
+        return True
+    if left_kind in _RATIO_LIKE_UNIT_KINDS and right_kind in _RATIO_LIKE_UNIT_KINDS:
+        return True
+    return False
+
+
+def _convert_term_to_anchor(
+    term: ResolvedTerm,
+    anchor: ResolvedTerm,
+    *,
+    symbol: str,
+    criterion_name: str,
+    side: str,
+    fx_service: FXService,
+) -> tuple[Optional[float], Optional[str]]:
+    if term.value is None:
+        return None, "missing"
+    if anchor.currency is None:
+        return None, "currency_missing"
+
+    if term.metric_id is None:
+        if term.currency is None:
+            return term.value, None
+        source_currency = normalize_currency_code(term.currency)
+        if source_currency is None:
+            return None, "currency_missing"
+        if source_currency == anchor.currency:
+            return term.value, None
+        converted = fx_service.convert_amount(
+            term.value,
+            source_currency,
+            anchor.currency,
+            anchor.as_of or date.today().isoformat(),
+        )
+        if converted is None:
+            LOGGER.warning(
+                "Missing FX during screen evaluation | symbol=%s criterion=%s side=%s from=%s to=%s as_of=%s",
+                symbol,
+                criterion_name,
+                side,
+                source_currency,
+                anchor.currency,
+                anchor.as_of,
+            )
+            return None, "fx_missing"
+        return float(converted), None
+
+    if not is_monetary_unit_kind(term.unit_kind):
+        return None, "unit_mismatch"
+    source_currency = normalize_currency_code(term.currency)
+    if source_currency is None:
+        LOGGER.warning(
+            "Missing metric currency during screen evaluation | symbol=%s criterion=%s side=%s metric=%s",
+            symbol,
+            criterion_name,
+            side,
+            term.metric_id,
+        )
+        return None, "currency_missing"
+    if source_currency == anchor.currency:
+        return term.value, None
+
+    converted = fx_service.convert_amount(
+        term.value,
+        source_currency,
+        anchor.currency,
+        term.as_of or anchor.as_of or date.today().isoformat(),
+    )
+    if converted is None:
+        LOGGER.warning(
+            "Missing FX during screen evaluation | symbol=%s criterion=%s side=%s metric=%s from=%s to=%s as_of=%s",
+            symbol,
+            criterion_name,
+            side,
+            term.metric_id,
+            source_currency,
+            anchor.currency,
+            term.as_of,
+        )
+        return None, "fx_missing"
+    return float(converted), None
+
+
 def _resolve_term(
     term: Term,
     symbol: str,
@@ -255,23 +480,37 @@ def _resolve_term(
     log_missing_metrics: bool,
 ) -> ResolvedTerm:
     if term.value is not None:
-        return ResolvedTerm(metric_id=None, value=term.value)
+        return ResolvedTerm(
+            metric_id=None,
+            value=term.value,
+            unit_kind="monetary" if term.currency else None,
+            currency=normalize_currency_code(term.currency),
+            unit_label=None,
+            as_of=None,
+        )
     if not term.metric:
         return ResolvedTerm(metric_id=None, value=None)
+    record = _ensure_metric_record(
+        symbol,
+        term.metric,
+        metrics_repo,
+        fact_repo,
+        market_repo,
+        log_missing_metric=log_missing_metrics,
+    )
+    if record is None:
+        return ResolvedTerm(metric_id=term.metric, value=None)
     return ResolvedTerm(
         metric_id=term.metric,
-        value=_ensure_metric_value(
-            symbol,
-            term.metric,
-            metrics_repo,
-            fact_repo,
-            market_repo,
-            log_missing_metric=log_missing_metrics,
-        ),
+        value=record.value,
+        unit_kind=record.unit_kind,
+        currency=record.currency,
+        unit_label=record.unit_label,
+        as_of=record.as_of,
     )
 
 
-def _ensure_metric_value(
+def _ensure_metric_record(
     symbol: str,
     metric_id: str,
     metrics_repo: MetricsRepository,
@@ -279,10 +518,11 @@ def _ensure_metric_value(
     market_repo: Optional[MarketDataRepository],
     *,
     log_missing_metric: bool = True,
-) -> Optional[float]:
+) -> Optional[MetricRecord]:
+    del fact_repo, market_repo
     record = metrics_repo.fetch(symbol, metric_id)
     if record is not None:
-        return record[0]
+        return record
     if log_missing_metric:
         LOGGER.warning(
             "Metric %s missing for %s; run compute-metrics first", metric_id, symbol
@@ -301,6 +541,11 @@ def _dedupe_missing_metric_ids(*metric_ids: Optional[str]) -> tuple[str, ...]:
     return tuple(ordered)
 
 
+@lru_cache(maxsize=8)
+def _fx_service_for_db(db_path: str) -> FXService:
+    return FXService(db_path)
+
+
 def _load_ranking_definition(data: object) -> Optional[RankingDefinition]:
     if not isinstance(data, dict):
         return None
@@ -316,6 +561,7 @@ def _load_ranking_definition(data: object) -> Optional[RankingDefinition]:
                 if entry.get("cap") is not None and str(entry.get("cap")).strip() != ""
                 else None
             ),
+            currency=normalize_currency_code(entry.get("currency")),
         )
         for entry in data.get("metrics", [])
         if isinstance(entry, dict)
@@ -325,6 +571,7 @@ def _load_ranking_definition(data: object) -> Optional[RankingDefinition]:
         RankingTieBreaker(
             metric_id=str(entry.get("metric") or entry.get("metric_id") or "").strip(),
             direction=str(entry.get("direction") or "ascending").strip().lower(),
+            currency=normalize_currency_code(entry.get("currency")),
         )
         for entry in data.get("tie_breakers", [])
         if isinstance(entry, dict)
@@ -349,3 +596,21 @@ def _normalize_percentile_threshold(value: object) -> float:
         raise TypeError("Percentile threshold must be numeric")
     numeric = float(value)
     return numeric / 100.0 if numeric > 1.0 else numeric
+
+
+__all__ = [
+    "Criterion",
+    "CriterionEvaluation",
+    "RankingDefinition",
+    "RankingMetric",
+    "RankingTieBreaker",
+    "ResolvedTerm",
+    "ScreenDefinition",
+    "Term",
+    "evaluate_criterion",
+    "evaluate_criterion_detail",
+    "evaluate_criterion_verbose",
+    "load_screen",
+    "ranking_metric_ids",
+    "screen_metric_ids",
+]

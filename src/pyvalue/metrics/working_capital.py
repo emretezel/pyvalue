@@ -12,6 +12,7 @@ import logging
 
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import is_recent_fact
+from pyvalue.money import fx_service_for_context
 from pyvalue.storage import FinancialFactsRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -40,10 +41,36 @@ class WorkingCapitalMetric:
                 as_of_record.end_date,
             )
             return None
+        if assets.currency is None or liabilities.currency is None:
+            LOGGER.warning(
+                "working_capital: missing currency for %s (assets=%s liabilities=%s)",
+                symbol,
+                assets.currency,
+                liabilities.currency,
+            )
+            return None
         as_of = as_of_record.end_date
-        return MetricResult(
+        liabilities_value = liabilities.value
+        if liabilities.currency != assets.currency:
+            converted = fx_service_for_context(repo).convert_amount(
+                liabilities.value,
+                liabilities.currency,
+                assets.currency,
+                liabilities.end_date,
+            )
+            if converted is None:
+                LOGGER.warning(
+                    "working_capital: FX conversion failed for %s (%s -> %s)",
+                    symbol,
+                    liabilities.currency,
+                    assets.currency,
+                )
+                return None
+            liabilities_value = float(converted)
+        return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
-            value=assets.value - liabilities.value,
+            value=assets.value - liabilities_value,
             as_of=as_of,
+            currency=assets.currency,
         )

@@ -12,6 +12,7 @@ The main persisted layers are:
 - fundamentals fetch state
 - normalized financial facts
 - market data snapshots
+- FX rates
 - market data fetch state
 - computed metrics
 
@@ -93,6 +94,15 @@ Purpose:
 - key facts by canonical `security_id`
 - retain `source_provider` for provenance
 
+Currency and unit semantics:
+
+- monetary facts store a real ISO `currency`
+- non-monetary facts do not invent currencies; they keep meaningful `unit`
+  values such as `shares`
+- a narrow legacy fallback still treats exact currency-like `unit` values as the
+  fact currency when the explicit `currency` column is empty
+- `GBX` and `GBP0.01` are normalized to `GBP` before arithmetic and persistence
+
 ### `market_data`
 
 Stores latest quote and market-cap snapshot information.
@@ -102,6 +112,25 @@ Purpose:
 - decouple market refresh cadence from fundamentals cadence
 - store canonical rows keyed by `security_id`
 - retain `source_provider` for provenance
+
+### `fx_rates`
+
+Stores direct FX rates fetched from the configured provider.
+
+Purpose:
+
+- support direct, inverse, and triangulated FX conversion
+- keep FX storage separate from market snapshots and financial facts
+- enable historical as-of lookups using latest available rate on or before a
+  requested date
+
+Key semantics:
+
+- stored direction is always `1 base_currency = rate quote_currency`
+- only direct provider rows are stored
+- inverse and triangulated rates are derived at lookup time
+- a unique constraint protects `(provider, rate_date, base_currency, quote_currency)`
+- lookup indexes are designed for pair/date searches ordered by newest
 
 ### `market_data_fetch_state`
 
@@ -120,6 +149,13 @@ Purpose:
 - cache reusable metric outputs
 - support bulk screen runs without recomputing everything on demand
 - keep downstream computation provider-agnostic through `security_id`
+
+Metric rows also persist unit metadata:
+
+- `unit_kind`: one of `monetary`, `per_share`, `ratio`, `percent`, `multiple`,
+  `count`, or `other`
+- `currency`: present only for currency-bearing metric kinds
+- `unit_label`: optional display/unit hint such as `x` or `per_share`
 
 ## Persistence Flow
 

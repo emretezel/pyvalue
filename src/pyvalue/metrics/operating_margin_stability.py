@@ -14,6 +14,7 @@ import logging
 
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import MAX_FY_FACT_AGE_DAYS
+from pyvalue.money import align_money_values, fx_service_for_context
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -58,6 +59,7 @@ class OperatingMarginTenYearCalculator:
     def compute_series(
         self, symbol: str, repo: FinancialFactsRepository
     ) -> Optional[OperatingMarginTenYearSnapshot]:
+        fx_service = fx_service_for_context(repo)
         operating_income_map = self._fy_map(symbol, repo, OPERATING_INCOME_CONCEPT)
         if not operating_income_map:
             LOGGER.warning(
@@ -78,14 +80,30 @@ class OperatingMarginTenYearCalculator:
             operating_income = operating_income_map.get(year)
             if operating_income is None:
                 continue
-            if not self._currencies_match(revenue.currency, operating_income.currency):
+            aligned, _ = align_money_values(
+                values=[
+                    (revenue.total, revenue.currency, revenue.as_of, REVENUE_CONCEPT),
+                    (
+                        operating_income.total,
+                        operating_income.currency,
+                        operating_income.as_of,
+                        OPERATING_INCOME_CONCEPT,
+                    ),
+                ],
+                fx_service=fx_service,
+                logger=LOGGER,
+                operation="metric:opm_10y",
+                symbol=symbol,
+                target_currency=revenue.currency or operating_income.currency,
+            )
+            if aligned is None:
                 continue
 
             margins_by_year[year] = _OperatingMarginFYPoint(
                 year=year,
-                value=operating_income.total / revenue.total,
+                value=aligned[1] / aligned[0],
                 as_of=max(revenue.as_of, operating_income.as_of),
-                currency=operating_income.currency or revenue.currency,
+                currency=None,
             )
 
         if not margins_by_year:
@@ -94,7 +112,6 @@ class OperatingMarginTenYearCalculator:
 
         latest_year = max(margins_by_year.keys())
         selected: list[_OperatingMarginFYPoint] = []
-        # Require the latest strict 10-year chain for comparability.
         for year in range(latest_year, latest_year - SERIES_YEARS, -1):
             point = margins_by_year.get(year)
             if point is None:
@@ -110,19 +127,10 @@ class OperatingMarginTenYearCalculator:
             LOGGER.warning("opm_10y: latest FY point too old for %s", symbol)
             return None
 
-        series_currency = self._combine_currency([point.currency for point in selected])
-        if series_currency is None and any(
-            point.currency is not None for point in selected
-        ):
-            LOGGER.warning(
-                "opm_10y: currency mismatch across selected series for %s", symbol
-            )
-            return None
-
         return OperatingMarginTenYearSnapshot(
             points=tuple(selected),
             as_of=selected[0].as_of,
-            currency=series_currency,
+            currency=None,
         )
 
     def _fy_map(
@@ -153,38 +161,22 @@ class OperatingMarginTenYearCalculator:
         seen_end_dates: set[str] = set()
         for record in records:
             period = (record.fiscal_period or "").upper()
-            if period not in periods:
-                continue
-            if record.end_date in seen_end_dates:
-                continue
-            if record.value is None:
+            if (
+                period not in periods
+                or record.end_date in seen_end_dates
+                or record.value is None
+            ):
                 continue
             filtered.append(record)
             seen_end_dates.add(record.end_date)
         return filtered
 
     def _normalize_currency(self, record: FactRecord) -> tuple[float, Optional[str]]:
-        value = record.value
         code = record.currency
+        value = record.value
         if code in {"GBX", "GBP0.01"}:
             return value / 100.0, "GBP"
         return value, code
-
-    def _combine_currency(self, values: Sequence[Optional[str]]) -> Optional[str]:
-        merged = None
-        for value in values:
-            if not value:
-                continue
-            if merged is None:
-                merged = value
-            elif merged != value:
-                return None
-        return merged
-
-    def _currencies_match(self, left: Optional[str], right: Optional[str]) -> bool:
-        if left and right:
-            return left == right
-        return True
 
     def _extract_year(self, value: str) -> Optional[int]:
         if len(value) < 4:
@@ -226,6 +218,7 @@ class OperatingMarginTenYearStdMetric:
             metric_id=self.id,
             value=stddev,
             as_of=snapshot.as_of,
+            unit_kind="percent",
         )
 
 
@@ -249,6 +242,7 @@ class OperatingMarginTenYearMinMetric:
             metric_id=self.id,
             value=minimum,
             as_of=snapshot.as_of,
+            unit_kind="percent",
         )
 
 

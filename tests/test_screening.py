@@ -14,7 +14,12 @@ from pyvalue.screening import (
     ranking_metric_ids,
     screen_metric_ids,
 )
-from pyvalue.storage import FinancialFactsRepository, MetricsRepository
+from pyvalue.storage import (
+    FXRateRecord,
+    FXRatesRepository,
+    FinancialFactsRepository,
+    MetricsRepository,
+)
 
 
 def test_evaluate_criterion_uses_metrics_repo(tmp_path):
@@ -66,6 +71,90 @@ def test_evaluate_criterion_supports_constant_terms(tmp_path):
         left=Term(metric="earnings_yield"),
         operator=">",
         right=Term(value=0.0),
+    )
+
+    assert evaluate_criterion(criterion, "AAPL.US", metrics_repo, fact_repo) is True
+
+
+def test_evaluate_criterion_converts_monetary_constant_currency(tmp_path):
+    db = tmp_path / "screen_fx_constant.db"
+    fact_repo = FinancialFactsRepository(db)
+    fact_repo.initialize_schema()
+    metrics_repo = MetricsRepository(db)
+    metrics_repo.initialize_schema()
+    metrics_repo.upsert(
+        "AAPL.US",
+        "working_capital",
+        100.0,
+        "2023-12-31",
+        unit_kind="monetary",
+        currency="GBP",
+    )
+    fx_repo = FXRatesRepository(db)
+    fx_repo.initialize_schema()
+    fx_repo.upsert(
+        FXRateRecord(
+            provider="FRANKFURTER",
+            rate_date="2023-12-31",
+            base_currency="USD",
+            quote_currency="GBP",
+            rate_text="0.8",
+            fetched_at="2023-12-31T00:00:00+00:00",
+            source_kind="provider",
+        )
+    )
+
+    criterion = Criterion(
+        name="GBP threshold",
+        left=Term(metric="working_capital"),
+        operator=">=",
+        right=Term(value=120.0, currency="USD"),
+    )
+
+    assert evaluate_criterion(criterion, "AAPL.US", metrics_repo, fact_repo) is True
+
+
+def test_evaluate_criterion_converts_mixed_currency_metrics(tmp_path):
+    db = tmp_path / "screen_fx_metric.db"
+    fact_repo = FinancialFactsRepository(db)
+    fact_repo.initialize_schema()
+    metrics_repo = MetricsRepository(db)
+    metrics_repo.initialize_schema()
+    metrics_repo.upsert(
+        "AAPL.US",
+        "long_term_debt",
+        100.0,
+        "2023-12-31",
+        unit_kind="monetary",
+        currency="USD",
+    )
+    metrics_repo.upsert(
+        "AAPL.US",
+        "working_capital",
+        120.0,
+        "2023-12-31",
+        unit_kind="monetary",
+        currency="EUR",
+    )
+    fx_repo = FXRatesRepository(db)
+    fx_repo.initialize_schema()
+    fx_repo.upsert(
+        FXRateRecord(
+            provider="FRANKFURTER",
+            rate_date="2023-12-31",
+            base_currency="USD",
+            quote_currency="EUR",
+            rate_text="0.9",
+            fetched_at="2023-12-31T00:00:00+00:00",
+            source_kind="provider",
+        )
+    )
+
+    criterion = Criterion(
+        name="Debt vs WC",
+        left=Term(metric="long_term_debt"),
+        operator="<=",
+        right=Term(metric="working_capital"),
     )
 
     assert evaluate_criterion(criterion, "AAPL.US", metrics_repo, fact_repo) is True

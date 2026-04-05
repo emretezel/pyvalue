@@ -1829,6 +1829,94 @@ def _migration_025_add_sector_industry_to_securities(
         conn.execute("ALTER TABLE securities ADD COLUMN industry TEXT")
 
 
+def _migration_026_add_fx_rates_and_metric_metadata(
+    conn: sqlite3.Connection,
+) -> None:
+    """Add DB-backed FX storage plus explicit metric unit metadata."""
+
+    if _table_exists(conn, "metrics"):
+        columns = _table_columns(conn, "metrics")
+        if "unit_kind" not in columns:
+            conn.execute(
+                "ALTER TABLE metrics ADD COLUMN unit_kind TEXT NOT NULL DEFAULT 'other'"
+            )
+        if "currency" not in columns:
+            conn.execute("ALTER TABLE metrics ADD COLUMN currency TEXT")
+        if "unit_label" not in columns:
+            conn.execute("ALTER TABLE metrics ADD COLUMN unit_label TEXT")
+        conn.execute(
+            """
+            UPDATE metrics
+            SET unit_kind = COALESCE(NULLIF(unit_kind, ''), 'other')
+            """
+        )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fx_rates (
+            provider TEXT NOT NULL,
+            rate_date TEXT NOT NULL,
+            base_currency TEXT NOT NULL,
+            quote_currency TEXT NOT NULL,
+            rate_text TEXT NOT NULL,
+            fetched_at TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            meta_json TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (provider, rate_date, base_currency, quote_currency)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fx_rates_pair_date
+        ON fx_rates(provider, base_currency, quote_currency, rate_date DESC)
+        """
+    )
+
+
+def _migration_027_add_currency_discovery_indexes(
+    conn: sqlite3.Connection,
+) -> None:
+    """Add narrow currency indexes for FX refresh currency discovery."""
+
+    existing_tables = {
+        str(row[0])
+        for row in conn.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table'
+            """
+        ).fetchall()
+    }
+    if "supported_tickers" in existing_tables:
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_supported_tickers_currency_nonnull
+            ON supported_tickers(currency)
+            WHERE currency IS NOT NULL
+            """
+        )
+    if "financial_facts" in existing_tables:
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_fin_facts_currency_nonnull
+            ON financial_facts(currency)
+            WHERE currency IS NOT NULL
+            """
+        )
+    if "market_data" in existing_tables:
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_market_data_currency_nonnull
+            ON market_data(currency)
+            WHERE currency IS NOT NULL
+            """
+        )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -1855,6 +1943,8 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_023_optimize_fundamentals_hot_paths,
     _migration_024_create_fundamentals_normalization_state,
     _migration_025_add_sector_industry_to_securities,
+    _migration_026_add_fx_rates_and_metric_metadata,
+    _migration_027_add_currency_discovery_indexes,
 ]
 
 

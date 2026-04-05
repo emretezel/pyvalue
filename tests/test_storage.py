@@ -4,6 +4,8 @@ from datetime import date, timedelta
 import pyvalue.storage as storage
 from pyvalue.storage import (
     EntityMetadataRepository,
+    FXRateRecord,
+    FXRatesRepository,
     FundamentalsNormalizationStateRepository,
     FundamentalsUpdate,
     FundamentalsRepository,
@@ -1110,6 +1112,96 @@ def test_metrics_repository_fetch_many_for_symbols_returns_requested_metrics(
         "BBB.US": {
             "metric_one": (3.0, "2024-01-03"),
         },
+    }
+
+
+def test_metrics_repository_persists_unit_metadata(tmp_path):
+    db_path = tmp_path / "metrics-metadata.db"
+    repo = MetricsRepository(db_path)
+    repo.initialize_schema()
+
+    repo.upsert(
+        "AAA.US",
+        "market_cap",
+        100.0,
+        "2024-01-01",
+        unit_kind="monetary",
+        currency="GBX",
+        unit_label="money",
+    )
+    repo.upsert(
+        "AAA.US",
+        "earnings_yield",
+        0.08,
+        "2024-01-01",
+        unit_kind="percent",
+        currency="USD",
+        unit_label="pct",
+    )
+
+    market_cap = repo.fetch("AAA.US", "market_cap")
+    earnings_yield = repo.fetch("AAA.US", "earnings_yield")
+
+    assert market_cap is not None
+    assert market_cap.unit_kind == "monetary"
+    assert market_cap.currency == "GBP"
+    assert market_cap.unit_label == "money"
+    assert earnings_yield is not None
+    assert earnings_yield.unit_kind == "percent"
+    assert earnings_yield.currency is None
+    assert earnings_yield.unit_label == "pct"
+
+
+def test_fx_rates_repository_latest_on_or_before_and_discover_currencies(tmp_path):
+    db_path = tmp_path / "fx-repo.db"
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    fact_repo.replace_facts(
+        "AAA.LSE",
+        [
+            FactRecord(
+                symbol="AAA.LSE",
+                concept="Assets",
+                fiscal_period="FY",
+                end_date="2024-01-01",
+                unit="GBX",
+                value=1000.0,
+                currency="GBX",
+            )
+        ],
+    )
+    repo = FXRatesRepository(db_path)
+    repo.initialize_schema()
+    repo.upsert_many(
+        [
+            FXRateRecord(
+                provider="FRANKFURTER",
+                rate_date="2024-01-01",
+                base_currency="USD",
+                quote_currency="EUR",
+                rate_text="0.8",
+                fetched_at="2024-01-01T00:00:00+00:00",
+                source_kind="provider",
+            ),
+            FXRateRecord(
+                provider="FRANKFURTER",
+                rate_date="2024-01-10",
+                base_currency="USD",
+                quote_currency="EUR",
+                rate_text="0.9",
+                fetched_at="2024-01-10T00:00:00+00:00",
+                source_kind="provider",
+            ),
+        ]
+    )
+
+    record = repo.latest_on_or_before("FRANKFURTER", "USD", "EUR", "2024-01-05")
+
+    assert record is not None
+    assert record.rate_date == "2024-01-01"
+    assert repo.discover_currencies() == ["GBP"]
+    assert repo.direct_pair_coverage("FRANKFURTER", "USD", ["EUR", "GBP"]) == {
+        "EUR": ("2024-01-01", "2024-01-10")
     }
 
 

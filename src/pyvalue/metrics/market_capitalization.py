@@ -29,11 +29,12 @@ class MarketCapitalizationMetric:
             return None
         if snapshot.market_cap <= 0:
             return None
-        return MetricResult(
+        return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
             value=snapshot.market_cap,
             as_of=snapshot.as_of,
+            currency=getattr(snapshot, "currency", None),
         )
 
 

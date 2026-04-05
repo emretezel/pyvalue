@@ -850,11 +850,12 @@ class OwnerEarningsEnterpriseTTMMetric:
         snapshot = OwnerEarningsEnterpriseCalculator().compute_ttm(symbol, repo)
         if snapshot is None:
             return None
-        return MetricResult(
+        return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
             value=snapshot.value,
             as_of=snapshot.as_of,
+            currency=snapshot.currency,
         )
 
 
@@ -871,11 +872,12 @@ class OwnerEarningsEnterpriseFiveYearAverageMetric:
         snapshot = OwnerEarningsEnterpriseCalculator().compute_5y_average(symbol, repo)
         if snapshot is None:
             return None
-        return MetricResult(
+        return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
             value=snapshot.value,
             as_of=snapshot.as_of,
+            currency=snapshot.currency,
         )
 
 
@@ -892,11 +894,12 @@ class OwnerEarningsEnterpriseFiveYearMedianMetric:
         snapshot = OwnerEarningsEnterpriseCalculator().compute_5y_median(symbol, repo)
         if snapshot is None:
             return None
-        return MetricResult(
+        return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
             value=snapshot.value,
             as_of=snapshot.as_of,
+            currency=snapshot.currency,
         )
 
 
@@ -913,11 +916,12 @@ class WorstOwnerEarningsEnterpriseTenYearMetric:
         snapshot = OwnerEarningsEnterpriseCalculator().compute_10y_series(symbol, repo)
         if snapshot is None:
             return None
-        return MetricResult(
+        return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
             value=min(point.value for point in snapshot.points),
             as_of=snapshot.as_of,
+            currency=snapshot.currency,
         )
 
 

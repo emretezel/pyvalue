@@ -10,7 +10,8 @@ import csv
 import concurrent.futures.thread as _thread_futures
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from inspect import Parameter, signature
 import json
 import logging
 import multiprocessing as mp
@@ -25,10 +26,17 @@ from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Uni
 import weakref
 
 from pyvalue.config import Config
+from pyvalue.currency import (
+    is_monetary_unit_kind,
+    metric_currency_or_none,
+    normalize_currency_code,
+)
 from pyvalue.ingestion import EODHDFundamentalsClient, SECCompanyFactsClient
+from pyvalue.fx import FXService
 from pyvalue.marketdata import EODHDProvider, MarketDataUpdate, PriceData
 from pyvalue.marketdata.service import MarketDataService
 from pyvalue.metrics import REGISTRY
+from pyvalue.metrics.base import metadata_for_metric
 from pyvalue.normalization import EODHDFactsNormalizer, SECFactsNormalizer
 from pyvalue.ranking import compute_screen_ranking
 from pyvalue.reporting import MetricCoverage, compute_fact_coverage
@@ -45,6 +53,7 @@ from pyvalue.logging_utils import setup_logging, suppress_console_metric_warning
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.storage import (
     EntityMetadataRepository,
+    FXRatesRepository,
     FundamentalsNormalizationCandidate,
     FundamentalsNormalizationStateRepository,
     FundamentalsUpdate,
@@ -57,6 +66,7 @@ from pyvalue.storage import (
     MarketDataFetchStateRepository,
     MarketDataRepository,
     MarketSnapshotRecord,
+    MetricRecord,
     MetricsRepository,
     SecurityRepository,
     SecurityMetadataUpdate,
@@ -69,6 +79,33 @@ from pyvalue.storage import (
 from pyvalue.universe import USUniverseLoader
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _instantiate_with_optional_fx_service(factory, database: str | Path):
+    """Instantiate ``factory``, injecting ``fx_service`` when supported."""
+
+    parameters: Sequence[Parameter]
+    try:
+        parameters = tuple(signature(factory).parameters.values())
+    except (TypeError, ValueError):
+        parameters = ()
+    accepts_fx_service = any(
+        parameter.kind == Parameter.VAR_KEYWORD or parameter.name == "fx_service"
+        for parameter in parameters
+    )
+    if accepts_fx_service:
+        return factory(fx_service=FXService(str(database)))
+    return factory()
+
+
+def _batch_values(values: Sequence[str], size: int) -> List[List[str]]:
+    """Split ``values`` into stable ordered batches."""
+
+    if size <= 0:
+        raise ValueError("size must be positive")
+    return [list(values[idx : idx + size]) for idx in range(0, len(values), size)]
+
+
 DEFAULT_SCREEN_RESULTS_PREFIX = "data/screen_results"
 EODHD_ALLOWED_TICKER_TYPES = {"COMMON STOCK", "PREFERRED STOCK", "STOCK"}
 EODHD_FUNDAMENTALS_CALL_COST = 10
@@ -79,6 +116,8 @@ FUNDAMENTALS_WORKERS = 16
 FUNDAMENTALS_RATE_LIMIT_BURST = 2
 FUNDAMENTALS_WRITE_BATCH_SIZE = 25
 FUNDAMENTALS_WRITE_BATCH_INTERVAL_SECONDS = 0.25
+FX_REFRESH_MAX_QUOTES_PER_REQUEST = 25
+FX_REFRESH_MAX_DAYS_PER_REQUEST = 730
 FUNDAMENTALS_PROGRESS_INTERVAL_SECONDS = 5.0
 FUNDAMENTALS_PROGRESS_SYMBOL_STEP = 250
 MARKET_DATA_BULK_BREAK_EVEN = 100
@@ -1541,6 +1580,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show metric/data-quality warnings on the console (default: suppressed).",
     )
 
+    refresh_fx_rates = subparsers.add_parser(
+        "refresh-fx-rates",
+        help="Fetch and store FX rates for currencies already present in the project database.",
+    )
+    refresh_fx_rates.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
+    )
+    refresh_fx_rates.add_argument(
+        "--start-date",
+        default=None,
+        help="Optional historical FX backfill start date (YYYY-MM-DD). Defaults to the end date.",
+    )
+    refresh_fx_rates.add_argument(
+        "--end-date",
+        default=None,
+        help="Optional FX refresh end date (YYYY-MM-DD). Defaults to today.",
+    )
+
     fact_report = subparsers.add_parser(
         "report-fact-freshness",
         help="List missing or stale financial facts required by metrics for the requested canonical scope.",
@@ -2931,7 +2990,7 @@ class _PreloadedMetricsRepository(_SchemaReadyMetricsRepository):
     def __init__(
         self,
         db_path: Union[str, Path],
-        metric_rows_by_symbol: Mapping[str, Mapping[str, Tuple[float, str]]],
+        metric_rows_by_symbol: Mapping[str, Mapping[str, MetricRecord]],
     ) -> None:
         super().__init__(db_path)
         self._metric_rows_by_symbol = {
@@ -2939,7 +2998,7 @@ class _PreloadedMetricsRepository(_SchemaReadyMetricsRepository):
             for symbol, metric_rows in metric_rows_by_symbol.items()
         }
 
-    def fetch(self, symbol: str, metric_id: str) -> Optional[Tuple[float, str]]:
+    def fetch(self, symbol: str, metric_id: str) -> Optional[MetricRecord]:
         return self._metric_rows_by_symbol.get(symbol.strip().upper(), {}).get(
             metric_id
         )
@@ -3139,6 +3198,65 @@ def _print_recompute_progress_bar(completed_symbols: int, total_symbols: int) ->
     )
 
 
+def _print_fx_progress_bar(completed_batches: int, total_batches: int) -> None:
+    """Print a compact ASCII bar for FX refresh batching."""
+
+    if total_batches <= 0:
+        percent = 100.0
+    else:
+        percent = (completed_batches / total_batches) * 100.0
+    bar_width = 20
+    filled_width = min(bar_width, max(0, round((percent / 100.0) * bar_width)))
+    bar = "#" * filled_width + "-" * (bar_width - filled_width)
+    print(
+        f"Progress: [{bar}] {completed_batches}/{total_batches} FX batches complete ({percent:.1f}%)",
+        flush=True,
+    )
+
+
+def _split_fx_refresh_ranges(
+    start_date: date,
+    end_date: date,
+    max_days_per_request: int = FX_REFRESH_MAX_DAYS_PER_REQUEST,
+) -> List[Tuple[date, date]]:
+    """Split one FX refresh date range into bounded inclusive windows."""
+
+    if max_days_per_request <= 0:
+        raise ValueError("max_days_per_request must be positive")
+    ranges: List[Tuple[date, date]] = []
+    current_start = start_date
+    window = timedelta(days=max_days_per_request - 1)
+    while current_start <= end_date:
+        current_end = min(current_start + window, end_date)
+        ranges.append((current_start, current_end))
+        current_start = current_end + timedelta(days=1)
+    return ranges
+
+
+def _fx_missing_ranges_for_coverage(
+    requested_start: date,
+    requested_end: date,
+    coverage: Optional[Tuple[str, str]],
+) -> List[Tuple[date, date]]:
+    """Return missing direct-FX ranges after considering stored coverage."""
+
+    if coverage is None:
+        return [(requested_start, requested_end)]
+
+    covered_start = date.fromisoformat(coverage[0])
+    covered_end = date.fromisoformat(coverage[1])
+    missing: List[Tuple[date, date]] = []
+    if requested_start < covered_start:
+        missing.append(
+            (requested_start, min(requested_end, covered_start - timedelta(days=1)))
+        )
+    if requested_end > covered_end:
+        missing.append(
+            (max(requested_start, covered_end + timedelta(days=1)), requested_end)
+        )
+    return [window for window in missing if window[0] <= window[1]]
+
+
 def _compute_metrics_for_symbol(
     symbol: str,
     metric_ids: Sequence[str],
@@ -3181,7 +3299,23 @@ def _compute_metrics_for_symbol(
                 "Metric %s could not be computed for %s", metric_id, symbol_upper
             )
             continue
-        rows.append((result.symbol, result.metric_id, result.value, result.as_of))
+        metadata = metadata_for_metric(metric_id, metric)
+        unit_kind = (
+            metadata.unit_kind if result.unit_kind == "other" else result.unit_kind
+        )
+        unit_label = result.unit_label or metadata.unit_label
+        currency = metric_currency_or_none(unit_kind, result.currency)
+        rows.append(
+            (
+                result.symbol,
+                result.metric_id,
+                result.value,
+                result.as_of,
+                unit_kind,
+                currency,
+                unit_label,
+            )
+        )
         computed += 1
 
     return _ComputedMetricsResult(
@@ -3466,15 +3600,97 @@ def _rank_screen_passers(
             continue
         if tie_breaker.metric_id not in metric_ids:
             metric_ids.append(tie_breaker.metric_id)
-    metric_values: Dict[str, Dict[str, float]] = {
-        metric_id: {} for metric_id in metric_ids
+    ranking_metric_config = {
+        metric.metric_id: metric for metric in definition.ranking.metrics
     }
-    for symbol in passed_symbols:
-        for metric_id in metric_ids:
+    tie_breaker_config = {
+        tie_breaker.metric_id: tie_breaker
+        for tie_breaker in definition.ranking.tie_breakers
+        if tie_breaker.metric_id not in {"canonical_symbol", "symbol", "ticker", "id"}
+    }
+    fx_service = FXService(metrics_repo.db_path)
+    metric_values: Dict[str, Dict[str, float]] = {}
+    for metric_id in metric_ids:
+        records_by_symbol: Dict[str, MetricRecord] = {}
+        unit_kinds = set()
+        currencies = set()
+        for symbol in passed_symbols:
             record = metrics_repo.fetch(symbol, metric_id)
             if record is None:
                 continue
-            metric_values[metric_id][symbol] = record[0]
+            records_by_symbol[symbol] = record
+            unit_kinds.add(record.unit_kind)
+            if record.currency:
+                currencies.add(record.currency)
+
+        if not records_by_symbol:
+            metric_values[metric_id] = {}
+            continue
+
+        if len(unit_kinds) > 1:
+            LOGGER.warning(
+                "Ranking metric skipped due to mixed unit kinds | metric=%s unit_kinds=%s",
+                metric_id,
+                ",".join(sorted(unit_kinds)),
+            )
+            metric_values[metric_id] = {}
+            continue
+
+        sample = next(iter(records_by_symbol.values()))
+        config_entry = ranking_metric_config.get(metric_id) or tie_breaker_config.get(
+            metric_id
+        )
+        comparison_currency = normalize_currency_code(
+            getattr(config_entry, "currency", None)
+        )
+
+        if is_monetary_unit_kind(sample.unit_kind):
+            if comparison_currency is None and len(currencies) > 1:
+                LOGGER.warning(
+                    "Ranking metric skipped due to mixed currencies without comparison currency | metric=%s currencies=%s",
+                    metric_id,
+                    ",".join(sorted(currencies)),
+                )
+                metric_values[metric_id] = {}
+                continue
+            target_currency = comparison_currency or next(iter(currencies), None)
+            converted_values: Dict[str, float] = {}
+            for symbol, record in records_by_symbol.items():
+                if target_currency is None:
+                    continue
+                if record.currency is None:
+                    LOGGER.warning(
+                        "Ranking metric missing currency | metric=%s symbol=%s",
+                        metric_id,
+                        symbol,
+                    )
+                    continue
+                if record.currency == target_currency:
+                    converted_values[symbol] = record.value
+                    continue
+                converted = fx_service.convert_amount(
+                    record.value,
+                    record.currency,
+                    target_currency,
+                    record.as_of,
+                )
+                if converted is None:
+                    LOGGER.warning(
+                        "Ranking FX conversion failed | metric=%s symbol=%s from=%s to=%s as_of=%s",
+                        metric_id,
+                        symbol,
+                        record.currency,
+                        target_currency,
+                        record.as_of,
+                    )
+                    continue
+                converted_values[symbol] = float(converted)
+            metric_values[metric_id] = converted_values
+            continue
+
+        metric_values[metric_id] = {
+            symbol: record.value for symbol, record in records_by_symbol.items()
+        }
 
     metadata = entity_repo.fetch_many(passed_symbols)
     sectors = {
@@ -3903,7 +4119,7 @@ def cmd_normalize_us_facts(
         return 0
 
     payload, raw_fetched_at = payload_record
-    normalizer = SECFactsNormalizer()
+    normalizer = _instantiate_with_optional_fx_service(SECFactsNormalizer, database)
     records = normalizer.normalize(payload, symbol=symbol.upper())
 
     fact_repo = FinancialFactsRepository(database)
@@ -3953,16 +4169,26 @@ def cmd_normalize_us_facts_bulk(
             raise SystemExit("No symbols provided for SEC normalization.")
 
     requested_total = len(symbols)
-    print(
-        f"Checking SEC normalization freshness for {requested_total} symbols",
-        flush=True,
-    )
-    symbols_to_normalize, candidates, skipped = _plan_normalization_selection(
-        database=database,
-        provider="SEC",
-        symbols=symbols,
-        force=force,
-    )
+    if force:
+        print(
+            f"Force re-normalization requested for {requested_total} SEC symbols; "
+            "skipping freshness scan",
+            flush=True,
+        )
+        symbols_to_normalize = list(symbols)
+        candidates: Dict[str, FundamentalsNormalizationCandidate] = {}
+        skipped = 0
+    else:
+        print(
+            f"Checking SEC normalization freshness for {requested_total} symbols",
+            flush=True,
+        )
+        symbols_to_normalize, candidates, skipped = _plan_normalization_selection(
+            database=database,
+            provider="SEC",
+            symbols=symbols,
+            force=False,
+        )
     if not symbols_to_normalize:
         _print_normalization_up_to_date("SEC", database)
         return 0
@@ -4057,7 +4283,7 @@ def _normalize_sec_symbol_worker(
     if payload_record is None:
         return None
     payload, raw_fetched_at = payload_record
-    normalizer = SECFactsNormalizer()
+    normalizer = _instantiate_with_optional_fx_service(SECFactsNormalizer, database)
     rows = tuple(
         _normalization_record_to_row(record)
         for record in normalizer.normalize(payload, symbol=symbol)
@@ -4080,7 +4306,7 @@ def _normalize_eodhd_symbol_worker(
     if payload_record is None:
         return None
     payload, raw_fetched_at = payload_record
-    normalizer = EODHDFactsNormalizer()
+    normalizer = _instantiate_with_optional_fx_service(EODHDFactsNormalizer, database)
     rows = tuple(
         _normalization_record_to_row(record)
         for record in normalizer.normalize(payload, symbol=symbol)
@@ -4305,7 +4531,7 @@ def cmd_normalize_eodhd_fundamentals(
 
     payload, raw_fetched_at = payload_record
 
-    normalizer = EODHDFactsNormalizer()
+    normalizer = _instantiate_with_optional_fx_service(EODHDFactsNormalizer, database)
     records = normalizer.normalize(payload, symbol=symbol_upper)
 
     fact_repo = FinancialFactsRepository(database)
@@ -4363,16 +4589,26 @@ def cmd_normalize_eodhd_fundamentals_bulk(
             raise SystemExit("No symbols provided for EODHD normalization.")
 
     requested_total = len(symbols)
-    print(
-        f"Checking EODHD normalization freshness for {requested_total} symbols",
-        flush=True,
-    )
-    symbols_to_normalize, candidates, skipped = _plan_normalization_selection(
-        database=database,
-        provider="EODHD",
-        symbols=symbols,
-        force=force,
-    )
+    if force:
+        print(
+            f"Force re-normalization requested for {requested_total} EODHD symbols; "
+            "skipping freshness scan",
+            flush=True,
+        )
+        symbols_to_normalize = list(symbols)
+        candidates: Dict[str, FundamentalsNormalizationCandidate] = {}
+        skipped = 0
+    else:
+        print(
+            f"Checking EODHD normalization freshness for {requested_total} symbols",
+            flush=True,
+        )
+        symbols_to_normalize, candidates, skipped = _plan_normalization_selection(
+            database=database,
+            provider="EODHD",
+            symbols=symbols,
+            force=False,
+        )
     if not symbols_to_normalize:
         _print_normalization_up_to_date("EODHD", database)
         return 0
@@ -5458,6 +5694,7 @@ def cmd_report_screen_failures(
             metric_impacts,
             fact_repo,
             market_repo,
+            progress_interval_seconds=SCREEN_PROGRESS_INTERVAL_SECONDS,
         )
 
     ordered_impacts = sorted(
@@ -6136,6 +6373,134 @@ def _write_fact_report_csv(report: Sequence[MetricCoverage], path: str) -> None:
                 )
 
 
+def cmd_refresh_fx_rates(
+    database: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> int:
+    """Refresh direct FX rates for currencies already present in the project DB."""
+
+    db_path = _resolve_database_path(database)
+
+    try:
+        resolved_end = date.fromisoformat(end_date) if end_date else date.today()
+    except ValueError as exc:
+        raise SystemExit(f"Invalid --end-date value: {end_date}") from exc
+    try:
+        resolved_start = date.fromisoformat(start_date) if start_date else resolved_end
+    except ValueError as exc:
+        raise SystemExit(f"Invalid --start-date value: {start_date}") from exc
+    if resolved_start > resolved_end:
+        raise SystemExit("--start-date must be on or before --end-date")
+
+    print(
+        "Preparing FX refresh schema and indexes (the first run after an upgrade may take a while on large databases)...",
+        flush=True,
+    )
+    repo = FXRatesRepository(db_path)
+    service = FXService(db_path, repository=repo)
+    print(
+        "Discovering FX currencies from supported_tickers, financial_facts, and market_data...",
+        flush=True,
+    )
+    currencies = [
+        code for code in repo.discover_currencies() if code != service.pivot_currency
+    ]
+    if not currencies:
+        print("No non-pivot currencies found in the database.")
+        return 0
+
+    coverage = repo.direct_pair_coverage(
+        service.provider_name,
+        service.pivot_currency,
+        currencies,
+    )
+    grouped_batches: Dict[Tuple[date, date], List[str]] = {}
+    skipped_currencies = 0
+    for currency in currencies:
+        missing_ranges = _fx_missing_ranges_for_coverage(
+            resolved_start,
+            resolved_end,
+            coverage.get(currency),
+        )
+        if not missing_ranges:
+            skipped_currencies += 1
+            continue
+        for missing_start, missing_end in missing_ranges:
+            for split_start, split_end in _split_fx_refresh_ranges(
+                missing_start,
+                missing_end,
+                FX_REFRESH_MAX_DAYS_PER_REQUEST,
+            ):
+                grouped_batches.setdefault((split_start, split_end), []).append(
+                    currency
+                )
+
+    batch_plan: List[Tuple[date, date, List[str]]] = []
+    for (window_start, window_end), window_currencies in sorted(
+        grouped_batches.items()
+    ):
+        for batch in _batch_values(
+            sorted(set(window_currencies)),
+            FX_REFRESH_MAX_QUOTES_PER_REQUEST,
+        ):
+            batch_plan.append((window_start, window_end, batch))
+
+    total_batches = len(batch_plan)
+    print(
+        "Refreshing FX rates: "
+        f"provider={service.provider_name} "
+        f"base={service.pivot_currency} "
+        f"currencies={len(currencies)} "
+        f"skipped_currencies={skipped_currencies} "
+        f"date_windows={len(grouped_batches)} "
+        f"requests={total_batches} "
+        f"range={resolved_start.isoformat()}..{resolved_end.isoformat()}",
+        flush=True,
+    )
+    _print_fx_progress_bar(0, total_batches)
+
+    stored = 0
+    failed_batches = 0
+    completed_batches = 0
+    for window_start, window_end, batch in batch_plan:
+        try:
+            rows = service.provider.fetch_rates(
+                base_currency=service.pivot_currency,
+                quote_currencies=batch,
+                start_date=window_start,
+                end_date=window_end,
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "FX refresh batch failed | provider=%s base=%s quotes=%s range=%s..%s exception=%s",
+                service.provider_name,
+                service.pivot_currency,
+                ",".join(batch),
+                window_start.isoformat(),
+                window_end.isoformat(),
+                exc,
+            )
+            failed_batches += 1
+            completed_batches += 1
+            _print_fx_progress_bar(completed_batches, total_batches)
+            continue
+        stored += repo.upsert_many(rows)
+        completed_batches += 1
+        _print_fx_progress_bar(completed_batches, total_batches)
+
+    print(
+        "Stored FX rates: "
+        f"provider={service.provider_name} "
+        f"base={service.pivot_currency} "
+        f"currencies={len(currencies)} "
+        f"rows={stored} "
+        f"failed_batches={failed_batches} "
+        f"range={resolved_start.isoformat()}..{resolved_end.isoformat()}"
+    )
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Entrypoint used by console_scripts."""
 
@@ -6156,6 +6521,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 exchange_codes=args.exchange_codes,
                 all_supported=args.all_supported,
                 include_etfs=args.include_etfs,
+            )
+        if args.command == "refresh-fx-rates":
+            return cmd_refresh_fx_rates(
+                database=args.database,
+                start_date=args.start_date,
+                end_date=args.end_date,
             )
         if args.command == "ingest-fundamentals":
             return cmd_ingest_fundamentals_stage(

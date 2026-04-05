@@ -454,11 +454,12 @@ class ICMostRecentQuarterMetric(_InvestedCapitalBase):
         snapshot = InvestedCapitalCalculator().compute_mqr(symbol, repo)
         if snapshot is None:
             return None
-        return MetricResult(
+        return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
             value=snapshot.value,
             as_of=snapshot.as_of,
+            currency=snapshot.currency,
         )
 
 
@@ -475,11 +476,12 @@ class ICFYMetric(_InvestedCapitalBase):
         snapshot = InvestedCapitalCalculator().compute_fy(symbol, repo)
         if snapshot is None:
             return None
-        return MetricResult(
+        return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
             value=snapshot.value,
             as_of=snapshot.as_of,
+            currency=snapshot.currency,
         )
 
 
@@ -496,11 +498,12 @@ class AvgICMetric(_InvestedCapitalBase):
         snapshot = InvestedCapitalCalculator().compute_avg(symbol, repo)
         if snapshot is None:
             return None
-        return MetricResult(
+        return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
             value=snapshot.value,
             as_of=snapshot.as_of,
+            currency=snapshot.currency,
         )
 
 

@@ -14,6 +14,7 @@ from pyvalue.fx import FXRateStore
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.share_count_change import ShareCountChangeCalculator
 from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS, is_recent_fact
+from pyvalue.money import ephemeral_fx_database_path
 from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -47,9 +48,10 @@ def _convert_market_cap(
     target_currency: Optional[str],
     as_of: str,
     context: str,
+    database: str,
 ) -> Optional[float]:
     if source_currency and target_currency and source_currency != target_currency:
-        converted = FXRateStore().convert(
+        converted = FXRateStore(database).convert(
             amount,
             source_currency,
             target_currency,
@@ -210,6 +212,7 @@ class NetBuybackYieldMetric:
             target_currency=target_currency,
             as_of=snapshot.as_of,
             context=self.id,
+            database=str(getattr(market_repo, "db_path", ephemeral_fx_database_path())),
         )
         if converted is None:
             return None

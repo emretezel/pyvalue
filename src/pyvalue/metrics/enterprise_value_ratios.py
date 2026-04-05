@@ -17,6 +17,7 @@ from pyvalue.metrics.enterprise_value import (
     merge_currency_codes,
     resolve_enterprise_value_denominator,
 )
+from pyvalue.money import ephemeral_fx_database_path
 from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS, is_recent_fact
 from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
 
@@ -280,7 +281,9 @@ class EBITYieldEVMetric:
             market_repo=market_repo,
             target_currency=numerator.currency,
             context=self.id,
-            converter=FXRateStore().convert,
+            converter=FXRateStore(
+                str(getattr(repo, "db_path", ephemeral_fx_database_path()))
+            ).convert,
         )
         if enterprise_value is None:
             return None
@@ -320,7 +323,9 @@ class FCFYieldEVMetric:
             market_repo=market_repo,
             target_currency=numerator.currency,
             context=self.id,
-            converter=FXRateStore().convert,
+            converter=FXRateStore(
+                str(getattr(repo, "db_path", ephemeral_fx_database_path()))
+            ).convert,
         )
         if enterprise_value is None:
             return None
@@ -363,7 +368,9 @@ class EVToEBITMetric:
             market_repo=market_repo,
             target_currency=numerator.currency,
             context=self.id,
-            converter=FXRateStore().convert,
+            converter=FXRateStore(
+                str(getattr(repo, "db_path", ephemeral_fx_database_path()))
+            ).convert,
         )
         if enterprise_value is None:
             return None
@@ -406,7 +413,9 @@ class EVToEBITDAMetric:
             market_repo=market_repo,
             target_currency=numerator.currency,
             context=self.id,
-            converter=FXRateStore().convert,
+            converter=FXRateStore(
+                str(getattr(repo, "db_path", ephemeral_fx_database_path()))
+            ).convert,
         )
         if enterprise_value is None:
             return None

@@ -27,11 +27,12 @@ class LongTermDebtMetric:
     ) -> Optional[MetricResult]:
         fact = repo.latest_fact(symbol, "LongTermDebt")
         if fact is not None and is_recent_fact(fact):
-            return MetricResult(
+            return MetricResult.monetary(
                 symbol=symbol,
                 metric_id=self.id,
                 value=fact.value,
                 as_of=fact.end_date,
+                currency=fact.currency,
             )
         LOGGER.warning("long_term_debt: no recent long-term debt fact for %s", symbol)
         return None

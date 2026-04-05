@@ -17,6 +17,7 @@ from pyvalue.metrics.enterprise_value import (
     convert_denominator_amount,
     resolve_enterprise_value_denominator,
 )
+from pyvalue.money import ephemeral_fx_database_path
 from pyvalue.metrics.owner_earnings_enterprise import (
     REQUIRED_CONCEPTS as OE_EV_REQUIRED_CONCEPTS,
     OwnerEarningsEnterpriseCalculator,
@@ -43,6 +44,7 @@ def _convert_denominator(
     target_currency: Optional[str],
     as_of: str,
     context: str,
+    database: str,
 ) -> Optional[float]:
     return convert_denominator_amount(
         symbol=symbol,
@@ -51,7 +53,7 @@ def _convert_denominator(
         target_currency=target_currency,
         as_of=as_of,
         context=context,
-        converter=FXRateStore().convert,
+        converter=FXRateStore(database).convert,
     )
 
 
@@ -61,6 +63,7 @@ def _denominator_market_cap(
     market_repo: MarketDataRepository,
     target_currency: Optional[str],
     context: str,
+    database: str,
 ) -> Optional[float]:
     snapshot = market_repo.latest_snapshot(symbol)
     if snapshot is None or snapshot.market_cap is None:
@@ -77,6 +80,7 @@ def _denominator_market_cap(
         target_currency=target_currency,
         as_of=snapshot.as_of,
         context=context,
+        database=database,
     )
 
 
@@ -94,7 +98,9 @@ def _denominator_enterprise_value(
         market_repo=market_repo,
         target_currency=target_currency,
         context=context,
-        converter=FXRateStore().convert,
+        converter=FXRateStore(
+            str(getattr(repo, "db_path", ephemeral_fx_database_path()))
+        ).convert,
     )
 
 
@@ -122,6 +128,7 @@ class OwnerEarningsYieldEquityMetric:
             market_repo=market_repo,
             target_currency=numerator.currency,
             context=self.id,
+            database=str(getattr(repo, "db_path", ephemeral_fx_database_path())),
         )
         if market_cap is None:
             return None
@@ -158,6 +165,7 @@ class OwnerEarningsYieldEquityFiveYearMetric:
             market_repo=market_repo,
             target_currency=numerator.currency,
             context=self.id,
+            database=str(getattr(repo, "db_path", ephemeral_fx_database_path())),
         )
         if market_cap is None:
             return None

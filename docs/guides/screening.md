@@ -27,6 +27,16 @@ The current screening engine is intentionally simple:
 - if either term resolves to `None`, the criterion fails
 - only these operators are supported: `<=`, `>=`, `<`, `>`, `==`
 
+Screening is unit-aware:
+
+- `ratio`, `percent`, `multiple`, and `count` terms compare directly
+- `monetary` and `per_share` metric-vs-metric comparisons convert the right
+  side into the left metric currency before comparison
+- metric-vs-constant monetary comparisons interpret an unlabelled constant in
+  the left metric currency; a constant can also declare an explicit currency
+- mismatched unit kinds fail the criterion with a warning instead of aborting
+  the whole run
+
 There is no support for:
 - OR logic
 - nested groups
@@ -50,6 +60,13 @@ metric: <metric_id>
 
 ```yaml
 value: <number>
+```
+
+Monetary constants can also declare a currency:
+
+```yaml
+value: 1_000_000_000
+currency: USD
 ```
 
 Optional right-hand multiplier:
@@ -162,6 +179,14 @@ Some screens also define a post-screen ranking block. In those cases:
 - only passing symbols are ranked
 - extra `qarp_rank` and `qarp_score` rows are added before the criterion rows
 - passing symbols are ordered best to worst in the console table and CSV
+
+Ranking notes:
+
+- non-monetary ranking metrics work directly
+- monetary or per-share ranking metrics should declare a comparison currency in
+  the ranking block when the passing set contains mixed currencies
+- if a mixed-currency monetary ranking metric omits that comparison currency,
+  `pyvalue` skips that ranking metric instead of failing the screen
 
 The bundled QARP screen uses sector-relative percentile subscores when enough
 same-sector passers exist, and otherwise falls back to the full passing set.

@@ -7,7 +7,11 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
+import logging
 
+from pyvalue.currency import normalize_currency_code, raw_currency_code
+from pyvalue.fx import FXService
+from pyvalue.money import choose_target_currency, convert_money_value
 from pyvalue.metrics.utils import is_recent_fact
 from pyvalue.storage import FactRecord
 
@@ -410,13 +414,20 @@ PREFERRED_DIVIDEND_FALLBACK = (
     "PreferredStockDividends",
 )
 COMMON_EQUITY_FALLBACK = ("StockholdersEquity",)
+FactPeriodKey = tuple[str, str]
+LOGGER = logging.getLogger(__name__)
 
 
 class SECFactsNormalizer:
     """Flatten SEC fact payloads into FactRecord entries."""
 
-    def __init__(self, concepts: Optional[Iterable[str]] = None) -> None:
+    def __init__(
+        self,
+        concepts: Optional[Iterable[str]] = None,
+        fx_service: Optional[FXService] = None,
+    ) -> None:
         self.concepts = set(concepts or TARGET_CONCEPTS)
+        self.fx_service = fx_service
 
     def normalize(
         self, payload: Dict, symbol: str, cik: Optional[str] = None
@@ -657,6 +668,101 @@ class SECFactsNormalizer:
                 bucket[key] = record
         return indexed
 
+    def _period_key(self, record: FactRecord) -> FactPeriodKey:
+        return (record.end_date, record.fiscal_period or "")
+
+    def _candidate_period_keys(
+        self,
+        indexed: Dict[str, Dict[tuple[str, str, str], FactRecord]],
+        concepts: Iterable[str],
+    ) -> set[FactPeriodKey]:
+        keys: set[FactPeriodKey] = set()
+        for concept in concepts:
+            keys.update(
+                self._period_key(record) for record in indexed.get(concept, {}).values()
+            )
+        return keys
+
+    def _records_for_period(
+        self,
+        indexed: Dict[str, Dict[tuple[str, str, str], FactRecord]],
+        concept: str,
+        period_key: FactPeriodKey,
+    ) -> List[FactRecord]:
+        end_date, fiscal_period = period_key
+        return [
+            record
+            for record in indexed.get(concept, {}).values()
+            if record.end_date == end_date
+            and (record.fiscal_period or "") == fiscal_period
+            and record.value is not None
+        ]
+
+    def _pick_period_record(
+        self,
+        indexed: Dict[str, Dict[tuple[str, str, str], FactRecord]],
+        concept: str,
+        period_key: FactPeriodKey,
+    ) -> Optional[FactRecord]:
+        records = self._records_for_period(indexed, concept, period_key)
+        return records[0] if records else None
+
+    def _convert_record_value(
+        self,
+        record: FactRecord,
+        target_currency: Optional[str],
+        *,
+        derived_concept: str,
+        symbol: str,
+    ) -> Optional[float]:
+        if record.value is None:
+            return None
+        return convert_money_value(
+            amount=record.value,
+            source_currency=record.currency,
+            target_currency=target_currency,
+            as_of=record.end_date,
+            fx_service=self.fx_service,
+            logger=LOGGER,
+            operation=f"sec:{derived_concept}",
+            symbol=symbol,
+            field_name=record.concept,
+        )
+
+    def _sum_records_for_derived_concept(
+        self,
+        records: Iterable[FactRecord],
+        *,
+        symbol: str,
+        derived_concept: str,
+        target_currency: Optional[str] = None,
+    ) -> tuple[Optional[float], Optional[str]]:
+        usable = [record for record in records if record.value is not None]
+        if not usable:
+            return None, None
+        resolved_target = normalize_currency_code(
+            target_currency
+        ) or choose_target_currency(record.currency for record in usable)
+        if resolved_target is None:
+            LOGGER.warning(
+                "Missing target currency for derived fact | symbol=%s concept=%s",
+                symbol,
+                derived_concept,
+            )
+            return None, None
+        total = 0.0
+        for record in usable:
+            converted = self._convert_record_value(
+                record,
+                resolved_target,
+                derived_concept=derived_concept,
+                symbol=symbol,
+            )
+            if converted is None:
+                return None, None
+            total += converted
+        return total, resolved_target
+
     def _derive_current_totals(
         self,
         records: List[FactRecord],
@@ -682,25 +788,36 @@ class SECFactsNormalizer:
         components: Iterable[str],
     ) -> List[FactRecord]:
         existing = indexed.get(concept, {})
-        candidate_keys: set[tuple[str, str, str]] = set()
-        for component in components:
-            candidate_keys.update(indexed.get(component, {}).keys())
+        existing_periods = {self._period_key(record) for record in existing.values()}
+        candidate_periods = self._candidate_period_keys(indexed, components)
 
         derived: List[FactRecord] = []
-        for key in candidate_keys:
-            if existing.get(key):
+        for period_key in candidate_periods:
+            if period_key in existing_periods:
                 continue
             component_records = self._prefer_recent_records(
-                indexed.get(component, {}).get(key) for component in components
+                self._pick_period_record(indexed, component, period_key)
+                for component in components
             )
             if not component_records:
                 continue
-            total = sum(
-                record.value for record in component_records if record.value is not None
+            total, target_currency = self._sum_records_for_derived_concept(
+                component_records,
+                symbol=symbol,
+                derived_concept=concept,
             )
+            if total is None or target_currency is None:
+                continue
             base = component_records[0]
             derived.append(
-                self._build_derived_record(base, concept, total, symbol, cik)
+                self._build_derived_record(
+                    base,
+                    concept,
+                    total,
+                    symbol,
+                    cik,
+                    currency=target_currency,
+                )
             )
         return derived
 
@@ -711,9 +828,11 @@ class SECFactsNormalizer:
         cik: Optional[str],
     ) -> List[FactRecord]:
         existing = indexed.get("LiabilitiesCurrent", {})
-        candidate_keys: set[tuple[str, str, str]] = set()
-        for component in LIABILITIES_CURRENT_COMPONENTS:
-            candidate_keys.update(indexed.get(component, {}).keys())
+        existing_periods = {self._period_key(record) for record in existing.values()}
+        candidate_periods = self._candidate_period_keys(
+            indexed,
+            LIABILITIES_CURRENT_COMPONENTS,
+        )
 
         grouped_tags = {
             *LIABILITIES_CURRENT_AP_ACCRUED_COMPONENTS,
@@ -724,13 +843,17 @@ class SECFactsNormalizer:
         }
 
         derived: List[FactRecord] = []
-        for key in candidate_keys:
-            if existing.get(key):
+        for period_key in candidate_periods:
+            if period_key in existing_periods:
                 continue
             component_records: List[FactRecord] = []
 
-            ap_record = indexed.get("AccountsPayableCurrent", {}).get(key)
-            accrued_record = indexed.get("AccruedLiabilitiesCurrent", {}).get(key)
+            ap_record = self._pick_period_record(
+                indexed, "AccountsPayableCurrent", period_key
+            )
+            accrued_record = self._pick_period_record(
+                indexed, "AccruedLiabilitiesCurrent", period_key
+            )
             has_ap = ap_record is not None and ap_record.value is not None
             has_accrued = (
                 accrued_record is not None and accrued_record.value is not None
@@ -743,9 +866,11 @@ class SECFactsNormalizer:
             ):
                 component_records.extend([ap_record, accrued_record])
             else:
-                combined_current = indexed.get(
-                    LIABILITIES_CURRENT_AP_ACCRUED_COMBINED, {}
-                ).get(key)
+                combined_current = self._pick_period_record(
+                    indexed,
+                    LIABILITIES_CURRENT_AP_ACCRUED_COMBINED,
+                    period_key,
+                )
                 if combined_current and combined_current.value is not None:
                     component_records.append(combined_current)
                 else:
@@ -756,40 +881,55 @@ class SECFactsNormalizer:
                         if accrued_record is not None:
                             component_records.append(accrued_record)
                     if not (has_ap or has_accrued):
-                        combined_fallback = indexed.get(
-                            LIABILITIES_CURRENT_AP_ACCRUED_FALLBACK, {}
-                        ).get(key)
+                        combined_fallback = self._pick_period_record(
+                            indexed,
+                            LIABILITIES_CURRENT_AP_ACCRUED_FALLBACK,
+                            period_key,
+                        )
                         if combined_fallback and combined_fallback.value is not None:
                             component_records.append(combined_fallback)
 
-            employee_record = indexed.get(
-                LIABILITIES_CURRENT_EMPLOYEE_COMPONENT, {}
-            ).get(key)
+            employee_record = self._pick_period_record(
+                indexed,
+                LIABILITIES_CURRENT_EMPLOYEE_COMPONENT,
+                period_key,
+            )
             if employee_record and employee_record.value is not None:
                 component_records.append(employee_record)
             else:
-                employee_fallback = indexed.get(
-                    LIABILITIES_CURRENT_EMPLOYEE_FALLBACK, {}
-                ).get(key)
+                employee_fallback = self._pick_period_record(
+                    indexed,
+                    LIABILITIES_CURRENT_EMPLOYEE_FALLBACK,
+                    period_key,
+                )
                 if employee_fallback and employee_fallback.value is not None:
                     component_records.append(employee_fallback)
 
             for component in LIABILITIES_CURRENT_COMPONENTS:
                 if component in grouped_tags:
                     continue
-                record = indexed.get(component, {}).get(key)
+                record = self._pick_period_record(indexed, component, period_key)
                 if record and record.value is not None:
                     component_records.append(record)
 
             if not component_records:
                 continue
-            total = sum(
-                record.value for record in component_records if record.value is not None
+            total, target_currency = self._sum_records_for_derived_concept(
+                component_records,
+                symbol=symbol,
+                derived_concept="LiabilitiesCurrent",
             )
+            if total is None or target_currency is None:
+                continue
             base = component_records[0]
             derived.append(
                 self._build_derived_record(
-                    base, "LiabilitiesCurrent", total, symbol, cik
+                    base,
+                    "LiabilitiesCurrent",
+                    total,
+                    symbol,
+                    cik,
+                    currency=target_currency,
                 )
             )
 
@@ -803,86 +943,127 @@ class SECFactsNormalizer:
     ) -> List[FactRecord]:
         indexed = self._index_records(records)
         existing = indexed.get("LongTermDebt", {})
-        candidate_keys: set[tuple[str, str, str]] = set()
-        candidate_keys.update(existing.keys())
-        for concept in (
-            "LongTermDebt",
-            "LongTermDebtNoncurrent",
-            "LongTermDebtCurrent",
-            *LONG_TERM_DEBT_NONCURRENT_COMPONENTS,
-            "OtherLongTermDebt",
-            *LONG_TERM_DEBT_NOTES_FALLBACK,
-            *LONG_TERM_DEBT_LEASE_COMPONENTS,
-            "LongTermDebtAndCapitalLeaseObligationsCurrent",
-            "LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities",
-            "OtherLiabilitiesNoncurrent",
-            "OperatingLeaseLiabilityNoncurrent",
-        ):
-            candidate_keys.update(indexed.get(concept, {}).keys())
+        existing_periods = {self._period_key(record) for record in existing.values()}
+        candidate_periods = self._candidate_period_keys(
+            indexed,
+            (
+                "LongTermDebt",
+                "LongTermDebtNoncurrent",
+                "LongTermDebtCurrent",
+                *LONG_TERM_DEBT_NONCURRENT_COMPONENTS,
+                "OtherLongTermDebt",
+                *LONG_TERM_DEBT_NOTES_FALLBACK,
+                *LONG_TERM_DEBT_LEASE_COMPONENTS,
+                "LongTermDebtAndCapitalLeaseObligationsCurrent",
+                "LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities",
+                "OtherLiabilitiesNoncurrent",
+                "OperatingLeaseLiabilityNoncurrent",
+            ),
+        )
 
         derived: List[FactRecord] = []
-        for key in candidate_keys:
-            if self._recent_record(existing.get(key)):
+        for period_key in candidate_periods:
+            if period_key in existing_periods:
                 continue
             noncurrent = self._recent_record(
-                indexed.get("LongTermDebtNoncurrent", {}).get(key)
+                self._pick_period_record(indexed, "LongTermDebtNoncurrent", period_key)
             )
             if noncurrent and noncurrent.value is not None:
-                total = noncurrent.value
                 current = self._recent_record(
-                    indexed.get("LongTermDebtCurrent", {}).get(key)
+                    self._pick_period_record(indexed, "LongTermDebtCurrent", period_key)
                 )
+                component_records = [noncurrent]
                 if current and current.value is not None:
-                    total += current.value
+                    component_records.append(current)
+                total, target_currency = self._sum_records_for_derived_concept(
+                    component_records,
+                    symbol=symbol,
+                    derived_concept="LongTermDebt",
+                )
+                if total is None or target_currency is None:
+                    continue
                 derived.append(
                     self._build_derived_record(
-                        noncurrent, "LongTermDebt", total, symbol, cik
+                        noncurrent,
+                        "LongTermDebt",
+                        total,
+                        symbol,
+                        cik,
+                        currency=target_currency,
                     )
                 )
                 continue
 
             components = []
             for component in LONG_TERM_DEBT_NONCURRENT_COMPONENTS:
-                record = self._recent_record(indexed.get(component, {}).get(key))
+                record = self._recent_record(
+                    self._pick_period_record(indexed, component, period_key)
+                )
                 if record and record.value is not None:
                     components.append(record)
             if components:
-                total = sum(
-                    record.value for record in components if record.value is not None
-                )
                 base = components[0]
                 current = self._recent_record(
-                    indexed.get("LongTermDebtCurrent", {}).get(key)
+                    self._pick_period_record(indexed, "LongTermDebtCurrent", period_key)
                 )
+                component_records = list(components)
                 if current and current.value is not None:
-                    total += current.value
+                    component_records.append(current)
+                total, target_currency = self._sum_records_for_derived_concept(
+                    component_records,
+                    symbol=symbol,
+                    derived_concept="LongTermDebt",
+                )
+                if total is None or target_currency is None:
+                    continue
                 derived.append(
-                    self._build_derived_record(base, "LongTermDebt", total, symbol, cik)
+                    self._build_derived_record(
+                        base,
+                        "LongTermDebt",
+                        total,
+                        symbol,
+                        cik,
+                        currency=target_currency,
+                    )
                 )
                 continue
 
             other_debt = self._recent_record(
-                indexed.get("OtherLongTermDebt", {}).get(key)
+                self._pick_period_record(indexed, "OtherLongTermDebt", period_key)
             )
             if other_debt and other_debt.value is not None:
-                total = other_debt.value
                 current = self._recent_record(
-                    indexed.get("LongTermDebtCurrent", {}).get(key)
+                    self._pick_period_record(indexed, "LongTermDebtCurrent", period_key)
                 )
+                component_records = [other_debt]
                 if current and current.value is not None:
-                    total += current.value
+                    component_records.append(current)
+                total, target_currency = self._sum_records_for_derived_concept(
+                    component_records,
+                    symbol=symbol,
+                    derived_concept="LongTermDebt",
+                )
+                if total is None or target_currency is None:
+                    continue
                 derived.append(
                     self._build_derived_record(
-                        other_debt, "LongTermDebt", total, symbol, cik
+                        other_debt,
+                        "LongTermDebt",
+                        total,
+                        symbol,
+                        cik,
+                        currency=target_currency,
                     )
                 )
                 continue
 
             notes = self._recent_record(
-                indexed.get("LongTermNotesPayable", {}).get(key)
+                self._pick_period_record(indexed, "LongTermNotesPayable", period_key)
             )
             if notes is None:
-                notes = self._recent_record(indexed.get("NotesPayable", {}).get(key))
+                notes = self._recent_record(
+                    self._pick_period_record(indexed, "NotesPayable", period_key)
+                )
             if notes and notes.value is not None:
                 derived.append(
                     self._build_derived_record(
@@ -892,35 +1073,56 @@ class SECFactsNormalizer:
                 continue
 
             lease_base = self._recent_record(
-                indexed.get("LongTermDebtAndCapitalLeaseObligations", {}).get(key)
+                self._pick_period_record(
+                    indexed,
+                    "LongTermDebtAndCapitalLeaseObligations",
+                    period_key,
+                )
             )
             if lease_base is None:
                 lease_base = self._recent_record(
-                    indexed.get(
-                        "LongTermDebtAndCapitalLeaseObligationsNoncurrent", {}
-                    ).get(key)
+                    self._pick_period_record(
+                        indexed,
+                        "LongTermDebtAndCapitalLeaseObligationsNoncurrent",
+                        period_key,
+                    )
                 )
             if lease_base and lease_base.value is not None:
-                total = lease_base.value
                 lease_current = self._recent_record(
-                    indexed.get(
-                        "LongTermDebtAndCapitalLeaseObligationsCurrent", {}
-                    ).get(key)
+                    self._pick_period_record(
+                        indexed,
+                        "LongTermDebtAndCapitalLeaseObligationsCurrent",
+                        period_key,
+                    )
                 )
+                component_records = [lease_base]
                 if lease_current and lease_current.value is not None:
-                    total += lease_current.value
+                    component_records.append(lease_current)
+                total, target_currency = self._sum_records_for_derived_concept(
+                    component_records,
+                    symbol=symbol,
+                    derived_concept="LongTermDebt",
+                )
+                if total is None or target_currency is None:
+                    continue
                 derived.append(
                     self._build_derived_record(
-                        lease_base, "LongTermDebt", total, symbol, cik
+                        lease_base,
+                        "LongTermDebt",
+                        total,
+                        symbol,
+                        cik,
+                        currency=target_currency,
                     )
                 )
                 continue
 
             lease_total = self._recent_record(
-                indexed.get(
+                self._pick_period_record(
+                    indexed,
                     "LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities",
-                    {},
-                ).get(key)
+                    period_key,
+                )
             )
             if lease_total and lease_total.value is not None:
                 derived.append(
@@ -931,35 +1133,63 @@ class SECFactsNormalizer:
                 continue
 
             operating_lease = self._recent_record(
-                indexed.get("OperatingLeaseLiabilityNoncurrent", {}).get(key)
+                self._pick_period_record(
+                    indexed, "OperatingLeaseLiabilityNoncurrent", period_key
+                )
             )
             if operating_lease and operating_lease.value is not None:
-                total = operating_lease.value
                 current = self._recent_record(
-                    indexed.get("LongTermDebtCurrent", {}).get(key)
+                    self._pick_period_record(indexed, "LongTermDebtCurrent", period_key)
                 )
+                component_records = [operating_lease]
                 if current and current.value is not None:
-                    total += current.value
+                    component_records.append(current)
+                total, target_currency = self._sum_records_for_derived_concept(
+                    component_records,
+                    symbol=symbol,
+                    derived_concept="LongTermDebt",
+                )
+                if total is None or target_currency is None:
+                    continue
                 derived.append(
                     self._build_derived_record(
-                        operating_lease, "LongTermDebt", total, symbol, cik
+                        operating_lease,
+                        "LongTermDebt",
+                        total,
+                        symbol,
+                        cik,
+                        currency=target_currency,
                     )
                 )
                 continue
 
             other_liabilities = self._recent_record(
-                indexed.get("OtherLiabilitiesNoncurrent", {}).get(key)
+                self._pick_period_record(
+                    indexed, "OtherLiabilitiesNoncurrent", period_key
+                )
             )
             if other_liabilities and other_liabilities.value is not None:
-                total = other_liabilities.value
                 current = self._recent_record(
-                    indexed.get("LongTermDebtCurrent", {}).get(key)
+                    self._pick_period_record(indexed, "LongTermDebtCurrent", period_key)
                 )
+                component_records = [other_liabilities]
                 if current and current.value is not None:
-                    total += current.value
+                    component_records.append(current)
+                total, target_currency = self._sum_records_for_derived_concept(
+                    component_records,
+                    symbol=symbol,
+                    derived_concept="LongTermDebt",
+                )
+                if total is None or target_currency is None:
+                    continue
                 derived.append(
                     self._build_derived_record(
-                        other_liabilities, "LongTermDebt", total, symbol, cik
+                        other_liabilities,
+                        "LongTermDebt",
+                        total,
+                        symbol,
+                        cik,
+                        currency=target_currency,
                     )
                 )
         return derived
@@ -1033,26 +1263,32 @@ class SECFactsNormalizer:
     ) -> List[FactRecord]:
         indexed = self._index_records(records)
         existing = indexed.get("IntangibleAssetsNetExcludingGoodwill", {})
-        candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
-        for concept in INTANGIBLE_EXCL_GOODWILL_COMPONENTS:
-            candidate_keys.update(indexed.get(concept, {}).keys())
-        for concept in INTANGIBLE_EXCL_GOODWILL_FALLBACK:
-            candidate_keys.update(indexed.get(concept, {}).keys())
+        candidate_periods = self._candidate_period_keys(
+            indexed,
+            (
+                "IntangibleAssetsNetExcludingGoodwill",
+                *INTANGIBLE_EXCL_GOODWILL_COMPONENTS,
+                *INTANGIBLE_EXCL_GOODWILL_FALLBACK,
+            ),
+        )
 
         derived: List[FactRecord] = []
-        for key in candidate_keys:
-            if existing.get(key):
+        existing_periods = {self._period_key(record) for record in existing.values()}
+        for period_key in candidate_periods:
+            if period_key in existing_periods:
                 continue
             component_records = self._prefer_recent_records(
-                indexed.get(concept, {}).get(key)
+                self._pick_period_record(indexed, concept, period_key)
                 for concept in INTANGIBLE_EXCL_GOODWILL_COMPONENTS
             )
             if component_records:
-                total = sum(
-                    record.value
-                    for record in component_records
-                    if record.value is not None
+                total, target_currency = self._sum_records_for_derived_concept(
+                    component_records,
+                    symbol=symbol,
+                    derived_concept="IntangibleAssetsNetExcludingGoodwill",
                 )
+                if total is None or target_currency is None:
+                    continue
                 component_base = component_records[0]
                 derived.append(
                     self._build_derived_record(
@@ -1061,12 +1297,13 @@ class SECFactsNormalizer:
                         total,
                         symbol,
                         cik,
+                        currency=target_currency,
                     )
                 )
                 continue
 
             fallback_base = self._pick_preferred_record(
-                indexed.get(concept, {}).get(key)
+                self._pick_period_record(indexed, concept, period_key)
                 for concept in INTANGIBLE_EXCL_GOODWILL_FALLBACK
             )
             if fallback_base is None:
@@ -1266,59 +1503,125 @@ class SECFactsNormalizer:
     ) -> List[FactRecord]:
         indexed = self._index_records(records)
         existing = indexed.get("PropertyPlantAndEquipmentNet", {})
-        candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
-        for concept in PPE_FALLBACK_CONCEPTS:
-            candidate_keys.update(indexed.get(concept, {}).keys())
-        for concept in PPE_GROSS_CONCEPTS:
-            candidate_keys.update(indexed.get(concept, {}).keys())
-        candidate_keys.update(indexed.get(PPE_GROSS_ACCUM_CONCEPT, {}).keys())
-        candidate_keys.update(indexed.get(PPE_FINANCE_LEASE_BEFORE, {}).keys())
-        candidate_keys.update(indexed.get(PPE_FINANCE_LEASE_ACCUM, {}).keys())
-        candidate_keys.update(indexed.get(PPE_OTHER_NET_CONCEPT, {}).keys())
+        candidate_periods = self._candidate_period_keys(
+            indexed,
+            (
+                "PropertyPlantAndEquipmentNet",
+                *PPE_FALLBACK_CONCEPTS,
+                *PPE_GROSS_CONCEPTS,
+                PPE_GROSS_ACCUM_CONCEPT,
+                PPE_FINANCE_LEASE_BEFORE,
+                PPE_FINANCE_LEASE_ACCUM,
+                PPE_OTHER_NET_CONCEPT,
+            ),
+        )
 
         derived: List[FactRecord] = []
-        for key in candidate_keys:
-            if existing.get(key):
+        existing_periods = {self._period_key(record) for record in existing.values()}
+        for period_key in candidate_periods:
+            if period_key in existing_periods:
                 continue
             base = self._pick_preferred_record(
-                indexed.get(concept, {}).get(key) for concept in PPE_FALLBACK_CONCEPTS
+                self._pick_period_record(indexed, concept, period_key)
+                for concept in PPE_FALLBACK_CONCEPTS
             )
             if base is None:
                 gross = self._pick_preferred_record(
-                    indexed.get(concept, {}).get(key) for concept in PPE_GROSS_CONCEPTS
+                    self._pick_period_record(indexed, concept, period_key)
+                    for concept in PPE_GROSS_CONCEPTS
                 )
-                accum = indexed.get(PPE_GROSS_ACCUM_CONCEPT, {}).get(key)
+                accum = self._pick_period_record(
+                    indexed, PPE_GROSS_ACCUM_CONCEPT, period_key
+                )
                 if (
                     gross
                     and gross.value is not None
                     and accum
                     and accum.value is not None
                 ):
-                    value = gross.value - accum.value
+                    target_currency = choose_target_currency(
+                        [gross.currency, accum.currency]
+                    )
+                    gross_value = self._convert_record_value(
+                        gross,
+                        target_currency,
+                        derived_concept="PropertyPlantAndEquipmentNet",
+                        symbol=symbol,
+                    )
+                    accum_value = self._convert_record_value(
+                        accum,
+                        target_currency,
+                        derived_concept="PropertyPlantAndEquipmentNet",
+                        symbol=symbol,
+                    )
+                    if (
+                        gross_value is None
+                        or accum_value is None
+                        or target_currency is None
+                    ):
+                        continue
+                    value = gross_value - accum_value
                     derived.append(
                         self._build_derived_record(
-                            gross, "PropertyPlantAndEquipmentNet", value, symbol, cik
+                            gross,
+                            "PropertyPlantAndEquipmentNet",
+                            value,
+                            symbol,
+                            cik,
+                            currency=target_currency,
                         )
                     )
                     continue
 
-                before = indexed.get(PPE_FINANCE_LEASE_BEFORE, {}).get(key)
-                accum_fl = indexed.get(PPE_FINANCE_LEASE_ACCUM, {}).get(key)
+                before = self._pick_period_record(
+                    indexed, PPE_FINANCE_LEASE_BEFORE, period_key
+                )
+                accum_fl = self._pick_period_record(
+                    indexed, PPE_FINANCE_LEASE_ACCUM, period_key
+                )
                 if (
                     before
                     and before.value is not None
                     and accum_fl
                     and accum_fl.value is not None
                 ):
-                    value = before.value - accum_fl.value
+                    target_currency = choose_target_currency(
+                        [before.currency, accum_fl.currency]
+                    )
+                    before_value = self._convert_record_value(
+                        before,
+                        target_currency,
+                        derived_concept="PropertyPlantAndEquipmentNet",
+                        symbol=symbol,
+                    )
+                    accum_fl_value = self._convert_record_value(
+                        accum_fl,
+                        target_currency,
+                        derived_concept="PropertyPlantAndEquipmentNet",
+                        symbol=symbol,
+                    )
+                    if (
+                        before_value is None
+                        or accum_fl_value is None
+                        or target_currency is None
+                    ):
+                        continue
+                    value = before_value - accum_fl_value
                     derived.append(
                         self._build_derived_record(
-                            before, "PropertyPlantAndEquipmentNet", value, symbol, cik
+                            before,
+                            "PropertyPlantAndEquipmentNet",
+                            value,
+                            symbol,
+                            cik,
+                            currency=target_currency,
                         )
                     )
                     continue
 
-                other_net = indexed.get(PPE_OTHER_NET_CONCEPT, {}).get(key)
+                other_net = self._pick_period_record(
+                    indexed, PPE_OTHER_NET_CONCEPT, period_key
+                )
                 if other_net and other_net.value is not None:
                     derived.append(
                         self._build_derived_record(
@@ -1332,7 +1635,12 @@ class SECFactsNormalizer:
                 continue
             derived.append(
                 self._build_derived_record(
-                    base, "PropertyPlantAndEquipmentNet", base.value, symbol, cik
+                    base,
+                    "PropertyPlantAndEquipmentNet",
+                    base.value,
+                    symbol,
+                    cik,
+                    currency=base.currency,
                 )
             )
         return derived
@@ -1345,32 +1653,61 @@ class SECFactsNormalizer:
     ) -> List[FactRecord]:
         indexed = self._index_records(records)
         existing = indexed.get("NetIncomeLossAvailableToCommonStockholdersBasic", {})
-        candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
-        for concept in INCOME_AVAILABLE_TO_COMMON_FALLBACK:
-            candidate_keys.update(indexed.get(concept, {}).keys())
+        candidate_periods = self._candidate_period_keys(
+            indexed,
+            (
+                "NetIncomeLossAvailableToCommonStockholdersBasic",
+                *INCOME_AVAILABLE_TO_COMMON_FALLBACK,
+                *PREFERRED_DIVIDEND_FALLBACK,
+            ),
+        )
 
         derived: List[FactRecord] = []
-        for key in candidate_keys:
-            if existing.get(key):
+        existing_periods = {self._period_key(record) for record in existing.values()}
+        for period_key in candidate_periods:
+            if period_key in existing_periods:
                 continue
             base_concept, base = self._pick_preferred_concept(
-                (concept, indexed.get(concept, {}).get(key))
+                (concept, self._pick_period_record(indexed, concept, period_key))
                 for concept in INCOME_AVAILABLE_TO_COMMON_FALLBACK
             )
             if base is None:
                 continue
             if base_concept == "NetIncomeLoss":
-                preferred_value = None
+                preferred_record = None
                 for concept in PREFERRED_DIVIDEND_FALLBACK:
-                    pref = self._pick_preferred_record(
-                        [indexed.get(concept, {}).get(key)]
-                    )
+                    pref = self._pick_period_record(indexed, concept, period_key)
                     if pref:
-                        preferred_value = pref.value
+                        preferred_record = pref
                         break
-                adjusted = base.value - (preferred_value or 0.0)
+                target_currency = choose_target_currency(
+                    [
+                        base.currency,
+                        preferred_record.currency if preferred_record else None,
+                    ]
+                )
+                base_value = self._convert_record_value(
+                    base,
+                    target_currency,
+                    derived_concept="NetIncomeLossAvailableToCommonStockholdersBasic",
+                    symbol=symbol,
+                )
+                if base_value is None or target_currency is None:
+                    continue
+                adjusted = base_value
+                if preferred_record and preferred_record.value is not None:
+                    preferred_value = self._convert_record_value(
+                        preferred_record,
+                        target_currency,
+                        derived_concept="NetIncomeLossAvailableToCommonStockholdersBasic",
+                        symbol=symbol,
+                    )
+                    if preferred_value is None:
+                        continue
+                    adjusted -= preferred_value
             else:
                 adjusted = base.value
+                target_currency = base.currency
             derived.append(
                 self._build_derived_record(
                     base,
@@ -1378,6 +1715,7 @@ class SECFactsNormalizer:
                     adjusted,
                     symbol,
                     cik,
+                    currency=target_currency,
                 )
             )
         return derived
@@ -1390,27 +1728,53 @@ class SECFactsNormalizer:
     ) -> List[FactRecord]:
         indexed = self._index_records(records)
         existing = indexed.get("CommonStockholdersEquity", {})
-        candidate_keys: set[tuple[str, str, str]] = set(existing.keys())
-        for concept in COMMON_EQUITY_FALLBACK:
-            candidate_keys.update(indexed.get(concept, {}).keys())
+        candidate_periods = self._candidate_period_keys(
+            indexed,
+            ("CommonStockholdersEquity", *COMMON_EQUITY_FALLBACK, "PreferredStock"),
+        )
 
         derived: List[FactRecord] = []
-        for key in candidate_keys:
-            if existing.get(key):
+        existing_periods = {self._period_key(record) for record in existing.values()}
+        for period_key in candidate_periods:
+            if period_key in existing_periods:
                 continue
             base = self._pick_preferred_record(
-                indexed.get(concept, {}).get(key) for concept in COMMON_EQUITY_FALLBACK
+                self._pick_period_record(indexed, concept, period_key)
+                for concept in COMMON_EQUITY_FALLBACK
             )
             if base is None:
                 continue
-            preferred = self._pick_preferred_record(
-                [indexed.get("PreferredStock", {}).get(key)]
+            preferred = self._pick_period_record(indexed, "PreferredStock", period_key)
+            target_currency = choose_target_currency(
+                [base.currency, preferred.currency if preferred else None]
             )
-            preferred_value = preferred.value if preferred else 0.0
-            adjusted = base.value - preferred_value
+            base_value = self._convert_record_value(
+                base,
+                target_currency,
+                derived_concept="CommonStockholdersEquity",
+                symbol=symbol,
+            )
+            if base_value is None or target_currency is None:
+                continue
+            adjusted = base_value
+            if preferred and preferred.value is not None:
+                preferred_value = self._convert_record_value(
+                    preferred,
+                    target_currency,
+                    derived_concept="CommonStockholdersEquity",
+                    symbol=symbol,
+                )
+                if preferred_value is None:
+                    continue
+                adjusted -= preferred_value
             derived.append(
                 self._build_derived_record(
-                    base, "CommonStockholdersEquity", adjusted, symbol, cik
+                    base,
+                    "CommonStockholdersEquity",
+                    adjusted,
+                    symbol,
+                    cik,
+                    currency=target_currency,
                 )
             )
         return derived
@@ -1422,21 +1786,24 @@ class SECFactsNormalizer:
         value: float,
         symbol: str,
         cik: Optional[str],
+        *,
+        currency: Optional[str] = None,
     ) -> FactRecord:
+        normalized_currency = normalize_currency_code(currency) or base.currency
         return FactRecord(
             symbol=symbol.upper(),
             cik=base.cik or cik,
             concept=concept,
             fiscal_period=base.fiscal_period,
             end_date=base.end_date,
-            unit=base.unit,
+            unit=normalized_currency or base.unit,
             value=value,
             accn=None,
             filed=None,
             frame=base.frame,
             start_date=None,
             accounting_standard=base.accounting_standard,
-            currency=base.currency,
+            currency=normalized_currency,
         )
 
     def _select_fy_entry(self, entries: List[Dict]) -> Dict:
@@ -1622,9 +1989,28 @@ class SECFactsNormalizer:
 
         if not unit:
             return None
-        cleaned = unit.strip().upper()
-        if len(cleaned) == 3 and cleaned.isalpha():
-            return cleaned
+        cleaned = unit.strip().upper().replace("ISO4217:", "")
+        direct = normalize_currency_code(cleaned)
+        if direct is not None and len(cleaned) == 3 and cleaned.isalpha():
+            return direct
+        token = ""
+        for char in cleaned:
+            if char.isalpha() or char == ".":
+                token += char
+                continue
+            if token:
+                candidate = raw_currency_code(token)
+                if candidate is not None and (
+                    len(candidate) == 3 or candidate in {"GBP0.01"}
+                ):
+                    return normalize_currency_code(candidate)
+                token = ""
+        if token:
+            candidate = raw_currency_code(token)
+            if candidate is not None and (
+                len(candidate) == 3 or candidate in {"GBP0.01"}
+            ):
+                return normalize_currency_code(candidate)
         return None
 
 

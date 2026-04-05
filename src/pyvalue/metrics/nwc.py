@@ -13,6 +13,7 @@ import logging
 
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS, MAX_FY_FACT_AGE_DAYS
+from pyvalue.money import fx_service_for_context
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -292,8 +293,12 @@ class NWCMostRecentQuarterMetric(_NWCBase):
         )
         if latest is None:
             return None
-        return MetricResult(
-            symbol=symbol, metric_id=self.id, value=latest.value, as_of=latest.as_of
+        return MetricResult.monetary(
+            symbol=symbol,
+            metric_id=self.id,
+            value=latest.value,
+            as_of=latest.as_of,
+            currency=latest.currency,
         )
 
 
@@ -313,8 +318,12 @@ class NWCFYMetric(_NWCBase):
         )
         if latest is None:
             return None
-        return MetricResult(
-            symbol=symbol, metric_id=self.id, value=latest.value, as_of=latest.as_of
+        return MetricResult.monetary(
+            symbol=symbol,
+            metric_id=self.id,
+            value=latest.value,
+            as_of=latest.as_of,
+            currency=latest.currency,
         )
 
 
@@ -359,12 +368,32 @@ class DeltaNWCTTMMetric(_NWCBase):
                 symbol,
             )
             return None
-
-        return MetricResult(
+        if latest.currency is None or prior.currency is None:
+            LOGGER.warning("delta_nwc_ttm: missing currency for %s", symbol)
+            return None
+        prior_value = prior.value
+        if prior.currency != latest.currency:
+            converted = fx_service_for_context(repo).convert_amount(
+                prior.value,
+                prior.currency,
+                latest.currency,
+                prior.as_of,
+            )
+            if converted is None:
+                LOGGER.warning(
+                    "delta_nwc_ttm: FX conversion failed for %s (%s -> %s)",
+                    symbol,
+                    prior.currency,
+                    latest.currency,
+                )
+                return None
+            prior_value = float(converted)
+        return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
-            value=latest.value - prior.value,
+            value=latest.value - prior_value,
             as_of=latest.as_of,
+            currency=latest.currency,
         )
 
 
@@ -401,12 +430,32 @@ class DeltaNWCFYMetric(_NWCBase):
         if prior is None:
             LOGGER.warning("delta_nwc_fy: missing strict prior FY for %s", symbol)
             return None
-
-        return MetricResult(
+        if latest.currency is None or prior.currency is None:
+            LOGGER.warning("delta_nwc_fy: missing currency for %s", symbol)
+            return None
+        prior_value = prior.value
+        if prior.currency != latest.currency:
+            converted = fx_service_for_context(repo).convert_amount(
+                prior.value,
+                prior.currency,
+                latest.currency,
+                prior.as_of,
+            )
+            if converted is None:
+                LOGGER.warning(
+                    "delta_nwc_fy: FX conversion failed for %s (%s -> %s)",
+                    symbol,
+                    prior.currency,
+                    latest.currency,
+                )
+                return None
+            prior_value = float(converted)
+        return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
-            value=latest.value - prior.value,
+            value=latest.value - prior_value,
             as_of=latest.as_of,
+            currency=latest.currency,
         )
 
 
@@ -460,11 +509,12 @@ class DeltaNWCMaintMetric(_NWCBase):
         delta_prev_2 = by_year[latest_year - 2].value - by_year[latest_year - 3].value
         average_delta = (delta_latest + delta_prev_1 + delta_prev_2) / 3.0
 
-        return MetricResult(
+        return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
             value=max(average_delta, 0.0),
             as_of=latest.as_of,
+            currency=latest.currency,
         )
 
 

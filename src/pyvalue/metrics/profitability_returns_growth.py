@@ -11,11 +11,11 @@ from typing import Optional, Sequence
 
 import logging
 
-from pyvalue.fx import FXRateStore
 from pyvalue.metrics.accruals_ratio import AccrualsRatioCalculator
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.buyback_yield import NetBuybackYieldMetric
 from pyvalue.metrics.enterprise_value import convert_denominator_amount
+from pyvalue.money import fx_converter_for_context
 from pyvalue.metrics.owner_earnings_enterprise import (
     REQUIRED_CONCEPTS as OE_ENTERPRISE_REQUIRED_CONCEPTS,
     OwnerEarningsEnterpriseCalculator,
@@ -431,7 +431,7 @@ class ProfitabilityReturnsGrowthCalculator:
             target_currency=dividend_per_share.currency,
             as_of=snapshot.as_of,
             context="dividend_yield_ttm",
-            converter=FXRateStore().convert,
+            converter=fx_converter_for_context(repo),
         )
         if price is None or price <= 0:
             if price is not None:
@@ -601,7 +601,7 @@ class ProfitabilityReturnsGrowthCalculator:
             target_currency=dividends_paid.currency,
             as_of=snapshot.as_of,
             context=context,
-            converter=FXRateStore().convert,
+            converter=fx_converter_for_context(market_repo),
         )
         if market_cap is None or market_cap <= 0:
             if market_cap is not None:

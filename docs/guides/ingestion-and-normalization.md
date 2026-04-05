@@ -102,6 +102,8 @@ That means:
   normalization for that provider, or the current facts are owned by a
   different provider
 - use `pyvalue normalize-fundamentals --force ...` to bypass that skip logic
+- bulk `--force` runs skip the freshness scan entirely and start reprocessing
+  the selected symbols immediately
 
 ## When to Re-Run Each Stage
 

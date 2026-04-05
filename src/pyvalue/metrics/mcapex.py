@@ -17,6 +17,7 @@ from pyvalue.metrics.utils import (
     MAX_FY_FACT_AGE_DAYS,
     is_recent_fact,
 )
+from pyvalue.money import fx_service_for_context
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ class _AmountResult:
 class _FYPoint:
     value: float
     as_of: str
+    currency: Optional[str]
 
 
 class _MCapexBase:
@@ -145,7 +147,9 @@ class _MCapexBase:
             value = self._compute_mcapex_value(capex, da, symbol, context="mcapex_fy")
             if value is None:
                 continue
-            points.append(_FYPoint(value=value.total, as_of=end_date))
+            points.append(
+                _FYPoint(value=value.total, as_of=end_date, currency=value.currency)
+            )
         return points
 
     def _amount_from_record(
@@ -235,8 +239,12 @@ class MCapexFYMetric(_MCapexBase):
                 "mcapex_fy: latest FY (%s) too old for %s", latest.as_of, symbol
             )
             return None
-        return MetricResult(
-            symbol=symbol, metric_id=self.id, value=latest.value, as_of=latest.as_of
+        return MetricResult.monetary(
+            symbol=symbol,
+            metric_id=self.id,
+            value=latest.value,
+            as_of=latest.as_of,
+            currency=latest.currency,
         )
 
 
@@ -265,12 +273,41 @@ class MCapexFiveYearMetric(_MCapexBase):
             )
             return None
         latest_five = points[:5]
-        average = sum(point.value for point in latest_five) / 5.0
-        return MetricResult(
+        target_currency = latest_five[0].currency
+        if target_currency is None:
+            LOGGER.warning("mcapex_5y: missing currency for %s", symbol)
+            return None
+        fx_service = fx_service_for_context(repo)
+        total = 0.0
+        for point in latest_five:
+            if point.currency is None:
+                LOGGER.warning("mcapex_5y: missing currency for %s", symbol)
+                return None
+            if point.currency == target_currency:
+                total += point.value
+                continue
+            converted = fx_service.convert_amount(
+                point.value,
+                point.currency,
+                target_currency,
+                point.as_of,
+            )
+            if converted is None:
+                LOGGER.warning(
+                    "mcapex_5y: FX conversion failed for %s (%s -> %s)",
+                    symbol,
+                    point.currency,
+                    target_currency,
+                )
+                return None
+            total += float(converted)
+        average = total / 5.0
+        return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
             value=average,
             as_of=latest_five[0].as_of,
+            currency=target_currency,
         )
 
 
@@ -302,8 +339,12 @@ class MCapexTTMMetric(_MCapexBase):
         value = self._compute_mcapex_value(capex, da, symbol, context="mcapex_ttm")
         if value is None:
             return None
-        return MetricResult(
-            symbol=symbol, metric_id=self.id, value=value.total, as_of=value.as_of
+        return MetricResult.monetary(
+            symbol=symbol,
+            metric_id=self.id,
+            value=value.total,
+            as_of=value.as_of,
+            currency=value.currency,
         )
 
 

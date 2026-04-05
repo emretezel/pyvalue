@@ -11,8 +11,10 @@ from typing import Optional, Sequence
 
 import logging
 
+from pyvalue.fx import FXService
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS, is_recent_fact
+from pyvalue.money import align_money_values, fx_service_for_context
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -64,11 +66,13 @@ class AccrualsRatioCalculator:
     def compute(
         self, symbol: str, repo: FinancialFactsRepository
     ) -> Optional[AccrualsRatioSnapshot]:
+        fx_service = fx_service_for_context(repo)
         net_income = self._compute_ttm_amount(
             symbol,
             repo,
             NET_INCOME_CONCEPTS,
             context="accruals_ratio",
+            fx_service=fx_service,
         )
         if net_income is None:
             LOGGER.warning("accruals_ratio: missing TTM net income for %s", symbol)
@@ -79,39 +83,71 @@ class AccrualsRatioCalculator:
             repo,
             OPERATING_CASH_FLOW_CONCEPTS,
             context="accruals_ratio",
+            fx_service=fx_service,
         )
         if cfo is None:
             LOGGER.warning("accruals_ratio: missing TTM CFO for %s", symbol)
             return None
 
-        numerator_currency = self._combine_currency([net_income.currency, cfo.currency])
-        if numerator_currency is None and any(
-            code is not None for code in (net_income.currency, cfo.currency)
-        ):
+        aligned_numerator, target_currency = align_money_values(
+            values=[
+                (
+                    net_income.total,
+                    net_income.currency,
+                    net_income.as_of,
+                    NET_INCOME_PRIMARY_CONCEPT,
+                ),
+                (cfo.total, cfo.currency, cfo.as_of, OPERATING_CASH_FLOW_CONCEPT),
+            ],
+            fx_service=fx_service,
+            logger=LOGGER,
+            operation="metric:accruals_ratio:numerator",
+            symbol=symbol,
+            target_currency=net_income.currency or cfo.currency,
+        )
+        if aligned_numerator is None or target_currency is None:
             LOGGER.warning(
                 "accruals_ratio: currency mismatch in numerator for %s", symbol
             )
             return None
 
-        average_assets = self._compute_avg_total_assets(symbol, repo)
+        average_assets = self._compute_avg_total_assets(
+            symbol,
+            repo,
+            fx_service=fx_service,
+        )
         if average_assets is None:
             return None
         if average_assets.total <= 0:
             LOGGER.warning("accruals_ratio: non-positive average assets for %s", symbol)
             return None
 
-        if not self._currencies_match(numerator_currency, average_assets.currency):
+        aligned_assets, _ = align_money_values(
+            values=[
+                (
+                    average_assets.total,
+                    average_assets.currency,
+                    average_assets.as_of,
+                    ASSETS_CONCEPT,
+                )
+            ],
+            fx_service=fx_service,
+            logger=LOGGER,
+            operation="metric:accruals_ratio:denominator",
+            symbol=symbol,
+            target_currency=target_currency,
+        )
+        if aligned_assets is None:
             LOGGER.warning(
-                "accruals_ratio: numerator/denominator currency mismatch for %s",
-                symbol,
+                "accruals_ratio: numerator/denominator currency mismatch for %s", symbol
             )
             return None
 
-        value = (net_income.total - cfo.total) / average_assets.total
+        value = (aligned_numerator[0] - aligned_numerator[1]) / aligned_assets[0]
         return AccrualsRatioSnapshot(
             value=value,
             as_of=max(net_income.as_of, cfo.as_of, average_assets.as_of),
-            currency=numerator_currency or average_assets.currency,
+            currency=None,
         )
 
     def compute_avg_total_assets(
@@ -119,7 +155,8 @@ class AccrualsRatioCalculator:
     ) -> Optional[_AmountResult]:
         """Return the average-assets denominator used by accrual-based metrics."""
 
-        return self._compute_avg_total_assets(symbol, repo)
+        fx_service = fx_service_for_context(repo)
+        return self._compute_avg_total_assets(symbol, repo, fx_service=fx_service)
 
     def _compute_ttm_amount(
         self,
@@ -128,6 +165,7 @@ class AccrualsRatioCalculator:
         concepts: Sequence[str],
         *,
         context: str,
+        fx_service: FXService,
     ) -> Optional[_AmountResult]:
         for concept in concepts:
             records = repo.facts_for_concept(symbol, concept)
@@ -150,7 +188,13 @@ class AccrualsRatioCalculator:
                     symbol,
                 )
                 continue
-            normalized, currency = self._normalize_records(quarterly[:4])
+            normalized, currency = self._normalize_records(
+                quarterly[:4],
+                symbol=symbol,
+                concept=concept,
+                context=context,
+                fx_service=fx_service,
+            )
             if normalized is None:
                 LOGGER.warning(
                     "%s: currency conflict in %s quarterly values for %s",
@@ -167,7 +211,11 @@ class AccrualsRatioCalculator:
         return None
 
     def _compute_avg_total_assets(
-        self, symbol: str, repo: FinancialFactsRepository
+        self,
+        symbol: str,
+        repo: FinancialFactsRepository,
+        *,
+        fx_service: FXService,
     ) -> Optional[_AmountResult]:
         records = repo.facts_for_concept(symbol, ASSETS_CONCEPT)
         quarterly = self._filter_periods(records, QUARTERLY_PERIODS)
@@ -220,14 +268,35 @@ class AccrualsRatioCalculator:
             )
             return None
 
-        if not self._currencies_match(latest_point.currency, prior_point.currency):
+        aligned_assets, target_currency = align_money_values(
+            values=[
+                (
+                    latest_point.value,
+                    latest_point.currency,
+                    latest_point.as_of,
+                    ASSETS_CONCEPT,
+                ),
+                (
+                    prior_point.value,
+                    prior_point.currency,
+                    prior_point.as_of,
+                    ASSETS_CONCEPT,
+                ),
+            ],
+            fx_service=fx_service,
+            logger=LOGGER,
+            operation="metric:accruals_ratio:assets",
+            symbol=symbol,
+            target_currency=latest_point.currency or prior_point.currency,
+        )
+        if aligned_assets is None or target_currency is None:
             LOGGER.warning("accruals_ratio: assets currency mismatch for %s", symbol)
             return None
 
         return _AmountResult(
-            total=(latest_point.value + prior_point.value) / 2.0,
+            total=(aligned_assets[0] + aligned_assets[1]) / 2.0,
             as_of=latest_point.as_of,
-            currency=latest_point.currency or prior_point.currency,
+            currency=target_currency,
         )
 
     def _filter_periods(
@@ -249,18 +318,26 @@ class AccrualsRatioCalculator:
         return filtered
 
     def _normalize_records(
-        self, records: Sequence[FactRecord]
+        self,
+        records: Sequence[FactRecord],
+        *,
+        symbol: str,
+        concept: str,
+        context: str,
+        fx_service: FXService,
     ) -> tuple[Optional[list[float]], Optional[str]]:
-        currency = None
-        normalized: list[float] = []
-        for record in records:
-            value, code = self._normalize_currency(record)
-            if currency is None and code:
-                currency = code
-            elif code and currency and code != currency:
-                return None, None
-            normalized.append(value)
-        return normalized, currency
+        return align_money_values(
+            values=[
+                (record.value, record.currency, record.end_date, concept)
+                for record in records
+                if record.value is not None
+            ],
+            fx_service=fx_service,
+            logger=LOGGER,
+            operation=f"metric:{context}:{concept}",
+            symbol=symbol,
+            target_currency=records[0].currency if records else None,
+        )
 
     def _normalize_currency(self, record: FactRecord) -> tuple[float, Optional[str]]:
         value = record.value
@@ -268,22 +345,6 @@ class AccrualsRatioCalculator:
         if code in {"GBX", "GBP0.01"}:
             return value / 100.0, "GBP"
         return value, code
-
-    def _combine_currency(self, values: Sequence[Optional[str]]) -> Optional[str]:
-        merged = None
-        for value in values:
-            if not value:
-                continue
-            if merged is None:
-                merged = value
-            elif merged != value:
-                return None
-        return merged
-
-    def _currencies_match(self, left: Optional[str], right: Optional[str]) -> bool:
-        if left and right:
-            return left == right
-        return True
 
     def _extract_year(self, value: str) -> Optional[int]:
         if len(value) < 4:
@@ -319,6 +380,7 @@ class AccrualsRatioMetric:
             metric_id=self.id,
             value=snapshot.value,
             as_of=snapshot.as_of,
+            unit_kind="ratio",
         )
 
 

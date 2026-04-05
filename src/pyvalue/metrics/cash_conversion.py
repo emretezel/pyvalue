@@ -11,12 +11,14 @@ from typing import Optional, Sequence
 
 import logging
 
+from pyvalue.fx import FXService
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     MAX_FY_FACT_AGE_DAYS,
     is_recent_fact,
 )
+from pyvalue.money import align_money_values, fx_service_for_context
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -75,11 +77,13 @@ class CashConversionCalculator:
     def compute_ttm(
         self, symbol: str, repo: FinancialFactsRepository
     ) -> Optional[CashConversionSnapshot]:
+        fx_service = fx_service_for_context(repo)
         cfo = self._compute_ttm_amount(
             symbol,
             repo,
             OPERATING_CASH_FLOW_CONCEPTS,
             context="cfo_to_ni_ttm",
+            fx_service=fx_service,
         )
         if cfo is None:
             LOGGER.warning("cfo_to_ni_ttm: missing TTM CFO for %s", symbol)
@@ -90,6 +94,7 @@ class CashConversionCalculator:
             repo,
             NET_INCOME_CONCEPTS,
             context="cfo_to_ni_ttm",
+            fx_service=fx_service,
         )
         if net_income is None:
             LOGGER.warning("cfo_to_ni_ttm: missing TTM net income for %s", symbol)
@@ -98,28 +103,52 @@ class CashConversionCalculator:
             LOGGER.warning("cfo_to_ni_ttm: non-positive TTM net income for %s", symbol)
             return None
 
-        currency = self._combine_currency([cfo.currency, net_income.currency])
-        if currency is None and any(
-            code is not None for code in (cfo.currency, net_income.currency)
-        ):
+        aligned, _ = align_money_values(
+            values=[
+                (cfo.total, cfo.currency, cfo.as_of, OPERATING_CASH_FLOW_CONCEPT),
+                (
+                    net_income.total,
+                    net_income.currency,
+                    net_income.as_of,
+                    NET_INCOME_PRIMARY_CONCEPT,
+                ),
+            ],
+            fx_service=fx_service,
+            logger=LOGGER,
+            operation="metric:cfo_to_ni_ttm",
+            symbol=symbol,
+            target_currency=cfo.currency or net_income.currency,
+        )
+        if aligned is None:
             LOGGER.warning("cfo_to_ni_ttm: currency mismatch for %s", symbol)
             return None
 
         return CashConversionSnapshot(
-            value=cfo.total / net_income.total,
+            value=aligned[0] / aligned[1],
             as_of=max(cfo.as_of, net_income.as_of),
-            currency=currency,
+            currency=None,
         )
 
     def compute_10y_series(
         self, symbol: str, repo: FinancialFactsRepository
     ) -> Optional[CashConversionTenYearSnapshot]:
-        cfo_map = self._build_fy_amount_map(symbol, repo, OPERATING_CASH_FLOW_CONCEPTS)
+        fx_service = fx_service_for_context(repo)
+        cfo_map = self._build_fy_amount_map(
+            symbol,
+            repo,
+            OPERATING_CASH_FLOW_CONCEPTS,
+            fx_service=fx_service,
+        )
         if not cfo_map:
             LOGGER.warning("cfo_to_ni_10y: missing FY CFO history for %s", symbol)
             return None
 
-        net_income_map = self._build_fy_amount_map(symbol, repo, NET_INCOME_CONCEPTS)
+        net_income_map = self._build_fy_amount_map(
+            symbol,
+            repo,
+            NET_INCOME_CONCEPTS,
+            fx_service=fx_service,
+        )
         if not net_income_map:
             LOGGER.warning(
                 "cfo_to_ni_10y: missing FY net income history for %s", symbol
@@ -151,20 +180,34 @@ class CashConversionCalculator:
                     symbol,
                 )
                 return None
-            if not self._currencies_match(cfo.currency, net_income.currency):
+            aligned, _ = align_money_values(
+                values=[
+                    (cfo.total, cfo.currency, cfo.as_of, OPERATING_CASH_FLOW_CONCEPT),
+                    (
+                        net_income.total,
+                        net_income.currency,
+                        net_income.as_of,
+                        NET_INCOME_PRIMARY_CONCEPT,
+                    ),
+                ],
+                fx_service=fx_service,
+                logger=LOGGER,
+                operation="metric:cfo_to_ni_10y_median",
+                symbol=symbol,
+                target_currency=cfo.currency or net_income.currency,
+            )
+            if aligned is None:
                 LOGGER.warning(
-                    "cfo_to_ni_10y: currency mismatch in %s for %s",
-                    year,
-                    symbol,
+                    "cfo_to_ni_10y: currency mismatch in %s for %s", year, symbol
                 )
                 return None
 
             selected.append(
                 _CashConversionFYPoint(
                     year=year,
-                    value=cfo.total / net_income.total,
+                    value=aligned[0] / aligned[1],
                     as_of=max(cfo.as_of, net_income.as_of),
-                    currency=cfo.currency or net_income.currency,
+                    currency=None,
                 )
             )
 
@@ -174,19 +217,10 @@ class CashConversionCalculator:
             LOGGER.warning("cfo_to_ni_10y: latest FY point too old for %s", symbol)
             return None
 
-        series_currency = self._combine_currency([point.currency for point in selected])
-        if series_currency is None and any(
-            point.currency is not None for point in selected
-        ):
-            LOGGER.warning(
-                "cfo_to_ni_10y: currency mismatch across selected series for %s", symbol
-            )
-            return None
-
         return CashConversionTenYearSnapshot(
             points=tuple(selected),
             as_of=selected[0].as_of,
-            currency=series_currency,
+            currency=None,
         )
 
     def _compute_ttm_amount(
@@ -196,6 +230,7 @@ class CashConversionCalculator:
         concepts: Sequence[str],
         *,
         context: str,
+        fx_service: FXService,
     ) -> Optional[_AmountResult]:
         for concept in concepts:
             records = repo.facts_for_concept(symbol, concept)
@@ -219,7 +254,13 @@ class CashConversionCalculator:
                 )
                 continue
 
-            normalized, currency = self._normalize_records(quarterly[:4])
+            normalized, currency = self._normalize_records(
+                quarterly[:4],
+                symbol=symbol,
+                concept=concept,
+                context=context,
+                fx_service=fx_service,
+            )
             if normalized is None:
                 LOGGER.warning(
                     "%s: currency conflict in %s quarterly values for %s",
@@ -241,8 +282,13 @@ class CashConversionCalculator:
         symbol: str,
         repo: FinancialFactsRepository,
         concepts: Sequence[str],
+        *,
+        fx_service: FXService,
     ) -> dict[int, _AmountResult]:
-        concept_maps = [self._fy_map(symbol, repo, concept) for concept in concepts]
+        concept_maps = [
+            self._fy_map(symbol, repo, concept, fx_service=fx_service)
+            for concept in concepts
+        ]
         merged: dict[int, _AmountResult] = {}
         candidate_years: set[int] = set()
         for mapped in concept_maps:
@@ -259,6 +305,8 @@ class CashConversionCalculator:
         symbol: str,
         repo: FinancialFactsRepository,
         concept: str,
+        *,
+        fx_service: FXService,
     ) -> dict[int, _AmountResult]:
         records = repo.facts_for_concept(symbol, concept, fiscal_period="FY")
         ordered = self._filter_periods(records, FY_PERIODS)
@@ -294,18 +342,26 @@ class CashConversionCalculator:
         return filtered
 
     def _normalize_records(
-        self, records: Sequence[FactRecord]
+        self,
+        records: Sequence[FactRecord],
+        *,
+        symbol: str,
+        concept: str,
+        context: str,
+        fx_service: FXService,
     ) -> tuple[Optional[list[float]], Optional[str]]:
-        currency = None
-        normalized: list[float] = []
-        for record in records:
-            value, code = self._normalize_currency(record)
-            if currency is None and code:
-                currency = code
-            elif code and currency and code != currency:
-                return None, None
-            normalized.append(value)
-        return normalized, currency
+        return align_money_values(
+            values=[
+                (record.value, record.currency, record.end_date, concept)
+                for record in records
+                if record.value is not None
+            ],
+            fx_service=fx_service,
+            logger=LOGGER,
+            operation=f"metric:{context}:{concept}",
+            symbol=symbol,
+            target_currency=records[0].currency if records else None,
+        )
 
     def _normalize_currency(self, record: FactRecord) -> tuple[float, Optional[str]]:
         value = record.value
@@ -313,22 +369,6 @@ class CashConversionCalculator:
         if code in {"GBX", "GBP0.01"}:
             return value / 100.0, "GBP"
         return value, code
-
-    def _combine_currency(self, values: Sequence[Optional[str]]) -> Optional[str]:
-        merged = None
-        for value in values:
-            if not value:
-                continue
-            if merged is None:
-                merged = value
-            elif merged != value:
-                return None
-        return merged
-
-    def _currencies_match(self, left: Optional[str], right: Optional[str]) -> bool:
-        if left and right:
-            return left == right
-        return True
 
     def _extract_year(self, value: str) -> Optional[int]:
         if len(value) < 4:
@@ -364,6 +404,7 @@ class CFOToNITTMMetric:
             metric_id=self.id,
             value=snapshot.value,
             as_of=snapshot.as_of,
+            unit_kind="ratio",
         )
 
 
@@ -387,6 +428,7 @@ class CFOToNITenYearMedianMetric:
             metric_id=self.id,
             value=median,
             as_of=snapshot.as_of,
+            unit_kind="ratio",
         )
 
 

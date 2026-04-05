@@ -2865,7 +2865,7 @@ def test_gm_10y_std_returns_none_when_revenue_non_positive():
     assert result is None
 
 
-def test_gm_10y_std_returns_none_on_series_currency_conflict():
+def test_gm_10y_std_allows_mixed_series_currencies_when_yearly_margins_align():
     metric = GrossMarginTenYearStdMetric()
     latest_year = date.today().year - 1
     concepts = _base_gm_10y_concepts(
@@ -2874,7 +2874,7 @@ def test_gm_10y_std_returns_none_on_series_currency_conflict():
     )
     repo = _build_ic_repo(concept_records=concepts)
     result = metric.compute("AAPL.US", repo)
-    assert result is None
+    assert result is not None
 
 
 def test_gm_10y_std_returns_none_when_latest_fy_stale():
@@ -2934,7 +2934,7 @@ def test_opm_10y_returns_none_when_revenue_non_positive():
     assert result is None
 
 
-def test_opm_10y_returns_none_on_series_currency_conflict():
+def test_opm_10y_allows_mixed_series_currencies_when_yearly_margins_align():
     metric = OperatingMarginTenYearStdMetric()
     latest_year = date.today().year - 1
     concepts = _base_opm_10y_concepts(
@@ -2943,7 +2943,7 @@ def test_opm_10y_returns_none_on_series_currency_conflict():
     )
     repo = _build_ic_repo(concept_records=concepts)
     result = metric.compute("AAPL.US", repo)
-    assert result is None
+    assert result is not None
 
 
 def test_opm_10y_returns_none_when_latest_fy_stale():

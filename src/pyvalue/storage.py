@@ -18,12 +18,19 @@ from typing import (
     List,
     Literal,
     Mapping,
+    NamedTuple,
     Optional,
     Sequence,
     Tuple,
     Union,
 )
 
+from pyvalue.currency import (
+    MetricUnitKind,
+    fact_currency_or_none,
+    metric_currency_or_none,
+    normalize_currency_code,
+)
 from pyvalue.marketdata.base import MarketDataUpdate, PriceData
 from pyvalue.migrations import apply_migrations
 from pyvalue.universe import Listing
@@ -193,6 +200,13 @@ class FactRecord:
     accounting_standard: Optional[str] = None
     currency: Optional[str] = None
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "currency",
+            fact_currency_or_none(self.currency, self.unit),
+        )
+
 
 @dataclass(frozen=True)
 class MarketSnapshotRecord:
@@ -222,7 +236,47 @@ StoredFactRow = Tuple[
     Optional[str],
 ]
 
-StoredMetricRow = Tuple[str, str, float, str]
+
+class MetricRecord(NamedTuple):
+    """Stored metric value with explicit unit metadata."""
+
+    value: float
+    as_of: str
+    unit_kind: MetricUnitKind
+    currency: Optional[str]
+    unit_label: Optional[str]
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, tuple) and len(other) == 2:
+            return (self.value, self.as_of) == other
+        return tuple.__eq__(self, other)
+
+
+StoredMetricRow = Tuple[
+    str,
+    str,
+    float,
+    str,
+    MetricUnitKind,
+    Optional[str],
+    Optional[str],
+]
+
+
+@dataclass(frozen=True)
+class FXRateRecord:
+    """Persisted direct FX rate observation."""
+
+    provider: str
+    rate_date: str
+    base_currency: str
+    quote_currency: str
+    rate_text: str
+    fetched_at: str
+    source_kind: str
+    meta_json: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -1025,6 +1079,13 @@ class SupportedTickerRepository(SQLiteStore):
                 """
                 CREATE INDEX IF NOT EXISTS idx_supported_tickers_security
                 ON supported_tickers(security_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_supported_tickers_currency_nonnull
+                ON supported_tickers(currency)
+                WHERE currency IS NOT NULL
                 """
             )
         FundamentalsRepository(self.db_path).initialize_schema()
@@ -2703,6 +2764,13 @@ class FinancialFactsRepository(SQLiteStore):
             except sqlite3.OperationalError as exc:
                 if "database is locked" not in str(exc).lower():
                     raise
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_fin_facts_currency_nonnull
+                ON financial_facts(currency)
+                WHERE currency IS NOT NULL
+                """
+            )
 
     def replace_facts(
         self,
@@ -3054,6 +3122,202 @@ class FinancialFactsRepository(SQLiteStore):
         return counts
 
 
+class FXRatesRepository(SQLiteStore):
+    """Persist and query direct FX rate observations."""
+
+    def initialize_schema(self) -> None:
+        apply_migrations(self.db_path)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS fx_rates (
+                    provider TEXT NOT NULL,
+                    rate_date TEXT NOT NULL,
+                    base_currency TEXT NOT NULL,
+                    quote_currency TEXT NOT NULL,
+                    rate_text TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL,
+                    source_kind TEXT NOT NULL,
+                    meta_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (provider, rate_date, base_currency, quote_currency)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_fx_rates_pair_date
+                ON fx_rates(provider, base_currency, quote_currency, rate_date DESC)
+                """
+            )
+
+    def upsert(self, record: FXRateRecord) -> None:
+        self.upsert_many([record])
+
+    def upsert_many(self, records: Sequence[FXRateRecord]) -> int:
+        self.initialize_schema()
+        if not records:
+            return 0
+        now = _utc_now_iso()
+        payload = [
+            (
+                record.provider.strip().upper(),
+                record.rate_date,
+                normalize_currency_code(record.base_currency),
+                normalize_currency_code(record.quote_currency),
+                str(record.rate_text),
+                record.fetched_at,
+                record.source_kind.strip().lower(),
+                record.meta_json,
+                record.created_at or now,
+                record.updated_at or now,
+            )
+            for record in records
+            if normalize_currency_code(record.base_currency)
+            and normalize_currency_code(record.quote_currency)
+        ]
+        if not payload:
+            return 0
+        with self._connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO fx_rates (
+                    provider,
+                    rate_date,
+                    base_currency,
+                    quote_currency,
+                    rate_text,
+                    fetched_at,
+                    source_kind,
+                    meta_json,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(provider, rate_date, base_currency, quote_currency)
+                DO UPDATE SET
+                    rate_text = excluded.rate_text,
+                    fetched_at = excluded.fetched_at,
+                    source_kind = excluded.source_kind,
+                    meta_json = excluded.meta_json,
+                    updated_at = excluded.updated_at
+                """,
+                payload,
+            )
+        return len(payload)
+
+    def latest_on_or_before(
+        self,
+        provider: str,
+        base_currency: str,
+        quote_currency: str,
+        as_of: str,
+    ) -> Optional[FXRateRecord]:
+        self.initialize_schema()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    provider,
+                    rate_date,
+                    base_currency,
+                    quote_currency,
+                    rate_text,
+                    fetched_at,
+                    source_kind,
+                    meta_json,
+                    created_at,
+                    updated_at
+                FROM fx_rates
+                WHERE provider = ?
+                  AND base_currency = ?
+                  AND quote_currency = ?
+                  AND rate_date <= ?
+                ORDER BY rate_date DESC
+                LIMIT 1
+                """,
+                (
+                    provider.strip().upper(),
+                    normalize_currency_code(base_currency),
+                    normalize_currency_code(quote_currency),
+                    as_of,
+                ),
+            ).fetchone()
+        if row is None:
+            return None
+        return FXRateRecord(*row)
+
+    def direct_pair_coverage(
+        self,
+        provider: str,
+        base_currency: str,
+        quote_currencies: Sequence[str],
+    ) -> Dict[str, Tuple[str, str]]:
+        """Return direct stored date coverage for one base and many quotes."""
+
+        self.initialize_schema()
+        normalized_quotes = [
+            code
+            for code in (
+                normalize_currency_code(quote_currency)
+                for quote_currency in quote_currencies
+            )
+            if code is not None
+        ]
+        if not normalized_quotes:
+            return {}
+        placeholders = ", ".join("?" for _ in normalized_quotes)
+        params = [
+            provider.strip().upper(),
+            normalize_currency_code(base_currency),
+            *normalized_quotes,
+        ]
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT
+                    quote_currency,
+                    MIN(rate_date) AS min_rate_date,
+                    MAX(rate_date) AS max_rate_date
+                FROM fx_rates
+                WHERE provider = ?
+                  AND base_currency = ?
+                  AND quote_currency IN ({placeholders})
+                GROUP BY quote_currency
+                """,
+                params,
+            ).fetchall()
+        return {
+            str(row["quote_currency"]): (
+                str(row["min_rate_date"]),
+                str(row["max_rate_date"]),
+            )
+            for row in rows
+            if row["min_rate_date"] is not None and row["max_rate_date"] is not None
+        }
+
+    def discover_currencies(self) -> List[str]:
+        """Return distinct normalized currencies referenced by the project DB."""
+
+        self.initialize_schema()
+        currencies: set[str] = set()
+        with self._connect() as conn:
+            for table_name in ("supported_tickers", "financial_facts", "market_data"):
+                rows = conn.execute(
+                    f"""
+                    SELECT DISTINCT currency
+                    FROM {table_name}
+                    WHERE currency IS NOT NULL
+                    ORDER BY currency
+                    """
+                ).fetchall()
+                for row in rows:
+                    code = normalize_currency_code(row["currency"])
+                    if code is not None:
+                        currencies.add(code)
+        return sorted(currencies)
+
+
 class MetricsRepository(SQLiteStore):
     """Persist computed metric values."""
 
@@ -3068,6 +3332,9 @@ class MetricsRepository(SQLiteStore):
                     metric_id TEXT NOT NULL,
                     value REAL NOT NULL,
                     as_of TEXT NOT NULL,
+                    unit_kind TEXT NOT NULL DEFAULT 'other',
+                    currency TEXT,
+                    unit_label TEXT,
                     PRIMARY KEY (security_id, metric_id)
                 )
                 """
@@ -3079,21 +3346,48 @@ class MetricsRepository(SQLiteStore):
                 """
             )
 
-    def upsert(self, symbol: str, metric_id: str, value: float, as_of: str) -> None:
-        self.upsert_many([(symbol, metric_id, value, as_of)])
+    def upsert(
+        self,
+        symbol: str,
+        metric_id: str,
+        value: float,
+        as_of: str,
+        unit_kind: MetricUnitKind = "other",
+        currency: Optional[str] = None,
+        unit_label: Optional[str] = None,
+    ) -> None:
+        self.upsert_many(
+            [(symbol, metric_id, value, as_of, unit_kind, currency, unit_label)]
+        )
 
     def upsert_many(
         self,
         rows: Iterable[StoredMetricRow],
     ) -> int:
         self.initialize_schema()
-        metric_rows = list(rows)
+        metric_rows: List[StoredMetricRow] = []
+        for row in rows:
+            if len(row) == 4:
+                symbol, metric_id, value, as_of = row
+                metric_rows.append(
+                    (
+                        symbol,
+                        metric_id,
+                        value,
+                        as_of,
+                        "other",
+                        None,
+                        None,
+                    )
+                )
+                continue
+            metric_rows.append(row)
         if not metric_rows:
             return 0
 
         unique_symbols = []
         seen_symbols = set()
-        for symbol, _, _, _ in metric_rows:
+        for symbol, _, _, _, _, _, _ in metric_rows:
             if symbol in seen_symbols:
                 continue
             seen_symbols.add(symbol)
@@ -3111,8 +3405,19 @@ class MetricsRepository(SQLiteStore):
                 metric_id,
                 value,
                 as_of,
+                unit_kind,
+                metric_currency_or_none(unit_kind, currency),
+                unit_label,
             )
-            for symbol, metric_id, value, as_of in metric_rows
+            for (
+                symbol,
+                metric_id,
+                value,
+                as_of,
+                unit_kind,
+                currency,
+                unit_label,
+            ) in metric_rows
             if symbol in security_ids
         ]
         if not persisted_rows:
@@ -3122,11 +3427,22 @@ class MetricsRepository(SQLiteStore):
             with self._connect() as conn:
                 conn.executemany(
                     """
-                    INSERT INTO metrics (security_id, metric_id, value, as_of)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO metrics (
+                        security_id,
+                        metric_id,
+                        value,
+                        as_of,
+                        unit_kind,
+                        currency,
+                        unit_label
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(security_id, metric_id) DO UPDATE SET
                         value = excluded.value,
-                        as_of = excluded.as_of
+                        as_of = excluded.as_of,
+                        unit_kind = excluded.unit_kind,
+                        currency = excluded.currency,
+                        unit_label = excluded.unit_label
                     """,
                     persisted_rows,
                 )
@@ -3134,7 +3450,7 @@ class MetricsRepository(SQLiteStore):
         self._run_with_locked_retry(_persist)
         return len(persisted_rows)
 
-    def fetch(self, symbol: str, metric_id: str) -> Optional[Tuple[float, str]]:
+    def fetch(self, symbol: str, metric_id: str) -> Optional[MetricRecord]:
         self.initialize_schema()
         security_id = self._security_repo().resolve_id(symbol)
         if security_id is None:
@@ -3142,7 +3458,7 @@ class MetricsRepository(SQLiteStore):
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT value, as_of
+                SELECT value, as_of, unit_kind, currency, unit_label
                 FROM metrics
                 WHERE security_id = ? AND metric_id = ?
                 """,
@@ -3150,14 +3466,20 @@ class MetricsRepository(SQLiteStore):
             ).fetchone()
         if row is None:
             return None
-        return row[0], row[1]
+        return MetricRecord(
+            value=row["value"],
+            as_of=row["as_of"],
+            unit_kind=row["unit_kind"],
+            currency=metric_currency_or_none(row["unit_kind"], row["currency"]),
+            unit_label=row["unit_label"],
+        )
 
     def fetch_many_for_symbols(
         self,
         symbols: Sequence[str],
         metric_ids: Sequence[str],
         chunk_size: int = 500,
-    ) -> Dict[str, Dict[str, Tuple[float, str]]]:
+    ) -> Dict[str, Dict[str, MetricRecord]]:
         """Fetch requested stored metrics for a symbol scope with chunked indexed reads."""
 
         self.initialize_schema()
@@ -3183,7 +3505,7 @@ class MetricsRepository(SQLiteStore):
             security_id: symbol
             for symbol, security_id in security_ids_by_symbol.items()
         }
-        metric_rows_by_symbol: Dict[str, Dict[str, Tuple[float, str]]] = {}
+        metric_rows_by_symbol: Dict[str, Dict[str, MetricRecord]] = {}
 
         metric_chunk_size = max(
             1,
@@ -3205,7 +3527,7 @@ class MetricsRepository(SQLiteStore):
                     metric_placeholders = ", ".join("?" for _ in metric_chunk)
                     rows = conn.execute(
                         f"""
-                        SELECT security_id, metric_id, value, as_of
+                        SELECT security_id, metric_id, value, as_of, unit_kind, currency, unit_label
                         FROM metrics
                         WHERE security_id IN ({security_placeholders})
                           AND metric_id IN ({metric_placeholders})
@@ -3216,9 +3538,14 @@ class MetricsRepository(SQLiteStore):
                         symbol = symbol_by_security_id[row["security_id"]]
                         metric_rows_by_symbol.setdefault(symbol, {})[
                             row["metric_id"]
-                        ] = (
-                            row["value"],
-                            row["as_of"],
+                        ] = MetricRecord(
+                            value=row["value"],
+                            as_of=row["as_of"],
+                            unit_kind=row["unit_kind"],
+                            currency=metric_currency_or_none(
+                                row["unit_kind"], row["currency"]
+                            ),
+                            unit_label=row["unit_label"],
                         )
 
         return metric_rows_by_symbol
@@ -3250,6 +3577,13 @@ class MarketDataRepository(SQLiteStore):
                 """
                 CREATE INDEX IF NOT EXISTS idx_market_data_latest
                 ON market_data(security_id, as_of DESC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_market_data_currency_nonnull
+                ON market_data(currency)
+                WHERE currency IS NOT NULL
                 """
             )
 
@@ -3292,7 +3626,7 @@ class MarketDataRepository(SQLiteStore):
                 row.price,
                 row.volume,
                 row.market_cap,
-                row.currency,
+                normalize_currency_code(row.currency),
                 row.source_provider.strip().upper(),
                 updated_at,
             )
@@ -3520,6 +3854,8 @@ def _normalized_codes(values: Optional[Sequence[str]]) -> List[str]:
 
 
 __all__ = [
+    "FXRateRecord",
+    "FXRatesRepository",
     "Security",
     "SecurityMetadataCandidate",
     "SecurityMetadataUpdate",
@@ -3538,6 +3874,7 @@ __all__ = [
     "MarketDataRepository",
     "FactRecord",
     "MarketSnapshotRecord",
+    "MetricRecord",
     "MetricsRepository",
     "EntityMetadataRepository",
 ]

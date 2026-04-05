@@ -10,12 +10,14 @@ from typing import Optional, Sequence
 
 import logging
 
+from pyvalue.fx import FXService
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.invested_capital import (
     REQUIRED_CONCEPTS as INVESTED_CAPITAL_REQUIRED_CONCEPTS,
     InvestedCapitalCalculator,
 )
 from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS, is_recent_fact
+from pyvalue.money import align_money_values, fx_service_for_context
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -66,12 +68,19 @@ class RoicTTMMetric:
     def compute(
         self, symbol: str, repo: FinancialFactsRepository
     ) -> Optional[MetricResult]:
-        ebit = self._compute_ttm_amount(symbol, repo, EBIT_CONCEPTS, context=self.id)
+        fx_service = fx_service_for_context(repo)
+        ebit = self._compute_ttm_amount(
+            symbol,
+            repo,
+            EBIT_CONCEPTS,
+            context=self.id,
+            fx_service=fx_service,
+        )
         if ebit is None:
             LOGGER.warning("roic_ttm: missing TTM EBIT for %s", symbol)
             return None
 
-        tax_rate = self._effective_tax_rate(symbol, repo)
+        tax_rate = self._effective_tax_rate(symbol, repo, fx_service=fx_service)
         numerator_as_of = ebit.as_of
         if tax_rate.as_of is not None:
             numerator_as_of = max(numerator_as_of, tax_rate.as_of)
@@ -89,36 +98,64 @@ class RoicTTMMetric:
             LOGGER.warning("roic_ttm: non-positive avg_ic for %s", symbol)
             return None
 
-        if not self._currencies_match(ebit.currency, avg_ic.currency):
+        aligned, _ = align_money_values(
+            values=[
+                (nopat, ebit.currency, numerator_as_of, EBIT_CONCEPT),
+                (avg_ic.value, avg_ic.currency, avg_ic.as_of, "avg_ic"),
+            ],
+            fx_service=fx_service,
+            logger=LOGGER,
+            operation="metric:roic_ttm",
+            symbol=symbol,
+            target_currency=ebit.currency or avg_ic.currency,
+        )
+        if aligned is None:
             LOGGER.warning(
                 "roic_ttm: numerator/denominator currency mismatch for %s", symbol
             )
             return None
 
-        ratio = nopat / avg_ic.value
+        ratio = aligned[0] / aligned[1]
         return MetricResult(
             symbol=symbol,
             metric_id=self.id,
             value=ratio,
             as_of=max(numerator_as_of, avg_ic.as_of),
+            unit_kind="percent",
         )
 
     def _effective_tax_rate(
-        self, symbol: str, repo: FinancialFactsRepository
+        self,
+        symbol: str,
+        repo: FinancialFactsRepository,
+        *,
+        fx_service: FXService,
     ) -> _TaxRateResult:
         ttm_tax = self._compute_ttm_amount(
-            symbol, repo, TAX_EXPENSE_CONCEPTS, context=self.id
+            symbol,
+            repo,
+            TAX_EXPENSE_CONCEPTS,
+            context=self.id,
+            fx_service=fx_service,
         )
         ttm_pretax = self._compute_ttm_amount(
-            symbol, repo, PRETAX_INCOME_CONCEPTS, context=self.id
+            symbol,
+            repo,
+            PRETAX_INCOME_CONCEPTS,
+            context=self.id,
+            fx_service=fx_service,
         )
         ttm_rate = self._rate_from_amounts(
-            ttm_tax, ttm_pretax, symbol=symbol, period_label="TTM"
+            ttm_tax,
+            ttm_pretax,
+            symbol=symbol,
+            period_label="TTM",
+            fx_service=fx_service,
         )
         if ttm_rate is not None:
             return ttm_rate
 
-        fy_rate = self._latest_valid_fy_tax_rate(symbol, repo)
+        fy_rate = self._latest_valid_fy_tax_rate(symbol, repo, fx_service=fx_service)
         if fy_rate is not None:
             return fy_rate
 
@@ -126,16 +163,26 @@ class RoicTTMMetric:
         return _TaxRateResult(rate=DEFAULT_TAX_RATE, as_of=None)
 
     def _latest_valid_fy_tax_rate(
-        self, symbol: str, repo: FinancialFactsRepository
+        self,
+        symbol: str,
+        repo: FinancialFactsRepository,
+        *,
+        fx_service: FXService,
     ) -> Optional[_TaxRateResult]:
-        tax_map = self._fy_map(symbol, repo, TAX_EXPENSE_CONCEPT)
-        pretax_map = self._fy_map(symbol, repo, PRETAX_INCOME_CONCEPT)
+        tax_map = self._fy_map(symbol, repo, TAX_EXPENSE_CONCEPT, fx_service=fx_service)
+        pretax_map = self._fy_map(
+            symbol,
+            repo,
+            PRETAX_INCOME_CONCEPT,
+            fx_service=fx_service,
+        )
         for end_date in sorted(set(tax_map).intersection(pretax_map), reverse=True):
             rate = self._rate_from_amounts(
                 tax_map[end_date],
                 pretax_map[end_date],
                 symbol=symbol,
                 period_label=end_date,
+                fx_service=fx_service,
             )
             if rate is not None:
                 return rate
@@ -148,17 +195,29 @@ class RoicTTMMetric:
         *,
         symbol: str,
         period_label: str,
+        fx_service: FXService,
     ) -> Optional[_TaxRateResult]:
         if tax is None or pretax is None:
             return None
-        if not self._currencies_match(tax.currency, pretax.currency):
+        aligned, _ = align_money_values(
+            values=[
+                (tax.total, tax.currency, tax.as_of, TAX_EXPENSE_CONCEPT),
+                (pretax.total, pretax.currency, pretax.as_of, PRETAX_INCOME_CONCEPT),
+            ],
+            fx_service=fx_service,
+            logger=LOGGER,
+            operation=f"metric:roic_ttm:tax_rate:{period_label}",
+            symbol=symbol,
+            target_currency=tax.currency or pretax.currency,
+        )
+        if aligned is None:
             LOGGER.warning(
                 "roic_ttm: tax currency mismatch for %s on %s", symbol, period_label
             )
             return None
-        if pretax.total <= PRETAX_MIN_ABS:
+        if aligned[1] <= PRETAX_MIN_ABS:
             return None
-        rate = tax.total / pretax.total
+        rate = aligned[0] / aligned[1]
         if rate < 0 or rate > 1:
             return None
         return _TaxRateResult(rate=rate, as_of=max(tax.as_of, pretax.as_of))
@@ -170,6 +229,7 @@ class RoicTTMMetric:
         concepts: Sequence[str],
         *,
         context: str,
+        fx_service: FXService,
     ) -> Optional[_AmountResult]:
         for concept in concepts:
             records = repo.facts_for_concept(symbol, concept)
@@ -178,7 +238,18 @@ class RoicTTMMetric:
                 continue
             if not is_recent_fact(quarterly[0], max_age_days=MAX_FACT_AGE_DAYS):
                 continue
-            normalized_values, currency = self._normalize_records(quarterly[:4])
+            normalized_values, currency = align_money_values(
+                values=[
+                    (record.value, record.currency, record.end_date, concept)
+                    for record in quarterly[:4]
+                    if record.value is not None
+                ],
+                fx_service=fx_service,
+                logger=LOGGER,
+                operation=f"metric:{context}:{concept}",
+                symbol=symbol,
+                target_currency=quarterly[0].currency,
+            )
             if normalized_values is None:
                 LOGGER.warning(
                     "%s: currency conflict in %s quarterly values for %s",
@@ -199,6 +270,8 @@ class RoicTTMMetric:
         symbol: str,
         repo: FinancialFactsRepository,
         concept: str,
+        *,
+        fx_service: FXService,
     ) -> dict[str, _AmountResult]:
         records = repo.facts_for_concept(symbol, concept, fiscal_period="FY")
         ordered = self._filter_periods(records, FY_PERIODS)
@@ -219,29 +292,15 @@ class RoicTTMMetric:
         seen_end_dates: set[str] = set()
         for record in records:
             period = (record.fiscal_period or "").upper()
-            if period not in periods:
-                continue
-            if record.end_date in seen_end_dates:
-                continue
-            if record.value is None:
+            if (
+                period not in periods
+                or record.end_date in seen_end_dates
+                or record.value is None
+            ):
                 continue
             filtered.append(record)
             seen_end_dates.add(record.end_date)
         return filtered
-
-    def _normalize_records(
-        self, records: Sequence[FactRecord]
-    ) -> tuple[Optional[list[float]], Optional[str]]:
-        currency = None
-        normalized: list[float] = []
-        for record in records:
-            value, code = self._normalize_currency(record)
-            if currency is None and code:
-                currency = code
-            elif code and currency and code != currency:
-                return None, None
-            normalized.append(value)
-        return normalized, currency
 
     def _normalize_currency(self, record: FactRecord) -> tuple[float, Optional[str]]:
         value = record.value
@@ -249,11 +308,6 @@ class RoicTTMMetric:
         if code in {"GBX", "GBP0.01"}:
             return value / 100.0, "GBP"
         return value, code
-
-    def _currencies_match(self, left: Optional[str], right: Optional[str]) -> bool:
-        if left and right:
-            return left == right
-        return True
 
 
 __all__ = ["RoicTTMMetric"]

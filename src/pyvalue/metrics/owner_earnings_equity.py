@@ -485,11 +485,12 @@ class OwnerEarningsEquityTTMMetric:
         snapshot = OwnerEarningsEquityCalculator().compute_ttm(symbol, repo)
         if snapshot is None:
             return None
-        return MetricResult(
+        return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
             value=snapshot.value,
             as_of=snapshot.as_of,
+            currency=snapshot.currency,
         )
 
 
@@ -506,11 +507,12 @@ class OwnerEarningsEquityFiveYearAverageMetric:
         snapshot = OwnerEarningsEquityCalculator().compute_5y_average(symbol, repo)
         if snapshot is None:
             return None
-        return MetricResult(
+        return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
             value=snapshot.value,
             as_of=snapshot.as_of,
+            currency=snapshot.currency,
         )
 
 

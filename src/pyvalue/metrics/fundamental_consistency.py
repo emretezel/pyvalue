@@ -393,11 +393,12 @@ class FCFFiveYearMedianMetric:
         )
         if snapshot is None:
             return None
-        return MetricResult(
+        return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
             value=snapshot.value,
             as_of=snapshot.as_of,
+            currency=snapshot.currency,
         )
 
 

@@ -53,6 +53,38 @@ You can also use an environment variable:
 export PYVALUE_SEC_USER_AGENT="pyvalue/0.1 (contact: you@example.com)"
 ```
 
+## FX Configuration
+
+FX behavior is configured under an optional `[fx]` section:
+
+```toml
+[fx]
+provider = "FRANKFURTER"
+pivot_currency = "USD"
+secondary_pivot_currency = "EUR"
+lazy_fetch = true
+stale_warning_days = 7
+```
+
+Settings:
+
+- `provider`: default `FRANKFURTER`
+- `pivot_currency`: primary triangulation pivot, default `USD`
+- `secondary_pivot_currency`: optional secondary pivot after the primary
+  direct/inverse lookup path, default `EUR`
+- `lazy_fetch`: when `true`, `pyvalue` will fetch missing FX ranges on demand
+  during runtime lookups and cache direct provider rows locally
+- `stale_warning_days`: warn when the selected on-or-before rate is older than
+  this many days
+
+FX semantics:
+
+- stored rates are always `1 base_currency = rate quote_currency`
+- GBX-like subunits are normalized to `GBP` before lookup
+- lookups use latest available rate on or before the requested date
+- direct provider rows are persisted; inverse and triangulated cross-rates are
+  computed at lookup time, not stored
+
 ## Database Path Behavior
 
 Most commands accept:
@@ -82,4 +114,5 @@ Use a separate database path when you want to:
 
 - [EODHD Provider Guide](providers/eodhd.md)
 - [SEC Provider Guide](providers/sec.md)
+- [CLI Reference](reference/cli.md)
 - [Getting Started](getting-started.md)

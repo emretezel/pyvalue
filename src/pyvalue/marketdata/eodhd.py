@@ -11,6 +11,11 @@ from typing import Dict, Optional
 
 import requests  # type: ignore[import-untyped]
 
+from pyvalue.currency import (
+    is_gbx_subunit_currency,
+    normalize_currency_code,
+    normalize_monetary_amount,
+)
 from pyvalue.marketdata.base import MarketDataProvider, PriceData
 
 LOGGER = logging.getLogger(__name__)
@@ -113,14 +118,20 @@ class EODHDProvider(MarketDataProvider):
                 f"Missing Close price in EODHD response for {symbol}: {entry}"
             )
         currency = self._extract_text(entry, "currency", "Currency")
+        currency = normalize_currency_code(currency)
         suffix = exchange_hint or (symbol.split(".")[-1] if "." in symbol else "")
         if "." in suffix:
             suffix = suffix.split(".")[-1]
         suffix = suffix.upper()
         gbx_hint = suffix in {"LSE", "LON", "XLON"}
-        if currency in {"GBX", "GBP0.01"}:
-            price = price / 100.0
-            currency = "GBP"
+        if is_gbx_subunit_currency(self._extract_text(entry, "currency", "Currency")):
+            normalized_price, normalized_currency = normalize_monetary_amount(
+                price,
+                self._extract_text(entry, "currency", "Currency"),
+            )
+            if normalized_price is not None:
+                price = float(normalized_price)
+            currency = normalized_currency
         elif gbx_hint and currency is None and price and price > 100:
             price = price / 100.0
             currency = "GBP"

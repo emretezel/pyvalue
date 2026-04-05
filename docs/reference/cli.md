@@ -138,6 +138,8 @@ Notes:
 - only symbols with stored raw fundamentals are normalized
 - by default, normalization skips symbols whose raw `fundamentals_raw.fetched_at`
   has not changed since the last successful normalization for that provider
+- bulk runs with `--force` skip the freshness scan and start re-normalizing the
+  requested symbol set immediately
 
 ## Market Data Commands
 
@@ -209,6 +211,38 @@ Key options:
 - metric/data-quality warnings are suppressed on the console by default but still written to `data/logs/pyvalue.log`
 - `--show-metric-warnings` to show metric/data-quality warnings on the console again
 - `--database <path>`
+
+Notes:
+
+- stored metric rows now include explicit `unit_kind`, optional `currency`, and
+  optional `unit_label`
+- monetary and per-share metrics are FX-aware; ratio, percent, multiple, and
+  count metrics remain non-monetary outputs
+
+### `refresh-fx-rates`
+
+Fetch and store direct FX rates for currencies already present in the project
+database.
+
+Key options:
+
+- `--database <path>`
+- `--start-date <YYYY-MM-DD>` optional historical backfill start
+- `--end-date <YYYY-MM-DD>` optional end date, default today
+
+Notes:
+
+- discovers currencies from existing project data and excludes the pivot
+  currency
+- stores direct provider rows in `fx_rates`
+- skips fully covered direct base/quote ranges already present in `fx_rates`
+- skips unnecessary re-downloads through upsert semantics
+- the first run after the FX/index migration may spend time building currency
+  indexes before discovery starts
+- long historical refreshes are split into smaller provider requests and report
+  batch progress on the console
+- later runtime lookups can use direct, inverse, or triangulated conversion from
+  those stored rows
 
 ## Reporting Commands
 
@@ -308,6 +342,9 @@ Notes:
 - if the screen YAML defines a `ranking` block, multi-symbol output also adds
   ranking rows such as `qarp_rank` and `qarp_score`, and sorts passing symbols
   by the configured ranking rules
+- monetary and per-share comparisons apply FX only where needed; ratio-like
+  metrics are compared directly
+- monetary constants can optionally declare a currency in YAML
 
 ### `refresh-security-metadata`
 

@@ -12,8 +12,8 @@ import logging
 
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import is_recent_fact, latest_quarterly_records
-from pyvalue.fx import FXRateStore
 from pyvalue.marketdata.base import PriceData
+from pyvalue.money import fx_converter_for_context
 from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
 
 
@@ -96,7 +96,7 @@ class GrahamMultiplierMetric:
             and price_data.currency
             and price_data.currency != target_currency
         ):
-            converted = FXRateStore().convert(
+            converted = fx_converter_for_context(repo)(
                 price, price_data.currency, target_currency, price_data.as_of
             )
             if converted is None:

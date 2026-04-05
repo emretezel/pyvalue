@@ -43,6 +43,36 @@ Default CLI behavior:
 - Run YAML-based stock screens against stored data, including ranked QARP
   output for passing symbols.
 
+## Currency and FX
+
+`pyvalue` now applies one shared currency framework across normalization,
+metrics, and screening.
+
+Key rules:
+
+- `GBX` and `GBP0.01` are always normalized to `GBP` before any arithmetic.
+- EODHD monetary currency resolution uses explicit precedence:
+  row currency, then statement currency, then payload currency, then a narrow
+  documented repo fallback for legacy facts whose `unit` already stores the ISO
+  currency code.
+- Monetary facts retain a real `currency` value. Non-monetary facts keep a
+  meaningful `unit` such as `shares`.
+- Monetary metrics persist explicit unit metadata and currency; ratio, percent,
+  multiple, count, and other non-monetary metrics do not carry fake currencies.
+- FX lookup is DB-backed, uses latest available rate on or before the requested
+  date, supports direct, inverse, and triangulated lookup, and never hard-fails
+  a universe-wide run because one symbol is missing FX.
+
+Refresh FX rates independently with:
+
+```bash
+pyvalue refresh-fx-rates
+```
+
+The command discovers currencies already present in the project DB, excludes the
+pivot currency, skips fully covered direct ranges already in `fx_rates`, and
+reports batch progress during long historical refreshes.
+
 ## Supported Providers
 
 - `SEC`: US-only fundamentals. Coverage is useful, but normalization and metric coverage are less complete than EODHD.

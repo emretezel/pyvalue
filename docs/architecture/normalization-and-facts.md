@@ -15,6 +15,12 @@ A normalized fact typically includes:
 - currency or unit metadata
 - optional source metadata
 
+Monetary and non-monetary facts are treated differently:
+
+- monetary facts must resolve to a real currency code
+- non-monetary facts keep a unit such as `shares`
+- `GBX`/`GBP0.01` are converted to `GBP` before downstream arithmetic
+
 ## Provider-Agnostic Design
 
 Metrics read from `financial_facts`, not directly from raw provider payloads.
@@ -24,6 +30,17 @@ That means:
 - normalization is where provider-specific mapping and fallback rules live
 - metrics can stay focused on financial logic rather than source payload shape
 
+For EODHD monetary fields, currency resolution follows one shared precedence:
+
+1. row-level currency on the specific statement or earnings entry
+2. statement-level currency
+3. payload-level default currency
+4. a narrow documented legacy fallback only when the fact `unit` already stores
+   the ISO currency code
+
+If a monetary field still cannot be assigned a currency, normalization logs a
+warning and skips only that fact or derived fact.
+
 ## Practical Consequence
 
 Two symbols can have the same metric logic but different provider-specific normalization paths underneath.
@@ -31,6 +48,15 @@ Two symbols can have the same metric logic but different provider-specific norma
 Examples:
 - SEC and EODHD may expose different raw field names for cash flow, debt, or share counts
 - EODHD-oriented metrics may rely on concepts or fallback chains that are realistically only available from EODHD normalization
+
+Derived facts are also currency-aware:
+
+- same-period accounting derivations prefer the statement/reporting currency for
+  that period
+- market-linked derivations prefer the market-data currency
+- mixed-currency monetary inputs are converted before arithmetic
+- missing currency or missing FX skips only the affected derived fact and logs
+  structured context
 
 ## Normalization Layers in This Repo
 

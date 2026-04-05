@@ -14,6 +14,7 @@ import logging
 
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import MAX_FY_FACT_AGE_DAYS
+from pyvalue.money import align_money_values, fx_service_for_context
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -60,6 +61,7 @@ class GrossMarginTenYearCalculator:
     def compute_series(
         self, symbol: str, repo: FinancialFactsRepository
     ) -> Optional[GrossMarginTenYearSnapshot]:
+        fx_service = fx_service_for_context(repo)
         revenue_map = self._fy_map(symbol, repo, REVENUE_CONCEPT)
         if not revenue_map:
             LOGGER.warning("gm_10y_std: missing FY revenues history for %s", symbol)
@@ -75,28 +77,66 @@ class GrossMarginTenYearCalculator:
 
             gross_profit = gross_profit_map.get(year)
             if gross_profit is not None:
-                if not self._currencies_match(revenue.currency, gross_profit.currency):
+                aligned, _ = align_money_values(
+                    values=[
+                        (
+                            revenue.total,
+                            revenue.currency,
+                            revenue.as_of,
+                            REVENUE_CONCEPT,
+                        ),
+                        (
+                            gross_profit.total,
+                            gross_profit.currency,
+                            gross_profit.as_of,
+                            GROSS_PROFIT_CONCEPT,
+                        ),
+                    ],
+                    fx_service=fx_service,
+                    logger=LOGGER,
+                    operation="metric:gm_10y_std:gross_profit",
+                    symbol=symbol,
+                    target_currency=revenue.currency or gross_profit.currency,
+                )
+                if aligned is None:
                     continue
-                gross_profit_total = gross_profit.total
+                gross_profit_total = aligned[1]
                 as_of = max(revenue.as_of, gross_profit.as_of)
-                point_currency = revenue.currency or gross_profit.currency
             else:
                 cost_of_revenue = cost_of_revenue_map.get(year)
                 if cost_of_revenue is None:
                     continue
-                if not self._currencies_match(
-                    revenue.currency, cost_of_revenue.currency
-                ):
+                aligned, _ = align_money_values(
+                    values=[
+                        (
+                            revenue.total,
+                            revenue.currency,
+                            revenue.as_of,
+                            REVENUE_CONCEPT,
+                        ),
+                        (
+                            cost_of_revenue.total,
+                            cost_of_revenue.currency,
+                            cost_of_revenue.as_of,
+                            COST_OF_REVENUE_CONCEPT,
+                        ),
+                    ],
+                    fx_service=fx_service,
+                    logger=LOGGER,
+                    operation="metric:gm_10y_std:cost_of_revenue",
+                    symbol=symbol,
+                    target_currency=revenue.currency or cost_of_revenue.currency,
+                )
+                if aligned is None:
                     continue
-                gross_profit_total = revenue.total - cost_of_revenue.total
+                gross_profit_total = aligned[0] - aligned[1]
                 as_of = max(revenue.as_of, cost_of_revenue.as_of)
-                point_currency = revenue.currency or cost_of_revenue.currency
 
             margins_by_year[year] = _GrossMarginFYPoint(
                 year=year,
                 value=gross_profit_total / revenue.total,
                 as_of=as_of,
-                currency=point_currency,
+                currency=None,
             )
 
         if not margins_by_year:
@@ -105,7 +145,6 @@ class GrossMarginTenYearCalculator:
 
         latest_year = max(margins_by_year.keys())
         selected: list[_GrossMarginFYPoint] = []
-        # Require the latest strict 10-year chain for comparability.
         for year in range(latest_year, latest_year - SERIES_YEARS, -1):
             point = margins_by_year.get(year)
             if point is None:
@@ -121,19 +160,10 @@ class GrossMarginTenYearCalculator:
             LOGGER.warning("gm_10y_std: latest FY point too old for %s", symbol)
             return None
 
-        series_currency = self._combine_currency([point.currency for point in selected])
-        if series_currency is None and any(
-            point.currency is not None for point in selected
-        ):
-            LOGGER.warning(
-                "gm_10y_std: currency mismatch across selected series for %s", symbol
-            )
-            return None
-
         return GrossMarginTenYearSnapshot(
             points=tuple(selected),
             as_of=selected[0].as_of,
-            currency=series_currency,
+            currency=None,
         )
 
     def _fy_map(
@@ -164,38 +194,22 @@ class GrossMarginTenYearCalculator:
         seen_end_dates: set[str] = set()
         for record in records:
             period = (record.fiscal_period or "").upper()
-            if period not in periods:
-                continue
-            if record.end_date in seen_end_dates:
-                continue
-            if record.value is None:
+            if (
+                period not in periods
+                or record.end_date in seen_end_dates
+                or record.value is None
+            ):
                 continue
             filtered.append(record)
             seen_end_dates.add(record.end_date)
         return filtered
 
     def _normalize_currency(self, record: FactRecord) -> tuple[float, Optional[str]]:
-        value = record.value
         code = record.currency
+        value = record.value
         if code in {"GBX", "GBP0.01"}:
             return value / 100.0, "GBP"
         return value, code
-
-    def _combine_currency(self, values: Sequence[Optional[str]]) -> Optional[str]:
-        merged = None
-        for value in values:
-            if not value:
-                continue
-            if merged is None:
-                merged = value
-            elif merged != value:
-                return None
-        return merged
-
-    def _currencies_match(self, left: Optional[str], right: Optional[str]) -> bool:
-        if left and right:
-            return left == right
-        return True
 
     def _extract_year(self, value: str) -> Optional[int]:
         if len(value) < 4:
@@ -237,6 +251,7 @@ class GrossMarginTenYearStdMetric:
             metric_id=self.id,
             value=stddev,
             as_of=snapshot.as_of,
+            unit_kind="percent",
         )
 
 

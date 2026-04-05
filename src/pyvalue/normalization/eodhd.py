@@ -7,11 +7,22 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+import logging
 
+from pyvalue.currency import (
+    SHARES_UNIT,
+    normalize_currency_code as shared_normalize_currency_code,
+    normalize_monetary_amount,
+    resolve_eodhd_currency,
+    warn_missing_monetary_currency,
+)
+from pyvalue.fx import FXService
+from pyvalue.money import choose_target_currency, convert_money_value
 from pyvalue.storage import FactRecord
 
 FactKey = tuple[str, str, str]
 FactIndex = Dict[str, Dict[FactKey, FactRecord]]
+FactPeriodKey = tuple[str, str]
 
 EPS_PREFERRED_CONCEPTS = (
     "EarningsPerShareDiluted",
@@ -153,6 +164,7 @@ EODHD_TARGET_CONCEPTS = {
     concept for statement in EODHD_STATEMENT_FIELDS.values() for concept in statement
 } | EODHD_EXTRA_CONCEPTS
 EODHD_DERIVED_OVERRIDE_CONCEPTS = ("CommonStockholdersEquity",)
+LOGGER = logging.getLogger(__name__)
 
 
 def _to_float(value: Any) -> Optional[float]:
@@ -163,13 +175,7 @@ def _to_float(value: Any) -> Optional[float]:
 
 
 def _normalize_currency_code(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    try:
-        code = str(value).strip()
-    except Exception:
-        return None
-    return code.upper() or None
+    return shared_normalize_currency_code(value)
 
 
 class EODHDFactsNormalizer:
@@ -181,12 +187,14 @@ class EODHDFactsNormalizer:
         self,
         concepts: Optional[Iterable[str]] = None,
         derived_overrides: Optional[Iterable[str]] = None,
+        fx_service: Optional[FXService] = None,
     ) -> None:
         self.concepts = set(concepts or EODHD_TARGET_CONCEPTS)
         if derived_overrides is None:
             self.derived_overrides = set(EODHD_DERIVED_OVERRIDE_CONCEPTS)
         else:
             self.derived_overrides = set(derived_overrides)
+        self.fx_service = fx_service
 
     def normalize(
         self,
@@ -325,11 +333,12 @@ class EODHDFactsNormalizer:
                 end_date = self._extract_date(entry)
                 if not end_date:
                     continue
-                currency = (
-                    _normalize_currency_code(entry.get("currency_symbol"))
-                    or _normalize_currency_code(default_currency)
-                    or _normalize_currency_code(entry.get("CurrencyCode"))
+                currency_resolution = resolve_eodhd_currency(
+                    entry,
+                    statement_currency=default_currency,
+                    payload_currency=None,
                 )
+                currency = currency_resolution.currency_code
                 period_code = fiscal_period or self._infer_quarter(entry)
                 frame = self._build_frame(end_date, period_code)
                 total_liab = self._extract_value(
@@ -538,13 +547,24 @@ class EODHDFactsNormalizer:
                     )
                     if normalized_value is None:
                         continue
+                    if normalized_currency is None:
+                        warn_missing_monetary_currency(
+                            symbol=symbol.upper(),
+                            field_name=concept,
+                            statement_name=statement_payload.get("__statement_name")
+                            if isinstance(statement_payload, dict)
+                            else None,
+                            end_date=end_date,
+                            logger=LOGGER,
+                        )
+                        continue
                     records.append(
                         FactRecord(
                             symbol=symbol.upper(),
                             concept=concept,
                             fiscal_period=period_code or "",
                             end_date=end_date,
-                            unit=currency or "",
+                            unit=normalized_currency,
                             value=normalized_value,
                             accn=None,
                             filed=entry.get("filing_date"),
@@ -592,7 +612,7 @@ class EODHDFactsNormalizer:
                 concept="EnterpriseValue",
                 fiscal_period="",
                 end_date=end_date,
-                unit=currency or "",
+                unit=normalized_currency or "",
                 value=normalized_value,
                 accn=None,
                 filed=None,
@@ -637,22 +657,19 @@ class EODHDFactsNormalizer:
         end_date = general.get("LatestQuarter") or general.get("LatestReportDate")
         if not end_date:
             return []
-        currency = _normalize_currency_code(
-            stats.get("CurrencyCode") or default_currency
-        )
         record = FactRecord(
             symbol=symbol.upper(),
             concept="CommonStockSharesOutstanding",
             fiscal_period="",
             end_date=end_date,
-            unit=currency or "",
+            unit=SHARES_UNIT,
             value=shares,
             accn=None,
             filed=None,
             frame=None,
             start_date=None,
             accounting_standard=accounting_standard,
-            currency=currency,
+            currency=None,
         )
         return [record] if record else []
 
@@ -667,7 +684,6 @@ class EODHDFactsNormalizer:
         if not shares_payload:
             return []
 
-        currency = _normalize_currency_code(default_currency)
         records: List[FactRecord] = []
         for bucket, fiscal_period in (("annual", "FY"), ("quarterly", None)):
             entries = self._iter_entries(shares_payload.get(bucket))
@@ -700,14 +716,14 @@ class EODHDFactsNormalizer:
                         concept="CommonStockSharesOutstanding",
                         fiscal_period=period,
                         end_date=end_date,
-                        unit=currency or "",
+                        unit=SHARES_UNIT,
                         value=shares,
                         accn=None,
                         filed=None,
                         frame=frame,
                         start_date=None,
                         accounting_standard=accounting_standard,
-                        currency=currency,
+                        currency=None,
                     )
                 )
         return records
@@ -747,7 +763,7 @@ class EODHDFactsNormalizer:
                 concept="CommonStockDividendsPerShareCashPaid",
                 fiscal_period="",
                 end_date=end_date,
-                unit=currency or "",
+                unit=normalized_currency or "",
                 value=normalized_value,
                 accn=None,
                 filed=None,
@@ -1228,6 +1244,9 @@ class EODHDFactsNormalizer:
     def _record_key(self, record: FactRecord) -> FactKey:
         return (record.end_date, record.fiscal_period or "", record.unit)
 
+    def _period_key(self, record: FactRecord) -> FactPeriodKey:
+        return (record.end_date, record.fiscal_period or "")
+
     def _index_records(self, records: List[FactRecord]) -> FactIndex:
         indexed: FactIndex = {}
         for record in records:
@@ -1236,6 +1255,86 @@ class EODHDFactsNormalizer:
             if key not in bucket:
                 bucket[key] = record
         return indexed
+
+    def _candidate_period_keys(
+        self, indexed: FactIndex, concepts: Iterable[str]
+    ) -> set[FactPeriodKey]:
+        keys: set[FactPeriodKey] = set()
+        for concept in concepts:
+            keys.update(
+                self._period_key(record) for record in indexed.get(concept, {}).values()
+            )
+        return keys
+
+    def _records_for_period(
+        self,
+        indexed: FactIndex,
+        concept: str,
+        period_key: FactPeriodKey,
+    ) -> List[FactRecord]:
+        end_date, fiscal_period = period_key
+        return [
+            record
+            for record in indexed.get(concept, {}).values()
+            if record.end_date == end_date
+            and (record.fiscal_period or "") == fiscal_period
+            and record.value is not None
+        ]
+
+    def _pick_period_record(
+        self,
+        indexed: FactIndex,
+        concept: str,
+        period_key: FactPeriodKey,
+    ) -> Optional[FactRecord]:
+        records = self._records_for_period(indexed, concept, period_key)
+        return records[0] if records else None
+
+    def _convert_record_value(
+        self,
+        record: FactRecord,
+        target_currency: Optional[str],
+        *,
+        derived_concept: str,
+        symbol: str,
+    ) -> Optional[float]:
+        if record.value is None:
+            return None
+        return convert_money_value(
+            amount=record.value,
+            source_currency=record.currency,
+            target_currency=target_currency,
+            as_of=record.end_date,
+            fx_service=self.fx_service,
+            logger=LOGGER,
+            operation=f"eodhd:{derived_concept}",
+            symbol=symbol.upper(),
+            field_name=record.concept,
+        )
+
+    def _build_monetary_derived_record(
+        self,
+        base: FactRecord,
+        *,
+        concept: str,
+        value: float,
+        currency: str,
+    ) -> FactRecord:
+        return FactRecord(
+            symbol=base.symbol,
+            cik=base.cik,
+            concept=concept,
+            fiscal_period=base.fiscal_period,
+            end_date=base.end_date,
+            unit=currency,
+            value=value,
+            accn=base.accn,
+            filed=base.filed,
+            frame=base.frame,
+            start_date=base.start_date,
+            accounting_standard=base.accounting_standard,
+            currency=currency,
+        )
 
     def _should_override(self, concept: str) -> bool:
         return concept in self.derived_overrides
@@ -1294,23 +1393,32 @@ class EODHDFactsNormalizer:
         self, indexed: FactIndex
     ) -> List[FactRecord]:
         existing = indexed.get("IntangibleAssetsNetExcludingGoodwill", {})
-        candidate_keys: set[FactKey] = set(existing.keys())
-        for concept in INTANGIBLE_EXCL_GOODWILL_FALLBACK:
-            candidate_keys.update(indexed.get(concept, {}).keys())
-        net_tangible = indexed.get("NetTangibleAssets", {})
-        assets = indexed.get("Assets", {})
-        liabilities = indexed.get("Liabilities", {})
-        goodwill = indexed.get("Goodwill", {})
-        candidate_keys.update(net_tangible.keys())
+        candidate_periods = self._candidate_period_keys(
+            indexed,
+            (
+                "IntangibleAssetsNetExcludingGoodwill",
+                *INTANGIBLE_EXCL_GOODWILL_FALLBACK,
+                "NetTangibleAssets",
+                "Assets",
+                "Liabilities",
+                "Goodwill",
+            ),
+        )
 
         derived: List[FactRecord] = []
         override = self._should_override("IntangibleAssetsNetExcludingGoodwill")
-        for key in candidate_keys:
-            if key in existing and not override:
+        for period_key in candidate_periods:
+            if (
+                any(
+                    self._period_key(record) == period_key
+                    for record in existing.values()
+                )
+                and not override
+            ):
                 continue
             base = None
             for concept in INTANGIBLE_EXCL_GOODWILL_FALLBACK:
-                base = indexed.get(concept, {}).get(key)
+                base = self._pick_period_record(indexed, concept, period_key)
                 if base and base.value is not None:
                     break
             if base is not None and base.value is not None:
@@ -1318,9 +1426,13 @@ class EODHDFactsNormalizer:
                     self._alias_record(base, "IntangibleAssetsNetExcludingGoodwill")
                 )
                 continue
-            net_tangible_rec = net_tangible.get(key)
-            assets_rec = assets.get(key)
-            liabilities_rec = liabilities.get(key)
+            net_tangible_rec = self._pick_period_record(
+                indexed, "NetTangibleAssets", period_key
+            )
+            assets_rec = self._pick_period_record(indexed, "Assets", period_key)
+            liabilities_rec = self._pick_period_record(
+                indexed, "Liabilities", period_key
+            )
             if (
                 net_tangible_rec
                 and assets_rec
@@ -1329,88 +1441,133 @@ class EODHDFactsNormalizer:
                 and assets_rec.value is not None
                 and liabilities_rec.value is not None
             ):
-                goodwill_rec = goodwill.get(key)
-                goodwill_value = (
-                    goodwill_rec.value
-                    if goodwill_rec and goodwill_rec.value is not None
-                    else 0.0
+                goodwill_rec = self._pick_period_record(indexed, "Goodwill", period_key)
+                target_currency = choose_target_currency(
+                    [
+                        assets_rec.currency,
+                        liabilities_rec.currency,
+                        net_tangible_rec.currency,
+                        goodwill_rec.currency if goodwill_rec else None,
+                    ]
                 )
-                equity_value = assets_rec.value - liabilities_rec.value
-                candidate = equity_value - net_tangible_rec.value - goodwill_value
+                assets_value = self._convert_record_value(
+                    assets_rec,
+                    target_currency,
+                    derived_concept="IntangibleAssetsNetExcludingGoodwill",
+                    symbol=net_tangible_rec.symbol,
+                )
+                liabilities_value = self._convert_record_value(
+                    liabilities_rec,
+                    target_currency,
+                    derived_concept="IntangibleAssetsNetExcludingGoodwill",
+                    symbol=net_tangible_rec.symbol,
+                )
+                net_tangible_value = self._convert_record_value(
+                    net_tangible_rec,
+                    target_currency,
+                    derived_concept="IntangibleAssetsNetExcludingGoodwill",
+                    symbol=net_tangible_rec.symbol,
+                )
+                goodwill_value = 0.0
+                if goodwill_rec and goodwill_rec.value is not None:
+                    converted_goodwill = self._convert_record_value(
+                        goodwill_rec,
+                        target_currency,
+                        derived_concept="IntangibleAssetsNetExcludingGoodwill",
+                        symbol=net_tangible_rec.symbol,
+                    )
+                    if converted_goodwill is None:
+                        continue
+                    goodwill_value = converted_goodwill
+                if (
+                    assets_value is None
+                    or liabilities_value is None
+                    or net_tangible_value is None
+                    or target_currency is None
+                ):
+                    continue
+                equity_value = assets_value - liabilities_value
+                candidate = equity_value - net_tangible_value - goodwill_value
                 if candidate >= 0:
                     derived.append(
-                        FactRecord(
-                            symbol=net_tangible_rec.symbol,
-                            cik=net_tangible_rec.cik,
+                        self._build_monetary_derived_record(
+                            net_tangible_rec,
                             concept="IntangibleAssetsNetExcludingGoodwill",
-                            fiscal_period=net_tangible_rec.fiscal_period,
-                            end_date=net_tangible_rec.end_date,
-                            unit=net_tangible_rec.unit,
                             value=candidate,
-                            accn=net_tangible_rec.accn,
-                            filed=net_tangible_rec.filed,
-                            frame=net_tangible_rec.frame,
-                            start_date=net_tangible_rec.start_date,
-                            accounting_standard=net_tangible_rec.accounting_standard,
-                            currency=net_tangible_rec.currency,
+                            currency=target_currency,
                         )
                     )
         return derived
 
     def _derive_equity_alias(self, indexed: FactIndex) -> List[FactRecord]:
         existing = indexed.get("StockholdersEquity", {})
-        candidate_keys: set[FactKey] = set(existing.keys())
-        assets = indexed.get("Assets", {})
-        liabilities = indexed.get("Liabilities", {})
-        candidate_keys.update(assets.keys())
-        candidate_keys.update(liabilities.keys())
-        for concept in EQUITY_FALLBACK_CONCEPTS:
-            candidate_keys.update(indexed.get(concept, {}).keys())
+        candidate_periods = self._candidate_period_keys(
+            indexed,
+            ("StockholdersEquity", "Assets", "Liabilities", *EQUITY_FALLBACK_CONCEPTS),
+        )
 
         derived: List[FactRecord] = []
         override = self._should_override("StockholdersEquity")
-        derived_keys = set() if override else set(existing.keys())
-        for key in candidate_keys:
-            if key in derived_keys:
+        derived_periods = (
+            set()
+            if override
+            else {self._period_key(record) for record in existing.values()}
+        )
+        for period_key in candidate_periods:
+            if period_key in derived_periods:
                 continue
-            assets_rec = assets.get(key)
-            liabilities_rec = liabilities.get(key)
+            assets_rec = self._pick_period_record(indexed, "Assets", period_key)
+            liabilities_rec = self._pick_period_record(
+                indexed, "Liabilities", period_key
+            )
             if (
                 assets_rec
                 and liabilities_rec
                 and assets_rec.value is not None
                 and liabilities_rec.value is not None
             ):
-                value = assets_rec.value - liabilities_rec.value
+                target_currency = choose_target_currency(
+                    [assets_rec.currency, liabilities_rec.currency]
+                )
+                assets_value = self._convert_record_value(
+                    assets_rec,
+                    target_currency,
+                    derived_concept="StockholdersEquity",
+                    symbol=assets_rec.symbol,
+                )
+                liabilities_value = self._convert_record_value(
+                    liabilities_rec,
+                    target_currency,
+                    derived_concept="StockholdersEquity",
+                    symbol=assets_rec.symbol,
+                )
+                if (
+                    assets_value is None
+                    or liabilities_value is None
+                    or target_currency is None
+                ):
+                    continue
+                value = assets_value - liabilities_value
                 if value >= 0:
                     derived.append(
-                        FactRecord(
-                            symbol=assets_rec.symbol,
-                            cik=assets_rec.cik,
+                        self._build_monetary_derived_record(
+                            assets_rec,
                             concept="StockholdersEquity",
-                            fiscal_period=assets_rec.fiscal_period,
-                            end_date=assets_rec.end_date,
-                            unit=assets_rec.unit,
                             value=value,
-                            accn=assets_rec.accn,
-                            filed=assets_rec.filed,
-                            frame=assets_rec.frame,
-                            start_date=assets_rec.start_date,
-                            accounting_standard=assets_rec.accounting_standard,
-                            currency=assets_rec.currency,
+                            currency=target_currency,
                         )
                     )
-                    derived_keys.add(key)
+                    derived_periods.add(period_key)
                     continue
             base = None
             for concept in EQUITY_FALLBACK_CONCEPTS:
-                base = indexed.get(concept, {}).get(key)
+                base = self._pick_period_record(indexed, concept, period_key)
                 if base and base.value is not None:
                     break
             if base is None or base.value is None:
                 continue
             derived.append(self._alias_record(base, "StockholdersEquity"))
-            derived_keys.add(key)
+            derived_periods.add(period_key)
         return derived
 
     def _derive_shares_alias(self, indexed: FactIndex) -> List[FactRecord]:
@@ -1524,46 +1681,76 @@ class EODHDFactsNormalizer:
         self, indexed: FactIndex
     ) -> List[FactRecord]:
         existing = indexed.get("NetIncomeLossAvailableToCommonStockholdersBasic", {})
-        candidate_keys: set[FactKey] = set(existing.keys())
-        for concept in INCOME_AVAILABLE_TO_COMMON_FALLBACK:
-            candidate_keys.update(indexed.get(concept, {}).keys())
+        candidate_periods = self._candidate_period_keys(
+            indexed,
+            (
+                "NetIncomeLossAvailableToCommonStockholdersBasic",
+                *INCOME_AVAILABLE_TO_COMMON_FALLBACK,
+                *PREFERRED_DIVIDEND_FALLBACK,
+            ),
+        )
 
         derived: List[FactRecord] = []
         override = self._should_override(
             "NetIncomeLossAvailableToCommonStockholdersBasic"
         )
-        for key in candidate_keys:
-            if key in existing and not override:
+        for period_key in candidate_periods:
+            if (
+                any(
+                    self._period_key(record) == period_key
+                    for record in existing.values()
+                )
+                and not override
+            ):
                 continue
             base = None
             for concept in INCOME_AVAILABLE_TO_COMMON_FALLBACK:
-                base = indexed.get(concept, {}).get(key)
+                base = self._pick_period_record(indexed, concept, period_key)
                 if base and base.value is not None:
                     break
             if base is None or base.value is None:
                 continue
-            preferred_value = None
+            preferred_value = 0.0
+            preferred_currency = None
             for concept in PREFERRED_DIVIDEND_FALLBACK:
-                pref = indexed.get(concept, {}).get(key)
+                pref = self._pick_period_record(indexed, concept, period_key)
                 if pref and pref.value is not None:
                     preferred_value = pref.value
+                    preferred_currency = pref.currency
                     break
-            adjusted = base.value - (preferred_value or 0.0)
-            derived.append(
-                FactRecord(
+            target_currency = choose_target_currency(
+                [base.currency, preferred_currency]
+            )
+            base_value = self._convert_record_value(
+                base,
+                target_currency,
+                derived_concept="NetIncomeLossAvailableToCommonStockholdersBasic",
+                symbol=base.symbol,
+            )
+            if base_value is None or target_currency is None:
+                continue
+            adjusted = base_value
+            if preferred_currency is not None:
+                converted_preferred = convert_money_value(
+                    amount=preferred_value,
+                    source_currency=preferred_currency,
+                    target_currency=target_currency,
+                    as_of=base.end_date,
+                    fx_service=self.fx_service,
+                    logger=LOGGER,
+                    operation="eodhd:NetIncomeLossAvailableToCommonStockholdersBasic",
                     symbol=base.symbol,
-                    cik=base.cik,
+                    field_name="PreferredStockDividendsAndOtherAdjustments",
+                )
+                if converted_preferred is None:
+                    continue
+                adjusted -= converted_preferred
+            derived.append(
+                self._build_monetary_derived_record(
+                    base,
                     concept="NetIncomeLossAvailableToCommonStockholdersBasic",
-                    fiscal_period=base.fiscal_period,
-                    end_date=base.end_date,
-                    unit=base.unit,
                     value=adjusted,
-                    accn=base.accn,
-                    filed=base.filed,
-                    frame=base.frame,
-                    start_date=base.start_date,
-                    accounting_standard=base.accounting_standard,
-                    currency=base.currency,
+                    currency=target_currency,
                 )
             )
         return derived
@@ -1573,41 +1760,61 @@ class EODHDFactsNormalizer:
     ) -> List[FactRecord]:
         existing = indexed.get("CommonStockholdersEquity", {})
         stockholders_equity = indexed.get("StockholdersEquity", {})
-        noncontrolling = indexed.get("NoncontrollingInterestInConsolidatedEntity", {})
 
         derived: List[FactRecord] = []
         override = self._should_override("CommonStockholdersEquity")
-        for key, base in stockholders_equity.items():
-            if key in existing and not override:
+        existing_periods = {self._period_key(record) for record in existing.values()}
+        for base in stockholders_equity.values():
+            period_key = self._period_key(base)
+            if period_key in existing_periods and not override:
                 continue
             if base.value is None:
                 continue
-            preferred = indexed.get("PreferredStock", {}).get(key)
-            preferred_value = (
-                preferred.value if preferred and preferred.value is not None else 0.0
+            preferred = self._pick_period_record(indexed, "PreferredStock", period_key)
+            noncontrolling_rec = self._pick_period_record(
+                indexed,
+                "NoncontrollingInterestInConsolidatedEntity",
+                period_key,
             )
-            noncontrolling_rec = noncontrolling.get(key)
-            noncontrolling_value = (
-                noncontrolling_rec.value
-                if noncontrolling_rec and noncontrolling_rec.value is not None
-                else 0.0
+            target_currency = choose_target_currency(
+                [
+                    base.currency,
+                    preferred.currency if preferred else None,
+                    noncontrolling_rec.currency if noncontrolling_rec else None,
+                ]
             )
-            adjusted = base.value - preferred_value - noncontrolling_value
-            derived.append(
-                FactRecord(
+            base_value = self._convert_record_value(
+                base,
+                target_currency,
+                derived_concept="CommonStockholdersEquity",
+                symbol=base.symbol,
+            )
+            if base_value is None or target_currency is None:
+                continue
+            adjusted: Optional[float] = base_value
+            for optional_record in (preferred, noncontrolling_rec):
+                if optional_record is None or optional_record.value is None:
+                    continue
+                converted = self._convert_record_value(
+                    optional_record,
+                    target_currency,
+                    derived_concept="CommonStockholdersEquity",
                     symbol=base.symbol,
-                    cik=base.cik,
+                )
+                if converted is None:
+                    adjusted = None
+                    break
+                if adjusted is None:
+                    break
+                adjusted -= converted
+            if adjusted is None:
+                continue
+            derived.append(
+                self._build_monetary_derived_record(
+                    base,
                     concept="CommonStockholdersEquity",
-                    fiscal_period=base.fiscal_period,
-                    end_date=base.end_date,
-                    unit=base.unit,
                     value=adjusted,
-                    accn=base.accn,
-                    filed=base.filed,
-                    frame=base.frame,
-                    start_date=base.start_date,
-                    accounting_standard=base.accounting_standard,
-                    currency=base.currency,
+                    currency=target_currency,
                 )
             )
         return derived
@@ -1717,9 +1924,14 @@ class EODHDFactsNormalizer:
     ) -> tuple[Optional[float], Optional[str]]:
         """Normalize GBX/GBP0.01 to GBP and scale values accordingly."""
 
-        if currency in {"GBX", "GBP0.01"}:
-            return (value / 100.0) if value is not None else None, "GBP"
-        return value, currency
+        normalized_value, normalized_currency = normalize_monetary_amount(
+            value,
+            currency,
+        )
+        return (
+            float(normalized_value) if normalized_value is not None else None,
+            normalized_currency,
+        )
 
     def _normalize_statement_currency(
         self, statement_payload: Dict, default: Optional[str]

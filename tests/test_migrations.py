@@ -165,10 +165,36 @@ def test_migration_adds_sector_and_industry_to_securities(tmp_path):
 
     applied = apply_migrations(db_path)
 
-    assert applied == 1
+    assert applied == 3
     with sqlite3.connect(db_path) as conn:
         info = conn.execute("PRAGMA table_info(securities)").fetchall()
         columns = {row[1] for row in info}
+        metrics_info = conn.execute("PRAGMA table_info(metrics)").fetchall()
+        metric_columns = {row[1] for row in metrics_info}
+        fx_info = conn.execute("PRAGMA table_info(fx_rates)").fetchall()
+        fx_columns = {row[1] for row in fx_info}
+        fx_indexes = conn.execute("PRAGMA index_list(fx_rates)").fetchall()
+        fx_index_names = {row[1] for row in fx_indexes}
+        supported_ticker_indexes = conn.execute(
+            "PRAGMA index_list(supported_tickers)"
+        ).fetchall()
+        supported_ticker_index_names = {row[1] for row in supported_ticker_indexes}
+        financial_fact_indexes = conn.execute(
+            "PRAGMA index_list(financial_facts)"
+        ).fetchall()
+        financial_fact_index_names = {row[1] for row in financial_fact_indexes}
+        market_data_indexes = conn.execute("PRAGMA index_list(market_data)").fetchall()
+        market_data_index_names = {row[1] for row in market_data_indexes}
+        tables = {
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'table'
+                """
+            ).fetchall()
+        }
         row = conn.execute(
             """
             SELECT entity_name, description, sector, industry
@@ -179,6 +205,27 @@ def test_migration_adds_sector_and_industry_to_securities(tmp_path):
 
     assert "sector" in columns
     assert "industry" in columns
+    if metric_columns:
+        assert {"unit_kind", "currency", "unit_label"} <= metric_columns
+    assert fx_columns == {
+        "provider",
+        "rate_date",
+        "base_currency",
+        "quote_currency",
+        "rate_text",
+        "fetched_at",
+        "source_kind",
+        "meta_json",
+        "created_at",
+        "updated_at",
+    }
+    assert "idx_fx_rates_pair_date" in fx_index_names
+    if "supported_tickers" in tables:
+        assert "idx_supported_tickers_currency_nonnull" in supported_ticker_index_names
+    if "financial_facts" in tables:
+        assert "idx_fin_facts_currency_nonnull" in financial_fact_index_names
+    if "market_data" in tables:
+        assert "idx_market_data_currency_nonnull" in market_data_index_names
     assert row == ("AAA Corp", "AAA description", None, None)
 
 
@@ -266,7 +313,7 @@ def test_migration_does_not_overwrite_existing_supported_tickers(tmp_path):
 
     applied = apply_migrations(db_path)
 
-    assert applied == 5
+    assert applied == 7
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
             """
@@ -278,6 +325,15 @@ def test_migration_does_not_overwrite_existing_supported_tickers(tmp_path):
         listings_exists = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='listings'"
         ).fetchone()
+        fx_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='fx_rates'"
+        ).fetchone()
+        supported_ticker_indexes = conn.execute(
+            "PRAGMA index_list(supported_tickers)"
+        ).fetchall()
+        supported_ticker_index_names = {index[1] for index in supported_ticker_indexes}
 
     assert row == ("Preserved Name", "ETF")
     assert listings_exists is None
+    assert fx_exists == ("fx_rates",)
+    assert "idx_supported_tickers_currency_nonnull" in supported_ticker_index_names

@@ -12,7 +12,7 @@ import logging
 
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import is_recent_fact
-from pyvalue.fx import FXRateStore
+from pyvalue.money import fx_converter_for_context
 from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
 
 OPERATING_CASH_FLOW_CONCEPTS = ["NetCashProvidedByUsedInOperatingActivities"]
@@ -56,7 +56,7 @@ class PriceToFCFMetric:
         market_cap = snapshot.market_cap
         snapshot_currency = getattr(snapshot, "currency", None)
         if fcf_result.currency and snapshot_currency:
-            converted = FXRateStore().convert(
+            converted = fx_converter_for_context(repo)(
                 market_cap, snapshot_currency, fcf_result.currency, snapshot.as_of
             )
             if converted is None:

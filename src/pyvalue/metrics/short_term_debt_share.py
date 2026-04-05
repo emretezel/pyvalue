@@ -10,8 +10,10 @@ from typing import Optional
 
 import logging
 
+from pyvalue.fx import FXService
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import is_recent_fact
+from pyvalue.money import align_money_values, fx_service_for_context
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -37,6 +39,7 @@ class ShortTermDebtShareMetric:
     def compute(
         self, symbol: str, repo: FinancialFactsRepository
     ) -> Optional[MetricResult]:
+        fx_service = fx_service_for_context(repo)
         short_record = self._latest_recent_fact(repo, symbol, "ShortTermDebt")
         if short_record is None:
             LOGGER.warning(
@@ -52,7 +55,10 @@ class ShortTermDebtShareMetric:
         )
 
         total_debt = self._compute_total_debt(
-            symbol=symbol, repo=repo, short_debt=short_debt
+            symbol=symbol,
+            repo=repo,
+            short_debt=short_debt,
+            fx_service=fx_service,
         )
         if total_debt is None:
             LOGGER.warning(
@@ -66,13 +72,39 @@ class ShortTermDebtShareMetric:
             )
             return None
 
-        ratio = short_debt.value / total_debt.value
+        aligned, _ = align_money_values(
+            values=[
+                (
+                    short_debt.value,
+                    short_debt.currency,
+                    short_debt.as_of,
+                    "ShortTermDebt",
+                ),
+                (total_debt.value, total_debt.currency, total_debt.as_of, "TotalDebt"),
+            ],
+            fx_service=fx_service,
+            logger=LOGGER,
+            operation="metric:short_term_debt_share",
+            symbol=symbol,
+            target_currency=short_debt.currency or total_debt.currency,
+        )
+        if aligned is None:
+            LOGGER.warning("short_term_debt_share: currency mismatch for %s", symbol)
+            return None
+
+        ratio = aligned[0] / aligned[1]
         if ratio < 0 or ratio > 1:
             LOGGER.warning("short_term_debt_share: ratio out of bounds for %s", symbol)
             return None
 
         as_of = max(short_debt.as_of, total_debt.as_of)
-        return MetricResult(symbol=symbol, metric_id=self.id, value=ratio, as_of=as_of)
+        return MetricResult(
+            symbol=symbol,
+            metric_id=self.id,
+            value=ratio,
+            as_of=as_of,
+            unit_kind="percent",
+        )
 
     def _compute_total_debt(
         self,
@@ -80,15 +112,32 @@ class ShortTermDebtShareMetric:
         symbol: str,
         repo: FinancialFactsRepository,
         short_debt: _DebtAmount,
+        fx_service: FXService,
     ) -> Optional[_DebtAmount]:
         long_record = self._latest_recent_fact(repo, symbol, "LongTermDebt")
         if long_record is not None:
             long_value, long_currency = self._normalize_currency(long_record)
-            if self._currencies_match(short_debt.currency, long_currency):
+            aligned, currency = align_money_values(
+                values=[
+                    (
+                        short_debt.value,
+                        short_debt.currency,
+                        short_debt.as_of,
+                        "ShortTermDebt",
+                    ),
+                    (long_value, long_currency, long_record.end_date, "LongTermDebt"),
+                ],
+                fx_service=fx_service,
+                logger=LOGGER,
+                operation="metric:short_term_debt_share:debt_components",
+                symbol=symbol,
+                target_currency=short_debt.currency or long_currency,
+            )
+            if aligned is not None and currency is not None:
                 return _DebtAmount(
-                    value=short_debt.value + long_value,
+                    value=aligned[0] + aligned[1],
                     as_of=max(short_debt.as_of, long_record.end_date),
-                    currency=short_debt.currency or long_currency,
+                    currency=currency,
                 )
 
         total_record = self._latest_recent_fact(
@@ -97,21 +146,17 @@ class ShortTermDebtShareMetric:
         if total_record is None:
             return None
         total_value, total_currency = self._normalize_currency(total_record)
-        if not self._currencies_match(short_debt.currency, total_currency):
-            return None
         return _DebtAmount(
             value=total_value,
             as_of=total_record.end_date,
-            currency=short_debt.currency or total_currency,
+            currency=total_currency,
         )
 
     def _latest_recent_fact(
         self, repo: FinancialFactsRepository, symbol: str, concept: str
     ) -> Optional[FactRecord]:
         record = repo.latest_fact(symbol, concept)
-        if record is None:
-            return None
-        if not is_recent_fact(record):
+        if record is None or not is_recent_fact(record):
             return None
         return record
 
@@ -121,11 +166,6 @@ class ShortTermDebtShareMetric:
         if code in {"GBX", "GBP0.01"}:
             return value / 100.0, "GBP"
         return value, code
-
-    def _currencies_match(self, left: Optional[str], right: Optional[str]) -> bool:
-        if left and right:
-            return left == right
-        return True
 
 
 __all__ = ["ShortTermDebtShareMetric"]

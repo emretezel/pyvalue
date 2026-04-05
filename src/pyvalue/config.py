@@ -60,6 +60,30 @@ class Config:
     def sec_user_agent(self) -> Optional[str]:
         return self._get_value("sec", "user_agent")
 
+    @property
+    def fx_provider(self) -> str:
+        return (self._get_value("fx", "provider") or "FRANKFURTER").strip().upper()
+
+    @property
+    def fx_pivot_currency(self) -> str:
+        return (self._get_value("fx", "pivot_currency") or "USD").strip().upper()
+
+    @property
+    def fx_secondary_pivot_currency(self) -> Optional[str]:
+        value = self._get_value("fx", "secondary_pivot_currency")
+        if value is None:
+            return "EUR"
+        cleaned = value.strip().upper()
+        return cleaned or None
+
+    @property
+    def fx_lazy_fetch(self) -> bool:
+        return self._get_bool_value("fx", "lazy_fetch", default=True)
+
+    @property
+    def fx_stale_warning_days(self) -> int:
+        return self._get_int_value("fx", "stale_warning_days", default=7)
+
     def _get_value(self, section: str, option: str) -> Optional[str]:
         value = self._parser.get(section, option, fallback=None)
         if value is None:
@@ -79,6 +103,17 @@ class Config:
             return int(value)
         except ValueError:
             return default
+
+    def _get_bool_value(self, section: str, option: str, default: bool) -> bool:
+        value = self._get_value(section, option)
+        if value is None:
+            return default
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+        return default
 
 
 __all__ = ["Config"]

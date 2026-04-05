@@ -3673,7 +3673,8 @@ def test_compute_metrics_for_symbol_matches_real_metrics(tmp_path):
 
     assert computed.computed_count == 3
     assert {
-        metric_id: (value, as_of) for _, metric_id, value, as_of in computed.rows
+        metric_id: (value, as_of)
+        for _, metric_id, value, as_of, _, _, _ in computed.rows
     } == expected
 
 
@@ -5222,6 +5223,55 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_reports_freshness_scan(
     assert "already up to date" in output_lines[-1]
 
 
+def test_cmd_normalize_eodhd_fundamentals_bulk_force_skips_freshness_scan(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "normalize-eodhd-force.db"
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    for symbol in ("AAA.US", "BBB.US"):
+        fund_repo.upsert(
+            "EODHD",
+            symbol,
+            {"General": {"Name": symbol}, "Financials": {}},
+            exchange="US",
+        )
+
+    def fail_plan(**kwargs):
+        raise AssertionError("freshness planning should be skipped for --force")
+
+    class FakeNormalizer:
+        def normalize(self, payload, symbol, accounting_standard=None):
+            return [
+                make_fact(
+                    symbol=symbol,
+                    concept="Dummy",
+                    end_date="2023-12-31",
+                    value=1.0,
+                )
+            ]
+
+    monkeypatch.setattr(cli, "_plan_normalization_selection", fail_plan)
+    monkeypatch.setattr(cli, "EODHDFactsNormalizer", lambda: FakeNormalizer())
+    monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 1)
+
+    rc = cli.cmd_normalize_eodhd_fundamentals_bulk(
+        database=str(db_path),
+        symbols=["AAA.US", "BBB.US"],
+        force=True,
+    )
+
+    assert rc == 0
+    output_lines = capsys.readouterr().out.splitlines()
+    assert (
+        output_lines[0]
+        == "Force re-normalization requested for 2 EODHD symbols; skipping freshness scan"
+    )
+    state_repo = FundamentalsNormalizationStateRepository(db_path)
+    assert state_repo.fetch("EODHD", "AAA.US") is not None
+    assert state_repo.fetch("EODHD", "BBB.US") is not None
+
+
 def test_cmd_normalize_eodhd_fundamentals_bulk_continues_after_symbol_failure_with_inline_executor(
     monkeypatch, tmp_path, capsys
 ):
@@ -5443,6 +5493,50 @@ def test_cmd_normalize_sec_facts_bulk_with_inline_executor(monkeypatch, tmp_path
         ("AAA.US", 6.0),
         ("BBB.US", 6.0),
     ]
+
+
+def test_cmd_normalize_us_facts_bulk_force_skips_freshness_scan(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "normalize-sec-force.db"
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    for symbol in ("AAA.US", "BBB.US"):
+        fund_repo.upsert("SEC", symbol, {"entityName": symbol, "facts": {}})
+
+    def fail_plan(**kwargs):
+        raise AssertionError("freshness planning should be skipped for --force")
+
+    class FakeNormalizer:
+        def normalize(self, payload, symbol, cik=None):
+            return [
+                make_fact(
+                    symbol=symbol,
+                    concept="NetIncomeLoss",
+                    end_date="2023-12-31",
+                    value=1.0,
+                )
+            ]
+
+    monkeypatch.setattr(cli, "_plan_normalization_selection", fail_plan)
+    monkeypatch.setattr(cli, "SECFactsNormalizer", lambda: FakeNormalizer())
+    monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 1)
+
+    rc = cli.cmd_normalize_us_facts_bulk(
+        database=str(db_path),
+        symbols=["AAA.US", "BBB.US"],
+        force=True,
+    )
+
+    assert rc == 0
+    output_lines = capsys.readouterr().out.splitlines()
+    assert (
+        output_lines[0]
+        == "Force re-normalization requested for 2 SEC symbols; skipping freshness scan"
+    )
+    state_repo = FundamentalsNormalizationStateRepository(db_path)
+    assert state_repo.fetch("SEC", "AAA.US") is not None
+    assert state_repo.fetch("SEC", "BBB.US") is not None
 
 
 def test_cmd_normalize_eodhd_fundamentals_bulk_process_pool_smoke(

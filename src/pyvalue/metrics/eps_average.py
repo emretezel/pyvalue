@@ -16,6 +16,7 @@ from pyvalue.metrics.utils import (
     filter_unique_fy,
     has_recent_fact,
 )
+from pyvalue.money import fx_service_for_context
 from pyvalue.storage import FinancialFactsRepository
 
 EPS_CONCEPTS = ["EarningsPerShare"]
@@ -48,9 +49,43 @@ class EPSAverageSixYearMetric:
             LOGGER.warning("eps_6y_avg: no recent FY EPS fact for %s", symbol)
             return None
         latest_records = history[:6]
-        avg = sum(record.value for record in latest_records) / 6
+        target_currency = latest_records[0].currency
+        if target_currency is None:
+            LOGGER.warning("eps_6y_avg: missing EPS currency for %s", symbol)
+            return None
+        fx_service = fx_service_for_context(repo)
+        total = 0.0
+        for record in latest_records:
+            if record.currency is None:
+                LOGGER.warning("eps_6y_avg: missing EPS currency for %s", symbol)
+                return None
+            if record.currency == target_currency:
+                total += record.value
+                continue
+            converted = fx_service.convert_amount(
+                record.value,
+                record.currency,
+                target_currency,
+                record.end_date,
+            )
+            if converted is None:
+                LOGGER.warning(
+                    "eps_6y_avg: FX conversion failed for %s (%s -> %s)",
+                    symbol,
+                    record.currency,
+                    target_currency,
+                )
+                return None
+            total += float(converted)
+        avg = total / 6
         as_of = latest_records[0].end_date
-        return MetricResult(symbol=symbol, metric_id=self.id, value=avg, as_of=as_of)
+        return MetricResult.per_share(
+            symbol=symbol,
+            metric_id=self.id,
+            value=avg,
+            as_of=as_of,
+            currency=target_currency,
+        )
 
     def _fetch_history(self, symbol: str, repo: FinancialFactsRepository):
         for concept in EPS_CONCEPTS:

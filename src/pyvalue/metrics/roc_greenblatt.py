@@ -12,6 +12,7 @@ import logging
 
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import MAX_FY_FACT_AGE_DAYS, has_recent_fact, is_recent_fact
+from pyvalue.money import fx_service_for_context
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 EBIT_CONCEPTS = ["OperatingIncomeLoss"]
@@ -106,12 +107,58 @@ class ROCGreenblattMetric:
         assets_by_period = self._index_by_period(assets_records)
         liabilities_by_period = self._index_by_period(liabilities_records)
         combined: List[FactRecord] = []
+        fx_service = fx_service_for_context(repo)
         for ppe in ppe_records:
             assets = assets_by_period.get((ppe.end_date, ppe.fiscal_period))
             liabilities = liabilities_by_period.get((ppe.end_date, ppe.fiscal_period))
             if assets is None or liabilities is None:
                 continue
-            value = (ppe.value or 0) + (assets.value or 0) - (liabilities.value or 0)
+            if (
+                ppe.currency is None
+                or assets.currency is None
+                or liabilities.currency is None
+            ):
+                LOGGER.warning(
+                    "roc_greenblatt: missing currency in tangible capital inputs for %s on %s",
+                    symbol,
+                    ppe.end_date,
+                )
+                continue
+            assets_value = assets.value or 0
+            liabilities_value = liabilities.value or 0
+            if assets.currency != ppe.currency:
+                converted_assets = fx_service.convert_amount(
+                    assets_value,
+                    assets.currency,
+                    ppe.currency,
+                    assets.end_date,
+                )
+                if converted_assets is None:
+                    LOGGER.warning(
+                        "roc_greenblatt: FX conversion failed for %s (%s -> %s)",
+                        symbol,
+                        assets.currency,
+                        ppe.currency,
+                    )
+                    continue
+                assets_value = float(converted_assets)
+            if liabilities.currency != ppe.currency:
+                converted_liabilities = fx_service.convert_amount(
+                    liabilities_value,
+                    liabilities.currency,
+                    ppe.currency,
+                    liabilities.end_date,
+                )
+                if converted_liabilities is None:
+                    LOGGER.warning(
+                        "roc_greenblatt: FX conversion failed for %s (%s -> %s)",
+                        symbol,
+                        liabilities.currency,
+                        ppe.currency,
+                    )
+                    continue
+                liabilities_value = float(converted_liabilities)
+            value = (ppe.value or 0) + assets_value - liabilities_value
             combined.append(
                 FactRecord(
                     symbol=ppe.symbol,
@@ -125,6 +172,8 @@ class ROCGreenblattMetric:
                     filed=ppe.filed,
                     frame=ppe.frame,
                     start_date=ppe.start_date,
+                    accounting_standard=ppe.accounting_standard,
+                    currency=ppe.currency,
                 )
             )
         return combined

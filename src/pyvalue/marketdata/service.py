@@ -10,6 +10,11 @@ from pathlib import Path
 from typing import Optional, Union
 
 from pyvalue.config import Config
+from pyvalue.currency import (
+    is_gbx_subunit_currency,
+    normalize_currency_code,
+    normalize_monetary_amount,
+)
 from pyvalue.marketdata import (
     EODHDProvider,
     MarketDataProvider,
@@ -111,19 +116,21 @@ class MarketDataService:
             market_cap=data.market_cap,
             currency=data.currency,
         )
-        effective_currency = (
+        raw_effective_currency = (
             prepared.currency
             or currency_hint
             or self.supported_ticker_repo.fetch_currency(normalized_symbol)
         )
+        effective_currency = normalize_currency_code(raw_effective_currency)
         price = prepared.price
-        if (
-            effective_currency
-            and effective_currency.upper() in {"GBX", "GBP0.01"}
-            and price is not None
-        ):
-            price = price / 100.0
-            effective_currency = "GBP"
+        if is_gbx_subunit_currency(raw_effective_currency) and price is not None:
+            normalized_price, normalized_currency = normalize_monetary_amount(
+                price,
+                raw_effective_currency,
+            )
+            if normalized_price is not None:
+                price = float(normalized_price)
+            effective_currency = normalized_currency
         market_cap = prepared.market_cap
         if market_cap is None and price is not None:
             shares = latest_share_count(normalized_symbol, self.facts_repo)
