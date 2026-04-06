@@ -1,4 +1,6 @@
+from pyvalue.fx import FXService
 from pyvalue.normalization.eodhd import EODHDFactsNormalizer
+from pyvalue.storage import FXRateRecord, FXRatesRepository
 
 
 def test_eodhd_normalizes_ppe_net():
@@ -923,3 +925,280 @@ def test_eodhd_normalizes_eps_for_configured_subunit_family():
         "2024-06-30": 3.0,
     }
     assert {record.currency for record in eps_records} == {"ZAR"}
+
+
+# ---------------------------------------------------------------------------
+# target_currency conversion
+# ---------------------------------------------------------------------------
+
+
+class _DummyFXProvider:
+    provider_name = "FRANKFURTER"
+
+    def fetch_rates(self, **kwargs):
+        return []
+
+
+def _fx_service_with_rates(tmp_path, *records):
+    db_path = tmp_path / "fx.db"
+    repo = FXRatesRepository(db_path)
+    repo.initialize_schema()
+    repo.upsert_many(list(records))
+    service = FXService(db_path, repository=repo, provider=_DummyFXProvider())
+    service.lazy_fetch = False
+    return service
+
+
+def test_eodhd_normalize_target_currency_identity():
+    """When all facts are already in the target currency, values stay unchanged."""
+
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Balance_Sheet": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "totalAssets": 1000.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US", target_currency="USD")
+    assets = [r for r in records if r.concept == "Assets"]
+    assert assets
+    assert assets[0].value == 1000.0
+    assert assets[0].currency == "USD"
+
+
+def test_eodhd_normalize_converts_monetary_facts_to_target_currency(tmp_path):
+    """EUR-denominated facts are converted to USD using the FX rate."""
+
+    fx = _fx_service_with_rates(
+        tmp_path,
+        FXRateRecord(
+            provider="FRANKFURTER",
+            rate_date="2024-12-31",
+            base_currency="EUR",
+            quote_currency="USD",
+            rate_text="1.1",
+            fetched_at="2024-12-31",
+            source_kind="provider",
+        ),
+    )
+    normalizer = EODHDFactsNormalizer(fx_service=fx)
+    payload = {
+        "Financials": {
+            "Balance_Sheet": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "totalAssets": 1000.0,
+                        "currency_symbol": "EUR",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "EUR"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.EU", target_currency="USD")
+    assets = [r for r in records if r.concept == "Assets"]
+    assert assets
+    assert assets[0].currency == "USD"
+    assert assets[0].unit == "USD"
+    assert abs(assets[0].value - 1100.0) < 0.01
+
+
+def test_eodhd_normalize_shares_not_converted_to_target_currency(tmp_path):
+    """Share count facts pass through unchanged regardless of target_currency."""
+
+    fx = _fx_service_with_rates(
+        tmp_path,
+        FXRateRecord(
+            provider="FRANKFURTER",
+            rate_date="2024-12-31",
+            base_currency="EUR",
+            quote_currency="USD",
+            rate_text="1.1",
+            fetched_at="2024-12-31",
+            source_kind="provider",
+        ),
+    )
+    normalizer = EODHDFactsNormalizer(fx_service=fx)
+    payload = {
+        "SharesStats": {"SharesOutstanding": 5000000},
+        "General": {"CurrencyCode": "EUR", "LatestQuarter": "2024-12-31"},
+        "Financials": {},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.EU", target_currency="USD")
+    shares = [r for r in records if r.concept == "CommonStockSharesOutstanding"]
+    assert shares
+    assert shares[0].currency is None
+    assert shares[0].value == 5000000
+
+
+def test_eodhd_normalize_no_target_currency_preserves_source():
+    """When target_currency is None, facts retain their source currency."""
+
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Balance_Sheet": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "totalAssets": 1000.0,
+                        "currency_symbol": "EUR",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "EUR"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.EU", target_currency=None)
+    assets = [r for r in records if r.concept == "Assets"]
+    assert assets
+    assert assets[0].currency == "EUR"
+    assert assets[0].value == 1000.0
+
+
+def test_eodhd_normalize_missing_fx_rate_drops_fact_without_crash(tmp_path):
+    """Facts that cannot be converted are dropped, not crashed."""
+
+    # No FX rates in the service -- conversion will fail gracefully.
+    fx = _fx_service_with_rates(tmp_path)
+    normalizer = EODHDFactsNormalizer(fx_service=fx)
+    payload = {
+        "Financials": {
+            "Balance_Sheet": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "totalAssets": 1000.0,
+                        "currency_symbol": "EUR",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "EUR"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.EU", target_currency="USD")
+    assets = [r for r in records if r.concept == "Assets"]
+    assert not assets, "Fact should be dropped when FX rate is missing"
+
+
+def test_eodhd_normalize_gbx_subunit_with_gbp_target_no_double_conversion():
+    """GBX currency code is normalized to GBP; values pass through without division.
+
+    EODHD reports statement-level monetary values in the main currency even when
+    currency_symbol is GBX, so the amount is NOT divided by 100.  The identity
+    check in _convert_facts_to_target_currency confirms the fact is already in
+    GBP and returns it unchanged.
+    """
+
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Balance_Sheet": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "totalAssets": 10000.0,
+                        "currency_symbol": "GBX",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "GBX"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.LSE", target_currency="GBP")
+    assets = [r for r in records if r.concept == "Assets"]
+    assert assets
+    # GBX code normalized to GBP; value NOT divided (statement amounts are main-unit)
+    assert assets[0].currency == "GBP"
+    assert assets[0].value == 10000.0
+
+
+def test_eodhd_normalize_mixed_currencies_aligned_to_target(tmp_path):
+    """Facts with different source currencies are all aligned to the target."""
+
+    fx = _fx_service_with_rates(
+        tmp_path,
+        FXRateRecord(
+            provider="FRANKFURTER",
+            rate_date="2024-12-31",
+            base_currency="EUR",
+            quote_currency="USD",
+            rate_text="1.1",
+            fetched_at="2024-12-31",
+            source_kind="provider",
+        ),
+    )
+    normalizer = EODHDFactsNormalizer(fx_service=fx)
+    payload = {
+        "Financials": {
+            "Balance_Sheet": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "totalAssets": 1000.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            },
+            "Income_Statement": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "totalRevenue": 500.0,
+                        "currency_symbol": "EUR",
+                    }
+                ]
+            },
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US", target_currency="USD")
+    assets = [r for r in records if r.concept == "Assets"]
+    revenue = [r for r in records if r.concept == "Revenues"]
+    assert assets and assets[0].currency == "USD"
+    assert assets[0].value == 1000.0  # Already in USD, no conversion
+    assert revenue and revenue[0].currency == "USD"
+    assert abs(revenue[0].value - 550.0) < 0.01  # 500 EUR * 1.1
+
+
+def test_eodhd_normalize_no_fx_service_returns_unconverted():
+    """When no FX service is available, facts pass through in source currency."""
+
+    normalizer = EODHDFactsNormalizer(fx_service=None)
+    payload = {
+        "Financials": {
+            "Balance_Sheet": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "totalAssets": 1000.0,
+                        "currency_symbol": "EUR",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "EUR"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.EU", target_currency="USD")
+    assets = [r for r in records if r.concept == "Assets"]
+    # No FX service -> conversion step returns records unchanged
+    assert assets
+    assert assets[0].currency == "EUR"
+    assert assets[0].value == 1000.0

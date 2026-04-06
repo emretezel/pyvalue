@@ -97,6 +97,32 @@ def _instantiate_with_optional_fx_service(factory, database: str | Path):
     return factory()
 
 
+def _resolve_ticker_target_currency(
+    database: Union[str, Path],
+    symbol: str,
+    payload: Optional[Dict[str, object]] = None,
+) -> Optional[str]:
+    """Resolve the canonical trading currency for a ticker.
+
+    Primary: supported_tickers.currency normalized through subunit
+    canonicalization.  Fallback: payload General.CurrencyCode normalized
+    through subunit canonicalization.
+    """
+
+    from pyvalue.currency import canonical_trading_currency
+
+    ticker_repo = SupportedTickerRepository(database)
+    observed = ticker_repo.fetch_currency(symbol)
+    canonical = canonical_trading_currency(observed)
+    if canonical is not None:
+        return canonical
+    if payload is not None:
+        general = payload.get("General")
+        if isinstance(general, Mapping):
+            return canonical_trading_currency(general.get("CurrencyCode"))
+    return None
+
+
 def _batch_values(values: Sequence[str], size: int) -> List[List[str]]:
     """Split ``values`` into stable ordered batches."""
 
@@ -4271,10 +4297,13 @@ def _normalize_eodhd_symbol_worker(
     if payload_record is None:
         return None
     payload, raw_fetched_at = payload_record
+    target_currency = _resolve_ticker_target_currency(database, symbol, payload)
     normalizer = _instantiate_with_optional_fx_service(EODHDFactsNormalizer, database)
     rows = tuple(
         _normalization_record_to_row(record)
-        for record in normalizer.normalize(payload, symbol=symbol)
+        for record in normalizer.normalize(
+            payload, symbol=symbol, target_currency=target_currency
+        )
     )
     return _NormalizedFactsResult(
         symbol=symbol,
@@ -4496,8 +4525,11 @@ def cmd_normalize_eodhd_fundamentals(
 
     payload, raw_fetched_at = payload_record
 
+    target_currency = _resolve_ticker_target_currency(database, symbol_upper, payload)
     normalizer = _instantiate_with_optional_fx_service(EODHDFactsNormalizer, database)
-    records = normalizer.normalize(payload, symbol=symbol_upper)
+    records = normalizer.normalize(
+        payload, symbol=symbol_upper, target_currency=target_currency
+    )
 
     fact_repo = FinancialFactsRepository(database)
     fact_repo.initialize_schema()

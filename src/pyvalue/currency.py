@@ -197,6 +197,16 @@ def normalize_monetary_amount(
     return decimal_value, normalized_currency
 
 
+def canonical_trading_currency(observed_currency: object) -> Optional[str]:
+    """Derive the canonical trading currency from an observed currency code.
+
+    Subunit codes (GBX, ZAC, ILA) are collapsed to their base currency.
+    Normal ISO codes pass through unchanged.
+    """
+
+    return normalize_currency_code(observed_currency)
+
+
 def is_monetary_unit_kind(unit_kind: Optional[str]) -> bool:
     """Return True when ``unit_kind`` represents a currency-bearing value."""
 
@@ -293,6 +303,7 @@ def merge_currency_codes(codes: Sequence[Optional[str]]) -> Optional[str]:
 __all__ = [
     "CurrencyResolution",
     "CurrencySubunit",
+    "canonical_trading_currency",
     "GBX_SUBUNIT_CODES",
     "GBX_TO_GBP_RATIO",
     "MONETARY_UNIT_KINDS",

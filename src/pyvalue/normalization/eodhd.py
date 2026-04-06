@@ -204,6 +204,7 @@ class EODHDFactsNormalizer:
         payload: Dict,
         symbol: str,
         accounting_standard: Optional[str] = None,
+        target_currency: Optional[str] = None,
     ) -> List[FactRecord]:
         if not payload:
             return []
@@ -318,6 +319,10 @@ class EODHDFactsNormalizer:
             self._derive_common_stockholders_equity(indexed),
             "CommonStockholdersEquity",
         )
+        if target_currency is not None:
+            records = self._convert_facts_to_target_currency(
+                records, target_currency, symbol
+            )
         return records
 
     def _normalize_statement(
@@ -1943,6 +1948,79 @@ class EODHDFactsNormalizer:
             float(normalized_value) if normalized_value is not None else None,
             normalized_currency,
         )
+
+    def _convert_facts_to_target_currency(
+        self,
+        records: List[FactRecord],
+        target_currency: str,
+        symbol: str,
+    ) -> List[FactRecord]:
+        """Convert all monetary facts to the ticker's canonical trading currency.
+
+        Non-monetary facts (shares, unitless) pass through unchanged.
+        Facts already in the target currency pass through unchanged.
+        Facts where FX conversion fails are dropped with a warning.
+        """
+
+        if self.fx_service is None:
+            LOGGER.warning(
+                "FX service unavailable for ticker-centric conversion | "
+                "symbol=%s target=%s",
+                symbol,
+                target_currency,
+            )
+            return records
+
+        converted: List[FactRecord] = []
+        for record in records:
+            if not self._is_monetary_fact(record):
+                converted.append(record)
+                continue
+            if record.currency == target_currency:
+                converted.append(record)
+                continue
+            new_value = convert_money_value(
+                amount=record.value,
+                source_currency=record.currency,
+                target_currency=target_currency,
+                as_of=record.end_date,
+                fx_service=self.fx_service,
+                logger=LOGGER,
+                operation="ticker_currency_alignment",
+                symbol=symbol,
+                field_name=record.concept,
+            )
+            if new_value is None:
+                # Warning already emitted by convert_money_value.
+                continue
+            converted.append(
+                FactRecord(
+                    symbol=record.symbol,
+                    cik=record.cik,
+                    concept=record.concept,
+                    fiscal_period=record.fiscal_period,
+                    end_date=record.end_date,
+                    unit=target_currency,
+                    value=new_value,
+                    accn=record.accn,
+                    filed=record.filed,
+                    frame=record.frame,
+                    start_date=record.start_date,
+                    accounting_standard=record.accounting_standard,
+                    currency=target_currency,
+                )
+            )
+        return converted
+
+    @staticmethod
+    def _is_monetary_fact(record: FactRecord) -> bool:
+        """Return True when the fact carries a monetary value needing currency alignment."""
+
+        if record.currency is None:
+            return False
+        if record.unit == SHARES_UNIT:
+            return False
+        return True
 
     def _normalize_statement_currency(
         self, statement_payload: Dict, default: Optional[str]

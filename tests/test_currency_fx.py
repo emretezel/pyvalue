@@ -11,6 +11,7 @@ from decimal import Decimal
 import pytest
 
 from pyvalue.currency import (
+    canonical_trading_currency,
     normalize_currency_code,
     normalize_monetary_amount,
     resolve_eodhd_currency,
@@ -337,3 +338,28 @@ def test_frankfurter_provider_normalizes_subunit_currencies_before_request():
     assert session.calls[0][1]["quotes"] == "ILS,USD"
     assert [row.base_currency for row in rows] == ["ZAR", "ZAR"]
     assert [row.quote_currency for row in rows] == ["ILS", "USD"]
+
+
+# ---------------------------------------------------------------------------
+# canonical_trading_currency
+# ---------------------------------------------------------------------------
+
+
+def test_canonical_trading_currency_normalizes_subunits():
+    assert canonical_trading_currency("GBX") == "GBP"
+    assert canonical_trading_currency("ZAC") == "ZAR"
+    assert canonical_trading_currency("ILA") == "ILS"
+    assert canonical_trading_currency("GBP0.01") == "GBP"
+
+
+def test_canonical_trading_currency_passes_through_normal_codes():
+    assert canonical_trading_currency("USD") == "USD"
+    assert canonical_trading_currency("EUR") == "EUR"
+    assert canonical_trading_currency("GBP") == "GBP"
+    assert canonical_trading_currency("ZAR") == "ZAR"
+    assert canonical_trading_currency("ILS") == "ILS"
+
+
+def test_canonical_trading_currency_returns_none_for_missing():
+    assert canonical_trading_currency(None) is None
+    assert canonical_trading_currency("") is None

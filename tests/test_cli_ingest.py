@@ -5014,7 +5014,7 @@ def test_cmd_normalize_fundamentals_eodhd(monkeypatch, tmp_path):
     )
 
     class FakeNormalizer:
-        def normalize(self, payload, symbol, accounting_standard=None):
+        def normalize(self, payload, symbol, accounting_standard=None, **kwargs):
             return [
                 make_fact(
                     symbol=symbol,
@@ -5072,7 +5072,7 @@ def test_cmd_normalize_fundamentals_eodhd_zero_row_normalization_records_state(
     calls = []
 
     class FakeNormalizer:
-        def normalize(self, payload, symbol, accounting_standard=None):
+        def normalize(self, payload, symbol, accounting_standard=None, **kwargs):
             calls.append(symbol)
             return []
 
@@ -5120,7 +5120,7 @@ def test_cmd_normalize_fundamentals_cross_provider_reruns_when_facts_owned_by_ot
     sec_calls = []
 
     class FakeEODHDNormalizer:
-        def normalize(self, payload, symbol, accounting_standard=None):
+        def normalize(self, payload, symbol, accounting_standard=None, **kwargs):
             eodhd_calls.append(symbol)
             return [
                 make_fact(
@@ -5287,7 +5287,7 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_force_skips_freshness_scan(
         raise AssertionError("freshness planning should be skipped for --force")
 
     class FakeNormalizer:
-        def normalize(self, payload, symbol, accounting_standard=None):
+        def normalize(self, payload, symbol, accounting_standard=None, **kwargs):
             return [
                 make_fact(
                     symbol=symbol,
@@ -5333,7 +5333,7 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_continues_after_symbol_failure_wi
         )
 
     class FakeNormalizer:
-        def normalize(self, payload, symbol, accounting_standard=None):
+        def normalize(self, payload, symbol, accounting_standard=None, **kwargs):
             if symbol == "BBB.US":
                 raise ValueError("boom")
             return [
@@ -5406,7 +5406,7 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_interrupts_cleanly(
         )
 
     class FakeNormalizer:
-        def normalize(self, payload, symbol, accounting_standard=None):
+        def normalize(self, payload, symbol, accounting_standard=None, **kwargs):
             return [
                 make_fact(
                     symbol=symbol,
@@ -7962,3 +7962,55 @@ def test_cmd_compute_metrics_all(tmp_path):
     assert metrics_repo.fetch("AAPL.US", "fcf_fy_median_5y") is not None
     assert metrics_repo.fetch("AAPL.US", "ni_loss_years_10y") is not None
     assert metrics_repo.fetch("AAPL.US", "fcf_neg_years_10y") is not None
+
+
+# ---------------------------------------------------------------------------
+# _resolve_ticker_target_currency
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_ticker_target_currency_from_supported_tickers(tmp_path):
+    """Primary resolution from supported_tickers.currency with subunit canonicalization."""
+
+    db_path = tmp_path / "resolve.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "LSE",
+        [
+            {
+                "Code": "TEST",
+                "Exchange": "LSE",
+                "Name": "Test PLC",
+                "Type": "Common Stock",
+                "Currency": "GBX",
+            },
+        ],
+    )
+
+    result = cli._resolve_ticker_target_currency(str(db_path), "TEST.LSE")
+    assert result == "GBP"
+
+
+def test_resolve_ticker_target_currency_falls_back_to_payload(tmp_path):
+    """Fallback to payload General.CurrencyCode when supported_tickers.currency is empty."""
+
+    db_path = tmp_path / "resolve.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+
+    payload = {"General": {"CurrencyCode": "ZAC"}}
+    result = cli._resolve_ticker_target_currency(str(db_path), "UNKNOWN.JSE", payload)
+    assert result == "ZAR"
+
+
+def test_resolve_ticker_target_currency_returns_none_when_unresolvable(tmp_path):
+    """Returns None when neither supported_tickers nor payload provides a currency."""
+
+    db_path = tmp_path / "resolve.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+
+    result = cli._resolve_ticker_target_currency(str(db_path), "UNKNOWN.XX")
+    assert result is None
