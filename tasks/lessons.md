@@ -130,3 +130,9 @@ Use this file to capture recurring mistake patterns after user corrections so fu
 - Recurring pattern: Treating one visible phase as the whole command can hide expensive downstream analysis and make a CLI look hung after reporting completion.
 - Preventive rule: For multi-phase CLI work, either keep the visible progress bar below `100%` until all expensive phases are done or expose the later expensive phase with its own explicit progress indicator.
 - Resulting action: `report-screen-failures` now shows a second progress phase for missing-symbol root-cause analysis after screening completes, so the command no longer appears finished while recomputation is still running.
+
+- Date: 2026-04-06
+- User correction: A commit I reported as done still left other tracked repo changes uncommitted in the worktree.
+- Recurring pattern: Making a focused commit in a dirty tree without explicitly reporting the remaining tracked changes can leave the user thinking the repo is fully committed when only one slice was committed.
+- Preventive rule: After every commit in a dirty worktree, run `git status --short`, call out any remaining tracked files explicitly, and never imply the repository is fully committed unless the worktree is actually clean.
+- Resulting action: Recorded the rule here and will always report the remaining tracked files after a scoped commit in `pyvalue`.

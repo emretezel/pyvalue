@@ -285,6 +285,14 @@ Key options:
 - `--output-csv <path>`
 - `--database <path>`
 
+Notes:
+
+- ROIC FY-series metrics now emit standardized root-cause buckets such as
+  missing FY EBIT history, fewer than required FY EBIT years, missing current
+  or prior FY invested capital, missing invested-capital debt/equity/cash
+  inputs, currency conflict, zero average invested capital, and latest FY point
+  too old.
+
 ### `report-screen-failures`
 
 Rank which screen criteria and missing metrics exclude the most symbols for the
@@ -315,6 +323,8 @@ Notes:
   - warning-driven `None` results
   - `exception: <type>`
   - `unknown_metric_id` when the screen references an unregistered metric
+- for ROIC FY-series metrics, those warning-driven `None` results now retain the
+  same standardized root-cause buckets shown by `report-metric-failures`
 
 ## Screening Commands
 

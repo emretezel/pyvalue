@@ -33,8 +33,10 @@ from .roic_ttm import RoicTTMMetric
 from .roic_fy_series import (
     IncrementalROICFiveYearMetric,
     ROIC10YMedianMetric,
+    ROIC7YMedianMetric,
     ROICYearsAbove12PctMetric,
     ROIC10YMinMetric,
+    ROIC7YMinMetric,
 )
 from .return_on_invested_capital import ReturnOnInvestedCapitalMetric
 from .mcapex import MCapexFYMetric, MCapexFiveYearMetric, MCapexTTMMetric
@@ -119,8 +121,10 @@ REGISTRY = {
     AvgICMetric.id: AvgICMetric,
     RoicTTMMetric.id: RoicTTMMetric,
     ROIC10YMedianMetric.id: ROIC10YMedianMetric,
+    ROIC7YMedianMetric.id: ROIC7YMedianMetric,
     ROICYearsAbove12PctMetric.id: ROICYearsAbove12PctMetric,
     ROIC10YMinMetric.id: ROIC10YMinMetric,
+    ROIC7YMinMetric.id: ROIC7YMinMetric,
     IncrementalROICFiveYearMetric.id: IncrementalROICFiveYearMetric,
     GrossMarginTenYearStdMetric.id: GrossMarginTenYearStdMetric,
     OperatingMarginTenYearStdMetric.id: OperatingMarginTenYearStdMetric,
@@ -200,8 +204,10 @@ __all__ = [
     "AvgICMetric",
     "RoicTTMMetric",
     "ROIC10YMedianMetric",
+    "ROIC7YMedianMetric",
     "ROICYearsAbove12PctMetric",
     "ROIC10YMinMetric",
+    "ROIC7YMinMetric",
     "IncrementalROICFiveYearMetric",
     "GrossMarginTenYearStdMetric",
     "OperatingMarginTenYearStdMetric",

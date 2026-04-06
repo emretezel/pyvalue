@@ -94,6 +94,9 @@ from pyvalue.metrics.roic_fy_series import (
     IncrementalROICFiveYearMetric,
     ROIC10YMedianMetric,
     ROIC10YMinMetric,
+    ROIC7YMedianMetric,
+    ROIC7YMinMetric,
+    ROICFYSeriesCalculator,
     ROICYearsAbove12PctMetric,
 )
 from pyvalue.metrics.roic_ttm import RoicTTMMetric
@@ -2680,6 +2683,131 @@ def test_roic_10y_returns_none_when_latest_fy_stale():
     )
     result = metric.compute("AAPL.US", repo)
     assert result is None
+
+
+def test_roic_10y_diagnostics_reports_missing_prior_ic_year():
+    calculator = ROICFYSeriesCalculator()
+    metric = ROIC10YMedianMetric()
+    latest_year = date.today().year - 1
+    ic_years = range(latest_year - 9, latest_year + 1)
+    repo = _build_ic_repo(
+        concept_records=_base_roic_10y_concepts(
+            latest_year=latest_year,
+            ic_short_by_year={year: 100.0 for year in ic_years},
+            ic_long_by_year={year: 300.0 for year in ic_years},
+            ic_equity_by_year={year: 900.0 for year in ic_years},
+            ic_cash_by_year={year: 300.0 for year in ic_years},
+        )
+    )
+
+    diagnostic = calculator.diagnose_series("AAPL.US", repo)
+
+    assert diagnostic.snapshot is None
+    assert diagnostic.failure_reason == "missing prior FY invested capital"
+    assert diagnostic.latest_valid_roic_year == latest_year
+    assert diagnostic.missing_window_years == (latest_year - 9,)
+    oldest_year = next(
+        item for item in diagnostic.year_diagnostics if item.year == latest_year - 9
+    )
+    assert oldest_year.roic_failure_reason == "missing prior FY invested capital"
+    assert metric.compute("AAPL.US", repo) is None
+
+
+def test_roic_10y_diagnostics_reports_missing_debt_input_on_latest_year():
+    calculator = ROICFYSeriesCalculator()
+    latest_year = date.today().year - 1
+    concepts = _base_roic_10y_concepts(latest_year=latest_year)
+    concepts["ShortTermDebt"] = [
+        record
+        for record in concepts["ShortTermDebt"]
+        if record.end_date != f"{latest_year}-09-30"
+    ]
+    concepts["LongTermDebt"] = [
+        record
+        for record in concepts["LongTermDebt"]
+        if record.end_date != f"{latest_year}-09-30"
+    ]
+    repo = _build_ic_repo(concept_records=concepts)
+
+    diagnostic = calculator.diagnose_series("AAPL.US", repo)
+
+    assert diagnostic.snapshot is None
+    assert diagnostic.failure_reason == "missing invested capital debt input"
+    latest = next(
+        item for item in diagnostic.year_diagnostics if item.year == latest_year
+    )
+    assert (
+        latest.invested_capital_failure_reason == "missing invested capital debt input"
+    )
+    assert latest.roic_failure_reason == "missing current FY invested capital"
+
+
+def test_roic_10y_diagnostics_reports_currency_conflict_on_latest_year():
+    calculator = ROICFYSeriesCalculator()
+    latest_year = date.today().year - 1
+    repo = _build_ic_repo(
+        concept_records=_base_roic_10y_concepts(
+            latest_year=latest_year,
+            currency_by_year={latest_year - 1: "EUR"},
+        )
+    )
+
+    diagnostic = calculator.diagnose_series("AAPL.US", repo)
+
+    assert diagnostic.snapshot is None
+    assert diagnostic.failure_reason == "currency conflict"
+    latest = next(
+        item for item in diagnostic.year_diagnostics if item.year == latest_year
+    )
+    assert latest.roic_failure_reason == "currency conflict"
+
+
+def test_roic_10y_diagnostics_records_tax_fallback_without_failing():
+    calculator = ROICFYSeriesCalculator()
+    latest_year = date.today().year - 1
+    roic_years = range(latest_year - 9, latest_year + 1)
+    pretax = {year: 200.0 for year in roic_years}
+    pretax[latest_year] = 0.0
+    repo = _build_ic_repo(
+        concept_records=_base_roic_10y_concepts(
+            latest_year=latest_year,
+            pretax_by_year=pretax,
+        )
+    )
+
+    diagnostic = calculator.diagnose_series("AAPL.US", repo)
+
+    assert diagnostic.snapshot is not None
+    assert diagnostic.failure_reason is None
+    latest = next(
+        item for item in diagnostic.year_diagnostics if item.year == latest_year
+    )
+    assert latest.tax_rate_source == "latest_valid_fy"
+    assert latest.roic_available is True
+
+
+def test_roic_7y_metrics_pass_when_10y_fails_on_missing_eleventh_ic_year():
+    latest_year = date.today().year - 1
+    ic_years = range(latest_year - 9, latest_year + 1)
+    repo = _build_ic_repo(
+        concept_records=_base_roic_10y_concepts(
+            latest_year=latest_year,
+            ic_short_by_year={year: 100.0 for year in ic_years},
+            ic_long_by_year={year: 300.0 for year in ic_years},
+            ic_equity_by_year={year: 900.0 for year in ic_years},
+            ic_cash_by_year={year: 300.0 for year in ic_years},
+        )
+    )
+
+    assert ROIC10YMedianMetric().compute("AAPL.US", repo) is None
+
+    median_result = ROIC7YMedianMetric().compute("AAPL.US", repo)
+    min_result = ROIC7YMinMetric().compute("AAPL.US", repo)
+
+    assert median_result is not None
+    assert min_result is not None
+    assert round(median_result.value, 6) == 0.18
+    assert round(min_result.value, 6) == 0.12
 
 
 def test_iroic_5y_metric_happy_path():
@@ -12050,8 +12178,10 @@ def test_registry_contains_all_ids():
     assert "avg_ic" in REGISTRY
     assert "roic_ttm" in REGISTRY
     assert "roic_10y_median" in REGISTRY
+    assert "roic_7y_median" in REGISTRY
     assert "roic_years_above_12pct" in REGISTRY
     assert "roic_10y_min" in REGISTRY
+    assert "roic_7y_min" in REGISTRY
     assert "iroic_5y" in REGISTRY
     assert "gm_10y_std" in REGISTRY
     assert "opm_10y_std" in REGISTRY
