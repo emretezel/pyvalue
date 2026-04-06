@@ -11,7 +11,7 @@ from typing import Optional, Union
 
 from pyvalue.config import Config
 from pyvalue.currency import (
-    is_gbx_subunit_currency,
+    is_subunit_currency,
     normalize_currency_code,
     normalize_monetary_amount,
 )
@@ -123,7 +123,7 @@ class MarketDataService:
         )
         effective_currency = normalize_currency_code(raw_effective_currency)
         price = prepared.price
-        if is_gbx_subunit_currency(raw_effective_currency) and price is not None:
+        if is_subunit_currency(raw_effective_currency) and price is not None:
             normalized_price, normalized_currency = normalize_monetary_amount(
                 price,
                 raw_effective_currency,

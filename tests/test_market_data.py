@@ -142,6 +142,19 @@ def test_eodhd_provider_converts_gbx_to_gbp():
     assert data.currency == "GBP"
 
 
+def test_eodhd_provider_converts_zac_to_zar():
+    payload = [
+        {"date": "2024-03-01", "Close": "23750.0", "Volume": "1000", "currency": "ZAC"},
+    ]
+    session = DummyEODSession(payload)
+    provider = EODHDProvider(api_key="demo", session=session)  # type: ignore[arg-type]
+
+    data = provider.latest_price("ABG.JSE")
+
+    assert data.price == 237.5
+    assert data.currency == "ZAR"
+
+
 def test_eodhd_provider_converts_gbx_by_suffix_when_currency_missing():
     payload = [
         {"date": "2024-03-01", "Close": "2783.5", "Volume": "1000"},
@@ -248,3 +261,42 @@ def test_market_data_service_prepare_price_data_uses_currency_hint(tmp_path):
 
     assert prepared.price == 27.835
     assert prepared.currency == "GBP"
+
+
+def test_market_data_service_prepare_price_data_uses_ila_currency_hint(tmp_path):
+    class DummyProvider:
+        def latest_price(self, symbol):
+            return PriceData(
+                symbol=symbol,
+                price=1234.0,
+                as_of="2024-03-04",
+                volume=100,
+                currency=None,
+            )
+
+    class DummyConfig:
+        eodhd_api_key = None
+
+    service = MarketDataService(
+        db_path=tmp_path / "ila-hint.db",
+        provider=DummyProvider(),
+        config=DummyConfig(),
+    )
+    service.supported_ticker_repo.fetch_currency = lambda symbol: (_ for _ in ()).throw(
+        AssertionError("fetch_currency should not be used when a currency hint exists")
+    )
+
+    prepared = service.prepare_price_data(
+        "BCOM.TA",
+        PriceData(
+            symbol="BCOM.TA",
+            price=1234.0,
+            as_of="2024-03-04",
+            volume=100,
+            currency=None,
+        ),
+        currency_hint="ILA",
+    )
+
+    assert prepared.price == 12.34
+    assert prepared.currency == "ILS"

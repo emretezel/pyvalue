@@ -13,6 +13,7 @@ import logging
 
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.nwc import DeltaNWCMaintMetric
+from pyvalue.money import normalize_money_value
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     MAX_FY_FACT_AGE_DAYS,
@@ -439,11 +440,11 @@ class OwnerEarningsEquityCalculator:
     def _normalize_currency(
         self, record: FactRecord, *, absolute: bool = False
     ) -> tuple[float, Optional[str]]:
-        value = record.value
-        code = record.currency
-        if code in {"GBX", "GBP0.01"}:
-            value = value / 100.0
-            code = "GBP"
+        normalized_value, code = normalize_money_value(
+            record.value,
+            record.currency,
+        )
+        value = record.value if normalized_value is None else normalized_value
         if absolute:
             value = abs(value)
         return value, code

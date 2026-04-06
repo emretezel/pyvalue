@@ -900,3 +900,26 @@ def test_eodhd_common_stockholders_equity_override_replaces_base_record():
 
     assert len(derived) == 1
     assert derived[0].value == 90.0
+
+
+def test_eodhd_normalizes_eps_for_configured_subunit_family():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "General": {"CurrencyCode": "ZAC"},
+        "Earnings": {
+            "History": {
+                "2024-03-31": {"date": "2024-03-31", "epsActual": 250.0},
+                "2024-06-30": {"date": "2024-06-30", "epsActual": 300.0},
+            }
+        },
+    }
+
+    records = normalizer.normalize(payload, symbol="ABG.JSE")
+    eps_records = [r for r in records if r.concept == "EarningsPerShareDiluted"]
+
+    assert len(eps_records) == 2
+    assert {record.end_date: record.value for record in eps_records} == {
+        "2024-03-31": 2.5,
+        "2024-06-30": 3.0,
+    }
+    assert {record.currency for record in eps_records} == {"ZAR"}

@@ -95,7 +95,7 @@ class FrankfurterProvider:
         start_date: date,
         end_date: date,
     ) -> list[FXRateRecord]:
-        quotes = sorted(
+        remaining_quotes = sorted(
             {
                 code
                 for code in (normalize_currency_code(item) for item in quote_currencies)
@@ -103,33 +103,53 @@ class FrankfurterProvider:
             }
         )
         base = normalize_currency_code(base_currency)
-        if base is None or not quotes:
+        if base is None or not remaining_quotes:
             return []
 
-        params = {
-            "base": base,
-            "quotes": ",".join(quotes),
-        }
-        if start_date == end_date:
-            params["date"] = start_date.isoformat()
-        else:
-            params["from"] = start_date.isoformat()
-            params["to"] = end_date.isoformat()
+        while True:
+            params = {
+                "base": base,
+                "quotes": ",".join(remaining_quotes),
+            }
+            if start_date == end_date:
+                params["date"] = start_date.isoformat()
+            else:
+                params["from"] = start_date.isoformat()
+                params["to"] = end_date.isoformat()
 
-        response = self.session.get(
-            f"{self.api_base}/rates",
-            params=params,
-            timeout=30,
-        )
-        if response.status_code in {400, 404, 422}:
-            LOGGER.warning(
-                "Frankfurter FX request failed | base=%s quotes=%s status=%s body=%s",
-                base,
-                ",".join(quotes),
-                response.status_code,
-                response.text[:500],
+            response = self.session.get(
+                f"{self.api_base}/rates",
+                params=params,
+                timeout=30,
             )
-            return []
+            if response.status_code not in {400, 404, 422}:
+                break
+            invalid_currencies = self._extract_invalid_currencies(response)
+            invalid_quotes = [
+                quote for quote in remaining_quotes if quote in invalid_currencies
+            ]
+            if base in invalid_currencies or not invalid_quotes:
+                LOGGER.warning(
+                    "Frankfurter FX request failed | base=%s quotes=%s status=%s body=%s",
+                    base,
+                    ",".join(remaining_quotes),
+                    response.status_code,
+                    response.text[:500],
+                )
+                return []
+            LOGGER.warning(
+                "Frankfurter FX request skipped unsupported currencies | base=%s unsupported_quotes=%s requested_quotes=%s status=%s",
+                base,
+                ",".join(invalid_quotes),
+                ",".join(remaining_quotes),
+                response.status_code,
+            )
+            remaining_quotes = [
+                quote for quote in remaining_quotes if quote not in invalid_currencies
+            ]
+            if not remaining_quotes:
+                return []
+
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, list):
@@ -159,6 +179,25 @@ class FrankfurterProvider:
                 )
             )
         return records
+
+    @staticmethod
+    def _extract_invalid_currencies(response: requests.Response) -> set[str]:
+        """Parse unsupported currency codes from a Frankfurter error response."""
+
+        try:
+            payload = response.json()
+        except ValueError:
+            return set()
+        if not isinstance(payload, dict):
+            return set()
+        message = payload.get("message")
+        if not isinstance(message, str):
+            return set()
+        prefix = "invalid currency:"
+        if not message.lower().startswith(prefix):
+            return set()
+        raw_codes = message.split(":", 1)[1]
+        return {code.strip().upper() for code in raw_codes.split(",") if code.strip()}
 
 
 class FXService:
@@ -273,44 +312,69 @@ class FXService:
         quote_currency: str,
         as_of: date,
     ) -> Optional[FXQuote]:
-        direct_or_inverse = self._lookup_direct_or_inverse(
+        candidates = self._lookup_direct_and_inverse(
             base_currency,
             quote_currency,
             as_of,
         )
-        if direct_or_inverse is not None:
-            return direct_or_inverse
-
         for pivot in (self.pivot_currency, self.secondary_pivot_currency):
             if pivot is None or pivot in {base_currency, quote_currency}:
                 continue
-            base_to_pivot = self._lookup_direct_or_inverse(base_currency, pivot, as_of)
-            quote_to_pivot = self._lookup_direct_or_inverse(
-                quote_currency,
-                pivot,
-                as_of,
-            )
-            if base_to_pivot is None or quote_to_pivot is None:
-                continue
-            if quote_to_pivot.rate == 0:
-                continue
-            return FXQuote(
-                provider=self.provider_name,
-                rate_date=min(base_to_pivot.rate_date, quote_to_pivot.rate_date),
-                base_currency=base_currency,
-                quote_currency=quote_currency,
-                rate=base_to_pivot.rate / quote_to_pivot.rate,
-                source_kind="triangulated",
-                via_currency=pivot,
-            )
-        return None
+            for base_to_pivot in self._lookup_direct_and_inverse(
+                base_currency, pivot, as_of
+            ):
+                for quote_to_pivot in self._lookup_direct_and_inverse(
+                    quote_currency, pivot, as_of
+                ):
+                    if quote_to_pivot.rate == 0:
+                        continue
+                    candidates.append(
+                        FXQuote(
+                            provider=self.provider_name,
+                            rate_date=min(
+                                base_to_pivot.rate_date, quote_to_pivot.rate_date
+                            ),
+                            base_currency=base_currency,
+                            quote_currency=quote_currency,
+                            rate=base_to_pivot.rate / quote_to_pivot.rate,
+                            source_kind="triangulated",
+                            via_currency=pivot,
+                        )
+                    )
+        if not candidates:
+            return None
+        return max(candidates, key=self._quote_rank)
 
-    def _lookup_direct_or_inverse(
+    def _quote_rank(self, quote: FXQuote) -> tuple[date, int, int]:
+        """Rank candidate quotes by freshness, then by path preference."""
+
+        source_rank = {
+            "provider": 3,
+            "inverse": 2,
+            "triangulated": 1,
+            "identity": 4,
+        }.get(quote.source_kind, 0)
+        pivot_rank = 0
+        if quote.source_kind == "triangulated":
+            if quote.via_currency == self.pivot_currency:
+                pivot_rank = 2
+            elif quote.via_currency == self.secondary_pivot_currency:
+                pivot_rank = 1
+        return (
+            quote.rate_date,
+            source_rank,
+            pivot_rank,
+        )
+
+    def _lookup_direct_and_inverse(
         self,
         base_currency: str,
         quote_currency: str,
         as_of: date,
-    ) -> Optional[FXQuote]:
+    ) -> list[FXQuote]:
+        """Return available direct and inverse quotes for a pair."""
+
+        quotes: list[FXQuote] = []
         direct = self.repository.latest_on_or_before(
             self.provider_name,
             base_currency,
@@ -319,15 +383,16 @@ class FXService:
         )
         if direct is not None:
             rate = Decimal(direct.rate_text)
-            return FXQuote(
-                provider=direct.provider,
-                rate_date=date.fromisoformat(direct.rate_date),
-                base_currency=direct.base_currency,
-                quote_currency=direct.quote_currency,
-                rate=rate,
-                source_kind=direct.source_kind,
+            quotes.append(
+                FXQuote(
+                    provider=direct.provider,
+                    rate_date=date.fromisoformat(direct.rate_date),
+                    base_currency=direct.base_currency,
+                    quote_currency=direct.quote_currency,
+                    rate=rate,
+                    source_kind=direct.source_kind,
+                )
             )
-
         inverse = self.repository.latest_on_or_before(
             self.provider_name,
             quote_currency,
@@ -337,16 +402,18 @@ class FXService:
         if inverse is not None:
             rate = Decimal(inverse.rate_text)
             if rate == 0:
-                return None
-            return FXQuote(
-                provider=inverse.provider,
-                rate_date=date.fromisoformat(inverse.rate_date),
-                base_currency=base_currency,
-                quote_currency=quote_currency,
-                rate=Decimal("1") / rate,
-                source_kind="inverse",
+                return quotes
+            quotes.append(
+                FXQuote(
+                    provider=inverse.provider,
+                    rate_date=date.fromisoformat(inverse.rate_date),
+                    base_currency=base_currency,
+                    quote_currency=quote_currency,
+                    rate=Decimal("1") / rate,
+                    source_kind="inverse",
+                )
             )
-        return None
+        return quotes
 
     def _fetch_missing_rates(
         self,

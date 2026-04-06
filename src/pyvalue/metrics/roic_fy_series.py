@@ -17,6 +17,7 @@ from pyvalue.metrics.invested_capital import (
     InvestedCapitalCalculator,
 )
 from pyvalue.metrics.utils import MAX_FY_FACT_AGE_DAYS
+from pyvalue.money import normalize_money_value
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -385,11 +386,14 @@ class ROICFYSeriesCalculator:
         return filtered
 
     def _normalize_currency(self, record: FactRecord) -> tuple[float, Optional[str]]:
-        value = record.value
-        code = record.currency
-        if code in {"GBX", "GBP0.01"}:
-            return value / 100.0, "GBP"
-        return value, code
+        normalized_value, normalized_currency = normalize_money_value(
+            record.value,
+            record.currency,
+        )
+        return (
+            record.value if normalized_value is None else normalized_value,
+            normalized_currency,
+        )
 
     def _combine_currency(self, values: Sequence[Optional[str]]) -> Optional[str]:
         merged = None

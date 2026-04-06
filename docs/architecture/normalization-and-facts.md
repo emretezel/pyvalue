@@ -19,7 +19,8 @@ Monetary and non-monetary facts are treated differently:
 
 - monetary facts must resolve to a real currency code
 - non-monetary facts keep a unit such as `shares`
-- `GBX`/`GBP0.01` are converted to `GBP` before downstream arithmetic
+- configured subunit currencies are converted to their base currencies before
+  downstream arithmetic: `GBX`/`GBP0.01` -> `GBP`, `ZAC` -> `ZAR`, `ILA` -> `ILS`
 
 ## Provider-Agnostic Design
 

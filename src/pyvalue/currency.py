@@ -7,12 +7,33 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from types import MappingProxyType
 from typing import Any, Literal, Mapping, Optional, Sequence
 import logging
 
 
 LOGGER = logging.getLogger(__name__)
 
+
+@dataclass(frozen=True)
+class CurrencySubunit:
+    """Metadata describing a provider subunit currency code."""
+
+    base_currency: str
+    divisor: Decimal
+
+
+SUBUNIT_CURRENCY_REGISTRY = MappingProxyType(
+    {
+        "GBX": CurrencySubunit(base_currency="GBP", divisor=Decimal("100")),
+        "GBP0.01": CurrencySubunit(base_currency="GBP", divisor=Decimal("100")),
+        "ZAC": CurrencySubunit(base_currency="ZAR", divisor=Decimal("100")),
+        "ILA": CurrencySubunit(base_currency="ILS", divisor=Decimal("100")),
+    }
+)
+SUBUNIT_BASE_CURRENCIES = frozenset(
+    info.base_currency for info in SUBUNIT_CURRENCY_REGISTRY.values()
+)
 GBX_SUBUNIT_CODES = frozenset({"GBX", "GBP0.01"})
 GBX_TO_GBP_RATIO = Decimal("100")
 MetricUnitKind = Literal[
@@ -50,7 +71,7 @@ def to_decimal(value: Any) -> Optional[Decimal]:
 
 
 def normalize_currency_code(value: object) -> Optional[str]:
-    """Normalize a raw currency code and collapse GBX-like subunits into GBP."""
+    """Normalize a raw currency code and collapse configured subunits."""
 
     if value is None:
         return None
@@ -60,8 +81,9 @@ def normalize_currency_code(value: object) -> Optional[str]:
         return None
     if not code:
         return None
-    if code in GBX_SUBUNIT_CODES:
-        return "GBP"
+    subunit = currency_subunit(value)
+    if subunit is not None:
+        return subunit.base_currency
     return code
 
 
@@ -75,7 +97,7 @@ def legacy_currency_from_unit(unit: object) -> Optional[str]:
         return None
     if "/" in raw_unit:
         return None
-    if raw_unit in GBX_SUBUNIT_CODES:
+    if is_subunit_currency(raw_unit):
         return normalize_currency_code(raw_unit)
     if len(raw_unit) == 3 and raw_unit.isalpha():
         return normalize_currency_code(raw_unit)
@@ -106,6 +128,48 @@ def raw_currency_code(value: object) -> Optional[str]:
     return code or None
 
 
+def currency_subunit(value: object) -> Optional[CurrencySubunit]:
+    """Return subunit metadata for ``value`` when configured."""
+
+    code = raw_currency_code(value)
+    if code is None:
+        return None
+    return SUBUNIT_CURRENCY_REGISTRY.get(code)
+
+
+def is_subunit_currency(value: object) -> bool:
+    """Return True when ``value`` denotes a configured subunit code."""
+
+    return currency_subunit(value) is not None
+
+
+def subunit_base_currency(value: object) -> Optional[str]:
+    """Return the normalized base currency for a configured subunit code."""
+
+    subunit = currency_subunit(value)
+    if subunit is None:
+        return None
+    return subunit.base_currency
+
+
+def subunit_divisor(value: object) -> Optional[Decimal]:
+    """Return the amount divisor for a configured subunit code."""
+
+    subunit = currency_subunit(value)
+    if subunit is None:
+        return None
+    return subunit.divisor
+
+
+def is_subunit_base_currency(value: object) -> bool:
+    """Return True when ``value`` belongs to a configured subunit family."""
+
+    normalized = normalize_currency_code(value)
+    if normalized is None:
+        return False
+    return normalized in SUBUNIT_BASE_CURRENCIES
+
+
 def is_gbx_subunit_currency(value: object) -> bool:
     """Return True when ``value`` denotes pence rather than pounds."""
 
@@ -119,16 +183,17 @@ def normalize_monetary_amount(
 ) -> tuple[Optional[Decimal], Optional[str]]:
     """Normalize a monetary amount and its currency code.
 
-    GBX-like currencies are always converted into GBP before the amount is
-    returned. The stored semantics are therefore always in whole pounds.
+    Configured subunit currencies are always converted into their base currencies
+    before the amount is returned.
     """
 
     normalized_currency = normalize_currency_code(currency_code)
     decimal_value = to_decimal(amount)
     if decimal_value is None:
         return None, normalized_currency
-    if is_gbx_subunit_currency(currency_code):
-        decimal_value = decimal_value / GBX_TO_GBP_RATIO
+    divisor = subunit_divisor(currency_code)
+    if divisor is not None:
+        decimal_value = decimal_value / divisor
     return decimal_value, normalized_currency
 
 
@@ -227,13 +292,19 @@ def merge_currency_codes(codes: Sequence[Optional[str]]) -> Optional[str]:
 
 __all__ = [
     "CurrencyResolution",
+    "CurrencySubunit",
     "GBX_SUBUNIT_CODES",
     "GBX_TO_GBP_RATIO",
     "MONETARY_UNIT_KINDS",
     "MetricUnitKind",
     "SHARES_UNIT",
+    "SUBUNIT_BASE_CURRENCIES",
+    "SUBUNIT_CURRENCY_REGISTRY",
+    "currency_subunit",
     "fact_currency_or_none",
     "is_gbx_subunit_currency",
+    "is_subunit_base_currency",
+    "is_subunit_currency",
     "is_monetary_unit_kind",
     "legacy_currency_from_unit",
     "merge_currency_codes",
@@ -242,6 +313,8 @@ __all__ = [
     "normalize_monetary_amount",
     "raw_currency_code",
     "resolve_eodhd_currency",
+    "subunit_base_currency",
+    "subunit_divisor",
     "to_decimal",
     "warn_missing_monetary_currency",
 ]

@@ -13,6 +13,7 @@ import logging
 
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import MAX_FY_FACT_AGE_DAYS
+from pyvalue.money import normalize_money_value
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -347,11 +348,14 @@ class FundamentalConsistencyCalculator:
         return filtered
 
     def _normalize_currency(self, record: FactRecord) -> tuple[float, Optional[str]]:
-        value = record.value
-        currency = record.currency
-        if currency in {"GBX", "GBP0.01"}:
-            return value / 100.0, "GBP"
-        return value, currency
+        normalized_value, normalized_currency = normalize_money_value(
+            record.value,
+            record.currency,
+        )
+        return (
+            record.value if normalized_value is None else normalized_value,
+            normalized_currency,
+        )
 
     def _is_recent_as_of(self, as_of: str, *, max_age_days: int) -> bool:
         try:

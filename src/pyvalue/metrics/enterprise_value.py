@@ -9,6 +9,7 @@ from typing import Callable, Optional, Sequence
 
 import logging
 
+from pyvalue.money import normalize_money_value
 from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -26,11 +27,14 @@ FXConverter = Callable[[float, str, str, str], Optional[float]]
 def normalize_fact_value(record: FactRecord) -> tuple[float, Optional[str]]:
     """Normalize subunit FX codes so EV helpers can compare currencies safely."""
 
-    value = record.value
-    currency = record.currency
-    if currency in {"GBX", "GBP0.01"}:
-        return value / 100.0, "GBP"
-    return value, currency
+    normalized_value, normalized_currency = normalize_money_value(
+        record.value,
+        record.currency,
+    )
+    return (
+        record.value if normalized_value is None else normalized_value,
+        normalized_currency,
+    )
 
 
 def merge_currency_codes(codes: Sequence[Optional[str]]) -> Optional[str]:

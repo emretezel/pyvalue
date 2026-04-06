@@ -14,7 +14,7 @@ from pyvalue.fx import FXRateStore
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.share_count_change import ShareCountChangeCalculator
 from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS, is_recent_fact
-from pyvalue.money import ephemeral_fx_database_path
+from pyvalue.money import ephemeral_fx_database_path, normalize_money_value
 from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -247,10 +247,8 @@ class NetBuybackYieldMetric:
         normalized: list[FactRecord] = []
         for record in records:
             code = getattr(record, "currency", None)
-            value = record.value
-            if code in {"GBX", "GBP0.01"}:
-                code = "GBP"
-                value = value / 100.0 if value is not None else None
+            value: Optional[float] = record.value
+            value, code = normalize_money_value(value, code)
             if value is None:
                 continue
             if currency is None and code:

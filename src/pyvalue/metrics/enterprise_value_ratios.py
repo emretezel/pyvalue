@@ -17,7 +17,7 @@ from pyvalue.metrics.enterprise_value import (
     merge_currency_codes,
     resolve_enterprise_value_denominator,
 )
-from pyvalue.money import ephemeral_fx_database_path
+from pyvalue.money import ephemeral_fx_database_path, normalize_money_value
 from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS, is_recent_fact
 from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
 
@@ -247,11 +247,14 @@ class EnterpriseValueRatioCalculator:
         return {record.end_date: record for record in self._filter_quarterly(records)}
 
     def _normalize_record(self, record: FactRecord) -> tuple[float, Optional[str]]:
-        value = record.value
-        currency = getattr(record, "currency", None)
-        if currency in {"GBX", "GBP0.01"}:
-            return value / 100.0, "GBP"
-        return value, currency
+        normalized_value, normalized_currency = normalize_money_value(
+            record.value,
+            getattr(record, "currency", None),
+        )
+        return (
+            record.value if normalized_value is None else normalized_value,
+            normalized_currency,
+        )
 
 
 @dataclass

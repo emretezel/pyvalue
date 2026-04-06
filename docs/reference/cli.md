@@ -235,7 +235,7 @@ Notes:
 - discovers currencies from existing project data and excludes the pivot
   currency
 - stores direct provider rows in `fx_rates`
-- skips fully covered direct base/quote ranges already present in `fx_rates`
+- skips only direct base/quote windows already fully covered in `fx_rates`
 - skips unnecessary re-downloads through upsert semantics
 - the first run after the FX/index migration may spend time building currency
   indexes before discovery starts

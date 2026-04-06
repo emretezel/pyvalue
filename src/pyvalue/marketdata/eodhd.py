@@ -12,7 +12,7 @@ from typing import Dict, Optional
 import requests  # type: ignore[import-untyped]
 
 from pyvalue.currency import (
-    is_gbx_subunit_currency,
+    is_subunit_currency,
     normalize_currency_code,
     normalize_monetary_amount,
 )
@@ -23,6 +23,16 @@ LOGGER = logging.getLogger(__name__)
 API_URL = "https://eodhd.com/api/eod"
 BULK_LAST_DAY_URL = "https://eodhd.com/api/eod-bulk-last-day"
 SINGLE_SYMBOL_LOOKBACK_DAYS = 30
+EXCHANGE_SUBUNIT_HINTS = {
+    "JSE": "ZAC",
+    "LON": "GBX",
+    "LSE": "GBX",
+    "TA": "ILA",
+    "TASE": "ILA",
+    "XJSE": "ZAC",
+    "XLON": "GBX",
+    "XTAE": "ILA",
+}
 
 
 class EODHDProvider(MarketDataProvider):
@@ -123,18 +133,24 @@ class EODHDProvider(MarketDataProvider):
         if "." in suffix:
             suffix = suffix.split(".")[-1]
         suffix = suffix.upper()
-        gbx_hint = suffix in {"LSE", "LON", "XLON"}
-        if is_gbx_subunit_currency(self._extract_text(entry, "currency", "Currency")):
+        raw_currency = self._extract_text(entry, "currency", "Currency")
+        subunit_hint = EXCHANGE_SUBUNIT_HINTS.get(suffix)
+        if is_subunit_currency(raw_currency):
             normalized_price, normalized_currency = normalize_monetary_amount(
                 price,
-                self._extract_text(entry, "currency", "Currency"),
+                raw_currency,
             )
             if normalized_price is not None:
                 price = float(normalized_price)
             currency = normalized_currency
-        elif gbx_hint and currency is None and price and price > 100:
-            price = price / 100.0
-            currency = "GBP"
+        elif subunit_hint and currency is None and price and price > 100:
+            normalized_price, normalized_currency = normalize_monetary_amount(
+                price,
+                subunit_hint,
+            )
+            if normalized_price is not None:
+                price = float(normalized_price)
+            currency = normalized_currency
         as_of = self._extract_text(entry, "date", "Date")
         if as_of is None:
             raise ValueError(f"Missing date in EODHD response for {symbol}: {entry}")

@@ -51,7 +51,8 @@ def normalize_money_value(
 ) -> tuple[Optional[float], Optional[str]]:
     """Return a normalized monetary amount and currency.
 
-    GBX-like subunits are converted into GBP before any downstream arithmetic.
+    Configured subunit currencies are converted into their base currencies before
+    any downstream arithmetic.
     """
 
     normalized_amount, normalized_currency = normalize_monetary_amount(amount, currency)

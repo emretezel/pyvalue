@@ -99,9 +99,13 @@ Currency and unit semantics:
 - monetary facts store a real ISO `currency`
 - non-monetary facts do not invent currencies; they keep meaningful `unit`
   values such as `shares`
+- provider catalogs such as `supported_tickers.currency` keep the raw provider
+  code for provenance; monetary facts, market data, metrics, and FX rows use
+  normalized base currencies
 - a narrow legacy fallback still treats exact currency-like `unit` values as the
   fact currency when the explicit `currency` column is empty
-- `GBX` and `GBP0.01` are normalized to `GBP` before arithmetic and persistence
+- configured subunit currencies are normalized before arithmetic and
+  persistence: `GBX`/`GBP0.01` -> `GBP`, `ZAC` -> `ZAR`, `ILA` -> `ILS`
 
 ### `market_data`
 

@@ -50,7 +50,8 @@ metrics, and screening.
 
 Key rules:
 
-- `GBX` and `GBP0.01` are always normalized to `GBP` before any arithmetic.
+- configured subunit currencies are normalized before any arithmetic:
+  `GBX`/`GBP0.01` -> `GBP`, `ZAC` -> `ZAR`, `ILA` -> `ILS`
 - EODHD monetary currency resolution uses explicit precedence:
   row currency, then statement currency, then payload currency, then a narrow
   documented repo fallback for legacy facts whose `unit` already stores the ISO
@@ -70,8 +71,8 @@ pyvalue refresh-fx-rates
 ```
 
 The command discovers currencies already present in the project DB, excludes the
-pivot currency, skips fully covered direct ranges already in `fx_rates`, and
-reports batch progress during long historical refreshes.
+pivot currency, skips only exact direct windows already fully covered in
+`fx_rates`, and reports batch progress during long historical refreshes.
 
 ## Supported Providers
 

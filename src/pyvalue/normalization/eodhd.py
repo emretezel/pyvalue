@@ -11,9 +11,12 @@ import logging
 
 from pyvalue.currency import (
     SHARES_UNIT,
+    is_subunit_base_currency,
     normalize_currency_code as shared_normalize_currency_code,
     normalize_monetary_amount,
+    raw_currency_code,
     resolve_eodhd_currency,
+    subunit_divisor,
     warn_missing_monetary_currency,
 )
 from pyvalue.fx import FXService
@@ -950,6 +953,7 @@ class EODHDFactsNormalizer:
         history = earnings.get("History") or {}
         annual = earnings.get("Annual") or {}
         general = payload.get("General") or {}
+        raw_general_currency = raw_currency_code(general.get("CurrencyCode"))
         general_currency = _normalize_currency_code(general.get("CurrencyCode"))
         earnings_currency = self._latest_earnings_currency(history, annual)
         income_statement = (payload.get("Financials") or {}).get(
@@ -1041,14 +1045,18 @@ class EODHDFactsNormalizer:
                     continue
                 add_record(date_str, value, period, statement_currency)
 
-        if general_currency in {"GBP", "GBX", "GBP0.01"}:
+        if is_subunit_base_currency(general_currency):
             for date_str, value, currency in self._normalize_eps_series(
-                history, general_currency, implied_quarterly
+                history,
+                raw_general_currency or general_currency,
+                implied_quarterly,
             ):
                 period = self._infer_quarter({"date": date_str}) or ""
                 add_record(date_str, value, period, currency)
             for date_str, value, currency in self._normalize_eps_series(
-                annual, general_currency, implied_annual
+                annual,
+                raw_general_currency or general_currency,
+                implied_annual,
             ):
                 add_record(date_str, value, "FY", currency)
         else:
@@ -1101,15 +1109,10 @@ class EODHDFactsNormalizer:
             ordered.append((date_str[:10], entry))
         ordered.sort(key=lambda item: item[0])
 
+        raw_base = raw_currency_code(base_currency)
         normalized_base = _normalize_currency_code(base_currency)
-        target_currency = normalized_base or "GBP"
-        scale = 1.0
-        if normalized_base in {"GBX", "GBP0.01"}:
-            scale = 0.01
-        elif normalized_base == "GBP":
-            scale = 1.0
-
-        if target_currency != "GBP":
+        target_currency = normalized_base
+        if target_currency is None or not is_subunit_base_currency(target_currency):
             normalized_entries: List[tuple[str, float, Optional[str]]] = []
             for date_str, entry in ordered:
                 value = _to_float(entry.get("epsActual"))
@@ -1127,6 +1130,13 @@ class EODHDFactsNormalizer:
                     (date_str, normalized_value, normalized_currency)
                 )
             return normalized_entries
+
+        scale = 1.0
+        divisor = subunit_divisor(raw_base)
+        if divisor is not None:
+            scale = 1.0 / float(divisor)
+        elif is_subunit_base_currency(normalized_base):
+            scale = 1.0
 
         normalized_scaled: List[tuple[str, float, Optional[str]]] = []
         values: List[float] = []
@@ -1192,14 +1202,15 @@ class EODHDFactsNormalizer:
             if not use_clusters or segment_median is None:
                 segment_scales.append(default_scale)
             else:
-                # Smaller cluster is treated as GBP, larger cluster as GBX (pence).
+                # Smaller cluster is treated as the base currency, larger cluster as
+                # the exchange subunit denomination (for example GBX, ILA, or ZAC).
                 segment_scales.append(1.0 if segment_median <= threshold else 0.01)
 
         for seg_index, (start, end) in enumerate(zip(segment_starts, segment_ends)):
             seg_scale = segment_scales[seg_index]
             for idx in range(start, end):
                 scaled = values[idx] * seg_scale
-                normalized_scaled.append((dates[idx], scaled, "GBP"))
+                normalized_scaled.append((dates[idx], scaled, target_currency))
         return normalized_scaled
 
     def _infer_eps_scale_from_implied(
@@ -1922,7 +1933,7 @@ class EODHDFactsNormalizer:
     def _normalize_value_currency(
         self, value: Optional[float], currency: Optional[str]
     ) -> tuple[Optional[float], Optional[str]]:
-        """Normalize GBX/GBP0.01 to GBP and scale values accordingly."""
+        """Normalize configured subunit currencies into their base currencies."""
 
         normalized_value, normalized_currency = normalize_monetary_amount(
             value,

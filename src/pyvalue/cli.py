@@ -3233,30 +3233,6 @@ def _split_fx_refresh_ranges(
     return ranges
 
 
-def _fx_missing_ranges_for_coverage(
-    requested_start: date,
-    requested_end: date,
-    coverage: Optional[Tuple[str, str]],
-) -> List[Tuple[date, date]]:
-    """Return missing direct-FX ranges after considering stored coverage."""
-
-    if coverage is None:
-        return [(requested_start, requested_end)]
-
-    covered_start = date.fromisoformat(coverage[0])
-    covered_end = date.fromisoformat(coverage[1])
-    missing: List[Tuple[date, date]] = []
-    if requested_start < covered_start:
-        missing.append(
-            (requested_start, min(requested_end, covered_start - timedelta(days=1)))
-        )
-    if requested_end > covered_end:
-        missing.append(
-            (max(requested_start, covered_end + timedelta(days=1)), requested_end)
-        )
-    return [window for window in missing if window[0] <= window[1]]
-
-
 def _compute_metrics_for_symbol(
     symbol: str,
     metric_ids: Sequence[str],
@@ -6410,50 +6386,44 @@ def cmd_refresh_fx_rates(
         print("No non-pivot currencies found in the database.")
         return 0
 
-    coverage = repo.direct_pair_coverage(
-        service.provider_name,
-        service.pivot_currency,
-        currencies,
-    )
-    grouped_batches: Dict[Tuple[date, date], List[str]] = {}
-    skipped_currencies = 0
-    for currency in currencies:
-        missing_ranges = _fx_missing_ranges_for_coverage(
-            resolved_start,
-            resolved_end,
-            coverage.get(currency),
-        )
-        if not missing_ranges:
-            skipped_currencies += 1
-            continue
-        for missing_start, missing_end in missing_ranges:
-            for split_start, split_end in _split_fx_refresh_ranges(
-                missing_start,
-                missing_end,
-                FX_REFRESH_MAX_DAYS_PER_REQUEST,
-            ):
-                grouped_batches.setdefault((split_start, split_end), []).append(
-                    currency
-                )
-
     batch_plan: List[Tuple[date, date, List[str]]] = []
-    for (window_start, window_end), window_currencies in sorted(
-        grouped_batches.items()
+    requested_windows = 0
+    fully_covered_currencies = set(currencies)
+    for window_start, window_end in _split_fx_refresh_ranges(
+        resolved_start,
+        resolved_end,
+        FX_REFRESH_MAX_DAYS_PER_REQUEST,
     ):
+        covered_quotes = repo.fully_covered_quotes_for_window(
+            service.provider_name,
+            service.pivot_currency,
+            currencies,
+            window_start,
+            window_end,
+        )
+        uncovered_quotes = [
+            currency for currency in currencies if currency not in covered_quotes
+        ]
+        if not uncovered_quotes:
+            continue
+        requested_windows += 1
+        for currency in uncovered_quotes:
+            fully_covered_currencies.discard(currency)
         for batch in _batch_values(
-            sorted(set(window_currencies)),
+            sorted(uncovered_quotes),
             FX_REFRESH_MAX_QUOTES_PER_REQUEST,
         ):
             batch_plan.append((window_start, window_end, batch))
 
     total_batches = len(batch_plan)
+    skipped_currencies = len(fully_covered_currencies)
     print(
         "Refreshing FX rates: "
         f"provider={service.provider_name} "
         f"base={service.pivot_currency} "
         f"currencies={len(currencies)} "
         f"skipped_currencies={skipped_currencies} "
-        f"date_windows={len(grouped_batches)} "
+        f"date_windows={requested_windows} "
         f"requests={total_batches} "
         f"range={resolved_start.isoformat()}..{resolved_end.isoformat()}",
         flush=True,

@@ -15,7 +15,7 @@ from pyvalue.metrics.accruals_ratio import AccrualsRatioCalculator
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.buyback_yield import NetBuybackYieldMetric
 from pyvalue.metrics.enterprise_value import convert_denominator_amount
-from pyvalue.money import fx_converter_for_context
+from pyvalue.money import fx_converter_for_context, normalize_money_value
 from pyvalue.metrics.owner_earnings_enterprise import (
     REQUIRED_CONCEPTS as OE_ENTERPRISE_REQUIRED_CONCEPTS,
     OwnerEarningsEnterpriseCalculator,
@@ -1290,11 +1290,11 @@ class ProfitabilityReturnsGrowthCalculator:
         *,
         absolute: bool = False,
     ) -> tuple[float, Optional[str]]:
-        value = record.value
-        currency = record.currency
-        if currency in {"GBX", "GBP0.01"}:
-            value = value / 100.0
-            currency = "GBP"
+        normalized_value, currency = normalize_money_value(
+            record.value,
+            record.currency,
+        )
+        value = record.value if normalized_value is None else normalized_value
         if absolute:
             value = abs(value)
         return value, currency

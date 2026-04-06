@@ -5,6 +5,8 @@ Author: Emre Tezel
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 import pyvalue.cli as cli
 from pyvalue.screening import RankingDefinition, RankingMetric, ScreenDefinition
 from pyvalue.storage import (
@@ -169,6 +171,24 @@ def test_cmd_refresh_fx_rates_normalizes_discovered_currencies(
                 value=100.0,
                 currency="USD",
             ),
+            FactRecord(
+                symbol="DDD.JSE",
+                concept="Assets",
+                fiscal_period="FY",
+                end_date="2023-12-31",
+                unit="ZAC",
+                value=1000.0,
+                currency="ZAC",
+            ),
+            FactRecord(
+                symbol="EEE.TA",
+                concept="Assets",
+                fiscal_period="FY",
+                end_date="2023-12-31",
+                unit="ILA",
+                value=1000.0,
+                currency="ILA",
+            ),
         ],
     )
 
@@ -211,7 +231,7 @@ def test_cmd_refresh_fx_rates_normalizes_discovered_currencies(
 
     assert rc == 0
     assert calls["base_currency"] == "USD"
-    assert calls["quote_currencies"] == ["EUR", "GBP"]
+    assert calls["quote_currencies"] == ["EUR", "GBP", "ILS", "ZAR"]
     output = capsys.readouterr().out
     assert "Preparing FX refresh schema and indexes" in output
     assert "Stored FX rates" in output
@@ -296,28 +316,24 @@ def test_cmd_refresh_fx_rates_skips_fully_covered_currency_ranges(
     db_path = tmp_path / "refresh_fx_skip_covered.db"
     repo = FXRatesRepository(db_path)
     repo.initialize_schema()
-    repo.upsert_many(
-        [
+    start = date(2020, 1, 1)
+    end = date(2020, 1, 3)
+    records = []
+    current = start
+    while current <= end:
+        records.append(
             FXRateRecord(
                 provider="FRANKFURTER",
-                rate_date="2020-01-01",
+                rate_date=current.isoformat(),
                 base_currency="USD",
                 quote_currency="EUR",
                 rate_text="0.9",
-                fetched_at="2020-01-01T00:00:00+00:00",
+                fetched_at=f"{current.isoformat()}T00:00:00+00:00",
                 source_kind="provider",
-            ),
-            FXRateRecord(
-                provider="FRANKFURTER",
-                rate_date="2020-12-31",
-                base_currency="USD",
-                quote_currency="EUR",
-                rate_text="0.8",
-                fetched_at="2020-12-31T00:00:00+00:00",
-                source_kind="provider",
-            ),
-        ]
-    )
+            )
+        )
+        current += timedelta(days=1)
+    repo.upsert_many(records)
 
     calls = []
 
@@ -344,8 +360,8 @@ def test_cmd_refresh_fx_rates_skips_fully_covered_currency_ranges(
 
     rc = cli.cmd_refresh_fx_rates(
         database=str(db_path),
-        start_date="2020-01-01",
-        end_date="2020-12-31",
+        start_date=start.isoformat(),
+        end_date=end.isoformat(),
     )
 
     assert rc == 0
@@ -353,3 +369,75 @@ def test_cmd_refresh_fx_rates_skips_fully_covered_currency_ranges(
     output = capsys.readouterr().out
     assert "skipped_currencies=1" in output
     assert "requests=0" in output
+
+
+def test_cmd_refresh_fx_rates_fetches_sparse_internal_gaps(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "refresh_fx_internal_gap.db"
+    repo = FXRatesRepository(db_path)
+    repo.initialize_schema()
+    repo.upsert_many(
+        [
+            FXRateRecord(
+                provider="FRANKFURTER",
+                rate_date="2020-01-01",
+                base_currency="USD",
+                quote_currency="EUR",
+                rate_text="0.9",
+                fetched_at="2020-01-01T00:00:00+00:00",
+                source_kind="provider",
+            ),
+            FXRateRecord(
+                provider="FRANKFURTER",
+                rate_date="2020-01-03",
+                base_currency="USD",
+                quote_currency="EUR",
+                rate_text="0.8",
+                fetched_at="2020-01-03T00:00:00+00:00",
+                source_kind="provider",
+            ),
+        ]
+    )
+
+    calls = []
+
+    class FakeProvider:
+        provider_name = "FRANKFURTER"
+
+        def fetch_rates(self, *, base_currency, quote_currencies, start_date, end_date):
+            calls.append(
+                (
+                    base_currency,
+                    tuple(quote_currencies),
+                    start_date.isoformat(),
+                    end_date.isoformat(),
+                )
+            )
+            return []
+
+    class FakeService:
+        def __init__(self, database, repository=None):
+            self.provider = FakeProvider()
+            self.provider_name = "FRANKFURTER"
+            self.pivot_currency = "USD"
+            self.repository = repository or FXRatesRepository(database)
+
+    monkeypatch.setattr(
+        cli.FXRatesRepository,
+        "discover_currencies",
+        lambda self: ["USD", "EUR"],
+    )
+    monkeypatch.setattr(cli, "FXService", FakeService)
+
+    rc = cli.cmd_refresh_fx_rates(
+        database=str(db_path),
+        start_date="2020-01-01",
+        end_date="2020-01-03",
+    )
+
+    assert rc == 0
+    assert calls == [("USD", ("EUR",), "2020-01-01", "2020-01-03")]
+    output = capsys.readouterr().out
+    assert "skipped_currencies=0" in output
+    assert "requests=1" in output

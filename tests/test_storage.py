@@ -1152,6 +1152,37 @@ def test_metrics_repository_persists_unit_metadata(tmp_path):
     assert earnings_yield.unit_label == "pct"
 
 
+def test_metrics_repository_normalizes_configured_subunit_currencies(tmp_path):
+    db_path = tmp_path / "metrics-subunits.db"
+    repo = MetricsRepository(db_path)
+    repo.initialize_schema()
+
+    repo.upsert(
+        "AAA.JSE",
+        "market_cap",
+        237.5,
+        "2024-01-01",
+        unit_kind="monetary",
+        currency="ZAC",
+    )
+    repo.upsert(
+        "BBB.TA",
+        "eps_ttm",
+        12.34,
+        "2024-01-01",
+        unit_kind="per_share",
+        currency="ILA",
+    )
+
+    market_cap = repo.fetch("AAA.JSE", "market_cap")
+    eps_ttm = repo.fetch("BBB.TA", "eps_ttm")
+
+    assert market_cap is not None
+    assert market_cap.currency == "ZAR"
+    assert eps_ttm is not None
+    assert eps_ttm.currency == "ILS"
+
+
 def test_fx_rates_repository_latest_on_or_before_and_discover_currencies(tmp_path):
     db_path = tmp_path / "fx-repo.db"
     fact_repo = FinancialFactsRepository(db_path)
@@ -1167,7 +1198,25 @@ def test_fx_rates_repository_latest_on_or_before_and_discover_currencies(tmp_pat
                 unit="GBX",
                 value=1000.0,
                 currency="GBX",
-            )
+            ),
+            FactRecord(
+                symbol="BBB.JSE",
+                concept="Assets",
+                fiscal_period="FY",
+                end_date="2024-01-01",
+                unit="ZAC",
+                value=1000.0,
+                currency="ZAC",
+            ),
+            FactRecord(
+                symbol="CCC.TA",
+                concept="Assets",
+                fiscal_period="FY",
+                end_date="2024-01-01",
+                unit="ILA",
+                value=1000.0,
+                currency="ILA",
+            ),
         ],
     )
     repo = FXRatesRepository(db_path)
@@ -1199,10 +1248,24 @@ def test_fx_rates_repository_latest_on_or_before_and_discover_currencies(tmp_pat
 
     assert record is not None
     assert record.rate_date == "2024-01-01"
-    assert repo.discover_currencies() == ["GBP"]
-    assert repo.direct_pair_coverage("FRANKFURTER", "USD", ["EUR", "GBP"]) == {
-        "EUR": ("2024-01-01", "2024-01-10")
-    }
+    assert repo.discover_currencies() == ["GBP", "ILS", "ZAR"]
+    assert (
+        repo.fully_covered_quotes_for_window(
+            "FRANKFURTER",
+            "USD",
+            ["EUR", "GBP"],
+            date(2024, 1, 1),
+            date(2024, 1, 10),
+        )
+        == set()
+    )
+    assert repo.fully_covered_quotes_for_window(
+        "FRANKFURTER",
+        "USD",
+        ["EUR", "GBP"],
+        date(2024, 1, 1),
+        date(2024, 1, 1),
+    ) == {"EUR"}
 
 
 def test_security_repository_upserts_sector_and_industry_metadata(tmp_path):

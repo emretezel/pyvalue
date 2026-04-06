@@ -9,7 +9,11 @@ from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
 import logging
 
-from pyvalue.currency import normalize_currency_code, raw_currency_code
+from pyvalue.currency import (
+    is_subunit_currency,
+    normalize_currency_code,
+    raw_currency_code,
+)
 from pyvalue.fx import FXService
 from pyvalue.money import choose_target_currency, convert_money_value
 from pyvalue.metrics.utils import is_recent_fact
@@ -2001,14 +2005,14 @@ class SECFactsNormalizer:
             if token:
                 candidate = raw_currency_code(token)
                 if candidate is not None and (
-                    len(candidate) == 3 or candidate in {"GBP0.01"}
+                    len(candidate) == 3 or is_subunit_currency(candidate)
                 ):
                     return normalize_currency_code(candidate)
                 token = ""
         if token:
             candidate = raw_currency_code(token)
             if candidate is not None and (
-                len(candidate) == 3 or candidate in {"GBP0.01"}
+                len(candidate) == 3 or is_subunit_currency(candidate)
             ):
                 return normalize_currency_code(candidate)
         return None

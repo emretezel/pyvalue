@@ -6,7 +6,7 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import json
 import sqlite3
@@ -3247,13 +3247,21 @@ class FXRatesRepository(SQLiteStore):
             return None
         return FXRateRecord(*row)
 
-    def direct_pair_coverage(
+    def fully_covered_quotes_for_window(
         self,
         provider: str,
         base_currency: str,
         quote_currencies: Sequence[str],
-    ) -> Dict[str, Tuple[str, str]]:
-        """Return direct stored date coverage for one base and many quotes."""
+        start_date: date,
+        end_date: date,
+    ) -> set[str]:
+        """Return quotes whose direct rows fully cover one inclusive date window.
+
+        The refresh command only skips a base/quote window when the stored rows
+        cover every day in that exact requested window. Sparse historical rows
+        must not be treated as continuous coverage just because their min/max
+        dates span the window.
+        """
 
         self.initialize_schema()
         normalized_quotes = [
@@ -3265,11 +3273,16 @@ class FXRatesRepository(SQLiteStore):
             if code is not None
         ]
         if not normalized_quotes:
-            return {}
+            return set()
+        expected_days = (end_date - start_date).days + 1
+        if expected_days <= 0:
+            return set()
         placeholders = ", ".join("?" for _ in normalized_quotes)
         params = [
             provider.strip().upper(),
             normalize_currency_code(base_currency),
+            start_date.isoformat(),
+            end_date.isoformat(),
             *normalized_quotes,
         ]
         with self._connect() as conn:
@@ -3277,23 +3290,25 @@ class FXRatesRepository(SQLiteStore):
                 f"""
                 SELECT
                     quote_currency,
+                    COUNT(*) AS row_count,
                     MIN(rate_date) AS min_rate_date,
                     MAX(rate_date) AS max_rate_date
                 FROM fx_rates
                 WHERE provider = ?
                   AND base_currency = ?
+                  AND rate_date >= ?
+                  AND rate_date <= ?
                   AND quote_currency IN ({placeholders})
                 GROUP BY quote_currency
                 """,
                 params,
             ).fetchall()
         return {
-            str(row["quote_currency"]): (
-                str(row["min_rate_date"]),
-                str(row["max_rate_date"]),
-            )
+            str(row["quote_currency"])
             for row in rows
-            if row["min_rate_date"] is not None and row["max_rate_date"] is not None
+            if row["min_rate_date"] == start_date.isoformat()
+            and row["max_rate_date"] == end_date.isoformat()
+            and int(row["row_count"]) == expected_days
         }
 
     def discover_currencies(self) -> List[str]:

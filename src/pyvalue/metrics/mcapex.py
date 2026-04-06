@@ -17,7 +17,7 @@ from pyvalue.metrics.utils import (
     MAX_FY_FACT_AGE_DAYS,
     is_recent_fact,
 )
-from pyvalue.money import fx_service_for_context
+from pyvalue.money import fx_service_for_context, normalize_money_value
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -199,12 +199,12 @@ class _MCapexBase:
         return normalized, currency
 
     def _normalize_currency(self, record: FactRecord) -> tuple[float, Optional[str]]:
-        value = record.value
-        code = record.currency
-        if code in {"GBX", "GBP0.01"}:
-            value = value / 100.0
-            code = "GBP"
-        return abs(value), code
+        normalized_value, normalized_currency = normalize_money_value(
+            record.value,
+            record.currency,
+        )
+        value = record.value if normalized_value is None else normalized_value
+        return abs(value), normalized_currency
 
     def _is_recent_as_of(self, as_of: str, *, max_age_days: int) -> bool:
         try:

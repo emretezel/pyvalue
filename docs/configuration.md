@@ -80,7 +80,8 @@ Settings:
 FX semantics:
 
 - stored rates are always `1 base_currency = rate quote_currency`
-- GBX-like subunits are normalized to `GBP` before lookup
+- configured subunit currencies are normalized before lookup:
+  `GBX`/`GBP0.01` -> `GBP`, `ZAC` -> `ZAR`, `ILA` -> `ILS`
 - lookups use latest available rate on or before the requested date
 - direct provider rows are persisted; inverse and triangulated cross-rates are
   computed at lookup time, not stored
