@@ -71,7 +71,7 @@ Performance-first database thinking is mandatory.
 - `src/pyvalue/`: core package. `ingestion/`, `normalization/`, `marketdata/`, `metrics/`, and `universe/` hold domain logic; `cli.py` wires the CLI; `storage.py` and `migrations.py` manage SQLite.
 - `tests/`: pytest suite.
 - `screeners/`: YAML screen definitions (e.g., `screeners/value.yml`).
-- `data/`: local artifacts (`data/pyvalue.db`, `data/screen_results_*.csv`) and bundled FX CSVs.
+- `data/`: local artifacts (`data/pyvalue.db`, logs, `data/screen_results_*.csv`).
 - `private/`: local config and API keys (`private/config.toml`, gitignored).
 
 ## Build, Test, and Development Commands

@@ -10,14 +10,14 @@ from typing import Iterable, Optional, Sequence
 
 import logging
 
-from pyvalue.fx import FXRateStore
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.enterprise_value import (
     EV_FALLBACK_REQUIRED_CONCEPTS,
+    FXConverter,
     merge_currency_codes,
     resolve_enterprise_value_denominator,
 )
-from pyvalue.money import ephemeral_fx_database_path, normalize_money_value
+from pyvalue.money import fx_converter_for_context, normalize_money_value
 from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS, is_recent_fact
 from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
 
@@ -278,15 +278,14 @@ class EBITYieldEVMetric:
             LOGGER.warning("%s: missing numerator for %s", self.id, symbol)
             return None
 
+        converter: FXConverter = fx_converter_for_context(repo, market_repo)
         enterprise_value = resolve_enterprise_value_denominator(
             symbol=symbol,
             repo=repo,
             market_repo=market_repo,
             target_currency=numerator.currency,
             context=self.id,
-            converter=FXRateStore(
-                str(getattr(repo, "db_path", ephemeral_fx_database_path()))
-            ).convert,
+            converter=converter,
         )
         if enterprise_value is None:
             return None
@@ -320,15 +319,14 @@ class FCFYieldEVMetric:
             LOGGER.warning("%s: missing numerator for %s", self.id, symbol)
             return None
 
+        converter: FXConverter = fx_converter_for_context(repo, market_repo)
         enterprise_value = resolve_enterprise_value_denominator(
             symbol=symbol,
             repo=repo,
             market_repo=market_repo,
             target_currency=numerator.currency,
             context=self.id,
-            converter=FXRateStore(
-                str(getattr(repo, "db_path", ephemeral_fx_database_path()))
-            ).convert,
+            converter=converter,
         )
         if enterprise_value is None:
             return None
@@ -365,15 +363,14 @@ class EVToEBITMetric:
             LOGGER.warning("%s: non-positive EBIT for %s", self.id, symbol)
             return None
 
+        converter: FXConverter = fx_converter_for_context(repo, market_repo)
         enterprise_value = resolve_enterprise_value_denominator(
             symbol=symbol,
             repo=repo,
             market_repo=market_repo,
             target_currency=numerator.currency,
             context=self.id,
-            converter=FXRateStore(
-                str(getattr(repo, "db_path", ephemeral_fx_database_path()))
-            ).convert,
+            converter=converter,
         )
         if enterprise_value is None:
             return None
@@ -410,15 +407,14 @@ class EVToEBITDAMetric:
             LOGGER.warning("%s: non-positive EBITDA for %s", self.id, symbol)
             return None
 
+        converter: FXConverter = fx_converter_for_context(repo, market_repo)
         enterprise_value = resolve_enterprise_value_denominator(
             symbol=symbol,
             repo=repo,
             market_repo=market_repo,
             target_currency=numerator.currency,
             context=self.id,
-            converter=FXRateStore(
-                str(getattr(repo, "db_path", ephemeral_fx_database_path()))
-            ).convert,
+            converter=converter,
         )
         if enterprise_value is None:
             return None

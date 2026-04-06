@@ -127,6 +127,16 @@ def fact(**kwargs):
     return FactRecord(**base)
 
 
+def _constant_converter(result):
+    return lambda *args, **kwargs: result
+
+
+def test_fx_rate_store_removed_from_public_api():
+    import pyvalue.fx as fx
+
+    assert not hasattr(fx, "FXRateStore")
+
+
 def _net_debt_quarter_dates():
     today = date.today()
     return (
@@ -8737,8 +8747,8 @@ def test_oey_equity_metric_applies_fx_conversion(monkeypatch):
     )
 
     monkeypatch.setattr(
-        "pyvalue.metrics.owner_earnings_yield.FXRateStore.convert",
-        lambda self, amount, from_currency, to_currency, as_of: amount * 2.0,
+        "pyvalue.metrics.owner_earnings_yield.fx_converter_for_context",
+        lambda *args, **kwargs: _constant_converter(200.0),
     )
 
     class DummyMarketRepo:
@@ -8844,8 +8854,8 @@ def test_oey_equity_metric_returns_none_when_fx_conversion_fails(monkeypatch):
     )
 
     monkeypatch.setattr(
-        "pyvalue.metrics.owner_earnings_yield.FXRateStore.convert",
-        lambda self, amount, from_currency, to_currency, as_of: None,
+        "pyvalue.metrics.owner_earnings_yield.fx_converter_for_context",
+        lambda *args, **kwargs: _constant_converter(None),
     )
 
     class DummyMarketRepo:
@@ -9170,8 +9180,8 @@ def test_oey_ev_metric_applies_fx_conversion(monkeypatch):
     ]
 
     monkeypatch.setattr(
-        "pyvalue.metrics.owner_earnings_yield.FXRateStore.convert",
-        lambda self, amount, from_currency, to_currency, as_of: amount * 2.0,
+        "pyvalue.metrics.owner_earnings_yield.fx_converter_for_context",
+        lambda *args, **kwargs: _constant_converter(200.0),
     )
 
     class DummyMarketRepo:
@@ -9215,8 +9225,8 @@ def test_oey_ev_metric_returns_none_when_fx_conversion_fails(monkeypatch):
     ]
 
     monkeypatch.setattr(
-        "pyvalue.metrics.owner_earnings_yield.FXRateStore.convert",
-        lambda self, amount, from_currency, to_currency, as_of: None,
+        "pyvalue.metrics.owner_earnings_yield.fx_converter_for_context",
+        lambda *args, **kwargs: _constant_converter(None),
     )
 
     class DummyMarketRepo:
@@ -9500,8 +9510,8 @@ def test_ebit_yield_ev_metric_applies_fx_conversion(monkeypatch):
     )
 
     monkeypatch.setattr(
-        "pyvalue.metrics.enterprise_value_ratios.FXRateStore.convert",
-        lambda self, amount, from_currency, to_currency, as_of: amount * 2.0,
+        "pyvalue.metrics.enterprise_value_ratios.fx_converter_for_context",
+        lambda *args, **kwargs: _constant_converter(1000.0),
     )
 
     result = metric.compute(
@@ -9529,8 +9539,8 @@ def test_ebit_yield_ev_metric_returns_none_when_fx_conversion_fails(monkeypatch)
     )
 
     monkeypatch.setattr(
-        "pyvalue.metrics.enterprise_value_ratios.FXRateStore.convert",
-        lambda self, amount, from_currency, to_currency, as_of: None,
+        "pyvalue.metrics.enterprise_value_ratios.fx_converter_for_context",
+        lambda *args, **kwargs: _constant_converter(None),
     )
 
     assert (
@@ -10550,8 +10560,8 @@ def test_net_buyback_yield_metric_applies_fx_conversion(monkeypatch):
     )
 
     monkeypatch.setattr(
-        "pyvalue.metrics.buyback_yield.FXRateStore.convert",
-        lambda self, amount, from_currency, to_currency, as_of: amount * 2.0,
+        "pyvalue.metrics.buyback_yield.fx_converter_for_context",
+        lambda *args, **kwargs: _constant_converter(1000.0),
     )
 
     result = metric.compute(
@@ -10596,8 +10606,8 @@ def test_net_buyback_yield_metric_uses_share_count_fallback_when_fx_conversion_f
     repo = _OwnerEarningsRepo(records)
 
     monkeypatch.setattr(
-        "pyvalue.metrics.buyback_yield.FXRateStore.convert",
-        lambda self, amount, from_currency, to_currency, as_of: None,
+        "pyvalue.metrics.buyback_yield.fx_converter_for_context",
+        lambda *args, **kwargs: _constant_converter(None),
     )
 
     result = metric.compute(
@@ -11469,8 +11479,8 @@ def test_oey_ev_norm_metric_returns_none_when_fx_conversion_fails(monkeypatch):
     ]
 
     monkeypatch.setattr(
-        "pyvalue.metrics.owner_earnings_yield.FXRateStore.convert",
-        lambda self, amount, from_currency, to_currency, as_of: None,
+        "pyvalue.metrics.owner_earnings_yield.fx_converter_for_context",
+        lambda *args, **kwargs: _constant_converter(None),
     )
 
     result = metric.compute(

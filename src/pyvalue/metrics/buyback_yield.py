@@ -6,15 +6,14 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 import logging
 
-from pyvalue.fx import FXRateStore
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.share_count_change import ShareCountChangeCalculator
 from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS, is_recent_fact
-from pyvalue.money import ephemeral_fx_database_path, normalize_money_value
+from pyvalue.money import fx_converter_for_context, normalize_money_value
 from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -32,6 +31,8 @@ REQUIRED_CONCEPTS = (
     SHARE_COUNT_CONCEPT,
 )
 
+FXConverter = Callable[[float, str, str, str], Optional[float]]
+
 
 @dataclass(frozen=True)
 class _TTMResult:
@@ -48,10 +49,10 @@ def _convert_market_cap(
     target_currency: Optional[str],
     as_of: str,
     context: str,
-    database: str,
+    converter: FXConverter,
 ) -> Optional[float]:
     if source_currency and target_currency and source_currency != target_currency:
-        converted = FXRateStore(database).convert(
+        converted = converter(
             amount,
             source_currency,
             target_currency,
@@ -212,7 +213,7 @@ class NetBuybackYieldMetric:
             target_currency=target_currency,
             as_of=snapshot.as_of,
             context=self.id,
-            database=str(getattr(market_repo, "db_path", ephemeral_fx_database_path())),
+            converter=fx_converter_for_context(market_repo),
         )
         if converted is None:
             return None

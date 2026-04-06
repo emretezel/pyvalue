@@ -17,7 +17,7 @@ Main repo areas:
 - `src/pyvalue/`: application code
 - `tests/`: pytest suite
 - `screeners/`: YAML screen definitions
-- `data/`: local database, FX data, and output artifacts
+- `data/`: local database, logs, and output artifacts
 - `private/`: local credentials and config
 - `docs/`: project documentation
 

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Optional, Protocol, Sequence, Union
+from typing import Optional, Protocol, Sequence
 import json
 import logging
 
@@ -205,7 +205,7 @@ class FXService:
 
     def __init__(
         self,
-        database: Union[str, Path],
+        database: str | Path,
         *,
         repository: Optional[FXRatesRepository] = None,
         provider: Optional[FXProvider] = None,
@@ -466,39 +466,10 @@ class FXService:
                 self.repository.upsert_many(rows)
 
 
-class FXRateStore:
-    """Compatibility wrapper exposing the historical ``convert`` API."""
-
-    def __init__(
-        self,
-        database: Union[str, Path] = "data/pyvalue.db",
-        *,
-        service: Optional[FXService] = None,
-        provider: Optional[FXProvider] = None,
-        config: Optional[Config] = None,
-    ) -> None:
-        self.service = service or FXService(database, provider=provider, config=config)
-
-    def convert(
-        self,
-        amount: float,
-        from_currency: str,
-        to_currency: str,
-        as_of: str | date,
-    ) -> Optional[float]:
-        converted = self.service.convert_amount(
-            amount, from_currency, to_currency, as_of
-        )
-        if converted is None:
-            return None
-        return float(converted)
-
-
 __all__ = [
     "DEFAULT_PROVIDER",
     "FXProvider",
     "FXQuote",
-    "FXRateStore",
     "FXService",
     "FrankfurterProvider",
 ]
