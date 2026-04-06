@@ -4,11 +4,12 @@ Author: Emre Tezel
 """
 
 import logging
+import multiprocessing as mp
 import sqlite3
 import threading
 import time
 import concurrent.futures.thread as thread_futures
-from concurrent.futures import Future
+from concurrent.futures import Future, ProcessPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -123,11 +124,31 @@ def store_catalog_listings(
     return repo
 
 
-def store_market_data(db_path, symbol: str, as_of: str, price: float = 10.0):
+def store_market_data(
+    db_path,
+    symbol: str,
+    as_of: str,
+    price: float = 10.0,
+    market_cap: float | None = None,
+    currency: str | None = None,
+):
     repo = MarketDataRepository(db_path)
     repo.initialize_schema()
-    repo.upsert_price(symbol, as_of, price)
+    repo.upsert_price(
+        symbol,
+        as_of,
+        price,
+        market_cap=market_cap,
+        currency=currency,
+    )
     return repo
+
+
+def _spawn_process_pool_executor(max_workers: int) -> ProcessPoolExecutor:
+    return ProcessPoolExecutor(
+        max_workers=max_workers,
+        mp_context=mp.get_context("spawn"),
+    )
 
 
 def make_supported_ticker(
@@ -3345,36 +3366,35 @@ def test_cmd_compute_metrics_bulk(monkeypatch, tmp_path):
     ]
     store_catalog_listings(db_path, "US", listings, provider="SEC")
 
-    fact_repo = FinancialFactsRepository(db_path)
-    fact_repo.initialize_schema()
-    for symbol in ["AAA.US", "BBB.US"]:
-        fact_repo.replace_facts(symbol, [])
-
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
-
-    class DummyMetric:
-        id = "dummy_metric"
-        required_concepts = ()
-        uses_market_data = False
-
-        def compute(self, symbol, repo):
-            return MetricResult(
-                symbol=symbol, metric_id=self.id, value=len(symbol), as_of="2024-01-01"
-            )
-
-    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
+    store_market_data(
+        db_path,
+        "AAA.US",
+        "2024-01-01",
+        price=10.0,
+        market_cap=120.0,
+        currency="USD",
+    )
+    store_market_data(
+        db_path,
+        "BBB.US",
+        "2024-01-01",
+        price=9.0,
+        market_cap=90.0,
+        currency="USD",
+    )
 
     rc = cli.cmd_compute_metrics_bulk(
         provider="SEC",
         database=str(db_path),
-        metric_ids=None,
+        metric_ids=["market_cap"],
         exchange_code="US",
     )
     assert rc == 0
 
-    assert metrics_repo.fetch("AAA.US", "dummy_metric")[0] == len("AAA.US")
-    assert metrics_repo.fetch("BBB.US", "dummy_metric")[0] == len("BBB.US")
+    assert metrics_repo.fetch("AAA.US", "market_cap") == (120.0, "2024-01-01")
+    assert metrics_repo.fetch("BBB.US", "market_cap") == (90.0, "2024-01-01")
 
 
 def test_cmd_compute_metrics_bulk_with_exchange(monkeypatch, tmp_path):
@@ -3987,31 +4007,36 @@ def test_cmd_compute_metrics_stage_all_supported_scope(monkeypatch, tmp_path):
         provider="EODHD",
     )
 
-    class DummyMetric:
-        id = "dummy_metric"
-        required_concepts = ()
-        uses_market_data = False
-
-        def compute(self, symbol, repo):
-            return MetricResult(
-                symbol=symbol, metric_id=self.id, value=2.0, as_of="2024-01-01"
-            )
-
-    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
+    store_market_data(
+        db_path,
+        "AAA.US",
+        "2024-01-01",
+        price=10.0,
+        market_cap=120.0,
+        currency="USD",
+    )
+    store_market_data(
+        db_path,
+        "BBB.LSE",
+        "2024-01-01",
+        price=20.0,
+        market_cap=210.0,
+        currency="GBP",
+    )
 
     rc = cli.cmd_compute_metrics_stage(
         database=str(db_path),
         symbols=None,
         exchange_codes=None,
         all_supported=True,
-        metric_ids=None,
+        metric_ids=["market_cap"],
     )
 
     assert rc == 0
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
-    assert repo.fetch("AAA.US", "dummy_metric") == (2.0, "2024-01-01")
-    assert repo.fetch("BBB.LSE", "dummy_metric") == (2.0, "2024-01-01")
+    assert repo.fetch("AAA.US", "market_cap") == (120.0, "2024-01-01")
+    assert repo.fetch("BBB.LSE", "market_cap") == (210.0, "2024-01-01")
 
 
 def test_cmd_compute_metrics_stage_parallel_with_inline_executor(
@@ -4062,7 +4087,7 @@ def test_cmd_compute_metrics_stage_parallel_with_inline_executor(
     monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 2)
     monkeypatch.setattr(
         cli,
-        "_create_normalization_executor",
+        "_create_process_pool_executor",
         lambda max_workers: InlineExecutor(),
     )
     monkeypatch.setattr(cli, "as_completed", reverse_as_completed)
@@ -4127,7 +4152,7 @@ def test_cmd_compute_metrics_stage_parallel_partial_failure(
     monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 2)
     monkeypatch.setattr(
         cli,
-        "_create_normalization_executor",
+        "_create_process_pool_executor",
         lambda max_workers: InlineExecutor(),
     )
     monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
@@ -4196,7 +4221,7 @@ def test_run_metric_computation_interrupts_cleanly(monkeypatch, tmp_path, capsys
     monkeypatch.setattr(cli, "_ensure_metrics_wal_mode", lambda repo: "wal")
     monkeypatch.setattr(
         cli,
-        "_create_normalization_executor",
+        "_create_process_pool_executor",
         lambda max_workers: executor,
     )
     monkeypatch.setattr(cli, "_compute_metrics_for_symbol_worker", fake_worker)
@@ -4280,7 +4305,7 @@ def test_cmd_compute_metrics_stage_falls_back_to_serial_without_wal(
     def fail_executor(max_workers):
         raise AssertionError("process executor should not be used without WAL")
 
-    monkeypatch.setattr(cli, "_create_normalization_executor", fail_executor)
+    monkeypatch.setattr(cli, "_create_process_pool_executor", fail_executor)
 
     rc = cli.cmd_compute_metrics_stage(
         database=str(db_path),
@@ -4355,7 +4380,7 @@ def test_run_metric_computation_batches_metric_writes(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "_ensure_metrics_wal_mode", lambda repo: "wal")
     monkeypatch.setattr(
         cli,
-        "_create_normalization_executor",
+        "_create_process_pool_executor",
         lambda max_workers: InlineExecutor(),
     )
     monkeypatch.setattr(cli, "_compute_metrics_for_symbol_worker", fake_worker)
@@ -4449,7 +4474,7 @@ def test_cmd_compute_metrics_stage_parallel_workers_skip_schema_init(
     monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 2)
     monkeypatch.setattr(
         cli,
-        "_create_normalization_executor",
+        "_create_process_pool_executor",
         lambda max_workers: InlineExecutor(),
     )
     monkeypatch.setattr(
@@ -4487,9 +4512,6 @@ def test_cmd_compute_metrics_stage_parallel_workers_skip_schema_init(
 
 
 def test_cmd_compute_metrics_stage_process_pool_smoke(monkeypatch, tmp_path):
-    if cli.os.name != "posix":
-        pytest.skip("requires POSIX fork support")
-
     db_path = tmp_path / "metric-stage-process.db"
     store_catalog_listings(
         db_path,
@@ -4501,35 +4523,42 @@ def test_cmd_compute_metrics_stage_process_pool_smoke(monkeypatch, tmp_path):
         provider="SEC",
     )
 
-    class DummyMetric:
-        id = "dummy_metric"
-        required_concepts = ()
-        uses_market_data = False
-
-        def compute(self, symbol, repo):
-            return MetricResult(
-                symbol=symbol,
-                metric_id=self.id,
-                value=float(len(symbol)),
-                as_of="2024-01-01",
-            )
-
-    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
     monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 2)
+    monkeypatch.setattr(
+        cli,
+        "_create_process_pool_executor",
+        _spawn_process_pool_executor,
+    )
+    store_market_data(
+        db_path,
+        "AAA.US",
+        "2024-01-01",
+        price=10.0,
+        market_cap=120.0,
+        currency="USD",
+    )
+    store_market_data(
+        db_path,
+        "BBB.US",
+        "2024-01-01",
+        price=9.0,
+        market_cap=90.0,
+        currency="USD",
+    )
 
     rc = cli.cmd_compute_metrics_stage(
         database=str(db_path),
         symbols=None,
         exchange_codes=["US"],
         all_supported=False,
-        metric_ids=None,
+        metric_ids=["market_cap"],
     )
 
     assert rc == 0
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
-    assert repo.fetch("AAA.US", "dummy_metric") == (6.0, "2024-01-01")
-    assert repo.fetch("BBB.US", "dummy_metric") == (6.0, "2024-01-01")
+    assert repo.fetch("AAA.US", "market_cap") == (120.0, "2024-01-01")
+    assert repo.fetch("BBB.US", "market_cap") == (90.0, "2024-01-01")
 
 
 def test_cmd_clear_fundamentals_raw(tmp_path):
@@ -4913,18 +4942,29 @@ def test_cmd_normalize_fundamentals_bulk_with_exchange(monkeypatch, tmp_path):
 
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert("SEC", "AAA.US", {"entityName": "AAA Corp", "facts": {}})
-    fund_repo.upsert("SEC", "BBB.US", {"entityName": "BBB Corp", "facts": {}})
-
-    class DummyNormalizer:
-        def normalize(self, payload, symbol, cik=None):
-            return [
-                make_fact(
-                    symbol=symbol, concept="Dummy", end_date="2023-12-31", value=1.0
-                )
-            ]
-
-    monkeypatch.setattr(cli, "SECFactsNormalizer", lambda: DummyNormalizer())
+    payload = {
+        "entityName": "Test Corp",
+        "facts": {
+            "us-gaap": {
+                "NetIncomeLoss": {
+                    "units": {
+                        "USD": [
+                            {
+                                "val": 123.0,
+                                "fy": 2024,
+                                "fp": "FY",
+                                "end": "2024-12-31",
+                                "filed": "2025-02-01",
+                                "form": "10-K",
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+    }
+    fund_repo.upsert("SEC", "AAA.US", payload)
+    fund_repo.upsert("SEC", "BBB.US", payload)
 
     rc = cli.cmd_normalize_fundamentals_bulk(
         provider="SEC",
@@ -4940,14 +4980,20 @@ def test_cmd_normalize_fundamentals_bulk_with_exchange(monkeypatch, tmp_path):
         .execute(
             """
             SELECT s.canonical_symbol
+            , ff.concept
+            , ff.value
             FROM financial_facts ff
             JOIN securities s ON s.security_id = ff.security_id
+            WHERE ff.concept = 'NetIncomeLoss'
             ORDER BY s.canonical_symbol
             """
         )
         .fetchall()
     )
-    assert [row[0] for row in rows] == ["AAA.US", "BBB.US"]
+    assert [(row[0], row[1], row[2]) for row in rows] == [
+        ("AAA.US", "NetIncomeLoss", 123.0),
+        ("BBB.US", "NetIncomeLoss", 123.0),
+    ]
 
 
 def test_cmd_normalize_fundamentals_eodhd(monkeypatch, tmp_path):
@@ -5316,7 +5362,7 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_continues_after_symbol_failure_wi
 
     monkeypatch.setattr(
         cli,
-        "_create_normalization_executor",
+        "_create_process_pool_executor",
         lambda max_workers: InlineExecutor(),
     )
 
@@ -5398,7 +5444,7 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_interrupts_cleanly(
     monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 2)
     monkeypatch.setattr(
         cli,
-        "_create_normalization_executor",
+        "_create_process_pool_executor",
         lambda max_workers: executor,
     )
     monkeypatch.setattr(cli, "as_completed", interrupting_as_completed)
@@ -5465,7 +5511,7 @@ def test_cmd_normalize_sec_facts_bulk_with_inline_executor(monkeypatch, tmp_path
     monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 2)
     monkeypatch.setattr(
         cli,
-        "_create_normalization_executor",
+        "_create_process_pool_executor",
         lambda max_workers: InlineExecutor(),
     )
 
@@ -5542,9 +5588,6 @@ def test_cmd_normalize_us_facts_bulk_force_skips_freshness_scan(
 def test_cmd_normalize_eodhd_fundamentals_bulk_process_pool_smoke(
     monkeypatch, tmp_path
 ):
-    if cli.os.name != "posix":
-        pytest.skip("requires POSIX fork support")
-
     db_path = tmp_path / "normalize-eodhd-process.db"
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
@@ -5570,6 +5613,11 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_process_pool_smoke(
         )
 
     monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 2)
+    monkeypatch.setattr(
+        cli,
+        "_create_process_pool_executor",
+        _spawn_process_pool_executor,
+    )
 
     rc = cli.cmd_normalize_eodhd_fundamentals_bulk(
         database=str(db_path),
@@ -5599,9 +5647,6 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_process_pool_smoke(
 
 
 def test_cmd_normalize_sec_facts_bulk_process_pool_smoke(monkeypatch, tmp_path):
-    if cli.os.name != "posix":
-        pytest.skip("requires POSIX fork support")
-
     db_path = tmp_path / "normalize-sec-process.db"
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
@@ -5630,6 +5675,11 @@ def test_cmd_normalize_sec_facts_bulk_process_pool_smoke(monkeypatch, tmp_path):
         fund_repo.upsert("SEC", symbol, payload)
 
     monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 2)
+    monkeypatch.setattr(
+        cli,
+        "_create_process_pool_executor",
+        _spawn_process_pool_executor,
+    )
 
     rc = cli.cmd_normalize_us_facts_bulk(
         database=str(db_path),
@@ -6693,6 +6743,121 @@ def test_cmd_report_metric_failures_with_exchange(tmp_path, capsys):
     assert "symbols=1" in output
     assert "example=AAA.LSE" in output
     assert "BBB.US" not in output
+
+
+def test_cmd_report_metric_failures_surfaces_roic_specific_reason(tmp_path, capsys):
+    db_path = tmp_path / "roic_failures.db"
+    symbol = "AAA.US"
+    latest_year = date.today().year - 1
+    store_catalog_listings(
+        db_path,
+        "US",
+        [Listing(symbol=symbol, security_name="AAA Inc", exchange="NYSE")],
+        provider="SEC",
+    )
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+
+    facts: list[FactRecord] = []
+    for year in range(latest_year - 9, latest_year + 1):
+        end_date = f"{year}-09-30"
+        facts.extend(
+            [
+                make_fact(
+                    symbol=symbol,
+                    concept="OperatingIncomeLoss",
+                    end_date=end_date,
+                    value=200.0,
+                ),
+                make_fact(
+                    symbol=symbol,
+                    concept="IncomeTaxExpense",
+                    end_date=end_date,
+                    value=40.0,
+                ),
+                make_fact(
+                    symbol=symbol,
+                    concept="IncomeBeforeIncomeTaxes",
+                    end_date=end_date,
+                    value=200.0,
+                ),
+                make_fact(
+                    symbol=symbol,
+                    concept="StockholdersEquity",
+                    end_date=end_date,
+                    value=900.0,
+                ),
+                make_fact(
+                    symbol=symbol,
+                    concept="CashAndCashEquivalents",
+                    end_date=end_date,
+                    value=300.0,
+                ),
+            ]
+        )
+        if year != latest_year:
+            facts.extend(
+                [
+                    make_fact(
+                        symbol=symbol,
+                        concept="ShortTermDebt",
+                        end_date=end_date,
+                        value=100.0,
+                    ),
+                    make_fact(
+                        symbol=symbol,
+                        concept="LongTermDebt",
+                        end_date=end_date,
+                        value=300.0,
+                    ),
+                ]
+            )
+
+    oldest_ic_year = latest_year - 10
+    oldest_end_date = f"{oldest_ic_year}-09-30"
+    facts.extend(
+        [
+            make_fact(
+                symbol=symbol,
+                concept="ShortTermDebt",
+                end_date=oldest_end_date,
+                value=100.0,
+            ),
+            make_fact(
+                symbol=symbol,
+                concept="LongTermDebt",
+                end_date=oldest_end_date,
+                value=300.0,
+            ),
+            make_fact(
+                symbol=symbol,
+                concept="StockholdersEquity",
+                end_date=oldest_end_date,
+                value=900.0,
+            ),
+            make_fact(
+                symbol=symbol,
+                concept="CashAndCashEquivalents",
+                end_date=oldest_end_date,
+                value=300.0,
+            ),
+        ]
+    )
+    fact_repo.replace_facts(symbol, facts)
+
+    rc = cli.cmd_report_metric_failures(
+        database=str(db_path),
+        metric_ids=["roic_10y_median"],
+        symbols=[symbol],
+        exchange_codes=None,
+        all_supported=False,
+        output_csv=None,
+    )
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "roic_10y_median" in output
+    assert "roic_10y: missing invested capital debt input for <symbol>: 1" in output
 
 
 def test_cmd_report_screen_failures_dedupes_metric_na_counts(tmp_path, capsys):

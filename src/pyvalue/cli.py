@@ -14,7 +14,6 @@ from datetime import date, datetime, timedelta, timezone
 from inspect import Parameter, signature
 import json
 import logging
-import multiprocessing as mp
 import os
 import re
 import sqlite3
@@ -3433,7 +3432,7 @@ def _run_metric_computation(
             print(f"Computed metrics for {total_symbols} symbols in {db_path}")
             return 0
 
-        executor = _create_normalization_executor(workers)
+        executor = _create_process_pool_executor(workers)
         interrupted = False
         try:
             futures = {
@@ -4233,20 +4232,10 @@ def _normalization_record_to_row(record: FactRecord) -> StoredFactRow:
     )
 
 
-def _normalization_mp_context() -> Optional[mp.context.BaseContext]:
-    if os.name != "posix":
-        return None
-    try:
-        return mp.get_context("fork")
-    except ValueError:
-        return None
+def _create_process_pool_executor(max_workers: int) -> ProcessPoolExecutor:
+    """Create a process pool using the interpreter's platform default start method."""
 
-
-def _create_normalization_executor(max_workers: int) -> ProcessPoolExecutor:
-    mp_context = _normalization_mp_context()
-    if mp_context is None:
-        return ProcessPoolExecutor(max_workers=max_workers)
-    return ProcessPoolExecutor(max_workers=max_workers, mp_context=mp_context)
+    return ProcessPoolExecutor(max_workers=max_workers)
 
 
 def _normalize_sec_symbol_worker(
@@ -4397,7 +4386,7 @@ def _run_bulk_normalization(
                 )
                 failed += 1
     else:
-        executor = _create_normalization_executor(workers)
+        executor = _create_process_pool_executor(workers)
         interrupted = False
         try:
             futures = {
