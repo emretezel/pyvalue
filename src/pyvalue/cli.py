@@ -11,7 +11,6 @@ import concurrent.futures.thread as _thread_futures
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from inspect import Parameter, signature
 import json
 import logging
 import os
@@ -31,7 +30,7 @@ from pyvalue.currency import (
     normalize_currency_code,
 )
 from pyvalue.ingestion import EODHDFundamentalsClient, SECCompanyFactsClient
-from pyvalue.fx import FXService
+from pyvalue.fx import FXService, FrankfurterProvider
 from pyvalue.marketdata import EODHDProvider, MarketDataUpdate, PriceData
 from pyvalue.marketdata.service import MarketDataService
 from pyvalue.metrics import REGISTRY
@@ -80,27 +79,12 @@ from pyvalue.universe import USUniverseLoader
 LOGGER = logging.getLogger(__name__)
 
 
-def _instantiate_with_optional_fx_service(factory, database: str | Path):
-    """Instantiate ``factory``, injecting ``fx_service`` when supported."""
-
-    parameters: Sequence[Parameter]
-    try:
-        parameters = tuple(signature(factory).parameters.values())
-    except (TypeError, ValueError):
-        parameters = ()
-    accepts_fx_service = any(
-        parameter.kind == Parameter.VAR_KEYWORD or parameter.name == "fx_service"
-        for parameter in parameters
-    )
-    if accepts_fx_service:
-        return factory(fx_service=FXService(str(database)))
-    return factory()
-
-
 def _resolve_ticker_target_currency(
     database: Union[str, Path],
     symbol: str,
     payload: Optional[Dict[str, object]] = None,
+    *,
+    ticker_repo: Optional[SupportedTickerRepository] = None,
 ) -> Optional[str]:
     """Resolve the canonical trading currency for a ticker.
 
@@ -111,8 +95,8 @@ def _resolve_ticker_target_currency(
 
     from pyvalue.currency import canonical_trading_currency
 
-    ticker_repo = SupportedTickerRepository(database)
-    observed = ticker_repo.fetch_currency(symbol)
+    repo = ticker_repo or SupportedTickerRepository(database)
+    observed = repo.fetch_currency(symbol)
     canonical = canonical_trading_currency(observed)
     if canonical is not None:
         return canonical
@@ -2976,6 +2960,20 @@ class _SchemaReadySecurityRepository(SecurityRepository):
         return
 
 
+class _SchemaReadyFXRatesRepository(FXRatesRepository):
+    """FX rates repository that skips schema init in normalization workers."""
+
+    def initialize_schema(self) -> None:
+        return
+
+
+class _SchemaReadySupportedTickerRepository(SupportedTickerRepository):
+    """Supported-ticker repository that skips schema init in normalization workers."""
+
+    def initialize_schema(self) -> None:
+        return
+
+
 class _SchemaReadyFinancialFactsRepository(FinancialFactsRepository):
     """Read-only facts repository that skips schema work in metric workers."""
 
@@ -4120,7 +4118,10 @@ def cmd_normalize_us_facts(
         return 0
 
     payload, raw_fetched_at = payload_record
-    normalizer = _instantiate_with_optional_fx_service(SECFactsNormalizer, database)
+    fx_repo = _SchemaReadyFXRatesRepository(database)
+    fx_service = FXService(database, repository=fx_repo)
+    fx_service.lazy_fetch = False
+    normalizer = SECFactsNormalizer(fx_service=fx_service)
     records = normalizer.normalize(payload, symbol=symbol.upper())
 
     fact_repo = FinancialFactsRepository(database)
@@ -4264,6 +4265,56 @@ def _create_process_pool_executor(max_workers: int) -> ProcessPoolExecutor:
     return ProcessPoolExecutor(max_workers=max_workers)
 
 
+# ---------------------------------------------------------------------------
+# Process-local caching for normalization workers
+# ---------------------------------------------------------------------------
+# Each worker process reuses a single FXService and SupportedTickerRepository
+# across all symbols, avoiding per-symbol Config reads, schema checks, and
+# HTTP session creation.  The _SchemaReady* subclasses no-op initialize_schema()
+# since the main process has already ensured the schema exists.
+
+_process_local_fx_service: Optional[FXService] = None
+_process_local_fx_service_db: Optional[str] = None
+_process_local_ticker_repo: Optional[SupportedTickerRepository] = None
+_process_local_ticker_repo_db: Optional[str] = None
+
+
+def _get_or_create_fx_service(database: Union[str, Path]) -> FXService:
+    """Return a process-local FXService, creating it on first call.
+
+    The cached instance is invalidated when ``database`` changes (can happen
+    in test harnesses that run workers in-process with different temp DBs).
+    """
+
+    global _process_local_fx_service, _process_local_fx_service_db
+    db_key = str(database)
+    if _process_local_fx_service is None or _process_local_fx_service_db != db_key:
+        repo = _SchemaReadyFXRatesRepository(database)
+        _process_local_fx_service = FXService(
+            database,
+            repository=repo,
+            provider=FrankfurterProvider(),
+        )
+        # All FX rates are already in the DB; never fetch from the network
+        # during normalization.
+        _process_local_fx_service.lazy_fetch = False
+        _process_local_fx_service_db = db_key
+    return _process_local_fx_service
+
+
+def _get_or_create_ticker_repo(
+    database: Union[str, Path],
+) -> SupportedTickerRepository:
+    """Return a process-local SupportedTickerRepository, creating it on first call."""
+
+    global _process_local_ticker_repo, _process_local_ticker_repo_db
+    db_key = str(database)
+    if _process_local_ticker_repo is None or _process_local_ticker_repo_db != db_key:
+        _process_local_ticker_repo = _SchemaReadySupportedTickerRepository(database)
+        _process_local_ticker_repo_db = db_key
+    return _process_local_ticker_repo
+
+
 def _normalize_sec_symbol_worker(
     database: Union[str, Path], symbol: str
 ) -> Optional[_NormalizedFactsResult]:
@@ -4274,7 +4325,8 @@ def _normalize_sec_symbol_worker(
     if payload_record is None:
         return None
     payload, raw_fetched_at = payload_record
-    normalizer = _instantiate_with_optional_fx_service(SECFactsNormalizer, database)
+    fx_service = _get_or_create_fx_service(database)
+    normalizer = SECFactsNormalizer(fx_service=fx_service)
     rows = tuple(
         _normalization_record_to_row(record)
         for record in normalizer.normalize(payload, symbol=symbol)
@@ -4297,8 +4349,11 @@ def _normalize_eodhd_symbol_worker(
     if payload_record is None:
         return None
     payload, raw_fetched_at = payload_record
-    target_currency = _resolve_ticker_target_currency(database, symbol, payload)
-    normalizer = _instantiate_with_optional_fx_service(EODHDFactsNormalizer, database)
+    target_currency = _resolve_ticker_target_currency(
+        database, symbol, payload, ticker_repo=_get_or_create_ticker_repo(database)
+    )
+    fx_service = _get_or_create_fx_service(database)
+    normalizer = EODHDFactsNormalizer(fx_service=fx_service)
     rows = tuple(
         _normalization_record_to_row(record)
         for record in normalizer.normalize(
@@ -4338,6 +4393,10 @@ def _run_bulk_normalization(
     entity_repo.initialize_schema()
     state_repo = FundamentalsNormalizationStateRepository(db_path)
     state_repo.initialize_schema()
+    # Pre-initialize schemas used by worker processes so that
+    # _SchemaReady* wrappers can safely skip redundant init calls.
+    FXRatesRepository(db_path).initialize_schema()
+    SupportedTickerRepository(db_path).initialize_schema()
 
     total = len(selected_symbols)
     requested = requested_total if requested_total is not None else total
@@ -4525,8 +4584,14 @@ def cmd_normalize_eodhd_fundamentals(
 
     payload, raw_fetched_at = payload_record
 
-    target_currency = _resolve_ticker_target_currency(database, symbol_upper, payload)
-    normalizer = _instantiate_with_optional_fx_service(EODHDFactsNormalizer, database)
+    ticker_repo = _SchemaReadySupportedTickerRepository(database)
+    target_currency = _resolve_ticker_target_currency(
+        database, symbol_upper, payload, ticker_repo=ticker_repo
+    )
+    fx_repo = _SchemaReadyFXRatesRepository(database)
+    fx_service = FXService(database, repository=fx_repo)
+    fx_service.lazy_fetch = False
+    normalizer = EODHDFactsNormalizer(fx_service=fx_service)
     records = normalizer.normalize(
         payload, symbol=symbol_upper, target_currency=target_currency
     )

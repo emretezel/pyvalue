@@ -4660,7 +4660,9 @@ def test_cmd_normalize_fundamentals_sec(monkeypatch, tmp_path):
             ]
 
     fake_normalizer = FakeNormalizer()
-    monkeypatch.setattr(cli, "SECFactsNormalizer", lambda: fake_normalizer)
+    monkeypatch.setattr(
+        cli, "SECFactsNormalizer", lambda fx_service=None: fake_normalizer
+    )
 
     rc = cli.cmd_normalize_fundamentals(
         provider="SEC",
@@ -4719,7 +4721,9 @@ def test_cmd_normalize_fundamentals_sec_skips_when_up_to_date(
                 )
             ]
 
-    monkeypatch.setattr(cli, "SECFactsNormalizer", lambda: FakeNormalizer())
+    monkeypatch.setattr(
+        cli, "SECFactsNormalizer", lambda fx_service=None: FakeNormalizer()
+    )
 
     assert (
         cli.cmd_normalize_fundamentals(
@@ -4766,7 +4770,9 @@ def test_cmd_normalize_fundamentals_sec_force_reprocesses_up_to_date_symbol(
                 )
             ]
 
-    monkeypatch.setattr(cli, "SECFactsNormalizer", lambda: FakeNormalizer())
+    monkeypatch.setattr(
+        cli, "SECFactsNormalizer", lambda fx_service=None: FakeNormalizer()
+    )
 
     assert (
         cli.cmd_normalize_fundamentals(
@@ -4824,7 +4830,7 @@ def test_cmd_normalize_fundamentals_bulk_sec(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 1)
 
     normalizer = DummyNormalizer()
-    monkeypatch.setattr(cli, "SECFactsNormalizer", lambda: normalizer)
+    monkeypatch.setattr(cli, "SECFactsNormalizer", lambda fx_service=None: normalizer)
 
     rc = cli.cmd_normalize_fundamentals_bulk(
         provider="SEC",
@@ -4883,7 +4889,9 @@ def test_cmd_normalize_fundamentals_bulk_sec_reprocesses_only_stale_symbols(
             ]
 
     monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 1)
-    monkeypatch.setattr(cli, "SECFactsNormalizer", lambda: DummyNormalizer())
+    monkeypatch.setattr(
+        cli, "SECFactsNormalizer", lambda fx_service=None: DummyNormalizer()
+    )
 
     assert (
         cli.cmd_normalize_fundamentals_bulk(
@@ -5024,7 +5032,9 @@ def test_cmd_normalize_fundamentals_eodhd(monkeypatch, tmp_path):
                 )
             ]
 
-    monkeypatch.setattr(cli, "EODHDFactsNormalizer", lambda: FakeNormalizer())
+    monkeypatch.setattr(
+        cli, "EODHDFactsNormalizer", lambda fx_service=None: FakeNormalizer()
+    )
 
     rc = cli.cmd_normalize_fundamentals(
         provider="EODHD",
@@ -5076,7 +5086,9 @@ def test_cmd_normalize_fundamentals_eodhd_zero_row_normalization_records_state(
             calls.append(symbol)
             return []
 
-    monkeypatch.setattr(cli, "EODHDFactsNormalizer", lambda: FakeNormalizer())
+    monkeypatch.setattr(
+        cli, "EODHDFactsNormalizer", lambda fx_service=None: FakeNormalizer()
+    )
 
     assert (
         cli.cmd_normalize_fundamentals(
@@ -5143,8 +5155,12 @@ def test_cmd_normalize_fundamentals_cross_provider_reruns_when_facts_owned_by_ot
                 )
             ]
 
-    monkeypatch.setattr(cli, "EODHDFactsNormalizer", lambda: FakeEODHDNormalizer())
-    monkeypatch.setattr(cli, "SECFactsNormalizer", lambda: FakeSECNormalizer())
+    monkeypatch.setattr(
+        cli, "EODHDFactsNormalizer", lambda fx_service=None: FakeEODHDNormalizer()
+    )
+    monkeypatch.setattr(
+        cli, "SECFactsNormalizer", lambda fx_service=None: FakeSECNormalizer()
+    )
 
     assert (
         cli.cmd_normalize_fundamentals(
@@ -5298,7 +5314,9 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_force_skips_freshness_scan(
             ]
 
     monkeypatch.setattr(cli, "_plan_normalization_selection", fail_plan)
-    monkeypatch.setattr(cli, "EODHDFactsNormalizer", lambda: FakeNormalizer())
+    monkeypatch.setattr(
+        cli, "EODHDFactsNormalizer", lambda fx_service=None: FakeNormalizer()
+    )
     monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 1)
 
     rc = cli.cmd_normalize_eodhd_fundamentals_bulk(
@@ -5333,6 +5351,9 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_continues_after_symbol_failure_wi
         )
 
     class FakeNormalizer:
+        def __init__(self, **kwargs):
+            pass
+
         def normalize(self, payload, symbol, accounting_standard=None, **kwargs):
             if symbol == "BBB.US":
                 raise ValueError("boom")
@@ -5406,6 +5427,9 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_interrupts_cleanly(
         )
 
     class FakeNormalizer:
+        def __init__(self, **kwargs):
+            pass
+
         def normalize(self, payload, symbol, accounting_standard=None, **kwargs):
             return [
                 make_fact(
@@ -5484,6 +5508,9 @@ def test_cmd_normalize_sec_facts_bulk_with_inline_executor(monkeypatch, tmp_path
         fund_repo.upsert("SEC", symbol, {"entityName": symbol, "facts": {}})
 
     class FakeNormalizer:
+        def __init__(self, **kwargs):
+            pass
+
         def normalize(self, payload, symbol, cik=None):
             return [
                 make_fact(
@@ -5565,7 +5592,9 @@ def test_cmd_normalize_us_facts_bulk_force_skips_freshness_scan(
             ]
 
     monkeypatch.setattr(cli, "_plan_normalization_selection", fail_plan)
-    monkeypatch.setattr(cli, "SECFactsNormalizer", lambda: FakeNormalizer())
+    monkeypatch.setattr(
+        cli, "SECFactsNormalizer", lambda fx_service=None: FakeNormalizer()
+    )
     monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 1)
 
     rc = cli.cmd_normalize_us_facts_bulk(
