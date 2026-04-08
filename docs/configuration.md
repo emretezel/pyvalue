@@ -59,32 +59,33 @@ FX behavior is configured under an optional `[fx]` section:
 
 ```toml
 [fx]
-provider = "FRANKFURTER"
+provider = "EODHD"
 pivot_currency = "USD"
 secondary_pivot_currency = "EUR"
-lazy_fetch = true
 stale_warning_days = 7
 ```
 
 Settings:
 
-- `provider`: default `FRANKFURTER`
+- `provider`: default `EODHD`; `FRANKFURTER` remains available for explicit
+  refreshes
 - `pivot_currency`: primary triangulation pivot, default `USD`
 - `secondary_pivot_currency`: optional secondary pivot after the primary
   direct/inverse lookup path, default `EUR`
-- `lazy_fetch`: when `true`, `pyvalue` will fetch missing FX ranges on demand
-  during runtime lookups and cache direct provider rows locally
 - `stale_warning_days`: warn when the selected on-or-before rate is older than
   this many days
 
 FX semantics:
 
+- `refresh-fx-rates` is the only FX command that talks to a remote provider
 - stored rates are always `1 base_currency = rate quote_currency`
 - configured subunit currencies are normalized before lookup:
   `GBX`/`GBP0.01` -> `GBP`, `ZAC` -> `ZAR`, `ILA` -> `ILS`
 - lookups use latest available rate on or before the requested date
 - direct provider rows are persisted; inverse and triangulated cross-rates are
   computed at lookup time, not stored
+- `normalize-fundamentals` uses only stored FX data and never performs runtime
+  FX fetches
 
 ## Database Path Behavior
 

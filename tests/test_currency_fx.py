@@ -16,15 +16,20 @@ from pyvalue.currency import (
     normalize_monetary_amount,
     resolve_eodhd_currency,
 )
-from pyvalue.fx import FXService, FrankfurterProvider
+from pyvalue.fx import (
+    EODHDFXProvider,
+    FXService,
+    FrankfurterProvider,
+    parse_eodhd_fx_catalog_entry,
+)
 from pyvalue.storage import FXRateRecord, FXRatesRepository
 
 
-class _DummyProvider:
-    provider_name = "FRANKFURTER"
+class _ExplodingProvider:
+    provider_name = "EODHD"
 
-    def fetch_rates(self, **kwargs):  # pragma: no cover - defensive fallback
-        return []
+    def fetch_history(self, **kwargs):  # pragma: no cover - defensive fallback
+        raise AssertionError("FXService must never fetch from the network at runtime")
 
 
 class _FakeResponse:
@@ -54,14 +59,39 @@ class _FakeSession:
         return self.responses.pop(0)
 
 
-def _service_with_rates(tmp_path, *records: FXRateRecord) -> FXService:
+class _CountingFXRatesRepository(FXRatesRepository):
+    def __init__(self, db_path):
+        super().__init__(db_path)
+        self.fetch_all_calls = 0
+        self.fetch_pair_history_calls = 0
+
+    def fetch_all_for_provider(self, provider):
+        self.fetch_all_calls += 1
+        return super().fetch_all_for_provider(provider)
+
+    def fetch_pair_history(self, provider, base_currency, quote_currency):
+        self.fetch_pair_history_calls += 1
+        return super().fetch_pair_history(provider, base_currency, quote_currency)
+
+
+def _service_with_rates(
+    tmp_path,
+    *records: FXRateRecord,
+    provider_name: str = "EODHD",
+    preload_all: bool = False,
+    repository_cls=FXRatesRepository,
+) -> tuple[FXService, FXRatesRepository]:
     db_path = tmp_path / "fx.db"
-    repo = FXRatesRepository(db_path)
+    repo = repository_cls(db_path)
     repo.initialize_schema()
     repo.upsert_many(list(records))
-    service = FXService(db_path, repository=repo, provider=_DummyProvider())
-    service.lazy_fetch = False
-    return service
+    service = FXService(
+        db_path,
+        repository=repo,
+        provider_name=provider_name,
+        preload_all=preload_all,
+    )
+    return service, repo
 
 
 def test_resolve_eodhd_currency_uses_explicit_precedence():
@@ -101,7 +131,7 @@ def test_normalize_monetary_amount_converts_gbx_to_gbp():
 
 
 def test_fx_service_same_currency_returns_identity(tmp_path):
-    service = _service_with_rates(tmp_path)
+    service, _ = _service_with_rates(tmp_path)
 
     quote = service.get_fx_rate("GBP0.01", "GBP", "2024-01-10")
     converted = service.convert_amount(Decimal("250"), "GBX", "GBP", "2024-01-10")
@@ -117,10 +147,10 @@ def test_fx_service_same_currency_returns_identity(tmp_path):
 
 
 def test_fx_service_direct_inverse_and_on_or_before_lookup(tmp_path):
-    service = _service_with_rates(
+    service, _ = _service_with_rates(
         tmp_path,
         FXRateRecord(
-            provider="FRANKFURTER",
+            provider="EODHD",
             rate_date="2024-01-01",
             base_currency="USD",
             quote_currency="EUR",
@@ -129,7 +159,7 @@ def test_fx_service_direct_inverse_and_on_or_before_lookup(tmp_path):
             source_kind="provider",
         ),
         FXRateRecord(
-            provider="FRANKFURTER",
+            provider="EODHD",
             rate_date="2024-01-10",
             base_currency="USD",
             quote_currency="EUR",
@@ -150,10 +180,10 @@ def test_fx_service_direct_inverse_and_on_or_before_lookup(tmp_path):
 
 
 def test_fx_service_triangulates_through_pivot_currency(tmp_path):
-    service = _service_with_rates(
+    service, _ = _service_with_rates(
         tmp_path,
         FXRateRecord(
-            provider="FRANKFURTER",
+            provider="EODHD",
             rate_date="2024-02-01",
             base_currency="USD",
             quote_currency="CAD",
@@ -162,7 +192,7 @@ def test_fx_service_triangulates_through_pivot_currency(tmp_path):
             source_kind="provider",
         ),
         FXRateRecord(
-            provider="FRANKFURTER",
+            provider="EODHD",
             rate_date="2024-02-01",
             base_currency="USD",
             quote_currency="EUR",
@@ -180,10 +210,10 @@ def test_fx_service_triangulates_through_pivot_currency(tmp_path):
 
 
 def test_fx_service_prefers_fresher_inverse_over_older_direct(tmp_path):
-    service = _service_with_rates(
+    service, _ = _service_with_rates(
         tmp_path,
         FXRateRecord(
-            provider="FRANKFURTER",
+            provider="EODHD",
             rate_date="2022-12-31",
             base_currency="EUR",
             quote_currency="GBP",
@@ -192,7 +222,7 @@ def test_fx_service_prefers_fresher_inverse_over_older_direct(tmp_path):
             source_kind="provider",
         ),
         FXRateRecord(
-            provider="FRANKFURTER",
+            provider="EODHD",
             rate_date="2024-06-30",
             base_currency="GBP",
             quote_currency="EUR",
@@ -211,10 +241,10 @@ def test_fx_service_prefers_fresher_inverse_over_older_direct(tmp_path):
 
 
 def test_fx_service_prefers_fresher_triangulation_over_older_direct(tmp_path):
-    service = _service_with_rates(
+    service, _ = _service_with_rates(
         tmp_path,
         FXRateRecord(
-            provider="FRANKFURTER",
+            provider="EODHD",
             rate_date="2022-12-31",
             base_currency="EUR",
             quote_currency="GBP",
@@ -223,7 +253,7 @@ def test_fx_service_prefers_fresher_triangulation_over_older_direct(tmp_path):
             source_kind="provider",
         ),
         FXRateRecord(
-            provider="FRANKFURTER",
+            provider="EODHD",
             rate_date="2025-12-31",
             base_currency="EUR",
             quote_currency="USD",
@@ -232,7 +262,7 @@ def test_fx_service_prefers_fresher_triangulation_over_older_direct(tmp_path):
             source_kind="provider",
         ),
         FXRateRecord(
-            provider="FRANKFURTER",
+            provider="EODHD",
             rate_date="2025-12-31",
             base_currency="GBP",
             quote_currency="USD",
@@ -251,14 +281,144 @@ def test_fx_service_prefers_fresher_triangulation_over_older_direct(tmp_path):
     assert quote.rate == pytest.approx(Decimal("0.9290796963946869070208728653"))
 
 
-def test_fx_service_missing_rate_warns_and_returns_none(tmp_path, caplog):
-    service = _service_with_rates(tmp_path)
+def test_fx_service_missing_rate_warns_and_returns_none_without_network_fetch(
+    tmp_path, caplog
+):
+    db_path = tmp_path / "fx.db"
+    repo = FXRatesRepository(db_path)
+    repo.initialize_schema()
+    service = FXService(db_path, repository=repo, provider=_ExplodingProvider())
 
     with caplog.at_level("WARNING"):
         quote = service.get_fx_rate("JPY", "CHF", "2024-03-01")
 
     assert quote is None
     assert "Missing FX rate" in caplog.text
+
+
+def test_fx_service_preload_all_loads_provider_table_once(tmp_path):
+    service, repo = _service_with_rates(
+        tmp_path,
+        FXRateRecord(
+            provider="EODHD",
+            rate_date="2024-01-01",
+            base_currency="USD",
+            quote_currency="EUR",
+            rate_text="0.90",
+            fetched_at="2024-01-01T00:00:00+00:00",
+            source_kind="provider",
+        ),
+        FXRateRecord(
+            provider="EODHD",
+            rate_date="2024-01-01",
+            base_currency="USD",
+            quote_currency="GBP",
+            rate_text="0.80",
+            fetched_at="2024-01-01T00:00:00+00:00",
+            source_kind="provider",
+        ),
+        preload_all=True,
+        repository_cls=_CountingFXRatesRepository,
+    )
+
+    direct = service.get_fx_rate("USD", "EUR", "2024-01-02")
+    inverse = service.get_fx_rate("EUR", "USD", "2024-01-02")
+    cross = service.get_fx_rate("EUR", "GBP", "2024-01-02")
+
+    assert direct is not None
+    assert inverse is not None
+    assert cross is not None
+    assert repo.fetch_all_calls == 1
+    assert repo.fetch_pair_history_calls == 0
+
+
+def test_parse_eodhd_fx_catalog_entry_parses_canonical_alias_and_odd_symbols():
+    canonical = parse_eodhd_fx_catalog_entry({"Code": "EURUSD", "Name": "EUR/USD"})
+    alias = parse_eodhd_fx_catalog_entry({"Code": "EUR", "Name": "USD/EUR"})
+    odd = parse_eodhd_fx_catalog_entry({"Code": "USDARSB", "Name": "odd"})
+
+    assert canonical is not None
+    assert canonical.canonical_symbol == "EURUSD"
+    assert canonical.base_currency == "EUR"
+    assert canonical.quote_currency == "USD"
+    assert canonical.is_alias is False
+    assert canonical.is_refreshable is True
+
+    assert alias is not None
+    assert alias.canonical_symbol == "USDEUR"
+    assert alias.base_currency == "USD"
+    assert alias.quote_currency == "EUR"
+    assert alias.is_alias is True
+    assert alias.is_refreshable is False
+
+    assert odd is not None
+    assert odd.canonical_symbol == "USDARSB"
+    assert odd.base_currency is None
+    assert odd.is_refreshable is False
+
+
+def test_eodhd_provider_lists_catalog_entries():
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                200,
+                [
+                    {"Code": "EURUSD", "Name": "EUR/USD"},
+                    {"Code": "EUR", "Name": "USD/EUR"},
+                    {"Code": "USDARSB", "Name": "Odd"},
+                ],
+            )
+        ]
+    )
+    provider = EODHDFXProvider(api_key="secret", session=session)
+
+    entries = provider.list_catalog()
+
+    assert [entry.symbol for entry in entries] == ["EURUSD", "EUR", "USDARSB"]
+    assert session.calls[0][0].endswith("/exchange-symbol-list/FOREX")
+    assert session.calls[0][1] == {"api_token": "secret", "fmt": "json"}
+
+
+def test_eodhd_provider_fetch_history_uses_close_rate():
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                200,
+                [
+                    {
+                        "date": "2024-01-02",
+                        "open": 1.09,
+                        "high": 1.10,
+                        "low": 1.08,
+                        "close": 1.095,
+                    }
+                ],
+                headers={"Date": "Tue, 02 Jan 2024 00:00:00 GMT"},
+            )
+        ]
+    )
+    provider = EODHDFXProvider(api_key="secret", session=session)
+
+    rows = provider.fetch_history(
+        canonical_symbol="EURUSD",
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 1, 2),
+    )
+
+    assert len(rows) == 1
+    assert rows[0].provider == "EODHD"
+    assert rows[0].base_currency == "EUR"
+    assert rows[0].quote_currency == "USD"
+    assert rows[0].rate_text == "1.095"
+    assert rows[0].meta_json is not None and "EURUSD" in rows[0].meta_json
+    assert session.calls[0][0].endswith("/eod/EURUSD.FOREX")
+    assert session.calls[0][1] == {
+        "api_token": "secret",
+        "fmt": "json",
+        "from": "2024-01-01",
+        "to": "2024-01-02",
+        "order": "a",
+    }
 
 
 def test_frankfurter_provider_retries_without_unsupported_quotes():
@@ -338,11 +498,6 @@ def test_frankfurter_provider_normalizes_subunit_currencies_before_request():
     assert session.calls[0][1]["quotes"] == "ILS,USD"
     assert [row.base_currency for row in rows] == ["ZAR", "ZAR"]
     assert [row.quote_currency for row in rows] == ["ILS", "USD"]
-
-
-# ---------------------------------------------------------------------------
-# canonical_trading_currency
-# ---------------------------------------------------------------------------
 
 
 def test_canonical_trading_currency_normalizes_subunits():

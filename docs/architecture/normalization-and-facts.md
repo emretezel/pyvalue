@@ -56,8 +56,15 @@ Derived facts are also currency-aware:
   that period
 - market-linked derivations prefer the market-data currency
 - mixed-currency monetary inputs are converted before arithmetic
-- missing currency or missing FX skips only the affected derived fact and logs
-  structured context
+- missing currency skips only the affected derived fact and logs structured
+  context
+- missing FX is now a hard symbol-level error once normalization knows the
+  source and target currencies but cannot resolve a stored direct, inverse, or
+  USD/EUR triangulated quote
+
+For bulk runs, each worker process preloads the full selected-provider FX table
+once and resolves conversions from that local in-memory cache only. No runtime
+FX web fetches happen during normalization.
 
 ## Normalization Layers in This Repo
 

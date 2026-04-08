@@ -1,12 +1,14 @@
-"""DB-backed FX lookup and conversion helpers.
+"""DB-backed FX lookup and refresh helpers.
 
 Author: Emre Tezel
 """
 
 from __future__ import annotations
 
+from array import array
+from bisect import bisect_right
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Optional, Protocol, Sequence
@@ -21,18 +23,18 @@ from pyvalue.storage import FXRateRecord, FXRatesRepository
 
 
 LOGGER = logging.getLogger(__name__)
-DEFAULT_PROVIDER = "FRANKFURTER"
-DEFAULT_API_BASE = "https://api.frankfurter.dev/v2"
-DEFAULT_FETCH_LOOKBACK_DAYS = 14
+DEFAULT_PROVIDER = "EODHD"
+DEFAULT_FRANKFURTER_API_BASE = "https://api.frankfurter.dev/v2"
+DEFAULT_EODHD_API_BASE = "https://eodhd.com/api"
 
 
 @dataclass(frozen=True)
 class _EphemeralFXConfig:
     """Non-fetching FX config used for ephemeral in-memory contexts."""
 
+    fx_provider: str = DEFAULT_PROVIDER
     fx_pivot_currency: str = "USD"
     fx_secondary_pivot_currency: Optional[str] = "EUR"
-    fx_lazy_fetch: bool = False
     fx_stale_warning_days: int = 7
 
 
@@ -59,16 +61,75 @@ class FXQuote:
     via_currency: Optional[str] = None
 
 
-class FXProvider(Protocol):
-    """Provider abstraction for fetching direct FX rates."""
+class MissingFXRateError(RuntimeError):
+    """Raised when no direct, inverse, or triangulated FX quote exists."""
+
+    def __init__(
+        self,
+        *,
+        provider: str,
+        base_currency: str,
+        quote_currency: str,
+        as_of: str,
+    ) -> None:
+        self.provider = provider
+        self.base_currency = base_currency
+        self.quote_currency = quote_currency
+        self.as_of = as_of
+        super().__init__(
+            "Missing FX rate "
+            f"(provider={provider} base={base_currency} quote={quote_currency} as_of={as_of})"
+        )
+
+
+@dataclass(frozen=True)
+class FXCatalogEntry:
+    """Parsed FX catalog metadata for one provider symbol."""
+
+    symbol: str
+    canonical_symbol: str
+    base_currency: Optional[str]
+    quote_currency: Optional[str]
+    name: Optional[str]
+    is_alias: bool
+    is_refreshable: bool
+
+
+@dataclass
+class FXSeries:
+    """Compact direct-rate history for one FX pair."""
+
+    ordinals: array
+    rates: array
+
+    @classmethod
+    def empty(cls) -> FXSeries:
+        return cls(array("I"), array("d"))
+
+    @classmethod
+    def from_rows(cls, rows: Sequence[tuple[str, str]]) -> FXSeries:
+        ordinals = array("I")
+        rates = array("d")
+        for rate_date, rate_text in rows:
+            parsed = _to_date(rate_date)
+            if parsed is None:
+                continue
+            ordinals.append(parsed.toordinal())
+            rates.append(float(rate_text))
+        return cls(ordinals=ordinals, rates=rates)
+
+
+class FXRefreshProvider(Protocol):
+    """Provider abstraction for syncing catalog entries and direct histories."""
 
     provider_name: str
 
-    def fetch_rates(
+    def list_catalog(self) -> list[FXCatalogEntry]: ...
+
+    def fetch_history(
         self,
         *,
-        base_currency: str,
-        quote_currencies: Sequence[str],
+        canonical_symbol: str,
         start_date: date,
         end_date: date,
     ) -> list[FXRateRecord]: ...
@@ -77,12 +138,12 @@ class FXProvider(Protocol):
 class FrankfurterProvider:
     """Fetch direct FX rates from the Frankfurter v2 API."""
 
-    provider_name = DEFAULT_PROVIDER
+    provider_name = "FRANKFURTER"
 
     def __init__(
         self,
         session: Optional[requests.Session] = None,
-        api_base: str = DEFAULT_API_BASE,
+        api_base: str = DEFAULT_FRANKFURTER_API_BASE,
     ) -> None:
         self.session = session or requests.Session()
         self.api_base = api_base.rstrip("/")
@@ -180,6 +241,27 @@ class FrankfurterProvider:
             )
         return records
 
+    def list_catalog(self) -> list[FXCatalogEntry]:
+        raise NotImplementedError("Frankfurter does not support catalog sync")
+
+    def fetch_history(
+        self,
+        *,
+        canonical_symbol: str,
+        start_date: date,
+        end_date: date,
+    ) -> list[FXRateRecord]:
+        base = normalize_currency_code(canonical_symbol[:3])
+        quote = normalize_currency_code(canonical_symbol[3:])
+        if base is None or quote is None:
+            raise ValueError(f"Unexpected FX symbol: {canonical_symbol}")
+        return self.fetch_rates(
+            base_currency=base,
+            quote_currencies=[quote],
+            start_date=start_date,
+            end_date=end_date,
+        )
+
     @staticmethod
     def _extract_invalid_currencies(response: requests.Response) -> set[str]:
         """Parse unsupported currency codes from a Frankfurter error response."""
@@ -200,16 +282,156 @@ class FrankfurterProvider:
         return {code.strip().upper() for code in raw_codes.split(",") if code.strip()}
 
 
+class EODHDFXProvider:
+    """Fetch FX catalog metadata and direct histories from the EODHD API."""
+
+    provider_name = DEFAULT_PROVIDER
+
+    def __init__(
+        self,
+        api_key: str,
+        session: Optional[requests.Session] = None,
+        api_base: str = DEFAULT_EODHD_API_BASE,
+    ) -> None:
+        if not api_key:
+            raise ValueError("EODHD API key is required")
+        self.api_key = api_key
+        self.session = session or requests.Session()
+        self.api_base = api_base.rstrip("/")
+
+    def list_catalog(self) -> list[FXCatalogEntry]:
+        response = self.session.get(
+            f"{self.api_base}/exchange-symbol-list/FOREX",
+            params={"api_token": self.api_key, "fmt": "json"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise ValueError(f"Unexpected EODHD FX catalog response: {payload!r}")
+        entries: list[FXCatalogEntry] = []
+        for entry in payload:
+            if not isinstance(entry, dict):
+                continue
+            parsed = parse_eodhd_fx_catalog_entry(entry)
+            if parsed is not None:
+                entries.append(parsed)
+        return entries
+
+    def fetch_history(
+        self,
+        *,
+        canonical_symbol: str,
+        start_date: date,
+        end_date: date,
+    ) -> list[FXRateRecord]:
+        symbol = canonical_symbol.strip().upper()
+        if len(symbol) != 6:
+            raise ValueError(f"Unexpected EODHD FX symbol: {canonical_symbol}")
+        base = normalize_currency_code(symbol[:3])
+        quote = normalize_currency_code(symbol[3:])
+        if base is None or quote is None:
+            raise ValueError(f"Unexpected EODHD FX symbol: {canonical_symbol}")
+
+        response = self.session.get(
+            f"{self.api_base}/eod/{symbol}.FOREX",
+            params={
+                "api_token": self.api_key,
+                "fmt": "json",
+                "from": start_date.isoformat(),
+                "to": end_date.isoformat(),
+                "order": "a",
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise ValueError(
+                f"Unexpected EODHD FX history response for {canonical_symbol}: {payload!r}"
+            )
+        fetched_at = response.headers.get("Date") or start_date.isoformat()
+        records: list[FXRateRecord] = []
+        for entry in payload:
+            if not isinstance(entry, dict):
+                continue
+            rate_date = str(entry.get("date") or "").strip()
+            close = entry.get("close")
+            if not rate_date or close is None:
+                continue
+            records.append(
+                FXRateRecord(
+                    provider=self.provider_name,
+                    rate_date=rate_date,
+                    base_currency=base,
+                    quote_currency=quote,
+                    rate_text=str(close),
+                    fetched_at=fetched_at,
+                    source_kind="provider",
+                    meta_json=json.dumps(
+                        {"provider": self.provider_name, "symbol": symbol}
+                    ),
+                )
+            )
+        return records
+
+
+def parse_eodhd_fx_catalog_entry(
+    entry: dict[object, object],
+) -> Optional[FXCatalogEntry]:
+    """Parse one EODHD FOREX catalog row into canonical refresh metadata."""
+
+    raw_symbol = str(entry.get("Code") or entry.get("code") or "").strip().upper()
+    if not raw_symbol:
+        return None
+    name = str(entry.get("Name") or entry.get("name") or "").strip() or None
+    if len(raw_symbol) == 6 and raw_symbol.isalpha():
+        base = normalize_currency_code(raw_symbol[:3])
+        quote = normalize_currency_code(raw_symbol[3:])
+        return FXCatalogEntry(
+            symbol=raw_symbol,
+            canonical_symbol=raw_symbol,
+            base_currency=base,
+            quote_currency=quote,
+            name=name,
+            is_alias=False,
+            is_refreshable=base is not None and quote is not None,
+        )
+    if len(raw_symbol) == 3 and raw_symbol.isalpha():
+        quote = normalize_currency_code(raw_symbol)
+        canonical_symbol = f"USD{quote}" if quote is not None else raw_symbol
+        return FXCatalogEntry(
+            symbol=raw_symbol,
+            canonical_symbol=canonical_symbol,
+            base_currency="USD" if quote is not None else None,
+            quote_currency=quote,
+            name=name,
+            is_alias=True,
+            is_refreshable=False,
+        )
+    return FXCatalogEntry(
+        symbol=raw_symbol,
+        canonical_symbol=raw_symbol,
+        base_currency=None,
+        quote_currency=None,
+        name=name,
+        is_alias=False,
+        is_refreshable=False,
+    )
+
+
 class FXService:
-    """Resolve FX rates from the local DB, lazy-fetching gaps when configured."""
+    """Resolve FX rates from the local DB using an in-memory cache."""
 
     def __init__(
         self,
         database: str | Path,
         *,
         repository: Optional[FXRatesRepository] = None,
-        provider: Optional[FXProvider] = None,
+        provider: Optional[object] = None,
+        provider_name: Optional[str] = None,
         config: Optional[Config] = None,
+        preload_all: bool = False,
     ) -> None:
         default_config: Config | _EphemeralFXConfig
         if config is None and str(database) == ":memory:":
@@ -219,16 +441,45 @@ class FXService:
         self.config = default_config
         self.repository = repository or FXRatesRepository(database)
         self.repository.initialize_schema()
-        self.provider = provider or FrankfurterProvider()
-        self.provider_name = self.provider.provider_name.strip().upper()
+        configured_provider = (
+            provider_name
+            or getattr(provider, "provider_name", None)
+            or self.config.fx_provider
+            or DEFAULT_PROVIDER
+        )
+        self.provider_name = str(configured_provider).strip().upper()
         self.pivot_currency = (
             normalize_currency_code(self.config.fx_pivot_currency) or "USD"
         )
         self.secondary_pivot_currency = normalize_currency_code(
             self.config.fx_secondary_pivot_currency
         )
-        self.lazy_fetch = bool(self.config.fx_lazy_fetch)
         self.stale_warning_days = max(int(self.config.fx_stale_warning_days), 0)
+        self._history_cache: dict[tuple[str, str, str], FXSeries] = {}
+        self._quote_cache: dict[tuple[str, str, str, int], Optional[FXQuote]] = {}
+        self._provider_fully_preloaded = False
+        if preload_all:
+            self.preload_provider_history()
+
+    def preload_provider_history(self, provider_name: Optional[str] = None) -> None:
+        """Load the full direct-rate history for one provider into memory."""
+
+        provider_norm = (provider_name or self.provider_name).strip().upper()
+        rows = self.repository.fetch_all_for_provider(provider_norm)
+        self._history_cache.clear()
+        self._quote_cache.clear()
+        current_pair: Optional[tuple[str, str, str]] = None
+        current_rows: list[tuple[str, str]] = []
+        for base_currency, quote_currency, rate_date, rate_text in rows:
+            pair_key = (provider_norm, base_currency, quote_currency)
+            if current_pair != pair_key and current_pair is not None:
+                self._history_cache[current_pair] = FXSeries.from_rows(current_rows)
+                current_rows = []
+            current_pair = pair_key
+            current_rows.append((rate_date, rate_text))
+        if current_pair is not None:
+            self._history_cache[current_pair] = FXSeries.from_rows(current_rows)
+        self._provider_fully_preloaded = True
 
     def get_fx_rate(
         self,
@@ -253,13 +504,16 @@ class FXService:
                 source_kind="identity",
             )
 
-        quote_result = self._lookup(base, quote, as_of)
-        if quote_result is None and self.lazy_fetch:
-            self._fetch_missing_rates(base, quote, as_of)
+        cache_key = (self.provider_name, base, quote, as_of.toordinal())
+        if cache_key in self._quote_cache:
+            quote_result = self._quote_cache[cache_key]
+        else:
             quote_result = self._lookup(base, quote, as_of)
+            self._quote_cache[cache_key] = quote_result
         if quote_result is None:
             LOGGER.warning(
-                "Missing FX rate | base=%s quote=%s as_of=%s operation=get_fx_rate",
+                "Missing FX rate | provider=%s base=%s quote=%s as_of=%s operation=get_fx_rate",
+                self.provider_name,
                 base,
                 quote,
                 as_of.isoformat(),
@@ -269,7 +523,8 @@ class FXService:
         age_days = (as_of - quote_result.rate_date).days
         if age_days > self.stale_warning_days:
             LOGGER.warning(
-                "Stale FX rate used | base=%s quote=%s requested_as_of=%s rate_date=%s age_days=%s source_kind=%s",
+                "Stale FX rate used | provider=%s base=%s quote=%s requested_as_of=%s rate_date=%s age_days=%s source_kind=%s",
+                self.provider_name,
                 base,
                 quote,
                 as_of.isoformat(),
@@ -375,101 +630,77 @@ class FXService:
         """Return available direct and inverse quotes for a pair."""
 
         quotes: list[FXQuote] = []
-        direct = self.repository.latest_on_or_before(
-            self.provider_name,
-            base_currency,
-            quote_currency,
-            as_of.isoformat(),
-        )
+        direct = self._latest_direct_quote(base_currency, quote_currency, as_of)
         if direct is not None:
-            rate = Decimal(direct.rate_text)
-            quotes.append(
-                FXQuote(
-                    provider=direct.provider,
-                    rate_date=date.fromisoformat(direct.rate_date),
-                    base_currency=direct.base_currency,
-                    quote_currency=direct.quote_currency,
-                    rate=rate,
-                    source_kind=direct.source_kind,
-                )
-            )
-        inverse = self.repository.latest_on_or_before(
-            self.provider_name,
-            quote_currency,
-            base_currency,
-            as_of.isoformat(),
-        )
-        if inverse is not None:
-            rate = Decimal(inverse.rate_text)
-            if rate == 0:
-                return quotes
+            quotes.append(direct)
+        inverse = self._latest_direct_quote(quote_currency, base_currency, as_of)
+        if inverse is not None and inverse.rate != 0:
             quotes.append(
                 FXQuote(
                     provider=inverse.provider,
-                    rate_date=date.fromisoformat(inverse.rate_date),
+                    rate_date=inverse.rate_date,
                     base_currency=base_currency,
                     quote_currency=quote_currency,
-                    rate=Decimal("1") / rate,
+                    rate=Decimal("1") / inverse.rate,
                     source_kind="inverse",
                 )
             )
         return quotes
 
-    def _fetch_missing_rates(
+    def _latest_direct_quote(
         self,
         base_currency: str,
         quote_currency: str,
         as_of: date,
-    ) -> None:
-        start_date = as_of - timedelta(days=DEFAULT_FETCH_LOOKBACK_DAYS)
-        quote_sets = [
-            {quote_currency, self.pivot_currency, self.secondary_pivot_currency},
-            {self.pivot_currency, self.secondary_pivot_currency},
-        ]
-        base_currencies = [base_currency, quote_currency]
-        for base, quotes in zip(base_currencies, quote_sets):
-            cleaned_quotes = [
-                code
-                for code in quotes
-                if code is not None and code != base and normalize_currency_code(code)
-            ]
-            if not cleaned_quotes:
-                continue
-            try:
-                rows = self.provider.fetch_rates(
-                    base_currency=base,
-                    quote_currencies=cleaned_quotes,
-                    start_date=start_date,
-                    end_date=as_of,
-                )
-            except requests.RequestException as exc:
-                LOGGER.warning(
-                    "FX provider request failed | provider=%s base=%s quotes=%s as_of=%s exception=%s",
-                    self.provider_name,
-                    base,
-                    ",".join(sorted(cleaned_quotes)),
-                    as_of.isoformat(),
-                    exc,
-                )
-                continue
-            except Exception as exc:  # pragma: no cover - defensive provider boundary
-                LOGGER.warning(
-                    "FX provider error | provider=%s base=%s quotes=%s as_of=%s exception=%s",
-                    self.provider_name,
-                    base,
-                    ",".join(sorted(cleaned_quotes)),
-                    as_of.isoformat(),
-                    exc,
-                )
-                continue
-            if rows:
-                self.repository.upsert_many(rows)
+    ) -> Optional[FXQuote]:
+        series = self._ensure_pair_history(base_currency, quote_currency)
+        index = bisect_right(series.ordinals, as_of.toordinal()) - 1
+        if index < 0:
+            return None
+        rate_date = date.fromordinal(int(series.ordinals[index]))
+        rate = Decimal(str(series.rates[index]))
+        return FXQuote(
+            provider=self.provider_name,
+            rate_date=rate_date,
+            base_currency=base_currency,
+            quote_currency=quote_currency,
+            rate=rate,
+            source_kind="provider",
+        )
+
+    def _ensure_pair_history(
+        self,
+        base_currency: str,
+        quote_currency: str,
+    ) -> FXSeries:
+        provider_norm = self.provider_name
+        pair_key = (provider_norm, base_currency, quote_currency)
+        cached = self._history_cache.get(pair_key)
+        if cached is not None:
+            return cached
+        if self._provider_fully_preloaded:
+            empty = FXSeries.empty()
+            self._history_cache[pair_key] = empty
+            return empty
+        rows = self.repository.fetch_pair_history(
+            provider_norm,
+            base_currency,
+            quote_currency,
+        )
+        series = FXSeries.from_rows(rows)
+        self._history_cache[pair_key] = series
+        return series
 
 
 __all__ = [
     "DEFAULT_PROVIDER",
-    "FXProvider",
+    "EODHDFXProvider",
+    "FXCatalogEntry",
     "FXQuote",
+    "FXRefreshProvider",
     "FXService",
+    "FXSeries",
     "FrankfurterProvider",
+    "MissingFXRateError",
+    "parse_eodhd_fx_catalog_entry",
 ]

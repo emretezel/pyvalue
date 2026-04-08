@@ -94,7 +94,7 @@ def test_evaluate_criterion_converts_monetary_constant_currency(tmp_path):
     fx_repo.initialize_schema()
     fx_repo.upsert(
         FXRateRecord(
-            provider="FRANKFURTER",
+            provider="EODHD",
             rate_date="2023-12-31",
             base_currency="USD",
             quote_currency="GBP",
@@ -140,7 +140,7 @@ def test_evaluate_criterion_converts_mixed_currency_metrics(tmp_path):
     fx_repo.initialize_schema()
     fx_repo.upsert(
         FXRateRecord(
-            provider="FRANKFURTER",
+            provider="EODHD",
             rate_date="2023-12-31",
             base_currency="USD",
             quote_currency="EUR",
@@ -186,7 +186,7 @@ def test_evaluate_criterion_normalizes_configured_subunit_metric_currencies(tmp_
     fx_repo.initialize_schema()
     fx_repo.upsert(
         FXRateRecord(
-            provider="FRANKFURTER",
+            provider="EODHD",
             rate_date="2023-12-31",
             base_currency="ZAR",
             quote_currency="ILS",

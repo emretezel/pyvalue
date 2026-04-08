@@ -280,6 +280,36 @@ class FXRateRecord:
 
 
 @dataclass(frozen=True)
+class FXSupportedPairRecord:
+    """Persisted FX catalog entry for one provider symbol."""
+
+    provider: str
+    symbol: str
+    canonical_symbol: str
+    base_currency: Optional[str]
+    quote_currency: Optional[str]
+    name: Optional[str]
+    is_alias: bool
+    is_refreshable: bool
+    last_seen_at: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class FXRefreshStateRecord:
+    """Persisted refresh coverage metadata for one canonical FX symbol."""
+
+    provider: str
+    canonical_symbol: str
+    min_rate_date: Optional[str]
+    max_rate_date: Optional[str]
+    full_history_backfilled: bool
+    last_fetched_at: Optional[str]
+    last_status: Optional[str]
+    last_error: Optional[str]
+    attempts: int
+
+
+@dataclass(frozen=True)
 class FundamentalsUpdate:
     """Raw fundamentals payload prepared for batch persistence."""
 
@@ -3247,6 +3277,91 @@ class FXRatesRepository(SQLiteStore):
             return None
         return FXRateRecord(*row)
 
+    def fetch_pair_history(
+        self,
+        provider: str,
+        base_currency: str,
+        quote_currency: str,
+    ) -> list[tuple[str, str]]:
+        """Return one direct pair history ordered by ascending rate date."""
+
+        self.initialize_schema()
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT rate_date, rate_text
+                FROM fx_rates
+                WHERE provider = ?
+                  AND base_currency = ?
+                  AND quote_currency = ?
+                ORDER BY rate_date ASC
+                """,
+                (
+                    provider.strip().upper(),
+                    normalize_currency_code(base_currency),
+                    normalize_currency_code(quote_currency),
+                ),
+            ).fetchall()
+        return [(str(row["rate_date"]), str(row["rate_text"])) for row in rows]
+
+    def fetch_all_for_provider(
+        self,
+        provider: str,
+    ) -> list[tuple[str, str, str, str]]:
+        """Return the full direct-rate history for one provider."""
+
+        self.initialize_schema()
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT base_currency, quote_currency, rate_date, rate_text
+                FROM fx_rates
+                WHERE provider = ?
+                ORDER BY base_currency ASC, quote_currency ASC, rate_date ASC
+                """,
+                (provider.strip().upper(),),
+            ).fetchall()
+        return [
+            (
+                str(row["base_currency"]),
+                str(row["quote_currency"]),
+                str(row["rate_date"]),
+                str(row["rate_text"]),
+            )
+            for row in rows
+        ]
+
+    def pair_coverage(
+        self,
+        provider: str,
+        base_currency: str,
+        quote_currency: str,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Return min/max stored direct dates for one pair."""
+
+        self.initialize_schema()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT MIN(rate_date) AS min_rate_date, MAX(rate_date) AS max_rate_date
+                FROM fx_rates
+                WHERE provider = ?
+                  AND base_currency = ?
+                  AND quote_currency = ?
+                """,
+                (
+                    provider.strip().upper(),
+                    normalize_currency_code(base_currency),
+                    normalize_currency_code(quote_currency),
+                ),
+            ).fetchone()
+        if row is None:
+            return None, None
+        return (
+            _normalize_optional_text(row["min_rate_date"]),
+            _normalize_optional_text(row["max_rate_date"]),
+        )
+
     def fully_covered_quotes_for_window(
         self,
         provider: str,
@@ -3331,6 +3446,269 @@ class FXRatesRepository(SQLiteStore):
                     if code is not None:
                         currencies.add(code)
         return sorted(currencies)
+
+
+class FXSupportedPairsRepository(SQLiteStore):
+    """Persist FX provider catalog entries."""
+
+    def initialize_schema(self) -> None:
+        apply_migrations(self.db_path)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS fx_supported_pairs (
+                    provider TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    canonical_symbol TEXT NOT NULL,
+                    base_currency TEXT,
+                    quote_currency TEXT,
+                    name TEXT,
+                    is_alias INTEGER NOT NULL DEFAULT 0,
+                    is_refreshable INTEGER NOT NULL DEFAULT 0,
+                    last_seen_at TEXT NOT NULL,
+                    PRIMARY KEY (provider, symbol)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_fx_supported_pairs_refreshable
+                ON fx_supported_pairs(provider, is_refreshable, canonical_symbol)
+                """
+            )
+
+    def replace_provider_catalog(
+        self,
+        provider: str,
+        records: Sequence[FXSupportedPairRecord],
+    ) -> int:
+        self.initialize_schema()
+        provider_norm = provider.strip().upper()
+        now = _utc_now_iso()
+        rows = [
+            (
+                provider_norm,
+                record.symbol.strip().upper(),
+                record.canonical_symbol.strip().upper(),
+                normalize_currency_code(record.base_currency),
+                normalize_currency_code(record.quote_currency),
+                _normalize_optional_text(record.name),
+                1 if record.is_alias else 0,
+                1 if record.is_refreshable else 0,
+                record.last_seen_at or now,
+            )
+            for record in records
+            if record.symbol and record.canonical_symbol
+        ]
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM fx_supported_pairs WHERE provider = ?",
+                (provider_norm,),
+            )
+            if rows:
+                conn.executemany(
+                    """
+                    INSERT INTO fx_supported_pairs (
+                        provider,
+                        symbol,
+                        canonical_symbol,
+                        base_currency,
+                        quote_currency,
+                        name,
+                        is_alias,
+                        is_refreshable,
+                        last_seen_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+        return len(rows)
+
+    def list_refreshable(self, provider: str) -> list[FXSupportedPairRecord]:
+        self.initialize_schema()
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    provider,
+                    symbol,
+                    canonical_symbol,
+                    base_currency,
+                    quote_currency,
+                    name,
+                    is_alias,
+                    is_refreshable,
+                    last_seen_at
+                FROM fx_supported_pairs
+                WHERE provider = ?
+                  AND is_refreshable = 1
+                ORDER BY canonical_symbol ASC
+                """,
+                (provider.strip().upper(),),
+            ).fetchall()
+        return [
+            FXSupportedPairRecord(
+                provider=str(row["provider"]),
+                symbol=str(row["symbol"]),
+                canonical_symbol=str(row["canonical_symbol"]),
+                base_currency=_normalize_optional_text(row["base_currency"]),
+                quote_currency=_normalize_optional_text(row["quote_currency"]),
+                name=_normalize_optional_text(row["name"]),
+                is_alias=bool(row["is_alias"]),
+                is_refreshable=bool(row["is_refreshable"]),
+                last_seen_at=_normalize_optional_text(row["last_seen_at"]),
+            )
+            for row in rows
+        ]
+
+
+class FXRefreshStateRepository(SQLiteStore):
+    """Persist FX refresh coverage and retry state per canonical symbol."""
+
+    def initialize_schema(self) -> None:
+        apply_migrations(self.db_path)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS fx_refresh_state (
+                    provider TEXT NOT NULL,
+                    canonical_symbol TEXT NOT NULL,
+                    min_rate_date TEXT,
+                    max_rate_date TEXT,
+                    full_history_backfilled INTEGER NOT NULL DEFAULT 0,
+                    last_fetched_at TEXT,
+                    last_status TEXT,
+                    last_error TEXT,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (provider, canonical_symbol)
+                )
+                """
+            )
+
+    def fetch(
+        self,
+        provider: str,
+        canonical_symbol: str,
+    ) -> Optional[FXRefreshStateRecord]:
+        self.initialize_schema()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    provider,
+                    canonical_symbol,
+                    min_rate_date,
+                    max_rate_date,
+                    full_history_backfilled,
+                    last_fetched_at,
+                    last_status,
+                    last_error,
+                    attempts
+                FROM fx_refresh_state
+                WHERE provider = ? AND canonical_symbol = ?
+                """,
+                (provider.strip().upper(), canonical_symbol.strip().upper()),
+            ).fetchone()
+        if row is None:
+            return None
+        return FXRefreshStateRecord(
+            provider=str(row["provider"]),
+            canonical_symbol=str(row["canonical_symbol"]),
+            min_rate_date=_normalize_optional_text(row["min_rate_date"]),
+            max_rate_date=_normalize_optional_text(row["max_rate_date"]),
+            full_history_backfilled=bool(row["full_history_backfilled"]),
+            last_fetched_at=_normalize_optional_text(row["last_fetched_at"]),
+            last_status=_normalize_optional_text(row["last_status"]),
+            last_error=_normalize_optional_text(row["last_error"]),
+            attempts=int(row["attempts"] or 0),
+        )
+
+    def mark_success(
+        self,
+        provider: str,
+        canonical_symbol: str,
+        *,
+        min_rate_date: Optional[str],
+        max_rate_date: Optional[str],
+        full_history_backfilled: bool,
+        fetched_at: Optional[str] = None,
+    ) -> None:
+        self.initialize_schema()
+        provider_norm = provider.strip().upper()
+        symbol_norm = canonical_symbol.strip().upper()
+        timestamp = fetched_at or _utc_now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO fx_refresh_state (
+                    provider,
+                    canonical_symbol,
+                    min_rate_date,
+                    max_rate_date,
+                    full_history_backfilled,
+                    last_fetched_at,
+                    last_status,
+                    last_error,
+                    attempts
+                ) VALUES (?, ?, ?, ?, ?, ?, 'ok', NULL, 0)
+                ON CONFLICT(provider, canonical_symbol) DO UPDATE SET
+                    min_rate_date = excluded.min_rate_date,
+                    max_rate_date = excluded.max_rate_date,
+                    full_history_backfilled = excluded.full_history_backfilled,
+                    last_fetched_at = excluded.last_fetched_at,
+                    last_status = 'ok',
+                    last_error = NULL,
+                    attempts = 0
+                """,
+                (
+                    provider_norm,
+                    symbol_norm,
+                    min_rate_date,
+                    max_rate_date,
+                    1 if full_history_backfilled else 0,
+                    timestamp,
+                ),
+            )
+
+    def mark_failure(
+        self,
+        provider: str,
+        canonical_symbol: str,
+        error: str,
+    ) -> None:
+        self.initialize_schema()
+        state = self.fetch(provider, canonical_symbol)
+        attempts = 1 if state is None else state.attempts + 1
+        provider_norm = provider.strip().upper()
+        symbol_norm = canonical_symbol.strip().upper()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO fx_refresh_state (
+                    provider,
+                    canonical_symbol,
+                    min_rate_date,
+                    max_rate_date,
+                    full_history_backfilled,
+                    last_fetched_at,
+                    last_status,
+                    last_error,
+                    attempts
+                ) VALUES (?, ?, NULL, NULL, 0, ?, 'error', ?, ?)
+                ON CONFLICT(provider, canonical_symbol) DO UPDATE SET
+                    last_fetched_at = excluded.last_fetched_at,
+                    last_status = 'error',
+                    last_error = excluded.last_error,
+                    attempts = excluded.attempts
+                """,
+                (
+                    provider_norm,
+                    symbol_norm,
+                    _utc_now_iso(),
+                    str(error),
+                    attempts,
+                ),
+            )
 
 
 class MetricsRepository(SQLiteStore):

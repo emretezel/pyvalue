@@ -5,16 +5,18 @@ Author: Emre Tezel
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
+import sqlite3
 
 import pyvalue.cli as cli
+from pyvalue.fx import FXCatalogEntry
 from pyvalue.screening import RankingDefinition, RankingMetric, ScreenDefinition
 from pyvalue.storage import (
     EntityMetadataRepository,
     FXRateRecord,
     FXRatesRepository,
-    FactRecord,
-    FinancialFactsRepository,
+    FXRefreshStateRepository,
+    FXSupportedPairsRepository,
     MetricsRepository,
 )
 
@@ -102,7 +104,7 @@ def test_rank_screen_passers_normalizes_mixed_currency_metric_with_ranking_curre
     fx_repo.initialize_schema()
     fx_repo.upsert(
         FXRateRecord(
-            provider="FRANKFURTER",
+            provider="EODHD",
             rate_date="2023-12-31",
             base_currency="USD",
             quote_currency="EUR",
@@ -135,309 +137,320 @@ def test_rank_screen_passers_normalizes_mixed_currency_metric_with_ranking_curre
     assert ordered == ["BBB.US", "AAA.US"]
 
 
-def test_cmd_refresh_fx_rates_normalizes_discovered_currencies(
+class _BaseFakeEODHDFXProvider:
+    provider_name = "EODHD"
+
+    def __init__(self, api_key):
+        self.api_key = api_key
+        self.calls = []
+
+    def list_catalog(self):
+        return [
+            FXCatalogEntry(
+                symbol="EURUSD",
+                canonical_symbol="EURUSD",
+                base_currency="EUR",
+                quote_currency="USD",
+                name="EUR/USD",
+                is_alias=False,
+                is_refreshable=True,
+            ),
+            FXCatalogEntry(
+                symbol="EUR",
+                canonical_symbol="USDEUR",
+                base_currency="USD",
+                quote_currency="EUR",
+                name="USD/EUR",
+                is_alias=True,
+                is_refreshable=False,
+            ),
+            FXCatalogEntry(
+                symbol="USDARSB",
+                canonical_symbol="USDARSB",
+                base_currency=None,
+                quote_currency=None,
+                name="Odd",
+                is_alias=False,
+                is_refreshable=False,
+            ),
+        ]
+
+    def fetch_history(self, *, canonical_symbol, start_date, end_date):
+        raise NotImplementedError
+
+
+def test_cmd_refresh_fx_rates_eodhd_syncs_catalog_and_skips_aliases(
     monkeypatch, tmp_path, capsys
 ):
-    db_path = tmp_path / "refresh_fx.db"
-    fact_repo = FinancialFactsRepository(db_path)
-    fact_repo.initialize_schema()
-    fact_repo.replace_facts(
-        "AAA.LSE",
-        [
-            FactRecord(
-                symbol="AAA.LSE",
-                concept="Assets",
-                fiscal_period="FY",
-                end_date="2023-12-31",
-                unit="GBX",
-                value=1000.0,
-                currency="GBX",
-            ),
-            FactRecord(
-                symbol="BBB.US",
-                concept="Assets",
-                fiscal_period="FY",
-                end_date="2023-12-31",
-                unit="EUR",
-                value=100.0,
-                currency="EUR",
-            ),
-            FactRecord(
-                symbol="CCC.US",
-                concept="Assets",
-                fiscal_period="FY",
-                end_date="2023-12-31",
-                unit="USD",
-                value=100.0,
-                currency="USD",
-            ),
-            FactRecord(
-                symbol="DDD.JSE",
-                concept="Assets",
-                fiscal_period="FY",
-                end_date="2023-12-31",
-                unit="ZAC",
-                value=1000.0,
-                currency="ZAC",
-            ),
-            FactRecord(
-                symbol="EEE.TA",
-                concept="Assets",
-                fiscal_period="FY",
-                end_date="2023-12-31",
-                unit="ILA",
-                value=1000.0,
-                currency="ILA",
-            ),
-        ],
-    )
+    db_path = tmp_path / "refresh_fx_eodhd.db"
 
-    calls = {}
+    class FakeProvider(_BaseFakeEODHDFXProvider):
+        last_instance = None
 
-    class FakeProvider:
-        provider_name = "FRANKFURTER"
+        def __init__(self, api_key):
+            super().__init__(api_key)
+            FakeProvider.last_instance = self
 
-        def fetch_rates(self, *, base_currency, quote_currencies, start_date, end_date):
-            calls["base_currency"] = base_currency
-            calls["quote_currencies"] = list(quote_currencies)
-            calls["start_date"] = start_date.isoformat()
-            calls["end_date"] = end_date.isoformat()
+        def fetch_history(self, *, canonical_symbol, start_date, end_date):
+            self.calls.append(
+                (canonical_symbol, start_date.isoformat(), end_date.isoformat())
+            )
             return [
                 FXRateRecord(
-                    provider="FRANKFURTER",
-                    rate_date=end_date.isoformat(),
-                    base_currency=base_currency,
-                    quote_currency=quote_currencies[0],
-                    rate_text="0.8",
-                    fetched_at=f"{end_date.isoformat()}T00:00:00+00:00",
+                    provider="EODHD",
+                    rate_date="2024-01-01",
+                    base_currency="EUR",
+                    quote_currency="USD",
+                    rate_text="1.09",
+                    fetched_at="2024-01-01T00:00:00+00:00",
                     source_kind="provider",
                 )
             ]
 
-    class FakeService:
-        def __init__(self, database, repository=None):
-            self.provider = FakeProvider()
-            self.provider_name = "FRANKFURTER"
-            self.pivot_currency = "USD"
-            self.repository = repository or FXRatesRepository(database)
-
-    monkeypatch.setattr(cli, "FXService", FakeService)
+    monkeypatch.setattr(cli, "EODHDFXProvider", FakeProvider)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "secret")
 
     rc = cli.cmd_refresh_fx_rates(
         database=str(db_path),
-        start_date="2023-12-31",
-        end_date="2023-12-31",
+        start_date="2024-01-01",
+        end_date="2024-01-01",
     )
 
     assert rc == 0
-    assert calls["base_currency"] == "USD"
-    assert calls["quote_currencies"] == ["EUR", "GBP", "ILS", "ZAR"]
+    assert FakeProvider.last_instance is not None
+    assert FakeProvider.last_instance.calls == [("EURUSD", "2024-01-01", "2024-01-01")]
+
+    fx_repo = FXRatesRepository(db_path)
+    assert fx_repo.fetch_pair_history("EODHD", "EUR", "USD") == [("2024-01-01", "1.09")]
+
+    state = FXRefreshStateRepository(db_path).fetch("EODHD", "EURUSD")
+    assert state is not None
+    assert state.min_rate_date == "2024-01-01"
+    assert state.max_rate_date == "2024-01-01"
+    assert state.full_history_backfilled is False
+
+    catalog_repo = FXSupportedPairsRepository(db_path)
+    refreshable = catalog_repo.list_refreshable("EODHD")
+    assert [row.canonical_symbol for row in refreshable] == ["EURUSD"]
+
+    with sqlite3.connect(db_path) as conn:
+        total_catalog_rows = conn.execute(
+            "SELECT COUNT(*) FROM fx_supported_pairs WHERE provider = 'EODHD'"
+        ).fetchone()[0]
+    assert total_catalog_rows == 3
+
     output = capsys.readouterr().out
-    assert "Preparing FX refresh schema and indexes" in output
-    assert "Stored FX rates" in output
+    assert "Syncing EODHD FOREX catalog" in output
+    assert "canonical_pairs=1" in output
+    assert "requested_range=2024-01-01..2024-01-01" in output
+    assert "pair=EURUSD" in output
 
 
-def test_cmd_refresh_fx_rates_batches_history_and_reports_progress(
+def test_cmd_refresh_fx_rates_eodhd_fetches_only_incremental_newer_history(
     monkeypatch, tmp_path, capsys
 ):
-    db_path = tmp_path / "refresh_fx_progress.db"
-
-    calls: list[tuple[str, tuple[str, ...], str, str]] = []
-
-    class FakeProvider:
-        provider_name = "FRANKFURTER"
-
-        def fetch_rates(self, *, base_currency, quote_currencies, start_date, end_date):
-            calls.append(
-                (
-                    base_currency,
-                    tuple(quote_currencies),
-                    start_date.isoformat(),
-                    end_date.isoformat(),
-                )
-            )
-            return [
-                FXRateRecord(
-                    provider="FRANKFURTER",
-                    rate_date=end_date.isoformat(),
-                    base_currency=base_currency,
-                    quote_currency=quote_currencies[0],
-                    rate_text="0.8",
-                    fetched_at=f"{end_date.isoformat()}T00:00:00+00:00",
-                    source_kind="provider",
-                )
-            ]
-
-    class FakeService:
-        def __init__(self, database, repository=None):
-            self.provider = FakeProvider()
-            self.provider_name = "FRANKFURTER"
-            self.pivot_currency = "USD"
-            self.repository = repository or FXRatesRepository(database)
-
-    monkeypatch.setattr(
-        cli.FXRatesRepository,
-        "discover_currencies",
-        lambda self: ["USD", *[f"C{i:02d}" for i in range(30)]],
-    )
-    monkeypatch.setattr(cli, "FXService", FakeService)
-    monkeypatch.setattr(cli, "FX_REFRESH_MAX_QUOTES_PER_REQUEST", 10)
-    monkeypatch.setattr(cli, "FX_REFRESH_MAX_DAYS_PER_REQUEST", 365)
-
-    rc = cli.cmd_refresh_fx_rates(
-        database=str(db_path),
-        start_date="2020-01-01",
-        end_date="2021-12-31",
-    )
-
-    assert rc == 0
-    assert len(calls) == 9
-    assert calls[0] == (
-        "USD",
-        tuple(f"C{i:02d}" for i in range(10)),
-        "2020-01-01",
-        "2020-12-30",
-    )
-    assert calls[-1] == (
-        "USD",
-        tuple(f"C{i:02d}" for i in range(20, 30)),
-        "2021-12-31",
-        "2021-12-31",
-    )
-    output = capsys.readouterr().out
-    assert "Refreshing FX rates" in output
-    assert "Progress: [--------------------] 0/9 FX batches complete (0.0%)" in output
-    assert "Progress: [####################] 9/9 FX batches complete (100.0%)" in output
-
-
-def test_cmd_refresh_fx_rates_skips_fully_covered_currency_ranges(
-    monkeypatch, tmp_path, capsys
-):
-    db_path = tmp_path / "refresh_fx_skip_covered.db"
-    repo = FXRatesRepository(db_path)
-    repo.initialize_schema()
-    start = date(2020, 1, 1)
-    end = date(2020, 1, 3)
-    records = []
-    current = start
-    while current <= end:
-        records.append(
-            FXRateRecord(
-                provider="FRANKFURTER",
-                rate_date=current.isoformat(),
-                base_currency="USD",
-                quote_currency="EUR",
-                rate_text="0.9",
-                fetched_at=f"{current.isoformat()}T00:00:00+00:00",
-                source_kind="provider",
-            )
-        )
-        current += timedelta(days=1)
-    repo.upsert_many(records)
-
-    calls = []
-
-    class FakeProvider:
-        provider_name = "FRANKFURTER"
-
-        def fetch_rates(self, *, base_currency, quote_currencies, start_date, end_date):
-            calls.append((base_currency, tuple(quote_currencies), start_date, end_date))
-            return []
-
-    class FakeService:
-        def __init__(self, database, repository=None):
-            self.provider = FakeProvider()
-            self.provider_name = "FRANKFURTER"
-            self.pivot_currency = "USD"
-            self.repository = repository or FXRatesRepository(database)
-
-    monkeypatch.setattr(
-        cli.FXRatesRepository,
-        "discover_currencies",
-        lambda self: ["USD", "EUR"],
-    )
-    monkeypatch.setattr(cli, "FXService", FakeService)
-
-    rc = cli.cmd_refresh_fx_rates(
-        database=str(db_path),
-        start_date=start.isoformat(),
-        end_date=end.isoformat(),
-    )
-
-    assert rc == 0
-    assert calls == []
-    output = capsys.readouterr().out
-    assert "skipped_currencies=1" in output
-    assert "requests=0" in output
-
-
-def test_cmd_refresh_fx_rates_fetches_sparse_internal_gaps(
-    monkeypatch, tmp_path, capsys
-):
-    db_path = tmp_path / "refresh_fx_internal_gap.db"
-    repo = FXRatesRepository(db_path)
-    repo.initialize_schema()
-    repo.upsert_many(
+    db_path = tmp_path / "refresh_fx_incremental.db"
+    fx_repo = FXRatesRepository(db_path)
+    fx_repo.initialize_schema()
+    fx_repo.upsert_many(
         [
             FXRateRecord(
-                provider="FRANKFURTER",
-                rate_date="2020-01-01",
-                base_currency="USD",
-                quote_currency="EUR",
-                rate_text="0.9",
-                fetched_at="2020-01-01T00:00:00+00:00",
+                provider="EODHD",
+                rate_date="2024-01-01",
+                base_currency="EUR",
+                quote_currency="USD",
+                rate_text="1.09",
+                fetched_at="2024-01-01T00:00:00+00:00",
                 source_kind="provider",
             ),
             FXRateRecord(
-                provider="FRANKFURTER",
-                rate_date="2020-01-03",
-                base_currency="USD",
-                quote_currency="EUR",
-                rate_text="0.8",
-                fetched_at="2020-01-03T00:00:00+00:00",
+                provider="EODHD",
+                rate_date="2024-01-02",
+                base_currency="EUR",
+                quote_currency="USD",
+                rate_text="1.10",
+                fetched_at="2024-01-02T00:00:00+00:00",
                 source_kind="provider",
             ),
         ]
     )
-
-    calls = []
-
-    class FakeProvider:
-        provider_name = "FRANKFURTER"
-
-        def fetch_rates(self, *, base_currency, quote_currencies, start_date, end_date):
-            calls.append(
-                (
-                    base_currency,
-                    tuple(quote_currencies),
-                    start_date.isoformat(),
-                    end_date.isoformat(),
-                )
-            )
-            return []
-
-    class FakeService:
-        def __init__(self, database, repository=None):
-            self.provider = FakeProvider()
-            self.provider_name = "FRANKFURTER"
-            self.pivot_currency = "USD"
-            self.repository = repository or FXRatesRepository(database)
-
-    monkeypatch.setattr(
-        cli.FXRatesRepository,
-        "discover_currencies",
-        lambda self: ["USD", "EUR"],
+    FXRefreshStateRepository(db_path).mark_success(
+        "EODHD",
+        "EURUSD",
+        min_rate_date="2024-01-01",
+        max_rate_date="2024-01-02",
+        full_history_backfilled=True,
     )
-    monkeypatch.setattr(cli, "FXService", FakeService)
+
+    class FakeProvider(_BaseFakeEODHDFXProvider):
+        last_instance = None
+
+        def __init__(self, api_key):
+            super().__init__(api_key)
+            FakeProvider.last_instance = self
+
+        def fetch_history(self, *, canonical_symbol, start_date, end_date):
+            self.calls.append(
+                (canonical_symbol, start_date.isoformat(), end_date.isoformat())
+            )
+            return [
+                FXRateRecord(
+                    provider="EODHD",
+                    rate_date="2024-01-03",
+                    base_currency="EUR",
+                    quote_currency="USD",
+                    rate_text="1.11",
+                    fetched_at="2024-01-03T00:00:00+00:00",
+                    source_kind="provider",
+                )
+            ]
+
+    monkeypatch.setattr(cli, "EODHDFXProvider", FakeProvider)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "secret")
 
     rc = cli.cmd_refresh_fx_rates(
         database=str(db_path),
-        start_date="2020-01-01",
-        end_date="2020-01-03",
+        end_date="2024-01-03",
     )
 
     assert rc == 0
-    assert calls == [("USD", ("EUR",), "2020-01-01", "2020-01-03")]
+    assert FakeProvider.last_instance is not None
+    assert FakeProvider.last_instance.calls == [("EURUSD", "2024-01-03", "2024-01-03")]
+
+    state = FXRefreshStateRepository(db_path).fetch("EODHD", "EURUSD")
+    assert state is not None
+    assert state.max_rate_date == "2024-01-03"
+    assert state.full_history_backfilled is True
     output = capsys.readouterr().out
-    assert "skipped_currencies=0" in output
-    assert "requests=1" in output
+    assert "mode=auto-full-history requested_end=2024-01-03" in output
+    assert "pair=EURUSD" in output
+
+
+def test_cmd_refresh_fx_rates_eodhd_completes_old_history_after_bounded_backfill(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "refresh_fx_complete_old.db"
+    fx_repo = FXRatesRepository(db_path)
+    fx_repo.initialize_schema()
+    fx_repo.upsert_many(
+        [
+            FXRateRecord(
+                provider="EODHD",
+                rate_date="2024-01-02",
+                base_currency="EUR",
+                quote_currency="USD",
+                rate_text="1.10",
+                fetched_at="2024-01-02T00:00:00+00:00",
+                source_kind="provider",
+            ),
+            FXRateRecord(
+                provider="EODHD",
+                rate_date="2024-01-03",
+                base_currency="EUR",
+                quote_currency="USD",
+                rate_text="1.11",
+                fetched_at="2024-01-03T00:00:00+00:00",
+                source_kind="provider",
+            ),
+        ]
+    )
+    FXRefreshStateRepository(db_path).mark_success(
+        "EODHD",
+        "EURUSD",
+        min_rate_date="2024-01-02",
+        max_rate_date="2024-01-03",
+        full_history_backfilled=False,
+    )
+
+    class FakeProvider(_BaseFakeEODHDFXProvider):
+        last_instance = None
+
+        def __init__(self, api_key):
+            super().__init__(api_key)
+            FakeProvider.last_instance = self
+
+        def fetch_history(self, *, canonical_symbol, start_date, end_date):
+            self.calls.append(
+                (canonical_symbol, start_date.isoformat(), end_date.isoformat())
+            )
+            if end_date == date(2024, 1, 1):
+                return [
+                    FXRateRecord(
+                        provider="EODHD",
+                        rate_date="2024-01-01",
+                        base_currency="EUR",
+                        quote_currency="USD",
+                        rate_text="1.09",
+                        fetched_at="2024-01-01T00:00:00+00:00",
+                        source_kind="provider",
+                    )
+                ]
+            return [
+                FXRateRecord(
+                    provider="EODHD",
+                    rate_date="2024-01-04",
+                    base_currency="EUR",
+                    quote_currency="USD",
+                    rate_text="1.12",
+                    fetched_at="2024-01-04T00:00:00+00:00",
+                    source_kind="provider",
+                ),
+                FXRateRecord(
+                    provider="EODHD",
+                    rate_date="2024-01-05",
+                    base_currency="EUR",
+                    quote_currency="USD",
+                    rate_text="1.13",
+                    fetched_at="2024-01-05T00:00:00+00:00",
+                    source_kind="provider",
+                ),
+            ]
+
+    monkeypatch.setattr(cli, "EODHDFXProvider", FakeProvider)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "secret")
+
+    rc = cli.cmd_refresh_fx_rates(
+        database=str(db_path),
+        end_date="2024-01-05",
+    )
+
+    assert rc == 0
+    assert FakeProvider.last_instance is not None
+    assert FakeProvider.last_instance.calls == [
+        ("EURUSD", "1900-01-01", "2024-01-01"),
+        ("EURUSD", "2024-01-04", "2024-01-05"),
+    ]
+
+    state = FXRefreshStateRepository(db_path).fetch("EODHD", "EURUSD")
+    assert state is not None
+    assert state.min_rate_date == "2024-01-01"
+    assert state.max_rate_date == "2024-01-05"
+    assert state.full_history_backfilled is True
+
+
+def test_cmd_refresh_fx_rates_eodhd_marks_failure_when_initial_fetch_returns_no_rows(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "refresh_fx_failure.db"
+
+    class FakeProvider(_BaseFakeEODHDFXProvider):
+        def fetch_history(self, *, canonical_symbol, start_date, end_date):
+            return []
+
+    monkeypatch.setattr(cli, "EODHDFXProvider", FakeProvider)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "secret")
+
+    rc = cli.cmd_refresh_fx_rates(
+        database=str(db_path),
+        start_date="2024-01-01",
+        end_date="2024-01-01",
+    )
+
+    assert rc == 0
+    state = FXRefreshStateRepository(db_path).fetch("EODHD", "EURUSD")
+    assert state is not None
+    assert state.last_status == "error"
+    assert state.attempts == 1
+    assert "No FX history returned" in (state.last_error or "")
+    output = capsys.readouterr().out
+    assert "failed_pairs=1" in output

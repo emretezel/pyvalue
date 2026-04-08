@@ -1917,6 +1917,51 @@ def _migration_027_add_currency_discovery_indexes(
         )
 
 
+def _migration_028_add_fx_catalog_tables(
+    conn: sqlite3.Connection,
+) -> None:
+    """Add EODHD FX catalog and refresh coverage tables."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fx_supported_pairs (
+            provider TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            canonical_symbol TEXT NOT NULL,
+            base_currency TEXT,
+            quote_currency TEXT,
+            name TEXT,
+            is_alias INTEGER NOT NULL DEFAULT 0,
+            is_refreshable INTEGER NOT NULL DEFAULT 0,
+            last_seen_at TEXT NOT NULL,
+            PRIMARY KEY (provider, symbol)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fx_supported_pairs_refreshable
+        ON fx_supported_pairs(provider, is_refreshable, canonical_symbol)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fx_refresh_state (
+            provider TEXT NOT NULL,
+            canonical_symbol TEXT NOT NULL,
+            min_rate_date TEXT,
+            max_rate_date TEXT,
+            full_history_backfilled INTEGER NOT NULL DEFAULT 0,
+            last_fetched_at TEXT,
+            last_status TEXT,
+            last_error TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (provider, canonical_symbol)
+        )
+        """
+    )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -1945,6 +1990,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_025_add_sector_industry_to_securities,
     _migration_026_add_fx_rates_and_metric_metadata,
     _migration_027_add_currency_discovery_indexes,
+    _migration_028_add_fx_catalog_tables,
 ]
 
 

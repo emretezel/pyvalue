@@ -1,4 +1,6 @@
-from pyvalue.fx import FXService
+import pytest
+
+from pyvalue.fx import FXService, MissingFXRateError
 from pyvalue.normalization.eodhd import EODHDFactsNormalizer
 from pyvalue.storage import FXRateRecord, FXRatesRepository
 
@@ -932,21 +934,12 @@ def test_eodhd_normalizes_eps_for_configured_subunit_family():
 # ---------------------------------------------------------------------------
 
 
-class _DummyFXProvider:
-    provider_name = "FRANKFURTER"
-
-    def fetch_rates(self, **kwargs):
-        return []
-
-
 def _fx_service_with_rates(tmp_path, *records):
     db_path = tmp_path / "fx.db"
     repo = FXRatesRepository(db_path)
     repo.initialize_schema()
     repo.upsert_many(list(records))
-    service = FXService(db_path, repository=repo, provider=_DummyFXProvider())
-    service.lazy_fetch = False
-    return service
+    return FXService(db_path, repository=repo, provider_name="EODHD", preload_all=True)
 
 
 def test_eodhd_normalize_target_currency_identity():
@@ -981,7 +974,7 @@ def test_eodhd_normalize_converts_monetary_facts_to_target_currency(tmp_path):
     fx = _fx_service_with_rates(
         tmp_path,
         FXRateRecord(
-            provider="FRANKFURTER",
+            provider="EODHD",
             rate_date="2024-12-31",
             base_currency="EUR",
             quote_currency="USD",
@@ -1020,7 +1013,7 @@ def test_eodhd_normalize_shares_not_converted_to_target_currency(tmp_path):
     fx = _fx_service_with_rates(
         tmp_path,
         FXRateRecord(
-            provider="FRANKFURTER",
+            provider="EODHD",
             rate_date="2024-12-31",
             base_currency="EUR",
             quote_currency="USD",
@@ -1069,10 +1062,9 @@ def test_eodhd_normalize_no_target_currency_preserves_source():
     assert assets[0].value == 1000.0
 
 
-def test_eodhd_normalize_missing_fx_rate_drops_fact_without_crash(tmp_path):
-    """Facts that cannot be converted are dropped, not crashed."""
+def test_eodhd_normalize_missing_fx_rate_raises_hard_error(tmp_path):
+    """Missing FX during target-currency conversion aborts the symbol."""
 
-    # No FX rates in the service -- conversion will fail gracefully.
     fx = _fx_service_with_rates(tmp_path)
     normalizer = EODHDFactsNormalizer(fx_service=fx)
     payload = {
@@ -1090,9 +1082,8 @@ def test_eodhd_normalize_missing_fx_rate_drops_fact_without_crash(tmp_path):
         "General": {"CurrencyCode": "EUR"},
     }
 
-    records = normalizer.normalize(payload, symbol="TEST.EU", target_currency="USD")
-    assets = [r for r in records if r.concept == "Assets"]
-    assert not assets, "Fact should be dropped when FX rate is missing"
+    with pytest.raises(MissingFXRateError):
+        normalizer.normalize(payload, symbol="TEST.EU", target_currency="USD")
 
 
 def test_eodhd_normalize_gbx_subunit_with_gbp_target_no_double_conversion():
@@ -1134,7 +1125,7 @@ def test_eodhd_normalize_mixed_currencies_aligned_to_target(tmp_path):
     fx = _fx_service_with_rates(
         tmp_path,
         FXRateRecord(
-            provider="FRANKFURTER",
+            provider="EODHD",
             rate_date="2024-12-31",
             base_currency="EUR",
             quote_currency="USD",

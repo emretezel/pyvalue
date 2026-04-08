@@ -126,6 +126,35 @@ Important fundamentals options:
 - `--max-age-days`: refresh stale or missing data; default `30`
 - retry backoff is respected by default; use `--retry-failed-now` to bypass it
 
+## FX Refresh
+
+EODHD is also the default FX provider.
+
+Refresh FX coverage explicitly with:
+
+```bash
+pyvalue refresh-fx-rates
+```
+
+Behavior:
+
+- syncs the EODHD FOREX catalog into `fx_supported_pairs`
+- refreshes canonical six-letter pairs such as `EURUSD`
+- treats three-letter shorthands such as `EUR` as aliases for `USDEUR`
+  and does not refresh those aliases separately
+- stores direct provider rows only in `fx_rates`
+- tracks pair coverage and retry state in `fx_refresh_state`
+- backfills full available history on the first unbounded run, then refreshes
+  only the missing older/newer outer ranges later
+
+If you need to limit the first backfill window:
+
+```bash
+pyvalue refresh-fx-rates --start-date 2000-01-01
+```
+
+A later unbounded run can still fill the older missing history.
+
 ## Fundamentals Normalization
 
 Single symbol:
@@ -157,6 +186,11 @@ Normalization converts raw EODHD payloads into provider-agnostic
 Exchange and all-supported normalization runs parallelize automatically.
 By default, normalization skips symbols whose raw payload has not changed since
 the last successful EODHD normalization.
+Normalization never fetches FX from the network. When a symbol needs currency
+conversion, each worker process preloads the full selected-provider FX table
+once and resolves direct, inverse, and USD/EUR triangulated rates from memory.
+Run `refresh-fx-rates` before normalization when the database does not already
+contain the required history.
 
 ## Market Data
 

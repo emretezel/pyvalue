@@ -1326,6 +1326,7 @@ class EODHDFactsNormalizer:
             operation=f"eodhd:{derived_concept}",
             symbol=symbol.upper(),
             field_name=record.concept,
+            raise_on_missing_fx=True,
         )
 
     def _build_monetary_derived_record(
@@ -1757,6 +1758,7 @@ class EODHDFactsNormalizer:
                     operation="eodhd:NetIncomeLossAvailableToCommonStockholdersBasic",
                     symbol=base.symbol,
                     field_name="PreferredStockDividendsAndOtherAdjustments",
+                    raise_on_missing_fx=True,
                 )
                 if converted_preferred is None:
                     continue
@@ -1959,7 +1961,7 @@ class EODHDFactsNormalizer:
 
         Non-monetary facts (shares, unitless) pass through unchanged.
         Facts already in the target currency pass through unchanged.
-        Facts where FX conversion fails are dropped with a warning.
+        Facts where FX conversion fails abort normalization for the symbol.
         """
 
         if self.fx_service is None:
@@ -1989,9 +1991,9 @@ class EODHDFactsNormalizer:
                 operation="ticker_currency_alignment",
                 symbol=symbol,
                 field_name=record.concept,
+                raise_on_missing_fx=True,
             )
             if new_value is None:
-                # Warning already emitted by convert_money_value.
                 continue
             converted.append(
                 FactRecord(

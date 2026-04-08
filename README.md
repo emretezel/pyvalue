@@ -61,8 +61,10 @@ Key rules:
 - Monetary metrics persist explicit unit metadata and currency; ratio, percent,
   multiple, count, and other non-monetary metrics do not carry fake currencies.
 - FX lookup is DB-backed, uses latest available rate on or before the requested
-  date, supports direct, inverse, and triangulated lookup, and never hard-fails
-  a universe-wide run because one symbol is missing FX.
+  date, and supports direct, inverse, and triangulated lookup.
+- `normalize-fundamentals` never fetches FX from the web. Refresh FX explicitly
+  first; if a required conversion still cannot be resolved from stored direct,
+  inverse, or USD/EUR triangulated rates, that symbol fails normalization.
 
 Refresh FX rates independently with:
 
@@ -70,9 +72,9 @@ Refresh FX rates independently with:
 pyvalue refresh-fx-rates
 ```
 
-The command discovers currencies already present in the project DB, excludes the
-pivot currency, skips only exact direct windows already fully covered in
-`fx_rates`, and reports batch progress during long historical refreshes.
+With the default `EODHD` provider, the command syncs the provider FOREX
+catalog, refreshes all canonical six-letter pairs, backfills full history on
+the first run, and later tops up only the missing older/newer outer ranges.
 
 ## Supported Providers
 

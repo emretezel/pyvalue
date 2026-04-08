@@ -17,7 +17,7 @@ from pyvalue.currency import (
     normalize_currency_code,
     normalize_monetary_amount,
 )
-from pyvalue.fx import FXService
+from pyvalue.fx import FXService, MissingFXRateError
 from pyvalue.storage import FactRecord
 
 
@@ -29,16 +29,16 @@ class _NoFetchFXConfig(Config):
         pass
 
     @property
+    def fx_provider(self) -> str:
+        return "EODHD"
+
+    @property
     def fx_pivot_currency(self) -> str:
         return "USD"
 
     @property
     def fx_secondary_pivot_currency(self) -> Optional[str]:
         return "EUR"
-
-    @property
-    def fx_lazy_fetch(self) -> bool:
-        return False
 
     @property
     def fx_stale_warning_days(self) -> int:
@@ -141,6 +141,7 @@ def convert_money_value(
     operation: str,
     symbol: str,
     field_name: str,
+    raise_on_missing_fx: bool = False,
 ) -> Optional[float]:
     """Convert one monetary amount into ``target_currency`` with structured warnings."""
 
@@ -198,6 +199,13 @@ def convert_money_value(
             normalized_target,
             as_of,
         )
+        if raise_on_missing_fx:
+            raise MissingFXRateError(
+                provider=fx_service.provider_name,
+                base_currency=normalized_source,
+                quote_currency=normalized_target,
+                as_of=as_of,
+            )
         return None
     return float(converted)
 
@@ -210,6 +218,7 @@ def align_money_values(
     operation: str,
     symbol: str,
     target_currency: Optional[str] = None,
+    raise_on_missing_fx: bool = False,
 ) -> tuple[Optional[list[float]], Optional[str]]:
     """Convert a sequence of monetary values into one target currency.
 
@@ -240,6 +249,7 @@ def align_money_values(
             operation=operation,
             symbol=symbol,
             field_name=field_name,
+            raise_on_missing_fx=raise_on_missing_fx,
         )
         if converted is None:
             return None, None

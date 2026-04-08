@@ -13,6 +13,8 @@ The main persisted layers are:
 - normalized financial facts
 - market data snapshots
 - FX rates
+- FX provider catalogs
+- FX refresh state
 - market data fetch state
 - computed metrics
 
@@ -135,6 +137,30 @@ Key semantics:
 - inverse and triangulated rates are derived at lookup time
 - a unique constraint protects `(provider, rate_date, base_currency, quote_currency)`
 - lookup indexes are designed for pair/date searches ordered by newest
+
+### `fx_supported_pairs`
+
+Stores the provider-published FX instrument catalog.
+
+Purpose:
+
+- cache the current EODHD FOREX symbol list locally
+- distinguish canonical refreshable six-letter pairs from alias symbols
+- map three-letter EODHD shorthand symbols such as `EUR` to canonical pairs
+  such as `USDEUR`
+- avoid re-scraping provider docs to discover supported pairs
+
+### `fx_refresh_state`
+
+Stores FX refresh coverage and retry state per canonical provider symbol.
+
+Purpose:
+
+- track the stored min/max historical coverage for each canonical pair
+- record whether full available history has already been backfilled
+- support first-full-then-incremental refresh planning
+- capture retry/error state for provider failures without inferring everything
+  from `fx_rates`
 
 ### `market_data_fetch_state`
 

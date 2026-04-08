@@ -731,6 +731,7 @@ class SECFactsNormalizer:
             operation=f"sec:{derived_concept}",
             symbol=symbol,
             field_name=record.concept,
+            raise_on_missing_fx=True,
         )
 
     def _sum_records_for_derived_concept(

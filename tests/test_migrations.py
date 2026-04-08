@@ -165,7 +165,7 @@ def test_migration_adds_sector_and_industry_to_securities(tmp_path):
 
     applied = apply_migrations(db_path)
 
-    assert applied == 3
+    assert applied == 4
     with sqlite3.connect(db_path) as conn:
         info = conn.execute("PRAGMA table_info(securities)").fetchall()
         columns = {row[1] for row in info}
@@ -175,6 +175,10 @@ def test_migration_adds_sector_and_industry_to_securities(tmp_path):
         fx_columns = {row[1] for row in fx_info}
         fx_indexes = conn.execute("PRAGMA index_list(fx_rates)").fetchall()
         fx_index_names = {row[1] for row in fx_indexes}
+        fx_supported_pair_indexes = conn.execute(
+            "PRAGMA index_list(fx_supported_pairs)"
+        ).fetchall()
+        fx_supported_pair_index_names = {row[1] for row in fx_supported_pair_indexes}
         supported_ticker_indexes = conn.execute(
             "PRAGMA index_list(supported_tickers)"
         ).fetchall()
@@ -220,6 +224,7 @@ def test_migration_adds_sector_and_industry_to_securities(tmp_path):
         "updated_at",
     }
     assert "idx_fx_rates_pair_date" in fx_index_names
+    assert "idx_fx_supported_pairs_refreshable" in fx_supported_pair_index_names
     if "supported_tickers" in tables:
         assert "idx_supported_tickers_currency_nonnull" in supported_ticker_index_names
     if "financial_facts" in tables:
@@ -313,7 +318,7 @@ def test_migration_does_not_overwrite_existing_supported_tickers(tmp_path):
 
     applied = apply_migrations(db_path)
 
-    assert applied == 7
+    assert applied == 8
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
             """
@@ -328,6 +333,12 @@ def test_migration_does_not_overwrite_existing_supported_tickers(tmp_path):
         fx_exists = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='fx_rates'"
         ).fetchone()
+        fx_supported_pairs_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='fx_supported_pairs'"
+        ).fetchone()
+        fx_refresh_state_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='fx_refresh_state'"
+        ).fetchone()
         supported_ticker_indexes = conn.execute(
             "PRAGMA index_list(supported_tickers)"
         ).fetchall()
@@ -336,4 +347,6 @@ def test_migration_does_not_overwrite_existing_supported_tickers(tmp_path):
     assert row == ("Preserved Name", "ETF")
     assert listings_exists is None
     assert fx_exists == ("fx_rates",)
+    assert fx_supported_pairs_exists == ("fx_supported_pairs",)
+    assert fx_refresh_state_exists == ("fx_refresh_state",)
     assert "idx_supported_tickers_currency_nonnull" in supported_ticker_index_names

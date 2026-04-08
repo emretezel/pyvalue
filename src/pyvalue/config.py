@@ -62,7 +62,7 @@ class Config:
 
     @property
     def fx_provider(self) -> str:
-        return (self._get_value("fx", "provider") or "FRANKFURTER").strip().upper()
+        return (self._get_value("fx", "provider") or "EODHD").strip().upper()
 
     @property
     def fx_pivot_currency(self) -> str:
@@ -75,10 +75,6 @@ class Config:
             return "EUR"
         cleaned = value.strip().upper()
         return cleaned or None
-
-    @property
-    def fx_lazy_fetch(self) -> bool:
-        return self._get_bool_value("fx", "lazy_fetch", default=True)
 
     @property
     def fx_stale_warning_days(self) -> int:

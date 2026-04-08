@@ -136,3 +136,9 @@ Use this file to capture recurring mistake patterns after user corrections so fu
 - Recurring pattern: Making a focused commit in a dirty tree without explicitly reporting the remaining tracked changes can leave the user thinking the repo is fully committed when only one slice was committed.
 - Preventive rule: After every commit in a dirty worktree, run `git status --short`, call out any remaining tracked files explicitly, and never imply the repository is fully committed unless the worktree is actually clean.
 - Resulting action: Recorded the rule here and will always report the remaining tracked files after a scoped commit in `pyvalue`.
+
+- Date: 2026-04-08
+- User correction: The FX cache plan must not use payload-level `fundamentals_raw.currency`; normalization should resolve whatever pair it needs from the preloaded FX cache because raw EODHD payloads can contain multiple currencies.
+- Recurring pattern: Reusing a convenient schema hint as if it were authoritative for runtime planning can produce the wrong architecture when provider payloads are more heterogeneous than the coarse stored metadata.
+- Preventive rule: For FX, currency, and normalization design in this repo, do not treat payload-level metadata columns as authoritative without checking the raw provider semantics first; if mixed currencies are possible, design lookup/cache behavior around actual conversion requests rather than precomputed payload hints.
+- Resulting action: Reworked the FX plan and implementation to use full per-worker FX preload with on-demand in-memory pair resolution, removed the cache design dependency on `fundamentals_raw.currency`, and recorded the rule here.

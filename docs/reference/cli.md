@@ -140,6 +140,13 @@ Notes:
   has not changed since the last successful normalization for that provider
 - bulk runs with `--force` skip the freshness scan and start re-normalizing the
   requested symbol set immediately
+- normalization never fetches FX from the network; run `refresh-fx-rates`
+  first when you need currency conversion coverage
+- bulk normalization preloads the entire selected-provider FX table once per
+  worker process, then resolves direct, inverse, and USD/EUR triangulated rates
+  from memory only
+- if a required conversion still cannot be resolved from stored FX, that symbol
+  fails normalization explicitly
 
 ## Market Data Commands
 
@@ -221,8 +228,7 @@ Notes:
 
 ### `refresh-fx-rates`
 
-Fetch and store direct FX rates for currencies already present in the project
-database.
+Fetch and store direct FX rates for the configured provider.
 
 Key options:
 
@@ -232,15 +238,19 @@ Key options:
 
 Notes:
 
-- discovers currencies from existing project data and excludes the pivot
-  currency
+- with the default `EODHD` provider, the command syncs the FOREX catalog into
+  `fx_supported_pairs` first
+- EODHD refresh iterates canonical six-letter pairs only; three-letter
+  shorthand aliases such as `EUR` are tracked as aliases to `USDEUR` and are
+  not refreshed separately
 - stores direct provider rows in `fx_rates`
-- skips only direct base/quote windows already fully covered in `fx_rates`
-- skips unnecessary re-downloads through upsert semantics
-- the first run after the FX/index migration may spend time building currency
-  indexes before discovery starts
-- long historical refreshes are split into smaller provider requests and report
-  batch progress on the console
+- EODHD stores per-pair coverage and retry state in `fx_refresh_state`
+- the first EODHD run backfills full available history per canonical pair when
+  `--start-date` is omitted; later runs top up only missing older/newer outer
+  ranges
+- `--start-date` limits the first requested window, but a later unbounded run
+  can still complete the older missing history
+- progress is reported pair-by-pair on the console
 - later runtime lookups can use direct, inverse, or triangulated conversion from
   those stored rows
 
