@@ -81,6 +81,34 @@ class MissingFXRateError(RuntimeError):
             f"(provider={provider} base={base_currency} quote={quote_currency} as_of={as_of})"
         )
 
+    def __reduce__(self) -> tuple[object, tuple[str, str, str, str]]:
+        """Make the exception pickle-safe for ProcessPoolExecutor transport."""
+
+        return (
+            self.__class__._rebuild,
+            (
+                self.provider,
+                self.base_currency,
+                self.quote_currency,
+                self.as_of,
+            ),
+        )
+
+    @classmethod
+    def _rebuild(
+        cls,
+        provider: str,
+        base_currency: str,
+        quote_currency: str,
+        as_of: str,
+    ) -> MissingFXRateError:
+        return cls(
+            provider=provider,
+            base_currency=base_currency,
+            quote_currency=quote_currency,
+            as_of=as_of,
+        )
+
 
 @dataclass(frozen=True)
 class FXCatalogEntry:

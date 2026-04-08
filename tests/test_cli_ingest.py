@@ -145,9 +145,16 @@ def store_market_data(
 
 
 def _spawn_process_pool_executor(max_workers: int) -> ProcessPoolExecutor:
+    log_dir, console_level, file_level = cli.current_logging_config()
     return ProcessPoolExecutor(
         max_workers=max_workers,
         mp_context=mp.get_context("spawn"),
+        initializer=cli._initialize_worker_logging,
+        initargs=(
+            str(log_dir) if log_dir is not None else None,
+            console_level,
+            file_level,
+        ),
     )
 
 
@@ -3727,6 +3734,57 @@ def test_suppress_console_metric_warnings_filters_only_metric_noise(tmp_path, ca
         clear_root_logging_handlers()
 
 
+def test_suppress_console_missing_fx_warnings_filters_only_missing_fx_noise(
+    tmp_path, capsys
+):
+    log_dir = tmp_path / "logs"
+    clear_root_logging_handlers()
+    cli.setup_logging(log_dir=log_dir)
+    try:
+        with cli.suppress_console_missing_fx_warnings(True):
+            logging.getLogger("pyvalue.fx").warning(
+                "Missing FX rate | provider=%s base=%s quote=%s as_of=%s operation=get_fx_rate",
+                "EODHD",
+                "NLG",
+                "EUR",
+                "2000-06-30",
+            )
+            logging.getLogger("pyvalue.money").warning(
+                "Missing FX rate for monetary conversion | operation=%s symbol=%s field=%s from=%s to=%s as_of=%s",
+                "ticker_currency_alignment",
+                "AALB.AS",
+                "Assets",
+                "NLG",
+                "EUR",
+                "2000-06-30",
+            )
+            logging.getLogger("pyvalue.fx").warning(
+                "Stale FX rate used | provider=%s base=%s quote=%s requested_as_of=%s rate_date=%s age_days=%s source_kind=%s",
+                "EODHD",
+                "EUR",
+                "USD",
+                "2024-01-10",
+                "2024-01-01",
+                9,
+                "provider",
+            )
+            logging.getLogger("pyvalue.cli").warning("Operational warning")
+
+        captured = capsys.readouterr()
+        assert "Missing FX rate | provider=EODHD base=NLG quote=EUR" not in captured.err
+        assert "Missing FX rate for monetary conversion" not in captured.err
+        assert "Stale FX rate used" in captured.err
+        assert "Operational warning" in captured.err
+
+        log_text = (log_dir / "pyvalue.log").read_text(encoding="utf-8")
+        assert "Missing FX rate | provider=EODHD base=NLG quote=EUR" in log_text
+        assert "Missing FX rate for monetary conversion" in log_text
+        assert "Stale FX rate used" in log_text
+        assert "Operational warning" in log_text
+    finally:
+        clear_root_logging_handlers()
+
+
 def test_cmd_compute_metrics_stage_suppresses_metric_warnings_by_default(
     monkeypatch, tmp_path, capsys
 ):
@@ -4641,6 +4699,7 @@ def test_cmd_normalize_fundamentals_sec(monkeypatch, tmp_path):
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     fund_repo.upsert("SEC", "AAPL.US", {"entityName": "Apple Inc", "facts": {}})
+    fx_service_preload_all = []
 
     class FakeNormalizer:
         def __init__(self):
@@ -4659,7 +4718,16 @@ def test_cmd_normalize_fundamentals_sec(monkeypatch, tmp_path):
                 )
             ]
 
+    class FakeFXService:
+        provider_name = "EODHD"
+
+        def __init__(
+            self, database, repository=None, provider_name=None, preload_all=False
+        ):
+            fx_service_preload_all.append(preload_all)
+
     fake_normalizer = FakeNormalizer()
+    monkeypatch.setattr(cli, "FXService", FakeFXService)
     monkeypatch.setattr(
         cli, "SECFactsNormalizer", lambda fx_service=None: fake_normalizer
     )
@@ -4697,6 +4765,7 @@ def test_cmd_normalize_fundamentals_sec(monkeypatch, tmp_path):
     assert state is not None
     assert state["raw_fetched_at"] is not None
     assert state["last_normalized_at"] is not None
+    assert fx_service_preload_all == [False]
 
 
 def test_cmd_normalize_fundamentals_sec_skips_when_up_to_date(
@@ -4825,9 +4894,22 @@ def test_cmd_normalize_fundamentals_bulk_sec(monkeypatch, tmp_path):
                 )
             ]
 
+    fx_service_preload_all = []
+
+    class FakeFXService:
+        provider_name = "EODHD"
+
+        def __init__(
+            self, database, repository=None, provider_name=None, preload_all=False
+        ):
+            fx_service_preload_all.append(preload_all)
+
     normalization_repo = FinancialFactsRepository(db_path)
     normalization_repo.initialize_schema()
     monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 1)
+    monkeypatch.setattr(cli, "_process_local_fx_service", None)
+    monkeypatch.setattr(cli, "_process_local_fx_service_db", None)
+    monkeypatch.setattr(cli, "FXService", FakeFXService)
 
     normalizer = DummyNormalizer()
     monkeypatch.setattr(cli, "SECFactsNormalizer", lambda fx_service=None: normalizer)
@@ -4852,6 +4934,7 @@ def test_cmd_normalize_fundamentals_bulk_sec(monkeypatch, tmp_path):
     entity_repo.initialize_schema()
     assert entity_repo.fetch("AAA.US") == "AAA Corp"
     assert entity_repo.fetch("BBB.US") == "BBB Corp"
+    assert fx_service_preload_all == [False]
 
 
 def test_cmd_normalize_fundamentals_bulk_sec_reprocesses_only_stale_symbols(
@@ -5020,6 +5103,7 @@ def test_cmd_normalize_fundamentals_eodhd(monkeypatch, tmp_path):
             "Financials": {},
         },
     )
+    fx_service_preload_all = []
 
     class FakeNormalizer:
         def normalize(self, payload, symbol, accounting_standard=None, **kwargs):
@@ -5032,6 +5116,15 @@ def test_cmd_normalize_fundamentals_eodhd(monkeypatch, tmp_path):
                 )
             ]
 
+    class FakeFXService:
+        provider_name = "EODHD"
+
+        def __init__(
+            self, database, repository=None, provider_name=None, preload_all=False
+        ):
+            fx_service_preload_all.append(preload_all)
+
+    monkeypatch.setattr(cli, "FXService", FakeFXService)
     monkeypatch.setattr(
         cli, "EODHDFactsNormalizer", lambda fx_service=None: FakeNormalizer()
     )
@@ -5066,6 +5159,68 @@ def test_cmd_normalize_fundamentals_eodhd(monkeypatch, tmp_path):
     assert entity_repo.fetch("SHEL.LSE") == "Shell PLC"
     assert entity_repo.fetch_sector("SHEL.LSE") == "Energy"
     assert entity_repo.fetch_industry("SHEL.LSE") == "Oil & Gas Integrated"
+    assert fx_service_preload_all == [False]
+
+
+def test_cmd_normalize_fundamentals_eodhd_drops_old_missing_fx_periods(tmp_path):
+    db_path = tmp_path / "funds-partial.db"
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD",
+        "AALB.AS",
+        {
+            "General": {
+                "Name": "Aalberts",
+                "Sector": "Industrials",
+                "Industry": "Industrial Products",
+                "CurrencyCode": "EUR",
+            },
+            "Financials": {
+                "Balance_Sheet": {
+                    "yearly": [
+                        {
+                            "date": "2000-06-30",
+                            "totalAssets": 1000.0,
+                            "currency_symbol": "NLG",
+                        },
+                        {
+                            "date": "2001-12-31",
+                            "totalAssets": 1200.0,
+                            "currency_symbol": "EUR",
+                        },
+                    ]
+                }
+            },
+        },
+    )
+
+    rc = cli.cmd_normalize_fundamentals(
+        provider="EODHD",
+        symbol="AALB.AS",
+        database=str(db_path),
+        exchange_code=None,
+    )
+
+    assert rc == 0
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    rows = (
+        fact_repo._connect()
+        .execute(
+            """
+            SELECT ff.end_date, ff.value, ff.currency, ff.unit
+            FROM financial_facts ff
+            JOIN securities s ON s.security_id = ff.security_id
+            WHERE s.canonical_symbol = 'AALB.AS' AND ff.concept = 'Assets'
+            ORDER BY ff.end_date
+            """
+        )
+        .fetchall()
+    )
+    assert [(row[0], row[1], row[2], row[3]) for row in rows] == [
+        ("2001-12-31", 1200.0, "EUR", "EUR")
+    ]
 
 
 def test_cmd_normalize_fundamentals_eodhd_zero_row_normalization_records_state(
@@ -5334,6 +5489,71 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_force_skips_freshness_scan(
     state_repo = FundamentalsNormalizationStateRepository(db_path)
     assert state_repo.fetch("EODHD", "AAA.US") is not None
     assert state_repo.fetch("EODHD", "BBB.US") is not None
+
+
+def test_cmd_normalize_eodhd_fundamentals_bulk_suppresses_missing_fx_warnings_on_console(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "normalize-eodhd-missing-fx.db"
+    log_dir = tmp_path / "logs"
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD",
+        "AALB.AS",
+        {
+            "General": {
+                "Name": "Aalberts",
+                "CurrencyCode": "EUR",
+            },
+            "Financials": {
+                "Balance_Sheet": {
+                    "yearly": [
+                        {
+                            "date": "2000-06-30",
+                            "totalAssets": 1000.0,
+                            "currency_symbol": "NLG",
+                        },
+                        {
+                            "date": "2001-12-31",
+                            "totalAssets": 1200.0,
+                            "currency_symbol": "EUR",
+                        },
+                    ]
+                }
+            },
+        },
+        exchange="AS",
+    )
+
+    monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 2)
+    monkeypatch.setattr(cli, "_process_local_fx_service", None)
+    monkeypatch.setattr(cli, "_process_local_fx_service_db", None)
+    monkeypatch.setattr(cli, "_process_local_ticker_repo", None)
+    monkeypatch.setattr(cli, "_process_local_ticker_repo_db", None)
+    monkeypatch.setattr(
+        cli,
+        "_create_process_pool_executor",
+        _spawn_process_pool_executor,
+    )
+    clear_root_logging_handlers()
+    cli.setup_logging(log_dir=log_dir)
+    try:
+        rc = cli.cmd_normalize_eodhd_fundamentals_bulk(
+            database=str(db_path),
+            symbols=["AALB.AS"],
+            force=True,
+        )
+        captured = capsys.readouterr()
+    finally:
+        clear_root_logging_handlers()
+
+    assert rc == 0
+    assert "Missing FX rate" not in captured.err
+    assert "Missing FX rate for monetary conversion" not in captured.err
+    log_text = (log_dir / "pyvalue.log").read_text(encoding="utf-8")
+    assert "Missing FX rate | provider=EODHD base=NLG quote=EUR" in log_text
+    assert "Missing FX rate for monetary conversion" in log_text
 
 
 def test_cmd_normalize_eodhd_fundamentals_bulk_continues_after_symbol_failure_with_inline_executor(

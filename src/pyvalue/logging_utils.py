@@ -9,7 +9,7 @@ from contextlib import contextmanager
 import logging
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
-from typing import Iterator, Union
+from typing import Iterator, Optional, Union
 
 
 def setup_logging(
@@ -48,6 +48,32 @@ def setup_logging(
     logging.getLogger("requests").setLevel(logging.WARNING)
 
 
+def current_logging_config() -> tuple[Optional[Path], int, int]:
+    """Return the active log directory plus console/file levels."""
+
+    root = logging.getLogger()
+    console_levels = [
+        handler.level
+        for handler in root.handlers
+        if isinstance(handler, logging.StreamHandler)
+        and not isinstance(handler, logging.FileHandler)
+    ]
+    file_handlers = [
+        handler
+        for handler in root.handlers
+        if isinstance(handler, TimedRotatingFileHandler)
+    ]
+    log_dir = (
+        Path(file_handlers[0].baseFilename).parent.resolve() if file_handlers else None
+    )
+    file_levels = [handler.level for handler in file_handlers]
+    return (
+        log_dir,
+        min(console_levels) if console_levels else logging.INFO,
+        min(file_levels) if file_levels else logging.DEBUG,
+    )
+
+
 class _ConsoleMetricWarningFilter(logging.Filter):
     """Suppress noisy metric and screen warnings on console only."""
 
@@ -67,22 +93,45 @@ class _ConsoleMetricWarningFilter(logging.Filter):
         )
 
 
-@contextmanager
-def suppress_console_metric_warnings(enabled: bool = True) -> Iterator[None]:
-    """Hide metric warning noise from console handlers only."""
+class _ConsoleMissingFXWarningFilter(logging.Filter):
+    """Suppress missing-FX warning noise on console only."""
 
-    if not enabled:
-        yield
-        return
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno != logging.WARNING:
+            return True
+        if (
+            record.name == "pyvalue.fx"
+            and record.msg
+            == "Missing FX rate | provider=%s base=%s quote=%s as_of=%s operation=get_fx_rate"
+        ):
+            return False
+        return not (
+            record.msg
+            == "Missing FX rate for monetary conversion | operation=%s symbol=%s field=%s from=%s to=%s as_of=%s"
+        )
 
+
+def _console_handlers() -> list[logging.Handler]:
     root = logging.getLogger()
-    console_handlers = [
+    return [
         handler
         for handler in root.handlers
         if isinstance(handler, logging.StreamHandler)
         and not isinstance(handler, logging.FileHandler)
     ]
-    warning_filter = _ConsoleMetricWarningFilter()
+
+
+@contextmanager
+def _suppress_console_filter(
+    warning_filter: logging.Filter, enabled: bool = True
+) -> Iterator[None]:
+    """Apply one console-only logging filter for the current process."""
+
+    if not enabled:
+        yield
+        return
+
+    console_handlers = _console_handlers()
     for handler in console_handlers:
         handler.addFilter(warning_filter)
     try:
@@ -92,4 +141,25 @@ def suppress_console_metric_warnings(enabled: bool = True) -> Iterator[None]:
             handler.removeFilter(warning_filter)
 
 
-__all__ = ["setup_logging", "suppress_console_metric_warnings"]
+@contextmanager
+def suppress_console_metric_warnings(enabled: bool = True) -> Iterator[None]:
+    """Hide metric warning noise from console handlers only."""
+
+    with _suppress_console_filter(_ConsoleMetricWarningFilter(), enabled):
+        yield
+
+
+@contextmanager
+def suppress_console_missing_fx_warnings(enabled: bool = True) -> Iterator[None]:
+    """Hide missing-FX warning noise from console handlers only."""
+
+    with _suppress_console_filter(_ConsoleMissingFXWarningFilter(), enabled):
+        yield
+
+
+__all__ = [
+    "current_logging_config",
+    "setup_logging",
+    "suppress_console_metric_warnings",
+    "suppress_console_missing_fx_warnings",
+]

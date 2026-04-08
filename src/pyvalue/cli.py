@@ -52,7 +52,12 @@ from pyvalue.screening import (
     ranking_metric_ids,
     screen_metric_ids,
 )
-from pyvalue.logging_utils import setup_logging, suppress_console_metric_warnings
+from pyvalue.logging_utils import (
+    current_logging_config,
+    setup_logging,
+    suppress_console_metric_warnings,
+    suppress_console_missing_fx_warnings,
+)
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.storage import (
     EntityMetadataRepository,
@@ -4134,7 +4139,7 @@ def cmd_normalize_us_facts(
 
     payload, raw_fetched_at = payload_record
     fx_repo = _SchemaReadyFXRatesRepository(database)
-    fx_service = FXService(database, repository=fx_repo, preload_all=True)
+    fx_service = FXService(database, repository=fx_repo)
     normalizer = SECFactsNormalizer(fx_service=fx_service)
     try:
         records = normalizer.normalize(payload, symbol=symbol.upper())
@@ -4281,16 +4286,42 @@ def _normalization_record_to_row(record: FactRecord) -> StoredFactRow:
 def _create_process_pool_executor(max_workers: int) -> ProcessPoolExecutor:
     """Create a process pool using the interpreter's platform default start method."""
 
-    return ProcessPoolExecutor(max_workers=max_workers)
+    log_dir, console_level, file_level = current_logging_config()
+    if log_dir is None:
+        return ProcessPoolExecutor(max_workers=max_workers)
+    return ProcessPoolExecutor(
+        max_workers=max_workers,
+        initializer=_initialize_worker_logging,
+        initargs=(
+            str(log_dir) if log_dir is not None else None,
+            console_level,
+            file_level,
+        ),
+    )
+
+
+def _initialize_worker_logging(
+    log_dir: Optional[str],
+    console_level: int,
+    file_level: int,
+) -> None:
+    """Mirror the parent logging configuration inside spawned worker processes."""
+
+    setup_logging(
+        log_dir=log_dir or "data/logs",
+        console_level=console_level,
+        file_level=file_level,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Process-local caching for normalization workers
 # ---------------------------------------------------------------------------
 # Each worker process reuses a single FXService and SupportedTickerRepository
-# across all symbols, avoiding per-symbol Config reads, schema checks, and
-# HTTP session creation.  The _SchemaReady* subclasses no-op initialize_schema()
-# since the main process has already ensured the schema exists.
+# across all symbols, avoiding per-symbol config reads, schema checks, and
+# repeated FX pair-history loads. The _SchemaReady* subclasses no-op
+# initialize_schema() since the main process has already ensured the schema
+# exists.
 
 _process_local_fx_service: Optional[FXService] = None
 _process_local_fx_service_db: Optional[str] = None
@@ -4312,7 +4343,6 @@ def _get_or_create_fx_service(database: Union[str, Path]) -> FXService:
         _process_local_fx_service = FXService(
             database,
             repository=repo,
-            preload_all=True,
         )
         _process_local_fx_service_db = db_key
     return _process_local_fx_service
@@ -4370,12 +4400,13 @@ def _normalize_eodhd_symbol_worker(
     )
     fx_service = _get_or_create_fx_service(database)
     normalizer = EODHDFactsNormalizer(fx_service=fx_service)
-    rows = tuple(
-        _normalization_record_to_row(record)
-        for record in normalizer.normalize(
-            payload, symbol=symbol, target_currency=target_currency
+    with suppress_console_missing_fx_warnings(True):
+        rows = tuple(
+            _normalization_record_to_row(record)
+            for record in normalizer.normalize(
+                payload, symbol=symbol, target_currency=target_currency
+            )
         )
-    )
     return _NormalizedFactsResult(
         symbol=symbol,
         rows=rows,
@@ -4605,12 +4636,13 @@ def cmd_normalize_eodhd_fundamentals(
         database, symbol_upper, payload, ticker_repo=ticker_repo
     )
     fx_repo = _SchemaReadyFXRatesRepository(database)
-    fx_service = FXService(database, repository=fx_repo, preload_all=True)
+    fx_service = FXService(database, repository=fx_repo)
     normalizer = EODHDFactsNormalizer(fx_service=fx_service)
     try:
-        records = normalizer.normalize(
-            payload, symbol=symbol_upper, target_currency=target_currency
-        )
+        with suppress_console_missing_fx_warnings(True):
+            records = normalizer.normalize(
+                payload, symbol=symbol_upper, target_currency=target_currency
+            )
     except MissingFXRateError as exc:
         raise SystemExit(
             f"EODHD normalization failed for {symbol_upper}: {exc}"

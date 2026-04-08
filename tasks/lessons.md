@@ -142,3 +142,9 @@ Use this file to capture recurring mistake patterns after user corrections so fu
 - Recurring pattern: Reusing a convenient schema hint as if it were authoritative for runtime planning can produce the wrong architecture when provider payloads are more heterogeneous than the coarse stored metadata.
 - Preventive rule: For FX, currency, and normalization design in this repo, do not treat payload-level metadata columns as authoritative without checking the raw provider semantics first; if mixed currencies are possible, design lookup/cache behavior around actual conversion requests rather than precomputed payload hints.
 - Resulting action: Reworked the FX plan and implementation to use full per-worker FX preload with on-demand in-memory pair resolution, removed the cache design dependency on `fundamentals_raw.currency`, and recorded the rule here.
+
+- Date: 2026-04-08
+- User correction: Missing-FX warning suppression worked in-process but still leaked to the terminal during spawned EODHD normalization workers.
+- Recurring pattern: It is easy to validate logging and warning filters only in the parent process and forget that spawned worker processes start with different logging state and can fall back to `logging.lastResort`, bypassing both formatting and console-only filters.
+- Preventive rule: Any CLI logging change that matters during multiprocessing must be verified in a real spawned worker path, not just inline or single-process tests; explicitly check worker handler initialization, console behavior, and file-log persistence together.
+- Resulting action: Added worker logging initialization for pyvalue process pools only when pyvalue's rotating file logger is active, extended tests to cover spawned worker normalization output, and recorded the rule here.

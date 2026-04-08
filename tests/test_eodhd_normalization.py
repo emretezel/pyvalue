@@ -1,6 +1,4 @@
-import pytest
-
-from pyvalue.fx import FXService, MissingFXRateError
+from pyvalue.fx import FXService
 from pyvalue.normalization.eodhd import EODHDFactsNormalizer
 from pyvalue.storage import FXRateRecord, FXRatesRepository
 
@@ -1062,28 +1060,110 @@ def test_eodhd_normalize_no_target_currency_preserves_source():
     assert assets[0].value == 1000.0
 
 
-def test_eodhd_normalize_missing_fx_rate_raises_hard_error(tmp_path):
-    """Missing FX during target-currency conversion aborts the symbol."""
+def test_eodhd_normalize_missing_fx_rate_drops_old_period_but_keeps_newer_converted_period(
+    tmp_path,
+):
+    """Old periods without FX are skipped while newer convertible periods survive."""
 
-    fx = _fx_service_with_rates(tmp_path)
+    fx = _fx_service_with_rates(
+        tmp_path,
+        FXRateRecord(
+            provider="EODHD",
+            rate_date="2001-12-31",
+            base_currency="EUR",
+            quote_currency="USD",
+            rate_text="1.25",
+            fetched_at="2001-12-31",
+            source_kind="provider",
+        ),
+    )
     normalizer = EODHDFactsNormalizer(fx_service=fx)
     payload = {
         "Financials": {
             "Balance_Sheet": {
                 "yearly": [
                     {
-                        "date": "2024-12-31",
+                        "date": "2000-06-30",
                         "totalAssets": 1000.0,
+                        "currency_symbol": "NLG",
+                    },
+                    {
+                        "date": "2001-12-31",
+                        "totalAssets": 1200.0,
                         "currency_symbol": "EUR",
-                    }
+                    },
                 ]
             }
         },
         "General": {"CurrencyCode": "EUR"},
     }
 
-    with pytest.raises(MissingFXRateError):
-        normalizer.normalize(payload, symbol="TEST.EU", target_currency="USD")
+    records = normalizer.normalize(payload, symbol="TEST.EU", target_currency="USD")
+    assets = sorted(
+        [record for record in records if record.concept == "Assets"],
+        key=lambda record: record.end_date,
+    )
+
+    assert [(record.end_date, record.currency, record.value) for record in assets] == [
+        ("2001-12-31", "USD", 1500.0)
+    ]
+
+
+def test_eodhd_normalize_missing_fx_rate_skips_old_derived_period_during_target_alignment(
+    tmp_path,
+):
+    """Derived periods still drop individually when target-currency FX is missing."""
+
+    fx = _fx_service_with_rates(
+        tmp_path,
+        FXRateRecord(
+            provider="EODHD",
+            rate_date="2001-12-31",
+            base_currency="USD",
+            quote_currency="EUR",
+            rate_text="0.8",
+            fetched_at="2001-12-31",
+            source_kind="provider",
+        ),
+    )
+    normalizer = EODHDFactsNormalizer(fx_service=fx)
+    payload = {
+        "Financials": {
+            "Balance_Sheet": {
+                "yearly": [
+                    {
+                        "date": "2000-06-30",
+                        "totalAssets": 1000.0,
+                        "currency_symbol": "EUR",
+                        "totalLiab": 600.0,
+                        "currency": "NLG",
+                    },
+                    {
+                        "date": "2001-12-31",
+                        "totalAssets": 200.0,
+                        "currency_symbol": "EUR",
+                        "totalLiab": 50.0,
+                        "currency": "USD",
+                    },
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "EUR"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.EU", target_currency="EUR")
+    equity = sorted(
+        [
+            record
+            for record in records
+            if record.concept == "StockholdersEquity" and record.fiscal_period == "FY"
+        ],
+        key=lambda record: record.end_date,
+    )
+
+    assert [(record.end_date, record.currency, record.value) for record in equity] == [
+        ("2001-12-31", "EUR", 120.0)
+    ]
 
 
 def test_eodhd_normalize_gbx_subunit_with_gbp_target_no_double_conversion():

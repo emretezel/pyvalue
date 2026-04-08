@@ -5,8 +5,11 @@ Author: Emre Tezel
 
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
 from datetime import date
 from decimal import Decimal
+import multiprocessing as mp
+import pickle
 
 import pytest
 
@@ -20,6 +23,7 @@ from pyvalue.fx import (
     EODHDFXProvider,
     FXService,
     FrankfurterProvider,
+    MissingFXRateError,
     parse_eodhd_fx_catalog_entry,
 )
 from pyvalue.storage import FXRateRecord, FXRatesRepository
@@ -64,6 +68,7 @@ class _CountingFXRatesRepository(FXRatesRepository):
         super().__init__(db_path)
         self.fetch_all_calls = 0
         self.fetch_pair_history_calls = 0
+        self.fetch_pair_history_pairs = []
 
     def fetch_all_for_provider(self, provider):
         self.fetch_all_calls += 1
@@ -71,7 +76,19 @@ class _CountingFXRatesRepository(FXRatesRepository):
 
     def fetch_pair_history(self, provider, base_currency, quote_currency):
         self.fetch_pair_history_calls += 1
+        self.fetch_pair_history_pairs.append(
+            (str(provider), str(base_currency), str(quote_currency))
+        )
         return super().fetch_pair_history(provider, base_currency, quote_currency)
+
+
+def _raise_missing_fx_rate_error() -> None:
+    raise MissingFXRateError(
+        provider="EODHD",
+        base_currency="NLG",
+        quote_currency="EUR",
+        as_of="2000-06-30",
+    )
 
 
 def _service_with_rates(
@@ -330,6 +347,93 @@ def test_fx_service_preload_all_loads_provider_table_once(tmp_path):
     assert cross is not None
     assert repo.fetch_all_calls == 1
     assert repo.fetch_pair_history_calls == 0
+
+
+def test_fx_service_lazy_pair_cache_loads_each_direct_leg_once(tmp_path):
+    service, repo = _service_with_rates(
+        tmp_path,
+        FXRateRecord(
+            provider="EODHD",
+            rate_date="2024-01-01",
+            base_currency="USD",
+            quote_currency="EUR",
+            rate_text="0.90",
+            fetched_at="2024-01-01T00:00:00+00:00",
+            source_kind="provider",
+        ),
+        repository_cls=_CountingFXRatesRepository,
+    )
+
+    first = service.get_fx_rate("USD", "EUR", "2024-01-02")
+    repeated = service.get_fx_rate("USD", "EUR", "2024-01-02")
+    inverse = service.get_fx_rate("EUR", "USD", "2024-01-02")
+    inverse_repeat = service.get_fx_rate("EUR", "USD", "2024-01-03")
+
+    assert first is not None
+    assert repeated is not None
+    assert inverse is not None
+    assert inverse_repeat is not None
+    assert repo.fetch_all_calls == 0
+    assert repo.fetch_pair_history_calls == 2
+    assert repo.fetch_pair_history_pairs == [
+        ("EODHD", "USD", "EUR"),
+        ("EODHD", "EUR", "USD"),
+    ]
+
+
+def test_fx_service_stale_rate_logs_warning_but_returns_quote(tmp_path, caplog):
+    service, _ = _service_with_rates(
+        tmp_path,
+        FXRateRecord(
+            provider="EODHD",
+            rate_date="2024-01-01",
+            base_currency="USD",
+            quote_currency="EUR",
+            rate_text="0.90",
+            fetched_at="2024-01-01T00:00:00+00:00",
+            source_kind="provider",
+        ),
+    )
+
+    with caplog.at_level("WARNING"):
+        quote = service.get_fx_rate("USD", "EUR", "2024-01-10")
+
+    assert quote is not None
+    assert quote.rate_date.isoformat() == "2024-01-01"
+    assert quote.rate == Decimal("0.90")
+    assert "Stale FX rate used" in caplog.text
+
+
+def test_missing_fx_rate_error_roundtrips_via_pickle():
+    exc = MissingFXRateError(
+        provider="EODHD",
+        base_currency="NLG",
+        quote_currency="EUR",
+        as_of="2000-06-30",
+    )
+
+    restored = pickle.loads(pickle.dumps(exc))
+
+    assert isinstance(restored, MissingFXRateError)
+    assert restored.provider == "EODHD"
+    assert restored.base_currency == "NLG"
+    assert restored.quote_currency == "EUR"
+    assert restored.as_of == "2000-06-30"
+
+
+def test_missing_fx_rate_error_crosses_spawn_process_pool():
+    ctx = mp.get_context("spawn")
+
+    with ProcessPoolExecutor(max_workers=1, mp_context=ctx) as executor:
+        future = executor.submit(_raise_missing_fx_rate_error)
+        with pytest.raises(MissingFXRateError) as exc_info:
+            future.result()
+
+    exc = exc_info.value
+    assert exc.provider == "EODHD"
+    assert exc.base_currency == "NLG"
+    assert exc.quote_currency == "EUR"
+    assert exc.as_of == "2000-06-30"
 
 
 def test_parse_eodhd_fx_catalog_entry_parses_canonical_alias_and_odd_symbols():
