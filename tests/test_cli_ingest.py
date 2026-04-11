@@ -372,6 +372,7 @@ def test_main_dispatches_compute_metrics_stage_with_warning_flag(monkeypatch):
         all_supported,
         metric_ids,
         show_metric_warnings,
+        profile,
     ):
         calls["database"] = database
         calls["symbols"] = symbols
@@ -379,6 +380,7 @@ def test_main_dispatches_compute_metrics_stage_with_warning_flag(monkeypatch):
         calls["all_supported"] = all_supported
         calls["metric_ids"] = metric_ids
         calls["show_metric_warnings"] = show_metric_warnings
+        calls["profile"] = profile
         return 0
 
     monkeypatch.setattr(cli, "setup_logging", lambda: None)
@@ -394,6 +396,7 @@ def test_main_dispatches_compute_metrics_stage_with_warning_flag(monkeypatch):
         "all_supported": False,
         "metric_ids": None,
         "show_metric_warnings": True,
+        "profile": False,
     }
 
 
@@ -4710,10 +4713,10 @@ def test_run_metric_computation_batches_metric_writes(monkeypatch, tmp_path):
     batch_sizes = []
     original_upsert_many = MetricsRepository.upsert_many
 
-    def recording_upsert_many(self, rows):
+    def recording_upsert_many(self, rows, *, connection=None):
         materialized = list(rows)
         batch_sizes.append(len(materialized))
-        return original_upsert_many(self, materialized)
+        return original_upsert_many(self, materialized, connection=connection)
 
     monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
     monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 2)

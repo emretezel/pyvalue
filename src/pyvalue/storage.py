@@ -41,6 +41,17 @@ SQLITE_LOCK_RETRY_ATTEMPTS = 5
 SQLITE_LOCK_RETRY_SLEEP_SECONDS = 0.5
 SQLITE_MAX_BOUND_PARAMETERS = 999
 
+# Connection-scoped pragmas applied on every SQLiteStore._connect() to amortise
+# fact reads, metric writes, and per-symbol metadata lookups. See _connect()
+# for the rationale on each value.
+_CONNECTION_PERFORMANCE_PRAGMAS: Tuple[str, ...] = (
+    "PRAGMA journal_mode=WAL",
+    "PRAGMA synchronous=NORMAL",
+    "PRAGMA cache_size=-65536",
+    "PRAGMA temp_store=MEMORY",
+    "PRAGMA mmap_size=268435456",
+)
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -398,9 +409,50 @@ class SQLiteStore:
             timeout=SQLITE_BUSY_TIMEOUT_MS / 1000.0,
             factory=_ManagedSQLiteConnection,
         )
+        self._configure_connection(conn)
+        return conn
+
+    def open_persistent_connection(self) -> sqlite3.Connection:
+        """Open a long-lived connection for callers that batch many writes.
+
+        Unlike ``_connect()``, the returned connection uses the standard
+        :class:`sqlite3.Connection` factory -- its ``__exit__`` commits/rolls
+        back without closing the file handle, so the same connection can be
+        reused across many ``with conn:`` blocks. The caller is responsible
+        for closing it.
+        """
+
+        conn = sqlite3.connect(
+            self.db_path,
+            timeout=SQLITE_BUSY_TIMEOUT_MS / 1000.0,
+        )
+        self._configure_connection(conn)
+        return conn
+
+    @staticmethod
+    def _configure_connection(conn: sqlite3.Connection) -> None:
+        """Apply row factory + busy/perf pragmas to a fresh connection."""
+
         conn.row_factory = sqlite3.Row
         conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
-        return conn
+        # Performance pragmas applied to every connection. journal_mode=WAL is
+        # safe to set repeatedly (no-op when already enabled) and lets readers
+        # run while a writer holds the database. synchronous=NORMAL is the
+        # WAL-recommended durability level: still crash-safe across application
+        # restarts, only loses committed-but-unflushed transactions on a host
+        # power failure -- acceptable for the batch ETL workloads in this repo.
+        # cache_size negative -> KiB, raising the per-connection page cache
+        # from the SQLite default of ~2 MiB to 64 MiB. temp_store=MEMORY keeps
+        # CTE/subquery scratch in RAM, and mmap_size enables memory-mapped
+        # reads on hot pages.
+        for pragma in _CONNECTION_PERFORMANCE_PRAGMAS:
+            try:
+                conn.execute(pragma)
+            except sqlite3.OperationalError:
+                # WAL toggling can fail transiently if another process is
+                # mid-checkpoint; the rest of the pragmas are independent and
+                # we never want connection setup to abort the caller.
+                pass
 
     def current_journal_mode(self) -> str:
         with self._connect() as conn:
@@ -657,6 +709,8 @@ class SecurityRepository(SQLiteStore):
         self,
         symbols: Sequence[str],
         chunk_size: int = 500,
+        *,
+        connection: Optional[sqlite3.Connection] = None,
     ) -> Dict[str, int]:
         self.initialize_schema()
         normalized = _normalized_codes(symbols)
@@ -674,7 +728,7 @@ class SecurityRepository(SQLiteStore):
         if not uncached:
             return resolved
 
-        with self._connect() as conn:
+        def _query(conn: sqlite3.Connection) -> None:
             for chunk in _batched(uncached, chunk_size):
                 placeholders = ", ".join("?" for _ in chunk)
                 rows = conn.execute(
@@ -687,6 +741,12 @@ class SecurityRepository(SQLiteStore):
                 ).fetchall()
                 for row in rows:
                     resolved[row["canonical_symbol"]] = row["security_id"]
+
+        if connection is not None:
+            _query(connection)
+        else:
+            with self._connect() as conn:
+                _query(conn)
         return resolved
 
     def fetch_many_by_symbol(
@@ -2807,10 +2867,16 @@ class FinancialFactsRepository(SQLiteStore):
                 ON financial_facts(concept)
                 """
             )
+            # ``idx_fin_facts_security_concept_latest`` is the canonical index
+            # for the compute-metrics fact preload (storage.facts_for_symbols_many
+            # pins it via INDEXED BY). Migration 029 creates it on existing
+            # databases that already hold ``financial_facts``; this CREATE acts
+            # as a backstop for fresh databases where migrations ran before
+            # this table existed. Both call sites use IF NOT EXISTS so the
+            # index is created exactly once. We swallow "database is locked"
+            # because parallel metric workers can race here on a fresh DB; a
+            # later initialize_schema() call will succeed once the lock clears.
             try:
-                # This index is a performance optimization for bulk latest-fact reads.
-                # If another process holds the database open, keep the command path
-                # working and try again on a later initialize_schema() call.
                 conn.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_fin_facts_security_concept_latest
@@ -2997,6 +3063,8 @@ class FinancialFactsRepository(SQLiteStore):
         self,
         symbols: Sequence[str],
         chunk_size: int = 25,
+        *,
+        concepts: Optional[Sequence[str]] = None,
     ) -> Dict[str, List[FactRecord]]:
         """Return all stored facts for many symbols grouped by canonical symbol.
 
@@ -3005,6 +3073,13 @@ class FinancialFactsRepository(SQLiteStore):
         universes. Each chunk performs indexed reads over a bounded set of
         ``security_id`` values and preserves the same per-symbol ordering as
         ``facts_for_symbol()``.
+
+        When ``concepts`` is provided and non-empty the result is restricted
+        to facts whose ``concept`` value is in the supplied set. The composite
+        ``(security_id, concept, end_date DESC, filed DESC)`` index converts
+        each ``(security_id, concept)`` pair into a direct seek, which is
+        substantially cheaper than a security-scoped scan when the requested
+        metric set only touches a subset of the stored concepts.
         """
 
         self.initialize_schema()
@@ -3022,6 +3097,17 @@ class FinancialFactsRepository(SQLiteStore):
         if not resolved_symbols:
             return {}
 
+        # Deduplicate while preserving call-site ordering for stable SQL plans.
+        concept_filter: Tuple[str, ...] = ()
+        if concepts:
+            seen_concepts: set[str] = set()
+            ordered_concepts: List[str] = []
+            for concept in concepts:
+                if concept and concept not in seen_concepts:
+                    seen_concepts.add(concept)
+                    ordered_concepts.append(concept)
+            concept_filter = tuple(ordered_concepts)
+
         grouped: Dict[str, List[FactRecord]] = {
             symbol: [] for symbol in resolved_symbols
         }
@@ -3031,6 +3117,12 @@ class FinancialFactsRepository(SQLiteStore):
                     security_ids_by_symbol[symbol]: symbol for symbol in chunk
                 }
                 placeholders = ", ".join("?" for _ in symbol_by_security_id)
+                params: List[Any] = list(symbol_by_security_id)
+                concept_clause = ""
+                if concept_filter:
+                    concept_placeholders = ", ".join("?" for _ in concept_filter)
+                    concept_clause = f" AND ff.concept IN ({concept_placeholders})"
+                    params.extend(concept_filter)
                 cursor = conn.execute(
                     f"""
                     SELECT
@@ -3048,10 +3140,10 @@ class FinancialFactsRepository(SQLiteStore):
                         ff.accounting_standard,
                         ff.currency
                     FROM financial_facts ff INDEXED BY idx_fin_facts_security_concept_latest
-                    WHERE ff.security_id IN ({placeholders})
+                    WHERE ff.security_id IN ({placeholders}){concept_clause}
                     ORDER BY ff.security_id, ff.concept, ff.end_date DESC, ff.filed DESC
                     """,
-                    list(symbol_by_security_id),
+                    params,
                 )
                 for row in cursor:
                     symbol = symbol_by_security_id[row["security_id"]]
@@ -3863,6 +3955,8 @@ class MetricsRepository(SQLiteStore):
     def upsert_many(
         self,
         rows: Iterable[StoredMetricRow],
+        *,
+        connection: Optional[sqlite3.Connection] = None,
     ) -> int:
         self.initialize_schema()
         metric_rows: List[StoredMetricRow] = []
@@ -3893,10 +3987,18 @@ class MetricsRepository(SQLiteStore):
             seen_symbols.add(symbol)
             unique_symbols.append(symbol)
 
-        security_ids = self._security_repo().resolve_ids_many(unique_symbols)
+        security_ids = self._security_repo().resolve_ids_many(
+            unique_symbols,
+            connection=connection,
+        )
         for symbol in unique_symbols:
             if symbol in security_ids:
                 continue
+            # Slow path: a metric row references a symbol that does not yet
+            # exist in the canonical securities table. Falls back to a fresh
+            # connection regardless of whether the caller supplied one,
+            # because ensure_from_symbol writes through SecurityRepository's
+            # own connection plumbing.
             security = self._security_repo().ensure_from_symbol(symbol)
             security_ids[symbol] = security.security_id
         persisted_rows = [
@@ -3923,31 +4025,37 @@ class MetricsRepository(SQLiteStore):
         if not persisted_rows:
             return 0
 
-        def _persist() -> None:
-            with self._connect() as conn:
-                conn.executemany(
-                    """
-                    INSERT INTO metrics (
-                        security_id,
-                        metric_id,
-                        value,
-                        as_of,
-                        unit_kind,
-                        currency,
-                        unit_label
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(security_id, metric_id) DO UPDATE SET
-                        value = excluded.value,
-                        as_of = excluded.as_of,
-                        unit_kind = excluded.unit_kind,
-                        currency = excluded.currency,
-                        unit_label = excluded.unit_label
-                    """,
-                    persisted_rows,
-                )
+        upsert_sql = """
+            INSERT INTO metrics (
+                security_id,
+                metric_id,
+                value,
+                as_of,
+                unit_kind,
+                currency,
+                unit_label
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(security_id, metric_id) DO UPDATE SET
+                value = excluded.value,
+                as_of = excluded.as_of,
+                unit_kind = excluded.unit_kind,
+                currency = excluded.currency,
+                unit_label = excluded.unit_label
+            """
 
-        self._run_with_locked_retry(_persist)
+        if connection is not None:
+            # Caller owns the connection lifetime; commit the new rows so
+            # other readers (workers, screeners) see them immediately.
+            connection.executemany(upsert_sql, persisted_rows)
+            connection.commit()
+        else:
+
+            def _persist() -> None:
+                with self._connect() as conn:
+                    conn.executemany(upsert_sql, persisted_rows)
+
+            self._run_with_locked_retry(_persist)
         return len(persisted_rows)
 
     def fetch(self, symbol: str, metric_id: str) -> Optional[MetricRecord]:

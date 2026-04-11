@@ -999,6 +999,181 @@ def test_financial_facts_repository_facts_for_symbols_many_matches_single_lookup
     assert "CCC.US" not in facts
 
 
+def test_financial_facts_repository_facts_for_symbols_many_concept_filter(tmp_path):
+    """A non-empty ``concepts`` argument restricts the preload to that subset."""
+
+    db_path = tmp_path / "facts-many-concepts.db"
+    repo = FinancialFactsRepository(db_path)
+    repo.initialize_schema()
+    repo.replace_facts(
+        "AAA.US",
+        [
+            FactRecord(
+                symbol="AAA.US",
+                concept="AssetsCurrent",
+                fiscal_period="FY",
+                end_date="2024-12-31",
+                unit="USD",
+                value=111.0,
+            ),
+            FactRecord(
+                symbol="AAA.US",
+                concept="LiabilitiesCurrent",
+                fiscal_period="FY",
+                end_date="2024-12-31",
+                unit="USD",
+                value=11.0,
+            ),
+            FactRecord(
+                symbol="AAA.US",
+                concept="Revenues",
+                fiscal_period="FY",
+                end_date="2024-12-31",
+                unit="USD",
+                value=999.0,
+            ),
+        ],
+    )
+
+    filtered = repo.facts_for_symbols_many(
+        ["AAA.US"],
+        concepts=["AssetsCurrent", "LiabilitiesCurrent"],
+    )
+    concepts = {record.concept for record in filtered["AAA.US"]}
+    assert concepts == {"AssetsCurrent", "LiabilitiesCurrent"}
+
+    # Empty concepts list short-circuits to the unfiltered query.
+    unfiltered = repo.facts_for_symbols_many(["AAA.US"], concepts=[])
+    assert {r.concept for r in unfiltered["AAA.US"]} == {
+        "AssetsCurrent",
+        "LiabilitiesCurrent",
+        "Revenues",
+    }
+
+
+def test_metrics_repository_upsert_many_with_external_connection(monkeypatch, tmp_path):
+    """When a connection is supplied the persistence path reuses it."""
+
+    from pyvalue.storage import StoredMetricRow
+
+    db_path = tmp_path / "metrics-external-conn.db"
+    repo = MetricsRepository(db_path)
+    repo.initialize_schema()
+    # Pre-create the canonical securities so resolve_ids_many doesn't fall
+    # through to ensure_from_symbol (which always opens its own connection).
+    sec_repo = repo._security_repo()
+    sec_repo.ensure_from_symbol("AAA.US", entity_name="AAA Corp")
+    sec_repo.ensure_from_symbol("BBB.US", entity_name="BBB Corp")
+
+    rows: list[StoredMetricRow] = [
+        ("AAA.US", "dummy_metric", 1.0, "2024-01-01", "monetary", "USD", None),
+        ("BBB.US", "dummy_metric", 2.0, "2024-01-01", "monetary", "USD", None),
+    ]
+
+    # Stub initialize_schema on both repos -- the table+migrations are already
+    # in place from the warm-up above, so any further _connect() opens during
+    # upsert_many can only come from the persistence path itself.
+    monkeypatch.setattr(repo, "initialize_schema", lambda: None)
+    monkeypatch.setattr(sec_repo, "initialize_schema", lambda: None)
+
+    write_conn = repo.open_persistent_connection()
+    try:
+        opened: list[int] = []
+        original_connect = repo._connect
+
+        def tracking_connect(*args, **kwargs):
+            opened.append(1)
+            return original_connect(*args, **kwargs)
+
+        original_sec_connect = sec_repo._connect
+        sec_opened: list[int] = []
+
+        def tracking_sec_connect(*args, **kwargs):
+            sec_opened.append(1)
+            return original_sec_connect(*args, **kwargs)
+
+        monkeypatch.setattr(repo, "_connect", tracking_connect)
+        monkeypatch.setattr(sec_repo, "_connect", tracking_sec_connect)
+        persisted = repo.upsert_many(rows, connection=write_conn)
+    finally:
+        write_conn.close()
+
+    assert persisted == len(rows)
+    # With initialize_schema stubbed out, neither the upsert nor the resolve
+    # path should have opened any new connection -- both share write_conn.
+    assert opened == []
+    assert sec_opened == []
+
+    # Confirm rows actually landed by reading via a fresh connection.
+    with sqlite3.connect(db_path) as verify_conn:
+        verify_conn.row_factory = sqlite3.Row
+        stored = verify_conn.execute(
+            "SELECT metric_id, value FROM metrics ORDER BY metric_id, value"
+        ).fetchall()
+    assert [(row["metric_id"], row["value"]) for row in stored] == [
+        ("dummy_metric", 1.0),
+        ("dummy_metric", 2.0),
+    ]
+
+
+def test_sqlite_store_connect_applies_performance_pragmas(tmp_path):
+    """Centralised pragma setup configures cache, sync, mmap, and temp store."""
+
+    db_path = tmp_path / "pragma-check.db"
+    repo = FinancialFactsRepository(db_path)
+    repo.initialize_schema()
+
+    with repo._connect() as conn:
+        synchronous = conn.execute("PRAGMA synchronous").fetchone()[0]
+        cache_size = conn.execute("PRAGMA cache_size").fetchone()[0]
+        temp_store = conn.execute("PRAGMA temp_store").fetchone()[0]
+        mmap_size = conn.execute("PRAGMA mmap_size").fetchone()[0]
+        journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+
+    # synchronous=NORMAL == 1
+    assert synchronous == 1
+    # cache_size negative encodes KiB; we ask for 64 MiB.
+    assert cache_size == -65536
+    # temp_store=MEMORY == 2
+    assert temp_store == 2
+    # 256 MiB mmap region.
+    assert mmap_size == 268435456
+    # WAL mode, applied per-connection.
+    assert journal_mode.lower() == "wal"
+
+
+def test_migration_029_creates_fin_facts_security_concept_latest_index(tmp_path):
+    """Migration 029 ensures the composite preload index exists on existing DBs."""
+
+    from pyvalue.migrations import apply_migrations
+
+    db_path = tmp_path / "migration-029.db"
+    repo = FinancialFactsRepository(db_path)
+    repo.initialize_schema()
+
+    # Drop the index then re-apply migrations to confirm 029 recreates it.
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DROP INDEX IF EXISTS idx_fin_facts_security_concept_latest")
+        before = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' "
+            "AND name='idx_fin_facts_security_concept_latest'"
+        ).fetchone()
+    assert before is None
+
+    # Force the migration to re-run by lowering schema_version below 029.
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE schema_migrations SET version = 28")
+
+    apply_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        after = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' "
+            "AND name='idx_fin_facts_security_concept_latest'"
+        ).fetchone()
+    assert after is not None
+
+
 def test_market_data_repository_update_market_caps_many_matches_single_update(tmp_path):
     db_path = tmp_path / "market-cap-updates-many.db"
     ticker_repo = SupportedTickerRepository(db_path)

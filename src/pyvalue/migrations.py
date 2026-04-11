@@ -1962,6 +1962,32 @@ def _migration_028_add_fx_catalog_tables(
     )
 
 
+def _migration_029_add_fin_facts_security_concept_latest_index(
+    conn: sqlite3.Connection,
+) -> None:
+    # The compute-metrics fact preload (storage.facts_for_symbols_many) issues
+    # a query that pins this exact composite ordering via INDEXED BY. Without
+    # this index that query would either fail outright or fall back to a
+    # slower path. The index used to be created opportunistically inside
+    # FinancialFactsRepository.initialize_schema(), which races with parallel
+    # workers; promoting it here guarantees presence on every database that
+    # already holds the financial_facts table. On older snapshots that have
+    # not yet bootstrapped that table, FinancialFactsRepository's own schema
+    # init will create the index alongside the table the first time the
+    # repository is touched, so the migration is a no-op in that case.
+    table_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='financial_facts'"
+    ).fetchone()
+    if not table_exists:
+        return
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fin_facts_security_concept_latest
+        ON financial_facts(security_id, concept, end_date DESC, filed DESC)
+        """
+    )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -1991,6 +2017,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_026_add_fx_rates_and_metric_metadata,
     _migration_027_add_currency_discovery_indexes,
     _migration_028_add_fx_catalog_tables,
+    _migration_029_add_fin_facts_security_concept_latest_index,
 ]
 
 

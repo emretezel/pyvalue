@@ -16,6 +16,7 @@ from concurrent.futures import (
 )
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from functools import lru_cache
 import json
 import logging
 import os
@@ -157,8 +158,12 @@ SECURITY_METADATA_PROGRESS_INTERVAL_SECONDS = 5.0
 SCREEN_PROGRESS_INTERVAL_SECONDS = 5.0
 SCREEN_FAILURE_METRIC_LOAD_CHUNK_SIZE = 1000
 SCREEN_FAILURE_PROGRESS_INTERVAL_SECONDS = 1.0
-METRICS_WRITE_BATCH_SIZE = 25
-METRICS_WRITE_BATCH_INTERVAL_SECONDS = 0.25
+# Metric write flushes amortise SQLite fsync overhead -- batch ~200 symbols
+# (~16k upsert rows at ~81 metrics each) per flush. End-of-run forced flush
+# guarantees small universes still write everything; the time-based bound is
+# just a liveness floor for very slow workers.
+METRICS_WRITE_BATCH_SIZE = 200
+METRICS_WRITE_BATCH_INTERVAL_SECONDS = 1.0
 NORMALIZATION_MAX_WORKERS = 16
 
 _MARKET_DATA_PROVIDER_LOCAL = local()
@@ -1611,6 +1616,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Show metric/data-quality warnings on the console (default: suppressed).",
     )
+    compute_metrics.add_argument(
+        "--profile",
+        action="store_true",
+        help=(
+            "Print read/compute/write/total wall-clock timings at end of run "
+            "(useful for tuning compute-metrics performance)."
+        ),
+    )
 
     refresh_fx_rates = subparsers.add_parser(
         "refresh-fx-rates",
@@ -2969,6 +2982,19 @@ class _CachedRegionFactsRepository(RegionFactsRepository):
 
         if fiscal_period is None:
             records = self._facts_by_concept.get(concept, ())
+            # Surface a metric that asked for a concept the preload didn't
+            # fetch — typically the metric under-declared its
+            # ``required_concepts`` and would silently degrade to N+1 reads
+            # against the live DB once we re-enable the concept filter on
+            # the preload. DEBUG so production stays quiet, but tests can
+            # opt in by setting the logger level.
+            if not records and concept not in self._facts_by_concept:
+                LOGGER.debug(
+                    "preloaded fact cache miss: symbol=%s concept=%s — "
+                    "metric may have under-declared required_concepts",
+                    self._symbol,
+                    concept,
+                )
         else:
             records = self._facts_by_concept_period.get((concept, fiscal_period), ())
 
@@ -3187,6 +3213,42 @@ def _metrics_use_financial_facts(metric_ids: Sequence[str]) -> bool:
     )
 
 
+@lru_cache(maxsize=None)
+def _required_concepts_for_metric_ids(metric_ids: Tuple[str, ...]) -> Tuple[str, ...]:
+    """Return the deduplicated union of ``required_concepts`` across metrics.
+
+    Used by ``_compute_metric_batch_results`` to restrict the fact preload to
+    only the concepts the requested metric set actually consumes. The result
+    is memoised because every batch in a run uses the same metric_ids tuple
+    and the audit cost (resolving each metric class's declaration) is fixed.
+
+    Returns an empty tuple if any metric in the set both uses financial facts
+    AND declares an empty ``required_concepts`` — that signals a "wildcard"
+    consumer, so the caller must fall back to the unfiltered preload to avoid
+    silently dropping rows the metric depends on. Today the only metric with
+    empty ``required_concepts`` (``MarketCapitalizationMetric``) also sets
+    ``uses_financial_facts = False``, so it never triggers the fallback.
+    """
+
+    seen: set[str] = set()
+    ordered: List[str] = []
+    for metric_id in metric_ids:
+        metric_cls = REGISTRY.get(metric_id)
+        if metric_cls is None:
+            continue
+        if not getattr(metric_cls, "uses_financial_facts", True):
+            continue
+        declared = tuple(getattr(metric_cls, "required_concepts", ()) or ())
+        if not declared:
+            # Wildcard fact consumer — disable the filter for the whole batch.
+            return ()
+        for concept in declared:
+            if concept and concept not in seen:
+                seen.add(concept)
+                ordered.append(concept)
+    return tuple(ordered)
+
+
 def _metric_worker_count(total_symbols: int) -> int:
     """Return an automatic worker count for bulk metric computation."""
 
@@ -3227,10 +3289,20 @@ def _ensure_metrics_wal_mode(metrics_repo: MetricsRepository) -> str:
 def _flush_metric_write_batch(
     metrics_repo: MetricsRepository,
     pending_rows: List[StoredMetricRow],
+    profile_state: Optional["_MetricComputationProfile"] = None,
+    write_connection: Optional[sqlite3.Connection] = None,
 ) -> None:
     """Persist one buffered metric batch."""
 
-    metrics_repo.upsert_many(pending_rows)
+    if profile_state is not None and profile_state.enabled:
+        row_count = len(pending_rows)
+        flush_start = time.perf_counter()
+        metrics_repo.upsert_many(pending_rows, connection=write_connection)
+        profile_state.write_seconds += time.perf_counter() - flush_start
+        profile_state.write_flush_count += 1
+        profile_state.write_row_count += row_count
+    else:
+        metrics_repo.upsert_many(pending_rows, connection=write_connection)
     pending_rows.clear()
 
 
@@ -3457,28 +3529,56 @@ def _compute_metric_batch_results(
     market_repo: Optional[MarketDataRepository] = None,
     *,
     suppress_metric_warnings: bool = True,
+    profile_state: Optional["_MetricComputationProfile"] = None,
 ) -> Tuple[_ComputedMetricsResult, ...]:
     selected_symbols = [symbol.strip().upper() for symbol in symbols]
     if not selected_symbols:
         return ()
 
     uses_financial_facts = _metrics_use_financial_facts(metric_ids)
-    facts_by_symbol = (
-        fact_repo.facts_for_symbols_many(
-            selected_symbols,
-            chunk_size=METRICS_COMPUTE_BATCH_SIZE,
-        )
-        if uses_financial_facts
-        else {}
-    )
-    snapshots_by_symbol = (
-        market_repo.latest_snapshots_many(
-            selected_symbols,
-            chunk_size=METRICS_COMPUTE_BATCH_SIZE,
-        )
-        if market_repo is not None
-        else {}
-    )
+    profile_enabled = profile_state is not None and profile_state.enabled
+    if uses_financial_facts:
+        # Restrict the preload to the union of concepts the requested metrics
+        # actually consume. The composite (security_id, concept, end_date,
+        # filed) index turns each (security_id, concept) pair into a direct
+        # seek, slashing both row transfer and Python-side FactRecord
+        # construction. An empty tuple is the wildcard signal — fall back to
+        # the unfiltered fetch in that case for safety.
+        required_concepts = _required_concepts_for_metric_ids(tuple(metric_ids))
+        preload_kwargs = {"concepts": required_concepts} if required_concepts else {}
+        if profile_enabled:
+            read_start = time.perf_counter()
+            facts_by_symbol = fact_repo.facts_for_symbols_many(
+                selected_symbols,
+                chunk_size=METRICS_COMPUTE_BATCH_SIZE,
+                **preload_kwargs,
+            )
+            assert profile_state is not None
+            profile_state.read_seconds += time.perf_counter() - read_start
+        else:
+            facts_by_symbol = fact_repo.facts_for_symbols_many(
+                selected_symbols,
+                chunk_size=METRICS_COMPUTE_BATCH_SIZE,
+                **preload_kwargs,
+            )
+    else:
+        facts_by_symbol = {}
+    if market_repo is not None:
+        if profile_enabled:
+            read_start = time.perf_counter()
+            snapshots_by_symbol = market_repo.latest_snapshots_many(
+                selected_symbols,
+                chunk_size=METRICS_COMPUTE_BATCH_SIZE,
+            )
+            assert profile_state is not None
+            profile_state.read_seconds += time.perf_counter() - read_start
+        else:
+            snapshots_by_symbol = market_repo.latest_snapshots_many(
+                selected_symbols,
+                chunk_size=METRICS_COMPUTE_BATCH_SIZE,
+            )
+    else:
+        snapshots_by_symbol = {}
 
     results: List[_ComputedMetricsResult] = []
     with suppress_console_metric_warnings(suppress_metric_warnings):
@@ -3552,16 +3652,41 @@ def _compute_metrics_for_symbol_batch_worker(
     )
 
 
+@dataclass
+class _MetricComputationProfile:
+    """Wall-clock accumulator for compute-metrics phases.
+
+    The compute phase accumulator only catches symbols processed on the
+    parent (serial) path -- worker processes cannot update parent state,
+    so for the parallel paths the "compute" bucket reflects parent-side
+    overhead while worker compute time is captured implicitly in the gap
+    between submission and result handling. Useful as a relative comparison
+    across runs, not as a per-phase absolute breakdown.
+    """
+
+    enabled: bool = False
+    read_seconds: float = 0.0
+    compute_seconds: float = 0.0
+    write_seconds: float = 0.0
+    total_seconds: float = 0.0
+    write_flush_count: int = 0
+    write_row_count: int = 0
+
+
 def _run_metric_computation(
     database: str,
     symbols: Sequence[str],
     metric_ids: Sequence[str],
     cancelled_message: str,
     suppress_metric_warnings: bool = True,
+    profile: bool = False,
 ) -> int:
     db_path = _resolve_database_path(database)
     selected_symbols = [symbol.upper() for symbol in symbols]
     total_symbols = len(selected_symbols)
+
+    profile_state = _MetricComputationProfile(enabled=profile)
+    run_start_at = time.perf_counter()
 
     include_market_data = _metrics_use_market_data(metric_ids)
     base_metrics_repo = MetricsRepository(db_path)
@@ -3569,6 +3694,11 @@ def _run_metric_computation(
     _initialize_metric_read_schema(db_path, include_market_data)
     journal_mode = _ensure_metrics_wal_mode(base_metrics_repo)
     metrics_repo = _SchemaReadyMetricsRepository(db_path)
+    # One persistent writer connection drives every flush in this run, so
+    # pragma setup happens once and the SQLite page cache stays warm across
+    # the ~tens of flushes a large universe produces. Close it on every exit
+    # path via the outer try/finally below.
+    write_connection: sqlite3.Connection = metrics_repo.open_persistent_connection()
 
     print(
         f"Computing metrics for {total_symbols} symbols ({len(metric_ids)} metrics each)"
@@ -3601,7 +3731,12 @@ def _run_metric_computation(
             and elapsed < METRICS_WRITE_BATCH_INTERVAL_SECONDS
         ):
             return
-        _flush_metric_write_batch(metrics_repo, pending_rows)
+        _flush_metric_write_batch(
+            metrics_repo,
+            pending_rows,
+            profile_state,
+            write_connection=write_connection,
+        )
         buffered_symbols = 0
         last_flush_at = time.monotonic()
 
@@ -3616,7 +3751,12 @@ def _run_metric_computation(
                 and elapsed < METRICS_WRITE_BATCH_INTERVAL_SECONDS
             ):
                 return
-        _flush_metric_write_batch(metrics_repo, pending_rows)
+        _flush_metric_write_batch(
+            metrics_repo,
+            pending_rows,
+            profile_state,
+            write_connection=write_connection,
+        )
         buffered_symbols = 0
         last_flush_at = time.monotonic()
 
@@ -3647,29 +3787,48 @@ def _run_metric_computation(
                 selected_symbols,
                 METRICS_COMPUTE_BATCH_SIZE,
             ):
+                if profile_state.enabled:
+                    batch_wall_start = time.perf_counter()
+                    read_seconds_before = profile_state.read_seconds
+                else:
+                    batch_wall_start = 0.0
+                    read_seconds_before = 0.0
                 for result in _compute_metric_batch_results(
                     symbol_batch,
                     metric_ids,
                     fact_repo,
                     market_repo,
                     suppress_metric_warnings=suppress_metric_warnings,
+                    profile_state=profile_state if profile_state.enabled else None,
                 ):
                     buffer_result(result.rows)
                     metric_failures.extend(result.failures)
                     completed_symbols += 1
                     maybe_report_progress()
+                if profile_state.enabled:
+                    # Compute = batch wall time minus the read phase, which
+                    # _compute_metric_batch_results already credited to
+                    # profile_state.read_seconds.
+                    batch_wall = time.perf_counter() - batch_wall_start
+                    read_delta = profile_state.read_seconds - read_seconds_before
+                    profile_state.compute_seconds += max(0.0, batch_wall - read_delta)
         except KeyboardInterrupt:
             return _cancel_cli_command(
                 cancelled_message,
                 flushers=[
                     lambda: flush_pending(force=True),
                     lambda: maybe_report_progress(force=True),
+                    write_connection.close,
                 ],
             )
         flush_pending(force=True)
         maybe_report_progress(force=True)
         _print_metric_invariant_failure_summary(metric_failures)
         print(f"Computed metrics for {total_symbols} symbols in {db_path}")
+        if profile_state.enabled:
+            profile_state.total_seconds = time.perf_counter() - run_start_at
+            _print_metric_computation_profile(profile_state)
+        write_connection.close()
         return 0
 
     executor = _create_process_pool_executor(workers)
@@ -3739,6 +3898,7 @@ def _run_metric_computation(
             flushers=[
                 lambda: flush_pending(force=True),
                 lambda: maybe_report_progress(force=True),
+                write_connection.close,
             ],
         )
     finally:
@@ -3749,7 +3909,35 @@ def _run_metric_computation(
     maybe_report_progress(force=True)
     _print_metric_invariant_failure_summary(metric_failures)
     print(f"Computed metrics for {total_symbols} symbols in {db_path}")
+    if profile_state.enabled:
+        profile_state.total_seconds = time.perf_counter() - run_start_at
+        _print_metric_computation_profile(profile_state)
+    write_connection.close()
     return 0
+
+
+def _print_metric_computation_profile(
+    profile_state: "_MetricComputationProfile",
+) -> None:
+    """Emit a one-line wall-clock summary of compute-metrics phases."""
+
+    parent_phase_seconds = (
+        profile_state.read_seconds
+        + profile_state.compute_seconds
+        + profile_state.write_seconds
+    )
+    other_seconds = max(0.0, profile_state.total_seconds - parent_phase_seconds)
+    print(
+        "Profile: "
+        f"read={profile_state.read_seconds:.2f}s "
+        f"compute={profile_state.compute_seconds:.2f}s "
+        f"write={profile_state.write_seconds:.2f}s "
+        f"other={other_seconds:.2f}s "
+        f"total={profile_state.total_seconds:.2f}s "
+        f"flushes={profile_state.write_flush_count} "
+        f"rows_written={profile_state.write_row_count}",
+        flush=True,
+    )
 
 
 def cmd_compute_metrics_stage(
@@ -3759,6 +3947,7 @@ def cmd_compute_metrics_stage(
     all_supported: bool,
     metric_ids: Optional[Sequence[str]],
     show_metric_warnings: bool = False,
+    profile: bool = False,
 ) -> int:
     """Unified metric computation over symbol, exchange, or full supported scope."""
 
@@ -3776,6 +3965,7 @@ def cmd_compute_metrics_stage(
         metric_ids=ids_to_compute,
         cancelled_message="\nMetric computation cancelled by user.",
         suppress_metric_warnings=not show_metric_warnings,
+        profile=profile,
     )
 
 
@@ -7324,6 +7514,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 all_supported=args.all_supported,
                 metric_ids=args.metrics,
                 show_metric_warnings=args.show_metric_warnings,
+                profile=args.profile,
             )
         if args.command == "report-fact-freshness":
             return cmd_report_fact_freshness(
