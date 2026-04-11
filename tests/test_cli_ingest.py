@@ -16,9 +16,10 @@ from types import SimpleNamespace
 import pytest
 
 from pyvalue import cli
+from pyvalue.currency import normalize_currency_code
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics import REGISTRY
-from pyvalue.metrics.base import MetricResult
+from pyvalue.metrics.base import MetricCurrencyInvariantError, MetricResult
 from pyvalue.storage import (
     EntityMetadataRepository,
     FundamentalsNormalizationStateRepository,
@@ -52,6 +53,10 @@ def make_fact(**kwargs):
         "start_date": None,
     }
     base.update(kwargs)
+    if "currency" not in kwargs:
+        inferred_currency = normalize_currency_code(base.get("unit"))
+        if inferred_currency is not None:
+            base["currency"] = inferred_currency
     return FactRecord(**base)
 
 
@@ -130,7 +135,7 @@ def store_market_data(
     as_of: str,
     price: float = 10.0,
     market_cap: float | None = None,
-    currency: str | None = None,
+    currency: str | None = "USD",
 ):
     repo = MarketDataRepository(db_path)
     repo.initialize_schema()
@@ -3404,6 +3409,76 @@ def test_cmd_compute_metrics_bulk(monkeypatch, tmp_path):
     assert metrics_repo.fetch("BBB.US", "market_cap") == (90.0, "2024-01-01")
 
 
+def test_cmd_compute_metrics_bulk_continues_and_summarizes_currency_invariant_failures(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "bulk-metric-summary.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="US"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="US"),
+        ],
+        provider="SEC",
+    )
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+
+    class GoodMetric:
+        id = "good_metric"
+        required_concepts = ()
+        uses_market_data = False
+
+        def compute(self, symbol, repo):
+            return MetricResult(
+                symbol=symbol,
+                metric_id=self.id,
+                value=1.0,
+                as_of="2024-01-01",
+            )
+
+    class BadMetric:
+        id = "bad_metric"
+        required_concepts = ()
+        uses_market_data = False
+
+        def compute(self, symbol, repo):
+            raise MetricCurrencyInvariantError(
+                metric_id=self.id,
+                symbol=symbol,
+                input_name="Revenue",
+                reason_code="currency_mismatch",
+                expected_currency="USD",
+                actual_currency="EUR",
+                as_of="2024-01-01",
+            )
+
+    monkeypatch.setattr(
+        cli,
+        "REGISTRY",
+        {
+            GoodMetric.id: GoodMetric,
+            BadMetric.id: BadMetric,
+        },
+    )
+    monkeypatch.setattr(cli, "_metric_worker_count", lambda total_symbols: 1)
+
+    rc = cli.cmd_compute_metrics_bulk(
+        provider="SEC",
+        database=str(db_path),
+        metric_ids=[GoodMetric.id, BadMetric.id],
+        exchange_code="US",
+    )
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "Metric currency invariant failures:" in output
+    assert "- bad_metric: currency invariant:" in output
+    assert metrics_repo.fetch("AAA.US", "good_metric") == (1.0, "2024-01-01")
+    assert metrics_repo.fetch("BBB.US", "good_metric") == (1.0, "2024-01-01")
+
+
 def test_cmd_compute_metrics_bulk_with_exchange(monkeypatch, tmp_path):
     db_path = tmp_path / "metrics_exchange.db"
     store_catalog_listings(
@@ -3677,7 +3752,13 @@ def test_compute_metrics_for_symbol_matches_real_metrics(tmp_path):
     )
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    market_repo.upsert_price("AAA.US", recent, price=25.0, market_cap=2500.0)
+    market_repo.upsert_price(
+        "AAA.US",
+        recent,
+        price=25.0,
+        market_cap=2500.0,
+        currency="USD",
+    )
 
     metric_ids = ["working_capital", "market_cap", "eps_6y_avg"]
     expected = {}
@@ -3703,6 +3784,63 @@ def test_compute_metrics_for_symbol_matches_real_metrics(tmp_path):
         metric_id: (value, as_of)
         for _, metric_id, value, as_of, _, _, _ in computed.rows
     } == expected
+
+
+def test_compute_metrics_for_symbol_collects_currency_invariant_failures(monkeypatch):
+    class GoodMetric:
+        id = "good_metric"
+        required_concepts = ()
+        uses_market_data = False
+
+        def compute(self, symbol, repo):
+            return MetricResult(
+                symbol=symbol,
+                metric_id=self.id,
+                value=1.0,
+                as_of="2024-01-01",
+            )
+
+    class BadMetric:
+        id = "bad_metric"
+        required_concepts = ()
+        uses_market_data = False
+
+        def compute(self, symbol, repo):
+            raise MetricCurrencyInvariantError(
+                metric_id=self.id,
+                symbol=symbol,
+                input_name="Assets",
+                reason_code="currency_mismatch",
+                expected_currency="USD",
+                actual_currency="EUR",
+                as_of="2024-01-01",
+            )
+
+    monkeypatch.setattr(
+        cli,
+        "REGISTRY",
+        {
+            GoodMetric.id: GoodMetric,
+            BadMetric.id: BadMetric,
+        },
+    )
+
+    result = cli._compute_metrics_for_symbol(
+        "AAA.US",
+        [GoodMetric.id, BadMetric.id],
+        SimpleNamespace(
+            facts_for_symbol=lambda symbol: [],
+            latest_fact=lambda symbol, concept: None,
+            facts_for_concept=lambda symbol, concept, fiscal_period=None, limit=None: [],
+            ticker_currency=lambda symbol: "USD",
+        ),
+    )
+
+    assert result.computed_count == 1
+    assert [row[1] for row in result.rows] == ["good_metric"]
+    assert len(result.failures) == 1
+    assert result.failures[0].metric_id == "bad_metric"
+    assert result.failures[0].reason.startswith("currency invariant:")
 
 
 def test_suppress_console_metric_warnings_filters_only_metric_noise(tmp_path, capsys):
@@ -4355,6 +4493,8 @@ def test_cmd_compute_metrics_stage_falls_back_to_serial_without_wal(
             ),
         ],
     )
+    store_market_data(db_path, "AAA.US", recent_date, market_cap=120.0, currency="USD")
+    store_market_data(db_path, "BBB.US", recent_date, market_cap=90.0, currency="USD")
 
     monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 2)
     monkeypatch.setattr(cli, "_ensure_metrics_wal_mode", lambda repo: "delete")
@@ -4514,8 +4654,20 @@ def test_cmd_compute_metrics_stage_parallel_workers_skip_schema_init(
     )
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    market_repo.upsert_price("AAA.US", recent_date, 12.0, market_cap=120.0)
-    market_repo.upsert_price("BBB.US", recent_date, 9.0, market_cap=90.0)
+    market_repo.upsert_price(
+        "AAA.US",
+        recent_date,
+        12.0,
+        market_cap=120.0,
+        currency="USD",
+    )
+    market_repo.upsert_price(
+        "BBB.US",
+        recent_date,
+        9.0,
+        market_cap=90.0,
+        currency="USD",
+    )
 
     class InlineExecutor:
         def submit(self, fn, *args, **kwargs):
@@ -5103,6 +5255,13 @@ def test_cmd_normalize_fundamentals_eodhd(monkeypatch, tmp_path):
             "Financials": {},
         },
     )
+    store_market_data(
+        db_path,
+        "SHEL.LSE",
+        "2026-01-31",
+        price=25.0,
+        currency="GBP",
+    )
     fx_service_preload_all = []
 
     class FakeNormalizer:
@@ -5194,6 +5353,13 @@ def test_cmd_normalize_fundamentals_eodhd_drops_old_missing_fx_periods(tmp_path)
             },
         },
     )
+    store_market_data(
+        db_path,
+        "AALB.AS",
+        "2026-01-31",
+        price=40.0,
+        currency="EUR",
+    )
 
     rc = cli.cmd_normalize_fundamentals(
         provider="EODHD",
@@ -5234,6 +5400,13 @@ def test_cmd_normalize_fundamentals_eodhd_zero_row_normalization_records_state(
         "SHEL.LSE",
         {"General": {"Name": "Shell PLC"}, "Financials": {}},
     )
+    store_market_data(
+        db_path,
+        "SHEL.LSE",
+        "2026-01-31",
+        price=25.0,
+        currency="GBP",
+    )
     calls = []
 
     class FakeNormalizer:
@@ -5270,6 +5443,35 @@ def test_cmd_normalize_fundamentals_eodhd_zero_row_normalization_records_state(
     assert "already up to date" in capsys.readouterr().out
 
 
+def test_cmd_normalize_fundamentals_eodhd_requires_market_data_currency(tmp_path):
+    db_path = tmp_path / "funds-missing-market-currency.db"
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD",
+        "LANDM.US",
+        {
+            "General": {"Name": "Gladstone Land Corp", "CurrencyCode": "USD"},
+            "Financials": {},
+        },
+    )
+    store_market_data(
+        db_path,
+        "LANDM.US",
+        "2026-01-31",
+        price=25.0,
+        currency=None,
+    )
+
+    with pytest.raises(SystemExit, match="missing trading currency in market_data"):
+        cli.cmd_normalize_fundamentals(
+            provider="EODHD",
+            symbol="LANDM.US",
+            database=str(db_path),
+            exchange_code=None,
+        )
+
+
 def test_cmd_normalize_fundamentals_cross_provider_reruns_when_facts_owned_by_other_provider(
     monkeypatch, tmp_path
 ):
@@ -5282,6 +5484,7 @@ def test_cmd_normalize_fundamentals_cross_provider_reruns_when_facts_owned_by_ot
         {"General": {"Name": "AAA"}, "Financials": {}},
         exchange="US",
     )
+    store_market_data(db_path, "AAA.US", "2024-12-31", currency="USD")
     fund_repo.upsert("SEC", "AAA.US", {"entityName": "AAA", "facts": {}})
     eodhd_calls = []
     sec_calls = []
@@ -5422,6 +5625,8 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_reports_freshness_scan(
             {"General": {"Name": symbol}, "Financials": {}},
             exchange="US",
         )
+        store_market_data(db_path, symbol, "2024-12-31", currency="USD")
+        store_market_data(db_path, symbol, "2024-12-31", currency="USD")
 
     monkeypatch.setattr(
         cli,
@@ -5453,6 +5658,7 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_force_skips_freshness_scan(
             {"General": {"Name": symbol}, "Financials": {}},
             exchange="US",
         )
+        store_market_data(db_path, symbol, "2024-12-31", currency="USD")
 
     def fail_plan(**kwargs):
         raise AssertionError("freshness planning should be skipped for --force")
@@ -5525,6 +5731,7 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_suppresses_missing_fx_warnings_on
         },
         exchange="AS",
     )
+    store_market_data(db_path, "AALB.AS", "2024-12-31", currency="EUR")
 
     monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 2)
     monkeypatch.setattr(cli, "_process_local_fx_service", None)
@@ -5569,6 +5776,7 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_continues_after_symbol_failure_wi
             {"General": {"Name": symbol}, "Financials": {}},
             exchange="US",
         )
+        store_market_data(db_path, symbol, "2024-12-31", currency="USD")
 
     class FakeNormalizer:
         def __init__(self, **kwargs):
@@ -5645,6 +5853,7 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_interrupts_cleanly(
             {"General": {"Name": symbol}, "Financials": {}},
             exchange="US",
         )
+        store_market_data(db_path, symbol, "2024-12-31", currency="USD")
 
     class FakeNormalizer:
         def __init__(self, **kwargs):
@@ -5860,6 +6069,7 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_process_pool_smoke(
             },
             exchange="US",
         )
+        store_market_data(db_path, symbol, "2024-12-31", currency="USD")
 
     monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 2)
     monkeypatch.setattr(
@@ -7093,6 +7303,7 @@ def test_cmd_report_metric_failures_surfaces_roic_specific_reason(tmp_path, caps
         ]
     )
     fact_repo.replace_facts(symbol, facts)
+    store_market_data(db_path, symbol, f"{latest_year}-09-30", currency="USD")
 
     rc = cli.cmd_report_metric_failures(
         database=str(db_path),
@@ -7145,7 +7356,13 @@ def test_cmd_report_screen_failures_dedupes_metric_na_counts(tmp_path, capsys):
     metrics_repo.upsert("AAA.US", "working_capital", 10.0, as_of)
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    market_repo.upsert_price("BBB.US", as_of, price=10.0, market_cap=250.0)
+    market_repo.upsert_price(
+        "BBB.US",
+        as_of,
+        price=10.0,
+        market_cap=250.0,
+        currency="USD",
+    )
 
     screen_path = tmp_path / "screen.yml"
     screen_path.write_text(
@@ -7664,7 +7881,7 @@ def test_cmd_compute_metrics(tmp_path):
     repo.initialize_schema()
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    market_repo.upsert_price("AAPL.US", recent, 150.0)
+    market_repo.upsert_price("AAPL.US", recent, 150.0, currency="USD")
 
     rc = cli.cmd_compute_metrics(
         "AAPL.US",
@@ -7678,6 +7895,65 @@ def test_cmd_compute_metrics(tmp_path):
     assert value[0] == 300
     graham_value = repo.fetch("AAPL.US", "graham_multiplier")
     assert graham_value[0] > 0
+
+
+def test_cmd_compute_metrics_prints_currency_invariant_summary(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "compute-metrics-summary.db"
+    MetricsRepository(db_path).initialize_schema()
+
+    class GoodMetric:
+        id = "good_metric"
+        required_concepts = ()
+        uses_market_data = False
+
+        def compute(self, symbol, repo):
+            return MetricResult(
+                symbol=symbol,
+                metric_id=self.id,
+                value=1.0,
+                as_of="2024-01-01",
+            )
+
+    class BadMetric:
+        id = "bad_metric"
+        required_concepts = ()
+        uses_market_data = False
+
+        def compute(self, symbol, repo):
+            raise MetricCurrencyInvariantError(
+                metric_id=self.id,
+                symbol=symbol,
+                input_name="Revenue",
+                reason_code="currency_mismatch",
+                expected_currency="USD",
+                actual_currency="EUR",
+                as_of="2024-01-01",
+            )
+
+    monkeypatch.setattr(
+        cli,
+        "REGISTRY",
+        {
+            GoodMetric.id: GoodMetric,
+            BadMetric.id: BadMetric,
+        },
+    )
+
+    rc = cli.cmd_compute_metrics(
+        "AAPL.US",
+        [GoodMetric.id, BadMetric.id],
+        str(db_path),
+        run_all=False,
+        exchange_code=None,
+    )
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "Metric currency invariant failures for AAPL.US:" in output
+    assert "- bad_metric: currency invariant:" in output
+    assert "Computed 1 metrics for AAPL.US" in output
 
 
 def test_cmd_compute_metrics_all(tmp_path):
@@ -8184,9 +8460,19 @@ def test_cmd_compute_metrics_all(tmp_path):
     metrics_repo.initialize_schema()
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    market_repo.upsert_price("AAPL.US", q3, 150.0, market_cap=50000.0)
     market_repo.upsert_price(
-        "AAPL.US", f"{current_year - 5}-09-30", 100.0, market_cap=30000.0
+        "AAPL.US",
+        q3,
+        150.0,
+        market_cap=50000.0,
+        currency="USD",
+    )
+    market_repo.upsert_price(
+        "AAPL.US",
+        f"{current_year - 5}-09-30",
+        100.0,
+        market_cap=30000.0,
+        currency="USD",
     )
 
     rc = cli.cmd_compute_metrics(
@@ -8219,7 +8505,7 @@ def test_cmd_compute_metrics_all(tmp_path):
 
 
 def test_resolve_ticker_target_currency_from_supported_tickers(tmp_path):
-    """Primary resolution from supported_tickers.currency with subunit canonicalization."""
+    """Trading currency resolves from stored market data only."""
 
     db_path = tmp_path / "resolve.db"
     ticker_repo = SupportedTickerRepository(db_path)
@@ -8237,25 +8523,30 @@ def test_resolve_ticker_target_currency_from_supported_tickers(tmp_path):
             },
         ],
     )
+    store_market_data(
+        db_path,
+        "TEST.LSE",
+        "2025-01-31",
+        price=10.0,
+        currency="GBX",
+    )
 
     result = cli._resolve_ticker_target_currency(str(db_path), "TEST.LSE")
     assert result == "GBP"
 
 
-def test_resolve_ticker_target_currency_falls_back_to_payload(tmp_path):
-    """Fallback to payload General.CurrencyCode when supported_tickers.currency is empty."""
+def test_resolve_ticker_target_currency_does_not_fall_back_to_payload(tmp_path):
+    """Payload currency must not act as trading-currency fallback."""
 
     db_path = tmp_path / "resolve.db"
-    ticker_repo = SupportedTickerRepository(db_path)
-    ticker_repo.initialize_schema()
 
     payload = {"General": {"CurrencyCode": "ZAC"}}
     result = cli._resolve_ticker_target_currency(str(db_path), "UNKNOWN.JSE", payload)
-    assert result == "ZAR"
+    assert result is None
 
 
 def test_resolve_ticker_target_currency_returns_none_when_unresolvable(tmp_path):
-    """Returns None when neither supported_tickers nor payload provides a currency."""
+    """Returns None when no stored market-data currency exists for the symbol."""
 
     db_path = tmp_path / "resolve.db"
     ticker_repo = SupportedTickerRepository(db_path)

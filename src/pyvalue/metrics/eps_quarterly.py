@@ -11,8 +11,11 @@ from typing import Iterable, Optional
 import logging
 
 from pyvalue.metrics.base import MetricResult
-from pyvalue.metrics.utils import is_recent_fact
-from pyvalue.money import fx_service_for_context
+from pyvalue.metrics.utils import (
+    is_recent_fact,
+    normalize_metric_record,
+    require_metric_ticker_currency,
+)
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 EPS_CONCEPTS = ["EarningsPerShare"]
@@ -62,18 +65,27 @@ class EarningsPerShareTTM:
                 "eps_ttm: latest FY EPS too old for %s (%s)", symbol, fy_record.end_date
             )
             return None
-        if fy_record.value is None:
-            LOGGER.warning("eps_ttm: missing FY EPS value for %s", symbol)
-            return None
-
-        ttm_value = fy_record.value
+        ttm_value, currency = normalize_metric_record(
+            fy_record,
+            metric_id=self.id,
+            symbol=symbol,
+            expected_currency=require_metric_ticker_currency(
+                symbol,
+                repo,
+                metric_id=self.id,
+                input_name="EarningsPerShare",
+                as_of=fy_record.end_date,
+                candidate_currencies=[fy_record.currency],
+            ),
+            contexts=(repo,),
+        )
         as_of = fy_record.end_date
         return MetricResult.per_share(
             symbol=symbol,
             metric_id=self.id,
             value=ttm_value,
             as_of=as_of,
-            currency=fy_record.currency,
+            currency=currency,
         )
 
     def _fetch_quarters(
@@ -117,35 +129,25 @@ class EarningsPerShareTTM:
         symbol: str,
         repo: FinancialFactsRepository,
         records: list[FactRecord],
-    ) -> Optional[tuple[float, Optional[str]]]:
-        target_currency = records[0].currency
-        if target_currency is None:
-            LOGGER.warning("eps_ttm: missing EPS currency for %s", symbol)
-            return None
-        fx_service = fx_service_for_context(repo)
+    ) -> Optional[tuple[float, str]]:
+        target_currency = require_metric_ticker_currency(
+            symbol,
+            repo,
+            metric_id=self.id,
+            input_name="EarningsPerShare",
+            as_of=records[0].end_date if records else None,
+            candidate_currencies=[record.currency for record in records],
+        )
         total = 0.0
         for record in records:
-            if record.currency is None:
-                LOGGER.warning("eps_ttm: missing EPS currency for %s", symbol)
-                return None
-            if record.currency == target_currency:
-                total += record.value
-                continue
-            converted = fx_service.convert_amount(
-                record.value,
-                record.currency,
-                target_currency,
-                record.end_date,
+            value, _ = normalize_metric_record(
+                record,
+                metric_id=self.id,
+                symbol=symbol,
+                expected_currency=target_currency,
+                contexts=(repo,),
             )
-            if converted is None:
-                LOGGER.warning(
-                    "eps_ttm: FX conversion failed for %s (%s -> %s)",
-                    symbol,
-                    record.currency,
-                    target_currency,
-                )
-                return None
-            total += float(converted)
+            total += value
         return total, target_currency
 
 

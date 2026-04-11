@@ -387,6 +387,7 @@ class SQLiteStore:
         if self.db_path.parent:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._security_repo_cache: Optional[SecurityRepository] = None
+        self._supported_ticker_repo_cache: Optional[SupportedTickerRepository] = None
         self._supported_exchange_repo_cache: Optional[SupportedExchangeRepository] = (
             None
         )
@@ -447,6 +448,31 @@ class SQLiteStore:
                 self.db_path
             )
         return self._supported_exchange_repo_cache
+
+    def _supported_ticker_repo(self) -> SupportedTickerRepository:
+        if self._supported_ticker_repo_cache is None:
+            self._supported_ticker_repo_cache = SupportedTickerRepository(self.db_path)
+        return self._supported_ticker_repo_cache
+
+    def ticker_currency(self, symbol: str) -> Optional[str]:
+        """Return the latest non-null stored market-data currency for ``symbol``."""
+
+        apply_migrations(self.db_path)
+        symbol_norm = symbol.strip().upper()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT md.currency
+                FROM market_data md
+                JOIN securities s ON s.security_id = md.security_id
+                WHERE UPPER(s.canonical_symbol) = ?
+                  AND md.currency IS NOT NULL
+                ORDER BY md.as_of DESC
+                LIMIT 1
+                """,
+                (symbol_norm,),
+            ).fetchone()
+        return normalize_currency_code(row[0]) if row else None
 
 
 class SecurityRepository(SQLiteStore):

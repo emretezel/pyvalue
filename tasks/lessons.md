@@ -148,3 +148,9 @@ Use this file to capture recurring mistake patterns after user corrections so fu
 - Recurring pattern: It is easy to validate logging and warning filters only in the parent process and forget that spawned worker processes start with different logging state and can fall back to `logging.lastResort`, bypassing both formatting and console-only filters.
 - Preventive rule: Any CLI logging change that matters during multiprocessing must be verified in a real spawned worker path, not just inline or single-process tests; explicitly check worker handler initialization, console behavior, and file-log persistence together.
 - Resulting action: Added worker logging initialization for pyvalue process pools only when pyvalue's rotating file logger is active, extended tests to cover spawned worker normalization output, and recorded the rule here.
+
+- Date: 2026-04-10
+- User correction: Trading currency for normalization and metric currency invariants must be strictly `market_data.currency`; do not infer it from exchange metadata, supported ticker currency, or payload-level currencies, and do not let `EnterpriseValue` inherit trading currency.
+- Recurring pattern: When both listing/trading currency and payload/reporting currency exist in the same pipeline, it is easy to blur them together with convenient fallbacks and accidentally encode the wrong business meaning into normalization and metric validation.
+- Preventive rule: In pyvalue, treat trading currency and payload currency as separate concepts. Trading currency resolves only from stored `market_data.currency`; payload-derived facts like `EnterpriseValue` must resolve currency only from provider payload fields and explicit payload traversal rules.
+- Resulting action: Reworked ticker-currency resolution to use only `market_data.currency`, updated EODHD normalization to require it, kept `EnterpriseValue` payload-only, and aligned the metric invariants and tests with that split.

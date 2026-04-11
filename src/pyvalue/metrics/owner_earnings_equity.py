@@ -13,11 +13,12 @@ import logging
 
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.nwc import DeltaNWCMaintMetric
-from pyvalue.money import normalize_money_value
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     MAX_FY_FACT_AGE_DAYS,
     is_recent_fact,
+    normalize_metric_record,
+    require_metric_ticker_currency,
 )
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
@@ -147,9 +148,19 @@ class OwnerEarningsEquityCalculator:
             LOGGER.warning("oe_equity_5y_avg: missing delta_nwc_maint for %s", symbol)
             return None
 
-        ni_map = self._build_fy_amount_map(symbol, repo, NI_CONCEPTS, absolute=False)
+        ni_map = self._build_fy_amount_map(
+            symbol,
+            repo,
+            NI_CONCEPTS,
+            context="oe_equity_5y_avg",
+            absolute=False,
+        )
         da_map = self._build_fy_amount_map(
-            symbol, repo, DA_PRIMARY_CONCEPTS + DA_FALLBACK_CONCEPTS, absolute=False
+            symbol,
+            repo,
+            DA_PRIMARY_CONCEPTS + DA_FALLBACK_CONCEPTS,
+            context="oe_equity_5y_avg",
+            absolute=False,
         )
         mcapex_map = self._build_mcapex_fy_map(symbol, repo)
 
@@ -256,16 +267,13 @@ class OwnerEarningsEquityCalculator:
                 )
                 continue
             normalized, currency = self._normalize_records(
-                quarterly[:4], absolute=absolute
+                quarterly[:4],
+                symbol=symbol,
+                repo=repo,
+                context=context,
+                input_name=concept,
+                absolute=absolute,
             )
-            if normalized is None:
-                LOGGER.warning(
-                    "%s: currency conflict in %s quarterly values for %s",
-                    context,
-                    concept,
-                    symbol,
-                )
-                continue
             return _AmountResult(
                 total=sum(normalized),
                 as_of=quarterly[0].end_date,
@@ -308,10 +316,11 @@ class OwnerEarningsEquityCalculator:
         repo: FinancialFactsRepository,
         concepts: Sequence[str],
         *,
+        context: str,
         absolute: bool = False,
     ) -> dict[str, _AmountResult]:
         maps = [
-            self._fy_map(symbol, repo, concept, absolute=absolute)
+            self._fy_map(symbol, repo, concept, context=context, absolute=absolute)
             for concept in concepts
         ]
         candidate_dates: set[str] = set()
@@ -329,9 +338,27 @@ class OwnerEarningsEquityCalculator:
     def _build_mcapex_fy_map(
         self, symbol: str, repo: FinancialFactsRepository
     ) -> dict[str, _AmountResult]:
-        capex_map = self._fy_map(symbol, repo, CAPEX_CONCEPT, absolute=True)
-        da_primary_map = self._fy_map(symbol, repo, DA_PRIMARY_CONCEPT, absolute=True)
-        da_fallback_map = self._fy_map(symbol, repo, DA_FALLBACK_CONCEPT, absolute=True)
+        capex_map = self._fy_map(
+            symbol,
+            repo,
+            CAPEX_CONCEPT,
+            context="oe_equity_5y_avg",
+            absolute=True,
+        )
+        da_primary_map = self._fy_map(
+            symbol,
+            repo,
+            DA_PRIMARY_CONCEPT,
+            context="oe_equity_5y_avg",
+            absolute=True,
+        )
+        da_fallback_map = self._fy_map(
+            symbol,
+            repo,
+            DA_FALLBACK_CONCEPT,
+            context="oe_equity_5y_avg",
+            absolute=True,
+        )
 
         candidate_dates = sorted(
             set(capex_map.keys())
@@ -392,13 +419,21 @@ class OwnerEarningsEquityCalculator:
         repo: FinancialFactsRepository,
         concept: str,
         *,
+        context: str,
         absolute: bool = False,
     ) -> dict[str, _AmountResult]:
         records = repo.facts_for_concept(symbol, concept, fiscal_period="FY")
         ordered = self._filter_periods(records, FY_PERIODS)
         mapped: dict[str, _AmountResult] = {}
         for record in ordered:
-            value, currency = self._normalize_currency(record, absolute=absolute)
+            value, currency = self._normalize_currency(
+                record,
+                symbol=symbol,
+                repo=repo,
+                context=context,
+                input_name=concept,
+                absolute=absolute,
+            )
             mapped[record.end_date] = _AmountResult(
                 total=value,
                 as_of=record.end_date,
@@ -424,27 +459,63 @@ class OwnerEarningsEquityCalculator:
         return filtered
 
     def _normalize_records(
-        self, records: Sequence[FactRecord], *, absolute: bool = False
-    ) -> tuple[Optional[list[float]], Optional[str]]:
-        currency = None
+        self,
+        records: Sequence[FactRecord],
+        *,
+        symbol: str,
+        repo: FinancialFactsRepository,
+        context: str,
+        input_name: str,
+        absolute: bool = False,
+    ) -> tuple[list[float], str]:
+        currency = require_metric_ticker_currency(
+            symbol,
+            repo,
+            metric_id=context,
+            input_name=input_name,
+            as_of=records[0].end_date if records else None,
+            candidate_currencies=[record.currency for record in records],
+        )
         normalized: list[float] = []
         for record in records:
-            value, code = self._normalize_currency(record, absolute=absolute)
-            if currency is None and code:
-                currency = code
-            elif code and currency and code != currency:
-                return None, None
+            value, code = self._normalize_currency(
+                record,
+                symbol=symbol,
+                repo=repo,
+                context=context,
+                input_name=input_name,
+                absolute=absolute,
+            )
             normalized.append(value)
+            currency = code
         return normalized, currency
 
     def _normalize_currency(
-        self, record: FactRecord, *, absolute: bool = False
-    ) -> tuple[float, Optional[str]]:
-        normalized_value, code = normalize_money_value(
-            record.value,
-            record.currency,
+        self,
+        record: FactRecord,
+        *,
+        symbol: str,
+        repo: FinancialFactsRepository,
+        context: str,
+        input_name: str,
+        absolute: bool = False,
+    ) -> tuple[float, str]:
+        target_currency = require_metric_ticker_currency(
+            symbol,
+            repo,
+            metric_id=context,
+            input_name=input_name,
+            as_of=record.end_date,
+            candidate_currencies=[record.currency],
         )
-        value = record.value if normalized_value is None else normalized_value
+        value, code = normalize_metric_record(
+            record,
+            metric_id=context,
+            symbol=symbol,
+            input_name=input_name,
+            expected_currency=target_currency,
+            contexts=(repo,),
+        )
         if absolute:
             value = abs(value)
         return value, code

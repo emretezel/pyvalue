@@ -39,7 +39,11 @@ from pyvalue.fx import (
 from pyvalue.marketdata import EODHDProvider, MarketDataUpdate, PriceData
 from pyvalue.marketdata.service import MarketDataService
 from pyvalue.metrics import REGISTRY
-from pyvalue.metrics.base import metadata_for_metric
+from pyvalue.metrics.base import (
+    MetricCurrencyInvariantError,
+    consume_metric_currency_invariant_error,
+    metadata_for_metric,
+)
 from pyvalue.normalization import EODHDFactsNormalizer, SECFactsNormalizer
 from pyvalue.ranking import compute_screen_ranking
 from pyvalue.reporting import MetricCoverage, compute_fact_coverage
@@ -99,25 +103,14 @@ def _resolve_ticker_target_currency(
     *,
     ticker_repo: Optional[SupportedTickerRepository] = None,
 ) -> Optional[str]:
-    """Resolve the canonical trading currency for a ticker.
+    """Resolve the trading currency for a ticker from stored market data only."""
 
-    Primary: supported_tickers.currency normalized through subunit
-    canonicalization.  Fallback: payload General.CurrencyCode normalized
-    through subunit canonicalization.
-    """
-
-    from pyvalue.currency import canonical_trading_currency
-
+    del payload  # Trading currency must never fall back to fundamentals payloads.
     repo = ticker_repo or SupportedTickerRepository(database)
-    observed = repo.fetch_currency(symbol)
-    canonical = canonical_trading_currency(observed)
-    if canonical is not None:
-        return canonical
-    if payload is not None:
-        general = payload.get("General")
-        if isinstance(general, Mapping):
-            return canonical_trading_currency(general.get("CurrencyCode"))
-    return None
+    resolver = getattr(repo, "ticker_currency", None)
+    if not callable(resolver):
+        return None
+    return resolver(symbol)
 
 
 def _batch_values(values: Sequence[str], size: int) -> List[List[str]]:
@@ -212,6 +205,15 @@ class _ComputedMetricsResult:
     symbol: str
     rows: Tuple[StoredMetricRow, ...]
     computed_count: int
+    failures: Tuple["_MetricComputationFailure", ...] = ()
+
+
+@dataclass(frozen=True)
+class _MetricComputationFailure:
+    symbol: str
+    metric_id: str
+    reason: str
+    message: str
 
 
 @dataclass
@@ -2910,6 +2912,8 @@ class _CachedRegionFactsRepository(RegionFactsRepository):
     ) -> None:
         super().__init__(repo)
         self._symbol = symbol.strip().upper()
+        self._ticker_currency_loaded = False
+        self._ticker_currency: Optional[str] = None
         self._latest_by_concept: Dict[str, FactRecord] = {}
         self._facts_by_concept: Dict[str, Tuple[FactRecord, ...]] = {}
         facts_by_concept: Dict[str, List[FactRecord]] = {}
@@ -2965,6 +2969,19 @@ class _CachedRegionFactsRepository(RegionFactsRepository):
         if limit is not None:
             selected = selected[:limit]
         return selected
+
+    def ticker_currency(self, symbol: str) -> Optional[str]:
+        symbol_upper = symbol.strip().upper()
+        if symbol_upper != self._symbol:
+            resolver = getattr(self._repo, "ticker_currency", None)
+            if callable(resolver):
+                return resolver(symbol)
+            return None
+        if not self._ticker_currency_loaded:
+            resolver = getattr(self._repo, "ticker_currency", None)
+            self._ticker_currency = resolver(symbol) if callable(resolver) else None
+            self._ticker_currency_loaded = True
+        return self._ticker_currency
 
 
 class _SchemaReadySecurityRepository(SecurityRepository):
@@ -3056,6 +3073,8 @@ class _CachedMarketDataRepository:
         self._symbol = symbol.strip().upper()
         self._snapshot_loaded = snapshot_loaded
         self._snapshot: Optional[PriceData] = snapshot
+        self._ticker_currency_loaded = False
+        self._ticker_currency: Optional[str] = None
 
     def _load_snapshot(self) -> None:
         if self._snapshot_loaded:
@@ -3074,6 +3093,19 @@ class _CachedMarketDataRepository:
         if snapshot is None:
             return None
         return snapshot.as_of, snapshot.price
+
+    def ticker_currency(self, symbol: str) -> Optional[str]:
+        symbol_upper = symbol.strip().upper()
+        if symbol_upper != self._symbol:
+            resolver = getattr(self._repo, "ticker_currency", None)
+            if callable(resolver):
+                return resolver(symbol)
+            return None
+        if not self._ticker_currency_loaded:
+            resolver = getattr(self._repo, "ticker_currency", None)
+            self._ticker_currency = resolver(symbol) if callable(resolver) else None
+            self._ticker_currency_loaded = True
+        return self._ticker_currency
 
     def __getattr__(self, name: str):
         return getattr(self._repo, name)
@@ -3295,6 +3327,7 @@ def _compute_metrics_for_symbol(
     )
 
     rows: List[StoredMetricRow] = []
+    failures: List[_MetricComputationFailure] = []
     computed = 0
     for metric_id in metric_ids:
         metric_cls = REGISTRY[metric_id]
@@ -3310,8 +3343,29 @@ def _compute_metrics_for_symbol(
                 )
             else:
                 result = metric.compute(symbol_upper, cached_fact_repo)
+        except MetricCurrencyInvariantError as exc:
+            failures.append(
+                _MetricComputationFailure(
+                    symbol=symbol_upper,
+                    metric_id=metric_id,
+                    reason=exc.summary_reason,
+                    message=str(exc),
+                )
+            )
+            continue
         except Exception as exc:  # pragma: no cover - metric errors
             LOGGER.error("Metric %s failed for %s: %s", metric_id, symbol_upper, exc)
+            continue
+        invariant_error = consume_metric_currency_invariant_error(metric)
+        if invariant_error is not None:
+            failures.append(
+                _MetricComputationFailure(
+                    symbol=symbol_upper,
+                    metric_id=metric_id,
+                    reason=invariant_error.summary_reason,
+                    message=str(invariant_error),
+                )
+            )
             continue
         if result is None:
             LOGGER.warning(
@@ -3341,6 +3395,7 @@ def _compute_metrics_for_symbol(
         symbol=symbol_upper,
         rows=tuple(rows),
         computed_count=computed,
+        failures=tuple(failures),
     )
 
 
@@ -3392,6 +3447,7 @@ def _run_metric_computation(
         workers = 1
 
     pending_rows: List[StoredMetricRow] = []
+    metric_failures: List[_MetricComputationFailure] = []
     buffered_symbols = 0
     last_flush_at = time.monotonic()
     completed_symbols = 0
@@ -3461,6 +3517,7 @@ def _run_metric_computation(
                         market_repo,
                     )
                     buffer_result(result.rows)
+                    metric_failures.extend(result.failures)
                     completed_symbols += 1
                     maybe_report_progress()
             except KeyboardInterrupt:
@@ -3473,6 +3530,7 @@ def _run_metric_computation(
                 )
             flush_pending(force=True)
             maybe_report_progress(force=True)
+            _print_metric_invariant_failure_summary(metric_failures)
             print(f"Computed metrics for {total_symbols} symbols in {db_path}")
             return 0
 
@@ -3493,6 +3551,7 @@ def _run_metric_computation(
                 try:
                     result = future.result()
                     buffer_result(result.rows)
+                    metric_failures.extend(result.failures)
                 except Exception as exc:  # pragma: no cover - worker crashes
                     LOGGER.error("Failed to compute metrics for %s: %s", symbol, exc)
                 completed_symbols += 1
@@ -3513,6 +3572,7 @@ def _run_metric_computation(
 
         flush_pending(force=True)
         maybe_report_progress(force=True)
+        _print_metric_invariant_failure_summary(metric_failures)
         print(f"Computed metrics for {total_symbols} symbols in {db_path}")
         return 0
 
@@ -4398,6 +4458,8 @@ def _normalize_eodhd_symbol_worker(
     target_currency = _resolve_ticker_target_currency(
         database, symbol, payload, ticker_repo=_get_or_create_ticker_repo(database)
     )
+    if target_currency is None:
+        raise ValueError(f"Missing trading currency in market_data for {symbol}")
     fx_service = _get_or_create_fx_service(database)
     normalizer = EODHDFactsNormalizer(fx_service=fx_service)
     with suppress_console_missing_fx_warnings(True):
@@ -4635,6 +4697,11 @@ def cmd_normalize_eodhd_fundamentals(
     target_currency = _resolve_ticker_target_currency(
         database, symbol_upper, payload, ticker_repo=ticker_repo
     )
+    if target_currency is None:
+        raise SystemExit(
+            "EODHD normalization failed for "
+            f"{symbol_upper}: missing trading currency in market_data"
+        )
     fx_repo = _SchemaReadyFXRatesRepository(database)
     fx_service = FXService(database, repository=fx_repo)
     normalizer = EODHDFactsNormalizer(fx_service=fx_service)
@@ -5043,6 +5110,7 @@ def cmd_compute_metrics(
             market_repo,
         )
     metrics_repo.upsert_many(result.rows)
+    _print_metric_invariant_failure_summary(result.failures, symbol=symbol_upper)
     print(f"Computed {result.computed_count} metrics for {symbol_upper} in {database}")
     return 0
 
@@ -5182,6 +5250,8 @@ def cmd_report_metric_coverage(
                     result = metric.compute(symbol, fact_repo, market_repo)
                 else:
                     result = metric.compute(symbol, fact_repo)
+            except MetricCurrencyInvariantError:
+                result = None
             except Exception as exc:  # pragma: no cover - defensive logging
                 LOGGER.error(
                     "Metric %s failed for %s: %s",
@@ -5189,6 +5259,8 @@ def cmd_report_metric_coverage(
                     symbol,
                     exc,
                 )
+                result = None
+            if consume_metric_currency_invariant_error(metric) is not None:
                 result = None
             if result is None:
                 symbol_ok = False
@@ -5261,6 +5333,61 @@ def _format_failure_reason(records: Sequence[logging.LogRecord], symbol: str) ->
         return msg % transformed_args
     except Exception:
         return record.getMessage()
+
+
+def _metric_failure_reason_from_exception(exc: Exception) -> str:
+    """Return a compact failure reason for one metric exception."""
+
+    if isinstance(exc, MetricCurrencyInvariantError):
+        return exc.summary_reason
+    return f"exception: {exc.__class__.__name__}"
+
+
+def _metric_failure_message(exc: Exception) -> str:
+    """Return the detailed user/log message for one metric exception."""
+
+    return str(exc)
+
+
+def _print_metric_invariant_failure_summary(
+    failures: Sequence[_MetricComputationFailure],
+    *,
+    symbol: Optional[str] = None,
+) -> None:
+    """Print a compact grouped summary for currency-invariant metric failures."""
+
+    invariant_failures = [
+        failure
+        for failure in failures
+        if failure.reason.startswith("currency invariant:")
+    ]
+    if not invariant_failures:
+        return
+
+    grouped = Counter(
+        (failure.metric_id, failure.reason) for failure in invariant_failures
+    )
+    examples: Dict[tuple[str, str], _MetricComputationFailure] = {}
+    for failure in invariant_failures:
+        examples.setdefault((failure.metric_id, failure.reason), failure)
+
+    if symbol is not None:
+        print(f"Metric currency invariant failures for {symbol}:")
+    else:
+        print(
+            f"Metric currency invariant failures: {len(invariant_failures)} across {len(grouped)} grouped reasons"
+        )
+
+    ordered = sorted(
+        grouped.items(),
+        key=lambda item: (-item[1], item[0][0], item[0][1]),
+    )
+    for (metric_id, reason), count in ordered:
+        example = examples[(metric_id, reason)]
+        if symbol is not None:
+            print(f"- {metric_id}: {reason} ({example.message})")
+            continue
+        print(f"- {metric_id}: {reason} ({count}, example={example.symbol})")
 
 
 def _write_metric_failure_report_csv(
@@ -5500,10 +5627,17 @@ def _recompute_missing_screen_metrics(
                             )
                         else:
                             result = metric.compute(symbol, cached_fact_repo)
+                    except MetricCurrencyInvariantError as exc:
+                        reason = exc.summary_reason
                     except Exception as exc:  # pragma: no cover - defensive
-                        reason = f"exception: {exc.__class__.__name__}"
+                        reason = _metric_failure_reason_from_exception(exc)
                     else:
-                        if result is not None:
+                        invariant_error = consume_metric_currency_invariant_error(
+                            metric
+                        )
+                        if invariant_error is not None:
+                            reason = invariant_error.summary_reason
+                        elif result is not None:
                             reason = "stored_missing_but_computable_now"
                         else:
                             reason = _format_failure_reason(handler.records, symbol)
@@ -5641,10 +5775,32 @@ def cmd_report_metric_failures(
                         result = metric.compute(symbol_upper, fact_repo, market_repo)
                     else:
                         result = metric.compute(symbol_upper, fact_repo)
+                except MetricCurrencyInvariantError as exc:
+                    reason = exc.summary_reason
                 except Exception as exc:  # pragma: no cover - defensive
-                    reason = f"exception: {exc.__class__.__name__}"
+                    reason = _metric_failure_reason_from_exception(exc)
                     failures[metric_id][reason] += 1
                     totals[metric_id] += 1
+                    continue
+                invariant_error = consume_metric_currency_invariant_error(metric)
+                if invariant_error is not None:
+                    reason = invariant_error.summary_reason
+                    failures[metric_id][reason] += 1
+                    totals[metric_id] += 1
+                    cap = market_caps.get(symbol_upper)
+                    if symbol_upper not in market_caps:
+                        snapshot = market_repo.latest_snapshot(symbol_upper)
+                        cap = snapshot.market_cap if snapshot else None
+                        market_caps[symbol_upper] = cap
+                    current = examples[metric_id].get(reason)
+                    if current is None:
+                        examples[metric_id][reason] = (symbol_upper, cap)
+                    else:
+                        current_cap = current[1]
+                        if cap is not None and (
+                            current_cap is None or cap > current_cap
+                        ):
+                            examples[metric_id][reason] = (symbol_upper, cap)
                     continue
                 if result is None:
                     reason = _format_failure_reason(handler.records, symbol_upper)

@@ -3,7 +3,7 @@
 Author: Emre Tezel
 """
 
-from .base import Metric, MetricResult
+from .base import Metric, MetricResult, wrap_metric_currency_invariants
 from .working_capital import WorkingCapitalMetric
 from .current_ratio import CurrentRatioMetric
 from .debt_paydown_years import DebtPaydownYearsMetric, FCFToDebtMetric
@@ -173,6 +173,9 @@ REGISTRY = {
     ROCGreenblattMetric.id: ROCGreenblattMetric,
     ROEGreenblattMetric.id: ROEGreenblattMetric,
 }
+
+for _metric_cls in REGISTRY.values():
+    wrap_metric_currency_invariants(_metric_cls)
 
 __all__ = [
     "Metric",

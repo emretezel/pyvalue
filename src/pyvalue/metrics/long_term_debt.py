@@ -11,7 +11,7 @@ from typing import Optional
 import logging
 
 from pyvalue.metrics.base import MetricResult
-from pyvalue.metrics.utils import is_recent_fact
+from pyvalue.metrics.utils import is_recent_fact, normalize_metric_record
 from pyvalue.storage import FinancialFactsRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -27,12 +27,18 @@ class LongTermDebtMetric:
     ) -> Optional[MetricResult]:
         fact = repo.latest_fact(symbol, "LongTermDebt")
         if fact is not None and is_recent_fact(fact):
+            value, currency = normalize_metric_record(
+                fact,
+                metric_id=self.id,
+                symbol=symbol,
+                contexts=(repo,),
+            )
             return MetricResult.monetary(
                 symbol=symbol,
                 metric_id=self.id,
-                value=fact.value,
+                value=value,
                 as_of=fact.end_date,
-                currency=fact.currency,
+                currency=currency,
             )
         LOGGER.warning("long_term_debt: no recent long-term debt fact for %s", symbol)
         return None

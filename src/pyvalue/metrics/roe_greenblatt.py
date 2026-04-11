@@ -11,8 +11,11 @@ from typing import List, Optional
 import logging
 
 from pyvalue.metrics.base import MetricResult
-from pyvalue.metrics.utils import MAX_FY_FACT_AGE_DAYS, has_recent_fact
-from pyvalue.money import fx_service_for_context
+from pyvalue.metrics.utils import (
+    MAX_FY_FACT_AGE_DAYS,
+    has_recent_fact,
+    normalize_metric_record,
+)
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 NET_INCOME_CONCEPTS = ["NetIncomeLossAvailableToCommonStockholdersBasic"]
@@ -61,7 +64,6 @@ class ROEGreenblattMetric:
             income_map[year] = rec
         years = sorted(income_map.keys(), reverse=True)
         roe_values: List[float] = []
-        fx_service = fx_service_for_context(repo)
         for year in years:
             income = income_map[year]
             equity_now = equity_map.get(year)
@@ -74,54 +76,29 @@ class ROEGreenblattMetric:
                 or equity_prev.value is None
             ):
                 continue
-            if (
-                income.currency is None
-                or equity_now.currency is None
-                or equity_prev.currency is None
-            ):
-                LOGGER.warning(
-                    "roe_greenblatt: missing currency inputs for %s on %s",
-                    symbol,
-                    income.end_date,
-                )
-                continue
-            equity_prev_value = equity_prev.value
-            if equity_prev.currency != equity_now.currency:
-                converted = fx_service.convert_amount(
-                    equity_prev.value,
-                    equity_prev.currency,
-                    equity_now.currency,
-                    equity_prev.end_date,
-                )
-                if converted is None:
-                    LOGGER.warning(
-                        "roe_greenblatt: FX conversion failed for %s (%s -> %s)",
-                        symbol,
-                        equity_prev.currency,
-                        equity_now.currency,
-                    )
-                    continue
-                equity_prev_value = float(converted)
-            avg_equity = (equity_now.value + equity_prev_value) / 2
+            equity_now_value, equity_currency = normalize_metric_record(
+                equity_now,
+                metric_id=self.id,
+                symbol=symbol,
+                contexts=(repo,),
+            )
+            equity_prev_value, _ = normalize_metric_record(
+                equity_prev,
+                metric_id=self.id,
+                symbol=symbol,
+                expected_currency=equity_currency,
+                contexts=(repo,),
+            )
+            avg_equity = (equity_now_value + equity_prev_value) / 2
             if avg_equity == 0:
                 continue
-            income_value = income.value
-            if income.currency != equity_now.currency:
-                converted = fx_service.convert_amount(
-                    income.value,
-                    income.currency,
-                    equity_now.currency,
-                    income.end_date,
-                )
-                if converted is None:
-                    LOGGER.warning(
-                        "roe_greenblatt: FX conversion failed for %s (%s -> %s)",
-                        symbol,
-                        income.currency,
-                        equity_now.currency,
-                    )
-                    continue
-                income_value = float(converted)
+            income_value, _ = normalize_metric_record(
+                income,
+                metric_id=self.id,
+                symbol=symbol,
+                expected_currency=equity_currency,
+                contexts=(repo,),
+            )
             roe_values.append(income_value / avg_equity)
             if len(roe_values) == 5:
                 break

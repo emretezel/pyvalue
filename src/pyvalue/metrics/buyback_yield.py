@@ -6,14 +6,19 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Iterable, Optional
+from typing import Iterable, Optional
 
 import logging
 
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.share_count_change import ShareCountChangeCalculator
-from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS, is_recent_fact
-from pyvalue.money import fx_converter_for_context, normalize_money_value
+from pyvalue.metrics.utils import (
+    MAX_FACT_AGE_DAYS,
+    is_recent_fact,
+    normalize_metric_amount,
+    normalize_metric_record,
+    require_metric_ticker_currency,
+)
 from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -31,44 +36,12 @@ REQUIRED_CONCEPTS = (
     SHARE_COUNT_CONCEPT,
 )
 
-FXConverter = Callable[[float, str, str, str], Optional[float]]
-
 
 @dataclass(frozen=True)
 class _TTMResult:
     total: float
     as_of: str
     currency: Optional[str]
-
-
-def _convert_market_cap(
-    *,
-    symbol: str,
-    amount: float,
-    source_currency: Optional[str],
-    target_currency: Optional[str],
-    as_of: str,
-    context: str,
-    converter: FXConverter,
-) -> Optional[float]:
-    if source_currency and target_currency and source_currency != target_currency:
-        converted = converter(
-            amount,
-            source_currency,
-            target_currency,
-            as_of,
-        )
-        if converted is None:
-            LOGGER.warning(
-                "%s: FX conversion failed %s -> %s for %s",
-                context,
-                source_currency,
-                target_currency,
-                symbol,
-            )
-            return None
-        return converted
-    return amount
 
 
 @dataclass
@@ -157,15 +130,7 @@ class NetBuybackYieldMetric:
             )
             return None
 
-        normalized, currency = self._normalize_quarterly(quarterly[:4])
-        if normalized is None:
-            LOGGER.warning(
-                "%s: currency conflict in %s quarterly values for %s",
-                self.id,
-                concept,
-                symbol,
-            )
-            return None
+        normalized, currency = self._normalize_quarterly(symbol, repo, quarterly[:4])
 
         return _TTMResult(
             total=sum(record.value for record in normalized),
@@ -206,20 +171,19 @@ class NetBuybackYieldMetric:
             )
             return None
 
-        converted = _convert_market_cap(
+        converted, _ = normalize_metric_amount(
+            snapshot.market_cap,
+            getattr(snapshot, "currency", None),
+            metric_id=self.id,
             symbol=symbol,
-            amount=snapshot.market_cap,
-            source_currency=getattr(snapshot, "currency", None),
-            target_currency=target_currency,
+            input_name="market_cap",
             as_of=snapshot.as_of,
-            context=self.id,
-            converter=fx_converter_for_context(market_repo),
+            expected_currency=target_currency,
+            contexts=(market_repo,),
         )
-        if converted is None:
-            return None
         if converted <= 0:
             LOGGER.warning(
-                "%s: non-positive market cap after FX for %s",
+                "%s: non-positive market cap for %s",
                 self.id,
                 symbol,
             )
@@ -242,20 +206,28 @@ class NetBuybackYieldMetric:
         return filtered
 
     def _normalize_quarterly(
-        self, records: list[FactRecord]
-    ) -> tuple[Optional[list[FactRecord]], Optional[str]]:
-        currency = None
+        self,
+        symbol: str,
+        repo: FinancialFactsRepository,
+        records: list[FactRecord],
+    ) -> tuple[list[FactRecord], str]:
+        currency = require_metric_ticker_currency(
+            symbol,
+            repo,
+            metric_id=self.id,
+            input_name="ShareRepurchases",
+            as_of=records[0].end_date if records else None,
+            candidate_currencies=[record.currency for record in records],
+        )
         normalized: list[FactRecord] = []
         for record in records:
-            code = getattr(record, "currency", None)
-            value: Optional[float] = record.value
-            value, code = normalize_money_value(value, code)
-            if value is None:
-                continue
-            if currency is None and code:
-                currency = code
-            elif code and currency and code != currency:
-                return None, None
+            value, _ = normalize_metric_record(
+                record,
+                metric_id=self.id,
+                symbol=symbol,
+                expected_currency=currency,
+                contexts=(repo,),
+            )
             normalized.append(
                 FactRecord(
                     symbol=record.symbol,
@@ -270,7 +242,7 @@ class NetBuybackYieldMetric:
                     frame=record.frame,
                     start_date=getattr(record, "start_date", None),
                     accounting_standard=getattr(record, "accounting_standard", None),
-                    currency=code,
+                    currency=currency,
                 )
             )
         return normalized, currency

@@ -10,13 +10,11 @@ from typing import Optional, Sequence
 
 import logging
 
-from pyvalue.fx import FXService
 from pyvalue.metrics.base import MetricResult
-from pyvalue.metrics.utils import is_recent_fact
-from pyvalue.money import (
-    align_money_values,
-    fx_service_for_context,
-    normalize_money_value,
+from pyvalue.metrics.utils import (
+    align_metric_money_values,
+    is_recent_fact,
+    normalize_metric_record,
 )
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
@@ -60,12 +58,10 @@ class _FCFDebtCalculator:
     def compute_inputs(
         self, symbol: str, repo: FinancialFactsRepository, *, metric_id: str
     ) -> Optional[_FCFDebtInputs]:
-        fx_service = fx_service_for_context(repo)
         debt = self._compute_total_debt(
             symbol,
             repo,
             metric_id=metric_id,
-            fx_service=fx_service,
         )
         if debt is None:
             LOGGER.warning("%s: missing debt inputs for %s", metric_id, symbol)
@@ -78,7 +74,6 @@ class _FCFDebtCalculator:
             symbol,
             repo,
             metric_id=metric_id,
-            fx_service=fx_service,
         )
         if fcf is None:
             LOGGER.warning("%s: missing TTM FCF for %s", metric_id, symbol)
@@ -87,20 +82,16 @@ class _FCFDebtCalculator:
             LOGGER.warning("%s: non-positive FCF for %s", metric_id, symbol)
             return None
 
-        aligned_pair, target_currency = align_money_values(
+        aligned_pair, target_currency = align_metric_money_values(
             values=[
                 (debt.total, debt.currency, debt.as_of, "TotalDebt"),
                 (fcf.total, fcf.currency, fcf.as_of, "FreeCashFlow"),
             ],
-            fx_service=fx_service,
-            logger=LOGGER,
-            operation=f"metric:{metric_id}:inputs",
+            metric_id=metric_id,
             symbol=symbol,
-            target_currency=debt.currency or fcf.currency,
+            expected_currency=debt.currency or fcf.currency,
+            contexts=(repo,),
         )
-        if aligned_pair is None or target_currency is None:
-            LOGGER.warning("%s: currency mismatch for %s", metric_id, symbol)
-            return None
 
         return _FCFDebtInputs(
             fcf=_TTMResult(
@@ -118,29 +109,34 @@ class _FCFDebtCalculator:
         repo: FinancialFactsRepository,
         *,
         metric_id: str,
-        fx_service: FXService,
     ) -> Optional[_DebtResult]:
         short_debt = self._latest_recent_fact(repo, symbol, "ShortTermDebt")
         long_debt = self._latest_recent_fact(repo, symbol, "LongTermDebt")
         total_debt = self._latest_recent_fact(repo, symbol, "TotalDebtFromBalanceSheet")
 
         if short_debt is not None and long_debt is not None:
-            short_value, short_currency = self._normalize_currency(short_debt)
-            long_value, long_currency = self._normalize_currency(long_debt)
-            aligned, currency = align_money_values(
+            short_value, short_currency = self._normalize_currency(
+                short_debt,
+                symbol=symbol,
+                repo=repo,
+                metric_id=metric_id,
+            )
+            long_value, long_currency = self._normalize_currency(
+                long_debt,
+                symbol=symbol,
+                repo=repo,
+                metric_id=metric_id,
+            )
+            aligned, currency = align_metric_money_values(
                 values=[
                     (short_value, short_currency, short_debt.end_date, "ShortTermDebt"),
                     (long_value, long_currency, long_debt.end_date, "LongTermDebt"),
                 ],
-                fx_service=fx_service,
-                logger=LOGGER,
-                operation=f"metric:{metric_id}:debt",
+                metric_id=metric_id,
                 symbol=symbol,
-                target_currency=short_currency or long_currency,
+                expected_currency=short_currency or long_currency,
+                contexts=(repo,),
             )
-            if aligned is None or currency is None:
-                LOGGER.warning("%s: debt currency conflict for %s", metric_id, symbol)
-                return None
             return _DebtResult(
                 total=aligned[0] + aligned[1],
                 as_of=max(short_debt.end_date, long_debt.end_date),
@@ -148,7 +144,12 @@ class _FCFDebtCalculator:
             )
 
         if total_debt is not None:
-            value, currency = self._normalize_currency(total_debt)
+            value, currency = self._normalize_currency(
+                total_debt,
+                symbol=symbol,
+                repo=repo,
+                metric_id=metric_id,
+            )
             return _DebtResult(
                 total=value, as_of=total_debt.end_date, currency=currency
             )
@@ -156,7 +157,12 @@ class _FCFDebtCalculator:
         one_side = short_debt or long_debt
         if one_side is None:
             return None
-        value, currency = self._normalize_currency(one_side)
+        value, currency = self._normalize_currency(
+            one_side,
+            symbol=symbol,
+            repo=repo,
+            metric_id=metric_id,
+        )
         return _DebtResult(total=value, as_of=one_side.end_date, currency=currency)
 
     def _compute_ttm_fcf(
@@ -165,14 +171,12 @@ class _FCFDebtCalculator:
         repo: FinancialFactsRepository,
         *,
         metric_id: str,
-        fx_service: FXService,
     ) -> Optional[_TTMResult]:
         operating = self._ttm_sum(
             symbol,
             repo,
             OPERATING_CASH_FLOW_CONCEPTS,
             metric_id=metric_id,
-            fx_service=fx_service,
         )
         if operating is None:
             return None
@@ -182,7 +186,6 @@ class _FCFDebtCalculator:
             repo,
             CAPEX_CONCEPTS,
             metric_id=metric_id,
-            fx_service=fx_service,
         )
         if capex is None:
             LOGGER.warning(
@@ -194,7 +197,7 @@ class _FCFDebtCalculator:
                 currency=operating.currency,
             )
 
-        aligned, currency = align_money_values(
+        aligned, currency = align_metric_money_values(
             values=[
                 (
                     operating.total,
@@ -204,17 +207,11 @@ class _FCFDebtCalculator:
                 ),
                 (capex.total, capex.currency, capex.as_of, CAPEX_CONCEPTS[0]),
             ],
-            fx_service=fx_service,
-            logger=LOGGER,
-            operation=f"metric:{metric_id}:fcf",
+            metric_id=metric_id,
             symbol=symbol,
-            target_currency=operating.currency or capex.currency,
+            expected_currency=operating.currency or capex.currency,
+            contexts=(repo,),
         )
-        if aligned is None or currency is None:
-            LOGGER.warning(
-                "%s: currency mismatch between OCF and capex for %s", metric_id, symbol
-            )
-            return None
         return _TTMResult(
             total=aligned[0] - aligned[1],
             as_of=max(operating.as_of, capex.as_of),
@@ -228,7 +225,6 @@ class _FCFDebtCalculator:
         concepts: Sequence[str],
         *,
         metric_id: str,
-        fx_service: FXService,
     ) -> Optional[_TTMResult]:
         for concept in concepts:
             records = repo.facts_for_concept(symbol, concept)
@@ -252,26 +248,17 @@ class _FCFDebtCalculator:
                 )
                 continue
 
-            normalized_values, currency = align_money_values(
+            normalized_values, currency = align_metric_money_values(
                 values=[
                     (record.value, record.currency, record.end_date, concept)
                     for record in quarterly[:4]
                     if record.value is not None
                 ],
-                fx_service=fx_service,
-                logger=LOGGER,
-                operation=f"metric:{metric_id}:{concept}",
+                metric_id=metric_id,
                 symbol=symbol,
-                target_currency=quarterly[0].currency,
+                expected_currency=quarterly[0].currency,
+                contexts=(repo,),
             )
-            if normalized_values is None:
-                LOGGER.warning(
-                    "%s: currency conflict in %s quarterly values for %s",
-                    metric_id,
-                    concept,
-                    symbol,
-                )
-                continue
             return _TTMResult(
                 total=sum(normalized_values),
                 as_of=quarterly[0].end_date,
@@ -303,15 +290,21 @@ class _FCFDebtCalculator:
             return None
         return record
 
-    def _normalize_currency(self, record: FactRecord) -> tuple[float, Optional[str]]:
-        normalized_value, normalized_currency = normalize_money_value(
-            record.value,
-            record.currency,
+    def _normalize_currency(
+        self,
+        record: FactRecord,
+        *,
+        symbol: str,
+        repo: FinancialFactsRepository,
+        metric_id: str,
+    ) -> tuple[float, str]:
+        normalized_value, normalized_currency = normalize_metric_record(
+            record,
+            metric_id=metric_id,
+            symbol=symbol,
+            contexts=(repo,),
         )
-        return (
-            record.value if normalized_value is None else normalized_value,
-            normalized_currency,
-        )
+        return normalized_value, normalized_currency
 
 
 @dataclass

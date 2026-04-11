@@ -6,10 +6,14 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Optional
 
 from pyvalue.metrics.base import MetricResult
+from pyvalue.metrics.utils import normalize_metric_amount
 from pyvalue.storage import FinancialFactsRepository, MarketDataRepository
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -26,15 +30,26 @@ class MarketCapitalizationMetric:
     ) -> Optional[MetricResult]:
         snapshot = market_repo.latest_snapshot(symbol)
         if snapshot is None or snapshot.market_cap is None or snapshot.as_of is None:
+            LOGGER.warning("market_cap: missing market cap snapshot for %s", symbol)
             return None
         if snapshot.market_cap <= 0:
+            LOGGER.warning("market_cap: non-positive market cap for %s", symbol)
             return None
+        value, currency = normalize_metric_amount(
+            snapshot.market_cap,
+            getattr(snapshot, "currency", None),
+            metric_id=self.id,
+            symbol=symbol,
+            input_name="market_cap",
+            as_of=snapshot.as_of,
+            contexts=(market_repo, repo),
+        )
         return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
-            value=snapshot.market_cap,
+            value=value,
             as_of=snapshot.as_of,
-            currency=getattr(snapshot, "currency", None),
+            currency=currency,
         )
 
 

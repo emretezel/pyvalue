@@ -12,8 +12,11 @@ from typing import Optional, Sequence
 import logging
 
 from pyvalue.metrics.base import MetricResult
-from pyvalue.metrics.utils import MAX_FY_FACT_AGE_DAYS
-from pyvalue.money import normalize_money_value
+from pyvalue.metrics.utils import (
+    MAX_FY_FACT_AGE_DAYS,
+    normalize_metric_record,
+    resolve_metric_ticker_currency,
+)
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -125,11 +128,13 @@ class FundamentalConsistencyCalculator:
             symbol,
             repo,
             OPERATING_CASH_FLOW_CONCEPTS,
+            context=context,
         )
         capex_map = self._build_fy_amount_map(
             symbol,
             repo,
             CAPEX_CONCEPTS,
+            context=context,
         )
 
         points: list[_FYPoint] = []
@@ -178,7 +183,12 @@ class FundamentalConsistencyCalculator:
         *,
         context: str,
     ) -> list[_FYPoint]:
-        amount_map = self._build_fy_amount_map(symbol, repo, concepts)
+        amount_map = self._build_fy_amount_map(
+            symbol,
+            repo,
+            concepts,
+            context=context,
+        )
         points: list[_FYPoint] = []
         for year in sorted(amount_map.keys(), reverse=True):
             amount = amount_map[year]
@@ -297,8 +307,12 @@ class FundamentalConsistencyCalculator:
         symbol: str,
         repo: FinancialFactsRepository,
         concepts: Sequence[str],
+        *,
+        context: str,
     ) -> dict[int, _AmountResult]:
-        concept_maps = [self._fy_map(symbol, repo, concept) for concept in concepts]
+        concept_maps = [
+            self._fy_map(symbol, repo, concept, context=context) for concept in concepts
+        ]
         merged: dict[int, _AmountResult] = {}
         candidate_years: set[int] = set()
         for mapped in concept_maps:
@@ -316,6 +330,8 @@ class FundamentalConsistencyCalculator:
         symbol: str,
         repo: FinancialFactsRepository,
         concept: str,
+        *,
+        context: str,
     ) -> dict[int, _AmountResult]:
         records = repo.facts_for_concept(symbol, concept, fiscal_period="FY")
         ordered = self._filter_periods(records)
@@ -324,7 +340,13 @@ class FundamentalConsistencyCalculator:
             year = self._parse_year(record.end_date)
             if year is None or year in mapped:
                 continue
-            value, currency = self._normalize_currency(record)
+            value, currency = self._normalize_currency(
+                record,
+                symbol=symbol,
+                repo=repo,
+                context=context,
+                input_name=concept,
+            )
             mapped[year] = _AmountResult(
                 total=value,
                 as_of=record.end_date,
@@ -347,14 +369,26 @@ class FundamentalConsistencyCalculator:
             seen_end_dates.add(record.end_date)
         return filtered
 
-    def _normalize_currency(self, record: FactRecord) -> tuple[float, Optional[str]]:
-        normalized_value, normalized_currency = normalize_money_value(
-            record.value,
-            record.currency,
-        )
-        return (
-            record.value if normalized_value is None else normalized_value,
-            normalized_currency,
+    def _normalize_currency(
+        self,
+        record: FactRecord,
+        *,
+        symbol: str,
+        repo: FinancialFactsRepository,
+        context: str,
+        input_name: str,
+    ) -> tuple[float, str]:
+        return normalize_metric_record(
+            record,
+            metric_id=context,
+            symbol=symbol,
+            input_name=input_name,
+            expected_currency=resolve_metric_ticker_currency(
+                symbol,
+                repo,
+                candidate_currencies=[record.currency],
+            ),
+            contexts=(repo,),
         )
 
     def _is_recent_as_of(self, as_of: str, *, max_age_days: int) -> bool:

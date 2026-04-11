@@ -9,7 +9,13 @@ from pyvalue.metrics.eps_quarterly import EarningsPerShareTTM
 from pyvalue.metrics.eps_average import EPSAverageSixYearMetric
 from pyvalue.metrics.long_term_debt import LongTermDebtMetric
 from pyvalue.metrics.roc_greenblatt import ROCGreenblattMetric
-from pyvalue.storage import FactRecord, FinancialFactsRepository
+from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
+
+
+def _store_market_currency(db_path, symbol: str, as_of: str, currency: str = "USD"):
+    market_repo = MarketDataRepository(db_path)
+    market_repo.initialize_schema()
+    market_repo.upsert_price(symbol, as_of, 10.0, currency=currency)
 
 
 def test_metric_skips_when_latest_fact_is_stale(tmp_path):
@@ -29,6 +35,7 @@ def test_metric_skips_when_latest_fact_is_stale(tmp_path):
             )
         ],
     )
+    _store_market_currency(tmp_path / "facts.db", "AAPL.US", stale_date)
 
     metric = LongTermDebtMetric()
 
@@ -52,6 +59,11 @@ def test_ttm_metric_requires_recent_quarters(tmp_path):
             )
         )
     repo.replace_facts("AAPL.US", records)
+    _store_market_currency(
+        tmp_path / "quarters.db",
+        "AAPL.US",
+        (today - timedelta(days=30)).isoformat(),
+    )
 
     metric = EarningsPerShareTTM()
     result = metric.compute("AAPL.US", repo)
@@ -77,6 +89,11 @@ def test_ttm_metric_skips_when_latest_quarter_is_stale(tmp_path):
             )
         )
     repo.replace_facts("AAPL.US", records)
+    _store_market_currency(
+        tmp_path / "stale_quarters.db",
+        "AAPL.US",
+        (today - timedelta(days=390)).isoformat(),
+    )
 
     metric = EarningsPerShareTTM()
 
@@ -112,6 +129,11 @@ def test_fy_metric_accepts_when_recent_quarter_exists(tmp_path):
         )
     )
     repo.replace_facts("AAPL.US", fy_records)
+    _store_market_currency(
+        tmp_path / "epsavg.db",
+        "AAPL.US",
+        (date.today() - timedelta(days=60)).isoformat(),
+    )
 
     metric = EPSAverageSixYearMetric()
     result = metric.compute("AAPL.US", repo)
@@ -193,6 +215,11 @@ def test_roc_metric_uses_recent_concept_even_if_fy_old(tmp_path):
                 value=20.0,
             ),
         ],
+    )
+    _store_market_currency(
+        tmp_path / "roc.db",
+        "TEST.US",
+        (date.today() - timedelta(days=45)).isoformat(),
     )
 
     metric = ROCGreenblattMetric()

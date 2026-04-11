@@ -13,11 +13,9 @@ import logging
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.enterprise_value import (
     EV_FALLBACK_REQUIRED_CONCEPTS,
-    FXConverter,
-    convert_denominator_amount,
     resolve_enterprise_value_denominator,
+    validate_denominator_amount,
 )
-from pyvalue.money import fx_converter_for_context
 from pyvalue.metrics.owner_earnings_enterprise import (
     REQUIRED_CONCEPTS as OE_EV_REQUIRED_CONCEPTS,
     OwnerEarningsEnterpriseCalculator,
@@ -36,27 +34,6 @@ REQUIRED_EV_CONCEPTS = tuple(
 )
 
 
-def _convert_denominator(
-    *,
-    symbol: str,
-    amount: float,
-    source_currency: Optional[str],
-    target_currency: Optional[str],
-    as_of: str,
-    context: str,
-    converter: FXConverter,
-) -> Optional[float]:
-    return convert_denominator_amount(
-        symbol=symbol,
-        amount=amount,
-        source_currency=source_currency,
-        target_currency=target_currency,
-        as_of=as_of,
-        context=context,
-        converter=converter,
-    )
-
-
 def _denominator_market_cap(
     *,
     symbol: str,
@@ -72,14 +49,14 @@ def _denominator_market_cap(
         LOGGER.warning("%s: non-positive market cap snapshot for %s", context, symbol)
         return None
 
-    return _convert_denominator(
+    return validate_denominator_amount(
         symbol=symbol,
         amount=snapshot.market_cap,
         source_currency=getattr(snapshot, "currency", None),
         target_currency=target_currency,
         as_of=snapshot.as_of,
         context=context,
-        converter=fx_converter_for_context(market_repo),
+        contexts=(market_repo,),
     )
 
 
@@ -91,14 +68,12 @@ def _denominator_enterprise_value(
     target_currency: Optional[str],
     context: str,
 ) -> Optional[float]:
-    converter = fx_converter_for_context(repo, market_repo)
     return resolve_enterprise_value_denominator(
         symbol=symbol,
         repo=repo,
         market_repo=market_repo,
         target_currency=target_currency,
         context=context,
-        converter=converter,
     )
 
 

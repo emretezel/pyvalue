@@ -11,8 +11,11 @@ from typing import Optional
 import logging
 
 from pyvalue.metrics.base import MetricResult
-from pyvalue.metrics.utils import is_recent_fact
-from pyvalue.money import fx_service_for_context
+from pyvalue.metrics.utils import (
+    is_recent_fact,
+    normalize_metric_record,
+    resolve_metric_ticker_currency,
+)
 from pyvalue.storage import FinancialFactsRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -44,32 +47,26 @@ class CurrentRatioMetric:
                 as_of_record.end_date,
             )
             return None
-        if assets.currency is None or liabilities.currency is None:
-            LOGGER.warning(
-                "current_ratio: missing currency for %s (assets=%s liabilities=%s)",
-                symbol,
-                assets.currency,
-                liabilities.currency,
-            )
-            return None
-        liabilities_value = liabilities.value
-        if liabilities.currency != assets.currency:
-            converted = fx_service_for_context(repo).convert_amount(
-                liabilities.value,
-                liabilities.currency,
-                assets.currency,
-                liabilities.end_date,
-            )
-            if converted is None:
-                LOGGER.warning(
-                    "current_ratio: FX conversion failed for %s (%s -> %s)",
-                    symbol,
-                    liabilities.currency,
-                    assets.currency,
-                )
-                return None
-            liabilities_value = float(converted)
-        ratio = assets.value / liabilities_value
+        target_currency = resolve_metric_ticker_currency(
+            symbol,
+            repo,
+            candidate_currencies=[assets.currency, liabilities.currency],
+        )
+        assets_value, _ = normalize_metric_record(
+            assets,
+            metric_id=self.id,
+            symbol=symbol,
+            expected_currency=target_currency,
+            contexts=(repo,),
+        )
+        liabilities_value, _ = normalize_metric_record(
+            liabilities,
+            metric_id=self.id,
+            symbol=symbol,
+            expected_currency=target_currency,
+            contexts=(repo,),
+        )
+        ratio = assets_value / liabilities_value
         as_of = as_of_record.end_date
         return MetricResult.ratio(
             symbol=symbol,

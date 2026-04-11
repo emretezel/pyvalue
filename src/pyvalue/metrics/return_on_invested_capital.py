@@ -10,14 +10,14 @@ from typing import Optional, Sequence
 
 import logging
 
-from pyvalue.fx import FXService
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     MAX_FY_FACT_AGE_DAYS,
     is_recent_fact,
+    normalize_metric_record,
+    require_metric_ticker_currency,
 )
-from pyvalue.money import align_money_values, fx_service_for_context
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -66,21 +66,18 @@ class ReturnOnInvestedCapitalMetric:
     def compute(
         self, symbol: str, repo: FinancialFactsRepository
     ) -> Optional[MetricResult]:
-        fx_service = fx_service_for_context(repo)
-        ebit = self._ttm_sum(symbol, repo, EBIT_CONCEPTS, fx_service=fx_service)
+        ebit = self._ttm_sum(symbol, repo, EBIT_CONCEPTS)
         if ebit is None:
             LOGGER.warning("roic: missing TTM EBIT for %s", symbol)
             return None
 
-        tax_rate = self._effective_tax_rate(symbol, repo, fx_service=fx_service)
+        tax_rate = self._effective_tax_rate(symbol, repo)
         nopat = ebit.total * (1.0 - tax_rate)
         if nopat <= 0:
             LOGGER.warning("roic: non-positive NOPAT for %s", symbol)
             return None
 
-        capital_points = self._invested_capital_points(
-            symbol, repo, fx_service=fx_service
-        )
+        capital_points = self._invested_capital_points(symbol, repo)
         if len(capital_points) < 2:
             LOGGER.warning("roic: insufficient invested capital history for %s", symbol)
             return None
@@ -91,25 +88,10 @@ class ReturnOnInvestedCapitalMetric:
             LOGGER.warning("roic: non-positive invested capital for %s", symbol)
             return None
 
-        aligned, _ = align_money_values(
-            values=[
-                (nopat, ebit.currency, ebit.as_of, EBIT_CONCEPTS[0]),
-                (avg_capital, latest.currency, latest.as_of, "avg_invested_capital"),
-            ],
-            fx_service=fx_service,
-            logger=LOGGER,
-            operation="metric:return_on_invested_capital",
-            symbol=symbol,
-            target_currency=ebit.currency or latest.currency,
-        )
-        if aligned is None:
-            LOGGER.warning("roic: currency mismatch for %s", symbol)
-            return None
-
         return MetricResult(
             symbol=symbol,
             metric_id=self.id,
-            value=aligned[0] / aligned[1],
+            value=nopat / avg_capital,
             as_of=max(ebit.as_of, latest.as_of),
             unit_kind="percent",
         )
@@ -118,37 +100,14 @@ class ReturnOnInvestedCapitalMetric:
         self,
         symbol: str,
         repo: FinancialFactsRepository,
-        *,
-        fx_service: FXService,
     ) -> float:
-        tax = self._ttm_sum(symbol, repo, TAX_EXPENSE_CONCEPTS, fx_service=fx_service)
-        pretax = self._ttm_sum(
-            symbol,
-            repo,
-            PRETAX_INCOME_CONCEPTS,
-            fx_service=fx_service,
-        )
+        tax = self._ttm_sum(symbol, repo, TAX_EXPENSE_CONCEPTS)
+        pretax = self._ttm_sum(symbol, repo, PRETAX_INCOME_CONCEPTS)
         if tax is None or pretax is None or pretax.total <= 0:
             return DEFAULT_TAX_RATE
-        aligned, _ = align_money_values(
-            values=[
-                (tax.total, tax.currency, tax.as_of, TAX_EXPENSE_CONCEPTS[0]),
-                (
-                    pretax.total,
-                    pretax.currency,
-                    pretax.as_of,
-                    PRETAX_INCOME_CONCEPTS[0],
-                ),
-            ],
-            fx_service=fx_service,
-            logger=LOGGER,
-            operation="metric:return_on_invested_capital:tax_rate",
-            symbol=symbol,
-            target_currency=tax.currency or pretax.currency,
-        )
-        if aligned is None or aligned[1] <= 0:
+        if pretax.total <= 0:
             return DEFAULT_TAX_RATE
-        rate = aligned[0] / aligned[1]
+        rate = tax.total / pretax.total
         if rate < 0 or rate > 1:
             return DEFAULT_TAX_RATE
         return rate
@@ -157,15 +116,12 @@ class ReturnOnInvestedCapitalMetric:
         self,
         symbol: str,
         repo: FinancialFactsRepository,
-        *,
-        fx_service: FXService,
     ) -> list[_CapitalPoint]:
         points = self._build_capital_points(
             symbol,
             repo,
             QUARTERLY_PERIODS,
             max_age_days=MAX_FACT_AGE_DAYS,
-            fx_service=fx_service,
         )
         if len(points) < 2:
             points = self._build_capital_points(
@@ -173,7 +129,6 @@ class ReturnOnInvestedCapitalMetric:
                 repo,
                 FY_PERIODS,
                 max_age_days=MAX_FY_FACT_AGE_DAYS,
-                fx_service=fx_service,
             )
         return points
 
@@ -184,7 +139,6 @@ class ReturnOnInvestedCapitalMetric:
         periods: set[str],
         *,
         max_age_days: int,
-        fx_service: FXService,
     ) -> list[_CapitalPoint]:
         short_map = self._period_map(
             repo.facts_for_concept(symbol, "ShortTermDebt"), periods
@@ -215,35 +169,10 @@ class ReturnOnInvestedCapitalMetric:
                 for record in (short, long, equity, cash)
             ):
                 continue
-            aligned, currency = align_money_values(
-                values=[
-                    (short.value, short.currency, short.end_date, "ShortTermDebt"),
-                    (long.value, long.currency, long.end_date, "LongTermDebt"),
-                    (
-                        equity.value,
-                        equity.currency,
-                        equity.end_date,
-                        "StockholdersEquity",
-                    ),
-                    (
-                        cash.value,
-                        cash.currency,
-                        cash.end_date,
-                        "CashAndShortTermInvestments",
-                    ),
-                ],
-                fx_service=fx_service,
-                logger=LOGGER,
-                operation="metric:return_on_invested_capital:capital",
-                symbol=symbol,
-                target_currency=short.currency
-                or long.currency
-                or equity.currency
-                or cash.currency,
+            currency = (
+                short.currency or long.currency or equity.currency or cash.currency
             )
-            if aligned is None or currency is None:
-                continue
-            invested_capital = aligned[0] + aligned[1] + aligned[2] - aligned[3]
+            invested_capital = short.value + long.value + equity.value - cash.value
             points.append(
                 _CapitalPoint(value=invested_capital, as_of=date_str, currency=currency)
             )
@@ -254,32 +183,35 @@ class ReturnOnInvestedCapitalMetric:
         symbol: str,
         repo: FinancialFactsRepository,
         concepts: Sequence[str],
-        *,
-        fx_service: FXService,
     ) -> Optional[_TTMResult]:
         for concept in concepts:
             records = repo.facts_for_concept(symbol, concept)
             quarterly = self._filter_quarterly(records)
             if len(quarterly) < 4 or not is_recent_fact(quarterly[0]):
                 continue
-            normalized, currency = align_money_values(
-                values=[
-                    (record.value, record.currency, record.end_date, concept)
-                    for record in quarterly[:4]
-                    if record.value is not None
-                ],
-                fx_service=fx_service,
-                logger=LOGGER,
-                operation=f"metric:return_on_invested_capital:{concept}",
-                symbol=symbol,
-                target_currency=quarterly[0].currency,
+            target_currency = require_metric_ticker_currency(
+                symbol,
+                repo,
+                metric_id=self.id,
+                input_name=concept,
+                as_of=quarterly[0].end_date if quarterly else None,
+                candidate_currencies=[record.currency for record in quarterly[:4]],
             )
-            if normalized is None:
-                continue
+            normalized: list[float] = []
+            for record in quarterly[:4]:
+                value, _ = normalize_metric_record(
+                    record,
+                    metric_id=self.id,
+                    symbol=symbol,
+                    input_name=concept,
+                    expected_currency=target_currency,
+                    contexts=(repo,),
+                )
+                normalized.append(value)
             return _TTMResult(
                 total=sum(normalized),
                 as_of=quarterly[0].end_date,
-                currency=currency,
+                currency=target_currency,
             )
         return None
 

@@ -10,10 +10,12 @@ from typing import Optional, Sequence
 
 import logging
 
-from pyvalue.fx import FXService
 from pyvalue.metrics.base import MetricResult
-from pyvalue.metrics.utils import is_recent_fact
-from pyvalue.money import align_money_values, fx_service_for_context
+from pyvalue.metrics.utils import (
+    is_recent_fact,
+    normalize_metric_record,
+    require_metric_ticker_currency,
+)
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -36,7 +38,6 @@ class InterestCoverageMetric:
     def compute(
         self, symbol: str, repo: FinancialFactsRepository
     ) -> Optional[MetricResult]:
-        fx_service = fx_service_for_context(repo)
         ebit_quarters = self._quarterly_map(
             repo.facts_for_concept(symbol, EBIT_CONCEPTS[0])
         )
@@ -48,7 +49,7 @@ class InterestCoverageMetric:
             ebit_quarters=ebit_quarters,
             interest_quarters=direct_interest_quarters,
             log_failures=False,
-            fx_service=fx_service,
+            repo=repo,
         )
         if result is not None:
             return result
@@ -71,7 +72,7 @@ class InterestCoverageMetric:
             ebit_quarters=ebit_quarters,
             interest_quarters=merged_interest_quarters,
             log_failures=True,
-            fx_service=fx_service,
+            repo=repo,
         )
 
     def _compute_from_maps(
@@ -81,7 +82,7 @@ class InterestCoverageMetric:
         ebit_quarters: dict[str, FactRecord],
         interest_quarters: dict[str, FactRecord],
         log_failures: bool,
-        fx_service: FXService,
+        repo: FinancialFactsRepository,
     ) -> Optional[MetricResult]:
         common_dates = sorted(
             set(ebit_quarters).intersection(interest_quarters), reverse=True
@@ -110,48 +111,17 @@ class InterestCoverageMetric:
             ebit_records,
             symbol=symbol,
             concept=EBIT_CONCEPTS[0],
-            fx_service=fx_service,
+            repo=repo,
         )
         normalized_interest, interest_currency = self._normalize_records(
             interest_records,
             symbol=symbol,
             concept=INTEREST_CONCEPTS[0],
-            fx_service=fx_service,
+            repo=repo,
         )
-        if normalized_ebit is None or normalized_interest is None:
-            if log_failures:
-                LOGGER.warning(
-                    "interest_coverage: currency conflict in quarterly values for %s",
-                    symbol,
-                )
-            return None
-
-        if ebit_currency is None or interest_currency is None:
-            if log_failures:
-                LOGGER.warning("interest_coverage: missing currency for %s", symbol)
-            return None
-        aligned_interest, _ = align_money_values(
-            values=[
-                (
-                    sum(normalized_interest),
-                    interest_currency,
-                    interest_records[0].end_date,
-                    INTEREST_CONCEPTS[0],
-                )
-            ],
-            fx_service=fx_service,
-            logger=LOGGER,
-            operation="metric:interest_coverage",
-            symbol=symbol,
-            target_currency=ebit_currency,
-        )
-        if aligned_interest is None:
-            if log_failures:
-                LOGGER.warning("interest_coverage: currency mismatch for %s", symbol)
-            return None
 
         ebit_ttm = sum(normalized_ebit)
-        interest_ttm = aligned_interest[0]
+        interest_ttm = sum(normalized_interest)
         if ebit_ttm <= 0:
             if log_failures:
                 LOGGER.warning("interest_coverage: non-positive EBIT for %s", symbol)
@@ -199,20 +169,28 @@ class InterestCoverageMetric:
         *,
         symbol: str,
         concept: str,
-        fx_service: FXService,
-    ) -> tuple[Optional[list[float]], Optional[str]]:
-        return align_money_values(
-            values=[
-                (record.value, record.currency, record.end_date, concept)
-                for record in records
-                if record.value is not None
-            ],
-            fx_service=fx_service,
-            logger=LOGGER,
-            operation=f"metric:{self.id}:{concept}",
-            symbol=symbol,
-            target_currency=records[0].currency if records else None,
+        repo: FinancialFactsRepository,
+    ) -> tuple[list[float], str]:
+        target_currency = require_metric_ticker_currency(
+            symbol,
+            repo,
+            metric_id=self.id,
+            input_name=concept,
+            as_of=records[0].end_date if records else None,
+            candidate_currencies=[record.currency for record in records],
         )
+        normalized: list[float] = []
+        for record in records:
+            value, _ = normalize_metric_record(
+                record,
+                metric_id=self.id,
+                symbol=symbol,
+                input_name=concept,
+                expected_currency=target_currency,
+                contexts=(repo,),
+            )
+            normalized.append(value)
+        return normalized, target_currency
 
 
 __all__ = ["InterestCoverageMetric"]

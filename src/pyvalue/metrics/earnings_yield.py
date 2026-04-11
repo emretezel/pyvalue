@@ -11,9 +11,14 @@ from typing import Optional
 import logging
 
 from pyvalue.metrics.base import MetricResult
-from pyvalue.metrics.utils import is_recent_fact, latest_quarterly_records
+from pyvalue.metrics.utils import (
+    is_recent_fact,
+    latest_quarterly_records,
+    normalize_metric_amount,
+    normalize_metric_record,
+    resolve_metric_ticker_currency,
+)
 from pyvalue.marketdata.base import PriceData
-from pyvalue.money import fx_converter_for_context
 from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
 
 EPS_CONCEPTS = ["EarningsPerShare"]
@@ -34,11 +39,26 @@ class EarningsYieldMetric:
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
         quarterly_records = self._latest_quarters(symbol, repo)
-        eps_currency = None
         if len(quarterly_records) >= 4:
-            ttm_eps = sum(record.value for record in quarterly_records[:4])
+            target_currency = resolve_metric_ticker_currency(
+                symbol,
+                repo,
+                market_repo,
+                candidate_currencies=[
+                    record.currency for record in quarterly_records[:4]
+                ],
+            )
+            ttm_eps = sum(
+                normalize_metric_record(
+                    record,
+                    metric_id=self.id,
+                    symbol=symbol,
+                    expected_currency=target_currency,
+                    contexts=(repo,),
+                )[0]
+                for record in quarterly_records[:4]
+            )
             as_of = quarterly_records[0].end_date
-            eps_currency = quarterly_records[0].currency
         else:
             fy_record = self._latest_fy_eps(symbol, repo)
             if fy_record is None:
@@ -51,37 +71,30 @@ class EarningsYieldMetric:
                     fy_record.end_date,
                 )
                 return None
-            if fy_record.value is None:
-                LOGGER.warning("earnings_yield: missing FY EPS value for %s", symbol)
-                return None
-            ttm_eps = fy_record.value
+            ttm_eps, target_currency = normalize_metric_record(
+                fy_record,
+                metric_id=self.id,
+                symbol=symbol,
+                contexts=(repo, market_repo),
+            )
             as_of = fy_record.end_date
-            eps_currency = fy_record.currency
         price_data = self._latest_snapshot(market_repo, symbol)
         if price_data is None or price_data.price is None:
             LOGGER.warning("earnings_yield: missing price for %s", symbol)
             return None
-        price = price_data.price
-        target_currency = self._select_currency(quarterly_records, eps_currency)
-        if (
-            target_currency
-            and price_data.currency
-            and price_data.currency != target_currency
-        ):
-            converted = fx_converter_for_context(repo)(
-                price, price_data.currency, target_currency, price_data.as_of
-            )
-            if converted is None:
-                LOGGER.warning(
-                    "earnings_yield: FX conversion failed %s -> %s for %s",
-                    price_data.currency,
-                    target_currency,
-                    symbol,
-                )
-                return None
-            price = converted
-        if price is None or price <= 0:
-            LOGGER.warning("earnings_yield: non-positive price after FX for %s", symbol)
+        price_currency = price_data.currency
+        price, _ = normalize_metric_amount(
+            price_data.price,
+            price_currency,
+            metric_id=self.id,
+            symbol=symbol,
+            input_name="price",
+            as_of=price_data.as_of,
+            expected_currency=target_currency,
+            contexts=(market_repo, repo),
+        )
+        if price <= 0:
+            LOGGER.warning("earnings_yield: non-positive price for %s", symbol)
             return None
         yield_value = ttm_eps / price
         return MetricResult(
@@ -120,12 +133,3 @@ class EarningsYieldMetric:
                 as_of, price = price_entry[0], price_entry[1]
                 return PriceData(symbol=symbol, price=price, as_of=as_of)
         return None
-
-    def _select_currency(
-        self, records: list[FactRecord], fallback: Optional[str]
-    ) -> Optional[str]:
-        for record in records:
-            code = getattr(record, "currency", None)
-            if code:
-                return code
-        return fallback

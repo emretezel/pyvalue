@@ -607,7 +607,14 @@ class EODHDFactsNormalizer:
         if not end_date:
             return []
 
-        currency = _normalize_currency_code(default_currency)
+        currency_resolution = resolve_eodhd_currency(
+            valuation if isinstance(valuation, Mapping) else None,
+            statement_currency=self._enterprise_value_statement_currency(
+                payload.get("Financials") or {}
+            ),
+            payload_currency=default_currency,
+        )
+        currency = currency_resolution.currency_code
         normalized_value, normalized_currency = self._normalize_value_currency(
             raw_value, currency
         )
@@ -630,6 +637,20 @@ class EODHDFactsNormalizer:
                 currency=normalized_currency,
             )
         ]
+
+    def _enterprise_value_statement_currency(
+        self, financials: Mapping[str, object]
+    ) -> Optional[str]:
+        """Return the first usable statement-derived currency for valuation facts."""
+
+        for statement_name in ("Balance_Sheet", "Income_Statement", "Cash_Flow"):
+            statement_payload = financials.get(statement_name)
+            if not isinstance(statement_payload, dict):
+                continue
+            code = self._normalize_statement_currency(statement_payload, None)
+            if code is not None:
+                return code
+        return None
 
     def _latest_financials_end_date(self, financials: Dict) -> Optional[str]:
         latest: Optional[str] = None

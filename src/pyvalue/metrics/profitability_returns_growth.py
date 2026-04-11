@@ -14,8 +14,7 @@ import logging
 from pyvalue.metrics.accruals_ratio import AccrualsRatioCalculator
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.buyback_yield import NetBuybackYieldMetric
-from pyvalue.metrics.enterprise_value import convert_denominator_amount
-from pyvalue.money import fx_converter_for_context, normalize_money_value
+from pyvalue.metrics.enterprise_value import validate_denominator_amount
 from pyvalue.metrics.owner_earnings_enterprise import (
     REQUIRED_CONCEPTS as OE_ENTERPRISE_REQUIRED_CONCEPTS,
     OwnerEarningsEnterpriseCalculator,
@@ -24,6 +23,8 @@ from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     MAX_FY_FACT_AGE_DAYS,
     is_recent_fact,
+    normalize_metric_record,
+    require_metric_ticker_currency,
 )
 from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
 
@@ -398,6 +399,7 @@ class ProfitabilityReturnsGrowthCalculator:
             cash_yield = self._compute_cash_dividend_yield(
                 symbol,
                 dividends_paid,
+                repo,
                 market_repo,
                 context="dividend_yield_ttm",
             )
@@ -424,19 +426,19 @@ class ProfitabilityReturnsGrowthCalculator:
             LOGGER.warning("dividend_yield_ttm: missing price snapshot for %s", symbol)
             return None
 
-        price = convert_denominator_amount(
+        price = validate_denominator_amount(
             symbol=symbol,
             amount=snapshot.price,
             source_currency=getattr(snapshot, "currency", None),
             target_currency=dividend_per_share.currency,
             as_of=snapshot.as_of,
             context="dividend_yield_ttm",
-            converter=fx_converter_for_context(repo),
+            contexts=(market_repo, repo),
         )
         if price is None or price <= 0:
             if price is not None:
                 LOGGER.warning(
-                    "dividend_yield_ttm: non-positive FX-adjusted price for %s",
+                    "dividend_yield_ttm: non-positive price for %s",
                     symbol,
                 )
             return None
@@ -585,6 +587,7 @@ class ProfitabilityReturnsGrowthCalculator:
         self,
         symbol: str,
         dividends_paid: _AmountSnapshot,
+        repo: FinancialFactsRepository,
         market_repo: MarketDataRepository,
         *,
         context: str,
@@ -594,19 +597,19 @@ class ProfitabilityReturnsGrowthCalculator:
             LOGGER.warning("%s: missing market cap snapshot for %s", context, symbol)
             return None
 
-        market_cap = convert_denominator_amount(
+        market_cap = validate_denominator_amount(
             symbol=symbol,
             amount=snapshot.market_cap,
             source_currency=getattr(snapshot, "currency", None),
             target_currency=dividends_paid.currency,
             as_of=snapshot.as_of,
             context=context,
-            converter=fx_converter_for_context(market_repo),
+            contexts=(market_repo, repo),
         )
         if market_cap is None or market_cap <= 0:
             if market_cap is not None:
                 LOGGER.warning(
-                    "%s: non-positive FX-adjusted market cap for %s",
+                    "%s: non-positive market cap for %s",
                     context,
                     symbol,
                 )
@@ -681,14 +684,26 @@ class ProfitabilityReturnsGrowthCalculator:
         currencies: list[Optional[str]] = []
         as_of_dates: list[str] = []
         for revenue_record in revenue_records[:4]:
-            revenue_value, revenue_currency = self._normalize_record(revenue_record)
+            revenue_value, revenue_currency = self._normalize_record(
+                revenue_record,
+                symbol=symbol,
+                repo=repo,
+                context=context,
+                input_name=REVENUE_CONCEPT,
+            )
             key = (
                 revenue_record.end_date,
                 (revenue_record.fiscal_period or "").upper(),
             )
             cogs_record = cogs_map.get(key)
             if cogs_record is not None:
-                cogs_value, cogs_currency = self._normalize_record(cogs_record)
+                cogs_value, cogs_currency = self._normalize_record(
+                    cogs_record,
+                    symbol=symbol,
+                    repo=repo,
+                    context=context,
+                    input_name=COST_OF_REVENUE_CONCEPT,
+                )
                 if not self._currencies_match(revenue_currency, cogs_currency):
                     LOGGER.warning(
                         "%s: revenue/COGS currency mismatch on %s for %s",
@@ -712,7 +727,11 @@ class ProfitabilityReturnsGrowthCalculator:
                 )
                 return None
             gross_profit_value, gross_profit_currency = self._normalize_record(
-                gross_profit_record
+                gross_profit_record,
+                symbol=symbol,
+                repo=repo,
+                context=context,
+                input_name=GROSS_PROFIT_CONCEPT,
             )
             if not self._currencies_match(revenue_currency, gross_profit_currency):
                 LOGGER.warning(
@@ -787,9 +806,14 @@ class ProfitabilityReturnsGrowthCalculator:
         context: str,
     ) -> Optional[_AmountSnapshot]:
         quarterly_points = self._build_common_equity_points(
-            symbol, repo, QUARTERLY_PERIODS
+            symbol, repo, QUARTERLY_PERIODS, context=context
         )
-        fy_points = self._build_common_equity_points(symbol, repo, FY_PERIODS)
+        fy_points = self._build_common_equity_points(
+            symbol,
+            repo,
+            FY_PERIODS,
+            context=context,
+        )
         return self._compute_average_balance_points(
             quarterly_points,
             fy_points,
@@ -830,6 +854,8 @@ class ProfitabilityReturnsGrowthCalculator:
         symbol: str,
         repo: FinancialFactsRepository,
         periods: set[str],
+        *,
+        context: str,
     ) -> list[_BalancePoint]:
         equity_map = self._period_record_map(
             repo.facts_for_concept(symbol, COMMON_EQUITY_CONCEPT), periods
@@ -840,7 +866,13 @@ class ProfitabilityReturnsGrowthCalculator:
             key=lambda item: (item[0][0], item[0][1]),
             reverse=True,
         ):
-            value, currency = self._normalize_record(record)
+            value, currency = self._normalize_record(
+                record,
+                symbol=symbol,
+                repo=repo,
+                context=context,
+                input_name=COMMON_EQUITY_CONCEPT,
+            )
             points.append(
                 _BalancePoint(
                     value=value,
@@ -878,13 +910,23 @@ class ProfitabilityReturnsGrowthCalculator:
             key=lambda item: (item[0][0], item[0][1]),
             reverse=True,
         ):
-            equity_value, equity_currency = self._normalize_record(equity_record)
+            equity_value, equity_currency = self._normalize_record(
+                equity_record,
+                symbol=symbol,
+                repo=repo,
+                context=context,
+                input_name=COMMON_EQUITY_CONCEPT,
+            )
             goodwill_record = goodwill_map.get(key)
             goodwill_value = 0.0
             goodwill_currency = None
             if goodwill_record is not None:
                 goodwill_value, goodwill_currency = self._normalize_record(
-                    goodwill_record
+                    goodwill_record,
+                    symbol=symbol,
+                    repo=repo,
+                    context=context,
+                    input_name=GOODWILL_CONCEPT,
                 )
 
             intangibles_record = intangibles_primary_map.get(key)
@@ -894,7 +936,11 @@ class ProfitabilityReturnsGrowthCalculator:
             intangible_currency = None
             if intangibles_record is not None:
                 intangible_value, intangible_currency = self._normalize_record(
-                    intangibles_record
+                    intangibles_record,
+                    symbol=symbol,
+                    repo=repo,
+                    context=context,
+                    input_name=intangibles_record.concept,
                 )
 
             currency = self._combine_currency(
@@ -1015,16 +1061,13 @@ class ProfitabilityReturnsGrowthCalculator:
             if not is_recent_fact(quarterly[0], max_age_days=MAX_FACT_AGE_DAYS):
                 continue
             normalized, currency = self._normalize_records(
-                quarterly[:4], absolute=absolute
+                quarterly[:4],
+                symbol=symbol,
+                repo=repo,
+                context=context,
+                input_name=concept,
+                absolute=absolute,
             )
-            if normalized is None:
-                LOGGER.warning(
-                    "%s: currency conflict in %s quarterly values for %s",
-                    context,
-                    concept,
-                    symbol,
-                )
-                continue
             return _AmountSnapshot(
                 value=sum(normalized),
                 as_of=quarterly[0].end_date,
@@ -1048,7 +1091,14 @@ class ProfitabilityReturnsGrowthCalculator:
                 continue
             if not is_recent_fact(record, max_age_days=max_age_days):
                 continue
-            value, currency = self._normalize_record(record, absolute=absolute)
+            value, currency = self._normalize_record(
+                record,
+                symbol=symbol,
+                repo=repo,
+                context=context,
+                input_name=concept,
+                absolute=absolute,
+            )
             return _AmountSnapshot(
                 value=value, as_of=record.end_date, currency=currency
             )
@@ -1065,9 +1115,17 @@ class ProfitabilityReturnsGrowthCalculator:
         context: str,
     ) -> list[_FYPoint]:
         operating_map = self._build_fy_amount_map(
-            symbol, repo, OPERATING_CASH_FLOW_CONCEPTS
+            symbol,
+            repo,
+            OPERATING_CASH_FLOW_CONCEPTS,
+            context=context,
         )
-        capex_map = self._build_fy_amount_map(symbol, repo, CAPEX_CONCEPTS)
+        capex_map = self._build_fy_amount_map(
+            symbol,
+            repo,
+            CAPEX_CONCEPTS,
+            context=context,
+        )
         points: list[_FYPoint] = []
         for year in sorted(operating_map.keys(), reverse=True):
             operating = operating_map[year]
@@ -1121,6 +1179,7 @@ class ProfitabilityReturnsGrowthCalculator:
             symbol,
             repo,
             concepts,
+            context=context,
             absolute=absolute,
         )
         points = [
@@ -1142,10 +1201,11 @@ class ProfitabilityReturnsGrowthCalculator:
         repo: FinancialFactsRepository,
         concepts: Sequence[str],
         *,
+        context: str,
         absolute: bool = False,
     ) -> dict[int, _AmountSnapshot]:
         concept_maps = [
-            self._fy_map(symbol, repo, concept, absolute=absolute)
+            self._fy_map(symbol, repo, concept, context=context, absolute=absolute)
             for concept in concepts
         ]
         merged: dict[int, _AmountSnapshot] = {}
@@ -1165,6 +1225,7 @@ class ProfitabilityReturnsGrowthCalculator:
         repo: FinancialFactsRepository,
         concept: str,
         *,
+        context: str,
         absolute: bool = False,
     ) -> dict[int, _AmountSnapshot]:
         records = repo.facts_for_concept(symbol, concept, fiscal_period="FY")
@@ -1174,7 +1235,14 @@ class ProfitabilityReturnsGrowthCalculator:
             year = self._parse_year(record.end_date)
             if year is None or year in mapped:
                 continue
-            value, currency = self._normalize_record(record, absolute=absolute)
+            value, currency = self._normalize_record(
+                record,
+                symbol=symbol,
+                repo=repo,
+                context=context,
+                input_name=concept,
+                absolute=absolute,
+            )
             mapped[year] = _AmountSnapshot(
                 value=value,
                 as_of=record.end_date,
@@ -1271,30 +1339,60 @@ class ProfitabilityReturnsGrowthCalculator:
         self,
         records: Sequence[FactRecord],
         *,
+        symbol: str,
+        repo: FinancialFactsRepository,
+        context: str,
+        input_name: str,
         absolute: bool = False,
-    ) -> tuple[Optional[list[float]], Optional[str]]:
+    ) -> tuple[list[float], str]:
         normalized: list[float] = []
-        currency: Optional[str] = None
+        currency = require_metric_ticker_currency(
+            symbol,
+            repo,
+            metric_id=context,
+            input_name=input_name,
+            as_of=records[0].end_date if records else None,
+            candidate_currencies=[record.currency for record in records],
+        )
         for record in records:
-            value, code = self._normalize_record(record, absolute=absolute)
-            if currency is None and code:
-                currency = code
-            elif code and currency and code != currency:
-                return None, None
+            value, code = self._normalize_record(
+                record,
+                symbol=symbol,
+                repo=repo,
+                context=context,
+                input_name=input_name,
+                absolute=absolute,
+            )
             normalized.append(value)
+            currency = code
         return normalized, currency
 
     def _normalize_record(
         self,
         record: FactRecord,
         *,
+        symbol: str,
+        repo: FinancialFactsRepository,
+        context: str,
+        input_name: str,
         absolute: bool = False,
-    ) -> tuple[float, Optional[str]]:
-        normalized_value, currency = normalize_money_value(
-            record.value,
-            record.currency,
+    ) -> tuple[float, str]:
+        target_currency = require_metric_ticker_currency(
+            symbol,
+            repo,
+            metric_id=context,
+            input_name=input_name,
+            as_of=record.end_date,
+            candidate_currencies=[record.currency],
         )
-        value = record.value if normalized_value is None else normalized_value
+        value, currency = normalize_metric_record(
+            record,
+            metric_id=context,
+            symbol=symbol,
+            input_name=input_name,
+            expected_currency=target_currency,
+            contexts=(repo,),
+        )
         if absolute:
             value = abs(value)
         return value, currency

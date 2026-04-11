@@ -13,11 +13,10 @@ from typing import Optional, Sequence
 import logging
 
 from pyvalue.metrics.base import MetricResult
-from pyvalue.metrics.utils import MAX_FY_FACT_AGE_DAYS
-from pyvalue.money import (
-    align_money_values,
-    fx_service_for_context,
-    normalize_money_value,
+from pyvalue.metrics.utils import (
+    MAX_FY_FACT_AGE_DAYS,
+    normalize_metric_record,
+    resolve_metric_ticker_currency,
 )
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
@@ -65,7 +64,6 @@ class GrossMarginTenYearCalculator:
     def compute_series(
         self, symbol: str, repo: FinancialFactsRepository
     ) -> Optional[GrossMarginTenYearSnapshot]:
-        fx_service = fx_service_for_context(repo)
         revenue_map = self._fy_map(symbol, repo, REVENUE_CONCEPT)
         if not revenue_map:
             LOGGER.warning("gm_10y_std: missing FY revenues history for %s", symbol)
@@ -81,59 +79,13 @@ class GrossMarginTenYearCalculator:
 
             gross_profit = gross_profit_map.get(year)
             if gross_profit is not None:
-                aligned, _ = align_money_values(
-                    values=[
-                        (
-                            revenue.total,
-                            revenue.currency,
-                            revenue.as_of,
-                            REVENUE_CONCEPT,
-                        ),
-                        (
-                            gross_profit.total,
-                            gross_profit.currency,
-                            gross_profit.as_of,
-                            GROSS_PROFIT_CONCEPT,
-                        ),
-                    ],
-                    fx_service=fx_service,
-                    logger=LOGGER,
-                    operation="metric:gm_10y_std:gross_profit",
-                    symbol=symbol,
-                    target_currency=revenue.currency or gross_profit.currency,
-                )
-                if aligned is None:
-                    continue
-                gross_profit_total = aligned[1]
+                gross_profit_total = gross_profit.total
                 as_of = max(revenue.as_of, gross_profit.as_of)
             else:
                 cost_of_revenue = cost_of_revenue_map.get(year)
                 if cost_of_revenue is None:
                     continue
-                aligned, _ = align_money_values(
-                    values=[
-                        (
-                            revenue.total,
-                            revenue.currency,
-                            revenue.as_of,
-                            REVENUE_CONCEPT,
-                        ),
-                        (
-                            cost_of_revenue.total,
-                            cost_of_revenue.currency,
-                            cost_of_revenue.as_of,
-                            COST_OF_REVENUE_CONCEPT,
-                        ),
-                    ],
-                    fx_service=fx_service,
-                    logger=LOGGER,
-                    operation="metric:gm_10y_std:cost_of_revenue",
-                    symbol=symbol,
-                    target_currency=revenue.currency or cost_of_revenue.currency,
-                )
-                if aligned is None:
-                    continue
-                gross_profit_total = aligned[0] - aligned[1]
+                gross_profit_total = revenue.total - cost_of_revenue.total
                 as_of = max(revenue.as_of, cost_of_revenue.as_of)
 
             margins_by_year[year] = _GrossMarginFYPoint(
@@ -183,7 +135,7 @@ class GrossMarginTenYearCalculator:
             year = self._extract_year(record.end_date)
             if year is None or year in mapped:
                 continue
-            value, currency = self._normalize_currency(record)
+            value, currency = self._normalize_currency(record, symbol, repo, concept)
             mapped[year] = _AmountResult(
                 total=value,
                 as_of=record.end_date,
@@ -208,14 +160,24 @@ class GrossMarginTenYearCalculator:
             seen_end_dates.add(record.end_date)
         return filtered
 
-    def _normalize_currency(self, record: FactRecord) -> tuple[float, Optional[str]]:
-        normalized_value, normalized_currency = normalize_money_value(
-            record.value,
-            record.currency,
-        )
-        return (
-            record.value if normalized_value is None else normalized_value,
-            normalized_currency,
+    def _normalize_currency(
+        self,
+        record: FactRecord,
+        symbol: str,
+        repo: FinancialFactsRepository,
+        concept: str,
+    ) -> tuple[float, str]:
+        return normalize_metric_record(
+            record,
+            metric_id="gm_10y_std",
+            symbol=symbol,
+            input_name=concept,
+            expected_currency=resolve_metric_ticker_currency(
+                symbol,
+                repo,
+                candidate_currencies=[record.currency],
+            ),
+            contexts=(repo,),
         )
 
     def _extract_year(self, value: str) -> Optional[int]:

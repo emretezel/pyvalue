@@ -10,13 +10,11 @@ from typing import Optional
 
 import logging
 
-from pyvalue.fx import FXService
 from pyvalue.metrics.base import MetricResult
-from pyvalue.metrics.utils import is_recent_fact
-from pyvalue.money import (
-    align_money_values,
-    fx_service_for_context,
-    normalize_money_value,
+from pyvalue.metrics.utils import (
+    is_recent_fact,
+    normalize_metric_record,
+    require_metric_ticker_currency,
 )
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
@@ -43,7 +41,6 @@ class ShortTermDebtShareMetric:
     def compute(
         self, symbol: str, repo: FinancialFactsRepository
     ) -> Optional[MetricResult]:
-        fx_service = fx_service_for_context(repo)
         short_record = self._latest_recent_fact(repo, symbol, "ShortTermDebt")
         if short_record is None:
             LOGGER.warning(
@@ -51,7 +48,12 @@ class ShortTermDebtShareMetric:
             )
             return None
 
-        short_value, short_currency = self._normalize_currency(short_record)
+        short_value, short_currency = self._normalize_currency(
+            short_record,
+            symbol,
+            repo,
+            "ShortTermDebt",
+        )
         short_debt = _DebtAmount(
             value=short_value,
             as_of=short_record.end_date,
@@ -62,7 +64,6 @@ class ShortTermDebtShareMetric:
             symbol=symbol,
             repo=repo,
             short_debt=short_debt,
-            fx_service=fx_service,
         )
         if total_debt is None:
             LOGGER.warning(
@@ -76,27 +77,7 @@ class ShortTermDebtShareMetric:
             )
             return None
 
-        aligned, _ = align_money_values(
-            values=[
-                (
-                    short_debt.value,
-                    short_debt.currency,
-                    short_debt.as_of,
-                    "ShortTermDebt",
-                ),
-                (total_debt.value, total_debt.currency, total_debt.as_of, "TotalDebt"),
-            ],
-            fx_service=fx_service,
-            logger=LOGGER,
-            operation="metric:short_term_debt_share",
-            symbol=symbol,
-            target_currency=short_debt.currency or total_debt.currency,
-        )
-        if aligned is None:
-            LOGGER.warning("short_term_debt_share: currency mismatch for %s", symbol)
-            return None
-
-        ratio = aligned[0] / aligned[1]
+        ratio = short_debt.value / total_debt.value
         if ratio < 0 or ratio > 1:
             LOGGER.warning("short_term_debt_share: ratio out of bounds for %s", symbol)
             return None
@@ -116,40 +97,34 @@ class ShortTermDebtShareMetric:
         symbol: str,
         repo: FinancialFactsRepository,
         short_debt: _DebtAmount,
-        fx_service: FXService,
     ) -> Optional[_DebtAmount]:
         long_record = self._latest_recent_fact(repo, symbol, "LongTermDebt")
         if long_record is not None:
-            long_value, long_currency = self._normalize_currency(long_record)
-            aligned, currency = align_money_values(
-                values=[
-                    (
-                        short_debt.value,
-                        short_debt.currency,
-                        short_debt.as_of,
-                        "ShortTermDebt",
-                    ),
-                    (long_value, long_currency, long_record.end_date, "LongTermDebt"),
-                ],
-                fx_service=fx_service,
-                logger=LOGGER,
-                operation="metric:short_term_debt_share:debt_components",
-                symbol=symbol,
-                target_currency=short_debt.currency or long_currency,
+            long_value, long_currency = self._normalize_currency(
+                long_record,
+                symbol,
+                repo,
+                "LongTermDebt",
+                expected_currency=short_debt.currency,
             )
-            if aligned is not None and currency is not None:
-                return _DebtAmount(
-                    value=aligned[0] + aligned[1],
-                    as_of=max(short_debt.as_of, long_record.end_date),
-                    currency=currency,
-                )
+            return _DebtAmount(
+                value=short_debt.value + long_value,
+                as_of=max(short_debt.as_of, long_record.end_date),
+                currency=short_debt.currency or long_currency,
+            )
 
         total_record = self._latest_recent_fact(
             repo, symbol, "TotalDebtFromBalanceSheet"
         )
         if total_record is None:
             return None
-        total_value, total_currency = self._normalize_currency(total_record)
+        total_value, total_currency = self._normalize_currency(
+            total_record,
+            symbol,
+            repo,
+            "TotalDebtFromBalanceSheet",
+            expected_currency=short_debt.currency,
+        )
         return _DebtAmount(
             value=total_value,
             as_of=total_record.end_date,
@@ -164,14 +139,29 @@ class ShortTermDebtShareMetric:
             return None
         return record
 
-    def _normalize_currency(self, record: FactRecord) -> tuple[float, Optional[str]]:
-        normalized_value, normalized_currency = normalize_money_value(
-            record.value,
-            record.currency,
-        )
-        return (
-            record.value if normalized_value is None else normalized_value,
-            normalized_currency,
+    def _normalize_currency(
+        self,
+        record: FactRecord,
+        symbol: str,
+        repo: FinancialFactsRepository,
+        concept: str,
+        expected_currency: Optional[str] = None,
+    ) -> tuple[float, str]:
+        return normalize_metric_record(
+            record,
+            metric_id=self.id,
+            symbol=symbol,
+            input_name=concept,
+            expected_currency=expected_currency
+            or require_metric_ticker_currency(
+                symbol,
+                repo,
+                metric_id=self.id,
+                input_name=concept,
+                as_of=record.end_date,
+                candidate_currencies=[record.currency],
+            ),
+            contexts=(repo,),
         )
 
 

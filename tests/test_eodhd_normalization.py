@@ -700,6 +700,7 @@ def test_eodhd_normalizes_enterprise_value_from_valuation():
     derived = [r for r in records if r.concept == "EnterpriseValue"]
     assert derived, "EnterpriseValue should map from Valuation.EnterpriseValue"
     assert derived[0].value == 1234.0
+    assert derived[0].currency == "USD"
     assert derived[0].end_date == "2025-09-30"
     assert derived[0].fiscal_period == ""
 
@@ -765,6 +766,30 @@ def test_eodhd_enterprise_value_falls_back_to_latest_statement_date():
     derived = [r for r in records if r.concept == "EnterpriseValue"]
     assert derived, "EnterpriseValue should fall back to latest statement date"
     assert derived[0].end_date == "2025-09-30"
+
+
+def test_eodhd_enterprise_value_uses_statement_currency_when_general_missing():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Valuation": {"EnterpriseValue": 777.0},
+        "Financials": {
+            "Income_Statement": {
+                "quarterly": [
+                    {
+                        "date": "2025-09-30",
+                        "totalRevenue": 300.0,
+                        "currency_symbol": "USD",
+                    }
+                ],
+            }
+        },
+        "General": {"CurrencyCode": None},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.BA")
+    derived = [r for r in records if r.concept == "EnterpriseValue"]
+    assert derived, "EnterpriseValue should use statement-derived currency"
+    assert derived[0].currency == "USD"
 
 
 def test_eodhd_normalizes_sale_purchase_of_stock():

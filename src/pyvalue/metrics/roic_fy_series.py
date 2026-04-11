@@ -22,8 +22,11 @@ from pyvalue.metrics.invested_capital import (
     SHORT_TERM_DEBT_CONCEPT,
     TOTAL_DEBT_CONCEPT,
 )
-from pyvalue.metrics.utils import MAX_FY_FACT_AGE_DAYS
-from pyvalue.money import normalize_money_value
+from pyvalue.metrics.utils import (
+    MAX_FY_FACT_AGE_DAYS,
+    normalize_metric_record,
+    require_metric_ticker_currency,
+)
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -620,6 +623,8 @@ class ROICFYSeriesCalculator:
                 continue
 
             debt, debt_failure = self._resolve_invested_capital_debt(
+                symbol=symbol,
+                repo=repo,
                 short_debt=short_map.get(key),
                 long_debt=long_map.get(key),
                 total_debt=total_map.get(key),
@@ -638,6 +643,8 @@ class ROICFYSeriesCalculator:
                 continue
 
             equity, equity_failure = self._resolve_invested_capital_single_amount(
+                symbol=symbol,
+                repo=repo,
                 primary=equity_map.get(key),
                 fallback=common_equity_map.get(key),
                 missing_failure=FAILURE_MISSING_INVESTED_CAPITAL_EQUITY_INPUT,
@@ -656,6 +663,8 @@ class ROICFYSeriesCalculator:
                 continue
 
             cash, cash_failure = self._resolve_invested_capital_single_amount(
+                symbol=symbol,
+                repo=repo,
                 primary=cash_primary_map.get(key),
                 fallback=cash_fallback_map.get(key),
                 missing_failure=FAILURE_MISSING_INVESTED_CAPITAL_CASH_INPUT,
@@ -711,13 +720,25 @@ class ROICFYSeriesCalculator:
     def _resolve_invested_capital_debt(
         self,
         *,
+        symbol: str,
+        repo: FinancialFactsRepository,
         short_debt: Optional[FactRecord],
         long_debt: Optional[FactRecord],
         total_debt: Optional[FactRecord],
     ) -> tuple[Optional[_AmountResult], Optional[str]]:
         if short_debt is not None and long_debt is not None:
-            short_value, short_currency = self._normalize_currency(short_debt)
-            long_value, long_currency = self._normalize_currency(long_debt)
+            short_value, short_currency = self._normalize_currency(
+                short_debt,
+                symbol,
+                repo,
+                SHORT_TERM_DEBT_CONCEPT,
+            )
+            long_value, long_currency = self._normalize_currency(
+                long_debt,
+                symbol,
+                repo,
+                LONG_TERM_DEBT_CONCEPT,
+            )
             currency = self._combine_currency([short_currency, long_currency])
             if currency is None and any(
                 code is not None for code in (short_currency, long_currency)
@@ -733,7 +754,12 @@ class ROICFYSeriesCalculator:
             )
 
         if total_debt is not None:
-            total_value, total_currency = self._normalize_currency(total_debt)
+            total_value, total_currency = self._normalize_currency(
+                total_debt,
+                symbol,
+                repo,
+                TOTAL_DEBT_CONCEPT,
+            )
             return (
                 _AmountResult(
                     total=total_value,
@@ -747,7 +773,12 @@ class ROICFYSeriesCalculator:
         if one_side is None:
             return None, FAILURE_MISSING_INVESTED_CAPITAL_DEBT_INPUT
 
-        value, currency = self._normalize_currency(one_side)
+        value, currency = self._normalize_currency(
+            one_side,
+            symbol,
+            repo,
+            one_side.concept,
+        )
         return (
             _AmountResult(total=value, as_of=one_side.end_date, currency=currency),
             None,
@@ -756,6 +787,8 @@ class ROICFYSeriesCalculator:
     def _resolve_invested_capital_single_amount(
         self,
         *,
+        symbol: str,
+        repo: FinancialFactsRepository,
         primary: Optional[FactRecord],
         fallback: Optional[FactRecord],
         missing_failure: str,
@@ -763,7 +796,12 @@ class ROICFYSeriesCalculator:
         record = primary or fallback
         if record is None:
             return None, missing_failure
-        value, currency = self._normalize_currency(record)
+        value, currency = self._normalize_currency(
+            record,
+            symbol,
+            repo,
+            record.concept,
+        )
         return (
             _AmountResult(total=value, as_of=record.end_date, currency=currency),
             None,
@@ -797,7 +835,12 @@ class ROICFYSeriesCalculator:
             year = self._extract_year(record.end_date)
             if year is None or year in mapped:
                 continue
-            value, currency = self._normalize_currency(record)
+            value, currency = self._normalize_currency(
+                record,
+                symbol,
+                repo,
+                concept,
+            )
             mapped[year] = _AmountResult(
                 total=value,
                 as_of=record.end_date,
@@ -896,14 +939,27 @@ class ROICFYSeriesCalculator:
             seen_end_dates.add(record.end_date)
         return filtered
 
-    def _normalize_currency(self, record: FactRecord) -> tuple[float, Optional[str]]:
-        normalized_value, normalized_currency = normalize_money_value(
-            record.value,
-            record.currency,
-        )
-        return (
-            record.value if normalized_value is None else normalized_value,
-            normalized_currency,
+    def _normalize_currency(
+        self,
+        record: FactRecord,
+        symbol: str,
+        repo: FinancialFactsRepository,
+        concept: str,
+    ) -> tuple[float, str]:
+        return normalize_metric_record(
+            record,
+            metric_id="roic_fy_series",
+            symbol=symbol,
+            input_name=concept,
+            expected_currency=require_metric_ticker_currency(
+                symbol,
+                repo,
+                metric_id="roic_fy_series",
+                input_name=concept,
+                as_of=record.end_date,
+                candidate_currencies=[record.currency],
+            ),
+            contexts=(repo,),
         )
 
     def _combine_currency(self, values: Sequence[Optional[str]]) -> Optional[str]:

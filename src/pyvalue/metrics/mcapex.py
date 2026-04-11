@@ -16,8 +16,9 @@ from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     MAX_FY_FACT_AGE_DAYS,
     is_recent_fact,
+    normalize_metric_record,
+    require_metric_ticker_currency,
 )
-from pyvalue.money import fx_service_for_context, normalize_money_value
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -60,7 +61,7 @@ class _MCapexBase:
         if capex is None and da is None:
             return None
         if capex is not None and da is not None:
-            if not self._currencies_match(capex.currency, da.currency):
+            if capex.currency != da.currency:
                 LOGGER.warning("%s: currency mismatch for %s", context, symbol)
                 return None
             return _AmountResult(
@@ -110,15 +111,12 @@ class _MCapexBase:
                     symbol,
                 )
                 continue
-            normalized, currency = self._normalize_records(quarterly[:4])
-            if normalized is None:
-                LOGGER.warning(
-                    "%s: currency conflict in %s quarterly values for %s",
-                    context,
-                    concept,
-                    symbol,
-                )
-                continue
+            normalized, currency = self._normalize_records(
+                quarterly[:4],
+                symbol=symbol,
+                repo=repo,
+                context=context,
+            )
             return _AmountResult(
                 total=sum(normalized),
                 as_of=quarterly[0].end_date,
@@ -127,7 +125,7 @@ class _MCapexBase:
         return None
 
     def _build_fy_points(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: FinancialFactsRepository, *, context: str
     ) -> list[_FYPoint]:
         capex_map = self._fy_map(symbol, repo, CAPEX_CONCEPT)
         da_primary_map = self._fy_map(symbol, repo, DA_PRIMARY_CONCEPT)
@@ -141,10 +139,20 @@ class _MCapexBase:
         )
         points: list[_FYPoint] = []
         for end_date in candidate_dates:
-            capex = self._amount_from_record(capex_map.get(end_date))
+            capex = self._amount_from_record(
+                capex_map.get(end_date),
+                symbol=symbol,
+                repo=repo,
+                context=context,
+            )
             da_record = da_primary_map.get(end_date) or da_fallback_map.get(end_date)
-            da = self._amount_from_record(da_record)
-            value = self._compute_mcapex_value(capex, da, symbol, context="mcapex_fy")
+            da = self._amount_from_record(
+                da_record,
+                symbol=symbol,
+                repo=repo,
+                context=context,
+            )
+            value = self._compute_mcapex_value(capex, da, symbol, context=context)
             if value is None:
                 continue
             points.append(
@@ -153,11 +161,21 @@ class _MCapexBase:
         return points
 
     def _amount_from_record(
-        self, record: Optional[FactRecord]
+        self,
+        record: Optional[FactRecord],
+        *,
+        symbol: str,
+        repo: FinancialFactsRepository,
+        context: str,
     ) -> Optional[_AmountResult]:
         if record is None:
             return None
-        value, currency = self._normalize_currency(record)
+        value, currency = self._normalize_currency(
+            record,
+            symbol=symbol,
+            repo=repo,
+            context=context,
+        )
         return _AmountResult(total=value, as_of=record.end_date, currency=currency)
 
     def _fy_map(
@@ -185,26 +203,55 @@ class _MCapexBase:
         return filtered
 
     def _normalize_records(
-        self, records: Sequence[FactRecord]
-    ) -> tuple[Optional[list[float]], Optional[str]]:
-        currency = None
+        self,
+        records: Sequence[FactRecord],
+        *,
+        symbol: str,
+        repo: FinancialFactsRepository,
+        context: str,
+    ) -> tuple[list[float], str]:
+        currency = require_metric_ticker_currency(
+            symbol,
+            repo,
+            metric_id=context,
+            input_name="MaintenanceCapex",
+            as_of=records[0].end_date if records else None,
+            candidate_currencies=[record.currency for record in records],
+        )
         normalized: list[float] = []
         for record in records:
-            value, code = self._normalize_currency(record)
-            if currency is None and code:
-                currency = code
-            elif code and currency and code != currency:
-                return None, None
+            value, _ = self._normalize_currency(
+                record,
+                symbol=symbol,
+                repo=repo,
+                context=context,
+            )
             normalized.append(value)
         return normalized, currency
 
-    def _normalize_currency(self, record: FactRecord) -> tuple[float, Optional[str]]:
-        normalized_value, normalized_currency = normalize_money_value(
-            record.value,
-            record.currency,
+    def _normalize_currency(
+        self,
+        record: FactRecord,
+        *,
+        symbol: str,
+        repo: FinancialFactsRepository,
+        context: str,
+    ) -> tuple[float, str]:
+        normalized_value, normalized_currency = normalize_metric_record(
+            record,
+            metric_id=context,
+            symbol=symbol,
+            expected_currency=require_metric_ticker_currency(
+                symbol,
+                repo,
+                metric_id=context,
+                input_name=record.concept,
+                as_of=record.end_date,
+                candidate_currencies=[record.currency],
+            ),
+            contexts=(repo,),
         )
-        value = record.value if normalized_value is None else normalized_value
-        return abs(value), normalized_currency
+        return abs(normalized_value), normalized_currency
 
     def _is_recent_as_of(self, as_of: str, *, max_age_days: int) -> bool:
         try:
@@ -212,11 +259,6 @@ class _MCapexBase:
         except ValueError:
             return False
         return end_date >= (date.today() - timedelta(days=max_age_days))
-
-    def _currencies_match(self, left: Optional[str], right: Optional[str]) -> bool:
-        if left and right:
-            return left == right
-        return True
 
 
 @dataclass
@@ -229,7 +271,7 @@ class MCapexFYMetric(_MCapexBase):
     def compute(
         self, symbol: str, repo: FinancialFactsRepository
     ) -> Optional[MetricResult]:
-        points = self._build_fy_points(symbol, repo)
+        points = self._build_fy_points(symbol, repo, context=self.id)
         if not points:
             LOGGER.warning("mcapex_fy: missing FY capex and D&A inputs for %s", symbol)
             return None
@@ -258,7 +300,7 @@ class MCapexFiveYearMetric(_MCapexBase):
     def compute(
         self, symbol: str, repo: FinancialFactsRepository
     ) -> Optional[MetricResult]:
-        points = self._build_fy_points(symbol, repo)
+        points = self._build_fy_points(symbol, repo, context=self.id)
         if len(points) < 5:
             LOGGER.warning(
                 "mcapex_5y: need 5 FY maintenance capex values for %s, found %s",
@@ -274,34 +316,7 @@ class MCapexFiveYearMetric(_MCapexBase):
             return None
         latest_five = points[:5]
         target_currency = latest_five[0].currency
-        if target_currency is None:
-            LOGGER.warning("mcapex_5y: missing currency for %s", symbol)
-            return None
-        fx_service = fx_service_for_context(repo)
-        total = 0.0
-        for point in latest_five:
-            if point.currency is None:
-                LOGGER.warning("mcapex_5y: missing currency for %s", symbol)
-                return None
-            if point.currency == target_currency:
-                total += point.value
-                continue
-            converted = fx_service.convert_amount(
-                point.value,
-                point.currency,
-                target_currency,
-                point.as_of,
-            )
-            if converted is None:
-                LOGGER.warning(
-                    "mcapex_5y: FX conversion failed for %s (%s -> %s)",
-                    symbol,
-                    point.currency,
-                    target_currency,
-                )
-                return None
-            total += float(converted)
-        average = total / 5.0
+        average = sum(point.value for point in latest_five) / 5.0
         return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,

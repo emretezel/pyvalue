@@ -11,8 +11,12 @@ from typing import Iterable, Optional, Sequence
 import logging
 
 from pyvalue.metrics.base import MetricResult
-from pyvalue.metrics.utils import is_recent_fact
-from pyvalue.money import fx_converter_for_context, normalize_money_value
+from pyvalue.metrics.utils import (
+    is_recent_fact,
+    normalize_metric_amount,
+    normalize_metric_record,
+    require_metric_ticker_currency,
+)
 from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
 
 OPERATING_CASH_FLOW_CONCEPTS = ["NetCashProvidedByUsedInOperatingActivities"]
@@ -53,21 +57,16 @@ class PriceToFCFMetric:
             LOGGER.warning("price_to_fcf: missing market cap for %s", symbol)
             return None
 
-        market_cap = snapshot.market_cap
-        snapshot_currency = getattr(snapshot, "currency", None)
-        if fcf_result.currency and snapshot_currency:
-            converted = fx_converter_for_context(repo)(
-                market_cap, snapshot_currency, fcf_result.currency, snapshot.as_of
-            )
-            if converted is None:
-                LOGGER.warning(
-                    "price_to_fcf: FX conversion failed %s -> %s for %s",
-                    snapshot_currency,
-                    fcf_result.currency,
-                    symbol,
-                )
-                return None
-            market_cap = converted
+        market_cap, _ = normalize_metric_amount(
+            snapshot.market_cap,
+            getattr(snapshot, "currency", None),
+            metric_id=self.id,
+            symbol=symbol,
+            input_name="market_cap",
+            as_of=snapshot.as_of,
+            expected_currency=fcf_result.currency,
+            contexts=(market_repo, repo),
+        )
 
         ratio = market_cap / fcf_result.total
         return MetricResult(
@@ -125,18 +124,9 @@ class PriceToFCFMetric:
                     symbol,
                 )
                 continue
-            normalized, currency = self._normalize_quarterly(values)
-            if normalized is None:
-                LOGGER.warning(
-                    "price_to_fcf: currency conflict in %s quarterly values for %s",
-                    concept,
-                    symbol,
-                )
-                continue
-            total = sum(record.value for record in normalized)
-            return _TTMResult(
-                total=total, as_of=normalized[0].end_date, currency=currency or None
-            )
+            normalized, currency = self._normalize_quarterly(symbol, repo, values)
+            total = sum(normalized)
+            return _TTMResult(total=total, as_of=values[0].end_date, currency=currency)
         return None
 
     def _filter_quarterly(self, records: Iterable[FactRecord]) -> list[FactRecord]:
@@ -155,40 +145,32 @@ class PriceToFCFMetric:
         return filtered
 
     def _normalize_quarterly(
-        self, records: list[FactRecord]
-    ) -> tuple[Optional[list[FactRecord]], Optional[str]]:
-        """Normalize subunit records and ensure consistent currency."""
+        self,
+        symbol: str,
+        repo: FinancialFactsRepository,
+        records: list[FactRecord],
+    ) -> tuple[list[float], str]:
+        """Normalize subunit records and assert ticker-currency consistency."""
 
-        currency = None
-        normalized: list[FactRecord] = []
+        currency = require_metric_ticker_currency(
+            symbol,
+            repo,
+            metric_id=self.id,
+            input_name="FreeCashFlow",
+            as_of=records[0].end_date if records else None,
+            candidate_currencies=[record.currency for record in records],
+        )
+        normalized: list[float] = []
         for record in records:
-            code = getattr(record, "currency", None)
-            value: Optional[float] = record.value
-            value, code = normalize_money_value(value, code)
-            if value is None:
-                continue
-            if currency is None and code:
-                currency = code
-            elif code and currency and code != currency:
-                return None, None
-            normalized.append(
-                FactRecord(
-                    symbol=record.symbol,
-                    cik=record.cik,
-                    concept=record.concept,
-                    fiscal_period=record.fiscal_period,
-                    end_date=record.end_date,
-                    unit=record.unit,
-                    value=value,
-                    accn=record.accn,
-                    filed=record.filed,
-                    frame=record.frame,
-                    start_date=getattr(record, "start_date", None),
-                    accounting_standard=getattr(record, "accounting_standard", None),
-                    currency=code,
-                )
+            value, _ = normalize_metric_record(
+                record,
+                metric_id=self.id,
+                symbol=symbol,
+                expected_currency=currency,
+                contexts=(repo,),
             )
-        return (normalized, currency)
+            normalized.append(value)
+        return normalized, currency
 
 
 __all__ = ["PriceToFCFMetric"]

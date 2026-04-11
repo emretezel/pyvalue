@@ -8,6 +8,7 @@ from pyvalue.metrics.current_ratio import CurrentRatioMetric
 from pyvalue.storage import (
     FactRecord,
     FinancialFactsRepository,
+    MarketDataRepository,
     SupportedTickerRepository,
 )
 from pyvalue.universe import Listing
@@ -67,6 +68,10 @@ def test_metric_coverage_counts_symbols(tmp_path, capsys):
             ),
         ],
     )
+    market_repo = MarketDataRepository(db_path)
+    market_repo.initialize_schema()
+    market_repo.upsert_price("AAA.US", recent, 10.0, currency="USD")
+    market_repo.upsert_price("BBB.US", recent, 10.0, currency="USD")
 
     exit_code = cmd_report_metric_coverage(
         database=str(db_path),

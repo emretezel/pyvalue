@@ -7,11 +7,17 @@ from datetime import date, timedelta
 
 from pyvalue.metrics.long_term_debt import LongTermDebtMetric
 from pyvalue.normalization import SECFactsNormalizer
-from pyvalue.storage import FinancialFactsRepository
+from pyvalue.storage import FinancialFactsRepository, MarketDataRepository
 
 
 def _recent_date() -> str:
     return (date.today() - timedelta(days=10)).isoformat()
+
+
+def _store_market_currency(db_path, symbol: str, as_of: str, currency: str = "USD"):
+    repo = MarketDataRepository(db_path)
+    repo.initialize_schema()
+    repo.upsert_price(symbol, as_of, 10.0, currency=currency)
 
 
 def test_long_term_debt_metric_uses_other_long_term_debt_fallback(tmp_path):
@@ -56,6 +62,7 @@ def test_long_term_debt_metric_uses_other_long_term_debt_fallback(tmp_path):
     repo = FinancialFactsRepository(tmp_path / "facts.db")
     repo.initialize_schema()
     repo.replace_facts("TEST.US", records)
+    _store_market_currency(tmp_path / "facts.db", "TEST.US", recent)
 
     metric = LongTermDebtMetric()
     result = metric.compute("TEST.US", repo)
@@ -94,6 +101,7 @@ def test_long_term_debt_metric_uses_lease_including_current_fallback(tmp_path):
     repo = FinancialFactsRepository(tmp_path / "facts.db")
     repo.initialize_schema()
     repo.replace_facts("TEST.US", records)
+    _store_market_currency(tmp_path / "facts.db", "TEST.US", recent)
 
     metric = LongTermDebtMetric()
     result = metric.compute("TEST.US", repo)
@@ -145,6 +153,7 @@ def test_long_term_debt_metric_uses_operating_lease_noncurrent_fallback(tmp_path
     repo = FinancialFactsRepository(tmp_path / "facts.db")
     repo.initialize_schema()
     repo.replace_facts("TEST.US", records)
+    _store_market_currency(tmp_path / "facts.db", "TEST.US", recent)
 
     metric = LongTermDebtMetric()
     result = metric.compute("TEST.US", repo)

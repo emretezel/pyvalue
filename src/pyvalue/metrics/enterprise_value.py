@@ -5,11 +5,12 @@ Author: Emre Tezel
 
 from __future__ import annotations
 
-from typing import Callable, Optional, Sequence
+from typing import Optional
 
 import logging
 
-from pyvalue.money import normalize_money_value
+from pyvalue.metrics.base import MetricCurrencyInvariantError
+from pyvalue.metrics.utils import normalize_metric_amount, normalize_metric_record
 from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -21,35 +22,28 @@ EV_FALLBACK_REQUIRED_CONCEPTS = (
     "CashAndShortTermInvestments",
 )
 
-FXConverter = Callable[[float, str, str, str], Optional[float]]
 
+def normalize_fact_value(
+    record: FactRecord,
+    *,
+    metric_id: str,
+    symbol: str,
+    expected_currency: Optional[str],
+    contexts: tuple[object, ...],
+) -> tuple[float, str]:
+    """Normalize one EV fact and enforce the ticker-currency invariant."""
 
-def normalize_fact_value(record: FactRecord) -> tuple[float, Optional[str]]:
-    """Normalize subunit FX codes so EV helpers can compare currencies safely."""
-
-    normalized_value, normalized_currency = normalize_money_value(
-        record.value,
-        record.currency,
+    normalized_value, normalized_currency = normalize_metric_record(
+        record,
+        metric_id=metric_id,
+        symbol=symbol,
+        expected_currency=expected_currency,
+        contexts=contexts,
     )
-    return (
-        record.value if normalized_value is None else normalized_value,
-        normalized_currency,
-    )
+    return normalized_value, normalized_currency
 
 
-def merge_currency_codes(codes: Sequence[Optional[str]]) -> Optional[str]:
-    merged: Optional[str] = None
-    for code in codes:
-        if not code:
-            continue
-        if merged is None:
-            merged = code
-        elif merged != code:
-            return None
-    return merged
-
-
-def convert_denominator_amount(
+def validate_denominator_amount(
     *,
     symbol: str,
     amount: float,
@@ -57,21 +51,18 @@ def convert_denominator_amount(
     target_currency: Optional[str],
     as_of: str,
     context: str,
-    converter: FXConverter,
-) -> Optional[float]:
-    if target_currency and source_currency and source_currency != target_currency:
-        converted = converter(amount, source_currency, target_currency, as_of)
-        if converted is None:
-            LOGGER.warning(
-                "%s: FX conversion failed %s -> %s for %s",
-                context,
-                source_currency,
-                target_currency,
-                symbol,
-            )
-            return None
-        return converted
-    return amount
+    contexts: tuple[object, ...],
+) -> float:
+    return normalize_metric_amount(
+        amount,
+        source_currency,
+        metric_id=context,
+        symbol=symbol,
+        input_name="denominator",
+        as_of=as_of,
+        expected_currency=target_currency,
+        contexts=contexts,
+    )[0]
 
 
 def resolve_enterprise_value_denominator(
@@ -81,37 +72,34 @@ def resolve_enterprise_value_denominator(
     market_repo: MarketDataRepository,
     target_currency: Optional[str],
     context: str,
-    converter: FXConverter,
 ) -> Optional[float]:
     """Resolve EV using normalized EV first, then the existing debt/cash fallback."""
 
     ev_fact = repo.latest_fact(symbol, "EnterpriseValue")
     if ev_fact is not None:
-        ev_value, ev_currency = normalize_fact_value(ev_fact)
-        if ev_value > 0:
-            converted = convert_denominator_amount(
+        try:
+            ev_value, _ = normalize_fact_value(
+                ev_fact,
+                metric_id=context,
                 symbol=symbol,
-                amount=ev_value,
-                source_currency=ev_currency,
-                target_currency=target_currency,
-                as_of=ev_fact.end_date,
-                context=context,
-                converter=converter,
+                expected_currency=target_currency,
+                contexts=(repo, market_repo),
             )
-            if converted is not None and converted > 0:
-                return converted
-            if converted is not None and converted <= 0:
-                LOGGER.warning(
-                    "%s: non-positive enterprise value after FX for %s",
-                    context,
-                    symbol,
-                )
-            return None
-        LOGGER.warning(
-            "%s: non-positive normalized enterprise value for %s; trying fallback",
-            context,
-            symbol,
-        )
+        except MetricCurrencyInvariantError as exc:
+            LOGGER.warning(
+                "%s: unusable enterprise value fact for %s (%s); trying fallback",
+                context,
+                symbol,
+                exc.summary_reason,
+            )
+        else:
+            if ev_value > 0:
+                return ev_value
+            LOGGER.warning(
+                "%s: non-positive normalized enterprise value for %s; trying fallback",
+                context,
+                symbol,
+            )
 
     snapshot = market_repo.latest_snapshot(symbol)
     if snapshot is None or snapshot.market_cap is None:
@@ -120,6 +108,15 @@ def resolve_enterprise_value_denominator(
     if snapshot.market_cap <= 0:
         LOGGER.warning("%s: non-positive market cap snapshot for %s", context, symbol)
         return None
+    market_cap = validate_denominator_amount(
+        symbol=symbol,
+        amount=snapshot.market_cap,
+        source_currency=getattr(snapshot, "currency", None),
+        target_currency=target_currency,
+        as_of=snapshot.as_of,
+        context=context,
+        contexts=(market_repo, repo),
+    )
 
     short_debt = repo.latest_fact(symbol, "ShortTermDebt")
     long_debt = repo.latest_fact(symbol, "LongTermDebt")
@@ -130,54 +127,39 @@ def resolve_enterprise_value_denominator(
         )
         return None
 
-    short_value, short_currency = normalize_fact_value(short_debt)
-    long_value, long_currency = normalize_fact_value(long_debt)
-    cash_value, cash_currency = normalize_fact_value(cash)
-    currency = merge_currency_codes(
-        [
-            getattr(snapshot, "currency", None),
-            short_currency,
-            long_currency,
-            cash_currency,
-        ]
+    short_value, _ = normalize_fact_value(
+        short_debt,
+        metric_id=context,
+        symbol=symbol,
+        expected_currency=target_currency,
+        contexts=(repo, market_repo),
     )
-    if currency is None and any(
-        code is not None
-        for code in (
-            getattr(snapshot, "currency", None),
-            short_currency,
-            long_currency,
-            cash_currency,
-        )
-    ):
-        LOGGER.warning("%s: EV fallback currency mismatch for %s", context, symbol)
-        return None
+    long_value, _ = normalize_fact_value(
+        long_debt,
+        metric_id=context,
+        symbol=symbol,
+        expected_currency=target_currency,
+        contexts=(repo, market_repo),
+    )
+    cash_value, _ = normalize_fact_value(
+        cash,
+        metric_id=context,
+        symbol=symbol,
+        expected_currency=target_currency,
+        contexts=(repo, market_repo),
+    )
 
-    ev_value = snapshot.market_cap + short_value + long_value - cash_value
+    ev_value = market_cap + short_value + long_value - cash_value
     if ev_value <= 0:
         LOGGER.warning("%s: non-positive derived EV for %s", context, symbol)
         return None
 
-    converted = convert_denominator_amount(
-        symbol=symbol,
-        amount=ev_value,
-        source_currency=currency,
-        target_currency=target_currency,
-        as_of=snapshot.as_of,
-        context=context,
-        converter=converter,
-    )
-    if converted is None or converted <= 0:
-        if converted is not None:
-            LOGGER.warning("%s: non-positive EV after FX for %s", context, symbol)
-        return None
-    return converted
+    return ev_value
 
 
 __all__ = [
     "EV_FALLBACK_REQUIRED_CONCEPTS",
-    "convert_denominator_amount",
-    "merge_currency_codes",
     "normalize_fact_value",
     "resolve_enterprise_value_denominator",
+    "validate_denominator_amount",
 ]

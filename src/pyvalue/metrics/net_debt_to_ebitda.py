@@ -10,13 +10,11 @@ from typing import Optional, Sequence
 
 import logging
 
-from pyvalue.fx import FXService
 from pyvalue.metrics.base import MetricResult
-from pyvalue.metrics.utils import is_recent_fact
-from pyvalue.money import (
-    align_money_values,
-    fx_service_for_context,
-    normalize_money_value,
+from pyvalue.metrics.utils import (
+    is_recent_fact,
+    normalize_metric_record,
+    resolve_metric_ticker_currency,
 )
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
@@ -71,8 +69,7 @@ class NetDebtToEBITDAMetric:
     def compute(
         self, symbol: str, repo: FinancialFactsRepository
     ) -> Optional[MetricResult]:
-        fx_service = fx_service_for_context(repo)
-        ttm_ebitda = self._compute_ttm_ebitda(symbol, repo, fx_service=fx_service)
+        ttm_ebitda = self._compute_ttm_ebitda(symbol, repo)
         if ttm_ebitda is None:
             LOGGER.warning("net_debt_to_ebitda: missing TTM EBITDA for %s", symbol)
             return None
@@ -80,27 +77,12 @@ class NetDebtToEBITDAMetric:
             LOGGER.warning("net_debt_to_ebitda: non-positive EBITDA for %s", symbol)
             return None
 
-        net_debt = self._compute_net_debt(symbol, repo, fx_service=fx_service)
+        net_debt = self._compute_net_debt(symbol, repo)
         if net_debt is None:
             LOGGER.warning("net_debt_to_ebitda: missing net debt inputs for %s", symbol)
             return None
 
-        aligned_pair, _ = align_money_values(
-            values=[
-                (net_debt.total, net_debt.currency, net_debt.as_of, "NetDebt"),
-                (ttm_ebitda.total, ttm_ebitda.currency, ttm_ebitda.as_of, "EBITDA"),
-            ],
-            fx_service=fx_service,
-            logger=LOGGER,
-            operation="metric:net_debt_to_ebitda",
-            symbol=symbol,
-            target_currency=net_debt.currency or ttm_ebitda.currency,
-        )
-        if aligned_pair is None:
-            LOGGER.warning("net_debt_to_ebitda: currency mismatch for %s", symbol)
-            return None
-
-        ratio = aligned_pair[0] / aligned_pair[1]
+        ratio = net_debt.total / ttm_ebitda.total
         as_of = max(ttm_ebitda.as_of, net_debt.as_of)
         return MetricResult(
             symbol=symbol,
@@ -114,8 +96,6 @@ class NetDebtToEBITDAMetric:
         self,
         symbol: str,
         repo: FinancialFactsRepository,
-        *,
-        fx_service: FXService,
     ) -> Optional[_TTMResult]:
         ebit_records = self._filter_quarterly(
             repo.facts_for_concept(symbol, EBIT_CONCEPTS[0])
@@ -154,27 +134,20 @@ class NetDebtToEBITDAMetric:
                 )
                 return None
 
-            ebit_value, ebit_currency = self._normalize_currency(ebit_record)
-            da_value, da_currency = self._normalize_currency(da_record)
-            aligned, aligned_currency = align_money_values(
-                values=[
-                    (ebit_value, ebit_currency, ebit_record.end_date, EBIT_CONCEPTS[0]),
-                    (da_value, da_currency, da_record.end_date, DA_PRIMARY_CONCEPTS[0]),
-                ],
-                fx_service=fx_service,
-                logger=LOGGER,
-                operation="metric:net_debt_to_ebitda:quarter",
-                symbol=symbol,
-                target_currency=currency or ebit_currency or da_currency,
+            ebit_value, ebit_currency = self._normalize_currency(
+                ebit_record,
+                symbol,
+                repo,
+                EBIT_CONCEPTS[0],
             )
-            if aligned is None or aligned_currency is None:
-                LOGGER.warning(
-                    "net_debt_to_ebitda: currency conflict in EBIT/D&A for %s",
-                    symbol,
-                )
-                return None
-            currency = aligned_currency
-            total += aligned[0] + aligned[1]
+            da_value, da_currency = self._normalize_currency(
+                da_record,
+                symbol,
+                repo,
+                DA_PRIMARY_CONCEPTS[0],
+            )
+            currency = currency or ebit_currency or da_currency
+            total += ebit_value + da_value
 
         return _TTMResult(
             total=total, as_of=ebit_records[0].end_date, currency=currency
@@ -184,64 +157,29 @@ class NetDebtToEBITDAMetric:
         self,
         symbol: str,
         repo: FinancialFactsRepository,
-        *,
-        fx_service: FXService,
     ) -> Optional[_NetDebtResult]:
         short_debt = self._latest_recent_fact(repo, symbol, "ShortTermDebt")
         long_debt = self._latest_recent_fact(repo, symbol, "LongTermDebt")
         if short_debt is None and long_debt is None:
             return None
 
-        cash = self._compute_cash(symbol, repo, fx_service=fx_service)
+        cash = self._compute_cash(symbol, repo)
         if cash is None:
             return None
 
         short_value, short_currency = (
-            self._normalize_currency(short_debt)
+            self._normalize_currency(short_debt, symbol, repo, "ShortTermDebt")
             if short_debt is not None
             else (0.0, None)
         )
         long_value, long_currency = (
-            self._normalize_currency(long_debt)
+            self._normalize_currency(long_debt, symbol, repo, "LongTermDebt")
             if long_debt is not None
             else (0.0, None)
         )
-        values: list[tuple[float, Optional[str], str, str]] = []
-        if short_debt is not None:
-            values.append(
-                (
-                    short_value,
-                    short_currency,
-                    short_debt.end_date,
-                    "ShortTermDebt",
-                )
-            )
-        if long_debt is not None:
-            values.append(
-                (
-                    long_value,
-                    long_currency,
-                    long_debt.end_date,
-                    "LongTermDebt",
-                )
-            )
-        values.append(
-            (cash.total, cash.currency, cash.as_of, "CashAndShortTermInvestments")
-        )
-        aligned, currency = align_money_values(
-            values=values,
-            fx_service=fx_service,
-            logger=LOGGER,
-            operation="metric:net_debt_to_ebitda:net_debt",
-            symbol=symbol,
-            target_currency=short_currency or long_currency or cash.currency,
-        )
-        if aligned is None or currency is None:
-            return None
-
-        cash_index = len(aligned) - 1
-        total_debt = sum(aligned[:cash_index])
-        net_debt = total_debt - aligned[cash_index]
+        currency = short_currency or long_currency or cash.currency
+        total_debt = short_value + long_value
+        net_debt = total_debt - cash.total
         as_of_candidates = [cash.as_of]
         if short_debt is not None:
             as_of_candidates.append(short_debt.end_date)
@@ -285,12 +223,15 @@ class NetDebtToEBITDAMetric:
         self,
         symbol: str,
         repo: FinancialFactsRepository,
-        *,
-        fx_service: FXService,
     ) -> Optional[_CashResult]:
         primary = self._latest_recent_fact(repo, symbol, "CashAndShortTermInvestments")
         if primary is not None:
-            value, currency = self._normalize_currency(primary)
+            value, currency = self._normalize_currency(
+                primary,
+                symbol,
+                repo,
+                "CashAndShortTermInvestments",
+            )
             return _CashResult(total=value, as_of=primary.end_date, currency=currency)
 
         cash_eq = self._latest_recent_fact(repo, symbol, "CashAndCashEquivalents")
@@ -300,51 +241,47 @@ class NetDebtToEBITDAMetric:
             repo, symbol, "ShortTermInvestments"
         )
 
-        cash_value, cash_currency = self._normalize_currency(cash_eq)
+        cash_value, cash_currency = self._normalize_currency(
+            cash_eq,
+            symbol,
+            repo,
+            "CashAndCashEquivalents",
+        )
         as_of_candidates = [cash_eq.end_date]
-        values: list[tuple[float, Optional[str], str, str]] = [
-            (cash_value, cash_currency, cash_eq.end_date, "CashAndCashEquivalents")
-        ]
         short_term_currency: Optional[str] = None
+        short_term_value = 0.0
         if short_term_investments is not None:
-            short_term_value: float
             short_term_value, short_term_currency = self._normalize_currency(
-                short_term_investments
+                short_term_investments,
+                symbol,
+                repo,
+                "ShortTermInvestments",
             )
             as_of_candidates.append(short_term_investments.end_date)
-            values.append(
-                (
-                    short_term_value,
-                    short_term_currency,
-                    short_term_investments.end_date,
-                    "ShortTermInvestments",
-                )
-            )
-
-        aligned, currency = align_money_values(
-            values=values,
-            fx_service=fx_service,
-            logger=LOGGER,
-            operation="metric:net_debt_to_ebitda:cash",
-            symbol=symbol,
-            target_currency=cash_currency or short_term_currency,
-        )
-        if aligned is None or currency is None:
-            return None
         return _CashResult(
-            total=sum(aligned),
+            total=cash_value + short_term_value,
             as_of=max(as_of_candidates),
-            currency=currency,
+            currency=cash_currency or short_term_currency,
         )
 
-    def _normalize_currency(self, record: FactRecord) -> tuple[float, Optional[str]]:
-        normalized_value, normalized_currency = normalize_money_value(
-            record.value,
-            getattr(record, "currency", None),
-        )
-        return (
-            record.value if normalized_value is None else normalized_value,
-            normalized_currency,
+    def _normalize_currency(
+        self,
+        record: FactRecord,
+        symbol: str,
+        repo: FinancialFactsRepository,
+        concept: str,
+    ) -> tuple[float, str]:
+        return normalize_metric_record(
+            record,
+            metric_id=self.id,
+            symbol=symbol,
+            input_name=concept,
+            expected_currency=resolve_metric_ticker_currency(
+                symbol,
+                repo,
+                candidate_currencies=[record.currency],
+            ),
+            contexts=(repo,),
         )
 
 

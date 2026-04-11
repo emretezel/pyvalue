@@ -6,6 +6,7 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import wraps
 from typing import Optional, Protocol, Sequence
 
 from pyvalue.currency import MetricUnitKind, metric_currency_or_none
@@ -179,6 +180,39 @@ class MetricResult:
         )
 
 
+@dataclass
+class MetricCurrencyInvariantError(RuntimeError):
+    """Structured metric failure for currency invariant violations."""
+
+    metric_id: str
+    symbol: str
+    input_name: str
+    reason_code: str
+    expected_currency: Optional[str] = None
+    actual_currency: Optional[str] = None
+    as_of: Optional[str] = None
+
+    def __str__(self) -> str:
+        return (
+            "Metric currency invariant violated "
+            f"(metric={self.metric_id} symbol={self.symbol} input={self.input_name} "
+            f"reason={self.reason_code} expected={self.expected_currency} "
+            f"actual={self.actual_currency} as_of={self.as_of})"
+        )
+
+    @property
+    def summary_reason(self) -> str:
+        if self.reason_code == "missing_trading_currency":
+            return "currency invariant: missing trading currency"
+        if self.reason_code == "missing_input_currency":
+            return f"currency invariant: missing currency on {self.input_name}"
+        if self.reason_code == "currency_mismatch":
+            expected = self.expected_currency or "<expected>"
+            actual = self.actual_currency or "<missing>"
+            return f"currency invariant: {self.input_name} expected {expected} got {actual}"
+        return f"currency invariant: {self.reason_code}"
+
+
 class Metric(Protocol):
     """Protocol that all metric implementations must follow."""
 
@@ -188,6 +222,48 @@ class Metric(Protocol):
     unit_label: Optional[str]
 
     def compute(self, symbol: str, repo) -> Optional[MetricResult]: ...
+
+
+def wrap_metric_currency_invariants(metric_cls):
+    """Return ``metric_cls`` with ``compute`` guarded against invariant exceptions.
+
+    Direct metric callers historically treat currency conflicts as an unavailable
+    metric rather than as a process-level exception. We preserve that contract by
+    storing the structured invariant error on the instance and returning ``None``.
+    Higher-level CLI flows can then consume that stored error and report grouped
+    invariant summaries without aborting the batch.
+    """
+
+    original_compute = getattr(metric_cls, "compute", None)
+    if not callable(original_compute):
+        return metric_cls
+    if getattr(original_compute, "_pyvalue_currency_guarded", False):
+        return metric_cls
+
+    @wraps(original_compute)
+    def guarded_compute(self, *args, **kwargs):
+        setattr(self, "_last_currency_invariant_error", None)
+        try:
+            return original_compute(self, *args, **kwargs)
+        except MetricCurrencyInvariantError as exc:
+            setattr(self, "_last_currency_invariant_error", exc)
+            return None
+
+    setattr(guarded_compute, "_pyvalue_currency_guarded", True)
+    setattr(metric_cls, "compute", guarded_compute)
+    return metric_cls
+
+
+def consume_metric_currency_invariant_error(
+    metric: object,
+) -> Optional[MetricCurrencyInvariantError]:
+    """Return and clear the last guarded metric invariant error, if any."""
+
+    error = getattr(metric, "_last_currency_invariant_error", None)
+    setattr(metric, "_last_currency_invariant_error", None)
+    if isinstance(error, MetricCurrencyInvariantError):
+        return error
+    return None
 
 
 def metadata_for_metric(
@@ -203,3 +279,14 @@ def metadata_for_metric(
                 unit_label=getattr(metric, "unit_label", None),
             )
     return _METRIC_METADATA.get(metric_id, MetricMetadata("other"))
+
+
+__all__ = [
+    "Metric",
+    "MetricCurrencyInvariantError",
+    "MetricMetadata",
+    "MetricResult",
+    "consume_metric_currency_invariant_error",
+    "metadata_for_metric",
+    "wrap_metric_currency_invariants",
+]

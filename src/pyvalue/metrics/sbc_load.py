@@ -10,10 +10,13 @@ from typing import Iterable, Optional
 
 import logging
 
-from pyvalue.fx import FXService
 from pyvalue.metrics.base import MetricResult
-from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS, is_recent_fact
-from pyvalue.money import align_money_values, fx_service_for_context
+from pyvalue.metrics.utils import (
+    MAX_FACT_AGE_DAYS,
+    is_recent_fact,
+    normalize_metric_record,
+    resolve_metric_ticker_currency,
+)
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -51,7 +54,6 @@ class SBCLoadCalculator:
             repo,
             STOCK_BASED_COMPENSATION_CONCEPT,
             context=context,
-            fx_service=fx_service_for_context(repo),
         )
 
     def compute_ttm_revenue(
@@ -62,19 +64,16 @@ class SBCLoadCalculator:
             repo,
             REVENUE_CONCEPT,
             context=context,
-            fx_service=fx_service_for_context(repo),
         )
 
     def compute_ttm_fcf(
         self, symbol: str, repo: FinancialFactsRepository, *, context: str
     ) -> Optional[_AmountResult]:
-        fx_service = fx_service_for_context(repo)
         operating = self._compute_ttm_amount(
             symbol,
             repo,
             OPERATING_CASH_FLOW_CONCEPT,
             context=context,
-            fx_service=fx_service,
         )
         if operating is None:
             LOGGER.warning(
@@ -87,7 +86,6 @@ class SBCLoadCalculator:
             repo,
             CAPEX_CONCEPT,
             context=context,
-            fx_service=fx_service,
         )
         if capex is None:
             LOGGER.warning(
@@ -99,32 +97,10 @@ class SBCLoadCalculator:
                 currency=operating.currency,
             )
 
-        aligned, currency = align_money_values(
-            values=[
-                (
-                    operating.total,
-                    operating.currency,
-                    operating.as_of,
-                    OPERATING_CASH_FLOW_CONCEPT,
-                ),
-                (capex.total, capex.currency, capex.as_of, CAPEX_CONCEPT),
-            ],
-            fx_service=fx_service,
-            logger=LOGGER,
-            operation=f"metric:{context}:fcf",
-            symbol=symbol,
-            target_currency=operating.currency or capex.currency,
-        )
-        if aligned is None or currency is None:
-            LOGGER.warning(
-                "%s: currency mismatch in TTM FCF inputs for %s", context, symbol
-            )
-            return None
-
         return _AmountResult(
-            total=aligned[0] - aligned[1],
+            total=operating.total - capex.total,
             as_of=max(operating.as_of, capex.as_of),
-            currency=currency,
+            currency=operating.currency or capex.currency,
         )
 
     def _compute_ttm_amount(
@@ -134,7 +110,6 @@ class SBCLoadCalculator:
         concept: str,
         *,
         context: str,
-        fx_service: FXService,
     ) -> Optional[_AmountResult]:
         records = repo.facts_for_concept(symbol, concept)
         quarterly = self._filter_quarterly(records)
@@ -157,31 +132,27 @@ class SBCLoadCalculator:
             )
             return None
 
-        normalized, currency = align_money_values(
-            values=[
-                (record.value, record.currency, record.end_date, concept)
-                for record in quarterly[:4]
-                if record.value is not None
-            ],
-            fx_service=fx_service,
-            logger=LOGGER,
-            operation=f"metric:{context}:{concept}",
-            symbol=symbol,
-            target_currency=quarterly[0].currency,
+        target_currency = resolve_metric_ticker_currency(
+            symbol,
+            repo,
+            candidate_currencies=[record.currency for record in quarterly[:4]],
         )
-        if normalized is None:
-            LOGGER.warning(
-                "%s: currency conflict in %s quarterly values for %s",
-                context,
-                concept,
-                symbol,
+        normalized: list[float] = []
+        for record in quarterly[:4]:
+            value, _ = normalize_metric_record(
+                record,
+                metric_id=context,
+                symbol=symbol,
+                input_name=concept,
+                expected_currency=target_currency,
+                contexts=(repo,),
             )
-            return None
+            normalized.append(value)
 
         return _AmountResult(
             total=sum(normalized),
             as_of=quarterly[0].end_date,
-            currency=currency,
+            currency=target_currency,
         )
 
     def _filter_quarterly(self, records: Iterable[FactRecord]) -> list[FactRecord]:
@@ -211,7 +182,6 @@ class SBCToRevenueMetric:
         self, symbol: str, repo: FinancialFactsRepository
     ) -> Optional[MetricResult]:
         calculator = SBCLoadCalculator()
-        fx_service = fx_service_for_context(repo)
         sbc = calculator.compute_ttm_sbc(symbol, repo, context=self.id)
         if sbc is None:
             LOGGER.warning("%s: missing TTM SBC for %s", self.id, symbol)
@@ -224,25 +194,10 @@ class SBCToRevenueMetric:
         if revenue.total <= 0:
             LOGGER.warning("%s: non-positive TTM revenue for %s", self.id, symbol)
             return None
-        aligned, _ = align_money_values(
-            values=[
-                (sbc.total, sbc.currency, sbc.as_of, STOCK_BASED_COMPENSATION_CONCEPT),
-                (revenue.total, revenue.currency, revenue.as_of, REVENUE_CONCEPT),
-            ],
-            fx_service=fx_service,
-            logger=LOGGER,
-            operation=f"metric:{self.id}",
-            symbol=symbol,
-            target_currency=sbc.currency or revenue.currency,
-        )
-        if aligned is None:
-            LOGGER.warning("%s: currency mismatch for %s", self.id, symbol)
-            return None
-
         return MetricResult(
             symbol=symbol,
             metric_id=self.id,
-            value=aligned[0] / aligned[1],
+            value=sbc.total / revenue.total,
             as_of=max(sbc.as_of, revenue.as_of),
             unit_kind="percent",
         )
@@ -259,7 +214,6 @@ class SBCToFCFMetric:
         self, symbol: str, repo: FinancialFactsRepository
     ) -> Optional[MetricResult]:
         calculator = SBCLoadCalculator()
-        fx_service = fx_service_for_context(repo)
         sbc = calculator.compute_ttm_sbc(symbol, repo, context=self.id)
         if sbc is None:
             LOGGER.warning("%s: missing TTM SBC for %s", self.id, symbol)
@@ -272,25 +226,10 @@ class SBCToFCFMetric:
         if fcf.total <= 0:
             LOGGER.warning("%s: non-positive TTM FCF for %s", self.id, symbol)
             return None
-        aligned, _ = align_money_values(
-            values=[
-                (sbc.total, sbc.currency, sbc.as_of, STOCK_BASED_COMPENSATION_CONCEPT),
-                (fcf.total, fcf.currency, fcf.as_of, "FreeCashFlow"),
-            ],
-            fx_service=fx_service,
-            logger=LOGGER,
-            operation=f"metric:{self.id}",
-            symbol=symbol,
-            target_currency=sbc.currency or fcf.currency,
-        )
-        if aligned is None:
-            LOGGER.warning("%s: currency mismatch for %s", self.id, symbol)
-            return None
-
         return MetricResult(
             symbol=symbol,
             metric_id=self.id,
-            value=aligned[0] / aligned[1],
+            value=sbc.total / fcf.total,
             as_of=max(sbc.as_of, fcf.as_of),
             unit_kind="percent",
         )

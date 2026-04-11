@@ -13,12 +13,14 @@ import logging
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.enterprise_value import (
     EV_FALLBACK_REQUIRED_CONCEPTS,
-    FXConverter,
-    merge_currency_codes,
     resolve_enterprise_value_denominator,
 )
-from pyvalue.money import fx_converter_for_context, normalize_money_value
-from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS, is_recent_fact
+from pyvalue.metrics.utils import (
+    MAX_FACT_AGE_DAYS,
+    is_recent_fact,
+    normalize_metric_record,
+    resolve_metric_ticker_currency,
+)
 from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -99,19 +101,10 @@ class EnterpriseValueRatioCalculator:
                 currency=operating.currency,
             )
 
-        currency = merge_currency_codes([operating.currency, capex.currency])
-        if currency is None and any(
-            code is not None for code in (operating.currency, capex.currency)
-        ):
-            LOGGER.warning(
-                "%s: currency conflict in TTM FCF inputs for %s", context, symbol
-            )
-            return None
-
         return _TTMResult(
             total=operating.total - capex.total,
             as_of=max(operating.as_of, capex.as_of),
-            currency=currency,
+            currency=operating.currency,
         )
 
     def compute_ttm_ebitda(
@@ -140,7 +133,11 @@ class EnterpriseValueRatioCalculator:
         )
 
         total = 0.0
-        currency: Optional[str] = None
+        currency = resolve_metric_ticker_currency(
+            symbol,
+            repo,
+            candidate_currencies=[record.currency for record in ebit_records[:4]],
+        )
         for ebit_record in ebit_records[:4]:
             da_record = da_primary.get(ebit_record.end_date) or da_fallback.get(
                 ebit_record.end_date
@@ -154,19 +151,20 @@ class EnterpriseValueRatioCalculator:
                 )
                 return None
 
-            ebit_value, ebit_currency = self._normalize_record(ebit_record)
-            da_value, da_currency = self._normalize_record(da_record)
-            merged = merge_currency_codes([currency, ebit_currency, da_currency])
-            if merged is None and any(
-                code is not None for code in (currency, ebit_currency, da_currency)
-            ):
-                LOGGER.warning(
-                    "%s: currency conflict in EBIT/D&A for %s",
-                    context,
-                    symbol,
-                )
-                return None
-            currency = merged
+            ebit_value, _ = self._normalize_record(
+                ebit_record,
+                symbol=symbol,
+                repo=repo,
+                context=context,
+                expected_currency=currency,
+            )
+            da_value, _ = self._normalize_record(
+                da_record,
+                symbol=symbol,
+                repo=repo,
+                context=context,
+                expected_currency=currency,
+            )
             total += ebit_value + da_value
 
         return _TTMResult(
@@ -204,21 +202,19 @@ class EnterpriseValueRatioCalculator:
             return None
 
         normalized: list[float] = []
-        currency: Optional[str] = None
+        currency = resolve_metric_ticker_currency(
+            symbol,
+            repo,
+            candidate_currencies=[record.currency for record in quarterly[:4]],
+        )
         for record in quarterly[:4]:
-            value, code = self._normalize_record(record)
-            merged = merge_currency_codes([currency, code])
-            if merged is None and any(
-                existing is not None for existing in (currency, code)
-            ):
-                LOGGER.warning(
-                    "%s: currency conflict in %s quarterly values for %s",
-                    context,
-                    concept,
-                    symbol,
-                )
-                return None
-            currency = merged
+            value, _ = self._normalize_record(
+                record,
+                symbol=symbol,
+                repo=repo,
+                context=context,
+                expected_currency=currency,
+            )
             normalized.append(value)
 
         return _TTMResult(
@@ -246,15 +242,23 @@ class EnterpriseValueRatioCalculator:
     def _quarterly_map(self, records: Sequence[FactRecord]) -> dict[str, FactRecord]:
         return {record.end_date: record for record in self._filter_quarterly(records)}
 
-    def _normalize_record(self, record: FactRecord) -> tuple[float, Optional[str]]:
-        normalized_value, normalized_currency = normalize_money_value(
-            record.value,
-            getattr(record, "currency", None),
+    def _normalize_record(
+        self,
+        record: FactRecord,
+        *,
+        symbol: str,
+        repo: FinancialFactsRepository,
+        context: str,
+        expected_currency: Optional[str],
+    ) -> tuple[float, str]:
+        normalized_value, normalized_currency = normalize_metric_record(
+            record,
+            metric_id=context,
+            symbol=symbol,
+            expected_currency=expected_currency,
+            contexts=(repo,),
         )
-        return (
-            record.value if normalized_value is None else normalized_value,
-            normalized_currency,
-        )
+        return normalized_value, normalized_currency
 
 
 @dataclass
@@ -278,14 +282,12 @@ class EBITYieldEVMetric:
             LOGGER.warning("%s: missing numerator for %s", self.id, symbol)
             return None
 
-        converter: FXConverter = fx_converter_for_context(repo, market_repo)
         enterprise_value = resolve_enterprise_value_denominator(
             symbol=symbol,
             repo=repo,
             market_repo=market_repo,
             target_currency=numerator.currency,
             context=self.id,
-            converter=converter,
         )
         if enterprise_value is None:
             return None
@@ -319,14 +321,12 @@ class FCFYieldEVMetric:
             LOGGER.warning("%s: missing numerator for %s", self.id, symbol)
             return None
 
-        converter: FXConverter = fx_converter_for_context(repo, market_repo)
         enterprise_value = resolve_enterprise_value_denominator(
             symbol=symbol,
             repo=repo,
             market_repo=market_repo,
             target_currency=numerator.currency,
             context=self.id,
-            converter=converter,
         )
         if enterprise_value is None:
             return None
@@ -363,14 +363,12 @@ class EVToEBITMetric:
             LOGGER.warning("%s: non-positive EBIT for %s", self.id, symbol)
             return None
 
-        converter: FXConverter = fx_converter_for_context(repo, market_repo)
         enterprise_value = resolve_enterprise_value_denominator(
             symbol=symbol,
             repo=repo,
             market_repo=market_repo,
             target_currency=numerator.currency,
             context=self.id,
-            converter=converter,
         )
         if enterprise_value is None:
             return None
@@ -407,14 +405,12 @@ class EVToEBITDAMetric:
             LOGGER.warning("%s: non-positive EBITDA for %s", self.id, symbol)
             return None
 
-        converter: FXConverter = fx_converter_for_context(repo, market_repo)
         enterprise_value = resolve_enterprise_value_denominator(
             symbol=symbol,
             repo=repo,
             market_repo=market_repo,
             target_currency=numerator.currency,
             context=self.id,
-            converter=converter,
         )
         if enterprise_value is None:
             return None

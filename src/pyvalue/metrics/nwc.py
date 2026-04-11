@@ -12,8 +12,12 @@ from typing import Optional, Sequence
 import logging
 
 from pyvalue.metrics.base import MetricResult
-from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS, MAX_FY_FACT_AGE_DAYS
-from pyvalue.money import fx_service_for_context, normalize_money_value
+from pyvalue.metrics.utils import (
+    MAX_FACT_AGE_DAYS,
+    MAX_FY_FACT_AGE_DAYS,
+    normalize_metric_record,
+    require_metric_ticker_currency,
+)
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -86,6 +90,7 @@ class _NWCBase:
                 cash_equivalents=cash_eq_map.get(key),
                 short_term_investments=short_term_investments_map.get(key),
                 short_term_debt=short_term_debt_map.get(key),
+                repo=repo,
             )
             if point is not None:
                 points.append(point)
@@ -102,12 +107,17 @@ class _NWCBase:
         cash_equivalents: Optional[FactRecord],
         short_term_investments: Optional[FactRecord],
         short_term_debt: Optional[FactRecord],
+        repo: FinancialFactsRepository,
     ) -> Optional[_NWCPoint]:
         if assets is None or liabilities is None:
             return None
 
-        assets_value, assets_currency = self._normalize_currency(assets)
-        liabilities_value, liabilities_currency = self._normalize_currency(liabilities)
+        assets_value, assets_currency = self._normalize_currency(
+            assets, symbol=symbol, repo=repo, context="nwc"
+        )
+        liabilities_value, liabilities_currency = self._normalize_currency(
+            liabilities, symbol=symbol, repo=repo, context="nwc"
+        )
 
         cash_amount = self._cash_amount(
             symbol=symbol,
@@ -115,6 +125,7 @@ class _NWCBase:
             cash_primary=cash_primary,
             cash_equivalents=cash_equivalents,
             short_term_investments=short_term_investments,
+            repo=repo,
         )
         if cash_amount is None:
             return None
@@ -124,33 +135,12 @@ class _NWCBase:
         short_term_debt_currency = None
         if short_term_debt is not None:
             short_term_debt_value, short_term_debt_currency = self._normalize_currency(
-                short_term_debt
+                short_term_debt,
+                symbol=symbol,
+                repo=repo,
+                context="nwc",
             )
-
-        currency = self._merge_currency(
-            [
-                assets_currency,
-                liabilities_currency,
-                cash_currency,
-                short_term_debt_currency,
-            ]
-        )
-        if currency is None and any(
-            code is not None
-            for code in (
-                assets_currency,
-                liabilities_currency,
-                cash_currency,
-                short_term_debt_currency,
-            )
-        ):
-            LOGGER.warning(
-                "nwc: currency mismatch for %s on %s/%s",
-                symbol,
-                key[0],
-                key[1],
-            )
-            return None
+        currency = assets_currency
 
         adjusted_liabilities = max(liabilities_value - short_term_debt_value, 0.0)
         nwc_value = (assets_value - cash_value) - adjusted_liabilities
@@ -169,9 +159,12 @@ class _NWCBase:
         cash_primary: Optional[FactRecord],
         cash_equivalents: Optional[FactRecord],
         short_term_investments: Optional[FactRecord],
+        repo: FinancialFactsRepository,
     ) -> Optional[tuple[float, Optional[str]]]:
         if cash_primary is not None:
-            return self._normalize_currency(cash_primary)
+            return self._normalize_currency(
+                cash_primary, symbol=symbol, repo=repo, context="nwc"
+            )
 
         if cash_equivalents is None and short_term_investments is None:
             LOGGER.warning(
@@ -182,7 +175,9 @@ class _NWCBase:
         cash_eq_value = 0.0
         cash_eq_currency = None
         if cash_equivalents is not None:
-            cash_eq_value, cash_eq_currency = self._normalize_currency(cash_equivalents)
+            cash_eq_value, cash_eq_currency = self._normalize_currency(
+                cash_equivalents, symbol=symbol, repo=repo, context="nwc"
+            )
 
         short_term_investments_value = 0.0
         short_term_investments_currency = None
@@ -190,22 +185,11 @@ class _NWCBase:
             (
                 short_term_investments_value,
                 short_term_investments_currency,
-            ) = self._normalize_currency(short_term_investments)
-
-        currency = self._merge_currency(
-            [cash_eq_currency, short_term_investments_currency]
-        )
-        if currency is None and any(
-            code is not None
-            for code in (cash_eq_currency, short_term_investments_currency)
-        ):
-            LOGGER.warning(
-                "nwc: cash fallback currency mismatch for %s on %s/%s",
-                symbol,
-                key[0],
-                key[1],
+            ) = self._normalize_currency(
+                short_term_investments, symbol=symbol, repo=repo, context="nwc"
             )
-            return None
+
+        currency = cash_eq_currency or short_term_investments_currency
 
         return cash_eq_value + short_term_investments_value, currency
 
@@ -224,26 +208,29 @@ class _NWCBase:
                 mapped[key] = record
         return mapped
 
-    def _normalize_currency(self, record: FactRecord) -> tuple[float, Optional[str]]:
-        normalized_value, normalized_currency = normalize_money_value(
-            record.value,
-            record.currency,
+    def _normalize_currency(
+        self,
+        record: FactRecord,
+        *,
+        symbol: str,
+        repo: FinancialFactsRepository,
+        context: str,
+    ) -> tuple[float, str]:
+        normalized_value, normalized_currency = normalize_metric_record(
+            record,
+            metric_id=context,
+            symbol=symbol,
+            expected_currency=require_metric_ticker_currency(
+                symbol,
+                repo,
+                metric_id=context,
+                input_name=record.concept,
+                as_of=record.end_date,
+                candidate_currencies=[record.currency],
+            ),
+            contexts=(repo,),
         )
-        return (
-            record.value if normalized_value is None else normalized_value,
-            normalized_currency,
-        )
-
-    def _merge_currency(self, codes: Sequence[Optional[str]]) -> Optional[str]:
-        merged = None
-        for code in codes:
-            if not code:
-                continue
-            if merged is None:
-                merged = code
-            elif merged != code:
-                return None
-        return merged
+        return normalized_value, normalized_currency
 
     def _extract_year(self, value: str) -> Optional[int]:
         if len(value) < 4:
@@ -371,30 +358,10 @@ class DeltaNWCTTMMetric(_NWCBase):
                 symbol,
             )
             return None
-        if latest.currency is None or prior.currency is None:
-            LOGGER.warning("delta_nwc_ttm: missing currency for %s", symbol)
-            return None
-        prior_value = prior.value
-        if prior.currency != latest.currency:
-            converted = fx_service_for_context(repo).convert_amount(
-                prior.value,
-                prior.currency,
-                latest.currency,
-                prior.as_of,
-            )
-            if converted is None:
-                LOGGER.warning(
-                    "delta_nwc_ttm: FX conversion failed for %s (%s -> %s)",
-                    symbol,
-                    prior.currency,
-                    latest.currency,
-                )
-                return None
-            prior_value = float(converted)
         return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
-            value=latest.value - prior_value,
+            value=latest.value - prior.value,
             as_of=latest.as_of,
             currency=latest.currency,
         )
@@ -433,30 +400,10 @@ class DeltaNWCFYMetric(_NWCBase):
         if prior is None:
             LOGGER.warning("delta_nwc_fy: missing strict prior FY for %s", symbol)
             return None
-        if latest.currency is None or prior.currency is None:
-            LOGGER.warning("delta_nwc_fy: missing currency for %s", symbol)
-            return None
-        prior_value = prior.value
-        if prior.currency != latest.currency:
-            converted = fx_service_for_context(repo).convert_amount(
-                prior.value,
-                prior.currency,
-                latest.currency,
-                prior.as_of,
-            )
-            if converted is None:
-                LOGGER.warning(
-                    "delta_nwc_fy: FX conversion failed for %s (%s -> %s)",
-                    symbol,
-                    prior.currency,
-                    latest.currency,
-                )
-                return None
-            prior_value = float(converted)
         return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
-            value=latest.value - prior_value,
+            value=latest.value - prior.value,
             as_of=latest.as_of,
             currency=latest.currency,
         )

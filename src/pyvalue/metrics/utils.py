@@ -6,13 +6,19 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from datetime import date, timedelta
-from typing import Dict, Iterable, List, Sequence
+import logging
+from typing import Dict, Iterable, List, Optional, Sequence
 
+from pyvalue.currency import normalize_currency_code
+from pyvalue.metrics.base import MetricCurrencyInvariantError
+from pyvalue.money import normalize_money_value
 from pyvalue.storage import FactRecord
 
 # Default freshness windows (days)
 MAX_FACT_AGE_DAYS = 365
 MAX_FY_FACT_AGE_DAYS = 366
+
+LOGGER = logging.getLogger(__name__)
 
 
 def is_recent_fact(
@@ -106,6 +112,247 @@ def latest_quarterly_records(
     return []
 
 
+def resolve_metric_ticker_currency(
+    symbol: str,
+    *objects: object,
+    candidate_currencies: Iterable[Optional[str]] = (),
+) -> Optional[str]:
+    """Return the stored trading currency for metric-side currency assertions.
+
+    Trading currency is defined strictly as the symbol's stored ``market_data.currency``.
+    ``candidate_currencies`` is accepted for backwards-compatible call sites but is
+    intentionally ignored here so metrics cannot silently infer a currency from facts.
+    """
+
+    for obj in objects:
+        if obj is None:
+            continue
+        resolver = getattr(obj, "ticker_currency", None)
+        if callable(resolver):
+            resolved = normalize_currency_code(resolver(symbol))
+            if resolved is not None:
+                return resolved
+    del candidate_currencies
+    return None
+
+
+def require_metric_ticker_currency(
+    symbol: str,
+    *objects: object,
+    metric_id: str,
+    input_name: str = "trading_currency",
+    as_of: Optional[str] = None,
+    candidate_currencies: Iterable[Optional[str]] = (),
+) -> str:
+    """Return the stored trading currency or raise a structured invariant error."""
+
+    resolved = resolve_metric_ticker_currency(
+        symbol,
+        *objects,
+        candidate_currencies=candidate_currencies,
+    )
+    if resolved is None:
+        _raise_currency_invariant(
+            metric_id=metric_id,
+            symbol=symbol,
+            input_name=input_name,
+            reason_code="missing_trading_currency",
+            as_of=as_of,
+        )
+    assert resolved is not None
+    return resolved
+
+
+def _raise_currency_invariant(
+    *,
+    metric_id: str,
+    symbol: str,
+    input_name: str,
+    reason_code: str,
+    expected_currency: Optional[str] = None,
+    actual_currency: Optional[str] = None,
+    as_of: Optional[str] = None,
+) -> None:
+    error = MetricCurrencyInvariantError(
+        metric_id=metric_id,
+        symbol=symbol,
+        input_name=input_name,
+        reason_code=reason_code,
+        expected_currency=expected_currency,
+        actual_currency=actual_currency,
+        as_of=as_of,
+    )
+    LOGGER.warning(
+        "Metric currency invariant violated | metric=%s symbol=%s input=%s reason=%s expected=%s actual=%s as_of=%s",
+        metric_id,
+        symbol,
+        input_name,
+        reason_code,
+        expected_currency,
+        actual_currency,
+        as_of,
+    )
+    raise error
+
+
+def ensure_metric_currency(
+    *,
+    metric_id: str,
+    symbol: str,
+    input_name: str,
+    actual_currency: Optional[str],
+    expected_currency: Optional[str] = None,
+    as_of: Optional[str] = None,
+    contexts: Sequence[object] = (),
+    fallback_currencies: Iterable[Optional[str]] = (),
+) -> str:
+    """Assert that one currency-bearing metric input matches the ticker currency."""
+
+    resolved_expected = normalize_currency_code(
+        expected_currency
+    ) or resolve_metric_ticker_currency(
+        symbol,
+        *contexts,
+    )
+    if resolved_expected is None:
+        _raise_currency_invariant(
+            metric_id=metric_id,
+            symbol=symbol,
+            input_name=input_name,
+            reason_code="missing_trading_currency",
+            as_of=as_of,
+        )
+    assert resolved_expected is not None
+
+    resolved_actual = normalize_currency_code(actual_currency)
+    if resolved_actual is None:
+        _raise_currency_invariant(
+            metric_id=metric_id,
+            symbol=symbol,
+            input_name=input_name,
+            reason_code="missing_input_currency",
+            expected_currency=resolved_expected,
+            as_of=as_of,
+        )
+    if resolved_actual != resolved_expected:
+        _raise_currency_invariant(
+            metric_id=metric_id,
+            symbol=symbol,
+            input_name=input_name,
+            reason_code="currency_mismatch",
+            expected_currency=resolved_expected,
+            actual_currency=resolved_actual,
+            as_of=as_of,
+        )
+    return resolved_expected
+
+
+def normalize_metric_amount(
+    amount: float,
+    currency: Optional[str],
+    *,
+    metric_id: str,
+    symbol: str,
+    input_name: str,
+    as_of: Optional[str],
+    expected_currency: Optional[str] = None,
+    contexts: Sequence[object] = (),
+    fallback_currencies: Iterable[Optional[str]] = (),
+) -> tuple[float, str]:
+    """Normalize one monetary/per-share input and assert ticker-currency equality."""
+
+    normalized_amount, normalized_currency = normalize_money_value(amount, currency)
+    if normalized_amount is None:
+        _raise_currency_invariant(
+            metric_id=metric_id,
+            symbol=symbol,
+            input_name=input_name,
+            reason_code="missing_input_currency",
+            expected_currency=normalize_currency_code(expected_currency),
+            as_of=as_of,
+        )
+    assert normalized_amount is not None
+    resolved_currency = ensure_metric_currency(
+        metric_id=metric_id,
+        symbol=symbol,
+        input_name=input_name,
+        actual_currency=normalized_currency,
+        expected_currency=expected_currency,
+        as_of=as_of,
+        contexts=contexts,
+        fallback_currencies=fallback_currencies,
+    )
+    return float(normalized_amount), resolved_currency
+
+
+def normalize_metric_record(
+    record: FactRecord,
+    *,
+    metric_id: str,
+    symbol: str,
+    input_name: Optional[str] = None,
+    expected_currency: Optional[str] = None,
+    contexts: Sequence[object] = (),
+    fallback_currencies: Iterable[Optional[str]] = (),
+) -> tuple[float, str]:
+    """Normalize one fact value and assert the fact currency matches the ticker."""
+
+    return normalize_metric_amount(
+        record.value,
+        record.currency,
+        metric_id=metric_id,
+        symbol=symbol,
+        input_name=input_name or record.concept,
+        as_of=record.end_date,
+        expected_currency=expected_currency,
+        contexts=contexts,
+        fallback_currencies=fallback_currencies,
+    )
+
+
+def align_metric_money_values(
+    *,
+    values: Iterable[tuple[float, Optional[str], str, str]],
+    metric_id: str,
+    symbol: str,
+    expected_currency: Optional[str] = None,
+    contexts: Sequence[object] = (),
+) -> tuple[list[float], str]:
+    """Return metric inputs after enforcing a shared ticker-currency invariant."""
+
+    collected = list(values)
+    resolved_currency = normalize_currency_code(
+        expected_currency
+    ) or resolve_metric_ticker_currency(
+        symbol,
+        *contexts,
+    )
+    if resolved_currency is None:
+        _raise_currency_invariant(
+            metric_id=metric_id,
+            symbol=symbol,
+            input_name="trading_currency",
+            reason_code="missing_trading_currency",
+            as_of=collected[0][2] if collected else None,
+        )
+    assert resolved_currency is not None
+
+    aligned: list[float] = []
+    for amount, currency, as_of, field_name in collected:
+        normalized_amount, _ = normalize_metric_amount(
+            amount,
+            currency,
+            metric_id=metric_id,
+            symbol=symbol,
+            input_name=field_name,
+            as_of=as_of,
+            expected_currency=resolved_currency,
+            contexts=contexts,
+        )
+        aligned.append(normalized_amount)
+    return aligned, resolved_currency
+
+
 def _filter_quarterly(records: Iterable[FactRecord]) -> List[FactRecord]:
     filtered: List[FactRecord] = []
     seen_end_dates: set[str] = set()
@@ -130,4 +377,10 @@ __all__ = [
     "MAX_FY_FACT_AGE_DAYS",
     "MAX_FACT_AGE_DAYS",
     "has_recent_fact",
+    "align_metric_money_values",
+    "ensure_metric_currency",
+    "normalize_metric_amount",
+    "normalize_metric_record",
+    "require_metric_ticker_currency",
+    "resolve_metric_ticker_currency",
 ]

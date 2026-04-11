@@ -12,8 +12,12 @@ from typing import Optional, Sequence
 import logging
 
 from pyvalue.metrics.base import MetricResult
-from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS, MAX_FY_FACT_AGE_DAYS
-from pyvalue.money import normalize_money_value
+from pyvalue.metrics.utils import (
+    MAX_FACT_AGE_DAYS,
+    MAX_FY_FACT_AGE_DAYS,
+    normalize_metric_record,
+    resolve_metric_ticker_currency,
+)
 from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -107,6 +111,7 @@ class _InvestedCapitalBase:
         for key in candidate_keys:
             debt = self._resolve_debt(
                 symbol=symbol,
+                repo=repo,
                 key=key,
                 short_debt=short_map.get(key),
                 long_debt=long_map.get(key),
@@ -117,6 +122,7 @@ class _InvestedCapitalBase:
 
             equity = self._resolve_equity(
                 symbol=symbol,
+                repo=repo,
                 key=key,
                 primary=equity_map.get(key),
                 fallback=common_equity_map.get(key),
@@ -126,6 +132,7 @@ class _InvestedCapitalBase:
 
             cash = self._resolve_cash(
                 symbol=symbol,
+                repo=repo,
                 key=key,
                 primary=cash_primary_map.get(key),
                 fallback=cash_fallback_map.get(key),
@@ -162,14 +169,25 @@ class _InvestedCapitalBase:
         self,
         *,
         symbol: str,
+        repo: FinancialFactsRepository,
         key: tuple[str, str],
         short_debt: Optional[FactRecord],
         long_debt: Optional[FactRecord],
         total_debt: Optional[FactRecord],
     ) -> Optional[_Amount]:
         if short_debt is not None and long_debt is not None:
-            short_value, short_currency = self._normalize_currency(short_debt)
-            long_value, long_currency = self._normalize_currency(long_debt)
+            short_value, short_currency = self._normalize_currency(
+                short_debt,
+                symbol,
+                repo,
+                SHORT_TERM_DEBT_CONCEPT,
+            )
+            long_value, long_currency = self._normalize_currency(
+                long_debt,
+                symbol,
+                repo,
+                LONG_TERM_DEBT_CONCEPT,
+            )
             currency = self._merge_currency([short_currency, long_currency])
             if currency is None and any(
                 code is not None for code in (short_currency, long_currency)
@@ -188,7 +206,12 @@ class _InvestedCapitalBase:
             )
 
         if total_debt is not None:
-            total_value, total_currency = self._normalize_currency(total_debt)
+            total_value, total_currency = self._normalize_currency(
+                total_debt,
+                symbol,
+                repo,
+                TOTAL_DEBT_CONCEPT,
+            )
             return _Amount(
                 value=total_value,
                 as_of=total_debt.end_date,
@@ -205,13 +228,19 @@ class _InvestedCapitalBase:
             )
             return None
 
-        value, currency = self._normalize_currency(one_side)
+        value, currency = self._normalize_currency(
+            one_side,
+            symbol,
+            repo,
+            one_side.concept,
+        )
         return _Amount(value=value, as_of=one_side.end_date, currency=currency)
 
     def _resolve_equity(
         self,
         *,
         symbol: str,
+        repo: FinancialFactsRepository,
         key: tuple[str, str],
         primary: Optional[FactRecord],
         fallback: Optional[FactRecord],
@@ -225,13 +254,19 @@ class _InvestedCapitalBase:
                 key[1],
             )
             return None
-        value, currency = self._normalize_currency(record)
+        value, currency = self._normalize_currency(
+            record,
+            symbol,
+            repo,
+            record.concept,
+        )
         return _Amount(value=value, as_of=record.end_date, currency=currency)
 
     def _resolve_cash(
         self,
         *,
         symbol: str,
+        repo: FinancialFactsRepository,
         key: tuple[str, str],
         primary: Optional[FactRecord],
         fallback: Optional[FactRecord],
@@ -245,7 +280,12 @@ class _InvestedCapitalBase:
                 key[1],
             )
             return None
-        value, currency = self._normalize_currency(record)
+        value, currency = self._normalize_currency(
+            record,
+            symbol,
+            repo,
+            record.concept,
+        )
         return _Amount(value=value, as_of=record.end_date, currency=currency)
 
     def _period_map(
@@ -263,14 +303,24 @@ class _InvestedCapitalBase:
                 mapped[key] = record
         return mapped
 
-    def _normalize_currency(self, record: FactRecord) -> tuple[float, Optional[str]]:
-        normalized_value, normalized_currency = normalize_money_value(
-            record.value,
-            record.currency,
-        )
-        return (
-            record.value if normalized_value is None else normalized_value,
-            normalized_currency,
+    def _normalize_currency(
+        self,
+        record: FactRecord,
+        symbol: str,
+        repo: FinancialFactsRepository,
+        concept: str,
+    ) -> tuple[float, str]:
+        return normalize_metric_record(
+            record,
+            metric_id="invested_capital",
+            symbol=symbol,
+            input_name=concept,
+            expected_currency=resolve_metric_ticker_currency(
+                symbol,
+                repo,
+                candidate_currencies=[record.currency],
+            ),
+            contexts=(repo,),
         )
 
     def _merge_currency(self, codes: Sequence[Optional[str]]) -> Optional[str]:
