@@ -2993,6 +2993,87 @@ class FinancialFactsRepository(SQLiteStore):
             ).fetchall()
         return [FactRecord(*row) for row in rows]
 
+    def facts_for_symbols_many(
+        self,
+        symbols: Sequence[str],
+        chunk_size: int = 25,
+    ) -> Dict[str, List[FactRecord]]:
+        """Return all stored facts for many symbols grouped by canonical symbol.
+
+        The query pattern matches ``compute-metrics`` where loading facts one
+        symbol at a time becomes dominated by SQLite round trips on large
+        universes. Each chunk performs indexed reads over a bounded set of
+        ``security_id`` values and preserves the same per-symbol ordering as
+        ``facts_for_symbol()``.
+        """
+
+        self.initialize_schema()
+        normalized = _normalized_codes(symbols)
+        if not normalized:
+            return {}
+
+        security_ids_by_symbol = self._security_repo().resolve_ids_many(
+            normalized,
+            chunk_size=chunk_size,
+        )
+        resolved_symbols = [
+            symbol for symbol in normalized if symbol in security_ids_by_symbol
+        ]
+        if not resolved_symbols:
+            return {}
+
+        grouped: Dict[str, List[FactRecord]] = {
+            symbol: [] for symbol in resolved_symbols
+        }
+        with self._connect() as conn:
+            for chunk in _batched(resolved_symbols, chunk_size):
+                symbol_by_security_id = {
+                    security_ids_by_symbol[symbol]: symbol for symbol in chunk
+                }
+                placeholders = ", ".join("?" for _ in symbol_by_security_id)
+                cursor = conn.execute(
+                    f"""
+                    SELECT
+                        ff.security_id,
+                        ff.cik,
+                        ff.concept,
+                        ff.fiscal_period,
+                        ff.end_date,
+                        ff.unit,
+                        ff.value,
+                        ff.accn,
+                        ff.filed,
+                        ff.frame,
+                        ff.start_date,
+                        ff.accounting_standard,
+                        ff.currency
+                    FROM financial_facts ff INDEXED BY idx_fin_facts_security_concept_latest
+                    WHERE ff.security_id IN ({placeholders})
+                    ORDER BY ff.security_id, ff.concept, ff.end_date DESC, ff.filed DESC
+                    """,
+                    list(symbol_by_security_id),
+                )
+                for row in cursor:
+                    symbol = symbol_by_security_id[row["security_id"]]
+                    grouped[symbol].append(
+                        FactRecord(
+                            symbol=symbol,
+                            cik=row["cik"],
+                            concept=row["concept"],
+                            fiscal_period=row["fiscal_period"],
+                            end_date=row["end_date"],
+                            unit=row["unit"],
+                            value=row["value"],
+                            accn=row["accn"],
+                            filed=row["filed"],
+                            frame=row["frame"],
+                            start_date=row["start_date"],
+                            accounting_standard=row["accounting_standard"],
+                            currency=row["currency"],
+                        )
+                    )
+        return grouped
+
     def latest_numeric_values_for_concept_many(
         self,
         symbols: Sequence[str],
@@ -4120,46 +4201,53 @@ class MarketDataRepository(SQLiteStore):
         if not normalized:
             return {}
 
+        security_ids_by_symbol = self._security_repo().resolve_ids_many(
+            normalized,
+            chunk_size=chunk_size,
+        )
+        resolved_symbols = [
+            symbol for symbol in normalized if symbol in security_ids_by_symbol
+        ]
+        if not resolved_symbols:
+            return {}
+
         snapshots: Dict[str, MarketSnapshotRecord] = {}
         with self._connect() as conn:
-            for chunk in _batched(normalized, chunk_size):
-                placeholders = ", ".join("?" for _ in chunk)
-                rows = conn.execute(
+            for chunk in _batched(resolved_symbols, chunk_size):
+                symbol_by_security_id = {
+                    security_ids_by_symbol[symbol]: symbol for symbol in chunk
+                }
+                placeholders = ", ".join("?" for _ in symbol_by_security_id)
+                cursor = conn.execute(
                     f"""
-                    SELECT
-                        ranked.security_id,
-                        ranked.canonical_symbol,
-                        ranked.as_of,
-                        ranked.price,
-                        ranked.volume,
-                        ranked.market_cap,
-                        ranked.currency
-                    FROM (
+                    WITH latest AS (
                         SELECT
-                            s.security_id,
-                            s.canonical_symbol,
-                            md.as_of,
-                            md.price,
-                            md.volume,
-                            md.market_cap,
-                            md.currency,
-                            ROW_NUMBER() OVER (
-                                PARTITION BY md.security_id
-                                ORDER BY md.as_of DESC
-                            ) AS row_num
-                        FROM market_data md
-                        JOIN securities s ON s.security_id = md.security_id
-                        WHERE s.canonical_symbol IN ({placeholders})
-                    ) ranked
-                    WHERE ranked.row_num = 1
-                    ORDER BY ranked.canonical_symbol
+                            security_id,
+                            MAX(as_of) AS as_of
+                        FROM market_data INDEXED BY idx_market_data_latest
+                        WHERE security_id IN ({placeholders})
+                        GROUP BY security_id
+                    )
+                    SELECT
+                        md.security_id,
+                        md.as_of,
+                        md.price,
+                        md.volume,
+                        md.market_cap,
+                        md.currency
+                    FROM latest
+                    JOIN market_data md
+                      ON md.security_id = latest.security_id
+                     AND md.as_of = latest.as_of
+                    ORDER BY md.security_id
                     """,
-                    list(chunk),
-                ).fetchall()
-                for row in rows:
-                    snapshots[row["canonical_symbol"]] = MarketSnapshotRecord(
+                    list(symbol_by_security_id),
+                )
+                for row in cursor:
+                    symbol = symbol_by_security_id[row["security_id"]]
+                    snapshots[symbol] = MarketSnapshotRecord(
                         security_id=row["security_id"],
-                        symbol=row["canonical_symbol"],
+                        symbol=symbol,
                         as_of=row["as_of"],
                         price=row["price"],
                         volume=row["volume"],

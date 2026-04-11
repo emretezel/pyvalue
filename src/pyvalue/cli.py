@@ -8,7 +8,12 @@ from __future__ import annotations
 import argparse
 import csv
 import concurrent.futures.thread as _thread_futures
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    Future,
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    as_completed,
+)
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 import json
@@ -145,6 +150,7 @@ MARKET_DATA_WRITE_BATCH_INTERVAL_SECONDS = 0.25
 MARKET_DATA_PROGRESS_INTERVAL_SECONDS = 5.0
 MARKET_DATA_PROGRESS_SYMBOL_STEP = 250
 METRICS_MAX_WORKERS = 16
+METRICS_COMPUTE_BATCH_SIZE = 25
 METRICS_PROGRESS_INTERVAL_SECONDS = 5.0
 SECURITY_METADATA_CHUNK_SIZE = 500
 SECURITY_METADATA_PROGRESS_INTERVAL_SECONDS = 5.0
@@ -157,6 +163,7 @@ NORMALIZATION_MAX_WORKERS = 16
 
 _MARKET_DATA_PROVIDER_LOCAL = local()
 _FUNDAMENTALS_CLIENT_LOCAL = local()
+_PRELOADED_MARKET_SNAPSHOT_MISSING = object()
 
 
 @dataclass(frozen=True)
@@ -3173,6 +3180,13 @@ def _metrics_use_market_data(metric_ids: Sequence[str]) -> bool:
     )
 
 
+def _metrics_use_financial_facts(metric_ids: Sequence[str]) -> bool:
+    return any(
+        getattr(REGISTRY[metric_id], "uses_financial_facts", True)
+        for metric_id in metric_ids
+    )
+
+
 def _metric_worker_count(total_symbols: int) -> int:
     """Return an automatic worker count for bulk metric computation."""
 
@@ -3229,6 +3243,22 @@ def _print_symbol_progress(completed_symbols: int, total_symbols: int) -> None:
         percent = (completed_symbols / total_symbols) * 100.0
     print(
         f"Progress: {completed_symbols}/{total_symbols} symbols complete ({percent:.1f}%)",
+        flush=True,
+    )
+
+
+def _print_metric_progress_bar(completed_symbols: int, total_symbols: int) -> None:
+    """Print a compact ASCII bar for metric-computation progress."""
+
+    if total_symbols <= 0:
+        percent = 100.0
+    else:
+        percent = (completed_symbols / total_symbols) * 100.0
+    bar_width = 20
+    filled_width = min(bar_width, max(0, round((percent / 100.0) * bar_width)))
+    bar = "#" * filled_width + "-" * (bar_width - filled_width)
+    print(
+        f"Progress: [{bar}] {completed_symbols}/{total_symbols} symbols complete ({percent:.1f}%)",
         flush=True,
     )
 
@@ -3313,15 +3343,36 @@ def _compute_metrics_for_symbol(
     metric_ids: Sequence[str],
     fact_repo: FinancialFactsRepository,
     market_repo: Optional[MarketDataRepository] = None,
+    *,
+    preloaded_facts: Optional[Sequence[FactRecord]] = None,
+    preloaded_market_snapshot: object = _PRELOADED_MARKET_SNAPSHOT_MISSING,
 ) -> _ComputedMetricsResult:
     symbol_upper = symbol.strip().upper()
+    records = (
+        list(preloaded_facts)
+        if preloaded_facts is not None
+        else fact_repo.facts_for_symbol(symbol_upper)
+    )
     cached_fact_repo = _CachedRegionFactsRepository(
         fact_repo,
         symbol_upper,
-        fact_repo.facts_for_symbol(symbol_upper),
+        records,
+    )
+    snapshot_loaded = (
+        preloaded_market_snapshot is not _PRELOADED_MARKET_SNAPSHOT_MISSING
+    )
+    snapshot = (
+        None
+        if preloaded_market_snapshot is _PRELOADED_MARKET_SNAPSHOT_MISSING
+        else cast(Optional[PriceData], preloaded_market_snapshot)
     )
     cached_market_repo = (
-        _CachedMarketDataRepository(market_repo, symbol_upper)
+        _CachedMarketDataRepository(
+            market_repo,
+            symbol_upper,
+            snapshot=snapshot,
+            snapshot_loaded=snapshot_loaded,
+        )
         if market_repo is not None
         else None
     )
@@ -3399,10 +3450,66 @@ def _compute_metrics_for_symbol(
     )
 
 
+def _compute_metric_batch_results(
+    symbols: Sequence[str],
+    metric_ids: Sequence[str],
+    fact_repo: FinancialFactsRepository,
+    market_repo: Optional[MarketDataRepository] = None,
+    *,
+    suppress_metric_warnings: bool = True,
+) -> Tuple[_ComputedMetricsResult, ...]:
+    selected_symbols = [symbol.strip().upper() for symbol in symbols]
+    if not selected_symbols:
+        return ()
+
+    uses_financial_facts = _metrics_use_financial_facts(metric_ids)
+    facts_by_symbol = (
+        fact_repo.facts_for_symbols_many(
+            selected_symbols,
+            chunk_size=METRICS_COMPUTE_BATCH_SIZE,
+        )
+        if uses_financial_facts
+        else {}
+    )
+    snapshots_by_symbol = (
+        market_repo.latest_snapshots_many(
+            selected_symbols,
+            chunk_size=METRICS_COMPUTE_BATCH_SIZE,
+        )
+        if market_repo is not None
+        else {}
+    )
+
+    results: List[_ComputedMetricsResult] = []
+    with suppress_console_metric_warnings(suppress_metric_warnings):
+        for symbol in selected_symbols:
+            snapshot_record = snapshots_by_symbol.get(symbol)
+            results.append(
+                _compute_metrics_for_symbol(
+                    symbol,
+                    metric_ids,
+                    fact_repo,
+                    market_repo,
+                    preloaded_facts=(
+                        facts_by_symbol.get(symbol, ()) if uses_financial_facts else ()
+                    ),
+                    preloaded_market_snapshot=(
+                        _price_data_from_snapshot_record(snapshot_record)
+                        if snapshot_record is not None
+                        else None
+                        if market_repo is not None
+                        else _PRELOADED_MARKET_SNAPSHOT_MISSING
+                    ),
+                )
+            )
+    return tuple(results)
+
+
 def _compute_metrics_for_symbol_worker(
     database: Union[str, Path],
     symbol: str,
     metric_ids: Sequence[str],
+    suppress_metric_warnings: bool = True,
 ) -> _ComputedMetricsResult:
     """Compute all requested metrics for one symbol using symbol-scoped caches."""
 
@@ -3412,7 +3519,37 @@ def _compute_metrics_for_symbol_worker(
         if _metrics_use_market_data(metric_ids)
         else None
     )
-    return _compute_metrics_for_symbol(symbol, metric_ids, fact_repo, market_repo)
+    results = _compute_metric_batch_results(
+        [symbol],
+        metric_ids,
+        fact_repo,
+        market_repo,
+        suppress_metric_warnings=suppress_metric_warnings,
+    )
+    return results[0]
+
+
+def _compute_metrics_for_symbol_batch_worker(
+    database: Union[str, Path],
+    symbols: Sequence[str],
+    metric_ids: Sequence[str],
+    suppress_metric_warnings: bool = True,
+) -> Tuple[_ComputedMetricsResult, ...]:
+    """Compute requested metrics for a batch of symbols in one worker."""
+
+    fact_repo = _SchemaReadyFinancialFactsRepository(database)
+    market_repo = (
+        _SchemaReadyMarketDataRepository(database)
+        if _metrics_use_market_data(metric_ids)
+        else None
+    )
+    return _compute_metric_batch_results(
+        symbols,
+        metric_ids,
+        fact_repo,
+        market_repo,
+        suppress_metric_warnings=suppress_metric_warnings,
+    )
 
 
 def _run_metric_computation(
@@ -3487,7 +3624,7 @@ def _run_metric_computation(
         nonlocal last_progress_at, last_reported_completed
         if total_symbols <= 0:
             if force and last_reported_completed != 0:
-                _print_symbol_progress(0, 0)
+                _print_metric_progress_bar(0, 0)
                 last_reported_completed = 0
                 last_progress_at = time.monotonic()
             return
@@ -3496,58 +3633,61 @@ def _run_metric_computation(
         elapsed = time.monotonic() - last_progress_at
         if not force and elapsed < METRICS_PROGRESS_INTERVAL_SECONDS:
             return
-        _print_symbol_progress(completed_symbols, total_symbols)
+        _print_metric_progress_bar(completed_symbols, total_symbols)
         last_reported_completed = completed_symbols
         last_progress_at = time.monotonic()
 
-    with suppress_console_metric_warnings(suppress_metric_warnings):
-        if workers <= 1:
-            fact_repo = _SchemaReadyFinancialFactsRepository(db_path)
-            market_repo = (
-                _SchemaReadyMarketDataRepository(db_path)
-                if include_market_data
-                else None
-            )
-            try:
-                for symbol in selected_symbols:
-                    result = _compute_metrics_for_symbol(
-                        symbol,
-                        metric_ids,
-                        fact_repo,
-                        market_repo,
-                    )
+    if workers <= 1:
+        fact_repo = _SchemaReadyFinancialFactsRepository(db_path)
+        market_repo = (
+            _SchemaReadyMarketDataRepository(db_path) if include_market_data else None
+        )
+        try:
+            for symbol_batch in _batch_values(
+                selected_symbols,
+                METRICS_COMPUTE_BATCH_SIZE,
+            ):
+                for result in _compute_metric_batch_results(
+                    symbol_batch,
+                    metric_ids,
+                    fact_repo,
+                    market_repo,
+                    suppress_metric_warnings=suppress_metric_warnings,
+                ):
                     buffer_result(result.rows)
                     metric_failures.extend(result.failures)
                     completed_symbols += 1
                     maybe_report_progress()
-            except KeyboardInterrupt:
-                return _cancel_cli_command(
-                    cancelled_message,
-                    flushers=[
-                        lambda: flush_pending(force=True),
-                        lambda: maybe_report_progress(force=True),
-                    ],
-                )
-            flush_pending(force=True)
-            maybe_report_progress(force=True)
-            _print_metric_invariant_failure_summary(metric_failures)
-            print(f"Computed metrics for {total_symbols} symbols in {db_path}")
-            return 0
+        except KeyboardInterrupt:
+            return _cancel_cli_command(
+                cancelled_message,
+                flushers=[
+                    lambda: flush_pending(force=True),
+                    lambda: maybe_report_progress(force=True),
+                ],
+            )
+        flush_pending(force=True)
+        maybe_report_progress(force=True)
+        _print_metric_invariant_failure_summary(metric_failures)
+        print(f"Computed metrics for {total_symbols} symbols in {db_path}")
+        return 0
 
-        executor = _create_process_pool_executor(workers)
-        interrupted = False
-        try:
-            futures = {
+    executor = _create_process_pool_executor(workers)
+    interrupted = False
+    try:
+        if total_symbols <= METRICS_COMPUTE_BATCH_SIZE:
+            single_futures: Dict[Future[_ComputedMetricsResult], str] = {
                 executor.submit(
                     _compute_metrics_for_symbol_worker,
                     str(db_path),
                     symbol,
                     tuple(metric_ids),
+                    suppress_metric_warnings,
                 ): symbol
                 for symbol in selected_symbols
             }
-            for future in as_completed(futures):
-                symbol = futures[future]
+            for future in as_completed(single_futures):
+                symbol = single_futures[future]
                 try:
                     result = future.result()
                     buffer_result(result.rows)
@@ -3556,25 +3696,60 @@ def _run_metric_computation(
                     LOGGER.error("Failed to compute metrics for %s: %s", symbol, exc)
                 completed_symbols += 1
                 maybe_report_progress()
-        except KeyboardInterrupt:
-            interrupted = True
-            return _cancel_cli_command(
-                cancelled_message,
-                executors=[executor],
-                flushers=[
-                    lambda: flush_pending(force=True),
-                    lambda: maybe_report_progress(force=True),
-                ],
-            )
-        finally:
-            if not interrupted:
-                executor.shutdown(wait=True)
+        else:
+            batch_futures: Dict[
+                Future[Tuple[_ComputedMetricsResult, ...]],
+                Tuple[str, ...],
+            ] = {
+                executor.submit(
+                    _compute_metrics_for_symbol_batch_worker,
+                    str(db_path),
+                    tuple(symbol_batch),
+                    tuple(metric_ids),
+                    suppress_metric_warnings,
+                ): tuple(symbol_batch)
+                for symbol_batch in _batch_values(
+                    selected_symbols,
+                    METRICS_COMPUTE_BATCH_SIZE,
+                )
+            }
+            for batch_future in as_completed(batch_futures):
+                batch_symbols = batch_futures[batch_future]
+                try:
+                    batch_results = batch_future.result()
+                    for result in batch_results:
+                        buffer_result(result.rows)
+                        metric_failures.extend(result.failures)
+                        completed_symbols += 1
+                        maybe_report_progress()
+                except Exception as exc:  # pragma: no cover - worker crashes
+                    LOGGER.error(
+                        "Failed to compute metrics for %d-symbol batch starting at %s: %s",
+                        len(batch_symbols),
+                        batch_symbols[0],
+                        exc,
+                    )
+                    completed_symbols += len(batch_symbols)
+                    maybe_report_progress()
+    except KeyboardInterrupt:
+        interrupted = True
+        return _cancel_cli_command(
+            cancelled_message,
+            executors=[executor],
+            flushers=[
+                lambda: flush_pending(force=True),
+                lambda: maybe_report_progress(force=True),
+            ],
+        )
+    finally:
+        if not interrupted:
+            executor.shutdown(wait=True)
 
-        flush_pending(force=True)
-        maybe_report_progress(force=True)
-        _print_metric_invariant_failure_summary(metric_failures)
-        print(f"Computed metrics for {total_symbols} symbols in {db_path}")
-        return 0
+    flush_pending(force=True)
+    maybe_report_progress(force=True)
+    _print_metric_invariant_failure_summary(metric_failures)
+    print(f"Computed metrics for {total_symbols} symbols in {db_path}")
+    return 0
 
 
 def cmd_compute_metrics_stage(

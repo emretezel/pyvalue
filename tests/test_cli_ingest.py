@@ -11,6 +11,7 @@ import time
 import concurrent.futures.thread as thread_futures
 from concurrent.futures import Future, ProcessPoolExecutor
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -3962,7 +3963,9 @@ def test_cmd_compute_metrics_stage_suppresses_metric_warnings_by_default(
     assert rc == 0
     captured = capsys.readouterr()
     assert "could not be computed" not in captured.err
-    assert "Progress: 1/1 symbols complete (100.0%)" in captured.out
+    assert (
+        "Progress: [####################] 1/1 symbols complete (100.0%)" in captured.out
+    )
     log_text = (log_dir / "pyvalue.log").read_text(encoding="utf-8")
     assert "Metric dummy_metric could not be computed for AAA.US" in log_text
 
@@ -4007,6 +4010,143 @@ def test_cmd_compute_metrics_stage_can_show_metric_warnings_on_console(
     assert (
         "Metric dummy_metric could not be computed for AAA.US"
         in capsys.readouterr().err
+    )
+
+
+def test_cmd_compute_metrics_stage_prints_currency_invariant_summary_when_warnings_suppressed(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "metric-stage-currency-summary.db"
+    log_dir = tmp_path / "logs"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
+        provider="SEC",
+    )
+
+    class BadMetric:
+        id = "bad_metric"
+        required_concepts = ()
+        uses_market_data = False
+
+        def compute(self, symbol, repo):
+            raise MetricCurrencyInvariantError(
+                metric_id=self.id,
+                symbol=symbol,
+                input_name="market_data.currency",
+                reason_code="missing_trading_currency",
+            )
+
+    monkeypatch.setattr(cli, "REGISTRY", {BadMetric.id: BadMetric})
+    monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 1)
+    monkeypatch.setattr(cli, "METRICS_PROGRESS_INTERVAL_SECONDS", 0.0)
+    clear_root_logging_handlers()
+    cli.setup_logging(log_dir=log_dir)
+    try:
+        rc = cli.cmd_compute_metrics_stage(
+            database=str(db_path),
+            symbols=["AAA.US"],
+            exchange_codes=None,
+            all_supported=False,
+            metric_ids=None,
+        )
+    finally:
+        clear_root_logging_handlers()
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "could not be computed" not in captured.err
+    assert "Metric currency invariant failures:" in captured.out
+    assert "- bad_metric: currency invariant:" in captured.out
+    assert "example=AAA.US" in captured.out
+    log_text = (log_dir / "pyvalue.log").read_text(encoding="utf-8")
+    assert "Metric currency invariant failures:" not in log_text
+
+
+def test_compute_metrics_batch_worker_suppresses_metric_warnings_by_default(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "metric-batch-worker-suppressed.db"
+    log_dir = tmp_path / "logs"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+
+    class DummyMetric:
+        id = "dummy_metric"
+        required_concepts = ()
+        uses_market_data = False
+
+        def compute(self, symbol, repo):
+            return None
+
+    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
+    clear_root_logging_handlers()
+    cli.setup_logging(log_dir=log_dir)
+    try:
+        cli._initialize_metric_read_schema(Path(db_path), include_market_data=False)
+        results = cli._compute_metrics_for_symbol_batch_worker(
+            str(db_path),
+            ["AAA.US", "BBB.US"],
+            [DummyMetric.id],
+        )
+    finally:
+        clear_root_logging_handlers()
+
+    assert [result.symbol for result in results] == ["AAA.US", "BBB.US"]
+    assert "could not be computed" not in capsys.readouterr().err
+    log_text = (log_dir / "pyvalue.log").read_text(encoding="utf-8")
+    assert "Metric dummy_metric could not be computed for AAA.US" in log_text
+    assert "Metric dummy_metric could not be computed for BBB.US" in log_text
+
+
+def test_compute_metric_batch_results_skips_fact_prefetch_for_market_cap(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "metric-batch-market-cap.db"
+    recent_date = (date.today() - timedelta(days=1)).isoformat()
+    store_catalog_listings(
+        db_path,
+        "US",
+        [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
+        provider="SEC",
+    )
+    market_repo = MarketDataRepository(db_path)
+    market_repo.initialize_schema()
+    market_repo.upsert_price(
+        "AAA.US",
+        recent_date,
+        12.0,
+        market_cap=120.0,
+        currency="USD",
+    )
+
+    def fail_facts_for_symbols_many(self, symbols, chunk_size=25):
+        raise AssertionError("financial facts should not be prefetched for market_cap")
+
+    monkeypatch.setattr(
+        FinancialFactsRepository,
+        "facts_for_symbols_many",
+        fail_facts_for_symbols_many,
+    )
+
+    results = cli._compute_metric_batch_results(
+        ["AAA.US"],
+        ["market_cap"],
+        FinancialFactsRepository(db_path),
+        MarketDataRepository(db_path),
+    )
+
+    assert len(results) == 1
+    assert results[0].rows == (
+        ("AAA.US", "market_cap", 120.0, recent_date, "monetary", "USD", None),
     )
 
 
@@ -4300,8 +4440,8 @@ def test_cmd_compute_metrics_stage_parallel_with_inline_executor(
     assert rc == 0
     output_lines = capsys.readouterr().out.splitlines()
     assert [line for line in output_lines if line.startswith("Progress:")] == [
-        "Progress: 1/2 symbols complete (50.0%)",
-        "Progress: 2/2 symbols complete (100.0%)",
+        "Progress: [##########----------] 1/2 symbols complete (50.0%)",
+        "Progress: [####################] 2/2 symbols complete (100.0%)",
     ]
     assert not any(line.startswith("[") for line in output_lines)
 
@@ -4332,7 +4472,7 @@ def test_cmd_compute_metrics_stage_parallel_partial_failure(
         def shutdown(self, wait=True, cancel_futures=False):
             return None
 
-    def fake_worker(database, symbol, metric_ids):
+    def fake_worker(database, symbol, metric_ids, suppress_metric_warnings=True):
         if symbol == "BBB.US":
             raise ValueError("boom")
         return cli._ComputedMetricsResult(
@@ -4365,8 +4505,8 @@ def test_cmd_compute_metrics_stage_parallel_partial_failure(
     assert rc == 0
     output_lines = capsys.readouterr().out.splitlines()
     assert [line for line in output_lines if line.startswith("Progress:")] == [
-        "Progress: 1/2 symbols complete (50.0%)",
-        "Progress: 2/2 symbols complete (100.0%)",
+        "Progress: [##########----------] 1/2 symbols complete (50.0%)",
+        "Progress: [####################] 2/2 symbols complete (100.0%)",
     ]
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
@@ -4396,7 +4536,7 @@ def test_run_metric_computation_interrupts_cleanly(monkeypatch, tmp_path, capsys
         def shutdown(self, wait=True, cancel_futures=False):
             self.shutdown_calls.append((wait, cancel_futures))
 
-    def fake_worker(database, symbol, metric_ids):
+    def fake_worker(database, symbol, metric_ids, suppress_metric_warnings=True):
         return cli._ComputedMetricsResult(
             symbol=symbol,
             rows=((symbol, "dummy_metric", 1.0, "2024-01-01"),),
@@ -4435,7 +4575,9 @@ def test_run_metric_computation_interrupts_cleanly(monkeypatch, tmp_path, capsys
     output_lines = capsys.readouterr().out.splitlines()
     assert "Metric computation cancelled by user." in output_lines
     assert "Computed metrics for 2 symbols in" not in "\n".join(output_lines)
-    assert any(line.startswith("Progress: 1/2") for line in output_lines)
+    assert (
+        "Progress: [##########----------] 1/2 symbols complete (50.0%)" in output_lines
+    )
     assert executor.shutdown_calls == [(False, True)]
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
@@ -4519,8 +4661,8 @@ def test_cmd_compute_metrics_stage_falls_back_to_serial_without_wal(
         "falling back to serial metric computation" in line for line in output_lines
     )
     assert [line for line in output_lines if line.startswith("Progress:")] == [
-        "Progress: 1/2 symbols complete (50.0%)",
-        "Progress: 2/2 symbols complete (100.0%)",
+        "Progress: [##########----------] 1/2 symbols complete (50.0%)",
+        "Progress: [####################] 2/2 symbols complete (100.0%)",
     ]
     assert not any(line.startswith("[") for line in output_lines)
     repo = MetricsRepository(db_path)
@@ -4558,7 +4700,7 @@ def test_run_metric_computation_batches_metric_writes(monkeypatch, tmp_path):
         def shutdown(self, wait=True, cancel_futures=False):
             return None
 
-    def fake_worker(database, symbol, metric_ids):
+    def fake_worker(database, symbol, metric_ids, suppress_metric_warnings=True):
         return cli._ComputedMetricsResult(
             symbol=symbol,
             rows=((symbol, "dummy_metric", float(len(symbol)), "2024-01-01"),),

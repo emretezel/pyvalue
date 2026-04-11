@@ -935,6 +935,70 @@ def test_financial_facts_repository_latest_share_counts_many_matches_single_look
     assert "CCC.US" not in counts
 
 
+def test_financial_facts_repository_facts_for_symbols_many_matches_single_lookup(
+    tmp_path,
+):
+    db_path = tmp_path / "facts-many.db"
+    repo = FinancialFactsRepository(db_path)
+    repo.initialize_schema()
+    repo.replace_facts(
+        "AAA.US",
+        [
+            FactRecord(
+                symbol="AAA.US",
+                concept="AssetsCurrent",
+                fiscal_period="FY",
+                end_date="2024-12-31",
+                unit="USD",
+                value=111.0,
+            ),
+            FactRecord(
+                symbol="AAA.US",
+                concept="AssetsCurrent",
+                fiscal_period="FY",
+                end_date="2023-12-31",
+                unit="USD",
+                value=101.0,
+            ),
+            FactRecord(
+                symbol="AAA.US",
+                concept="LiabilitiesCurrent",
+                fiscal_period="FY",
+                end_date="2024-12-31",
+                unit="USD",
+                value=11.0,
+            ),
+        ],
+    )
+    repo.replace_facts(
+        "BBB.US",
+        [
+            FactRecord(
+                symbol="BBB.US",
+                concept="AssetsCurrent",
+                fiscal_period="FY",
+                end_date="2024-12-31",
+                unit="USD",
+                value=222.0,
+            ),
+            FactRecord(
+                symbol="BBB.US",
+                concept="Revenue",
+                fiscal_period="FY",
+                end_date="2024-12-31",
+                unit="USD",
+                value=333.0,
+            ),
+        ],
+    )
+
+    facts = repo.facts_for_symbols_many(["AAA.US", "BBB.US", "CCC.US"], chunk_size=1)
+
+    assert facts["AAA.US"] == repo.facts_for_symbol("AAA.US")
+    assert facts["BBB.US"] == repo.facts_for_symbol("BBB.US")
+    assert "CCC.US" not in facts
+
+
 def test_market_data_repository_update_market_caps_many_matches_single_update(tmp_path):
     db_path = tmp_path / "market-cap-updates-many.db"
     ticker_repo = SupportedTickerRepository(db_path)

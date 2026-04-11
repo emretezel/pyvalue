@@ -21,6 +21,7 @@ class MarketCapitalizationMetric:
     id: str = "market_cap"
     required_concepts: tuple[str, ...] = ()
     uses_market_data = True
+    uses_financial_facts = False
 
     def compute(
         self,
