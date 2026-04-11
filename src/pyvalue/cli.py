@@ -3213,6 +3213,34 @@ def _metrics_use_financial_facts(metric_ids: Sequence[str]) -> bool:
     )
 
 
+def _prefetch_metric_facts_for_symbols(
+    fact_repo: FinancialFactsRepository,
+    symbols: Sequence[str],
+    metric_ids: Sequence[str],
+    *,
+    chunk_size: int,
+) -> Dict[str, List[FactRecord]]:
+    """Bulk-load only the facts required by the requested metrics.
+
+    Unknown metric ids are ignored so investigative paths can still classify
+    them without aborting the whole batch. When every known metric is
+    market-data-only, the preload is skipped entirely.
+    """
+
+    known_metric_ids = tuple(
+        metric_id for metric_id in metric_ids if metric_id in REGISTRY
+    )
+    if not known_metric_ids or not _metrics_use_financial_facts(known_metric_ids):
+        return {}
+    required_concepts = _required_concepts_for_metric_ids(known_metric_ids)
+    preload_kwargs = {"concepts": required_concepts} if required_concepts else {}
+    return fact_repo.facts_for_symbols_many(
+        symbols,
+        chunk_size=chunk_size,
+        **preload_kwargs,
+    )
+
+
 @lru_cache(maxsize=None)
 def _required_concepts_for_metric_ids(metric_ids: Tuple[str, ...]) -> Tuple[str, ...]:
     """Return the deduplicated union of ``required_concepts`` across metrics.
@@ -3535,31 +3563,30 @@ def _compute_metric_batch_results(
     if not selected_symbols:
         return ()
 
-    uses_financial_facts = _metrics_use_financial_facts(metric_ids)
+    known_metric_ids = tuple(
+        metric_id for metric_id in metric_ids if metric_id in REGISTRY
+    )
+    uses_financial_facts = bool(known_metric_ids) and _metrics_use_financial_facts(
+        known_metric_ids
+    )
     profile_enabled = profile_state is not None and profile_state.enabled
     if uses_financial_facts:
-        # Restrict the preload to the union of concepts the requested metrics
-        # actually consume. The composite (security_id, concept, end_date,
-        # filed) index turns each (security_id, concept) pair into a direct
-        # seek, slashing both row transfer and Python-side FactRecord
-        # construction. An empty tuple is the wildcard signal — fall back to
-        # the unfiltered fetch in that case for safety.
-        required_concepts = _required_concepts_for_metric_ids(tuple(metric_ids))
-        preload_kwargs = {"concepts": required_concepts} if required_concepts else {}
         if profile_enabled:
             read_start = time.perf_counter()
-            facts_by_symbol = fact_repo.facts_for_symbols_many(
+            facts_by_symbol = _prefetch_metric_facts_for_symbols(
+                fact_repo,
                 selected_symbols,
+                known_metric_ids,
                 chunk_size=METRICS_COMPUTE_BATCH_SIZE,
-                **preload_kwargs,
             )
             assert profile_state is not None
             profile_state.read_seconds += time.perf_counter() - read_start
         else:
-            facts_by_symbol = fact_repo.facts_for_symbols_many(
+            facts_by_symbol = _prefetch_metric_facts_for_symbols(
+                fact_repo,
                 selected_symbols,
+                known_metric_ids,
                 chunk_size=METRICS_COMPUTE_BATCH_SIZE,
-                **preload_kwargs,
             )
     else:
         facts_by_symbol = {}
@@ -5933,85 +5960,109 @@ def _recompute_missing_screen_metrics(
         metric_id: (REGISTRY[metric_id]() if metric_id in REGISTRY else None)
         for metric_id in metric_impacts.keys()
     }
+    symbols_by_metric_group: Dict[Tuple[str, ...], List[str]] = {}
+    for symbol in symbols_to_recompute:
+        metric_group = tuple(metric_ids_by_symbol[symbol])
+        symbols_by_metric_group.setdefault(metric_group, []).append(symbol)
     handler = _MetricWarningCollector()
     root_logger = logging.getLogger()
     root_logger.addHandler(handler)
 
     try:
         completed_symbols = 0
-        for symbol in symbols_to_recompute:
-            metrics_for_symbol = metric_ids_by_symbol[symbol]
-            cached_fact_repo: Optional[_CachedRegionFactsRepository] = None
-            cached_market_repo: Optional[_CachedMarketDataRepository] = None
-            if any(
-                metrics_by_id[metric_id] is not None for metric_id in metrics_for_symbol
+        for metric_group, group_symbols in symbols_by_metric_group.items():
+            for symbol_batch in _batch_values(
+                group_symbols,
+                METRICS_COMPUTE_BATCH_SIZE,
             ):
-                cached_fact_repo = _CachedRegionFactsRepository(
+                facts_by_symbol = _prefetch_metric_facts_for_symbols(
                     fact_repo,
-                    symbol,
-                    fact_repo.facts_for_symbol(symbol),
+                    symbol_batch,
+                    metric_group,
+                    chunk_size=METRICS_COMPUTE_BATCH_SIZE,
                 )
-
-            if any(
-                getattr(metrics_by_id[metric_id], "uses_market_data", False)
-                for metric_id in metrics_for_symbol
-                if metrics_by_id[metric_id] is not None
-            ):
-                cached_market_repo = _CachedMarketDataRepository(
-                    market_repo,
-                    symbol,
-                    snapshot=snapshots_by_symbol.get(symbol),
-                    snapshot_loaded=True,
-                )
-
-            for metric_id in metrics_for_symbol:
-                handler.clear()
-                metric = metrics_by_id.get(metric_id)
-                if metric is None:
-                    reason = "unknown_metric_id"
-                else:
-                    if cached_fact_repo is None:  # pragma: no cover - defensive
+                for symbol in symbol_batch:
+                    metrics_for_symbol = metric_ids_by_symbol[symbol]
+                    cached_fact_repo: Optional[_CachedRegionFactsRepository] = None
+                    cached_market_repo: Optional[_CachedMarketDataRepository] = None
+                    if any(
+                        metrics_by_id[metric_id] is not None
+                        for metric_id in metrics_for_symbol
+                    ):
                         cached_fact_repo = _CachedRegionFactsRepository(
                             fact_repo,
                             symbol,
-                            fact_repo.facts_for_symbol(symbol),
+                            facts_by_symbol.get(symbol, ()),
                         )
-                    try:
-                        if getattr(metric, "uses_market_data", False):
-                            if cached_market_repo is None:
-                                cached_market_repo = _CachedMarketDataRepository(
-                                    market_repo,
+
+                    if any(
+                        getattr(metrics_by_id[metric_id], "uses_market_data", False)
+                        for metric_id in metrics_for_symbol
+                        if metrics_by_id[metric_id] is not None
+                    ):
+                        cached_market_repo = _CachedMarketDataRepository(
+                            market_repo,
+                            symbol,
+                            snapshot=snapshots_by_symbol.get(symbol),
+                            snapshot_loaded=True,
+                        )
+
+                    for metric_id in metrics_for_symbol:
+                        handler.clear()
+                        metric = metrics_by_id.get(metric_id)
+                        if metric is None:
+                            reason = "unknown_metric_id"
+                        else:
+                            if cached_fact_repo is None:  # pragma: no cover - defensive
+                                cached_fact_repo = _CachedRegionFactsRepository(
+                                    fact_repo,
                                     symbol,
-                                    snapshot=snapshots_by_symbol.get(symbol),
-                                    snapshot_loaded=True,
+                                    facts_by_symbol.get(symbol, ()),
                                 )
-                            result = metric.compute(
-                                symbol,
-                                cached_fact_repo,
-                                cached_market_repo,
-                            )
-                        else:
-                            result = metric.compute(symbol, cached_fact_repo)
-                    except MetricCurrencyInvariantError as exc:
-                        reason = exc.summary_reason
-                    except Exception as exc:  # pragma: no cover - defensive
-                        reason = _metric_failure_reason_from_exception(exc)
-                    else:
-                        invariant_error = consume_metric_currency_invariant_error(
-                            metric
+                            try:
+                                if getattr(metric, "uses_market_data", False):
+                                    if cached_market_repo is None:
+                                        cached_market_repo = (
+                                            _CachedMarketDataRepository(
+                                                market_repo,
+                                                symbol,
+                                                snapshot=snapshots_by_symbol.get(
+                                                    symbol
+                                                ),
+                                                snapshot_loaded=True,
+                                            )
+                                        )
+                                    result = metric.compute(
+                                        symbol,
+                                        cached_fact_repo,
+                                        cached_market_repo,
+                                    )
+                                else:
+                                    result = metric.compute(symbol, cached_fact_repo)
+                            except MetricCurrencyInvariantError as exc:
+                                reason = exc.summary_reason
+                            except Exception as exc:  # pragma: no cover - defensive
+                                reason = _metric_failure_reason_from_exception(exc)
+                            else:
+                                invariant_error = (
+                                    consume_metric_currency_invariant_error(metric)
+                                )
+                                if invariant_error is not None:
+                                    reason = invariant_error.summary_reason
+                                elif result is not None:
+                                    reason = "stored_missing_but_computable_now"
+                                else:
+                                    reason = _format_failure_reason(
+                                        handler.records, symbol
+                                    )
+                        failures[metric_id][reason] += 1
+                        cap = _metric_market_cap(market_repo, market_caps, symbol)
+                        _record_failure_example(
+                            examples, metric_id, reason, symbol, cap
                         )
-                        if invariant_error is not None:
-                            reason = invariant_error.summary_reason
-                        elif result is not None:
-                            reason = "stored_missing_but_computable_now"
-                        else:
-                            reason = _format_failure_reason(handler.records, symbol)
-                failures[metric_id][reason] += 1
-                cap = _metric_market_cap(market_repo, market_caps, symbol)
-                _record_failure_example(examples, metric_id, reason, symbol, cap)
-            completed_symbols += 1
-            if maybe_report_progress is not None:
-                maybe_report_progress(completed_symbols, False)
+                    completed_symbols += 1
+                    if maybe_report_progress is not None:
+                        maybe_report_progress(completed_symbols, False)
     finally:
         root_logger.removeHandler(handler)
 

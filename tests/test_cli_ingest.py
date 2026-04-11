@@ -7767,13 +7767,32 @@ def test_cmd_report_screen_failures_recompute_uses_symbol_caches(
     market_repo.upsert_price("AAA.US", "2024-12-31", price=25.0, market_cap=1000.0)
 
     fact_calls = {"count": 0}
+    facts_many_calls = {"count": 0, "symbols": [], "concepts": None}
     snapshot_batch_calls = {"count": 0}
     original_facts_for_symbol = FinancialFactsRepository.facts_for_symbol
+    original_facts_for_symbols_many = FinancialFactsRepository.facts_for_symbols_many
     original_latest_snapshots_many = MarketDataRepository.latest_snapshots_many
 
     def counting_facts_for_symbol(self, symbol):
         fact_calls["count"] += 1
         return original_facts_for_symbol(self, symbol)
+
+    def counting_facts_for_symbols_many(
+        self,
+        symbols,
+        chunk_size=25,
+        *,
+        concepts=None,
+    ):
+        facts_many_calls["count"] += 1
+        facts_many_calls["symbols"].append(tuple(symbols))
+        facts_many_calls["concepts"] = tuple(concepts) if concepts is not None else None
+        return original_facts_for_symbols_many(
+            self,
+            symbols,
+            chunk_size=chunk_size,
+            concepts=concepts,
+        )
 
     def counting_latest_snapshots_many(self, symbols, chunk_size=500):
         snapshot_batch_calls["count"] += 1
@@ -7786,6 +7805,11 @@ def test_cmd_report_screen_failures_recompute_uses_symbol_caches(
         FinancialFactsRepository,
         "facts_for_symbol",
         counting_facts_for_symbol,
+    )
+    monkeypatch.setattr(
+        FinancialFactsRepository,
+        "facts_for_symbols_many",
+        counting_facts_for_symbols_many,
     )
     monkeypatch.setattr(
         MarketDataRepository,
@@ -7815,6 +7839,7 @@ def test_cmd_report_screen_failures_recompute_uses_symbol_caches(
         id = "repeat_market"
         required_concepts = ()
         uses_market_data = True
+        uses_financial_facts = False
 
         def compute(self, symbol, repo, market_repo):
             snapshot_a = market_repo.latest_snapshot(symbol)
@@ -7870,7 +7895,10 @@ criteria:
     assert "- repeat_facts: missing=1 symbols, affects=1 criteria" in output
     assert "- repeat_market: missing=1 symbols, affects=1 criteria" in output
     assert "stored_missing_but_computable_now: 1 (example=AAA.US" in output
-    assert fact_calls["count"] == 1
+    assert fact_calls["count"] == 0
+    assert facts_many_calls["count"] == 1
+    assert facts_many_calls["symbols"] == [("AAA.US",)]
+    assert facts_many_calls["concepts"] == ("AssetsCurrent",)
     assert snapshot_batch_calls["count"] == 1
 
 
