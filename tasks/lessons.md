@@ -154,3 +154,9 @@ Use this file to capture recurring mistake patterns after user corrections so fu
 - Recurring pattern: When both listing/trading currency and payload/reporting currency exist in the same pipeline, it is easy to blur them together with convenient fallbacks and accidentally encode the wrong business meaning into normalization and metric validation.
 - Preventive rule: In pyvalue, treat trading currency and payload currency as separate concepts. Trading currency resolves only from stored `market_data.currency`; payload-derived facts like `EnterpriseValue` must resolve currency only from provider payload fields and explicit payload traversal rules.
 - Resulting action: Reworked ticker-currency resolution to use only `market_data.currency`, updated EODHD normalization to require it, kept `EnterpriseValue` payload-only, and aligned the metric invariants and tests with that split.
+
+- Date: 2026-04-11
+- User correction: Build the new skill from scratch instead of anchoring on an adjacent existing skill.
+- Recurring pattern: When creating a net-new artifact, inspecting nearby existing artifacts too early can bias the design toward adaptation when the user wants a first-principles solution.
+- Preventive rule: For new skills, designs, or workflows, start from the user’s requirements alone and only inspect existing neighboring artifacts if the user explicitly asks for comparison, reuse, or extension.
+- Resulting action: Ignored the neighboring performance skill for the actual design, rewrote the new skill from first principles, and recorded the rule here.
