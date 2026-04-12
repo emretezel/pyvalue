@@ -34,6 +34,7 @@ from pyvalue.storage import (
     MetricComputeStatusRecord,
     MetricComputeStatusRepository,
     MetricsRepository,
+    SecurityRepository,
     SupportedTicker,
     SupportedExchangeRepository,
     SupportedTickerRepository,
@@ -4156,6 +4157,185 @@ def test_compute_metric_batch_results_skips_fact_prefetch_for_market_cap(
     )
 
 
+def test_compute_metric_batch_results_reuses_shared_read_connection_per_batch(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "metric-batch-shared-read.db"
+    recent_date = (date.today() - timedelta(days=1)).isoformat()
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    fact_repo.replace_facts(
+        "AAA.US",
+        [
+            make_fact(
+                symbol="AAA.US",
+                concept="AssetsCurrent",
+                end_date=recent_date,
+                value=10.0,
+            ),
+            make_fact(
+                symbol="AAA.US",
+                concept="LiabilitiesCurrent",
+                end_date=recent_date,
+                value=3.0,
+            ),
+        ],
+    )
+    fact_repo.replace_facts(
+        "BBB.US",
+        [
+            make_fact(
+                symbol="BBB.US",
+                concept="AssetsCurrent",
+                end_date=recent_date,
+                value=8.0,
+            ),
+            make_fact(
+                symbol="BBB.US",
+                concept="LiabilitiesCurrent",
+                end_date=recent_date,
+                value=2.0,
+            ),
+        ],
+    )
+    market_repo = MarketDataRepository(db_path)
+    market_repo.initialize_schema()
+    market_repo.upsert_price(
+        "AAA.US",
+        recent_date,
+        12.0,
+        market_cap=120.0,
+        currency="USD",
+    )
+    market_repo.upsert_price(
+        "BBB.US",
+        recent_date,
+        9.0,
+        market_cap=90.0,
+        currency="USD",
+    )
+
+    calls = {"resolve_ids_many": 0}
+    observed_connection_ids = []
+    observed_security_map_ids = []
+    original_resolve_ids_many = SecurityRepository.resolve_ids_many
+    original_facts_for_symbols_many = FinancialFactsRepository.facts_for_symbols_many
+    original_fetch_many_for_symbols = (
+        FinancialFactsRefreshStateRepository.fetch_many_for_symbols
+    )
+    original_latest_snapshots_many = MarketDataRepository.latest_snapshots_many
+
+    def counting_resolve_ids_many(self, symbols, chunk_size=500, *, connection=None):
+        calls["resolve_ids_many"] += 1
+        return original_resolve_ids_many(
+            self,
+            symbols,
+            chunk_size=chunk_size,
+            connection=connection,
+        )
+
+    def tracking_facts_for_symbols_many(
+        self,
+        symbols,
+        chunk_size=25,
+        *,
+        concepts=None,
+        security_ids_by_symbol=None,
+        connection=None,
+    ):
+        observed_connection_ids.append(id(connection))
+        observed_security_map_ids.append(id(security_ids_by_symbol))
+        return original_facts_for_symbols_many(
+            self,
+            symbols,
+            chunk_size=chunk_size,
+            concepts=concepts,
+            security_ids_by_symbol=security_ids_by_symbol,
+            connection=connection,
+        )
+
+    def tracking_fetch_many_for_symbols(
+        self,
+        symbols,
+        chunk_size=500,
+        *,
+        security_ids_by_symbol=None,
+        connection=None,
+    ):
+        observed_connection_ids.append(id(connection))
+        observed_security_map_ids.append(id(security_ids_by_symbol))
+        return original_fetch_many_for_symbols(
+            self,
+            symbols,
+            chunk_size=chunk_size,
+            security_ids_by_symbol=security_ids_by_symbol,
+            connection=connection,
+        )
+
+    def tracking_latest_snapshots_many(
+        self,
+        symbols,
+        chunk_size=500,
+        *,
+        security_ids_by_symbol=None,
+        connection=None,
+    ):
+        observed_connection_ids.append(id(connection))
+        observed_security_map_ids.append(id(security_ids_by_symbol))
+        return original_latest_snapshots_many(
+            self,
+            symbols,
+            chunk_size=chunk_size,
+            security_ids_by_symbol=security_ids_by_symbol,
+            connection=connection,
+        )
+
+    monkeypatch.setattr(
+        SecurityRepository, "resolve_ids_many", counting_resolve_ids_many
+    )
+    monkeypatch.setattr(
+        FinancialFactsRepository,
+        "facts_for_symbols_many",
+        tracking_facts_for_symbols_many,
+    )
+    monkeypatch.setattr(
+        FinancialFactsRefreshStateRepository,
+        "fetch_many_for_symbols",
+        tracking_fetch_many_for_symbols,
+    )
+    monkeypatch.setattr(
+        MarketDataRepository,
+        "latest_snapshots_many",
+        tracking_latest_snapshots_many,
+    )
+
+    results = cli._compute_metric_batch_results(
+        ["AAA.US", "BBB.US"],
+        ["working_capital", "market_cap"],
+        FinancialFactsRepository(db_path),
+        MarketDataRepository(db_path),
+    )
+
+    assert [result.computed_count for result in results] == [2, 2]
+    assert calls == {"resolve_ids_many": 1}
+    assert len(observed_connection_ids) == 3
+    assert all(connection_id != id(None) for connection_id in observed_connection_ids)
+    assert len(set(observed_connection_ids)) == 1
+    assert all(
+        security_map_id != id(None) for security_map_id in observed_security_map_ids
+    )
+    assert len(set(observed_security_map_ids)) == 1
+
+
 def test_cmd_run_screen_stage_suppresses_metric_warnings_on_console_by_default(
     tmp_path, capsys
 ):
@@ -4716,10 +4896,15 @@ def test_run_metric_computation_batches_metric_writes(monkeypatch, tmp_path):
     batch_sizes = []
     original_upsert_many = MetricsRepository.upsert_many
 
-    def recording_upsert_many(self, rows, *, connection=None):
+    def recording_upsert_many(self, rows, *, connection=None, commit=True):
         materialized = list(rows)
         batch_sizes.append(len(materialized))
-        return original_upsert_many(self, materialized, connection=connection)
+        return original_upsert_many(
+            self,
+            materialized,
+            connection=connection,
+            commit=commit,
+        )
 
     monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
     monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 2)
@@ -4743,6 +4928,159 @@ def test_run_metric_computation_batches_metric_writes(monkeypatch, tmp_path):
 
     assert rc == 0
     assert batch_sizes == [2, 1]
+
+
+def test_flush_metric_write_batch_commits_external_connection_once(tmp_path):
+    db_path = tmp_path / "metric-flush-single-commit.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
+        provider="SEC",
+    )
+    metrics_repo = MetricsRepository(db_path)
+    status_repo = MetricComputeStatusRepository(db_path)
+    metrics_repo.initialize_schema()
+    status_repo.initialize_schema()
+
+    class ConnectionSpy:
+        def __init__(self, connection):
+            self._connection = connection
+            self.commit_calls = 0
+            self.rollback_calls = 0
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+        def commit(self):
+            self.commit_calls += 1
+            return self._connection.commit()
+
+        def rollback(self):
+            self.rollback_calls += 1
+            return self._connection.rollback()
+
+    real_connection = metrics_repo.open_persistent_connection()
+    write_connection = ConnectionSpy(real_connection)
+    try:
+        cli._flush_metric_write_batch(
+            metrics_repo,
+            status_repo,
+            [
+                (
+                    "AAA.US",
+                    "dummy_metric",
+                    1.0,
+                    "2024-01-01",
+                    "other",
+                    None,
+                    None,
+                )
+            ],
+            [
+                cli._MetricAttemptResult(
+                    symbol="AAA.US",
+                    metric_id="dummy_metric",
+                    status="success",
+                    attempted_at="2024-01-02T00:00:00+00:00",
+                    value_as_of="2024-01-01",
+                )
+            ],
+            write_connection=write_connection,
+        )
+    finally:
+        real_connection.close()
+
+    assert write_connection.commit_calls == 1
+    assert write_connection.rollback_calls == 0
+    assert metrics_repo.fetch("AAA.US", "dummy_metric") == (1.0, "2024-01-01")
+    status_record = status_repo.fetch("AAA.US", "dummy_metric")
+    assert status_record is not None
+    assert status_record.status == "success"
+
+
+def test_run_metric_computation_parallel_profile_accumulates_worker_timings(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "metric-stage-profiled-parallel.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+            Listing(symbol="CCC.US", security_name="CCC Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+
+    class DummyMetric:
+        id = "dummy_metric"
+        uses_market_data = False
+
+    class InlineExecutor:
+        def submit(self, fn, *args, **kwargs):
+            future = Future()
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except Exception as exc:
+                future.set_exception(exc)
+            return future
+
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
+
+    def fake_profiled_worker(
+        database, symbols, metric_ids, suppress_metric_warnings=True
+    ):
+        assert suppress_metric_warnings is True
+        return cli._ProfiledComputedMetricsBatchResult(
+            results=tuple(
+                cli._ComputedMetricsResult(
+                    symbol=symbol,
+                    rows=(
+                        (
+                            symbol,
+                            "dummy_metric",
+                            float(len(symbol)),
+                            "2024-01-01",
+                        ),
+                    ),
+                    computed_count=1,
+                )
+                for symbol in symbols
+            ),
+            read_seconds=0.25 * len(symbols),
+            compute_seconds=0.50 * len(symbols),
+        )
+
+    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
+    monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 2)
+    monkeypatch.setattr(cli, "_ensure_metrics_wal_mode", lambda repo: "wal")
+    monkeypatch.setattr(
+        cli,
+        "_create_process_pool_executor",
+        lambda max_workers: InlineExecutor(),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_compute_metrics_for_symbol_batch_worker_profiled",
+        fake_profiled_worker,
+    )
+    monkeypatch.setattr(cli, "METRICS_COMPUTE_BATCH_SIZE", 2)
+    monkeypatch.setattr(cli, "METRICS_PROGRESS_INTERVAL_SECONDS", 0.0)
+
+    rc = cli._run_metric_computation(
+        database=str(db_path),
+        symbols=["AAA.US", "BBB.US", "CCC.US"],
+        metric_ids=["dummy_metric"],
+        cancelled_message="\nMetric computation cancelled by user.",
+        profile=True,
+    )
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "Profile: read=0.75s compute=1.50s" in output
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
     assert repo.fetch("AAA.US", "dummy_metric") == (6.0, "2024-01-01")
@@ -6433,7 +6771,14 @@ def test_cmd_recalc_market_cap_prints_status_before_market_data_scan(
         provider="SEC",
     )
 
-    def fake_latest_snapshots_many(self, symbols, chunk_size=500):
+    def fake_latest_snapshots_many(
+        self,
+        symbols,
+        chunk_size=500,
+        *,
+        security_ids_by_symbol=None,
+        connection=None,
+    ):
         output = capsys.readouterr().out
         assert "Preparing market cap recalculation for US (selected=1)" in output
         assert "Loading latest market data for 1 symbols" in output
@@ -8123,6 +8468,8 @@ def test_cmd_report_screen_failures_recompute_uses_symbol_caches(
         chunk_size=25,
         *,
         concepts=None,
+        security_ids_by_symbol=None,
+        connection=None,
     ):
         facts_many_calls["count"] += 1
         facts_many_calls["symbols"].append(tuple(symbols))
@@ -8132,11 +8479,26 @@ def test_cmd_report_screen_failures_recompute_uses_symbol_caches(
             symbols,
             chunk_size=chunk_size,
             concepts=concepts,
+            security_ids_by_symbol=security_ids_by_symbol,
+            connection=connection,
         )
 
-    def counting_latest_snapshots_many(self, symbols, chunk_size=500):
+    def counting_latest_snapshots_many(
+        self,
+        symbols,
+        chunk_size=500,
+        *,
+        security_ids_by_symbol=None,
+        connection=None,
+    ):
         snapshot_batch_calls["count"] += 1
-        return original_latest_snapshots_many(self, symbols, chunk_size=chunk_size)
+        return original_latest_snapshots_many(
+            self,
+            symbols,
+            chunk_size=chunk_size,
+            security_ids_by_symbol=security_ids_by_symbol,
+            connection=connection,
+        )
 
     def fail_latest_snapshot(self, symbol):
         raise AssertionError("expected report-screen-failures to use bulk snapshots")

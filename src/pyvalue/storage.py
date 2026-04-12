@@ -2916,26 +2916,34 @@ class FinancialFactsRefreshStateRepository(SQLiteStore):
         self,
         symbols: Sequence[str],
         chunk_size: int = 500,
+        *,
+        security_ids_by_symbol: Optional[Mapping[str, int]] = None,
+        connection: Optional[sqlite3.Connection] = None,
     ) -> Dict[str, FinancialFactsRefreshStateRecord]:
         self.initialize_schema()
         normalized_symbols = _normalized_codes(symbols)
         if not normalized_symbols:
             return {}
 
-        security_ids_by_symbol = self._security_repo().resolve_ids_many(
-            normalized_symbols,
-            chunk_size=chunk_size,
+        resolved_security_ids = (
+            dict(security_ids_by_symbol)
+            if security_ids_by_symbol is not None
+            else self._security_repo().resolve_ids_many(
+                normalized_symbols,
+                chunk_size=chunk_size,
+                connection=connection,
+            )
         )
-        if not security_ids_by_symbol:
+        if not resolved_security_ids:
             return {}
 
         symbol_by_security_id = {
-            security_id: symbol
-            for symbol, security_id in security_ids_by_symbol.items()
+            security_id: symbol for symbol, security_id in resolved_security_ids.items()
         }
         rows_by_symbol: Dict[str, FinancialFactsRefreshStateRecord] = {}
         security_ids = sorted(symbol_by_security_id.keys())
-        with self._connect() as conn:
+
+        def _query(conn: sqlite3.Connection) -> None:
             for security_chunk in _batched(security_ids, chunk_size):
                 placeholders = ", ".join("?" for _ in security_chunk)
                 rows = conn.execute(
@@ -2952,6 +2960,12 @@ class FinancialFactsRefreshStateRepository(SQLiteStore):
                         symbol=symbol,
                         refreshed_at=row["refreshed_at"],
                     )
+
+        if connection is not None:
+            _query(connection)
+        else:
+            with self._connect() as conn:
+                _query(conn)
         return rows_by_symbol
 
 
@@ -3198,6 +3212,8 @@ class FinancialFactsRepository(SQLiteStore):
         chunk_size: int = 25,
         *,
         concepts: Optional[Sequence[str]] = None,
+        security_ids_by_symbol: Optional[Mapping[str, int]] = None,
+        connection: Optional[sqlite3.Connection] = None,
     ) -> Dict[str, List[FactRecord]]:
         """Return all stored facts for many symbols grouped by canonical symbol.
 
@@ -3220,12 +3236,17 @@ class FinancialFactsRepository(SQLiteStore):
         if not normalized:
             return {}
 
-        security_ids_by_symbol = self._security_repo().resolve_ids_many(
-            normalized,
-            chunk_size=chunk_size,
+        resolved_security_ids = (
+            dict(security_ids_by_symbol)
+            if security_ids_by_symbol is not None
+            else self._security_repo().resolve_ids_many(
+                normalized,
+                chunk_size=chunk_size,
+                connection=connection,
+            )
         )
         resolved_symbols = [
-            symbol for symbol in normalized if symbol in security_ids_by_symbol
+            symbol for symbol in normalized if symbol in resolved_security_ids
         ]
         if not resolved_symbols:
             return {}
@@ -3244,10 +3265,11 @@ class FinancialFactsRepository(SQLiteStore):
         grouped: Dict[str, List[FactRecord]] = {
             symbol: [] for symbol in resolved_symbols
         }
-        with self._connect() as conn:
+
+        def _query(conn: sqlite3.Connection) -> None:
             for chunk in _batched(resolved_symbols, chunk_size):
                 symbol_by_security_id = {
-                    security_ids_by_symbol[symbol]: symbol for symbol in chunk
+                    resolved_security_ids[symbol]: symbol for symbol in chunk
                 }
                 placeholders = ", ".join("?" for _ in symbol_by_security_id)
                 params: List[Any] = list(symbol_by_security_id)
@@ -3297,6 +3319,12 @@ class FinancialFactsRepository(SQLiteStore):
                             currency=row["currency"],
                         )
                     )
+
+        if connection is not None:
+            _query(connection)
+        else:
+            with self._connect() as conn:
+                _query(conn)
         return grouped
 
     def latest_numeric_values_for_concept_many(
@@ -4090,6 +4118,7 @@ class MetricsRepository(SQLiteStore):
         rows: Iterable[StoredMetricRow],
         *,
         connection: Optional[sqlite3.Connection] = None,
+        commit: bool = True,
     ) -> int:
         self.initialize_schema()
         metric_rows: List[StoredMetricRow] = []
@@ -4181,7 +4210,8 @@ class MetricsRepository(SQLiteStore):
             # Caller owns the connection lifetime; commit the new rows so
             # other readers (workers, screeners) see them immediately.
             connection.executemany(upsert_sql, persisted_rows)
-            connection.commit()
+            if commit:
+                connection.commit()
         else:
 
             def _persist() -> None:
@@ -4328,6 +4358,7 @@ class MetricComputeStatusRepository(SQLiteStore):
         rows: Iterable[MetricComputeStatusRecord],
         *,
         connection: Optional[sqlite3.Connection] = None,
+        commit: bool = True,
     ) -> int:
         status_rows = list(rows)
         if not status_rows:
@@ -4399,7 +4430,8 @@ class MetricComputeStatusRepository(SQLiteStore):
 
         if connection is not None:
             connection.executemany(upsert_sql, payload)
-            connection.commit()
+            if commit:
+                connection.commit()
         else:
 
             def _persist() -> None:
@@ -4674,27 +4706,36 @@ class MarketDataRepository(SQLiteStore):
         self,
         symbols: Sequence[str],
         chunk_size: int = 500,
+        *,
+        security_ids_by_symbol: Optional[Mapping[str, int]] = None,
+        connection: Optional[sqlite3.Connection] = None,
     ) -> Dict[str, MarketSnapshotRecord]:
         self.initialize_schema()
         normalized = _normalized_codes(symbols)
         if not normalized:
             return {}
 
-        security_ids_by_symbol = self._security_repo().resolve_ids_many(
-            normalized,
-            chunk_size=chunk_size,
+        resolved_security_ids = (
+            dict(security_ids_by_symbol)
+            if security_ids_by_symbol is not None
+            else self._security_repo().resolve_ids_many(
+                normalized,
+                chunk_size=chunk_size,
+                connection=connection,
+            )
         )
         resolved_symbols = [
-            symbol for symbol in normalized if symbol in security_ids_by_symbol
+            symbol for symbol in normalized if symbol in resolved_security_ids
         ]
         if not resolved_symbols:
             return {}
 
         snapshots: Dict[str, MarketSnapshotRecord] = {}
-        with self._connect() as conn:
+
+        def _query(conn: sqlite3.Connection) -> None:
             for chunk in _batched(resolved_symbols, chunk_size):
                 symbol_by_security_id = {
-                    security_ids_by_symbol[symbol]: symbol for symbol in chunk
+                    resolved_security_ids[symbol]: symbol for symbol in chunk
                 }
                 placeholders = ", ".join("?" for _ in symbol_by_security_id)
                 cursor = conn.execute(
@@ -4735,6 +4776,12 @@ class MarketDataRepository(SQLiteStore):
                         currency=row["currency"],
                         updated_at=row["updated_at"],
                     )
+
+        if connection is not None:
+            _query(connection)
+        else:
+            with self._connect() as conn:
+                _query(conn)
         return snapshots
 
     def update_market_cap(self, symbol: str, market_cap: float) -> int:

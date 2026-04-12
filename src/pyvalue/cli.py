@@ -239,6 +239,15 @@ class _ComputedMetricsResult:
 
 
 @dataclass(frozen=True)
+class _ProfiledComputedMetricsBatchResult:
+    """One worker batch result plus the worker-side read/compute timings."""
+
+    results: Tuple[_ComputedMetricsResult, ...]
+    read_seconds: float
+    compute_seconds: float
+
+
+@dataclass(frozen=True)
 class _MetricComputationFailure:
     symbol: str
     metric_id: str
@@ -3509,6 +3518,8 @@ def _prefetch_metric_facts_for_symbols(
     metric_ids: Sequence[str],
     *,
     chunk_size: int,
+    security_ids_by_symbol: Optional[Mapping[str, int]] = None,
+    connection: Optional[sqlite3.Connection] = None,
 ) -> Dict[str, List[FactRecord]]:
     """Bulk-load only the facts required by the requested metrics.
 
@@ -3527,6 +3538,8 @@ def _prefetch_metric_facts_for_symbols(
     return fact_repo.facts_for_symbols_many(
         symbols,
         chunk_size=chunk_size,
+        security_ids_by_symbol=security_ids_by_symbol,
+        connection=connection,
         **preload_kwargs,
     )
 
@@ -3641,20 +3654,47 @@ def _flush_metric_write_batch(
         return
     status_rows = _metric_status_rows_from_attempts(pending_attempts)
     row_count = len(pending_rows)
+
+    def _persist_with_external_connection() -> None:
+        assert write_connection is not None
+        try:
+            if pending_rows:
+                metrics_repo.upsert_many(
+                    pending_rows,
+                    connection=write_connection,
+                    commit=False,
+                )
+            if status_rows:
+                status_repo.upsert_many(
+                    status_rows,
+                    connection=write_connection,
+                    commit=False,
+                )
+            write_connection.commit()
+        except Exception:
+            write_connection.rollback()
+            raise
+
     if profile_state is not None and profile_state.enabled:
         flush_start = time.perf_counter()
-        if pending_rows:
-            metrics_repo.upsert_many(pending_rows, connection=write_connection)
-        if status_rows:
-            status_repo.upsert_many(status_rows, connection=write_connection)
+        if write_connection is not None:
+            _persist_with_external_connection()
+        else:
+            if pending_rows:
+                metrics_repo.upsert_many(pending_rows)
+            if status_rows:
+                status_repo.upsert_many(status_rows)
         profile_state.write_seconds += time.perf_counter() - flush_start
         profile_state.write_flush_count += 1
         profile_state.write_row_count += row_count
     else:
-        if pending_rows:
-            metrics_repo.upsert_many(pending_rows, connection=write_connection)
-        if status_rows:
-            status_repo.upsert_many(status_rows, connection=write_connection)
+        if write_connection is not None:
+            _persist_with_external_connection()
+        else:
+            if pending_rows:
+                metrics_repo.upsert_many(pending_rows)
+            if status_rows:
+                status_repo.upsert_many(status_rows)
     pending_rows.clear()
     pending_attempts.clear()
 
@@ -4068,68 +4108,60 @@ def _compute_metric_batch_results(
         )
     )
     profile_enabled = profile_state is not None and profile_state.enabled
+    facts_by_symbol: Dict[str, List[FactRecord]] = {}
+    facts_refresh_rows = dict(preloaded_facts_refresh_rows or {})
+    snapshots_by_symbol: Dict[str, MarketSnapshotRecord] = {}
+    if preloaded_snapshots_by_symbol is not None:
+        snapshots_by_symbol = {
+            symbol: snapshot
+            for symbol, snapshot in preloaded_snapshots_by_symbol.items()
+            if symbol in selected_symbols
+        }
+    needs_market_snapshot_load = (
+        uses_market_data and preloaded_snapshots_by_symbol is None
+    )
+    needs_shared_read_connection = uses_financial_facts or needs_market_snapshot_load
     if uses_financial_facts:
+        facts_refresh_rows = dict(preloaded_facts_refresh_rows or {})
+    if needs_shared_read_connection:
+        read_start = time.perf_counter() if profile_enabled else 0.0
+        with fact_repo._connect() as read_connection:
+            security_ids_by_symbol = fact_repo._security_repo().resolve_ids_many(
+                selected_symbols,
+                chunk_size=METRICS_COMPUTE_BATCH_SIZE,
+                connection=read_connection,
+            )
+            if uses_financial_facts:
+                facts_by_symbol = _prefetch_metric_facts_for_symbols(
+                    fact_repo,
+                    selected_symbols,
+                    known_metric_ids,
+                    chunk_size=METRICS_COMPUTE_BATCH_SIZE,
+                    security_ids_by_symbol=security_ids_by_symbol,
+                    connection=read_connection,
+                )
+                if not facts_refresh_rows:
+                    facts_refresh_rows = (
+                        _SchemaReadyFinancialFactsRefreshStateRepository(
+                            fact_repo.db_path
+                        ).fetch_many_for_symbols(
+                            selected_symbols,
+                            chunk_size=METRICS_COMPUTE_BATCH_SIZE,
+                            security_ids_by_symbol=security_ids_by_symbol,
+                            connection=read_connection,
+                        )
+                    )
+            if needs_market_snapshot_load:
+                assert market_repo is not None
+                snapshots_by_symbol = market_repo.latest_snapshots_many(
+                    selected_symbols,
+                    chunk_size=METRICS_COMPUTE_BATCH_SIZE,
+                    security_ids_by_symbol=security_ids_by_symbol,
+                    connection=read_connection,
+                )
         if profile_enabled:
-            read_start = time.perf_counter()
-            facts_by_symbol = _prefetch_metric_facts_for_symbols(
-                fact_repo,
-                selected_symbols,
-                known_metric_ids,
-                chunk_size=METRICS_COMPUTE_BATCH_SIZE,
-            )
             assert profile_state is not None
             profile_state.read_seconds += time.perf_counter() - read_start
-            refresh_read_start = time.perf_counter()
-            facts_refresh_rows = dict(preloaded_facts_refresh_rows or {})
-            if not facts_refresh_rows:
-                facts_refresh_rows = _SchemaReadyFinancialFactsRefreshStateRepository(
-                    fact_repo.db_path
-                ).fetch_many_for_symbols(
-                    selected_symbols,
-                    chunk_size=METRICS_COMPUTE_BATCH_SIZE,
-                )
-            profile_state.read_seconds += time.perf_counter() - refresh_read_start
-        else:
-            facts_by_symbol = _prefetch_metric_facts_for_symbols(
-                fact_repo,
-                selected_symbols,
-                known_metric_ids,
-                chunk_size=METRICS_COMPUTE_BATCH_SIZE,
-            )
-            facts_refresh_rows = dict(preloaded_facts_refresh_rows or {})
-            if not facts_refresh_rows:
-                facts_refresh_rows = _SchemaReadyFinancialFactsRefreshStateRepository(
-                    fact_repo.db_path
-                ).fetch_many_for_symbols(
-                    selected_symbols,
-                    chunk_size=METRICS_COMPUTE_BATCH_SIZE,
-                )
-    else:
-        facts_by_symbol = {}
-        facts_refresh_rows = {}
-    if uses_market_data:
-        assert market_repo is not None
-        if preloaded_snapshots_by_symbol is not None:
-            snapshots_by_symbol = {
-                symbol: snapshot
-                for symbol, snapshot in preloaded_snapshots_by_symbol.items()
-                if symbol in selected_symbols
-            }
-        elif profile_enabled:
-            read_start = time.perf_counter()
-            snapshots_by_symbol = market_repo.latest_snapshots_many(
-                selected_symbols,
-                chunk_size=METRICS_COMPUTE_BATCH_SIZE,
-            )
-            assert profile_state is not None
-            profile_state.read_seconds += time.perf_counter() - read_start
-        else:
-            snapshots_by_symbol = market_repo.latest_snapshots_many(
-                selected_symbols,
-                chunk_size=METRICS_COMPUTE_BATCH_SIZE,
-            )
-    else:
-        snapshots_by_symbol = {}
 
     results: List[_ComputedMetricsResult] = []
     warning_collector = _MetricWarningCollector()
@@ -4211,17 +4243,37 @@ def _compute_metrics_for_symbol_batch_worker(
     )
 
 
+def _compute_metrics_for_symbol_batch_worker_profiled(
+    database: Union[str, Path],
+    symbols: Sequence[str],
+    metric_ids: Sequence[str],
+    suppress_metric_warnings: bool = True,
+) -> _ProfiledComputedMetricsBatchResult:
+    """Compute one worker batch and return worker-side timing breakdowns."""
+
+    profile_state = _MetricComputationProfile(enabled=True)
+    results = _compute_metric_batch_results(
+        symbols,
+        metric_ids,
+        _SchemaReadyFinancialFactsRepository(database),
+        (
+            _SchemaReadyMarketDataRepository(database)
+            if _metrics_use_market_data(metric_ids)
+            else None
+        ),
+        suppress_metric_warnings=suppress_metric_warnings,
+        profile_state=profile_state,
+    )
+    return _ProfiledComputedMetricsBatchResult(
+        results=results,
+        read_seconds=profile_state.read_seconds,
+        compute_seconds=profile_state.compute_seconds,
+    )
+
+
 @dataclass
 class _MetricComputationProfile:
-    """Wall-clock accumulator for compute-metrics phases.
-
-    The compute phase accumulator only catches symbols processed on the
-    parent (serial) path -- worker processes cannot update parent state,
-    so for the parallel paths the "compute" bucket reflects parent-side
-    overhead while worker compute time is captured implicitly in the gap
-    between submission and result handling. Useful as a relative comparison
-    across runs, not as a per-phase absolute breakdown.
-    """
+    """Wall-clock accumulator for compute-metrics phases."""
 
     enabled: bool = False
     read_seconds: float = 0.0
@@ -4401,61 +4453,134 @@ def _run_metric_computation(
     interrupted = False
     try:
         if total_symbols <= METRICS_COMPUTE_BATCH_SIZE:
-            single_futures: Dict[Future[_ComputedMetricsResult], str] = {
-                executor.submit(
-                    _compute_metrics_for_symbol_worker,
-                    str(db_path),
-                    symbol,
-                    tuple(metric_ids),
-                    suppress_metric_warnings,
-                ): symbol
-                for symbol in selected_symbols
-            }
-            for future in as_completed(single_futures):
-                symbol = single_futures[future]
-                try:
-                    result = future.result()
-                    buffer_result(result)
-                    metric_failures.extend(result.failures)
-                except Exception as exc:  # pragma: no cover - worker crashes
-                    LOGGER.error("Failed to compute metrics for %s: %s", symbol, exc)
-                completed_symbols += 1
-                maybe_report_progress()
-        else:
-            batch_futures: Dict[
-                Future[Tuple[_ComputedMetricsResult, ...]],
-                Tuple[str, ...],
-            ] = {
-                executor.submit(
-                    _compute_metrics_for_symbol_batch_worker,
-                    str(db_path),
-                    tuple(symbol_batch),
-                    tuple(metric_ids),
-                    suppress_metric_warnings,
-                ): tuple(symbol_batch)
-                for symbol_batch in _batch_values(
-                    selected_symbols,
-                    METRICS_COMPUTE_BATCH_SIZE,
-                )
-            }
-            for batch_future in as_completed(batch_futures):
-                batch_symbols = batch_futures[batch_future]
-                try:
-                    batch_results = batch_future.result()
-                    for result in batch_results:
-                        buffer_result(result)
-                        metric_failures.extend(result.failures)
-                        completed_symbols += 1
-                        maybe_report_progress()
-                except Exception as exc:  # pragma: no cover - worker crashes
-                    LOGGER.error(
-                        "Failed to compute metrics for %d-symbol batch starting at %s: %s",
-                        len(batch_symbols),
-                        batch_symbols[0],
-                        exc,
-                    )
-                    completed_symbols += len(batch_symbols)
+            if profile_state.enabled:
+                single_profile_futures: Dict[
+                    Future[_ProfiledComputedMetricsBatchResult], str
+                ] = {
+                    executor.submit(
+                        _compute_metrics_for_symbol_batch_worker_profiled,
+                        str(db_path),
+                        (symbol,),
+                        tuple(metric_ids),
+                        suppress_metric_warnings,
+                    ): symbol
+                    for symbol in selected_symbols
+                }
+                for profiled_future in as_completed(single_profile_futures):
+                    symbol = single_profile_futures[profiled_future]
+                    try:
+                        profiled_result_batch = profiled_future.result()
+                        profile_state.read_seconds += profiled_result_batch.read_seconds
+                        profile_state.compute_seconds += (
+                            profiled_result_batch.compute_seconds
+                        )
+                        for result in profiled_result_batch.results:
+                            buffer_result(result)
+                            metric_failures.extend(result.failures)
+                    except Exception as exc:  # pragma: no cover - worker crashes
+                        LOGGER.error(
+                            "Failed to compute metrics for %s: %s", symbol, exc
+                        )
+                    completed_symbols += 1
                     maybe_report_progress()
+            else:
+                single_result_futures: Dict[Future[_ComputedMetricsResult], str] = {
+                    executor.submit(
+                        _compute_metrics_for_symbol_worker,
+                        str(db_path),
+                        symbol,
+                        tuple(metric_ids),
+                        suppress_metric_warnings,
+                    ): symbol
+                    for symbol in selected_symbols
+                }
+                for result_future in as_completed(single_result_futures):
+                    symbol = single_result_futures[result_future]
+                    try:
+                        computed_result = result_future.result()
+                        buffer_result(computed_result)
+                        metric_failures.extend(computed_result.failures)
+                    except Exception as exc:  # pragma: no cover - worker crashes
+                        LOGGER.error(
+                            "Failed to compute metrics for %s: %s", symbol, exc
+                        )
+                    completed_symbols += 1
+                    maybe_report_progress()
+        else:
+            if profile_state.enabled:
+                batch_profile_futures: Dict[
+                    Future[_ProfiledComputedMetricsBatchResult],
+                    Tuple[str, ...],
+                ] = {
+                    executor.submit(
+                        _compute_metrics_for_symbol_batch_worker_profiled,
+                        str(db_path),
+                        tuple(symbol_batch),
+                        tuple(metric_ids),
+                        suppress_metric_warnings,
+                    ): tuple(symbol_batch)
+                    for symbol_batch in _batch_values(
+                        selected_symbols,
+                        METRICS_COMPUTE_BATCH_SIZE,
+                    )
+                }
+                for profiled_batch_future in as_completed(batch_profile_futures):
+                    batch_symbols = batch_profile_futures[profiled_batch_future]
+                    try:
+                        profiled_result_batch = profiled_batch_future.result()
+                        profile_state.read_seconds += profiled_result_batch.read_seconds
+                        profile_state.compute_seconds += (
+                            profiled_result_batch.compute_seconds
+                        )
+                        for result in profiled_result_batch.results:
+                            buffer_result(result)
+                            metric_failures.extend(result.failures)
+                            completed_symbols += 1
+                            maybe_report_progress()
+                    except Exception as exc:  # pragma: no cover - worker crashes
+                        LOGGER.error(
+                            "Failed to compute metrics for %d-symbol batch starting at %s: %s",
+                            len(batch_symbols),
+                            batch_symbols[0],
+                            exc,
+                        )
+                        completed_symbols += len(batch_symbols)
+                        maybe_report_progress()
+            else:
+                batch_result_futures: Dict[
+                    Future[Tuple[_ComputedMetricsResult, ...]],
+                    Tuple[str, ...],
+                ] = {
+                    executor.submit(
+                        _compute_metrics_for_symbol_batch_worker,
+                        str(db_path),
+                        tuple(symbol_batch),
+                        tuple(metric_ids),
+                        suppress_metric_warnings,
+                    ): tuple(symbol_batch)
+                    for symbol_batch in _batch_values(
+                        selected_symbols,
+                        METRICS_COMPUTE_BATCH_SIZE,
+                    )
+                }
+                for result_batch_future in as_completed(batch_result_futures):
+                    batch_symbols = batch_result_futures[result_batch_future]
+                    try:
+                        computed_batch_results = result_batch_future.result()
+                        for result in computed_batch_results:
+                            buffer_result(result)
+                            metric_failures.extend(result.failures)
+                            completed_symbols += 1
+                            maybe_report_progress()
+                    except Exception as exc:  # pragma: no cover - worker crashes
+                        LOGGER.error(
+                            "Failed to compute metrics for %d-symbol batch starting at %s: %s",
+                            len(batch_symbols),
+                            batch_symbols[0],
+                            exc,
+                        )
+                        completed_symbols += len(batch_symbols)
+                        maybe_report_progress()
     except KeyboardInterrupt:
         interrupted = True
         return _cancel_cli_command(
