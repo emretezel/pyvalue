@@ -225,6 +225,8 @@ Notes:
   optional `unit_label`
 - monetary and per-share metrics are FX-aware; ratio, percent, multiple, and
   count metrics remain non-monetary outputs
+- every metric attempt also updates `metric_compute_status`, which stores the
+  latest success or failure plus the input watermarks used for freshness checks
 
 ### `refresh-fx-rates`
 
@@ -302,6 +304,8 @@ Notes:
   or prior FY invested capital, missing invested-capital debt/equity/cash
   inputs, currency conflict, zero average invested capital, and latest FY point
   too old.
+- the command reads fresh persisted metric failure status first and only
+  recomputes pairs whose status is missing or stale for the current inputs
 
 ### `report-screen-failures`
 
@@ -322,13 +326,15 @@ Notes:
   by YAML order
 - metric NA counts are deduplicated by `(symbol, metric_id)`, even when the same
   metric appears in multiple criteria
+- screen evaluation now treats fresh failed or stale metric status as
+  unavailable, even if an older raw row still exists in `metrics`
 - the console report has two sections:
   - `Metric NA impact`: missing stored metrics ranked by affected-symbol count,
     with recompute-time root-cause buckets
   - `Criterion fallout`: per-criterion fail counts split into `na_fails` versus
     `threshold_fails`
-- if a stored metric row is missing, the command recomputes only that metric for
-  the affected symbols to distinguish:
+- if a metric is unavailable because its latest status is missing or stale, the
+  command recomputes only that metric for the affected symbols to distinguish:
   - `stored_missing_but_computable_now`
   - warning-driven `None` results
   - `exception: <type>`
@@ -355,7 +361,9 @@ Key options:
 
 Notes:
 
-- metrics must already be computed and stored
+- screen reads use the latest metric status when available; a fresh failed
+  status or stale success status hides older raw metric rows until the metric is
+  recomputed
 - when the scope is a single symbol, output includes entity details and
   criterion-by-criterion pass/fail rows
 - when the scope contains multiple symbols, output lists only passing symbols
@@ -398,7 +406,8 @@ Key options:
 
 ### `clear-financial-facts`
 
-Delete all normalized facts.
+Delete all normalized facts, financial-facts refresh state, and metric attempt
+status.
 
 ### `clear-fundamentals-raw`
 
@@ -406,7 +415,7 @@ Delete all stored raw fundamentals.
 
 ### `clear-metrics`
 
-Delete all stored metric rows.
+Delete all stored metric rows and metric attempt status.
 
 ### `clear-market-data`
 

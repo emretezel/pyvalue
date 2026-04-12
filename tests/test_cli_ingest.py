@@ -23,6 +23,7 @@ from pyvalue.metrics import REGISTRY
 from pyvalue.metrics.base import MetricCurrencyInvariantError, MetricResult
 from pyvalue.storage import (
     EntityMetadataRepository,
+    FinancialFactsRefreshStateRepository,
     FundamentalsNormalizationStateRepository,
     FundamentalsRepository,
     FundamentalsFetchStateRepository,
@@ -30,6 +31,8 @@ from pyvalue.storage import (
     FactRecord,
     MarketDataFetchStateRepository,
     MarketDataRepository,
+    MetricComputeStatusRecord,
+    MetricComputeStatusRepository,
     MetricsRepository,
     SupportedTicker,
     SupportedExchangeRepository,
@@ -4970,12 +4973,26 @@ def test_cmd_clear_financial_facts_clears_normalization_state(tmp_path):
         source_provider="SEC",
     )
     state_repo = FundamentalsNormalizationStateRepository(db_path)
+    refresh_state_repo = FinancialFactsRefreshStateRepository(db_path)
+    metric_status_repo = MetricComputeStatusRepository(db_path)
     security_id = fact_repo._security_repo().ensure_from_symbol("AAA.US").security_id
     state_repo.mark_success(
         "SEC",
         "AAA.US",
         security_id=security_id,
         raw_fetched_at="2024-01-01T00:00:00+00:00",
+    )
+    assert refresh_state_repo.fetch("AAA.US") is not None
+    metric_status_repo.upsert_many(
+        [
+            MetricComputeStatusRecord(
+                symbol="AAA.US",
+                metric_id="working_capital",
+                status="failure",
+                attempted_at="2024-01-02T00:00:00+00:00",
+                reason_code="missing_data",
+            )
+        ]
     )
 
     rc = cli.cmd_clear_financial_facts(str(db_path))
@@ -4985,8 +5002,48 @@ def test_cmd_clear_financial_facts_clears_normalization_state(tmp_path):
         assert conn.execute("SELECT COUNT(*) FROM financial_facts").fetchone()[0] == 0
         assert (
             conn.execute(
+                "SELECT COUNT(*) FROM financial_facts_refresh_state"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute("SELECT COUNT(*) FROM metric_compute_status").fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute(
                 "SELECT COUNT(*) FROM fundamentals_normalization_state"
             ).fetchone()[0]
+            == 0
+        )
+
+
+def test_cmd_clear_metrics_clears_metric_compute_status(tmp_path):
+    db_path = tmp_path / "clearmetrics.db"
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+    metrics_repo.upsert("AAA.US", "working_capital", 10.0, "2024-12-31")
+    status_repo = MetricComputeStatusRepository(db_path)
+    status_repo.initialize_schema()
+    status_repo.upsert_many(
+        [
+            MetricComputeStatusRecord(
+                symbol="AAA.US",
+                metric_id="working_capital",
+                status="success",
+                attempted_at="2025-01-01T00:00:00+00:00",
+                value_as_of="2024-12-31",
+            )
+        ]
+    )
+
+    rc = cli.cmd_clear_metrics(str(db_path))
+
+    assert rc == 0
+    with metrics_repo._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM metrics").fetchone()[0] == 0
+        assert (
+            conn.execute("SELECT COUNT(*) FROM metric_compute_status").fetchone()[0]
             == 0
         )
 
@@ -7237,6 +7294,176 @@ criteria:
     assert output_lines[-1] == "No symbols satisfied all criteria."
 
 
+def test_cmd_run_screen_stage_missing_status_falls_back_to_raw_metric_value(
+    tmp_path,
+):
+    db_path = tmp_path / "screen-stage-missing-status.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
+        provider="SEC",
+    )
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+    metrics_repo.upsert("AAA.US", "working_capital", 100.0, "2024-12-31")
+
+    screen_path = tmp_path / "screen.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Working capital minimum"
+    left:
+      metric: working_capital
+    operator: ">="
+    right:
+      value: 75
+"""
+    )
+
+    rc = cli.cmd_run_screen_stage(
+        config_path=str(screen_path),
+        database=str(db_path),
+        symbols=["AAA.US"],
+        exchange_codes=None,
+        all_supported=False,
+        output_csv=None,
+    )
+
+    assert rc == 0
+
+
+def test_cmd_run_screen_stage_failure_status_shadows_stored_metric_value(tmp_path):
+    db_path = tmp_path / "screen-stage-failed-status.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
+        provider="SEC",
+    )
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+    metrics_repo.upsert("AAA.US", "working_capital", 100.0, "2024-12-31")
+    status_repo = MetricComputeStatusRepository(db_path)
+    status_repo.initialize_schema()
+    status_repo.upsert_many(
+        [
+            MetricComputeStatusRecord(
+                symbol="AAA.US",
+                metric_id="working_capital",
+                status="failure",
+                attempted_at="2025-01-01T00:00:00+00:00",
+                reason_code="missing_data",
+            )
+        ]
+    )
+
+    screen_path = tmp_path / "screen.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Working capital minimum"
+    left:
+      metric: working_capital
+    operator: ">="
+    right:
+      value: 75
+"""
+    )
+
+    rc = cli.cmd_run_screen_stage(
+        config_path=str(screen_path),
+        database=str(db_path),
+        symbols=["AAA.US"],
+        exchange_codes=None,
+        all_supported=False,
+        output_csv=None,
+    )
+
+    assert rc == 1
+
+
+def test_cmd_run_screen_stage_stale_success_status_hides_stored_metric_value(tmp_path):
+    db_path = tmp_path / "screen-stage-stale-status.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
+        provider="SEC",
+    )
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    fact_repo.replace_facts(
+        "AAA.US",
+        [
+            make_fact(concept="AssetsCurrent", end_date="2024-12-31", value=150.0),
+            make_fact(
+                concept="LiabilitiesCurrent",
+                end_date="2024-12-31",
+                value=50.0,
+            ),
+        ],
+    )
+    refresh_repo = FinancialFactsRefreshStateRepository(db_path)
+    initial_refresh = refresh_repo.fetch("AAA.US")
+    assert initial_refresh is not None
+
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+    metrics_repo.upsert("AAA.US", "working_capital", 100.0, "2024-12-31")
+    status_repo = MetricComputeStatusRepository(db_path)
+    status_repo.initialize_schema()
+    status_repo.upsert_many(
+        [
+            MetricComputeStatusRecord(
+                symbol="AAA.US",
+                metric_id="working_capital",
+                status="success",
+                attempted_at="2025-01-01T00:00:00+00:00",
+                value_as_of="2024-12-31",
+                facts_refreshed_at=initial_refresh.refreshed_at,
+            )
+        ]
+    )
+
+    time.sleep(0.01)
+    fact_repo.replace_facts(
+        "AAA.US",
+        [
+            make_fact(concept="AssetsCurrent", end_date="2025-03-31", value=80.0),
+            make_fact(
+                concept="LiabilitiesCurrent",
+                end_date="2025-03-31",
+                value=70.0,
+            ),
+        ],
+    )
+
+    screen_path = tmp_path / "screen.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Working capital minimum"
+    left:
+      metric: working_capital
+    operator: ">="
+    right:
+      value: 75
+"""
+    )
+
+    rc = cli.cmd_run_screen_stage(
+        config_path=str(screen_path),
+        database=str(db_path),
+        symbols=["AAA.US"],
+        exchange_codes=None,
+        all_supported=False,
+        output_csv=None,
+    )
+
+    assert rc == 1
+
+
 def test_cmd_run_screen_stage_creates_output_csv_parent_dirs_when_no_symbols_pass(
     tmp_path, capsys
 ):
@@ -7465,6 +7692,56 @@ def test_cmd_report_metric_failures_surfaces_roic_specific_reason(tmp_path, caps
     assert "roic_10y: missing invested capital debt input for <symbol>: 1" in output
 
 
+def test_cmd_report_metric_failures_reuses_persisted_failure_status_without_recompute(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "metric-failure-status.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
+        provider="SEC",
+    )
+    status_repo = MetricComputeStatusRepository(db_path)
+    status_repo.initialize_schema()
+    status_repo.upsert_many(
+        [
+            MetricComputeStatusRecord(
+                symbol="AAA.US",
+                metric_id="cached_metric",
+                status="failure",
+                attempted_at="2025-01-01T00:00:00+00:00",
+                reason_code="cached_failure",
+            )
+        ]
+    )
+
+    class CachedMetric:
+        id = "cached_metric"
+        required_concepts = ()
+        uses_market_data = False
+        uses_financial_facts = False
+
+        def compute(self, symbol, repo):
+            raise AssertionError("expected persisted failure status to skip recompute")
+
+    monkeypatch.setattr(cli, "REGISTRY", {CachedMetric.id: CachedMetric})
+
+    rc = cli.cmd_report_metric_failures(
+        database=str(db_path),
+        metric_ids=[CachedMetric.id],
+        symbols=["AAA.US"],
+        exchange_codes=None,
+        all_supported=False,
+        output_csv=None,
+    )
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "- cached_metric: failures=1/1" in output
+    assert "cached_failure: 1" in output
+
+
 def test_cmd_report_screen_failures_dedupes_metric_na_counts(tmp_path, capsys):
     db_path = tmp_path / "screen_failures.db"
     store_catalog_listings(
@@ -7565,6 +7842,69 @@ criteria:
     )
     assert "working_capital,1,2," in csv_lines[1]
     assert "stored_missing_but_computable_now,1,BBB.US,250.0" in csv_lines[1]
+
+
+def test_cmd_report_screen_failures_reuses_persisted_failure_status_without_recompute(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "screen-failure-status.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
+        provider="SEC",
+    )
+    status_repo = MetricComputeStatusRepository(db_path)
+    status_repo.initialize_schema()
+    status_repo.upsert_many(
+        [
+            MetricComputeStatusRecord(
+                symbol="AAA.US",
+                metric_id="cached_metric",
+                status="failure",
+                attempted_at="2025-01-01T00:00:00+00:00",
+                reason_code="cached_failure",
+            )
+        ]
+    )
+
+    class CachedMetric:
+        id = "cached_metric"
+        required_concepts = ()
+        uses_market_data = False
+        uses_financial_facts = False
+
+        def compute(self, symbol, repo):
+            raise AssertionError("expected persisted failure status to skip recompute")
+
+    monkeypatch.setattr(cli, "REGISTRY", {CachedMetric.id: CachedMetric})
+
+    screen_path = tmp_path / "screen.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Cached metric > 0"
+    left:
+      metric: cached_metric
+    operator: ">"
+    right:
+      value: 0
+"""
+    )
+
+    rc = cli.cmd_report_screen_failures(
+        config_path=str(screen_path),
+        database=str(db_path),
+        symbols=["AAA.US"],
+        exchange_codes=None,
+        all_supported=False,
+        output_csv=None,
+    )
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "- cached_metric: missing=1 symbols, affects=1 criteria" in output
+    assert "cached_failure: 1 (example=AAA.US" in output
 
 
 def test_cmd_report_screen_failures_reports_progress_by_phase(
@@ -8127,6 +8467,66 @@ def test_cmd_compute_metrics_prints_currency_invariant_summary(
     assert "Metric currency invariant failures for AAPL.US:" in output
     assert "- bad_metric: currency invariant:" in output
     assert "Computed 1 metrics for AAPL.US" in output
+
+
+def test_cmd_compute_metrics_persists_metric_compute_status_success_and_failure(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "compute-metrics-status.db"
+    MetricsRepository(db_path).initialize_schema()
+
+    class GoodMetric:
+        id = "good_metric"
+        required_concepts = ()
+        uses_market_data = False
+        uses_financial_facts = False
+
+        def compute(self, symbol, repo):
+            return MetricResult(
+                symbol=symbol,
+                metric_id=self.id,
+                value=1.0,
+                as_of="2024-01-01",
+            )
+
+    class BadMetric:
+        id = "bad_metric"
+        required_concepts = ()
+        uses_market_data = False
+        uses_financial_facts = False
+
+        def compute(self, symbol, repo):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        cli,
+        "REGISTRY",
+        {
+            GoodMetric.id: GoodMetric,
+            BadMetric.id: BadMetric,
+        },
+    )
+
+    rc = cli.cmd_compute_metrics(
+        "AAPL.US",
+        [GoodMetric.id, BadMetric.id],
+        str(db_path),
+        run_all=False,
+        exchange_code=None,
+    )
+
+    assert rc == 0
+    status_repo = MetricComputeStatusRepository(db_path)
+    good_status = status_repo.fetch("AAPL.US", GoodMetric.id)
+    bad_status = status_repo.fetch("AAPL.US", BadMetric.id)
+    assert good_status is not None
+    assert good_status.status == "success"
+    assert good_status.value_as_of == "2024-01-01"
+    assert bad_status is not None
+    assert bad_status.status == "failure"
+    assert bad_status.reason_code == "exception: RuntimeError"
+    assert MetricsRepository(db_path).fetch("AAPL.US", GoodMetric.id) is not None
+    assert MetricsRepository(db_path).fetch("AAPL.US", BadMetric.id) is None
 
 
 def test_cmd_compute_metrics_all(tmp_path):

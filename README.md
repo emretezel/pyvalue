@@ -42,6 +42,9 @@ Default CLI behavior:
 - Compute value and quality metrics.
 - Run YAML-based stock screens against stored data, including ranked QARP
   output for passing symbols.
+- Persist the latest metric-computation attempt status so reporting commands can
+  reuse fresh failure reasons instead of recomputing the same missing metrics on
+  every run.
 
 ## Currency and FX
 

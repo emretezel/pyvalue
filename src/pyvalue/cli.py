@@ -26,7 +26,18 @@ from threading import Lock, Thread, local
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union, cast
+from typing import (
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+    cast,
+)
 import weakref
 
 from pyvalue.config import Config
@@ -46,7 +57,9 @@ from pyvalue.marketdata import EODHDProvider, MarketDataUpdate, PriceData
 from pyvalue.marketdata.service import MarketDataService
 from pyvalue.metrics import REGISTRY
 from pyvalue.metrics.base import (
+    Metric,
     MetricCurrencyInvariantError,
+    MetricResult,
     consume_metric_currency_invariant_error,
     metadata_for_metric,
 )
@@ -81,12 +94,16 @@ from pyvalue.storage import (
     FundamentalsRepository,
     FundamentalsFetchStateRepository,
     FinancialFactsRepository,
+    FinancialFactsRefreshStateRecord,
+    FinancialFactsRefreshStateRepository,
     FactRecord,
     IngestProgressExchange,
     IngestProgressSummary,
     MarketDataFetchStateRepository,
     MarketDataRepository,
     MarketSnapshotRecord,
+    MetricComputeStatusRecord,
+    MetricComputeStatusRepository,
     MetricRecord,
     MetricsRepository,
     SecurityRepository,
@@ -218,6 +235,7 @@ class _ComputedMetricsResult:
     rows: Tuple[StoredMetricRow, ...]
     computed_count: int
     failures: Tuple["_MetricComputationFailure", ...] = ()
+    attempts: Tuple["_MetricAttemptResult", ...] = ()
 
 
 @dataclass(frozen=True)
@@ -226,6 +244,30 @@ class _MetricComputationFailure:
     metric_id: str
     reason: str
     message: str
+
+
+@dataclass(frozen=True)
+class _MetricAttemptResult:
+    symbol: str
+    metric_id: str
+    status: str
+    attempted_at: str
+    stored_row: Optional[StoredMetricRow] = None
+    reason_code: Optional[str] = None
+    reason_detail: Optional[str] = None
+    value_as_of: Optional[str] = None
+    facts_refreshed_at: Optional[str] = None
+    market_data_as_of: Optional[str] = None
+    market_data_updated_at: Optional[str] = None
+    persist_status: bool = True
+
+
+@dataclass(frozen=True)
+class _MetricAvailabilityState:
+    metric_id: str
+    record: Optional[MetricRecord]
+    status_record: Optional[MetricComputeStatusRecord]
+    stale: bool
 
 
 @dataclass
@@ -3071,6 +3113,30 @@ class _SchemaReadyMetricsRepository(MetricsRepository):
         return
 
 
+class _SchemaReadyMetricComputeStatusRepository(MetricComputeStatusRepository):
+    """Metric-status repository that assumes the schema is already initialized."""
+
+    def __init__(self, db_path: Union[str, Path]) -> None:
+        super().__init__(db_path)
+        self._security_repo_cache = _SchemaReadySecurityRepository(self.db_path)
+
+    def initialize_schema(self) -> None:
+        return
+
+
+class _SchemaReadyFinancialFactsRefreshStateRepository(
+    FinancialFactsRefreshStateRepository
+):
+    """Facts-refresh-state repository that assumes the schema is ready."""
+
+    def __init__(self, db_path: Union[str, Path]) -> None:
+        super().__init__(db_path)
+        self._security_repo_cache = _SchemaReadySecurityRepository(self.db_path)
+
+    def initialize_schema(self) -> None:
+        return
+
+
 class _PreloadedMetricsRepository(_SchemaReadyMetricsRepository):
     """Serve stored metric values from memory for a fixed symbol scope."""
 
@@ -3089,6 +3155,230 @@ class _PreloadedMetricsRepository(_SchemaReadyMetricsRepository):
         return self._metric_rows_by_symbol.get(symbol.strip().upper(), {}).get(
             metric_id
         )
+
+
+def _metric_status_current_facts_refresh(
+    record: Optional[FinancialFactsRefreshStateRecord],
+) -> Optional[str]:
+    return record.refreshed_at if record is not None else None
+
+
+def _metric_status_current_market_watermark(
+    record: Optional[MarketSnapshotRecord],
+) -> Tuple[Optional[str], Optional[str]]:
+    if record is None:
+        return None, None
+    return record.as_of, record.updated_at
+
+
+def _build_metric_availability_state(
+    metric_id: str,
+    record: Optional[MetricRecord],
+    status_record: Optional[MetricComputeStatusRecord],
+    facts_refresh_record: Optional[FinancialFactsRefreshStateRecord],
+    market_snapshot_record: Optional[MarketSnapshotRecord],
+) -> _MetricAvailabilityState:
+    if status_record is None:
+        return _MetricAvailabilityState(
+            metric_id=metric_id,
+            record=record,
+            status_record=None,
+            stale=False,
+        )
+
+    metric_cls = REGISTRY.get(metric_id)
+    uses_financial_facts = bool(metric_cls) and getattr(
+        metric_cls, "uses_financial_facts", True
+    )
+    uses_market_data = bool(metric_cls) and getattr(
+        metric_cls, "uses_market_data", False
+    )
+    stale = False
+    current_facts_refreshed_at = _metric_status_current_facts_refresh(
+        facts_refresh_record
+    )
+    current_market_data_as_of, current_market_data_updated_at = (
+        _metric_status_current_market_watermark(market_snapshot_record)
+    )
+
+    if uses_financial_facts and (
+        status_record.facts_refreshed_at != current_facts_refreshed_at
+    ):
+        stale = True
+    if uses_market_data and (
+        status_record.market_data_as_of != current_market_data_as_of
+        or status_record.market_data_updated_at != current_market_data_updated_at
+    ):
+        stale = True
+    if status_record.status == "success":
+        if record is None:
+            stale = True
+        elif (
+            status_record.value_as_of is not None
+            and record.as_of != status_record.value_as_of
+        ):
+            stale = True
+
+    if stale:
+        return _MetricAvailabilityState(
+            metric_id=metric_id,
+            record=None,
+            status_record=status_record,
+            stale=True,
+        )
+    if status_record.status == "failure":
+        return _MetricAvailabilityState(
+            metric_id=metric_id,
+            record=None,
+            status_record=status_record,
+            stale=False,
+        )
+    return _MetricAvailabilityState(
+        metric_id=metric_id,
+        record=record,
+        status_record=status_record,
+        stale=False,
+    )
+
+
+class _StatusAwareMetricsRepository(_SchemaReadyMetricsRepository):
+    """Expose metric reads with persisted latest-attempt status shadowing."""
+
+    def __init__(
+        self,
+        db_path: Union[str, Path],
+        *,
+        raw_metrics_repo: Optional[MetricsRepository] = None,
+        status_repo: Optional[MetricComputeStatusRepository] = None,
+        facts_refresh_repo: Optional[FinancialFactsRefreshStateRepository] = None,
+        market_repo: Optional[MarketDataRepository] = None,
+    ) -> None:
+        super().__init__(db_path)
+        self._raw_metrics_repo = raw_metrics_repo or _SchemaReadyMetricsRepository(
+            db_path
+        )
+        self._status_repo = status_repo or _SchemaReadyMetricComputeStatusRepository(
+            db_path
+        )
+        self._facts_refresh_repo = (
+            facts_refresh_repo
+            or _SchemaReadyFinancialFactsRefreshStateRepository(db_path)
+        )
+        self._market_repo = market_repo or _SchemaReadyMarketDataRepository(db_path)
+
+    def state(self, symbol: str, metric_id: str) -> _MetricAvailabilityState:
+        symbol_upper = symbol.strip().upper()
+        record = self._raw_metrics_repo.fetch(symbol_upper, metric_id)
+        status_record = self._status_repo.fetch(symbol_upper, metric_id)
+        facts_refresh_record = None
+        market_snapshot_record = None
+        metric_cls = REGISTRY.get(metric_id)
+        if metric_cls is not None and getattr(metric_cls, "uses_financial_facts", True):
+            facts_refresh_record = self._facts_refresh_repo.fetch(symbol_upper)
+        if metric_cls is not None and getattr(metric_cls, "uses_market_data", False):
+            market_snapshot_record = self._market_repo.latest_snapshot_record(
+                symbol_upper
+            )
+        return _build_metric_availability_state(
+            metric_id,
+            record,
+            status_record,
+            facts_refresh_record,
+            market_snapshot_record,
+        )
+
+    def states_many(
+        self,
+        symbols: Sequence[str],
+        metric_ids: Sequence[str],
+        *,
+        chunk_size: int = 500,
+    ) -> Dict[str, Dict[str, _MetricAvailabilityState]]:
+        normalized_symbols = [symbol.strip().upper() for symbol in symbols if symbol]
+        requested_metric_ids = [
+            metric_id.strip() for metric_id in metric_ids if str(metric_id).strip()
+        ]
+        if not normalized_symbols or not requested_metric_ids:
+            return {}
+
+        raw_rows = self._raw_metrics_repo.fetch_many_for_symbols(
+            normalized_symbols,
+            requested_metric_ids,
+            chunk_size=chunk_size,
+        )
+        status_rows = self._status_repo.fetch_many_for_symbols(
+            normalized_symbols,
+            requested_metric_ids,
+            chunk_size=chunk_size,
+        )
+        facts_refresh_symbols = sorted(
+            {
+                symbol
+                for symbol, per_symbol_statuses in status_rows.items()
+                for metric_id in per_symbol_statuses.keys()
+                if getattr(REGISTRY.get(metric_id), "uses_financial_facts", True)
+            }
+        )
+        facts_refresh_rows = (
+            self._facts_refresh_repo.fetch_many_for_symbols(
+                facts_refresh_symbols,
+                chunk_size=chunk_size,
+            )
+            if facts_refresh_symbols
+            else {}
+        )
+        market_snapshot_symbols = sorted(
+            {
+                symbol
+                for symbol, per_symbol_statuses in status_rows.items()
+                for metric_id in per_symbol_statuses.keys()
+                if getattr(REGISTRY.get(metric_id), "uses_market_data", False)
+            }
+        )
+        market_snapshot_rows = (
+            self._market_repo.latest_snapshots_many(
+                market_snapshot_symbols,
+                chunk_size=chunk_size,
+            )
+            if market_snapshot_symbols
+            else {}
+        )
+
+        states: Dict[str, Dict[str, _MetricAvailabilityState]] = {}
+        for symbol_upper in normalized_symbols:
+            per_symbol_states: Dict[str, _MetricAvailabilityState] = {}
+            symbol_metric_rows = raw_rows.get(symbol_upper, {})
+            symbol_status_rows = status_rows.get(symbol_upper, {})
+            facts_refresh_record = facts_refresh_rows.get(symbol_upper)
+            market_snapshot_record = market_snapshot_rows.get(symbol_upper)
+            for metric_id in requested_metric_ids:
+                per_symbol_states[metric_id] = _build_metric_availability_state(
+                    metric_id,
+                    symbol_metric_rows.get(metric_id),
+                    symbol_status_rows.get(metric_id),
+                    facts_refresh_record,
+                    market_snapshot_record,
+                )
+            states[symbol_upper] = per_symbol_states
+        return states
+
+    def fetch(self, symbol: str, metric_id: str) -> Optional[MetricRecord]:
+        return self.state(symbol, metric_id).record
+
+    def fetch_many_for_symbols(
+        self,
+        symbols: Sequence[str],
+        metric_ids: Sequence[str],
+        chunk_size: int = 500,
+    ) -> Dict[str, Dict[str, MetricRecord]]:
+        states = self.states_many(symbols, metric_ids, chunk_size=chunk_size)
+        rows_by_symbol: Dict[str, Dict[str, MetricRecord]] = {}
+        for symbol, per_symbol_states in states.items():
+            for metric_id, state in per_symbol_states.items():
+                if state.record is None:
+                    continue
+                rows_by_symbol.setdefault(symbol, {})[metric_id] = state.record
+        return rows_by_symbol
 
 
 class _CachedMarketDataRepository:
@@ -3293,6 +3583,8 @@ def _initialize_metric_read_schema(
     """Ensure worker-read tables exist before process workers start reading."""
 
     FinancialFactsRepository(db_path).initialize_schema()
+    FinancialFactsRefreshStateRepository(db_path).initialize_schema()
+    MetricComputeStatusRepository(db_path).initialize_schema()
     if include_market_data:
         MarketDataRepository(db_path).initialize_schema()
 
@@ -3314,24 +3606,74 @@ def _ensure_metrics_wal_mode(metrics_repo: MetricsRepository) -> str:
             return "unknown"
 
 
+def _metric_status_rows_from_attempts(
+    attempts: Sequence[_MetricAttemptResult],
+) -> List[MetricComputeStatusRecord]:
+    return [
+        MetricComputeStatusRecord(
+            symbol=attempt.symbol,
+            metric_id=attempt.metric_id,
+            status=cast(Literal["success", "failure"], attempt.status),
+            attempted_at=attempt.attempted_at,
+            reason_code=attempt.reason_code,
+            reason_detail=attempt.reason_detail,
+            value_as_of=attempt.value_as_of,
+            facts_refreshed_at=attempt.facts_refreshed_at,
+            market_data_as_of=attempt.market_data_as_of,
+            market_data_updated_at=attempt.market_data_updated_at,
+        )
+        for attempt in attempts
+        if attempt.persist_status
+    ]
+
+
 def _flush_metric_write_batch(
     metrics_repo: MetricsRepository,
+    status_repo: MetricComputeStatusRepository,
     pending_rows: List[StoredMetricRow],
+    pending_attempts: List[_MetricAttemptResult],
     profile_state: Optional["_MetricComputationProfile"] = None,
     write_connection: Optional[sqlite3.Connection] = None,
 ) -> None:
     """Persist one buffered metric batch."""
 
+    if not pending_rows and not pending_attempts:
+        return
+    status_rows = _metric_status_rows_from_attempts(pending_attempts)
+    row_count = len(pending_rows)
     if profile_state is not None and profile_state.enabled:
-        row_count = len(pending_rows)
         flush_start = time.perf_counter()
-        metrics_repo.upsert_many(pending_rows, connection=write_connection)
+        if pending_rows:
+            metrics_repo.upsert_many(pending_rows, connection=write_connection)
+        if status_rows:
+            status_repo.upsert_many(status_rows, connection=write_connection)
         profile_state.write_seconds += time.perf_counter() - flush_start
         profile_state.write_flush_count += 1
         profile_state.write_row_count += row_count
     else:
-        metrics_repo.upsert_many(pending_rows, connection=write_connection)
+        if pending_rows:
+            metrics_repo.upsert_many(pending_rows, connection=write_connection)
+        if status_rows:
+            status_repo.upsert_many(status_rows, connection=write_connection)
     pending_rows.clear()
+    pending_attempts.clear()
+
+
+def _persist_metric_attempts(
+    metrics_repo: MetricsRepository,
+    status_repo: MetricComputeStatusRepository,
+    attempts: Sequence[_MetricAttemptResult],
+) -> None:
+    metric_rows = [
+        cast(StoredMetricRow, attempt.stored_row)
+        for attempt in attempts
+        if attempt.stored_row is not None
+    ]
+    if metric_rows:
+        metrics_repo.upsert_many(metric_rows)
+    status_rows = _metric_status_rows_from_attempts(attempts)
+    if status_rows:
+        status_repo.upsert_many(status_rows)
 
 
 def _print_symbol_progress(completed_symbols: int, total_symbols: int) -> None:
@@ -3438,6 +3780,79 @@ def _split_fx_refresh_ranges(
     return ranges
 
 
+def _metric_attempt_success(
+    metric_id: str,
+    metric: Metric,
+    result: MetricResult,
+    *,
+    symbol: str,
+    attempted_at: str,
+    facts_refreshed_at: Optional[str],
+    market_snapshot_record: Optional[MarketSnapshotRecord],
+) -> _MetricAttemptResult:
+    metadata = metadata_for_metric(metric_id, metric)
+    unit_kind = metadata.unit_kind if result.unit_kind == "other" else result.unit_kind
+    unit_label = result.unit_label or metadata.unit_label
+    currency = metric_currency_or_none(unit_kind, result.currency)
+    stored_row: StoredMetricRow = (
+        result.symbol,
+        result.metric_id,
+        result.value,
+        result.as_of,
+        unit_kind,
+        currency,
+        unit_label,
+    )
+    return _MetricAttemptResult(
+        symbol=symbol,
+        metric_id=metric_id,
+        status="success",
+        attempted_at=attempted_at,
+        stored_row=stored_row,
+        value_as_of=result.as_of,
+        facts_refreshed_at=facts_refreshed_at,
+        market_data_as_of=(
+            market_snapshot_record.as_of if market_snapshot_record is not None else None
+        ),
+        market_data_updated_at=(
+            market_snapshot_record.updated_at
+            if market_snapshot_record is not None
+            else None
+        ),
+    )
+
+
+def _metric_attempt_failure(
+    *,
+    symbol: str,
+    metric_id: str,
+    attempted_at: str,
+    reason_code: str,
+    reason_detail: Optional[str],
+    facts_refreshed_at: Optional[str],
+    market_snapshot_record: Optional[MarketSnapshotRecord],
+    persist_status: bool = True,
+) -> _MetricAttemptResult:
+    return _MetricAttemptResult(
+        symbol=symbol,
+        metric_id=metric_id,
+        status="failure",
+        attempted_at=attempted_at,
+        reason_code=reason_code,
+        reason_detail=reason_detail,
+        facts_refreshed_at=facts_refreshed_at,
+        market_data_as_of=(
+            market_snapshot_record.as_of if market_snapshot_record is not None else None
+        ),
+        market_data_updated_at=(
+            market_snapshot_record.updated_at
+            if market_snapshot_record is not None
+            else None
+        ),
+        persist_status=persist_status,
+    )
+
+
 def _compute_metrics_for_symbol(
     symbol: str,
     metric_ids: Sequence[str],
@@ -3446,6 +3861,9 @@ def _compute_metrics_for_symbol(
     *,
     preloaded_facts: Optional[Sequence[FactRecord]] = None,
     preloaded_market_snapshot: object = _PRELOADED_MARKET_SNAPSHOT_MISSING,
+    preloaded_market_snapshot_record: Optional[MarketSnapshotRecord] = None,
+    facts_refreshed_at: Optional[str] = None,
+    warning_collector: Optional["_MetricWarningCollector"] = None,
 ) -> _ComputedMetricsResult:
     symbol_upper = symbol.strip().upper()
     records = (
@@ -3461,6 +3879,14 @@ def _compute_metrics_for_symbol(
     snapshot_loaded = (
         preloaded_market_snapshot is not _PRELOADED_MARKET_SNAPSHOT_MISSING
     )
+    if (
+        preloaded_market_snapshot is _PRELOADED_MARKET_SNAPSHOT_MISSING
+        and preloaded_market_snapshot_record is not None
+    ):
+        preloaded_market_snapshot = _price_data_from_snapshot_record(
+            preloaded_market_snapshot_record
+        )
+        snapshot_loaded = True
     snapshot = (
         None
         if preloaded_market_snapshot is _PRELOADED_MARKET_SNAPSHOT_MISSING
@@ -3479,9 +3905,27 @@ def _compute_metrics_for_symbol(
 
     rows: List[StoredMetricRow] = []
     failures: List[_MetricComputationFailure] = []
+    attempts: List[_MetricAttemptResult] = []
     computed = 0
     for metric_id in metric_ids:
-        metric_cls = REGISTRY[metric_id]
+        if warning_collector is not None:
+            warning_collector.clear()
+        metric_cls = REGISTRY.get(metric_id)
+        attempted_at = datetime.now(timezone.utc).isoformat()
+        if metric_cls is None:
+            attempts.append(
+                _metric_attempt_failure(
+                    symbol=symbol_upper,
+                    metric_id=metric_id,
+                    attempted_at=attempted_at,
+                    reason_code="unknown_metric_id",
+                    reason_detail="Metric id not found in registry",
+                    facts_refreshed_at=facts_refreshed_at,
+                    market_snapshot_record=preloaded_market_snapshot_record,
+                    persist_status=False,
+                )
+            )
+            continue
         metric = metric_cls()
         try:
             if getattr(metric, "uses_market_data", False):
@@ -3503,9 +3947,31 @@ def _compute_metrics_for_symbol(
                     message=str(exc),
                 )
             )
+            attempts.append(
+                _metric_attempt_failure(
+                    symbol=symbol_upper,
+                    metric_id=metric_id,
+                    attempted_at=attempted_at,
+                    reason_code=exc.summary_reason,
+                    reason_detail=str(exc),
+                    facts_refreshed_at=facts_refreshed_at,
+                    market_snapshot_record=preloaded_market_snapshot_record,
+                )
+            )
             continue
         except Exception as exc:  # pragma: no cover - metric errors
             LOGGER.error("Metric %s failed for %s: %s", metric_id, symbol_upper, exc)
+            attempts.append(
+                _metric_attempt_failure(
+                    symbol=symbol_upper,
+                    metric_id=metric_id,
+                    attempted_at=attempted_at,
+                    reason_code=_metric_failure_reason_from_exception(exc),
+                    reason_detail=_metric_failure_message(exc),
+                    facts_refreshed_at=facts_refreshed_at,
+                    market_snapshot_record=preloaded_market_snapshot_record,
+                )
+            )
             continue
         invariant_error = consume_metric_currency_invariant_error(metric)
         if invariant_error is not None:
@@ -3517,29 +3983,48 @@ def _compute_metrics_for_symbol(
                     message=str(invariant_error),
                 )
             )
+            attempts.append(
+                _metric_attempt_failure(
+                    symbol=symbol_upper,
+                    metric_id=metric_id,
+                    attempted_at=attempted_at,
+                    reason_code=invariant_error.summary_reason,
+                    reason_detail=str(invariant_error),
+                    facts_refreshed_at=facts_refreshed_at,
+                    market_snapshot_record=preloaded_market_snapshot_record,
+                )
+            )
             continue
         if result is None:
             LOGGER.warning(
                 "Metric %s could not be computed for %s", metric_id, symbol_upper
             )
-            continue
-        metadata = metadata_for_metric(metric_id, metric)
-        unit_kind = (
-            metadata.unit_kind if result.unit_kind == "other" else result.unit_kind
-        )
-        unit_label = result.unit_label or metadata.unit_label
-        currency = metric_currency_or_none(unit_kind, result.currency)
-        rows.append(
-            (
-                result.symbol,
-                result.metric_id,
-                result.value,
-                result.as_of,
-                unit_kind,
-                currency,
-                unit_label,
+            attempts.append(
+                _metric_attempt_failure(
+                    symbol=symbol_upper,
+                    metric_id=metric_id,
+                    attempted_at=attempted_at,
+                    reason_code=_format_failure_reason(
+                        warning_collector.records if warning_collector else (),
+                        symbol_upper,
+                    ),
+                    reason_detail=None,
+                    facts_refreshed_at=facts_refreshed_at,
+                    market_snapshot_record=preloaded_market_snapshot_record,
+                )
             )
+            continue
+        attempt = _metric_attempt_success(
+            metric_id,
+            metric,
+            result,
+            symbol=symbol_upper,
+            attempted_at=attempted_at,
+            facts_refreshed_at=facts_refreshed_at,
+            market_snapshot_record=preloaded_market_snapshot_record,
         )
+        rows.append(cast(StoredMetricRow, attempt.stored_row))
+        attempts.append(attempt)
         computed += 1
 
     return _ComputedMetricsResult(
@@ -3547,6 +4032,7 @@ def _compute_metrics_for_symbol(
         rows=tuple(rows),
         computed_count=computed,
         failures=tuple(failures),
+        attempts=tuple(attempts),
     )
 
 
@@ -3558,6 +4044,10 @@ def _compute_metric_batch_results(
     *,
     suppress_metric_warnings: bool = True,
     profile_state: Optional["_MetricComputationProfile"] = None,
+    preloaded_snapshots_by_symbol: Optional[Mapping[str, MarketSnapshotRecord]] = None,
+    preloaded_facts_refresh_rows: Optional[
+        Mapping[str, FinancialFactsRefreshStateRecord]
+    ] = None,
 ) -> Tuple[_ComputedMetricsResult, ...]:
     selected_symbols = [symbol.strip().upper() for symbol in symbols]
     if not selected_symbols:
@@ -3568,6 +4058,14 @@ def _compute_metric_batch_results(
     )
     uses_financial_facts = bool(known_metric_ids) and _metrics_use_financial_facts(
         known_metric_ids
+    )
+    uses_market_data = (
+        market_repo is not None
+        and bool(known_metric_ids)
+        and any(
+            getattr(REGISTRY[metric_id], "uses_market_data", False)
+            for metric_id in known_metric_ids
+        )
     )
     profile_enabled = profile_state is not None and profile_state.enabled
     if uses_financial_facts:
@@ -3581,6 +4079,16 @@ def _compute_metric_batch_results(
             )
             assert profile_state is not None
             profile_state.read_seconds += time.perf_counter() - read_start
+            refresh_read_start = time.perf_counter()
+            facts_refresh_rows = dict(preloaded_facts_refresh_rows or {})
+            if not facts_refresh_rows:
+                facts_refresh_rows = _SchemaReadyFinancialFactsRefreshStateRepository(
+                    fact_repo.db_path
+                ).fetch_many_for_symbols(
+                    selected_symbols,
+                    chunk_size=METRICS_COMPUTE_BATCH_SIZE,
+                )
+            profile_state.read_seconds += time.perf_counter() - refresh_read_start
         else:
             facts_by_symbol = _prefetch_metric_facts_for_symbols(
                 fact_repo,
@@ -3588,10 +4096,26 @@ def _compute_metric_batch_results(
                 known_metric_ids,
                 chunk_size=METRICS_COMPUTE_BATCH_SIZE,
             )
+            facts_refresh_rows = dict(preloaded_facts_refresh_rows or {})
+            if not facts_refresh_rows:
+                facts_refresh_rows = _SchemaReadyFinancialFactsRefreshStateRepository(
+                    fact_repo.db_path
+                ).fetch_many_for_symbols(
+                    selected_symbols,
+                    chunk_size=METRICS_COMPUTE_BATCH_SIZE,
+                )
     else:
         facts_by_symbol = {}
-    if market_repo is not None:
-        if profile_enabled:
+        facts_refresh_rows = {}
+    if uses_market_data:
+        assert market_repo is not None
+        if preloaded_snapshots_by_symbol is not None:
+            snapshots_by_symbol = {
+                symbol: snapshot
+                for symbol, snapshot in preloaded_snapshots_by_symbol.items()
+                if symbol in selected_symbols
+            }
+        elif profile_enabled:
             read_start = time.perf_counter()
             snapshots_by_symbol = market_repo.latest_snapshots_many(
                 selected_symbols,
@@ -3608,27 +4132,35 @@ def _compute_metric_batch_results(
         snapshots_by_symbol = {}
 
     results: List[_ComputedMetricsResult] = []
-    with suppress_console_metric_warnings(suppress_metric_warnings):
-        for symbol in selected_symbols:
-            snapshot_record = snapshots_by_symbol.get(symbol)
-            results.append(
-                _compute_metrics_for_symbol(
-                    symbol,
-                    metric_ids,
-                    fact_repo,
-                    market_repo,
-                    preloaded_facts=(
-                        facts_by_symbol.get(symbol, ()) if uses_financial_facts else ()
-                    ),
-                    preloaded_market_snapshot=(
-                        _price_data_from_snapshot_record(snapshot_record)
-                        if snapshot_record is not None
-                        else None
-                        if market_repo is not None
-                        else _PRELOADED_MARKET_SNAPSHOT_MISSING
-                    ),
+    warning_collector = _MetricWarningCollector()
+    root_logger = logging.getLogger()
+    root_logger.addHandler(warning_collector)
+    try:
+        with suppress_console_metric_warnings(suppress_metric_warnings):
+            for symbol in selected_symbols:
+                snapshot_record = snapshots_by_symbol.get(symbol)
+                results.append(
+                    _compute_metrics_for_symbol(
+                        symbol,
+                        metric_ids,
+                        fact_repo,
+                        market_repo,
+                        preloaded_facts=(
+                            facts_by_symbol.get(symbol, ())
+                            if uses_financial_facts
+                            else ()
+                        ),
+                        preloaded_market_snapshot_record=snapshot_record,
+                        facts_refreshed_at=(
+                            facts_refresh_rows[symbol].refreshed_at
+                            if symbol in facts_refresh_rows
+                            else None
+                        ),
+                        warning_collector=warning_collector,
+                    )
                 )
-            )
+    finally:
+        root_logger.removeHandler(warning_collector)
     return tuple(results)
 
 
@@ -3721,6 +4253,7 @@ def _run_metric_computation(
     _initialize_metric_read_schema(db_path, include_market_data)
     journal_mode = _ensure_metrics_wal_mode(base_metrics_repo)
     metrics_repo = _SchemaReadyMetricsRepository(db_path)
+    status_repo = _SchemaReadyMetricComputeStatusRepository(db_path)
     # One persistent writer connection drives every flush in this run, so
     # pragma setup happens once and the SQLite page cache stays warm across
     # the ~tens of flushes a large universe produces. Close it on every exit
@@ -3741,6 +4274,7 @@ def _run_metric_computation(
         workers = 1
 
     pending_rows: List[StoredMetricRow] = []
+    pending_attempts: List[_MetricAttemptResult] = []
     metric_failures: List[_MetricComputationFailure] = []
     buffered_symbols = 0
     last_flush_at = time.monotonic()
@@ -3748,9 +4282,10 @@ def _run_metric_computation(
     last_progress_at = time.monotonic()
     last_reported_completed = -1
 
-    def buffer_result(rows: Sequence[StoredMetricRow]) -> None:
+    def buffer_result(result: _ComputedMetricsResult) -> None:
         nonlocal buffered_symbols, last_flush_at
-        pending_rows.extend(rows)
+        pending_rows.extend(result.rows)
+        pending_attempts.extend(result.attempts)
         buffered_symbols += 1
         elapsed = time.monotonic() - last_flush_at
         if (
@@ -3760,7 +4295,9 @@ def _run_metric_computation(
             return
         _flush_metric_write_batch(
             metrics_repo,
+            status_repo,
             pending_rows,
+            pending_attempts,
             profile_state,
             write_connection=write_connection,
         )
@@ -3769,7 +4306,7 @@ def _run_metric_computation(
 
     def flush_pending(force: bool = False) -> None:
         nonlocal buffered_symbols, last_flush_at
-        if not pending_rows:
+        if not pending_rows and not pending_attempts:
             return
         if not force:
             elapsed = time.monotonic() - last_flush_at
@@ -3780,7 +4317,9 @@ def _run_metric_computation(
                 return
         _flush_metric_write_batch(
             metrics_repo,
+            status_repo,
             pending_rows,
+            pending_attempts,
             profile_state,
             write_connection=write_connection,
         )
@@ -3828,7 +4367,7 @@ def _run_metric_computation(
                     suppress_metric_warnings=suppress_metric_warnings,
                     profile_state=profile_state if profile_state.enabled else None,
                 ):
-                    buffer_result(result.rows)
+                    buffer_result(result)
                     metric_failures.extend(result.failures)
                     completed_symbols += 1
                     maybe_report_progress()
@@ -3876,7 +4415,7 @@ def _run_metric_computation(
                 symbol = single_futures[future]
                 try:
                     result = future.result()
-                    buffer_result(result.rows)
+                    buffer_result(result)
                     metric_failures.extend(result.failures)
                 except Exception as exc:  # pragma: no cover - worker crashes
                     LOGGER.error("Failed to compute metrics for %s: %s", symbol, exc)
@@ -3904,7 +4443,7 @@ def _run_metric_computation(
                 try:
                     batch_results = batch_future.result()
                     for result in batch_results:
-                        buffer_result(result.rows)
+                        buffer_result(result)
                         metric_failures.extend(result.failures)
                         completed_symbols += 1
                         maybe_report_progress()
@@ -3994,6 +4533,36 @@ def cmd_compute_metrics_stage(
         suppress_metric_warnings=not show_metric_warnings,
         profile=profile,
     )
+
+
+def _ordered_unique_metric_ids(*metric_id_lists: Sequence[str]) -> List[str]:
+    ordered: List[str] = []
+    seen: set[str] = set()
+    for metric_ids in metric_id_lists:
+        for metric_id in metric_ids:
+            candidate = str(metric_id).strip()
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            ordered.append(candidate)
+    return ordered
+
+
+def _screen_requested_metric_ids(definition) -> List[str]:
+    metric_ids = _ordered_unique_metric_ids(
+        screen_metric_ids(definition),
+        ranking_metric_ids(definition),
+    )
+    ranking = getattr(definition, "ranking", None)
+    if ranking is None:
+        return metric_ids
+    for tie_breaker in ranking.tie_breakers:
+        metric_id = str(tie_breaker.metric_id).strip()
+        if metric_id in {"canonical_symbol", "symbol", "ticker", "id"}:
+            continue
+        if metric_id not in metric_ids:
+            metric_ids.append(metric_id)
+    return metric_ids
 
 
 def _evaluate_screen_scope(
@@ -4264,12 +4833,22 @@ def cmd_run_screen_stage(
         )
     )
     definition = load_screen(config_path)
-    metrics_repo = MetricsRepository(db_path)
-    metrics_repo.initialize_schema()
+    requested_metric_ids = _screen_requested_metric_ids(definition)
+    include_market_data = any(
+        getattr(REGISTRY.get(metric_id), "uses_market_data", False)
+        for metric_id in requested_metric_ids
+        if REGISTRY.get(metric_id) is not None
+    )
+    MetricsRepository(db_path).initialize_schema()
+    _initialize_metric_read_schema(db_path, include_market_data)
     base_fact_repo = FinancialFactsRepository(db_path)
     fact_repo = RegionFactsRepository(base_fact_repo)
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
+    metrics_repo = _StatusAwareMetricsRepository(
+        db_path,
+        market_repo=_SchemaReadyMarketDataRepository(db_path),
+    )
     entity_repo = EntityMetadataRepository(db_path)
     entity_repo.initialize_schema()
 
@@ -4299,10 +4878,17 @@ def cmd_run_screen_stage(
         universe_names = dict(
             ticker_repo.list_canonical_symbol_name_pairs(resolved_exchange_codes)
         )
+        evaluation_metrics_repo = _PreloadedMetricsRepository(
+            db_path,
+            metrics_repo.fetch_many_for_symbols(
+                canonical_symbols,
+                requested_metric_ids,
+            ),
+        )
         passed_symbols, criterion_values, entity_labels = _evaluate_screen_scope(
             definition,
             canonical_symbols,
-            metrics_repo,
+            evaluation_metrics_repo,
             fact_repo,
             market_repo,
             entity_repo,
@@ -4328,7 +4914,7 @@ def cmd_run_screen_stage(
         ordered_symbols, extra_rows = _rank_screen_passers(
             definition,
             passed_symbols,
-            metrics_repo,
+            evaluation_metrics_repo,
             entity_repo,
         )
         _emit_screen_results(
@@ -5488,20 +6074,26 @@ def cmd_compute_metrics(
 
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
+    status_repo = MetricComputeStatusRepository(db_path)
+    status_repo.initialize_schema()
     fact_repo = FinancialFactsRepository(db_path)
     market_repo = (
         MarketDataRepository(db_path)
         if _metrics_use_market_data(ids_to_compute)
         else None
     )
-    with suppress_console_metric_warnings(not show_metric_warnings):
-        result = _compute_metrics_for_symbol(
-            symbol_upper,
-            ids_to_compute,
-            fact_repo,
-            market_repo,
-        )
-    metrics_repo.upsert_many(result.rows)
+    result = _compute_metric_batch_results(
+        [symbol_upper],
+        ids_to_compute,
+        fact_repo,
+        market_repo,
+        suppress_metric_warnings=not show_metric_warnings,
+    )[0]
+    if result.rows:
+        metrics_repo.upsert_many(result.rows)
+    status_rows = _metric_status_rows_from_attempts(result.attempts)
+    if status_rows:
+        status_repo.upsert_many(status_rows)
     _print_metric_invariant_failure_summary(result.failures, symbol=symbol_upper)
     print(f"Computed {result.computed_count} metrics for {symbol_upper} in {database}")
     return 0
@@ -5912,6 +6504,21 @@ def _record_failure_example(
         examples[metric_id][reason] = (symbol, market_cap)
 
 
+def _record_metric_failure_reason(
+    failures: Dict[str, Counter],
+    examples: Dict[str, Dict[str, tuple[str, Optional[float]]]],
+    market_repo: MarketDataRepository,
+    market_caps: Dict[str, Optional[float]],
+    *,
+    metric_id: str,
+    reason: str,
+    symbol: str,
+) -> None:
+    failures[metric_id][reason] += 1
+    cap = _metric_market_cap(market_repo, market_caps, symbol)
+    _record_failure_example(examples, metric_id, reason, symbol, cap)
+
+
 def _recompute_missing_screen_metrics(
     metric_impacts: Mapping[str, _ScreenMetricImpactSummary],
     fact_repo: FinancialFactsRepository,
@@ -5933,6 +6540,16 @@ def _recompute_missing_screen_metrics(
     if not symbols_to_recompute:
         return failures, examples
 
+    db_path = fact_repo.db_path
+    metrics_repo = _SchemaReadyMetricsRepository(db_path)
+    status_repo = _SchemaReadyMetricComputeStatusRepository(db_path)
+    availability_repo = _StatusAwareMetricsRepository(
+        db_path,
+        raw_metrics_repo=metrics_repo,
+        status_repo=status_repo,
+        facts_refresh_repo=_SchemaReadyFinancialFactsRefreshStateRepository(db_path),
+        market_repo=market_repo,
+    )
     maybe_report_progress = (
         _make_symbol_progress_reporter(
             len(symbols_to_recompute),
@@ -5944,127 +6561,100 @@ def _recompute_missing_screen_metrics(
         else None
     )
 
-    snapshots_by_symbol = {
-        symbol: _price_data_from_snapshot_record(snapshot)
-        for symbol, snapshot in market_repo.latest_snapshots_many(
-            symbols_to_recompute
-        ).items()
-    }
+    snapshots_by_symbol = market_repo.latest_snapshots_many(symbols_to_recompute)
     market_caps: Dict[str, Optional[float]] = {
         symbol: None for symbol in symbols_to_recompute
     }
     for symbol, snapshot in snapshots_by_symbol.items():
         market_caps[symbol] = snapshot.market_cap
 
-    metrics_by_id = {
-        metric_id: (REGISTRY[metric_id]() if metric_id in REGISTRY else None)
-        for metric_id in metric_impacts.keys()
-    }
-    symbols_by_metric_group: Dict[Tuple[str, ...], List[str]] = {}
+    availability_states = availability_repo.states_many(
+        symbols_to_recompute,
+        tuple(metric_impacts.keys()),
+        chunk_size=METRICS_COMPUTE_BATCH_SIZE,
+    )
+    pending_metric_ids_by_symbol: Dict[str, List[str]] = {}
+    completed_symbols = 0
+
     for symbol in symbols_to_recompute:
-        metric_group = tuple(metric_ids_by_symbol[symbol])
-        symbols_by_metric_group.setdefault(metric_group, []).append(symbol)
-    handler = _MetricWarningCollector()
-    root_logger = logging.getLogger()
-    root_logger.addHandler(handler)
-
-    try:
-        completed_symbols = 0
-        for metric_group, group_symbols in symbols_by_metric_group.items():
-            for symbol_batch in _batch_values(
-                group_symbols,
-                METRICS_COMPUTE_BATCH_SIZE,
-            ):
-                facts_by_symbol = _prefetch_metric_facts_for_symbols(
-                    fact_repo,
-                    symbol_batch,
-                    metric_group,
-                    chunk_size=METRICS_COMPUTE_BATCH_SIZE,
+        pending_metric_ids: List[str] = []
+        for metric_id in metric_ids_by_symbol[symbol]:
+            if metric_id not in REGISTRY:
+                _record_metric_failure_reason(
+                    failures,
+                    examples,
+                    market_repo,
+                    market_caps,
+                    metric_id=metric_id,
+                    reason="unknown_metric_id",
+                    symbol=symbol,
                 )
-                for symbol in symbol_batch:
-                    metrics_for_symbol = metric_ids_by_symbol[symbol]
-                    cached_fact_repo: Optional[_CachedRegionFactsRepository] = None
-                    cached_market_repo: Optional[_CachedMarketDataRepository] = None
-                    if any(
-                        metrics_by_id[metric_id] is not None
-                        for metric_id in metrics_for_symbol
-                    ):
-                        cached_fact_repo = _CachedRegionFactsRepository(
-                            fact_repo,
-                            symbol,
-                            facts_by_symbol.get(symbol, ()),
-                        )
+                continue
+            state = availability_states.get(symbol, {}).get(metric_id)
+            if (
+                state is not None
+                and state.status_record is not None
+                and not state.stale
+                and state.status_record.status == "failure"
+            ):
+                _record_metric_failure_reason(
+                    failures,
+                    examples,
+                    market_repo,
+                    market_caps,
+                    metric_id=metric_id,
+                    reason=state.status_record.reason_code or "no warning emitted",
+                    symbol=symbol,
+                )
+                continue
+            pending_metric_ids.append(metric_id)
+        if pending_metric_ids:
+            pending_metric_ids_by_symbol[symbol] = pending_metric_ids
+            continue
+        completed_symbols += 1
+        if maybe_report_progress is not None:
+            maybe_report_progress(completed_symbols, False)
 
-                    if any(
-                        getattr(metrics_by_id[metric_id], "uses_market_data", False)
-                        for metric_id in metrics_for_symbol
-                        if metrics_by_id[metric_id] is not None
-                    ):
-                        cached_market_repo = _CachedMarketDataRepository(
-                            market_repo,
-                            symbol,
-                            snapshot=snapshots_by_symbol.get(symbol),
-                            snapshot_loaded=True,
-                        )
+    symbols_by_metric_group: Dict[Tuple[str, ...], List[str]] = {}
+    for symbol, pending_metric_ids in pending_metric_ids_by_symbol.items():
+        metric_group = tuple(pending_metric_ids)
+        symbols_by_metric_group.setdefault(metric_group, []).append(symbol)
 
-                    for metric_id in metrics_for_symbol:
-                        handler.clear()
-                        metric = metrics_by_id.get(metric_id)
-                        if metric is None:
-                            reason = "unknown_metric_id"
-                        else:
-                            if cached_fact_repo is None:  # pragma: no cover - defensive
-                                cached_fact_repo = _CachedRegionFactsRepository(
-                                    fact_repo,
-                                    symbol,
-                                    facts_by_symbol.get(symbol, ()),
-                                )
-                            try:
-                                if getattr(metric, "uses_market_data", False):
-                                    if cached_market_repo is None:
-                                        cached_market_repo = (
-                                            _CachedMarketDataRepository(
-                                                market_repo,
-                                                symbol,
-                                                snapshot=snapshots_by_symbol.get(
-                                                    symbol
-                                                ),
-                                                snapshot_loaded=True,
-                                            )
-                                        )
-                                    result = metric.compute(
-                                        symbol,
-                                        cached_fact_repo,
-                                        cached_market_repo,
-                                    )
-                                else:
-                                    result = metric.compute(symbol, cached_fact_repo)
-                            except MetricCurrencyInvariantError as exc:
-                                reason = exc.summary_reason
-                            except Exception as exc:  # pragma: no cover - defensive
-                                reason = _metric_failure_reason_from_exception(exc)
-                            else:
-                                invariant_error = (
-                                    consume_metric_currency_invariant_error(metric)
-                                )
-                                if invariant_error is not None:
-                                    reason = invariant_error.summary_reason
-                                elif result is not None:
-                                    reason = "stored_missing_but_computable_now"
-                                else:
-                                    reason = _format_failure_reason(
-                                        handler.records, symbol
-                                    )
-                        failures[metric_id][reason] += 1
-                        cap = _metric_market_cap(market_repo, market_caps, symbol)
-                        _record_failure_example(
-                            examples, metric_id, reason, symbol, cap
-                        )
-                    completed_symbols += 1
-                    if maybe_report_progress is not None:
-                        maybe_report_progress(completed_symbols, False)
-    finally:
-        root_logger.removeHandler(handler)
+    for metric_group, group_symbols in symbols_by_metric_group.items():
+        for symbol_batch in _batch_values(
+            group_symbols,
+            METRICS_COMPUTE_BATCH_SIZE,
+        ):
+            batch_results = _compute_metric_batch_results(
+                symbol_batch,
+                metric_group,
+                fact_repo,
+                market_repo,
+                suppress_metric_warnings=True,
+                preloaded_snapshots_by_symbol=snapshots_by_symbol,
+            )
+            batch_attempts: List[_MetricAttemptResult] = []
+            for result in batch_results:
+                batch_attempts.extend(result.attempts)
+                for attempt in result.attempts:
+                    reason = (
+                        "stored_missing_but_computable_now"
+                        if attempt.status == "success"
+                        else attempt.reason_code or "no warning emitted"
+                    )
+                    _record_metric_failure_reason(
+                        failures,
+                        examples,
+                        market_repo,
+                        market_caps,
+                        metric_id=attempt.metric_id,
+                        reason=reason,
+                        symbol=attempt.symbol,
+                    )
+                completed_symbols += 1
+                if maybe_report_progress is not None:
+                    maybe_report_progress(completed_symbols, False)
+            _persist_metric_attempts(metrics_repo, status_repo, batch_attempts)
 
     if maybe_report_progress is not None:
         maybe_report_progress(len(symbols_to_recompute), True)
@@ -6159,11 +6749,23 @@ def cmd_report_metric_failures(
     )
 
     metric_classes = _select_metric_classes(metric_ids)
-    base_fact_repo = FinancialFactsRepository(db_path)
-    base_fact_repo.initialize_schema()
-    fact_repo = RegionFactsRepository(base_fact_repo)
-    market_repo = MarketDataRepository(db_path)
-    market_repo.initialize_schema()
+    metric_id_order = [getattr(cls, "id", cls.__name__) for cls in metric_classes]
+    include_market_data = any(
+        getattr(metric_cls, "uses_market_data", False) for metric_cls in metric_classes
+    )
+    MetricsRepository(db_path).initialize_schema()
+    _initialize_metric_read_schema(db_path, include_market_data)
+    fact_repo = _SchemaReadyFinancialFactsRepository(db_path)
+    market_repo = _SchemaReadyMarketDataRepository(db_path)
+    metrics_repo = _SchemaReadyMetricsRepository(db_path)
+    status_repo = _SchemaReadyMetricComputeStatusRepository(db_path)
+    availability_repo = _StatusAwareMetricsRepository(
+        db_path,
+        raw_metrics_repo=metrics_repo,
+        status_repo=status_repo,
+        facts_refresh_repo=_SchemaReadyFinancialFactsRefreshStateRepository(db_path),
+        market_repo=market_repo,
+    )
 
     failures: Dict[str, Counter] = {
         getattr(cls, "id", cls.__name__): Counter() for cls in metric_classes
@@ -6174,74 +6776,94 @@ def cmd_report_metric_failures(
     examples: Dict[str, Dict[str, tuple[str, Optional[float]]]] = {
         getattr(cls, "id", cls.__name__): {} for cls in metric_classes
     }
-    market_caps: Dict[str, Optional[float]] = {}
-    handler = _MetricWarningCollector()
-    root_logger = logging.getLogger()
-    root_logger.addHandler(handler)
+    market_caps: Dict[str, Optional[float]] = {
+        symbol: None for symbol in selected_symbols
+    }
+    for symbol, snapshot in market_repo.latest_snapshots_many(
+        selected_symbols,
+        chunk_size=METRICS_COMPUTE_BATCH_SIZE,
+    ).items():
+        market_caps[symbol] = snapshot.market_cap
 
-    try:
+    for metric_cls in metric_classes:
+        metric_id = getattr(metric_cls, "id", metric_cls.__name__)
+        states_by_symbol = availability_repo.states_many(
+            selected_symbols,
+            [metric_id],
+            chunk_size=METRICS_COMPUTE_BATCH_SIZE,
+        )
+        pending_symbols: List[str] = []
         for symbol in selected_symbols:
-            symbol_upper = symbol.upper()
-            for metric_cls in metric_classes:
-                metric_id = getattr(metric_cls, "id", metric_cls.__name__)
-                handler.clear()
-                metric = metric_cls()
-                try:
-                    if getattr(metric, "uses_market_data", False):
-                        result = metric.compute(symbol_upper, fact_repo, market_repo)
-                    else:
-                        result = metric.compute(symbol_upper, fact_repo)
-                except MetricCurrencyInvariantError as exc:
-                    reason = exc.summary_reason
-                except Exception as exc:  # pragma: no cover - defensive
-                    reason = _metric_failure_reason_from_exception(exc)
-                    failures[metric_id][reason] += 1
+            state = states_by_symbol.get(symbol, {}).get(metric_id)
+            if state is None:
+                pending_symbols.append(symbol)
+                continue
+            if (
+                state.status_record is None
+                and state.record is not None
+                and not state.stale
+            ):
+                continue
+            if state.status_record is not None and not state.stale:
+                if state.status_record.status == "failure":
+                    reason = state.status_record.reason_code or "no warning emitted"
                     totals[metric_id] += 1
+                    _record_metric_failure_reason(
+                        failures,
+                        examples,
+                        market_repo,
+                        market_caps,
+                        metric_id=metric_id,
+                        reason=reason,
+                        symbol=symbol,
+                    )
                     continue
-                invariant_error = consume_metric_currency_invariant_error(metric)
-                if invariant_error is not None:
-                    reason = invariant_error.summary_reason
-                    failures[metric_id][reason] += 1
-                    totals[metric_id] += 1
-                    cap = market_caps.get(symbol_upper)
-                    if symbol_upper not in market_caps:
-                        snapshot = market_repo.latest_snapshot(symbol_upper)
-                        cap = snapshot.market_cap if snapshot else None
-                        market_caps[symbol_upper] = cap
-                    current = examples[metric_id].get(reason)
-                    if current is None:
-                        examples[metric_id][reason] = (symbol_upper, cap)
-                    else:
-                        current_cap = current[1]
-                        if cap is not None and (
-                            current_cap is None or cap > current_cap
-                        ):
-                            examples[metric_id][reason] = (symbol_upper, cap)
+                if state.record is not None:
                     continue
-                if result is None:
-                    reason = _format_failure_reason(handler.records, symbol_upper)
-                    failures[metric_id][reason] += 1
+            pending_symbols.append(symbol)
+
+        if not pending_symbols:
+            continue
+
+        batch_market_repo = (
+            market_repo if getattr(metric_cls, "uses_market_data", False) else None
+        )
+        for symbol_batch in _batch_values(
+            pending_symbols,
+            METRICS_COMPUTE_BATCH_SIZE,
+        ):
+            batch_results = _compute_metric_batch_results(
+                symbol_batch,
+                [metric_id],
+                fact_repo,
+                batch_market_repo,
+                suppress_metric_warnings=True,
+            )
+            batch_attempts: List[_MetricAttemptResult] = []
+            for result in batch_results:
+                batch_attempts.extend(result.attempts)
+                for attempt in result.attempts:
+                    if attempt.status != "failure":
+                        continue
                     totals[metric_id] += 1
-                    cap = market_caps.get(symbol_upper)
-                    if symbol_upper not in market_caps:
-                        snapshot = market_repo.latest_snapshot(symbol_upper)
-                        cap = snapshot.market_cap if snapshot else None
-                        market_caps[symbol_upper] = cap
-                    current = examples[metric_id].get(reason)
-                    if current is None:
-                        examples[metric_id][reason] = (symbol_upper, cap)
-                    else:
-                        current_cap = current[1]
-                        if cap is not None and (
-                            current_cap is None or cap > current_cap
-                        ):
-                            examples[metric_id][reason] = (symbol_upper, cap)
-    finally:
-        root_logger.removeHandler(handler)
+                    _record_metric_failure_reason(
+                        failures,
+                        examples,
+                        market_repo,
+                        market_caps,
+                        metric_id=metric_id,
+                        reason=attempt.reason_code or "no warning emitted",
+                        symbol=attempt.symbol,
+                    )
+            _persist_metric_attempts(metrics_repo, status_repo, batch_attempts)
 
     total_symbols = len(selected_symbols)
     metric_order = sorted(
-        totals.keys(), key=lambda metric_id: (-totals.get(metric_id, 0), metric_id)
+        metric_id_order,
+        key=lambda current_metric_id: (
+            -totals.get(current_metric_id, 0),
+            current_metric_id,
+        ),
     )
     scope_label = _scope_label(
         explicit_symbols,
@@ -6319,11 +6941,19 @@ def cmd_report_screen_failures(
 
     definition = load_screen(config_path)
     metric_ids = screen_metric_ids(definition)
+    include_market_data = any(
+        getattr(REGISTRY.get(metric_id), "uses_market_data", False)
+        for metric_id in metric_ids
+        if REGISTRY.get(metric_id) is not None
+    )
     MetricsRepository(db_path).initialize_schema()
-    _initialize_metric_read_schema(db_path, include_market_data=True)
-    metrics_repo = _SchemaReadyMetricsRepository(db_path)
+    _initialize_metric_read_schema(db_path, include_market_data)
     fact_repo = _SchemaReadyFinancialFactsRepository(db_path)
     market_repo = _SchemaReadyMarketDataRepository(db_path)
+    metrics_repo = _StatusAwareMetricsRepository(
+        db_path,
+        market_repo=market_repo,
+    )
     evaluation_metrics_repo = _PreloadedMetricsRepository(
         db_path,
         metrics_repo.fetch_many_for_symbols(selected_symbols, metric_ids),
@@ -6590,10 +7220,16 @@ def cmd_clear_financial_facts(database: str) -> int:
 
     repo = FinancialFactsRepository(database)
     state_repo = FundamentalsNormalizationStateRepository(database)
+    refresh_state_repo = FinancialFactsRefreshStateRepository(database)
+    metric_status_repo = MetricComputeStatusRepository(database)
     with repo._connect() as conn:
         conn.execute("DROP TABLE IF EXISTS financial_facts")
+        conn.execute("DROP TABLE IF EXISTS financial_facts_refresh_state")
+        conn.execute("DROP TABLE IF EXISTS metric_compute_status")
         conn.execute("DROP TABLE IF EXISTS fundamentals_normalization_state")
     repo.initialize_schema()
+    refresh_state_repo.initialize_schema()
+    metric_status_repo.initialize_schema()
     state_repo.initialize_schema()
     print(f"Cleared financial_facts table in {database}")
     return 0
@@ -6617,9 +7253,12 @@ def cmd_clear_metrics(database: str) -> int:
     """Delete all computed metrics."""
 
     repo = MetricsRepository(database)
+    status_repo = MetricComputeStatusRepository(database)
     with repo._connect() as conn:
         conn.execute("DROP TABLE IF EXISTS metrics")
+        conn.execute("DROP TABLE IF EXISTS metric_compute_status")
     repo.initialize_schema()
+    status_repo.initialize_schema()
     print(f"Cleared metrics table in {database}")
     return 0
 
@@ -6651,12 +7290,24 @@ def cmd_run_screen(
                 "--exchange-code is required when symbol has no exchange suffix (e.g., AAPL.US)."
             )
         symbol_upper = _format_market_symbol(symbol_upper, exchange_code)
-    metrics_repo = MetricsRepository(database)
-    metrics_repo.initialize_schema()
+    requested_metric_ids = _screen_requested_metric_ids(definition)
+    include_market_data = any(
+        getattr(REGISTRY.get(metric_id), "uses_market_data", False)
+        for metric_id in requested_metric_ids
+        if REGISTRY.get(metric_id) is not None
+    )
+    MetricsRepository(database).initialize_schema()
+    _initialize_metric_read_schema(
+        _resolve_database_path(database), include_market_data
+    )
     base_fact_repo = FinancialFactsRepository(database)
     fact_repo = RegionFactsRepository(base_fact_repo)
     market_repo = MarketDataRepository(database)
     market_repo.initialize_schema()
+    metrics_repo = _StatusAwareMetricsRepository(
+        database,
+        market_repo=_SchemaReadyMarketDataRepository(database),
+    )
     entity_repo = EntityMetadataRepository(database)
     entity_repo.initialize_schema()
     entity_name = entity_repo.fetch(symbol_upper) or symbol_upper
@@ -6705,12 +7356,24 @@ def cmd_run_screen_bulk(
             f"{_catalog_bootstrap_guidance(provider_norm)}"
         )
 
-    metrics_repo = MetricsRepository(database)
-    metrics_repo.initialize_schema()
+    requested_metric_ids = _screen_requested_metric_ids(definition)
+    include_market_data = any(
+        getattr(REGISTRY.get(metric_id), "uses_market_data", False)
+        for metric_id in requested_metric_ids
+        if REGISTRY.get(metric_id) is not None
+    )
+    MetricsRepository(database).initialize_schema()
+    _initialize_metric_read_schema(
+        _resolve_database_path(database), include_market_data
+    )
     base_fact_repo = FinancialFactsRepository(database)
     fact_repo = RegionFactsRepository(base_fact_repo)
     market_repo = MarketDataRepository(database)
     market_repo.initialize_schema()
+    metrics_repo = _StatusAwareMetricsRepository(
+        database,
+        market_repo=_SchemaReadyMarketDataRepository(database),
+    )
     entity_repo = EntityMetadataRepository(database)
     entity_repo.initialize_schema()
 
@@ -6718,10 +7381,17 @@ def cmd_run_screen_bulk(
         provider_norm, exchange_norm
     )
     universe_names = {row[0].upper(): (row[1] or row[0].upper()) for row in name_rows}
+    evaluation_metrics_repo = _PreloadedMetricsRepository(
+        database,
+        metrics_repo.fetch_many_for_symbols(
+            [symbol.upper() for symbol in symbols],
+            requested_metric_ids,
+        ),
+    )
     passed_symbols, criterion_values, entity_labels = _evaluate_screen_scope(
         definition,
         [symbol.upper() for symbol in symbols],
-        metrics_repo,
+        evaluation_metrics_repo,
         fact_repo,
         market_repo,
         entity_repo,
@@ -6738,7 +7408,7 @@ def cmd_run_screen_bulk(
     ordered_symbols, extra_rows = _rank_screen_passers(
         definition,
         passed_symbols,
-        metrics_repo,
+        evaluation_metrics_repo,
         entity_repo,
     )
     _emit_screen_results(

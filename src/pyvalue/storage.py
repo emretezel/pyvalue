@@ -230,6 +230,31 @@ class MarketSnapshotRecord:
     volume: Optional[int] = None
     market_cap: Optional[float] = None
     currency: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class FinancialFactsRefreshStateRecord:
+    """Latest financial-facts refresh watermark for one symbol."""
+
+    symbol: str
+    refreshed_at: str
+
+
+@dataclass(frozen=True)
+class MetricComputeStatusRecord:
+    """Latest persisted metric-computation attempt for one symbol/metric."""
+
+    symbol: str
+    metric_id: str
+    status: Literal["success", "failure"]
+    attempted_at: str
+    reason_code: Optional[str] = None
+    reason_detail: Optional[str] = None
+    value_as_of: Optional[str] = None
+    facts_refreshed_at: Optional[str] = None
+    market_data_as_of: Optional[str] = None
+    market_data_updated_at: Optional[str] = None
 
 
 StoredFactRow = Tuple[
@@ -2827,12 +2852,116 @@ class FundamentalsNormalizationStateRepository(SQLiteStore):
         return int(cursor.rowcount or 0)
 
 
+class FinancialFactsRefreshStateRepository(SQLiteStore):
+    """Track the latest normalized financial-facts refresh per security."""
+
+    def initialize_schema(self) -> None:
+        apply_migrations(self.db_path)
+        self._security_repo().initialize_schema()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS financial_facts_refresh_state (
+                    security_id INTEGER NOT NULL PRIMARY KEY,
+                    refreshed_at TEXT NOT NULL
+                )
+                """
+            )
+
+    def mark_security_refreshed(
+        self,
+        security_id: int,
+        refreshed_at: Optional[str] = None,
+        *,
+        connection: Optional[sqlite3.Connection] = None,
+    ) -> None:
+        timestamp = refreshed_at or _utc_now_iso()
+        sql = """
+            INSERT INTO financial_facts_refresh_state (
+                security_id,
+                refreshed_at
+            ) VALUES (?, ?)
+            ON CONFLICT(security_id) DO UPDATE SET
+                refreshed_at = excluded.refreshed_at
+        """
+        if connection is not None:
+            connection.execute(sql, (int(security_id), timestamp))
+            return
+        self.initialize_schema()
+        with self._connect() as conn:
+            conn.execute(sql, (int(security_id), timestamp))
+
+    def fetch(self, symbol: str) -> Optional[FinancialFactsRefreshStateRecord]:
+        self.initialize_schema()
+        security_id = self._security_repo().resolve_id(symbol)
+        if security_id is None:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT refreshed_at
+                FROM financial_facts_refresh_state
+                WHERE security_id = ?
+                """,
+                (security_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return FinancialFactsRefreshStateRecord(
+            symbol=symbol.strip().upper(),
+            refreshed_at=row["refreshed_at"],
+        )
+
+    def fetch_many_for_symbols(
+        self,
+        symbols: Sequence[str],
+        chunk_size: int = 500,
+    ) -> Dict[str, FinancialFactsRefreshStateRecord]:
+        self.initialize_schema()
+        normalized_symbols = _normalized_codes(symbols)
+        if not normalized_symbols:
+            return {}
+
+        security_ids_by_symbol = self._security_repo().resolve_ids_many(
+            normalized_symbols,
+            chunk_size=chunk_size,
+        )
+        if not security_ids_by_symbol:
+            return {}
+
+        symbol_by_security_id = {
+            security_id: symbol
+            for symbol, security_id in security_ids_by_symbol.items()
+        }
+        rows_by_symbol: Dict[str, FinancialFactsRefreshStateRecord] = {}
+        security_ids = sorted(symbol_by_security_id.keys())
+        with self._connect() as conn:
+            for security_chunk in _batched(security_ids, chunk_size):
+                placeholders = ", ".join("?" for _ in security_chunk)
+                rows = conn.execute(
+                    f"""
+                    SELECT security_id, refreshed_at
+                    FROM financial_facts_refresh_state
+                    WHERE security_id IN ({placeholders})
+                    """,
+                    list(security_chunk),
+                ).fetchall()
+                for row in rows:
+                    symbol = symbol_by_security_id[row["security_id"]]
+                    rows_by_symbol[symbol] = FinancialFactsRefreshStateRecord(
+                        symbol=symbol,
+                        refreshed_at=row["refreshed_at"],
+                    )
+        return rows_by_symbol
+
+
 class FinancialFactsRepository(SQLiteStore):
     """Persist normalized financial facts for downstream metrics."""
 
     def initialize_schema(self) -> None:
         apply_migrations(self.db_path)
         self._security_repo().initialize_schema()
+        FinancialFactsRefreshStateRepository(self.db_path).initialize_schema()
         with self._connect() as conn:
             conn.execute(
                 """
@@ -2980,6 +3109,10 @@ class FinancialFactsRepository(SQLiteStore):
                     """,
                     prepared_rows,
                 )
+            FinancialFactsRefreshStateRepository(self.db_path).mark_security_refreshed(
+                security.security_id,
+                connection=conn,
+            )
         return len(prepared_rows)
 
     def latest_fact(
@@ -4159,6 +4292,229 @@ class MetricsRepository(SQLiteStore):
         return metric_rows_by_symbol
 
 
+class MetricComputeStatusRepository(SQLiteStore):
+    """Persist the latest metric-computation attempt per symbol/metric."""
+
+    def initialize_schema(self) -> None:
+        apply_migrations(self.db_path)
+        self._security_repo().initialize_schema()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS metric_compute_status (
+                    security_id INTEGER NOT NULL,
+                    metric_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    reason_code TEXT,
+                    reason_detail TEXT,
+                    attempted_at TEXT NOT NULL,
+                    value_as_of TEXT,
+                    facts_refreshed_at TEXT,
+                    market_data_as_of TEXT,
+                    market_data_updated_at TEXT,
+                    PRIMARY KEY (security_id, metric_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_metric_compute_status_metric_status
+                ON metric_compute_status(metric_id, status)
+                """
+            )
+
+    def upsert_many(
+        self,
+        rows: Iterable[MetricComputeStatusRecord],
+        *,
+        connection: Optional[sqlite3.Connection] = None,
+    ) -> int:
+        status_rows = list(rows)
+        if not status_rows:
+            return 0
+
+        unique_symbols = []
+        seen_symbols = set()
+        for row in status_rows:
+            symbol = row.symbol.strip().upper()
+            if symbol in seen_symbols:
+                continue
+            seen_symbols.add(symbol)
+            unique_symbols.append(symbol)
+
+        if connection is None:
+            self.initialize_schema()
+        security_ids = self._security_repo().resolve_ids_many(
+            unique_symbols,
+            connection=connection,
+        )
+        for symbol in unique_symbols:
+            if symbol in security_ids:
+                continue
+            security = self._security_repo().ensure_from_symbol(symbol)
+            security_ids[symbol] = security.security_id
+
+        payload = [
+            (
+                security_ids[row.symbol.strip().upper()],
+                row.metric_id,
+                row.status,
+                row.reason_code,
+                row.reason_detail,
+                row.attempted_at,
+                row.value_as_of,
+                row.facts_refreshed_at,
+                row.market_data_as_of,
+                row.market_data_updated_at,
+            )
+            for row in status_rows
+            if row.symbol.strip().upper() in security_ids
+        ]
+        if not payload:
+            return 0
+
+        upsert_sql = """
+            INSERT INTO metric_compute_status (
+                security_id,
+                metric_id,
+                status,
+                reason_code,
+                reason_detail,
+                attempted_at,
+                value_as_of,
+                facts_refreshed_at,
+                market_data_as_of,
+                market_data_updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(security_id, metric_id) DO UPDATE SET
+                status = excluded.status,
+                reason_code = excluded.reason_code,
+                reason_detail = excluded.reason_detail,
+                attempted_at = excluded.attempted_at,
+                value_as_of = excluded.value_as_of,
+                facts_refreshed_at = excluded.facts_refreshed_at,
+                market_data_as_of = excluded.market_data_as_of,
+                market_data_updated_at = excluded.market_data_updated_at
+        """
+
+        if connection is not None:
+            connection.executemany(upsert_sql, payload)
+            connection.commit()
+        else:
+
+            def _persist() -> None:
+                with self._connect() as conn:
+                    conn.executemany(upsert_sql, payload)
+
+            self._run_with_locked_retry(_persist)
+        return len(payload)
+
+    def fetch(self, symbol: str, metric_id: str) -> Optional[MetricComputeStatusRecord]:
+        self.initialize_schema()
+        security_id = self._security_repo().resolve_id(symbol)
+        if security_id is None:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT status, reason_code, reason_detail, attempted_at,
+                       value_as_of, facts_refreshed_at, market_data_as_of,
+                       market_data_updated_at
+                FROM metric_compute_status
+                WHERE security_id = ? AND metric_id = ?
+                """,
+                (security_id, metric_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return MetricComputeStatusRecord(
+            symbol=symbol.strip().upper(),
+            metric_id=metric_id,
+            status=row["status"],
+            attempted_at=row["attempted_at"],
+            reason_code=row["reason_code"],
+            reason_detail=row["reason_detail"],
+            value_as_of=row["value_as_of"],
+            facts_refreshed_at=row["facts_refreshed_at"],
+            market_data_as_of=row["market_data_as_of"],
+            market_data_updated_at=row["market_data_updated_at"],
+        )
+
+    def fetch_many_for_symbols(
+        self,
+        symbols: Sequence[str],
+        metric_ids: Sequence[str],
+        chunk_size: int = 500,
+    ) -> Dict[str, Dict[str, MetricComputeStatusRecord]]:
+        self.initialize_schema()
+        normalized_symbols = _normalized_codes(symbols)
+        requested_metric_ids = sorted(
+            {
+                str(metric_id).strip()
+                for metric_id in metric_ids
+                if str(metric_id).strip()
+            }
+        )
+        if not normalized_symbols or not requested_metric_ids:
+            return {}
+
+        security_ids_by_symbol = self._security_repo().resolve_ids_many(
+            normalized_symbols,
+            chunk_size=chunk_size,
+        )
+        if not security_ids_by_symbol:
+            return {}
+
+        symbol_by_security_id = {
+            security_id: symbol
+            for symbol, security_id in security_ids_by_symbol.items()
+        }
+        rows_by_symbol: Dict[str, Dict[str, MetricComputeStatusRecord]] = {}
+        metric_chunk_size = max(
+            1,
+            min(len(requested_metric_ids), SQLITE_MAX_BOUND_PARAMETERS // 2),
+        )
+        security_ids = sorted(symbol_by_security_id.keys())
+
+        with self._connect() as conn:
+            for metric_chunk in _batched(requested_metric_ids, metric_chunk_size):
+                security_chunk_size = max(
+                    1,
+                    min(chunk_size, SQLITE_MAX_BOUND_PARAMETERS - len(metric_chunk)),
+                )
+                for security_chunk in _batched(security_ids, security_chunk_size):
+                    security_placeholders = ", ".join("?" for _ in security_chunk)
+                    metric_placeholders = ", ".join("?" for _ in metric_chunk)
+                    rows = conn.execute(
+                        f"""
+                        SELECT security_id, metric_id, status, reason_code, reason_detail,
+                               attempted_at, value_as_of, facts_refreshed_at,
+                               market_data_as_of, market_data_updated_at
+                        FROM metric_compute_status
+                        WHERE security_id IN ({security_placeholders})
+                          AND metric_id IN ({metric_placeholders})
+                        """,
+                        list(security_chunk) + list(metric_chunk),
+                    ).fetchall()
+                    for row in rows:
+                        symbol = symbol_by_security_id[row["security_id"]]
+                        rows_by_symbol.setdefault(symbol, {})[row["metric_id"]] = (
+                            MetricComputeStatusRecord(
+                                symbol=symbol,
+                                metric_id=row["metric_id"],
+                                status=row["status"],
+                                attempted_at=row["attempted_at"],
+                                reason_code=row["reason_code"],
+                                reason_detail=row["reason_detail"],
+                                value_as_of=row["value_as_of"],
+                                facts_refreshed_at=row["facts_refreshed_at"],
+                                market_data_as_of=row["market_data_as_of"],
+                                market_data_updated_at=row["market_data_updated_at"],
+                            )
+                        )
+        return rows_by_symbol
+
+
 class MarketDataRepository(SQLiteStore):
     """Persist canonical market data snapshots."""
 
@@ -4265,6 +4621,25 @@ class MarketDataRepository(SQLiteStore):
             )
 
     def latest_snapshot(self, symbol: str) -> Optional[PriceData]:
+        record = self.latest_snapshot_record(symbol)
+        if record is None:
+            return None
+        return PriceData(
+            symbol=record.symbol,
+            price=record.price,
+            as_of=record.as_of,
+            volume=record.volume,
+            market_cap=record.market_cap,
+            currency=record.currency,
+        )
+
+    def latest_price(self, symbol: str) -> Optional[Tuple[str, float]]:
+        snapshot = self.latest_snapshot(symbol)
+        if snapshot is None:
+            return None
+        return snapshot.as_of, snapshot.price
+
+    def latest_snapshot_record(self, symbol: str) -> Optional[MarketSnapshotRecord]:
         self.initialize_schema()
         security_id = self._security_repo().resolve_id(symbol)
         if security_id is None:
@@ -4272,8 +4647,8 @@ class MarketDataRepository(SQLiteStore):
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT s.canonical_symbol, md.as_of, md.price, md.volume,
-                       md.market_cap, md.currency
+                SELECT s.canonical_symbol, md.security_id, md.as_of, md.price, md.volume,
+                       md.market_cap, md.currency, md.updated_at
                 FROM market_data md
                 JOIN securities s ON s.security_id = md.security_id
                 WHERE md.security_id = ?
@@ -4284,20 +4659,16 @@ class MarketDataRepository(SQLiteStore):
             ).fetchone()
         if row is None:
             return None
-        return PriceData(
+        return MarketSnapshotRecord(
+            security_id=row["security_id"],
             symbol=row["canonical_symbol"],
-            price=row["price"],
             as_of=row["as_of"],
+            price=row["price"],
             volume=row["volume"],
             market_cap=row["market_cap"],
             currency=row["currency"],
+            updated_at=row["updated_at"],
         )
-
-    def latest_price(self, symbol: str) -> Optional[Tuple[str, float]]:
-        snapshot = self.latest_snapshot(symbol)
-        if snapshot is None:
-            return None
-        return snapshot.as_of, snapshot.price
 
     def latest_snapshots_many(
         self,
@@ -4342,7 +4713,8 @@ class MarketDataRepository(SQLiteStore):
                         md.price,
                         md.volume,
                         md.market_cap,
-                        md.currency
+                        md.currency,
+                        md.updated_at
                     FROM latest
                     JOIN market_data md
                       ON md.security_id = latest.security_id
@@ -4361,6 +4733,7 @@ class MarketDataRepository(SQLiteStore):
                         volume=row["volume"],
                         market_cap=row["market_cap"],
                         currency=row["currency"],
+                        updated_at=row["updated_at"],
                     )
         return snapshots
 
@@ -4486,9 +4859,13 @@ __all__ = [
     "FundamentalsFetchStateRepository",
     "MarketDataFetchStateRepository",
     "FinancialFactsRepository",
+    "FinancialFactsRefreshStateRecord",
+    "FinancialFactsRefreshStateRepository",
     "MarketDataRepository",
     "FactRecord",
     "MarketSnapshotRecord",
+    "MetricComputeStatusRecord",
+    "MetricComputeStatusRepository",
     "MetricRecord",
     "MetricsRepository",
     "EntityMetadataRepository",

@@ -1988,6 +1988,66 @@ def _migration_029_add_fin_facts_security_concept_latest_index(
     )
 
 
+def _migration_030_add_metric_compute_status_tables(
+    conn: sqlite3.Connection,
+) -> None:
+    """Add latest metric-attempt status and financial-facts refresh state tables."""
+
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS financial_facts_refresh_state (
+            security_id INTEGER NOT NULL PRIMARY KEY,
+            refreshed_at TEXT NOT NULL
+        )
+        """
+    )
+    table_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='financial_facts'"
+    ).fetchone()
+    if table_exists:
+        conn.execute(
+            """
+            INSERT INTO financial_facts_refresh_state (
+                security_id,
+                refreshed_at
+            )
+            SELECT DISTINCT ff.security_id, ?
+            FROM financial_facts ff
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM financial_facts_refresh_state ffrs
+                WHERE ffrs.security_id = ff.security_id
+            )
+            """,
+            (now,),
+        )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS metric_compute_status (
+            security_id INTEGER NOT NULL,
+            metric_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            reason_code TEXT,
+            reason_detail TEXT,
+            attempted_at TEXT NOT NULL,
+            value_as_of TEXT,
+            facts_refreshed_at TEXT,
+            market_data_as_of TEXT,
+            market_data_updated_at TEXT,
+            PRIMARY KEY (security_id, metric_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_metric_compute_status_metric_status
+        ON metric_compute_status(metric_id, status)
+        """
+    )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -2018,6 +2078,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_027_add_currency_discovery_indexes,
     _migration_028_add_fx_catalog_tables,
     _migration_029_add_fin_facts_security_concept_latest_index,
+    _migration_030_add_metric_compute_status_tables,
 ]
 
 

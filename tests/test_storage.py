@@ -6,6 +6,7 @@ from pyvalue.storage import (
     EntityMetadataRepository,
     FXRateRecord,
     FXRatesRepository,
+    FinancialFactsRefreshStateRepository,
     FundamentalsNormalizationStateRepository,
     FundamentalsUpdate,
     FundamentalsRepository,
@@ -14,6 +15,8 @@ from pyvalue.storage import (
     FactRecord,
     MarketDataFetchStateRepository,
     MarketDataRepository,
+    MetricComputeStatusRecord,
+    MetricComputeStatusRepository,
     MetricsRepository,
     SecurityMetadataUpdate,
     SecurityRepository,
@@ -312,6 +315,32 @@ def test_financial_facts_repository_replace_fact_rows_matches_replace_facts(tmp_
         ).fetchall()
 
     assert rows == [("AAA.US", "Liabilities", 40.0, None)]
+
+
+def test_financial_facts_repository_replace_facts_updates_refresh_state(tmp_path):
+    db_path = tmp_path / "facts-refresh-state.db"
+    repo = FinancialFactsRepository(db_path)
+    repo.initialize_schema()
+
+    repo.replace_facts(
+        "AAA.US",
+        [
+            FactRecord(
+                symbol="AAA.US",
+                concept="Assets",
+                end_date="2024-12-31",
+                unit="USD",
+                value=10.0,
+            )
+        ],
+    )
+
+    refresh_repo = FinancialFactsRefreshStateRepository(db_path)
+    refresh_record = refresh_repo.fetch("AAA.US")
+
+    assert refresh_record is not None
+    assert refresh_record.symbol == "AAA.US"
+    assert refresh_record.refreshed_at
 
 
 def test_financial_facts_repository_replace_fact_rows_persists_source_provider(
@@ -1352,6 +1381,49 @@ def test_metrics_repository_fetch_many_for_symbols_returns_requested_metrics(
             "metric_one": (3.0, "2024-01-03"),
         },
     }
+
+
+def test_metric_compute_status_repository_upsert_and_fetch_many(tmp_path):
+    db_path = tmp_path / "metric-status.db"
+    repo = MetricComputeStatusRepository(db_path)
+    repo.initialize_schema()
+
+    updated = repo.upsert_many(
+        [
+            MetricComputeStatusRecord(
+                symbol="AAA.US",
+                metric_id="metric_one",
+                status="success",
+                attempted_at="2024-01-02T00:00:00+00:00",
+                value_as_of="2024-01-01",
+            ),
+            MetricComputeStatusRecord(
+                symbol="BBB.US",
+                metric_id="metric_one",
+                status="failure",
+                attempted_at="2024-01-02T00:00:00+00:00",
+                reason_code="missing_data",
+                reason_detail="Need more facts",
+                facts_refreshed_at="2024-01-02T00:00:00+00:00",
+            ),
+        ]
+    )
+
+    assert updated == 2
+    single = repo.fetch("BBB.US", "metric_one")
+    assert single is not None
+    assert single.status == "failure"
+    assert single.reason_code == "missing_data"
+
+    fetched = repo.fetch_many_for_symbols(
+        ["AAA.US", "BBB.US"],
+        ["metric_one"],
+        chunk_size=1,
+    )
+
+    assert fetched["AAA.US"]["metric_one"].status == "success"
+    assert fetched["AAA.US"]["metric_one"].value_as_of == "2024-01-01"
+    assert fetched["BBB.US"]["metric_one"].reason_detail == "Need more facts"
 
 
 def test_metrics_repository_persists_unit_metadata(tmp_path):

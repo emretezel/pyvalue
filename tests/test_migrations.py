@@ -165,7 +165,7 @@ def test_migration_adds_sector_and_industry_to_securities(tmp_path):
 
     applied = apply_migrations(db_path)
 
-    assert applied == 5
+    assert applied == 6
     with sqlite3.connect(db_path) as conn:
         info = conn.execute("PRAGMA table_info(securities)").fetchall()
         columns = {row[1] for row in info}
@@ -280,6 +280,90 @@ def test_migration_creates_fundamentals_hot_path_indexes(tmp_path):
     )
 
 
+def test_migration_adds_metric_status_and_facts_refresh_tables(tmp_path):
+    db_path = tmp_path / "metric-status-migration.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE financial_facts (
+                security_id INTEGER NOT NULL,
+                cik TEXT,
+                concept TEXT NOT NULL,
+                fiscal_period TEXT,
+                end_date TEXT NOT NULL,
+                unit TEXT NOT NULL,
+                value REAL NOT NULL,
+                accn TEXT,
+                filed TEXT,
+                frame TEXT,
+                start_date TEXT,
+                accounting_standard TEXT,
+                currency TEXT,
+                source_provider TEXT,
+                PRIMARY KEY (security_id, concept, fiscal_period, end_date, unit, accn)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO financial_facts (
+                security_id, cik, concept, fiscal_period, end_date, unit, value,
+                accn, filed, frame, start_date, accounting_standard, currency, source_provider
+            ) VALUES (
+                1, NULL, 'Assets', 'FY', '2024-12-31', 'USD', 10.0,
+                NULL, NULL, NULL, NULL, NULL, 'USD', 'SEC'
+            )
+            """
+        )
+        conn.execute("CREATE TABLE schema_migrations (version INTEGER NOT NULL)")
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (29)")
+
+    applied = apply_migrations(db_path)
+
+    assert applied == 1
+    with sqlite3.connect(db_path) as conn:
+        refresh_columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(financial_facts_refresh_state)"
+            ).fetchall()
+        }
+        status_columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(metric_compute_status)"
+            ).fetchall()
+        }
+        refresh_row = conn.execute(
+            """
+            SELECT security_id, refreshed_at
+            FROM financial_facts_refresh_state
+            """
+        ).fetchone()
+        status_indexes = conn.execute(
+            "PRAGMA index_list(metric_compute_status)"
+        ).fetchall()
+        status_index_names = {row[1] for row in status_indexes}
+
+    assert refresh_columns == {"security_id", "refreshed_at"}
+    assert refresh_row is not None
+    assert refresh_row[0] == 1
+    assert refresh_row[1]
+    assert status_columns == {
+        "security_id",
+        "metric_id",
+        "status",
+        "reason_code",
+        "reason_detail",
+        "attempted_at",
+        "value_as_of",
+        "facts_refreshed_at",
+        "market_data_as_of",
+        "market_data_updated_at",
+    }
+    assert "idx_metric_compute_status_metric_status" in status_index_names
+
+
 def test_migration_does_not_overwrite_existing_supported_tickers(tmp_path):
     db_path = tmp_path / "supported-tickers-backfill.sqlite"
     with sqlite3.connect(db_path) as conn:
@@ -318,7 +402,7 @@ def test_migration_does_not_overwrite_existing_supported_tickers(tmp_path):
 
     applied = apply_migrations(db_path)
 
-    assert applied == 9
+    assert applied == 10
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
             """
