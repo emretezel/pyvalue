@@ -303,7 +303,7 @@ def test_load_screen_parses_quality_reasonable_price_example():
         ">=",
         "<=",
     }
-    assert definition.criteria[0].left.metric == "roic_10y_median"
+    assert definition.criteria[0].left.metric == "roic_7y_median"
     assert definition.criteria[1].left.metric == "opm_10y_min"
     assert definition.criteria[2].left.metric == "net_debt_to_ebitda"
     assert definition.criteria[3].left.metric == "cfo_to_ni_ttm"
@@ -335,7 +335,7 @@ def test_ranking_metric_ids_preserve_first_seen_order():
         "oey_ev_norm",
         "ev_to_ebit",
         "graham_multiplier",
-        "roic_10y_median",
+        "roic_7y_median",
         "cfo_to_ni_ttm",
         "opm_10y_std",
         "net_debt_to_ebitda",

@@ -1,7 +1,7 @@
 criteria:
-  - name: "ROIC median (10Y) >= 10%"
+  - name: "ROIC median (7Y) >= 10%"
     left:
-      metric: roic_10y_median
+      metric: roic_7y_median
     operator: ">="
     right:
       value: 0.10
@@ -57,7 +57,7 @@ ranking:
     - metric: graham_multiplier
       weight: 0.05
       direction: lower
-    - metric: roic_10y_median
+    - metric: roic_7y_median
       weight: 0.20
       direction: higher
     - metric: cfo_to_ni_ttm
