@@ -11,6 +11,12 @@ Use this file to capture recurring mistake patterns after user corrections so fu
 
 ## Lessons
 
+- Date: 2026-04-13
+- User correction: When validating screen or metric failures with spot checks, use large-cap examples rather than the first alphabetical tickers.
+- Recurring pattern: Defaulting to arbitrary or alphabetical samples can overweight illiquid microcaps and make a failure audit less representative of the names the user actually cares about.
+- Preventive rule: For ticker spot checks, raw-payload audits, and exchange-level samples in this repo, default to the largest-market-cap names within the target failure bucket unless the user asks for another sampling method, and state the sampling basis explicitly.
+- Resulting action: Recorded the sampling rule here and will use large-cap examples by default for future pyvalue failure investigations.
+
 - Date: 2026-03-22
 - User correction: `pyvalue report-ingest-progress` crashed after a quota helper signature change.
 - Recurring pattern: Generalizing a shared helper without explicitly verifying every runtime call site can leave one CLI path behind even when related tests look adequate.

@@ -129,6 +129,66 @@ def test_market_data_service_derives_market_cap_from_shares(tmp_path):
     assert snapshot.market_cap == 50000.0
 
 
+def test_market_data_service_prefers_share_unit_count_when_duplicates_exist(tmp_path):
+    class DummyProvider:
+        def latest_price(self, symbol):
+            return PriceData(
+                symbol=symbol,
+                price=10.0,
+                as_of="2024-01-02",
+                volume=None,
+                currency=None,
+            )
+
+    class DummyConfig:
+        eodhd_api_key = None
+
+    db_path = tmp_path / "duplicate-shares.db"
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    fact_repo.replace_facts(
+        "AAPL.US",
+        [
+            FactRecord(
+                symbol="AAPL.US",
+                cik="CIK0000320193",
+                concept="EntityCommonStockSharesOutstanding",
+                fiscal_period="FY",
+                end_date="2023-12-31",
+                unit="USD",
+                value=1_000_000.0,
+                accn=None,
+                filed="2024-03-01",
+                frame="CY2023",
+                start_date=None,
+            ),
+            FactRecord(
+                symbol="AAPL.US",
+                cik="CIK0000320193",
+                concept="CommonStockSharesOutstanding",
+                fiscal_period="FY",
+                end_date="2023-12-31",
+                unit="shares",
+                value=1_000.0,
+                accn=None,
+                filed=None,
+                frame="CY2023",
+                start_date=None,
+            ),
+        ],
+    )
+
+    service = MarketDataService(
+        db_path=db_path, provider=DummyProvider(), config=DummyConfig()
+    )
+    service.refresh_symbol("AAPL.US")
+
+    repo = MarketDataRepository(db_path)
+    snapshot = repo.latest_snapshot("AAPL.US")
+    assert snapshot is not None
+    assert snapshot.market_cap == 10000.0
+
+
 def test_eodhd_provider_converts_gbx_to_gbp():
     payload = [
         {"date": "2024-03-01", "Close": "99.0", "Volume": "1000", "currency": "GBX"},

@@ -958,7 +958,7 @@ def test_financial_facts_repository_latest_share_counts_many_matches_single_look
 
     assert counts["AAA.US"] == latest_share_count("AAA.US", repo)
     assert counts["BBB.US"] == latest_share_count("BBB.US", repo)
-    assert counts["AAA.US"] == 111.0
+    assert counts["AAA.US"] == 222.0
     assert counts["BBB.US"] == 333.0
     assert counts_with_security_ids == counts
     assert "CCC.US" not in counts
@@ -1272,6 +1272,56 @@ def test_market_data_repository_update_market_caps_many_matches_single_update(tm
             """
         ).fetchone()[0]
     assert historical == 900.0
+
+
+def test_latest_share_counts_many_prefers_best_same_date_share_fact(tmp_path):
+    db_path = tmp_path / "share-count-selection.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    ticker_repo.replace_from_listings("EODHD", "US", [_listing("AAA")])
+
+    repo = FinancialFactsRepository(db_path)
+    repo.initialize_schema()
+    repo.replace_facts(
+        "AAA.US",
+        [
+            FactRecord(
+                symbol="AAA.US",
+                cik=None,
+                concept="EntityCommonStockSharesOutstanding",
+                fiscal_period="FY",
+                end_date="2025-12-31",
+                unit="USD",
+                value=1_000_000.0,
+                accn=None,
+                filed="2026-03-27",
+                frame="CY2025",
+                start_date=None,
+                accounting_standard=None,
+                currency="USD",
+            ),
+            FactRecord(
+                symbol="AAA.US",
+                cik=None,
+                concept="CommonStockSharesOutstanding",
+                fiscal_period="FY",
+                end_date="2025-12-31",
+                unit="shares",
+                value=1_000.0,
+                accn=None,
+                filed=None,
+                frame="CY2025",
+                start_date=None,
+                accounting_standard=None,
+                currency=None,
+            ),
+        ],
+    )
+
+    counts = repo.latest_share_counts_many(["AAA.US"])
+
+    assert counts == {"AAA.US": 1000.0}
+    assert latest_share_count("AAA.US", repo) == 1000.0
 
 
 def test_sqlite_store_connect_context_closes_connection(tmp_path):

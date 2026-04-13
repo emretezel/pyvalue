@@ -167,6 +167,10 @@ EODHD_TARGET_CONCEPTS = {
     concept for statement in EODHD_STATEMENT_FIELDS.values() for concept in statement
 } | EODHD_EXTRA_CONCEPTS
 EODHD_DERIVED_OVERRIDE_CONCEPTS = ("CommonStockholdersEquity",)
+SHARE_FACT_CONCEPTS = {
+    "CommonStockSharesOutstanding",
+    "EntityCommonStockSharesOutstanding",
+}
 LOGGER = logging.getLogger(__name__)
 
 
@@ -319,11 +323,45 @@ class EODHDFactsNormalizer:
             self._derive_common_stockholders_equity(indexed),
             "CommonStockholdersEquity",
         )
+        records = self._collapse_share_records(records)
         if target_currency is not None:
             records = self._convert_facts_to_target_currency(
                 records, target_currency, symbol
             )
         return records
+
+    def _collapse_share_records(self, records: List[FactRecord]) -> List[FactRecord]:
+        """Keep one best share-count fact per concept/date/period."""
+
+        selected: dict[tuple[str, str, str], FactRecord] = {}
+        ordered_keys: list[tuple[str, str, str]] = []
+        passthrough: list[FactRecord] = []
+        for record in records:
+            if record.concept not in SHARE_FACT_CONCEPTS:
+                passthrough.append(record)
+                continue
+            key = (
+                record.concept,
+                record.end_date,
+                (record.fiscal_period or "").upper(),
+            )
+            existing = selected.get(key)
+            if existing is None:
+                selected[key] = record
+                ordered_keys.append(key)
+                continue
+            if self._share_record_priority(record) < self._share_record_priority(
+                existing
+            ):
+                selected[key] = record
+        return passthrough + [selected[key] for key in ordered_keys]
+
+    def _share_record_priority(self, record: FactRecord) -> tuple[int, int, float]:
+        return (
+            0 if record.unit == SHARES_UNIT else 1,
+            0 if record.currency is None else 1,
+            abs(record.value),
+        )
 
     def _normalize_statement(
         self,
@@ -550,29 +588,37 @@ class EODHDFactsNormalizer:
                         value = derived_operating_cash
                     if value is None:
                         continue
-                    normalized_value, normalized_currency = (
-                        self._normalize_value_currency(value, currency)
-                    )
-                    if normalized_value is None:
-                        continue
-                    if normalized_currency is None:
-                        warn_missing_monetary_currency(
-                            symbol=symbol.upper(),
-                            field_name=concept,
-                            statement_name=statement_payload.get("__statement_name")
-                            if isinstance(statement_payload, dict)
-                            else None,
-                            end_date=end_date,
-                            logger=LOGGER,
+                    normalized_value: Optional[float]
+                    normalized_currency: Optional[str]
+                    if concept in SHARE_FACT_CONCEPTS:
+                        normalized_value = float(value)
+                        normalized_currency = None
+                        unit = SHARES_UNIT
+                    else:
+                        normalized_value, normalized_currency = (
+                            self._normalize_value_currency(value, currency)
                         )
-                        continue
+                        if normalized_value is None:
+                            continue
+                        if normalized_currency is None:
+                            warn_missing_monetary_currency(
+                                symbol=symbol.upper(),
+                                field_name=concept,
+                                statement_name=statement_payload.get("__statement_name")
+                                if isinstance(statement_payload, dict)
+                                else None,
+                                end_date=end_date,
+                                logger=LOGGER,
+                            )
+                            continue
+                        unit = normalized_currency
                     records.append(
                         FactRecord(
                             symbol=symbol.upper(),
                             concept=concept,
                             fiscal_period=period_code or "",
                             end_date=end_date,
-                            unit=normalized_currency,
+                            unit=unit,
                             value=normalized_value,
                             accn=None,
                             filed=entry.get("filing_date"),

@@ -40,15 +40,14 @@ SHARE_CONCEPTS = [
 def latest_share_count(
     symbol: str, repo: FinancialFactsRepository | RegionFactsRepository
 ) -> Optional[float]:
-    for concept in SHARE_CONCEPTS:
-        fact = repo.latest_fact(symbol, concept)
-        if fact is None or fact.value is None:
-            continue
-        try:
-            return float(fact.value)
-        except (TypeError, ValueError):
-            continue
-    return None
+    counts = repo.latest_share_counts_many([symbol], chunk_size=1)
+    value = counts.get(symbol.upper())
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class MarketDataService:

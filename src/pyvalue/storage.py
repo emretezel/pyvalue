@@ -27,6 +27,7 @@ from typing import (
 
 from pyvalue.currency import (
     MetricUnitKind,
+    SHARES_UNIT,
     fact_currency_or_none,
     metric_currency_or_none,
     normalize_currency_code,
@@ -3423,27 +3424,39 @@ class FinancialFactsRepository(SQLiteStore):
             """
             SELECT
                 selected.canonical_symbol,
-                COALESCE(
-                    (
-                        SELECT ff.value
-                        FROM financial_facts ff INDEXED BY idx_fin_facts_security_concept_latest
-                        WHERE ff.security_id = selected.security_id
-                          AND ff.concept = ?
-                        ORDER BY ff.end_date DESC, ff.filed DESC
-                        LIMIT 1
-                    ),
-                    (
-                        SELECT ff.value
-                        FROM financial_facts ff INDEXED BY idx_fin_facts_security_concept_latest
-                        WHERE ff.security_id = selected.security_id
-                          AND ff.concept = ?
-                        ORDER BY ff.end_date DESC, ff.filed DESC
-                        LIMIT 1
-                    )
+                (
+                    SELECT ff.value
+                    FROM financial_facts ff INDEXED BY idx_fin_facts_security_concept_latest
+                    WHERE ff.security_id = selected.security_id
+                      AND ff.concept IN (?, ?)
+                    ORDER BY ff.end_date DESC,
+                             CASE ff.concept
+                                 WHEN 'CommonStockSharesOutstanding' THEN 0
+                                 ELSE 1
+                             END,
+                             CASE ff.unit
+                                 WHEN ? THEN 0
+                                 ELSE 1
+                             END,
+                             CASE
+                                 WHEN ff.currency IS NULL THEN 0
+                                 ELSE 1
+                             END,
+                             CASE UPPER(COALESCE(ff.fiscal_period, ''))
+                                 WHEN 'Q4' THEN 0
+                                 WHEN 'Q3' THEN 1
+                                 WHEN 'Q2' THEN 2
+                                 WHEN 'Q1' THEN 3
+                                 WHEN 'FY' THEN 4
+                                 ELSE 5
+                             END,
+                             ABS(ff.value) ASC,
+                             ff.filed DESC
+                    LIMIT 1
                 ) AS value
             FROM temp_selected_securities selected
             """,
-            (primary_concept, fallback_concept),
+            (primary_concept, fallback_concept, SHARES_UNIT),
         ).fetchall()
         for row in rows:
             try:

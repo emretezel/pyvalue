@@ -104,6 +104,85 @@ def test_eodhd_derives_common_shares_from_entity_shares():
     assert derived[0].value == 1500.0
 
 
+def test_eodhd_normalizes_statement_share_fields_as_shares():
+    normalizer = EODHDFactsNormalizer(
+        concepts=["EntityCommonStockSharesOutstanding", "CommonStockSharesOutstanding"]
+    )
+    payload = {
+        "Financials": {
+            "Balance_Sheet": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "commonStockSharesOutstanding": 1500,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.LSE")
+    shares = [
+        r
+        for r in records
+        if r.concept == "CommonStockSharesOutstanding" and r.fiscal_period == "FY"
+    ]
+    entity = [
+        r
+        for r in records
+        if r.concept == "EntityCommonStockSharesOutstanding" and r.fiscal_period == "FY"
+    ]
+
+    assert shares
+    assert entity
+    assert shares[0].unit == "shares"
+    assert shares[0].currency is None
+    assert entity[0].unit == "shares"
+    assert entity[0].currency is None
+
+
+def test_eodhd_prefers_dedicated_outstanding_shares_over_scaled_statement_duplicate():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Balance_Sheet": {
+                "yearly": [
+                    {
+                        "date": "2025-12-31",
+                        "commonStockSharesOutstanding": 384_512_470_000.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "outstandingShares": {
+            "annual": {
+                "0": {
+                    "date": "2025",
+                    "dateFormatted": "2025-12-31",
+                    "shares": 384_512_500,
+                }
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+    common_fy = [
+        r
+        for r in records
+        if r.concept == "CommonStockSharesOutstanding"
+        and r.fiscal_period == "FY"
+        and r.end_date == "2025-12-31"
+    ]
+
+    assert len(common_fy) == 1
+    assert common_fy[0].unit == "shares"
+    assert common_fy[0].value == 384_512_500.0
+
+
 def test_eodhd_derives_common_equity_from_stockholders_equity():
     normalizer = EODHDFactsNormalizer(concepts=["StockholdersEquity"])
     payload = {
