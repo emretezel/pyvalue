@@ -6,9 +6,9 @@ criteria:
     right:
       value: 0.10
 
-  - name: "Operating margin minimum (10Y) >= 5%"
+  - name: "Operating margin minimum (7Y) >= 5%"
     left:
-      metric: opm_10y_min
+      metric: opm_7y_min
     operator: ">="
     right:
       value: 0.05

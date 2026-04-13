@@ -65,6 +65,7 @@ from .owner_earnings_enterprise import (
 )
 from .gross_margin_stability import GrossMarginTenYearStdMetric
 from .operating_margin_stability import (
+    OperatingMarginSevenYearMinMetric,
     OperatingMarginTenYearMinMetric,
     OperatingMarginTenYearStdMetric,
 )
@@ -129,6 +130,7 @@ REGISTRY = {
     GrossMarginTenYearStdMetric.id: GrossMarginTenYearStdMetric,
     OperatingMarginTenYearStdMetric.id: OperatingMarginTenYearStdMetric,
     OperatingMarginTenYearMinMetric.id: OperatingMarginTenYearMinMetric,
+    OperatingMarginSevenYearMinMetric.id: OperatingMarginSevenYearMinMetric,
     ShareCountCAGR10YMetric.id: ShareCountCAGR10YMetric,
     Shares10YPctChangeMetric.id: Shares10YPctChangeMetric,
     NetBuybackYieldMetric.id: NetBuybackYieldMetric,
@@ -215,6 +217,7 @@ __all__ = [
     "GrossMarginTenYearStdMetric",
     "OperatingMarginTenYearStdMetric",
     "OperatingMarginTenYearMinMetric",
+    "OperatingMarginSevenYearMinMetric",
     "ShareCountCAGR10YMetric",
     "Shares10YPctChangeMetric",
     "NetBuybackYieldMetric",

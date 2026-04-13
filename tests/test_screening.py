@@ -304,7 +304,7 @@ def test_load_screen_parses_quality_reasonable_price_example():
         "<=",
     }
     assert definition.criteria[0].left.metric == "roic_7y_median"
-    assert definition.criteria[1].left.metric == "opm_10y_min"
+    assert definition.criteria[1].left.metric == "opm_7y_min"
     assert definition.criteria[2].left.metric == "net_debt_to_ebitda"
     assert definition.criteria[3].left.metric == "cfo_to_ni_ttm"
     assert definition.criteria[4].left.metric == "oey_ev_norm"

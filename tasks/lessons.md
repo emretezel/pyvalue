@@ -12,6 +12,12 @@ Use this file to capture recurring mistake patterns after user corrections so fu
 ## Lessons
 
 - Date: 2026-04-13
+- User correction: When investigating `opm_10y_min` failure causes here, only consider the `EODHD` provider rather than mixing provider-specific conclusions.
+- Recurring pattern: Starting a broad cross-provider audit before locking the requested provider scope can waste time and introduce irrelevant findings.
+- Preventive rule: For pyvalue data-quality and metric-failure investigations, confirm the provider scope first and keep code-path, raw-payload, and normalization conclusions provider-specific unless the user explicitly asks for cross-provider analysis.
+- Resulting action: Narrowed this `opm_10y_min` investigation to `EODHD` only and recorded the scope rule here.
+
+- Date: 2026-04-13
 - User correction: When validating screen or metric failures with spot checks, use large-cap examples rather than the first alphabetical tickers.
 - Recurring pattern: Defaulting to arbitrary or alphabetical samples can overweight illiquid microcaps and make a failure audit less representative of the names the user actually cares about.
 - Preventive rule: For ticker spot checks, raw-payload audits, and exchange-level samples in this repo, default to the largest-market-cap names within the target failure bucket unless the user asks for another sampling method, and state the sampling basis explicitly.

@@ -112,6 +112,7 @@ Columns:
 | Gross Margin Standard Deviation (10Y) | `gm_10y_std` | EODHD-oriented population standard deviation of FY gross margin over the latest strict 10 consecutive FY years. | Lower variability suggests more stable economics and easier valuation work. |
 | Operating Margin Standard Deviation (10Y) | `opm_10y_std` | EODHD-oriented population standard deviation of FY operating margin over the latest strict 10 consecutive FY years. | Stable operating margins usually indicate a more predictable business. |
 | Operating Margin Minimum (10Y) | `opm_10y_min` | EODHD-oriented minimum FY operating margin in the latest strict 10-year window. | Shows how bad operating profitability got in the toughest observed year. |
+| Operating Margin Minimum (7Y) | `opm_7y_min` | EODHD-oriented minimum FY operating margin in the latest strict 7-year window. | A shorter-horizon bad-year check that preserves strict consecutive FY semantics. |
 
 ## Share Count / Capital Allocation
 

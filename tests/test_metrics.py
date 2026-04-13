@@ -75,6 +75,7 @@ from pyvalue.metrics.owner_earnings_enterprise import (
     WorstOwnerEarningsEnterpriseTenYearMetric,
 )
 from pyvalue.metrics.operating_margin_stability import (
+    OperatingMarginSevenYearMinMetric,
     OperatingMarginTenYearMinMetric,
     OperatingMarginTenYearStdMetric,
 )
@@ -3237,6 +3238,76 @@ def test_opm_10y_min_keeps_signed_negative_margin():
     result = metric.compute("AAPL.US", repo)
     assert result is not None
     assert round(result.value, 12) == round(-20.0 / (1000.0 + 10.0 * 5), 12)
+
+
+def test_opm_7y_min_happy_path():
+    metric = OperatingMarginSevenYearMinMetric()
+    latest_year = date.today().year - 1
+    repo = _build_ic_repo(
+        concept_records=_base_opm_10y_concepts(latest_year=latest_year)
+    )
+
+    result = metric.compute("AAPL.US", repo)
+
+    assert result is not None
+    margins = [0.08 + 0.01 * idx for idx in range(7)]
+    assert round(result.value, 12) == round(min(margins), 12)
+
+
+def test_opm_7y_min_returns_none_when_strict_window_missing_year():
+    metric = OperatingMarginSevenYearMinMetric()
+    latest_year = date.today().year - 1
+    concepts = _base_opm_10y_concepts(latest_year=latest_year)
+    concepts["OperatingIncomeLoss"] = [
+        record
+        for record in concepts["OperatingIncomeLoss"]
+        if record.end_date != f"{latest_year - 3}-09-30"
+    ]
+    repo = _build_ic_repo(concept_records=concepts)
+
+    result = metric.compute("AAPL.US", repo)
+
+    assert result is None
+
+
+def test_opm_7y_min_returns_none_when_revenue_non_positive():
+    metric = OperatingMarginSevenYearMinMetric()
+    latest_year = date.today().year - 1
+    concepts = _base_opm_10y_concepts(
+        latest_year=latest_year,
+        revenue_by_year={
+            year: (0.0 if year == latest_year - 2 else 1000.0 + 10.0 * idx)
+            for idx, year in enumerate(range(latest_year - 9, latest_year + 1))
+        },
+    )
+    repo = _build_ic_repo(concept_records=concepts)
+
+    result = metric.compute("AAPL.US", repo)
+
+    assert result is None
+
+
+def test_opm_7y_min_keeps_signed_negative_margin():
+    metric = OperatingMarginSevenYearMinMetric()
+    latest_year = date.today().year - 1
+    concepts = _base_opm_10y_concepts(
+        latest_year=latest_year,
+        operating_income_by_year={
+            year: (
+                -20.0
+                if year == latest_year - 2
+                else (1000.0 + 10.0 * idx) * (0.05 + 0.01 * idx)
+            )
+            for idx, year in enumerate(range(latest_year - 9, latest_year + 1))
+        },
+    )
+    repo = _build_ic_repo(concept_records=concepts)
+
+    result = metric.compute("AAPL.US", repo)
+
+    assert result is not None
+    expected_revenue = 1000.0 + 10.0 * 7
+    assert round(result.value, 12) == round(-20.0 / expected_revenue, 12)
 
 
 def test_debt_paydown_years_skips_non_positive_fcf():
@@ -12256,6 +12327,7 @@ def test_registry_contains_all_ids():
     assert "gm_10y_std" in REGISTRY
     assert "opm_10y_std" in REGISTRY
     assert "opm_10y_min" in REGISTRY
+    assert "opm_7y_min" in REGISTRY
     assert "cfo_to_ni_ttm" in REGISTRY
     assert "cfo_to_ni_10y_median" in REGISTRY
     assert "fcf_fy_median_5y" in REGISTRY

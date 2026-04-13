@@ -26,7 +26,8 @@ OPERATING_INCOME_CONCEPT = "OperatingIncomeLoss"
 REVENUE_CONCEPT = "Revenues"
 
 FY_PERIODS = {"FY"}
-SERIES_YEARS = 10
+TEN_YEAR_SERIES_YEARS = 10
+SEVEN_YEAR_SERIES_YEARS = 7
 
 REQUIRED_CONCEPTS = (
     OPERATING_INCOME_CONCEPT,
@@ -50,28 +51,38 @@ class _OperatingMarginFYPoint:
 
 
 @dataclass(frozen=True)
-class OperatingMarginTenYearSnapshot:
+class OperatingMarginSeriesSnapshot:
     points: tuple[_OperatingMarginFYPoint, ...]
     as_of: str
     currency: Optional[str]
 
 
-class OperatingMarginTenYearCalculator:
-    """Build a strict 10-year consecutive FY operating-margin series."""
+@dataclass(frozen=True)
+class OperatingMarginSeriesCalculator:
+    """Build a strict consecutive FY operating-margin series for one horizon."""
+
+    metric_context: str
+    series_years: int
 
     def compute_series(
         self, symbol: str, repo: FinancialFactsRepository
-    ) -> Optional[OperatingMarginTenYearSnapshot]:
+    ) -> Optional[OperatingMarginSeriesSnapshot]:
         operating_income_map = self._fy_map(symbol, repo, OPERATING_INCOME_CONCEPT)
         if not operating_income_map:
             LOGGER.warning(
-                "opm_10y: missing FY operating income history for %s", symbol
+                "%s: missing FY operating income history for %s",
+                self.metric_context,
+                symbol,
             )
             return None
 
         revenue_map = self._fy_map(symbol, repo, REVENUE_CONCEPT)
         if not revenue_map:
-            LOGGER.warning("opm_10y: missing FY revenues history for %s", symbol)
+            LOGGER.warning(
+                "%s: missing FY revenues history for %s",
+                self.metric_context,
+                symbol,
+            )
             return None
 
         margins_by_year: dict[int, _OperatingMarginFYPoint] = {}
@@ -91,16 +102,22 @@ class OperatingMarginTenYearCalculator:
             )
 
         if not margins_by_year:
-            LOGGER.warning("opm_10y: no FY operating-margin points for %s", symbol)
+            LOGGER.warning(
+                "%s: no FY operating-margin points for %s",
+                self.metric_context,
+                symbol,
+            )
             return None
 
         latest_year = max(margins_by_year.keys())
         selected: list[_OperatingMarginFYPoint] = []
-        for year in range(latest_year, latest_year - SERIES_YEARS, -1):
+        for year in range(latest_year, latest_year - self.series_years, -1):
             point = margins_by_year.get(year)
             if point is None:
                 LOGGER.warning(
-                    "opm_10y: missing strict consecutive FY chain for %s", symbol
+                    "%s: missing strict consecutive FY chain for %s",
+                    self.metric_context,
+                    symbol,
                 )
                 return None
             selected.append(point)
@@ -108,10 +125,14 @@ class OperatingMarginTenYearCalculator:
         if not self._is_recent_as_of(
             selected[0].as_of, max_age_days=MAX_FY_FACT_AGE_DAYS
         ):
-            LOGGER.warning("opm_10y: latest FY point too old for %s", symbol)
+            LOGGER.warning(
+                "%s: latest FY point too old for %s",
+                self.metric_context,
+                symbol,
+            )
             return None
 
-        return OperatingMarginTenYearSnapshot(
+        return OperatingMarginSeriesSnapshot(
             points=tuple(selected),
             as_of=selected[0].as_of,
             currency=None,
@@ -164,7 +185,7 @@ class OperatingMarginTenYearCalculator:
     ) -> tuple[float, str]:
         return normalize_metric_record(
             record,
-            metric_id="opm_10y",
+            metric_id=self.metric_context,
             symbol=symbol,
             input_name=concept,
             expected_currency=resolve_metric_ticker_currency(
@@ -201,7 +222,10 @@ class OperatingMarginTenYearStdMetric:
     def compute(
         self, symbol: str, repo: FinancialFactsRepository
     ) -> Optional[MetricResult]:
-        snapshot = OperatingMarginTenYearCalculator().compute_series(symbol, repo)
+        snapshot = OperatingMarginSeriesCalculator(
+            metric_context=self.id,
+            series_years=TEN_YEAR_SERIES_YEARS,
+        ).compute_series(symbol, repo)
         if snapshot is None:
             return None
 
@@ -229,7 +253,37 @@ class OperatingMarginTenYearMinMetric:
     def compute(
         self, symbol: str, repo: FinancialFactsRepository
     ) -> Optional[MetricResult]:
-        snapshot = OperatingMarginTenYearCalculator().compute_series(symbol, repo)
+        snapshot = OperatingMarginSeriesCalculator(
+            metric_context=self.id,
+            series_years=TEN_YEAR_SERIES_YEARS,
+        ).compute_series(symbol, repo)
+        if snapshot is None:
+            return None
+
+        minimum = min(point.value for point in snapshot.points)
+        return MetricResult(
+            symbol=symbol,
+            metric_id=self.id,
+            value=minimum,
+            as_of=snapshot.as_of,
+            unit_kind="percent",
+        )
+
+
+@dataclass
+class OperatingMarginSevenYearMinMetric:
+    """Compute the minimum FY operating margin over strict latest 7 years."""
+
+    id: str = "opm_7y_min"
+    required_concepts = REQUIRED_CONCEPTS
+
+    def compute(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> Optional[MetricResult]:
+        snapshot = OperatingMarginSeriesCalculator(
+            metric_context=self.id,
+            series_years=SEVEN_YEAR_SERIES_YEARS,
+        ).compute_series(symbol, repo)
         if snapshot is None:
             return None
 
@@ -244,8 +298,9 @@ class OperatingMarginTenYearMinMetric:
 
 
 __all__ = [
-    "OperatingMarginTenYearSnapshot",
-    "OperatingMarginTenYearCalculator",
+    "OperatingMarginSeriesSnapshot",
+    "OperatingMarginSeriesCalculator",
     "OperatingMarginTenYearStdMetric",
     "OperatingMarginTenYearMinMetric",
+    "OperatingMarginSevenYearMinMetric",
 ]
