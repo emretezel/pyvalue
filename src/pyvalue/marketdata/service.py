@@ -5,6 +5,7 @@ Author: Emre Tezel
 
 from __future__ import annotations
 
+from datetime import date
 import logging
 from pathlib import Path
 from typing import Optional, Union
@@ -35,6 +36,12 @@ SHARE_CONCEPTS = [
     "EntityCommonStockSharesOutstanding",
     "CommonStockSharesOutstanding",
 ]
+PRICE_VALIDATION_WINDOW_DAYS = 180
+MAX_UNEXPLAINED_MARKET_VALUE_CHANGE_FACTOR = 50.0
+
+
+class SuspiciousMarketPriceChangeError(ValueError):
+    """Raised when fetched market data implies an implausible value jump."""
 
 
 def latest_share_count(
@@ -100,6 +107,86 @@ class MarketDataService:
                 continue
         return None
 
+    def _latest_share_count(self, symbol: str) -> Optional[float]:
+        shares = latest_share_count(symbol, self.facts_repo)
+        if shares is not None:
+            return shares
+        return self._shares_from_fundamentals(symbol)
+
+    def _validate_price_change(
+        self,
+        symbol: str,
+        *,
+        as_of: str,
+        price: Optional[float],
+        currency: Optional[str],
+        market_cap: Optional[float],
+    ) -> None:
+        if price is None or price <= 0:
+            return
+
+        previous = self.repo.latest_snapshot_record(symbol)
+        if previous is None or previous.price is None or previous.price <= 0:
+            return
+        if previous.currency and currency and previous.currency != currency:
+            return
+
+        try:
+            current_date = date.fromisoformat(as_of)
+            previous_date = date.fromisoformat(previous.as_of)
+        except ValueError:
+            return
+
+        if current_date <= previous_date:
+            return
+        if (current_date - previous_date).days > PRICE_VALIDATION_WINDOW_DAYS:
+            return
+
+        price_ratio = price / previous.price
+        if price_ratio <= 0:
+            return
+
+        current_market_cap = (
+            market_cap if market_cap is not None and market_cap > 0 else None
+        )
+        previous_market_cap = (
+            previous.market_cap
+            if previous.market_cap is not None and previous.market_cap > 0
+            else None
+        )
+
+        basis = "price"
+        if current_market_cap is not None and previous_market_cap is not None:
+            value_ratio = current_market_cap / previous_market_cap
+            basis = "market_cap"
+        else:
+            current_shares = self._latest_share_count(symbol)
+            previous_shares = None
+            if previous_market_cap is not None:
+                previous_shares = previous_market_cap / previous.price
+            if (
+                current_shares is not None
+                and current_shares > 0
+                and previous_shares is not None
+                and previous_shares > 0
+            ):
+                value_ratio = price_ratio * (current_shares / previous_shares)
+                basis = "share_adjusted_market_cap"
+            else:
+                value_ratio = price_ratio
+
+        unexplained_factor = max(value_ratio, 1.0 / value_ratio)
+        if unexplained_factor < MAX_UNEXPLAINED_MARKET_VALUE_CHANGE_FACTOR:
+            return
+
+        raise SuspiciousMarketPriceChangeError(
+            (
+                "suspicious market data for "
+                f"{symbol}: {basis} changed by {unexplained_factor:.2f}x "
+                f"({previous.price} on {previous.as_of} -> {price} on {as_of})"
+            )
+        )
+
     def prepare_price_data(
         self,
         symbol: str,
@@ -132,11 +219,16 @@ class MarketDataService:
             effective_currency = normalized_currency
         market_cap = prepared.market_cap
         if market_cap is None and price is not None:
-            shares = latest_share_count(normalized_symbol, self.facts_repo)
-            if shares is None:
-                shares = self._shares_from_fundamentals(normalized_symbol)
+            shares = self._latest_share_count(normalized_symbol)
             if shares is not None:
                 market_cap = shares * price
+        self._validate_price_change(
+            normalized_symbol,
+            as_of=prepared.as_of,
+            price=price,
+            currency=effective_currency or prepared.currency,
+            market_cap=market_cap,
+        )
         prepared.price = price
         prepared.market_cap = market_cap
         prepared.currency = effective_currency or prepared.currency
@@ -163,4 +255,8 @@ class MarketDataService:
         return prepared
 
 
-__all__ = ["MarketDataService", "latest_share_count"]
+__all__ = [
+    "MarketDataService",
+    "SuspiciousMarketPriceChangeError",
+    "latest_share_count",
+]

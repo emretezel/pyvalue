@@ -40,7 +40,7 @@ from pyvalue.storage import (
     SupportedTickerRepository,
 )
 from pyvalue.universe import Listing
-from pyvalue.marketdata import PriceData
+from pyvalue.marketdata import MarketDataUpdate, PriceData
 
 
 def make_fact(**kwargs):
@@ -2650,6 +2650,98 @@ def test_cmd_update_market_data_stage_retries_missing_bulk_symbol_individually(
     assert calls["symbols"] == ["U099.US"]
     state_repo = MarketDataFetchStateRepository(db_path)
     assert state_repo.fetch("EODHD", "U099.US")["last_status"] == "ok"
+
+
+def test_cmd_update_market_data_stage_marks_bulk_validation_failure_per_symbol(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "stage-market-data-bulk-validation.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[
+            {"Code": f"U{i:03d}", "Exchange": "US", "Type": "Common Stock"}
+            for i in range(100)
+        ],
+    )
+    today = date.today().isoformat()
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+
+        def user_metadata(self):
+            return {
+                "dailyRateLimit": "1000",
+                "apiRequests": "0",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
+
+    class FakeProvider:
+        def __init__(self, api_key: str, session=None):
+            assert api_key == "TOKEN"
+
+        def latest_prices_for_exchange(self, exchange_code: str):
+            return {
+                f"U{i:03d}.US": PriceData(
+                    symbol=f"U{i:03d}.US",
+                    price=10.0 + i,
+                    as_of=today,
+                    volume=100 + i,
+                    currency="USD",
+                )
+                for i in range(100)
+            }
+
+        def latest_price(self, symbol: str):
+            raise AssertionError("symbol fallback should not run in this test")
+
+    def fake_build_market_data_update(service, ticker, data):
+        if ticker.symbol == "U099.US":
+            raise ValueError("suspicious market data for U099.US")
+        return MarketDataUpdate(
+            security_id=ticker.security_id,
+            symbol=ticker.symbol,
+            as_of=data.as_of,
+            price=data.price,
+            volume=data.volume,
+            market_cap=data.market_cap,
+            currency=data.currency,
+            source_provider="EODHD",
+        )
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(cli, "EODHDProvider", FakeProvider)
+    monkeypatch.setattr(cli, "_build_market_data_update", fake_build_market_data_update)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_api_key="TOKEN",
+            eodhd_market_data_daily_buffer_calls=0,
+            eodhd_market_data_requests_per_minute=950,
+        ),
+    )
+
+    rc = cli.cmd_update_market_data_stage(
+        provider="EODHD",
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=None,
+        all_supported=True,
+        rate=None,
+        max_symbols=None,
+        max_age_days=7,
+        respect_backoff=True,
+    )
+
+    assert rc == 0
+    state_repo = MarketDataFetchStateRepository(db_path)
+    assert state_repo.fetch("EODHD", "U098.US")["last_status"] == "ok"
+    failed = state_repo.fetch("EODHD", "U099.US")
+    assert failed["last_status"] == "error"
+    assert failed["last_error"] == "suspicious market data for U099.US"
 
 
 def test_cmd_update_market_data_stage_interrupts_cleanly_in_symbol_phase(

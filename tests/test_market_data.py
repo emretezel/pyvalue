@@ -3,9 +3,14 @@
 Author: Emre Tezel
 """
 
+import pytest
+
 from pyvalue.marketdata.eodhd import EODHDProvider
 from pyvalue.marketdata.base import PriceData
-from pyvalue.marketdata.service import MarketDataService
+from pyvalue.marketdata.service import (
+    MarketDataService,
+    SuspiciousMarketPriceChangeError,
+)
 from pyvalue.storage import (
     FactRecord,
     FinancialFactsRepository,
@@ -261,6 +266,127 @@ def test_market_data_service_uses_fundamentals_shares(tmp_path):
     snapshot = repo.latest_snapshot("SHEL.LSE")
     assert snapshot is not None
     assert snapshot.market_cap == 1000.0
+
+
+def test_market_data_service_rejects_unexplained_price_jump(tmp_path):
+    class DummyProvider:
+        def latest_price(self, symbol):
+            return PriceData(
+                symbol=symbol,
+                price=5298.0,
+                as_of="2026-03-20",
+                volume=0,
+                currency="USD",
+            )
+
+    class DummyConfig:
+        eodhd_api_key = None
+
+    db_path = tmp_path / "suspicious-price.db"
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    fact_repo.replace_facts(
+        "ATXS.US",
+        [
+            FactRecord(
+                symbol="ATXS.US",
+                cik="CIK0000000001",
+                concept="CommonStockSharesOutstanding",
+                fiscal_period="FY",
+                end_date="2025-12-31",
+                unit="shares",
+                value=58_005_300.0,
+                accn=None,
+                filed=None,
+                frame="CY2025",
+                start_date=None,
+            )
+        ],
+    )
+    market_repo = MarketDataRepository(db_path)
+    market_repo.initialize_schema()
+    market_repo.upsert_price(
+        "ATXS.US",
+        "2025-12-22",
+        12.92,
+        market_cap=749_428_631.04,
+        currency="USD",
+    )
+
+    service = MarketDataService(
+        db_path=db_path, provider=DummyProvider(), config=DummyConfig()
+    )
+
+    with pytest.raises(
+        SuspiciousMarketPriceChangeError,
+        match=r"suspicious market data for ATXS\.US",
+    ):
+        service.refresh_symbol("ATXS.US")
+
+    latest_snapshot = market_repo.latest_snapshot("ATXS.US")
+    assert latest_snapshot is not None
+    assert latest_snapshot.as_of == "2025-12-22"
+    assert latest_snapshot.price == 12.92
+    assert latest_snapshot.market_cap == 749_428_631.04
+
+
+def test_market_data_service_allows_split_like_price_change_when_value_is_stable(
+    tmp_path,
+):
+    class DummyProvider:
+        def latest_price(self, symbol):
+            return PriceData(
+                symbol=symbol,
+                price=100.0,
+                as_of="2026-03-20",
+                volume=0,
+                currency="USD",
+            )
+
+    class DummyConfig:
+        eodhd_api_key = None
+
+    db_path = tmp_path / "split-like-price.db"
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    fact_repo.replace_facts(
+        "SPLT.US",
+        [
+            FactRecord(
+                symbol="SPLT.US",
+                cik="CIK0000000002",
+                concept="CommonStockSharesOutstanding",
+                fiscal_period="FY",
+                end_date="2025-12-31",
+                unit="shares",
+                value=1_000_000.0,
+                accn=None,
+                filed=None,
+                frame="CY2025",
+                start_date=None,
+            )
+        ],
+    )
+    market_repo = MarketDataRepository(db_path)
+    market_repo.initialize_schema()
+    market_repo.upsert_price(
+        "SPLT.US",
+        "2026-01-15",
+        1.0,
+        market_cap=100_000_000.0,
+        currency="USD",
+    )
+
+    service = MarketDataService(
+        db_path=db_path, provider=DummyProvider(), config=DummyConfig()
+    )
+    service.refresh_symbol("SPLT.US")
+
+    latest_snapshot = market_repo.latest_snapshot("SPLT.US")
+    assert latest_snapshot is not None
+    assert latest_snapshot.as_of == "2026-03-20"
+    assert latest_snapshot.price == 100.0
+    assert latest_snapshot.market_cap == 100_000_000.0
 
 
 def test_eodhd_provider_parses_bulk_exchange_response():

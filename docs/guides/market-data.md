@@ -54,6 +54,8 @@ Important behavior:
 - the command selects missing symbols first, then the oldest stale symbols
 - large exchange and all-supported runs can mix exchange-bulk fetches with
   per-symbol fallbacks
+- suspicious price jumps are rejected before they are written to `market_data`;
+  the symbol is recorded as a fetch failure in `market_data_fetch_state`
 - it uses the EODHD daily quota and stops cleanly when the remaining budget is exhausted
 - rerun it the next day to continue from the remaining stale or missing symbols
 
@@ -80,6 +82,9 @@ The report defaults to the same 30-day freshness window and shows:
 
 `Stored` means a snapshot exists in the DB. `Fresh` means the symbol currently
 counts as complete for the selected freshness window.
+
+Rejected price anomalies show up in `Recent failures` with the rejection
+message, so they are visible in the same place as API or network failures.
 
 ## Recalculate Market Cap
 

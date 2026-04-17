@@ -176,6 +176,8 @@ Notes:
 - large exchange and all-supported runs may use exchange-bulk fetches and then
   fall back to individual symbols when needed
 - progress across multiple days is tracked through `market_data_fetch_state`
+- suspicious price jumps are rejected before persistence and are stored as
+  symbol-level fetch failures in `market_data_fetch_state`
 
 ### `report-market-data-progress`
 
@@ -192,6 +194,8 @@ Notes:
 
 - `Stored` means a market-data snapshot exists in the database
 - `Fresh` means the latest snapshot satisfies the selected freshness window
+- `Recent failures` includes rejected price anomalies as well as API/network
+  failures
 
 ### `recalc-market-cap`
 

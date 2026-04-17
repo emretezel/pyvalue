@@ -2805,10 +2805,20 @@ def cmd_update_market_data_stage(
                             )
                             failed += 1
                         continue
-                    pending_updates.append(
-                        _build_market_data_update(service, ticker, bulk_data)
-                    )
-                    stored_for_exchange += 1
+                    try:
+                        pending_updates.append(
+                            _build_market_data_update(service, ticker, bulk_data)
+                        )
+                        stored_for_exchange += 1
+                    except Exception as exc:
+                        LOGGER.error(
+                            "Failed to prepare market data for %s from bulk %s: %s",
+                            ticker.symbol,
+                            task.exchange_code,
+                            exc,
+                        )
+                        pending_failures.append((ticker.symbol, str(exc)))
+                        failed += 1
                 processed += stored_for_exchange
                 maybe_flush(force=True)
                 print(
