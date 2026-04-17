@@ -172,3 +172,9 @@ Use this file to capture recurring mistake patterns after user corrections so fu
 - Recurring pattern: When creating a net-new artifact, inspecting nearby existing artifacts too early can bias the design toward adaptation when the user wants a first-principles solution.
 - Preventive rule: For new skills, designs, or workflows, start from the user’s requirements alone and only inspect existing neighboring artifacts if the user explicitly asks for comparison, reuse, or extension.
 - Resulting action: Ignored the neighboring performance skill for the actual design, rewrote the new skill from first principles, and recorded the rule here.
+
+- Date: 2026-04-17
+- User correction: The installed `pyvalue-screen-failure-audit` skill should cover all failed exchanges with up to 50 symbols per exchange, run safely from `~/.codex/skills/...` without repo-relative path failures, and not leave a duplicate repo-side copy when the installed skill is the source of truth.
+- Recurring pattern: Narrowing a failure audit to one inferred exchange or updating only one copy of a duplicated skill can silently break the intended scope and leave skill behavior drifting between locations.
+- Preventive rule: For installed repo-specific skills, do not infer a single exchange from an example symbol when the requested audit should span all failed exchanges; derive the exchange list from live status rows or ask. When the installed skill is the source of truth, verify execution from the installed directory and remove duplicate copies in the repo in the same task.
+- Resulting action: Updated the installed `pyvalue-screen-failure-audit` bundle to derive failed exchanges and sample per exchange from `metric_compute_status`, verified execution from `~/.codex/skills/pyvalue-screen-failure-audit`, and removed the duplicate repo-side skill directory.
