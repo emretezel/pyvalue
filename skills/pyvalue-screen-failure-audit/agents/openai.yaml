@@ -1,0 +1,4 @@
+interface:
+  display_name: "Pyvalue Screen Failure Audit"
+  short_description: "Audit EODHD screen failure root causes"
+  default_prompt: "Use $pyvalue-screen-failure-audit to investigate metric opm_10y_min with reason missing FY EBIT history for exchange code LSE."

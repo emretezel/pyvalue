@@ -20,6 +20,7 @@ Main repo areas:
 - `data/`: local database, logs, and output artifacts
 - `private/`: local credentials and config
 - `docs/`: project documentation
+- `skills/`: repo-local Codex skills and helper assets
 
 Main application subsystems in `src/pyvalue/`:
 - `universe/`
