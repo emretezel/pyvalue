@@ -24,7 +24,8 @@ SHARE_COUNT_CONCEPT = "CommonStockSharesOutstanding"
 
 QUARTERLY_PERIODS = {"Q1", "Q2", "Q3", "Q4"}
 FY_PERIODS = {"FY"}
-EXACT_YEARS = 10
+FIVE_YEAR_EXACT_YEARS = 5
+TEN_YEAR_EXACT_YEARS = 10
 
 REQUIRED_CONCEPTS = (SHARE_COUNT_CONCEPT,)
 
@@ -38,22 +39,26 @@ class _ShareCountPoint:
 
 
 @dataclass(frozen=True)
-class ShareCountTenYearSnapshot:
+class ShareCountSnapshot:
     latest: _ShareCountPoint
     prior: _ShareCountPoint
     as_of: str
 
 
+# Backward-compatible alias for any external imports using the old name.
+ShareCountTenYearSnapshot = ShareCountSnapshot
+
+
 class ShareCountChangeCalculator:
-    """Resolve the latest exact 10-year share-count comparison pair."""
+    """Resolve the latest exact-year share-count comparison pair."""
 
     def compute_pair(
         self, symbol: str, repo: FinancialFactsRepository
-    ) -> Optional[ShareCountTenYearSnapshot]:
+    ) -> Optional[ShareCountSnapshot]:
         return self.compute_pair_for_years(
             symbol,
             repo,
-            exact_years=EXACT_YEARS,
+            exact_years=TEN_YEAR_EXACT_YEARS,
             context="share_count_change",
         )
 
@@ -64,7 +69,7 @@ class ShareCountChangeCalculator:
         *,
         exact_years: int,
         context: str,
-    ) -> Optional[ShareCountTenYearSnapshot]:
+    ) -> Optional[ShareCountSnapshot]:
         records = repo.facts_for_concept(symbol, SHARE_COUNT_CONCEPT)
         if not records:
             LOGGER.warning(
@@ -113,7 +118,7 @@ class ShareCountChangeCalculator:
         exact_years: int,
         context: str,
         logger_context: str,
-    ) -> Optional[ShareCountTenYearSnapshot]:
+    ) -> Optional[ShareCountSnapshot]:
         if not records:
             return None
 
@@ -169,7 +174,7 @@ class ShareCountChangeCalculator:
             )
             return None
 
-        return ShareCountTenYearSnapshot(
+        return ShareCountSnapshot(
             latest=latest,
             prior=prior,
             as_of=latest.as_of,
@@ -214,6 +219,50 @@ class ShareCountChangeCalculator:
         return int(prefix)
 
 
+def _compute_share_count_cagr(
+    *,
+    metric_id: str,
+    symbol: str,
+    repo: FinancialFactsRepository,
+    exact_years: int,
+) -> Optional[MetricResult]:
+    snapshot = ShareCountChangeCalculator().compute_pair_for_years(
+        symbol,
+        repo,
+        exact_years=exact_years,
+        context=metric_id,
+    )
+    if snapshot is None:
+        return None
+
+    ratio = snapshot.latest.shares / snapshot.prior.shares
+    value = ratio ** (1.0 / exact_years) - 1.0
+    return MetricResult(
+        symbol=symbol,
+        metric_id=metric_id,
+        value=value,
+        as_of=snapshot.as_of,
+    )
+
+
+@dataclass
+class ShareCountCAGR5YMetric:
+    """Compute 5-year CAGR of outstanding shares."""
+
+    id: str = "share_count_cagr_5y"
+    required_concepts = REQUIRED_CONCEPTS
+
+    def compute(
+        self, symbol: str, repo: FinancialFactsRepository
+    ) -> Optional[MetricResult]:
+        return _compute_share_count_cagr(
+            metric_id=self.id,
+            symbol=symbol,
+            repo=repo,
+            exact_years=FIVE_YEAR_EXACT_YEARS,
+        )
+
+
 @dataclass
 class ShareCountCAGR10YMetric:
     """Compute 10-year CAGR of outstanding shares."""
@@ -224,17 +273,11 @@ class ShareCountCAGR10YMetric:
     def compute(
         self, symbol: str, repo: FinancialFactsRepository
     ) -> Optional[MetricResult]:
-        snapshot = ShareCountChangeCalculator().compute_pair(symbol, repo)
-        if snapshot is None:
-            return None
-
-        ratio = snapshot.latest.shares / snapshot.prior.shares
-        value = ratio ** (1.0 / EXACT_YEARS) - 1.0
-        return MetricResult(
-            symbol=symbol,
+        return _compute_share_count_cagr(
             metric_id=self.id,
-            value=value,
-            as_of=snapshot.as_of,
+            symbol=symbol,
+            repo=repo,
+            exact_years=TEN_YEAR_EXACT_YEARS,
         )
 
 
@@ -262,8 +305,10 @@ class Shares10YPctChangeMetric:
 
 
 __all__ = [
+    "ShareCountSnapshot",
     "ShareCountTenYearSnapshot",
     "ShareCountChangeCalculator",
+    "ShareCountCAGR5YMetric",
     "ShareCountCAGR10YMetric",
     "Shares10YPctChangeMetric",
 ]

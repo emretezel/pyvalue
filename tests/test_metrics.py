@@ -11,7 +11,7 @@ import pytest
 from pyvalue.currency import normalize_currency_code
 from pyvalue.metrics import REGISTRY
 from pyvalue.metrics.accruals_ratio import AccrualsRatioMetric
-from pyvalue.metrics.base import MetricCurrencyInvariantError
+from pyvalue.metrics.base import MetricCurrencyInvariantError, metadata_for_metric
 from pyvalue.metrics.buyback_yield import NetBuybackYieldMetric
 from pyvalue.metrics.cash_conversion import (
     CFOToNITenYearMedianMetric,
@@ -109,6 +109,7 @@ from pyvalue.metrics.roic_ttm import RoicTTMMetric
 from pyvalue.metrics.roe_greenblatt import ROEGreenblattMetric
 from pyvalue.metrics.return_on_invested_capital import ReturnOnInvestedCapitalMetric
 from pyvalue.metrics.share_count_change import (
+    ShareCountCAGR5YMetric,
     ShareCountCAGR10YMetric,
     Shares10YPctChangeMetric,
 )
@@ -10545,6 +10546,34 @@ def test_share_count_change_metrics_prefer_quarterly_path():
     assert round(pct_change.value, 10) == -0.2
 
 
+def test_share_count_cagr_5y_metric_prefers_quarterly_path():
+    symbol = "AAPL.US"
+    today = date.today()
+    q_latest = (today - timedelta(days=20)).isoformat()
+    latest_year = int(q_latest[:4])
+    q_prior = f"{latest_year - 5}-03-31"
+    fy_latest = f"{latest_year}-09-30"
+    fy_prior = f"{latest_year - 5}-09-30"
+
+    repo = _OwnerEarningsRepo(
+        _build_share_count_records(
+            symbol=symbol,
+            points=[
+                ("Q4", q_latest, 80.0),
+                ("FY", fy_latest, 140.0),
+                ("FY", fy_prior, 100.0),
+                ("Q4", q_prior, 100.0),
+            ],
+        )
+    )
+
+    result = ShareCountCAGR5YMetric().compute(symbol, repo)
+
+    assert result is not None
+    assert result.as_of == q_latest
+    assert round(result.value, 10) == round((80.0 / 100.0) ** 0.2 - 1.0, 10)
+
+
 def test_share_count_change_metrics_fallback_to_fy_path():
     symbol = "AAPL.US"
     today = date.today()
@@ -10575,6 +10604,32 @@ def test_share_count_change_metrics_fallback_to_fy_path():
     assert round(pct_change.value, 10) == 0.5
 
 
+def test_share_count_cagr_5y_metric_fallbacks_to_fy_path():
+    symbol = "AAPL.US"
+    today = date.today()
+    q_latest = (today - timedelta(days=20)).isoformat()
+    latest_year = int(q_latest[:4])
+    fy_latest = f"{latest_year}-09-30"
+    fy_prior = f"{latest_year - 5}-09-30"
+
+    repo = _OwnerEarningsRepo(
+        _build_share_count_records(
+            symbol=symbol,
+            points=[
+                ("Q4", q_latest, 90.0),
+                ("FY", fy_latest, 150.0),
+                ("FY", fy_prior, 100.0),
+            ],
+        )
+    )
+
+    result = ShareCountCAGR5YMetric().compute(symbol, repo)
+
+    assert result is not None
+    assert result.as_of == fy_latest
+    assert round(result.value, 10) == round((150.0 / 100.0) ** 0.2 - 1.0, 10)
+
+
 def test_share_count_change_metrics_require_exact_10_year_match():
     symbol = "AAPL.US"
     today = date.today()
@@ -10594,6 +10649,26 @@ def test_share_count_change_metrics_require_exact_10_year_match():
 
     assert ShareCountCAGR10YMetric().compute(symbol, repo) is None
     assert Shares10YPctChangeMetric().compute(symbol, repo) is None
+
+
+def test_share_count_cagr_5y_metric_requires_exact_5_year_match():
+    symbol = "AAPL.US"
+    today = date.today()
+    q_latest = (today - timedelta(days=20)).isoformat()
+    latest_year = int(q_latest[:4])
+
+    repo = _OwnerEarningsRepo(
+        _build_share_count_records(
+            symbol=symbol,
+            points=[
+                ("Q4", q_latest, 80.0),
+                ("FY", f"{latest_year}-09-30", 150.0),
+                ("FY", f"{latest_year - 4}-09-30", 100.0),
+            ],
+        )
+    )
+
+    assert ShareCountCAGR5YMetric().compute(symbol, repo) is None
 
 
 def test_share_count_change_metrics_require_positive_share_counts():
@@ -10617,6 +10692,26 @@ def test_share_count_change_metrics_require_positive_share_counts():
     assert Shares10YPctChangeMetric().compute(symbol, repo) is None
 
 
+def test_share_count_cagr_5y_metric_requires_positive_share_counts():
+    symbol = "AAPL.US"
+    today = date.today()
+    q_latest = (today - timedelta(days=20)).isoformat()
+    latest_year = int(q_latest[:4])
+
+    repo = _OwnerEarningsRepo(
+        _build_share_count_records(
+            symbol=symbol,
+            points=[
+                ("Q4", q_latest, 80.0),
+                ("FY", f"{latest_year}-09-30", 150.0),
+                ("FY", f"{latest_year - 5}-09-30", 0.0),
+            ],
+        )
+    )
+
+    assert ShareCountCAGR5YMetric().compute(symbol, repo) is None
+
+
 def test_share_count_change_metrics_reject_stale_latest_quarter_without_fallback():
     symbol = "AAPL.US"
     stale_latest = (date.today() - timedelta(days=MAX_FACT_AGE_DAYS + 10)).isoformat()
@@ -10634,6 +10729,24 @@ def test_share_count_change_metrics_reject_stale_latest_quarter_without_fallback
 
     assert ShareCountCAGR10YMetric().compute(symbol, repo) is None
     assert Shares10YPctChangeMetric().compute(symbol, repo) is None
+
+
+def test_share_count_cagr_5y_metric_rejects_stale_latest_quarter_without_fallback():
+    symbol = "AAPL.US"
+    stale_latest = (date.today() - timedelta(days=MAX_FACT_AGE_DAYS + 10)).isoformat()
+    latest_year = int(stale_latest[:4])
+
+    repo = _OwnerEarningsRepo(
+        _build_share_count_records(
+            symbol=symbol,
+            points=[
+                ("Q4", stale_latest, 100.0),
+                ("Q4", f"{latest_year - 5}-03-31", 90.0),
+            ],
+        )
+    )
+
+    assert ShareCountCAGR5YMetric().compute(symbol, repo) is None
 
 
 def test_share_count_change_metrics_reject_stale_latest_fy_fallback():
@@ -10656,6 +10769,25 @@ def test_share_count_change_metrics_reject_stale_latest_fy_fallback():
     assert Shares10YPctChangeMetric().compute(symbol, repo) is None
 
 
+def test_share_count_cagr_5y_metric_rejects_stale_latest_fy_fallback():
+    symbol = "AAPL.US"
+    latest_fy = (date.today() - timedelta(days=MAX_FY_FACT_AGE_DAYS + 10)).isoformat()
+    latest_year = int(latest_fy[:4])
+
+    repo = _OwnerEarningsRepo(
+        _build_share_count_records(
+            symbol=symbol,
+            points=[
+                ("Q4", (date.today() - timedelta(days=20)).isoformat(), 100.0),
+                ("FY", latest_fy, 150.0),
+                ("FY", f"{latest_year - 5}-09-30", 90.0),
+            ],
+        )
+    )
+
+    assert ShareCountCAGR5YMetric().compute(symbol, repo) is None
+
+
 def test_share_count_change_metrics_ignore_weighted_average_share_concepts():
     symbol = "AAPL.US"
     today = date.today()
@@ -10673,6 +10805,11 @@ def test_share_count_change_metrics_ignore_weighted_average_share_concepts():
 
     assert ShareCountCAGR10YMetric().compute(symbol, repo) is None
     assert Shares10YPctChangeMetric().compute(symbol, repo) is None
+    assert ShareCountCAGR5YMetric().compute(symbol, repo) is None
+
+
+def test_share_count_cagr_5y_metric_declares_percent_metadata():
+    assert metadata_for_metric("share_count_cagr_5y").unit_kind == "percent"
 
 
 def test_net_buyback_yield_metric_computes_from_sale_purchase_ttm():
@@ -12334,6 +12471,7 @@ def test_registry_contains_all_ids():
     assert "ni_loss_years_10y" in REGISTRY
     assert "fcf_neg_years_10y" in REGISTRY
     assert "accruals_ratio" in REGISTRY
+    assert "share_count_cagr_5y" in REGISTRY
     assert "share_count_cagr_10y" in REGISTRY
     assert "shares_10y_pct_change" in REGISTRY
     assert "net_buyback_yield" in REGISTRY

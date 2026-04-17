@@ -308,7 +308,7 @@ def test_load_screen_parses_quality_reasonable_price_example():
     assert definition.criteria[2].left.metric == "net_debt_to_ebitda"
     assert definition.criteria[3].left.metric == "cfo_to_ni_ttm"
     assert definition.criteria[4].left.metric == "oey_ev_norm"
-    assert definition.criteria[5].left.metric == "share_count_cagr_10y"
+    assert definition.criteria[5].left.metric == "share_count_cagr_5y"
     assert definition.ranking is not None
     assert definition.ranking.peer_group == "sector"
     assert definition.ranking.min_sector_peers == 10
@@ -340,6 +340,6 @@ def test_ranking_metric_ids_preserve_first_seen_order():
         "opm_10y_std",
         "net_debt_to_ebitda",
         "interest_coverage",
-        "share_count_cagr_10y",
+        "share_count_cagr_5y",
         "net_buyback_yield",
     ]

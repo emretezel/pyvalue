@@ -69,7 +69,11 @@ from .operating_margin_stability import (
     OperatingMarginTenYearMinMetric,
     OperatingMarginTenYearStdMetric,
 )
-from .share_count_change import ShareCountCAGR10YMetric, Shares10YPctChangeMetric
+from .share_count_change import (
+    ShareCountCAGR5YMetric,
+    ShareCountCAGR10YMetric,
+    Shares10YPctChangeMetric,
+)
 from .buyback_yield import NetBuybackYieldMetric
 from .enterprise_value_ratios import (
     EBITYieldEVMetric,
@@ -131,6 +135,7 @@ REGISTRY = {
     OperatingMarginTenYearStdMetric.id: OperatingMarginTenYearStdMetric,
     OperatingMarginTenYearMinMetric.id: OperatingMarginTenYearMinMetric,
     OperatingMarginSevenYearMinMetric.id: OperatingMarginSevenYearMinMetric,
+    ShareCountCAGR5YMetric.id: ShareCountCAGR5YMetric,
     ShareCountCAGR10YMetric.id: ShareCountCAGR10YMetric,
     Shares10YPctChangeMetric.id: Shares10YPctChangeMetric,
     NetBuybackYieldMetric.id: NetBuybackYieldMetric,
@@ -218,6 +223,7 @@ __all__ = [
     "OperatingMarginTenYearStdMetric",
     "OperatingMarginTenYearMinMetric",
     "OperatingMarginSevenYearMinMetric",
+    "ShareCountCAGR5YMetric",
     "ShareCountCAGR10YMetric",
     "Shares10YPctChangeMetric",
     "NetBuybackYieldMetric",

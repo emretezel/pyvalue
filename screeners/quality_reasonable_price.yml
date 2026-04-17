@@ -34,9 +34,9 @@ criteria:
     right:
       value: 0.05
 
-  - name: "Share count CAGR (10Y) <= +1%"
+  - name: "Share count CAGR (5Y) <= +1%"
     left:
-      metric: share_count_cagr_10y
+      metric: share_count_cagr_5y
     operator: "<="
     right:
       value: 0.01
@@ -74,7 +74,7 @@ ranking:
       weight: 0.05
       direction: higher
       cap: 20
-    - metric: share_count_cagr_10y
+    - metric: share_count_cagr_5y
       weight: 0.05
       direction: lower
     - metric: net_buyback_yield

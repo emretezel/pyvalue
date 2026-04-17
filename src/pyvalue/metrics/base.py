@@ -59,6 +59,7 @@ _METRIC_METADATA: dict[str, MetricMetadata] = {
     "opm_10y_std": MetricMetadata("percent"),
     "opm_10y_min": MetricMetadata("percent"),
     "opm_7y_min": MetricMetadata("percent"),
+    "share_count_cagr_5y": MetricMetadata("percent"),
     "share_count_cagr_10y": MetricMetadata("percent"),
     "shares_10y_pct_change": MetricMetadata("percent"),
     "net_buyback_yield": MetricMetadata("percent"),
