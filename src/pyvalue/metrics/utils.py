@@ -15,8 +15,8 @@ from pyvalue.money import normalize_money_value
 from pyvalue.storage import FactRecord
 
 # Default freshness windows (days)
-MAX_FACT_AGE_DAYS = 365
-MAX_FY_FACT_AGE_DAYS = 366
+MAX_FACT_AGE_DAYS = 400
+MAX_FY_FACT_AGE_DAYS = 400
 
 LOGGER = logging.getLogger(__name__)
 

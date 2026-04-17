@@ -63,6 +63,7 @@ from pyvalue.metrics.base import (
     consume_metric_currency_invariant_error,
     metadata_for_metric,
 )
+from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS
 from pyvalue.normalization import EODHDFactsNormalizer, SECFactsNormalizer
 from pyvalue.ranking import compute_screen_ranking
 from pyvalue.reporting import MetricCoverage, compute_fact_coverage
@@ -1715,7 +1716,7 @@ def build_parser() -> argparse.ArgumentParser:
     fact_report.add_argument(
         "--max-age-days",
         type=int,
-        default=30,
+        default=MAX_FACT_AGE_DAYS,
         help="Fact freshness window in days (default: %(default)s)",
     )
     fact_report.add_argument(

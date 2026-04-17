@@ -6,6 +6,7 @@ Author: Emre Tezel
 from datetime import date, timedelta
 
 from pyvalue.cli import cmd_report_fact_freshness
+from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS
 from pyvalue.metrics.working_capital import WorkingCapitalMetric
 from pyvalue.reporting import compute_fact_coverage
 from pyvalue.storage import (
@@ -32,7 +33,7 @@ def _seed_universe(db_path):
 def _seed_facts(repo: FinancialFactsRepository):
     today = date.today()
     fresh_date = today.isoformat()
-    stale_date = (today - timedelta(days=400)).isoformat()
+    stale_date = (today - timedelta(days=MAX_FACT_AGE_DAYS + 1)).isoformat()
     repo.replace_facts(
         "AAA.US",
         [
@@ -77,7 +78,9 @@ def test_compute_fact_coverage_counts_missing_and_stale(tmp_path):
     _seed_facts(fact_repo)
 
     report = compute_fact_coverage(
-        fact_repo, ["AAA.US", "BBB.US"], [WorkingCapitalMetric], max_age_days=365
+        fact_repo,
+        ["AAA.US", "BBB.US"],
+        [WorkingCapitalMetric],
     )
 
     assert len(report) == 1
@@ -105,7 +108,7 @@ def test_cmd_report_fact_freshness_outputs_counts(tmp_path, capsys):
         exchange_codes=["US"],
         all_supported=False,
         metric_ids=["working_capital"],
-        max_age_days=365,
+        max_age_days=MAX_FACT_AGE_DAYS,
         output_csv=None,
         show_all=True,
     )
@@ -146,9 +149,7 @@ def test_fact_report_counts_assets_current_from_components(tmp_path):
         ],
     )
 
-    report = compute_fact_coverage(
-        fact_repo, ["AAA.US"], [WorkingCapitalMetric], max_age_days=365
-    )
+    report = compute_fact_coverage(fact_repo, ["AAA.US"], [WorkingCapitalMetric])
     entry = report[0]
     coverage = {c.concept: c for c in entry.concepts}
     assert coverage["AssetsCurrent"].missing == 1
@@ -192,9 +193,7 @@ def test_fact_report_counts_liabilities_current_from_components(tmp_path):
         ],
     )
 
-    report = compute_fact_coverage(
-        fact_repo, ["AAA.US"], [WorkingCapitalMetric], max_age_days=365
-    )
+    report = compute_fact_coverage(fact_repo, ["AAA.US"], [WorkingCapitalMetric])
     entry = report[0]
     coverage = {c.concept: c for c in entry.concepts}
     assert coverage["LiabilitiesCurrent"].missing == 1

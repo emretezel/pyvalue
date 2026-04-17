@@ -21,6 +21,7 @@ from pyvalue.currency import normalize_currency_code
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics import REGISTRY
 from pyvalue.metrics.base import MetricCurrencyInvariantError, MetricResult
+from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS
 from pyvalue.storage import (
     EntityMetadataRepository,
     FinancialFactsRefreshStateRepository,
@@ -738,7 +739,7 @@ def test_build_parser_report_fact_freshness_defaults_max_age_days():
     )
 
     assert args.command == "report-fact-freshness"
-    assert args.max_age_days == 30
+    assert args.max_age_days == MAX_FACT_AGE_DAYS
 
 
 def test_cmd_ingest_fundamentals_sec(monkeypatch, tmp_path):

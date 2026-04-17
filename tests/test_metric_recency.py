@@ -9,6 +9,7 @@ from pyvalue.metrics.eps_quarterly import EarningsPerShareTTM
 from pyvalue.metrics.eps_average import EPSAverageSixYearMetric
 from pyvalue.metrics.long_term_debt import LongTermDebtMetric
 from pyvalue.metrics.roc_greenblatt import ROCGreenblattMetric
+from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS
 from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
 
 
@@ -21,7 +22,7 @@ def _store_market_currency(db_path, symbol: str, as_of: str, currency: str = "US
 def test_metric_skips_when_latest_fact_is_stale(tmp_path):
     repo = FinancialFactsRepository(tmp_path / "facts.db")
     repo.initialize_schema()
-    stale_date = (date.today() - timedelta(days=400)).isoformat()
+    stale_date = (date.today() - timedelta(days=MAX_FACT_AGE_DAYS + 1)).isoformat()
     repo.replace_facts(
         "AAPL.US",
         [
@@ -77,13 +78,21 @@ def test_ttm_metric_skips_when_latest_quarter_is_stale(tmp_path):
     repo.initialize_schema()
     today = date.today()
     records = []
-    for idx, months_ago in enumerate((13, 15, 16, 17), start=1):
+    for idx, days_ago in enumerate(
+        (
+            MAX_FACT_AGE_DAYS + 10,
+            MAX_FACT_AGE_DAYS + 70,
+            MAX_FACT_AGE_DAYS + 160,
+            MAX_FACT_AGE_DAYS + 250,
+        ),
+        start=1,
+    ):
         records.append(
             FactRecord(
                 symbol="AAPL.US",
                 concept="EarningsPerShare",
                 fiscal_period=f"Q{idx}",
-                end_date=(today - timedelta(days=months_ago * 30)).isoformat(),
+                end_date=(today - timedelta(days=days_ago)).isoformat(),
                 unit="USD",
                 value=float(idx),
             )
@@ -92,7 +101,7 @@ def test_ttm_metric_skips_when_latest_quarter_is_stale(tmp_path):
     _store_market_currency(
         tmp_path / "stale_quarters.db",
         "AAPL.US",
-        (today - timedelta(days=390)).isoformat(),
+        (today - timedelta(days=MAX_FACT_AGE_DAYS + 10)).isoformat(),
     )
 
     metric = EarningsPerShareTTM()

@@ -27,7 +27,8 @@ Default database: `data/pyvalue.db`
 
 Default CLI behavior:
 - commands that accept `--provider` default to `EODHD`
-- commands that accept `--max-age-days` default to `30`
+- fundamentals and market-data commands that accept `--max-age-days` default to `30`
+- metric fact freshness checks and `report-fact-freshness --max-age-days` default to `400`
 - multi-symbol EODHD fundamentals ingestion defaults to `950 req/min` and runs
   through concurrent fetch workers with batched SQLite writes
 

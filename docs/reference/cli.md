@@ -272,7 +272,7 @@ Key options:
 - optional scope selector: `--symbols`, `--exchange-codes`, or
   `--all-supported` (defaults to the full supported universe)
 - `--metrics <metric-ids...>`
-- `--max-age-days <int>` default `30`
+- `--max-age-days <int>` default `400`
 - `--output-csv <path>`
 - `--show-all`
 - `--database <path>`
