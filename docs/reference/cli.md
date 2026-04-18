@@ -371,8 +371,16 @@ Notes:
 - when the scope is a single symbol, output includes entity details and
   criterion-by-criterion pass/fail rows
 - when the scope contains multiple symbols, output lists only passing symbols
+- the multi-symbol console view is a compact preview with one passing symbol per
+  row, a truncated description, and ranking columns when present
+- large passing sets are previewed in the console and the command tells you how
+  to save or inspect the full result set
+- `--output-csv` writes a row-oriented file with one passing symbol per row,
+  base columns such as `symbol`, `entity`, `description`, `price`, and
+  `price_currency`, then ranking columns and one column per criterion
 - if the screen YAML defines a `ranking` block, multi-symbol output also adds
-  ranking rows such as `qarp_rank` and `qarp_score`, and sorts passing symbols
+  ranking columns such as `qarp_rank` and `qarp_score`, and sorts passing
+  symbols
   by the configured ranking rules
 - monetary and per-share comparisons apply FX only where needed; ratio-like
   metrics are compared directly

@@ -7420,13 +7420,15 @@ criteria:
     )
     assert rc == 0
     output = capsys.readouterr().out
+    assert "Passing symbols: 1" in output
     assert "AAA.US" in output
     assert "BBB.US" not in output
     csv_contents = csv_path.read_text().strip().splitlines()
-    assert csv_contents[0] == "Criterion,AAA.US"
-    assert csv_contents[1].startswith("Entity,AAA Inc")
-    assert csv_contents[2].startswith("Description,AAA description")
-    assert csv_contents[3] == "Price,N/A"
+    assert (
+        csv_contents[0]
+        == "symbol,entity,description,price,price_currency,Working capital minimum"
+    )
+    assert csv_contents[1] == "AAA.US,AAA Inc,AAA description,N/A,N/A,100"
 
 
 def test_cmd_run_screen_bulk_with_exchange(tmp_path, capsys):
@@ -7478,13 +7480,15 @@ criteria:
     )
     assert rc == 0
     output = capsys.readouterr().out
+    assert "Passing symbols: 1" in output
     assert "AAA.LSE" in output
     assert "BBB.US" not in output
     csv_contents = csv_path.read_text().strip().splitlines()
-    assert csv_contents[0] == "Criterion,AAA.LSE"
-    assert csv_contents[1].startswith("Entity,AAA PLC")
-    assert csv_contents[2].startswith("Description,AAA description")
-    assert csv_contents[3] == "Price,N/A"
+    assert (
+        csv_contents[0]
+        == "symbol,entity,description,price,price_currency,Working capital minimum"
+    )
+    assert csv_contents[1] == "AAA.LSE,AAA PLC,AAA description,N/A,N/A,100"
 
 
 def test_cmd_run_screen_stage_reports_progress_for_multi_symbol_scope(
@@ -7590,11 +7594,15 @@ criteria:
     assert rc == 0
     assert csv_path.exists()
     csv_contents = csv_path.read_text().strip().splitlines()
-    assert csv_contents[0] == "Criterion,AAA.US"
-    assert csv_contents[1].startswith("Entity,AAA Inc")
-    assert csv_contents[2].startswith("Description,AAA description")
-    assert csv_contents[3] == "Price,N/A"
-    assert "AAA.US" in capsys.readouterr().out
+    assert (
+        csv_contents[0]
+        == "symbol,entity,description,price,price_currency,Working capital minimum"
+    )
+    assert csv_contents[1] == "AAA.US,AAA Inc,AAA description,N/A,N/A,100"
+    output = capsys.readouterr().out
+    assert "Passing symbols: 1" in output
+    assert "CSV output:" in output
+    assert "AAA.US" in output
 
 
 def test_cmd_run_screen_stage_adds_ranked_output_rows_and_sorts_passers(
@@ -7672,13 +7680,87 @@ ranking:
 
     assert rc == 0
     csv_contents = csv_path.read_text().strip().splitlines()
-    assert csv_contents[0] == "Criterion,BBB.US,AAA.US,CCC.US"
-    assert csv_contents[5] == "qarp_rank,1,2,3"
-    assert csv_contents[6].startswith("qarp_score,66.6667,66.6667,16.6667")
-    output = capsys.readouterr().out.splitlines()
-    assert any(
-        line.lstrip().startswith("Criterion") and "BBB.US" in line for line in output
+    assert (
+        csv_contents[0]
+        == "symbol,entity,description,price,price_currency,qarp_rank,qarp_score,Working capital minimum"
     )
+    assert csv_contents[1].startswith(
+        "BBB.US,BBB Inc,BBB description,N/A,N/A,1,66.6667,100"
+    )
+    assert csv_contents[2].startswith(
+        "AAA.US,AAA Inc,AAA description,N/A,N/A,2,66.6667,100"
+    )
+    assert csv_contents[3].startswith(
+        "CCC.US,CCC Inc,CCC description,N/A,N/A,3,16.6667,100"
+    )
+    output = capsys.readouterr().out.splitlines()
+    assert "Passing symbols: 3" in output
+    assert any(
+        line.lstrip().startswith("Rank") and "BBB.US" not in line for line in output
+    )
+    assert any("BBB.US" in line for line in output)
+
+
+def test_cmd_run_screen_stage_limits_console_preview_and_truncates_description(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "screen-stage-preview.db"
+    listings = [
+        Listing(symbol=f"{symbol}.US", security_name=f"{symbol} Inc", exchange="NYSE")
+        for symbol in ("AAA", "BBB", "CCC")
+    ]
+    store_catalog_listings(db_path, "US", listings, provider="SEC")
+
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+    for symbol in ("AAA.US", "BBB.US", "CCC.US"):
+        metrics_repo.upsert(symbol, "working_capital", 100.0, "2023-12-31")
+
+    entity_repo = EntityMetadataRepository(db_path)
+    entity_repo.initialize_schema()
+    entity_repo.upsert(
+        "AAA.US",
+        "AAA Incorporated",
+        description=(
+            "AAA makes precision industrial components for regulated and safety-"
+            "critical end markets across aerospace, energy, and medical devices."
+        ),
+    )
+    entity_repo.upsert("BBB.US", "BBB Incorporated", description="BBB description")
+    entity_repo.upsert("CCC.US", "CCC Incorporated", description="CCC description")
+
+    screen_path = tmp_path / "screen.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Working capital minimum"
+    left:
+      metric: working_capital
+    operator: ">="
+    right:
+      value: 75
+"""
+    )
+
+    monkeypatch.setattr(cli, "SCREEN_CONSOLE_PREVIEW_MAX_ROWS", 2)
+    monkeypatch.setattr(cli, "SCREEN_CONSOLE_MAX_DESCRIPTION_WIDTH", 36)
+
+    rc = cli.cmd_run_screen_stage(
+        config_path=str(screen_path),
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=["US"],
+        all_supported=False,
+        output_csv=None,
+    )
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "Passing symbols: 3" in output
+    assert "Showing top 2 of 3 passing symbols." in output
+    assert "Use --output-csv to save the full result set." in output
+    assert "AAA makes precision industrial..." in output
+    assert "CCC.US" not in output
 
 
 def test_cmd_run_screen_stage_reports_progress_when_no_symbols_pass(
@@ -7947,10 +8029,11 @@ criteria:
     assert rc == 1
     assert csv_path.exists()
     csv_contents = csv_path.read_text().strip().splitlines()
-    assert csv_contents[0] == "Criterion"
-    assert csv_contents[1] == "Entity"
-    assert csv_contents[2] == "Description"
-    assert csv_contents[3] == "Price"
+    assert (
+        csv_contents[0]
+        == "symbol,entity,description,price,price_currency,Working capital minimum"
+    )
+    assert len(csv_contents) == 1
     assert "No symbols satisfied all criteria." in capsys.readouterr().out
 
 

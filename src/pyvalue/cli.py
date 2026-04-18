@@ -21,8 +21,10 @@ import json
 import logging
 import os
 import re
+import shutil
 import sqlite3
 from threading import Lock, Thread, local
+import textwrap
 import time
 from collections import Counter
 from pathlib import Path
@@ -174,6 +176,11 @@ METRICS_PROGRESS_INTERVAL_SECONDS = 5.0
 SECURITY_METADATA_CHUNK_SIZE = 500
 SECURITY_METADATA_PROGRESS_INTERVAL_SECONDS = 5.0
 SCREEN_PROGRESS_INTERVAL_SECONDS = 5.0
+SCREEN_CONSOLE_PREVIEW_MAX_ROWS = 25
+SCREEN_CONSOLE_MIN_ENTITY_WIDTH = 18
+SCREEN_CONSOLE_MAX_ENTITY_WIDTH = 28
+SCREEN_CONSOLE_MIN_DESCRIPTION_WIDTH = 24
+SCREEN_CONSOLE_MAX_DESCRIPTION_WIDTH = 60
 SCREEN_FAILURE_METRIC_LOAD_CHUNK_SIZE = 1000
 SCREEN_FAILURE_PROGRESS_INTERVAL_SECONDS = 1.0
 # Metric write flushes amortise SQLite fsync overhead -- batch ~200 symbols
@@ -4932,6 +4939,8 @@ def _emit_screen_results(
         selected_names,
         selected_descriptions,
         selected_prices,
+        selected_price_currencies,
+        output_csv=output_csv,
         extra_rows=extra_rows,
     )
     if output_csv:
@@ -7730,30 +7739,199 @@ def _print_screen_table(
     entity_names: Dict[str, str],
     descriptions: Dict[str, str],
     prices: Dict[str, str],
+    price_currencies: Dict[str, str],
+    output_csv: Optional[str] = None,
     extra_rows: Optional[Sequence[tuple[str, Dict[str, object]]]] = None,
 ) -> None:
-    header = ["Criterion"] + list(symbols)
-    rows: List[List[str]] = [header]
-    rows.append(["Entity"] + [entity_names.get(symbol, symbol) for symbol in symbols])
-    rows.append(
-        ["Description"] + [descriptions.get(symbol, "N/A") for symbol in symbols]
+    output_rows = _build_screen_output_rows(
+        criteria,
+        symbols,
+        values,
+        entity_names,
+        descriptions,
+        prices,
+        price_currencies,
+        extra_rows=extra_rows,
     )
-    rows.append(["Price"] + [prices.get(symbol, "N/A") for symbol in symbols])
-    for row_name, row_values in extra_rows or ():
-        row = [row_name]
-        for symbol in symbols:
-            value = row_values.get(symbol)
-            row.append("N/A" if value is None else _format_output_cell(value))
-        rows.append(row)
-    for criterion in criteria:
-        row = [criterion.name]
-        for symbol in symbols:
-            value = values.get(criterion.name, {}).get(symbol)
-            row.append(_format_value(value) if value is not None else "N/A")
-        rows.append(row)
-    widths = [max(len(row[i]) for row in rows) for i in range(len(header))]
+    if not output_rows:
+        return
+
+    preview_rows = output_rows[:SCREEN_CONSOLE_PREVIEW_MAX_ROWS]
+    print(f"Passing symbols: {len(output_rows)}")
+    if len(output_rows) > len(preview_rows):
+        print(f"Showing top {len(preview_rows)} of {len(output_rows)} passing symbols.")
+    if output_csv:
+        print(f"CSV output: {output_csv}")
+    elif len(output_rows) > len(preview_rows):
+        print("Use --output-csv to save the full result set.")
+    print()
+
+    preview_fields = [row_name for row_name, _ in extra_rows or ()]
+    preview_fields.extend(["symbol", "entity", "price_display", "description"])
+    header = [_screen_preview_label(field_name) for field_name in preview_fields]
+    rows: List[List[str]] = [
+        [_truncate_display(row[field_name], 1_000) for field_name in preview_fields]
+        for row in preview_rows
+    ]
+    widths = _screen_preview_widths(header, rows)
+    print(" | ".join(title.ljust(widths[idx]) for idx, title in enumerate(header)))
+    print("-+-".join("-" * widths[idx] for idx in range(len(header))))
     for row in rows:
-        print(" | ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)))
+        print(
+            " | ".join(
+                _truncate_display(cell, widths[idx]).ljust(widths[idx])
+                for idx, cell in enumerate(row)
+            )
+        )
+
+
+def _build_screen_output_rows(
+    criteria: Sequence[Criterion],
+    symbols: Sequence[str],
+    values: Dict[str, Dict[str, float]],
+    entity_names: Mapping[str, str],
+    descriptions: Mapping[str, str],
+    prices: Mapping[str, str],
+    price_currencies: Mapping[str, str],
+    extra_rows: Optional[Sequence[tuple[str, Dict[str, object]]]] = None,
+) -> List[Dict[str, str]]:
+    rows: List[Dict[str, str]] = []
+    for symbol in symbols:
+        price = prices.get(symbol, "N/A")
+        price_currency = price_currencies.get(symbol, "N/A")
+        row = {
+            "symbol": symbol,
+            "entity": entity_names.get(symbol, symbol),
+            "description": descriptions.get(symbol, "N/A"),
+            "price": price,
+            "price_currency": price_currency,
+            "price_display": _screen_price_display(price, price_currency),
+        }
+        for row_name, row_values in extra_rows or ():
+            value = row_values.get(symbol)
+            row[row_name] = "" if value is None else _format_output_cell(value)
+        for criterion in criteria:
+            value = values.get(criterion.name, {}).get(symbol)
+            row[criterion.name] = "" if value is None else _format_value(value)
+        rows.append(row)
+    return rows
+
+
+def _screen_output_columns(
+    criteria: Sequence[Criterion],
+    extra_rows: Optional[Sequence[tuple[str, Dict[str, object]]]] = None,
+) -> List[str]:
+    return [
+        "symbol",
+        "entity",
+        "description",
+        "price",
+        "price_currency",
+        *[row_name for row_name, _ in extra_rows or ()],
+        *[criterion.name for criterion in criteria],
+    ]
+
+
+def _screen_price_display(price: str, price_currency: str) -> str:
+    if price == "N/A":
+        return price
+    if not price_currency or price_currency == "N/A":
+        return price
+    return f"{price} {price_currency}"
+
+
+def _screen_preview_label(field_name: str) -> str:
+    if field_name == "symbol":
+        return "Symbol"
+    if field_name == "entity":
+        return "Entity"
+    if field_name == "description":
+        return "Description"
+    if field_name == "price_display":
+        return "Price"
+    if field_name == "qarp_rank":
+        return "Rank"
+    if field_name == "qarp_score":
+        return "Score"
+    return field_name
+
+
+def _screen_preview_widths(
+    header: Sequence[str], rows: Sequence[Sequence[str]]
+) -> List[int]:
+    widths = []
+    terminal_width = shutil.get_terminal_size(fallback=(140, 20)).columns
+    for idx, title in enumerate(header):
+        column_width = max(len(title), *(len(row[idx]) for row in rows))
+        if title == "Entity":
+            column_width = max(
+                SCREEN_CONSOLE_MIN_ENTITY_WIDTH,
+                min(column_width, SCREEN_CONSOLE_MAX_ENTITY_WIDTH),
+            )
+        elif title == "Description":
+            column_width = max(
+                SCREEN_CONSOLE_MIN_DESCRIPTION_WIDTH,
+                min(column_width, SCREEN_CONSOLE_MAX_DESCRIPTION_WIDTH),
+            )
+        elif title == "Symbol":
+            column_width = min(column_width, 16)
+        elif title == "Price":
+            column_width = min(column_width, 18)
+        elif title == "Rank":
+            column_width = min(column_width, 6)
+        elif title == "Score":
+            column_width = min(column_width, 9)
+        widths.append(column_width)
+
+    total_width = sum(widths) + (3 * (len(widths) - 1))
+    if total_width <= terminal_width:
+        return widths
+
+    def shrink(title: str, minimum: int, overflow: int) -> int:
+        nonlocal total_width
+        if overflow <= 0:
+            return overflow
+        try:
+            index = header.index(title)
+        except ValueError:
+            return overflow
+        reducible = max(0, widths[index] - minimum)
+        reduction = min(reducible, overflow)
+        widths[index] -= reduction
+        total_width -= reduction
+        return overflow - reduction
+
+    overflow = total_width - terminal_width
+    overflow = shrink("Description", SCREEN_CONSOLE_MIN_DESCRIPTION_WIDTH, overflow)
+    overflow = shrink("Entity", SCREEN_CONSOLE_MIN_ENTITY_WIDTH, overflow)
+    overflow = shrink("Price", len("Price"), overflow)
+    overflow = shrink("Score", len("Score"), overflow)
+    overflow = shrink("Symbol", len("Symbol"), overflow)
+
+    if overflow > 0:
+        for idx, title in enumerate(header):
+            minimum = len(title)
+            reducible = max(0, widths[idx] - minimum)
+            if reducible <= 0:
+                continue
+            reduction = min(reducible, overflow)
+            widths[idx] -= reduction
+            overflow -= reduction
+            if overflow <= 0:
+                break
+
+    return widths
+
+
+def _truncate_display(value: str, width: int) -> str:
+    if width <= 0:
+        return ""
+    collapsed = " ".join(str(value).split())
+    if len(collapsed) <= width:
+        return collapsed
+    if width <= 3:
+        return collapsed[:width]
+    return textwrap.shorten(collapsed, width=width, placeholder="...")
 
 
 def _format_value(value: float) -> str:
@@ -7785,40 +7963,22 @@ def _write_screen_csv(
     extra_rows: Optional[Sequence[tuple[str, Dict[str, object]]]] = None,
 ) -> None:
     output_path = _prepare_output_csv_path(path)
+    columns = _screen_output_columns(criteria, extra_rows=extra_rows)
+    rows = _build_screen_output_rows(
+        criteria,
+        symbols,
+        values,
+        entity_names,
+        descriptions,
+        prices,
+        price_currencies,
+        extra_rows=extra_rows,
+    )
     with output_path.open("w", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["Criterion", *symbols])
-        writer.writerow(
-            ["Entity", *[entity_names.get(symbol, symbol) for symbol in symbols]]
-        )
-        writer.writerow(
-            ["Description", *[descriptions.get(symbol, "N/A") for symbol in symbols]]
-        )
-        writer.writerow(["Price", *[prices.get(symbol, "N/A") for symbol in symbols]])
-        writer.writerow(
-            [
-                "Price Currency",
-                *[price_currencies.get(symbol, "N/A") for symbol in symbols],
-            ]
-        )
-        for row_name, row_values in extra_rows or ():
-            writer.writerow(
-                [
-                    row_name,
-                    *[
-                        ""
-                        if row_values.get(symbol) is None
-                        else _format_output_cell(row_values[symbol])
-                        for symbol in symbols
-                    ],
-                ]
-            )
-        for criterion in criteria:
-            row = [criterion.name]
-            for symbol in symbols:
-                value = values.get(criterion.name, {}).get(symbol)
-                row.append("" if value is None else _format_value(value))
-            writer.writerow(row)
+        writer.writerow(columns)
+        for row in rows:
+            writer.writerow([row.get(column, "") for column in columns])
 
 
 def _write_fact_report_csv(report: Sequence[MetricCoverage], path: str) -> None:

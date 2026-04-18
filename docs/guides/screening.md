@@ -166,18 +166,35 @@ Write passing symbols to a CSV:
 pyvalue run-screen --config screeners/basic_value.yml --exchange-codes US --output-csv data/screen_results_basic_value.csv
 ```
 
-Bulk output shows only symbols that satisfy every criterion. The table includes:
-- symbol columns for passing names only
+Bulk output shows only symbols that satisfy every criterion.
+
+The console now prints a compact preview table with one passing symbol per row.
+It includes:
+- ranking fields such as `qarp_rank` and `qarp_score` when present
+- symbol
 - entity name
-- description
-- price
-- one row per criterion with the left-side metric value
+- latest price
+- a truncated description for readability
+
+When many symbols pass, the console shows only the top slice and tells you to
+use the CSV for the full result set.
+
+The CSV is row-oriented as well, which is much easier to open in spreadsheet
+tools than the older wide transposed layout. Each row is one passing symbol and
+the columns include:
+- `symbol`
+- `entity`
+- `description`
+- `price`
+- `price_currency`
+- ranking fields such as `qarp_rank` and `qarp_score` when present
+- one column per screen criterion with the stored left-side metric value
 
 Some screens also define a post-screen ranking block. In those cases:
 
 - pass/fail behavior stays unchanged
 - only passing symbols are ranked
-- extra `qarp_rank` and `qarp_score` rows are added before the criterion rows
+- extra `qarp_rank` and `qarp_score` columns are added before the criterion columns
 - passing symbols are ordered best to worst in the console table and CSV
 
 Ranking notes:
