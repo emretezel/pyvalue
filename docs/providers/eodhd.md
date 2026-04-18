@@ -118,6 +118,15 @@ provider-symbol in `fundamentals_raw`. Older historical periods remain
 available through the newly stored payload and normalized downstream tables are
 refreshed only when you run normalization again.
 
+`pyvalue` also inspects `General.PrimaryTicker` on each stored EODHD payload
+and caches whether that listing is primary or secondary. Missing, blank, or
+otherwise unusable `PrimaryTicker` values are treated as primary. Once a
+listing is classified as secondary, downstream normalization, market-data,
+metric, screening, metadata-refresh, and FX-discovery scopes exclude it. The
+raw `fundamentals_raw` row and `supported_tickers` catalog row are retained for
+provenance and future reclassification, but downstream normalized facts, market
+data, metrics, and related refresh state for that listing are purged.
+
 Important fundamentals options:
 
 - `--symbols`, `--exchange-codes`, or `--all-supported`: choose the scope
@@ -186,6 +195,8 @@ Normalization converts raw EODHD payloads into provider-agnostic
 Exchange and all-supported normalization runs parallelize automatically.
 By default, normalization skips symbols whose raw payload has not changed since
 the last successful EODHD normalization.
+Listings already classified as secondary from `General.PrimaryTicker` are
+excluded from normalization scopes.
 Normalization never fetches FX from the network. When a symbol needs currency
 conversion, each worker process preloads the full selected-provider FX table
 once and resolves direct, inverse, and USD/EUR triangulated rates from memory.
@@ -250,6 +261,8 @@ Important market-data options:
 - `--rate`: requests per minute, capped at the EODHD limit of `1000`
 - `--max-symbols`: limit one run
 - `--max-age-days`: refresh stale or missing market data; default `30`
+- listings already classified as secondary from raw fundamentals are excluded
+  before market-data refresh planning and progress accounting
 - retry backoff is respected by default; use `--retry-failed-now` to bypass it
 
 Market cap can be recalculated later from stored prices and latest share counts:

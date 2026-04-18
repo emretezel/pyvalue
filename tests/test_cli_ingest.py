@@ -2568,6 +2568,106 @@ def test_cmd_update_market_data_stage_uses_bulk_for_large_exchange(
     assert state_repo.fetch("EODHD", "SMALL.LSE")["last_status"] == "ok"
 
 
+def test_cmd_update_market_data_stage_skips_secondary_listings(monkeypatch, tmp_path):
+    db_path = tmp_path / "stage-market-data-primary-only.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[{"Code": "AAA", "Exchange": "US", "Type": "Common Stock"}],
+    )
+    store_supported_tickers(
+        db_path,
+        "LSE",
+        rows=[
+            {"Code": "AAA", "Exchange": "LSE", "Type": "Common Stock"},
+            {"Code": "BBB", "Exchange": "LSE", "Type": "Common Stock"},
+        ],
+    )
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD",
+        "AAA.US",
+        {"General": {"Name": "AAA", "PrimaryTicker": "AAA.US"}},
+        exchange="US",
+    )
+    fund_repo.upsert(
+        "EODHD",
+        "AAA.LSE",
+        {"General": {"Name": "AAA plc", "PrimaryTicker": "AAA.US"}},
+        exchange="LSE",
+    )
+    fund_repo.upsert(
+        "EODHD",
+        "BBB.LSE",
+        {"General": {"Name": "BBB plc"}},
+        exchange="LSE",
+    )
+    calls = []
+    today = date.today().isoformat()
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+
+        def user_metadata(self):
+            return {
+                "dailyRateLimit": "1000",
+                "apiRequests": "0",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
+
+    class FakeProvider:
+        def __init__(self, api_key: str, session=None):
+            assert api_key == "TOKEN"
+
+        def latest_price(self, symbol: str):
+            calls.append(symbol)
+            return PriceData(
+                symbol=symbol,
+                price=20.0,
+                as_of=today,
+                volume=50,
+                currency="USD" if symbol.endswith(".US") else "GBP",
+            )
+
+    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
+    monkeypatch.setattr(cli, "EODHDProvider", FakeProvider)
+    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_api_key="TOKEN",
+            eodhd_market_data_daily_buffer_calls=0,
+            eodhd_market_data_requests_per_minute=950,
+        ),
+    )
+
+    rc = cli.cmd_update_market_data_stage(
+        provider="EODHD",
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=None,
+        all_supported=True,
+        rate=None,
+        max_symbols=None,
+        max_age_days=7,
+        respect_backoff=True,
+    )
+
+    assert rc == 0
+    assert sorted(calls) == ["AAA.US", "BBB.LSE"]
+    state_repo = MarketDataFetchStateRepository(db_path)
+    assert state_repo.fetch("EODHD", "AAA.US")["last_status"] == "ok"
+    assert state_repo.fetch("EODHD", "BBB.LSE")["last_status"] == "ok"
+    assert state_repo.fetch("EODHD", "AAA.LSE") is None
+    market_repo = MarketDataRepository(db_path)
+    assert market_repo.latest_snapshot("AAA.US") is not None
+    assert market_repo.latest_snapshot("BBB.LSE") is not None
+    assert market_repo.latest_snapshot("AAA.LSE") is None
+
+
 def test_cmd_update_market_data_stage_retries_missing_bulk_symbol_individually(
     monkeypatch, tmp_path
 ):
@@ -6212,13 +6312,25 @@ def test_cmd_normalize_fundamentals_stage_all_supported_filters_to_raw_symbols(
     fund_repo.upsert(
         "EODHD",
         "AAA.US",
-        {"General": {"Name": "AAA"}, "Financials": {}},
+        {
+            "General": {"Name": "AAA", "PrimaryTicker": "AAA.US"},
+            "Financials": {},
+        },
         exchange="US",
     )
     fund_repo.upsert(
         "EODHD",
         "CCC.LSE",
-        {"General": {"Name": "CCC"}, "Financials": {}},
+        {
+            "General": {"Name": "CCC", "PrimaryTicker": "AAA.US"},
+            "Financials": {},
+        },
+        exchange="LSE",
+    )
+    fund_repo.upsert(
+        "EODHD",
+        "DDD.LSE",
+        {"General": {"Name": "DDD"}, "Financials": {}},
         exchange="LSE",
     )
     captured = {}
@@ -6241,7 +6353,7 @@ def test_cmd_normalize_fundamentals_stage_all_supported_filters_to_raw_symbols(
 
     assert rc == 0
     assert captured["database"] == str(db_path)
-    assert sorted(captured["symbols"]) == ["AAA.US", "CCC.LSE"]
+    assert sorted(captured["symbols"]) == ["AAA.US", "DDD.LSE"]
     assert captured["force"] is False
 
 

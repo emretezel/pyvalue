@@ -31,11 +31,17 @@ Default CLI behavior:
 - metric fact freshness checks and `report-fact-freshness --max-age-days` default to `400`
 - multi-symbol EODHD fundamentals ingestion defaults to `950 req/min` and runs
   through concurrent fetch workers with batched SQLite writes
+- once EODHD raw fundamentals identify a listing as secondary through
+  `General.PrimaryTicker`, downstream stage commands skip it; missing or
+  unusable `PrimaryTicker` is treated as primary
 
 ## What pyvalue does
 
 - Load canonical provider ticker catalogs into SQLite.
 - Ingest raw fundamentals from SEC or EODHD.
+- Classify EODHD listings as primary or secondary from raw fundamentals and
+  keep only primary listings in downstream market-data, normalization, metric,
+  FX-discovery, and screening scopes.
 - Normalize raw payloads into provider-agnostic financial facts.
 - Refresh canonical security metadata such as sector and industry from stored
   raw fundamentals.

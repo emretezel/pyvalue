@@ -130,6 +130,36 @@ def test_migration_creates_supported_tickers_table(tmp_path):
     assert "idx_supported_tickers_provider_exchange" in index_names
 
 
+def test_migration_creates_security_listing_status_table(tmp_path):
+    db_path = tmp_path / "security-listing-status.sqlite"
+
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0
+
+    with sqlite3.connect(db_path) as conn:
+        info = conn.execute("PRAGMA table_info(security_listing_status)").fetchall()
+        columns = {row[1] for row in info}
+        pk_cols = [row[1] for row in info if row[5]]
+        indexes = conn.execute("PRAGMA index_list(security_listing_status)").fetchall()
+        index_names = {row[1] for row in indexes}
+
+    assert columns == {
+        "security_id",
+        "source_provider",
+        "provider_symbol",
+        "raw_fetched_at",
+        "is_primary_listing",
+        "primary_provider_symbol",
+        "classification_basis",
+        "updated_at",
+    }
+    assert pk_cols == ["security_id"]
+    assert "idx_security_listing_status_primary" in index_names
+
+
 def test_migration_adds_sector_and_industry_to_securities(tmp_path):
     db_path = tmp_path / "securities-sector-industry.sqlite"
     with sqlite3.connect(db_path) as conn:
@@ -165,7 +195,7 @@ def test_migration_adds_sector_and_industry_to_securities(tmp_path):
 
     applied = apply_migrations(db_path)
 
-    assert applied == 6
+    assert applied == 7
     with sqlite3.connect(db_path) as conn:
         info = conn.execute("PRAGMA table_info(securities)").fetchall()
         columns = {row[1] for row in info}
@@ -320,7 +350,7 @@ def test_migration_adds_metric_status_and_facts_refresh_tables(tmp_path):
 
     applied = apply_migrations(db_path)
 
-    assert applied == 1
+    assert applied == 2
     with sqlite3.connect(db_path) as conn:
         refresh_columns = {
             row[1]
@@ -402,7 +432,7 @@ def test_migration_does_not_overwrite_existing_supported_tickers(tmp_path):
 
     applied = apply_migrations(db_path)
 
-    assert applied == 10
+    assert applied == 11
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
             """

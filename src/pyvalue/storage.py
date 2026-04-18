@@ -53,6 +53,11 @@ _CONNECTION_PERFORMANCE_PRAGMAS: Tuple[str, ...] = (
     "PRAGMA mmap_size=268435456",
 )
 
+_PRIMARY_LISTING_SOURCE_PROVIDER = "EODHD"
+_LISTING_CLASS_MATCHED_PRIMARY = "matched_primary_ticker"
+_LISTING_CLASS_DIFFERENT_PRIMARY = "different_primary_ticker"
+_LISTING_CLASS_MISSING_PRIMARY = "missing_primary_ticker"
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -80,6 +85,16 @@ def _normalize_symbol_base(symbol: str) -> Tuple[str, Optional[str]]:
     return ticker, exchange
 
 
+def _normalize_qualified_symbol(value: Any) -> Optional[str]:
+    text = _normalize_optional_text(value)
+    if text is None:
+        return None
+    ticker, exchange = _normalize_symbol_base(text)
+    if not ticker or exchange is None:
+        return None
+    return f"{ticker}.{exchange.upper()}"
+
+
 def _coerce_int(value: Any) -> int:
     if value is None:
         return 0
@@ -89,6 +104,22 @@ def _coerce_int(value: Any) -> int:
 def _batched(values: Sequence[Any], size: int) -> Iterable[Sequence[Any]]:
     for start in range(0, len(values), size):
         yield values[start : start + size]
+
+
+def _primary_listing_left_join(
+    *,
+    security_alias: str,
+    status_alias: str = "sls",
+) -> str:
+    return (
+        "LEFT JOIN security_listing_status "
+        f"{status_alias} ON {status_alias}.security_id = {security_alias}.security_id "
+        f"AND {status_alias}.source_provider = '{_PRIMARY_LISTING_SOURCE_PROVIDER}'"
+    )
+
+
+def _primary_listing_predicate(status_alias: str = "sls") -> str:
+    return f"COALESCE({status_alias}.is_primary_listing, 1) = 1"
 
 
 @dataclass(frozen=True)
@@ -356,6 +387,24 @@ class FundamentalsUpdate:
     currency: Optional[str]
     data: str
     fetched_at: str
+
+
+@dataclass(frozen=True)
+class SecurityListingStatusRecord:
+    """Cached primary-vs-secondary listing classification for one security."""
+
+    security_id: int
+    source_provider: str
+    provider_symbol: str
+    raw_fetched_at: str
+    is_primary_listing: bool
+    primary_provider_symbol: Optional[str]
+    classification_basis: Literal[
+        "matched_primary_ticker",
+        "different_primary_ticker",
+        "missing_primary_ticker",
+    ]
+    updated_at: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -952,6 +1001,8 @@ class SecurityRepository(SQLiteStore):
     def list_supported_symbols(
         self,
         exchange_codes: Optional[Sequence[str]] = None,
+        *,
+        primary_only: bool = False,
     ) -> List[str]:
         self.initialize_schema()
         params: List[object] = []
@@ -960,11 +1011,17 @@ class SecurityRepository(SQLiteStore):
             "FROM supported_tickers st",
             "JOIN securities s ON s.security_id = st.security_id",
         ]
+        if primary_only:
+            query.append(_primary_listing_left_join(security_alias="st"))
         normalized = _normalized_codes(exchange_codes)
         if normalized:
             placeholders = ", ".join("?" for _ in normalized)
             query.append(f"WHERE UPPER(s.canonical_exchange_code) IN ({placeholders})")
             params.extend(normalized)
+            if primary_only:
+                query.append(f"AND {_primary_listing_predicate()}")
+        elif primary_only:
+            query.append(f"WHERE {_primary_listing_predicate()}")
         query.append("ORDER BY s.canonical_symbol")
         with self._connect() as conn:
             rows = conn.execute(" ".join(query), params).fetchall()
@@ -973,6 +1030,8 @@ class SecurityRepository(SQLiteStore):
     def list_supported_symbol_name_pairs(
         self,
         exchange_codes: Optional[Sequence[str]] = None,
+        *,
+        primary_only: bool = False,
     ) -> List[Tuple[str, Optional[str]]]:
         self.initialize_schema()
         params: List[object] = []
@@ -982,11 +1041,17 @@ class SecurityRepository(SQLiteStore):
             "FROM supported_tickers st",
             "JOIN securities s ON s.security_id = st.security_id",
         ]
+        if primary_only:
+            query.append(_primary_listing_left_join(security_alias="st"))
         normalized = _normalized_codes(exchange_codes)
         if normalized:
             placeholders = ", ".join("?" for _ in normalized)
             query.append(f"WHERE UPPER(s.canonical_exchange_code) IN ({placeholders})")
             params.extend(normalized)
+            if primary_only:
+                query.append(f"AND {_primary_listing_predicate()}")
+        elif primary_only:
+            query.append(f"WHERE {_primary_listing_predicate()}")
         query.append("GROUP BY s.security_id, s.canonical_symbol, s.entity_name")
         query.append("ORDER BY s.canonical_symbol")
         with self._connect() as conn:
@@ -1295,52 +1360,87 @@ class SupportedTickerRepository(SQLiteStore):
         provider: str,
         exchange_codes: Optional[Sequence[str]] = None,
         provider_symbols: Optional[Sequence[str]] = None,
+        *,
+        primary_only: bool = False,
     ) -> List[SupportedTicker]:
         self.initialize_schema()
         provider_norm = provider.strip().upper()
         params: List[object] = [provider_norm]
         query = [
-            "SELECT provider, provider_exchange_code, provider_symbol, provider_ticker,",
-            "security_id, listing_exchange, security_name, security_type, country, currency, isin, updated_at",
-            "FROM supported_tickers",
-            "WHERE UPPER(provider) = ?",
+            "SELECT st.provider, st.provider_exchange_code, st.provider_symbol, st.provider_ticker,",
+            "st.security_id, st.listing_exchange, st.security_name, st.security_type,",
+            "st.country, st.currency, st.isin, st.updated_at",
+            "FROM supported_tickers st",
         ]
+        if primary_only:
+            query.append(_primary_listing_left_join(security_alias="st"))
+        query.append("WHERE UPPER(st.provider) = ?")
         normalized_codes = _normalized_codes(exchange_codes)
         if normalized_codes:
             placeholders = ", ".join("?" for _ in normalized_codes)
-            query.append(f"AND UPPER(provider_exchange_code) IN ({placeholders})")
+            query.append(f"AND UPPER(st.provider_exchange_code) IN ({placeholders})")
             params.extend(normalized_codes)
         normalized_symbols = _normalized_codes(provider_symbols)
         if normalized_symbols:
             placeholders = ", ".join("?" for _ in normalized_symbols)
-            query.append(f"AND UPPER(provider_symbol) IN ({placeholders})")
+            query.append(f"AND UPPER(st.provider_symbol) IN ({placeholders})")
             params.extend(normalized_symbols)
-        query.append("ORDER BY provider_exchange_code, provider_symbol")
+        if primary_only:
+            query.append(f"AND {_primary_listing_predicate()}")
+        query.append("ORDER BY st.provider_exchange_code, st.provider_symbol")
         with self._connect() as conn:
             rows = conn.execute(" ".join(query), params).fetchall()
         return [SupportedTicker(*row) for row in rows]
 
-    def list_symbols_by_exchange(self, provider: str, exchange_code: str) -> List[str]:
-        rows = self.list_for_provider(provider, exchange_codes=[exchange_code])
+    def list_symbols_by_exchange(
+        self,
+        provider: str,
+        exchange_code: str,
+        *,
+        primary_only: bool = False,
+    ) -> List[str]:
+        rows = self.list_for_provider(
+            provider,
+            exchange_codes=[exchange_code],
+            primary_only=primary_only,
+        )
         return [row.provider_symbol for row in rows]
 
     def list_symbol_name_pairs_by_exchange(
-        self, provider: str, exchange_code: str
+        self,
+        provider: str,
+        exchange_code: str,
+        *,
+        primary_only: bool = False,
     ) -> List[Tuple[str, Optional[str]]]:
-        rows = self.list_for_provider(provider, exchange_codes=[exchange_code])
+        rows = self.list_for_provider(
+            provider,
+            exchange_codes=[exchange_code],
+            primary_only=primary_only,
+        )
         return [(row.provider_symbol, row.security_name) for row in rows]
 
     def list_canonical_symbols(
         self,
         exchange_codes: Optional[Sequence[str]] = None,
+        *,
+        primary_only: bool = False,
     ) -> List[str]:
-        return self._security_repo().list_supported_symbols(exchange_codes)
+        return self._security_repo().list_supported_symbols(
+            exchange_codes,
+            primary_only=primary_only,
+        )
 
     def list_canonical_symbol_name_pairs(
         self,
         exchange_codes: Optional[Sequence[str]] = None,
+        *,
+        primary_only: bool = False,
     ) -> List[Tuple[str, Optional[str]]]:
-        return self._security_repo().list_supported_symbol_name_pairs(exchange_codes)
+        return self._security_repo().list_supported_symbol_name_pairs(
+            exchange_codes,
+            primary_only=primary_only,
+        )
 
     def available_exchanges(self, provider: Optional[str] = None) -> List[str]:
         self.initialize_schema()
@@ -1389,9 +1489,17 @@ class SupportedTickerRepository(SQLiteStore):
         return int(cursor.rowcount or 0)
 
     def list_for_exchange(
-        self, provider: str, exchange_code: str
+        self,
+        provider: str,
+        exchange_code: str,
+        *,
+        primary_only: bool = False,
     ) -> List[SupportedTicker]:
-        return self.list_for_provider(provider, exchange_codes=[exchange_code])
+        return self.list_for_provider(
+            provider,
+            exchange_codes=[exchange_code],
+            primary_only=primary_only,
+        )
 
     def fetch_currency(
         self,
@@ -1665,6 +1773,8 @@ class SupportedTickerRepository(SQLiteStore):
         max_symbols: Optional[int] = None,
         respect_backoff: bool = True,
         provider_symbols: Optional[Sequence[str]] = None,
+        *,
+        primary_only: bool = False,
     ) -> List[SupportedTicker]:
         self.initialize_schema()
         provider_norm = provider.strip().upper()
@@ -1684,6 +1794,8 @@ class SupportedTickerRepository(SQLiteStore):
             "LEFT JOIN market_data_fetch_state ms ON ms.provider = ? AND ms.provider_symbol = st.provider_symbol",
             "WHERE st.provider = ?",
         ]
+        if primary_only:
+            query.insert(4, _primary_listing_left_join(security_alias="st"))
         normalized_codes = _normalized_codes(exchange_codes)
         if normalized_codes:
             placeholders = ", ".join("?" for _ in normalized_codes)
@@ -1694,6 +1806,8 @@ class SupportedTickerRepository(SQLiteStore):
             placeholders = ", ".join("?" for _ in normalized_symbols)
             query.append(f"AND st.provider_symbol IN ({placeholders})")
             params.extend(normalized_symbols)
+        if primary_only:
+            query.append(f"AND {_primary_listing_predicate()}")
         query.append("AND (md.latest_as_of IS NULL OR md.latest_as_of <= ?)")
         params.append(cutoff)
         if respect_backoff:
@@ -1716,6 +1830,8 @@ class SupportedTickerRepository(SQLiteStore):
         provider: str,
         exchange_codes: Optional[Sequence[str]] = None,
         max_age_days: int = 7,
+        *,
+        primary_only: bool = False,
     ) -> IngestProgressSummary:
         self.initialize_schema()
         provider_norm = provider.strip().upper()
@@ -1741,11 +1857,15 @@ class SupportedTickerRepository(SQLiteStore):
             "LEFT JOIN market_data_fetch_state ms ON ms.provider = ? AND ms.provider_symbol = st.provider_symbol",
             "WHERE st.provider = ?",
         ]
+        if primary_only:
+            query.insert(8, _primary_listing_left_join(security_alias="st"))
         normalized_codes = _normalized_codes(exchange_codes)
         if normalized_codes:
             placeholders = ", ".join("?" for _ in normalized_codes)
             query.append(f"AND st.provider_exchange_code IN ({placeholders})")
             params.extend(normalized_codes)
+        if primary_only:
+            query.append(f"AND {_primary_listing_predicate()}")
         with self._connect() as conn:
             row = conn.execute(" ".join(query), params).fetchone()
         return IngestProgressSummary(
@@ -1762,6 +1882,8 @@ class SupportedTickerRepository(SQLiteStore):
         provider: str,
         exchange_codes: Optional[Sequence[str]] = None,
         max_age_days: int = 7,
+        *,
+        primary_only: bool = False,
     ) -> List[IngestProgressExchange]:
         self.initialize_schema()
         provider_norm = provider.strip().upper()
@@ -1788,11 +1910,15 @@ class SupportedTickerRepository(SQLiteStore):
             "LEFT JOIN market_data_fetch_state ms ON ms.provider = ? AND ms.provider_symbol = st.provider_symbol",
             "WHERE st.provider = ?",
         ]
+        if primary_only:
+            query.insert(9, _primary_listing_left_join(security_alias="st"))
         normalized_codes = _normalized_codes(exchange_codes)
         if normalized_codes:
             placeholders = ", ".join("?" for _ in normalized_codes)
             query.append(f"AND st.provider_exchange_code IN ({placeholders})")
             params.extend(normalized_codes)
+        if primary_only:
+            query.append(f"AND {_primary_listing_predicate()}")
         query.append("GROUP BY st.provider_exchange_code")
         query.append("ORDER BY st.provider_exchange_code")
         with self._connect() as conn:
@@ -1815,6 +1941,8 @@ class SupportedTickerRepository(SQLiteStore):
         provider: str,
         exchange_codes: Optional[Sequence[str]] = None,
         limit: int = 10,
+        *,
+        primary_only: bool = False,
     ) -> List[IngestProgressFailure]:
         self.initialize_schema()
         provider_norm = provider.strip().upper()
@@ -1826,11 +1954,15 @@ class SupportedTickerRepository(SQLiteStore):
             "JOIN market_data_fetch_state ms ON ms.provider = ? AND ms.provider_symbol = st.provider_symbol",
             "WHERE st.provider = ? AND ms.last_status = 'error'",
         ]
+        if primary_only:
+            query.insert(4, _primary_listing_left_join(security_alias="st"))
         normalized_codes = _normalized_codes(exchange_codes)
         if normalized_codes:
             placeholders = ", ".join("?" for _ in normalized_codes)
             query.append(f"AND st.provider_exchange_code IN ({placeholders})")
             params.extend(normalized_codes)
+        if primary_only:
+            query.append(f"AND {_primary_listing_predicate()}")
         query.append(
             "ORDER BY CASE WHEN ms.next_eligible_at IS NULL THEN 1 ELSE 0 END, ms.next_eligible_at ASC, st.provider_symbol ASC"
         )
@@ -2082,6 +2214,8 @@ class FundamentalsRepository(SQLiteStore):
         ]
         if not rows:
             return
+        listing_repo = SecurityListingStatusRepository(self.db_path)
+        listing_updates: List[SecurityListingStatusRecord] = []
         with self._connect() as conn:
             conn.executemany(
                 """
@@ -2102,6 +2236,21 @@ class FundamentalsRepository(SQLiteStore):
                     fetched_at = excluded.fetched_at
                 """,
                 rows,
+            )
+            listing_updates = listing_repo.upsert_many_from_fundamentals_updates(
+                provider_norm,
+                updates,
+                connection=conn,
+            )
+        secondary_updates = [
+            update for update in listing_updates if not update.is_primary_listing
+        ]
+        if secondary_updates:
+            listing_repo.purge_secondary_security_data(
+                security_ids=[update.security_id for update in secondary_updates],
+                provider_symbols=[
+                    update.provider_symbol for update in secondary_updates
+                ],
             )
 
     def fetch(self, provider: str, symbol: str) -> Optional[Dict[str, Any]]:
@@ -2485,6 +2634,304 @@ class FundamentalsRepository(SQLiteStore):
             provider_exchange_code,
             existing_security.security_id if existing_security else None,
         )
+
+
+class SecurityListingStatusRepository(SQLiteStore):
+    """Persist and reconcile cached primary-listing classification."""
+
+    def initialize_schema(self) -> None:
+        apply_migrations(self.db_path)
+        self._security_repo().initialize_schema()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS security_listing_status (
+                    security_id INTEGER NOT NULL PRIMARY KEY,
+                    source_provider TEXT NOT NULL,
+                    provider_symbol TEXT NOT NULL,
+                    raw_fetched_at TEXT NOT NULL,
+                    is_primary_listing INTEGER NOT NULL CHECK (is_primary_listing IN (0, 1)),
+                    primary_provider_symbol TEXT,
+                    classification_basis TEXT NOT NULL CHECK (
+                        classification_basis IN (
+                            'matched_primary_ticker',
+                            'different_primary_ticker',
+                            'missing_primary_ticker'
+                        )
+                    ),
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_security_listing_status_primary
+                ON security_listing_status(is_primary_listing, security_id)
+                """
+            )
+
+    @staticmethod
+    def _build_status_record(
+        *,
+        security_id: int,
+        provider_symbol: str,
+        raw_fetched_at: str,
+        payload: Mapping[str, Any],
+    ) -> SecurityListingStatusRecord:
+        provider_symbol_norm = _normalize_qualified_symbol(provider_symbol)
+        if provider_symbol_norm is None:
+            raise ValueError(f"provider_symbol must be qualified: {provider_symbol}")
+
+        general = payload.get("General") if isinstance(payload, Mapping) else None
+        primary_provider_symbol = (
+            _normalize_qualified_symbol(general.get("PrimaryTicker"))
+            if isinstance(general, Mapping)
+            else None
+        )
+        classification_basis: Literal[
+            "matched_primary_ticker",
+            "different_primary_ticker",
+            "missing_primary_ticker",
+        ]
+        if primary_provider_symbol is None:
+            is_primary_listing = True
+            classification_basis = "missing_primary_ticker"
+        elif primary_provider_symbol == provider_symbol_norm:
+            is_primary_listing = True
+            classification_basis = "matched_primary_ticker"
+        else:
+            is_primary_listing = False
+            classification_basis = "different_primary_ticker"
+
+        return SecurityListingStatusRecord(
+            security_id=int(security_id),
+            source_provider=_PRIMARY_LISTING_SOURCE_PROVIDER,
+            provider_symbol=provider_symbol_norm,
+            raw_fetched_at=raw_fetched_at,
+            is_primary_listing=is_primary_listing,
+            primary_provider_symbol=primary_provider_symbol,
+            classification_basis=classification_basis,
+            updated_at=_utc_now_iso(),
+        )
+
+    def upsert_many(
+        self,
+        rows: Sequence[SecurityListingStatusRecord],
+        *,
+        connection: Optional[sqlite3.Connection] = None,
+    ) -> int:
+        self.initialize_schema()
+        if not rows:
+            return 0
+        payload = [
+            (
+                int(row.security_id),
+                row.source_provider.strip().upper(),
+                row.provider_symbol.strip().upper(),
+                row.raw_fetched_at,
+                1 if row.is_primary_listing else 0,
+                _normalize_qualified_symbol(row.primary_provider_symbol),
+                row.classification_basis,
+                row.updated_at or _utc_now_iso(),
+            )
+            for row in rows
+        ]
+        sql = """
+            INSERT INTO security_listing_status (
+                security_id,
+                source_provider,
+                provider_symbol,
+                raw_fetched_at,
+                is_primary_listing,
+                primary_provider_symbol,
+                classification_basis,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(security_id) DO UPDATE SET
+                source_provider = excluded.source_provider,
+                provider_symbol = excluded.provider_symbol,
+                raw_fetched_at = excluded.raw_fetched_at,
+                is_primary_listing = excluded.is_primary_listing,
+                primary_provider_symbol = excluded.primary_provider_symbol,
+                classification_basis = excluded.classification_basis,
+                updated_at = excluded.updated_at
+        """
+        if connection is not None:
+            connection.executemany(sql, payload)
+            return len(payload)
+        with self._connect() as conn:
+            conn.executemany(sql, payload)
+        return len(payload)
+
+    def upsert_many_from_fundamentals_updates(
+        self,
+        provider: str,
+        updates: Sequence[FundamentalsUpdate],
+        *,
+        connection: Optional[sqlite3.Connection] = None,
+    ) -> List[SecurityListingStatusRecord]:
+        provider_norm = provider.strip().upper()
+        if provider_norm != _PRIMARY_LISTING_SOURCE_PROVIDER:
+            return []
+
+        records: List[SecurityListingStatusRecord] = []
+        for update in updates:
+            if not update.provider_symbol or not update.security_id:
+                continue
+            try:
+                payload = json.loads(update.data)
+            except (TypeError, ValueError):
+                payload = {}
+            records.append(
+                self._build_status_record(
+                    security_id=update.security_id,
+                    provider_symbol=update.provider_symbol,
+                    raw_fetched_at=update.fetched_at,
+                    payload=payload if isinstance(payload, Mapping) else {},
+                )
+            )
+        self.upsert_many(records, connection=connection)
+        return records
+
+    def reconcile_eodhd_fundamentals(
+        self,
+        *,
+        provider_symbols: Optional[Sequence[str]] = None,
+        exchange_codes: Optional[Sequence[str]] = None,
+        security_ids: Optional[Sequence[int]] = None,
+        chunk_size: int = 500,
+    ) -> List[SecurityListingStatusRecord]:
+        self.initialize_schema()
+        provider_norm = _PRIMARY_LISTING_SOURCE_PROVIDER
+        normalized_symbols = _normalized_codes(provider_symbols)
+        normalized_exchanges = _normalized_codes(exchange_codes)
+        normalized_security_ids = sorted(
+            {int(security_id) for security_id in security_ids or () if security_id}
+        )
+
+        def _select_rows(
+            conn: sqlite3.Connection,
+            *,
+            symbols_chunk: Optional[Sequence[str]] = None,
+            security_chunk: Optional[Sequence[int]] = None,
+        ) -> List[sqlite3.Row]:
+            params: List[Any] = [provider_norm, provider_norm]
+            query = [
+                "SELECT fr.security_id, fr.provider_symbol, fr.fetched_at, fr.data",
+                "FROM fundamentals_raw fr",
+                "JOIN supported_tickers st",
+                "  ON st.provider = fr.provider",
+                " AND st.provider_symbol = fr.provider_symbol",
+                _primary_listing_left_join(security_alias="fr"),
+                "WHERE fr.provider = ?",
+                "AND st.provider = ?",
+                "AND (sls.raw_fetched_at IS NULL OR sls.raw_fetched_at < fr.fetched_at)",
+            ]
+            if normalized_exchanges:
+                placeholders = ", ".join("?" for _ in normalized_exchanges)
+                query.append(f"AND st.provider_exchange_code IN ({placeholders})")
+                params.extend(normalized_exchanges)
+            if symbols_chunk:
+                placeholders = ", ".join("?" for _ in symbols_chunk)
+                query.append(f"AND fr.provider_symbol IN ({placeholders})")
+                params.extend(symbols_chunk)
+            if security_chunk:
+                placeholders = ", ".join("?" for _ in security_chunk)
+                query.append(f"AND fr.security_id IN ({placeholders})")
+                params.extend(security_chunk)
+            query.append("ORDER BY fr.provider_symbol ASC")
+            return conn.execute(" ".join(query), params).fetchall()
+
+        fetched_rows: List[sqlite3.Row] = []
+        with self._connect() as conn:
+            if normalized_symbols:
+                for symbol_chunk in _batched(normalized_symbols, chunk_size):
+                    fetched_rows.extend(_select_rows(conn, symbols_chunk=symbol_chunk))
+            elif normalized_security_ids:
+                for security_chunk in _batched(normalized_security_ids, chunk_size):
+                    fetched_rows.extend(
+                        _select_rows(conn, security_chunk=security_chunk)
+                    )
+            else:
+                fetched_rows.extend(_select_rows(conn))
+
+        records: List[SecurityListingStatusRecord] = []
+        for row in fetched_rows:
+            try:
+                payload = json.loads(row["data"])
+            except (TypeError, ValueError):
+                payload = {}
+            records.append(
+                self._build_status_record(
+                    security_id=int(row["security_id"]),
+                    provider_symbol=str(row["provider_symbol"]),
+                    raw_fetched_at=str(row["fetched_at"]),
+                    payload=payload if isinstance(payload, Mapping) else {},
+                )
+            )
+        self.upsert_many(records)
+        return records
+
+    def purge_secondary_security_data(
+        self,
+        *,
+        security_ids: Sequence[int],
+        provider_symbols: Sequence[str],
+    ) -> None:
+        normalized_security_ids = sorted(
+            {int(security_id) for security_id in security_ids if security_id}
+        )
+        normalized_symbols = _normalized_codes(provider_symbols)
+        if not normalized_security_ids and not normalized_symbols:
+            return
+
+        provider_norm = _PRIMARY_LISTING_SOURCE_PROVIDER
+        FinancialFactsRepository(self.db_path).initialize_schema()
+        FinancialFactsRefreshStateRepository(self.db_path).initialize_schema()
+        MarketDataRepository(self.db_path).initialize_schema()
+        MetricsRepository(self.db_path).initialize_schema()
+        MetricComputeStatusRepository(self.db_path).initialize_schema()
+        FundamentalsNormalizationStateRepository(self.db_path).initialize_schema()
+        MarketDataFetchStateRepository(self.db_path).initialize_schema()
+
+        def _delete_security_rows(
+            conn: sqlite3.Connection,
+            table_name: str,
+        ) -> None:
+            for security_chunk in _batched(normalized_security_ids, 500):
+                placeholders = ", ".join("?" for _ in security_chunk)
+                conn.execute(
+                    f"DELETE FROM {table_name} WHERE security_id IN ({placeholders})",
+                    list(security_chunk),
+                )
+
+        with self._connect() as conn:
+            if normalized_security_ids:
+                for table_name in (
+                    "financial_facts",
+                    "financial_facts_refresh_state",
+                    "market_data",
+                    "metrics",
+                    "metric_compute_status",
+                ):
+                    _delete_security_rows(conn, table_name)
+            if normalized_symbols:
+                for symbol_chunk in _batched(normalized_symbols, 500):
+                    placeholders = ", ".join("?" for _ in symbol_chunk)
+                    conn.execute(
+                        f"""
+                        DELETE FROM fundamentals_normalization_state
+                        WHERE provider = ? AND provider_symbol IN ({placeholders})
+                        """,
+                        [provider_norm, *symbol_chunk],
+                    )
+                    conn.execute(
+                        f"""
+                        DELETE FROM market_data_fetch_state
+                        WHERE provider = ? AND provider_symbol IN ({placeholders})
+                        """,
+                        [provider_norm, *symbol_chunk],
+                    )
 
 
 class _FetchStateRepository(SQLiteStore):
@@ -3805,7 +4252,21 @@ class FXRatesRepository(SQLiteStore):
         self.initialize_schema()
         currencies: set[str] = set()
         with self._connect() as conn:
-            for table_name in ("supported_tickers", "financial_facts", "market_data"):
+            supported_rows = conn.execute(
+                f"""
+                SELECT DISTINCT st.currency
+                FROM supported_tickers st
+                {_primary_listing_left_join(security_alias="st")}
+                WHERE st.currency IS NOT NULL
+                  AND {_primary_listing_predicate()}
+                ORDER BY st.currency
+                """
+            ).fetchall()
+            for row in supported_rows:
+                code = normalize_currency_code(row["currency"])
+                if code is not None:
+                    currencies.add(code)
+            for table_name in ("financial_facts", "market_data"):
                 rows = conn.execute(
                     f"""
                     SELECT DISTINCT currency

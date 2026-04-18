@@ -9,6 +9,7 @@ The main persisted layers are:
 - canonical security identities
 - supported ticker catalogs
 - raw fundamentals
+- listing classification state
 - fundamentals fetch state
 - normalized financial facts
 - market data snapshots
@@ -74,6 +75,22 @@ Purpose:
 - track retry state for failed fundamentals fetches
 - support resumable bulk ingestion
 - avoid repeatedly hitting symbols that are still inside backoff
+
+### `security_listing_status`
+
+Cached EODHD primary-vs-secondary listing classification lives here.
+
+Purpose:
+- record whether a listing is primary or secondary once raw EODHD
+  fundamentals have been stored
+- cache the provider-reported `General.PrimaryTicker` decision outside the raw
+  JSON payload so downstream scope queries stay index-friendly
+- treat missing or unusable `PrimaryTicker` values as primary instead of
+  blocking the symbol
+- let downstream stages exclude secondary listings without re-parsing
+  `fundamentals_raw.data`
+- provide a stable place to trigger purge logic for downstream canonical rows
+  that should not remain for secondary listings
 
 ### `fundamentals_normalization_state`
 
@@ -193,11 +210,17 @@ A normal run looks like:
 
 1. provider catalogs refreshed into `supported_exchanges`, `securities`, and `supported_tickers`
 2. raw fundamentals fetched into `fundamentals_raw`
-3. provider-specific normalization writes canonical `financial_facts`
-4. market refresh writes canonical `market_data`
-5. retry/backoff state updates `fundamentals_fetch_state` and `market_data_fetch_state`
-6. metric computation writes `metrics`
-7. screens read from canonical metrics
+3. EODHD raw writes refresh `security_listing_status` from `General.PrimaryTicker`
+4. provider-specific normalization writes canonical `financial_facts`
+5. market refresh writes canonical `market_data`
+6. retry/backoff state updates `fundamentals_fetch_state` and `market_data_fetch_state`
+7. metric computation writes `metrics`
+8. screens read from canonical metrics
+
+If an EODHD listing is classified as secondary at step 3, downstream rows for
+that `security_id` are deleted from `financial_facts`, `market_data`,
+`metrics`, and related downstream refresh-state tables. The raw payload and
+catalog row remain.
 
 ## Migration Notes
 

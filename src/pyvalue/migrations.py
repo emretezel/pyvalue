@@ -2048,6 +2048,39 @@ def _migration_030_add_metric_compute_status_tables(
     )
 
 
+def _migration_031_add_security_listing_status_table(
+    conn: sqlite3.Connection,
+) -> None:
+    """Cache primary-vs-secondary listing classification from raw fundamentals."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS security_listing_status (
+            security_id INTEGER NOT NULL PRIMARY KEY,
+            source_provider TEXT NOT NULL,
+            provider_symbol TEXT NOT NULL,
+            raw_fetched_at TEXT NOT NULL,
+            is_primary_listing INTEGER NOT NULL CHECK (is_primary_listing IN (0, 1)),
+            primary_provider_symbol TEXT,
+            classification_basis TEXT NOT NULL CHECK (
+                classification_basis IN (
+                    'matched_primary_ticker',
+                    'different_primary_ticker',
+                    'missing_primary_ticker'
+                )
+            ),
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_security_listing_status_primary
+        ON security_listing_status(is_primary_listing, security_id)
+        """
+    )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -2079,6 +2112,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_028_add_fx_catalog_tables,
     _migration_029_add_fin_facts_security_concept_latest_index,
     _migration_030_add_metric_compute_status_tables,
+    _migration_031_add_security_listing_status_table,
 ]
 
 

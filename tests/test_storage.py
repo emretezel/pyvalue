@@ -20,6 +20,7 @@ from pyvalue.storage import (
     MetricsRepository,
     SecurityMetadataUpdate,
     SecurityRepository,
+    SecurityListingStatusRepository,
     SupportedExchangeRepository,
     SupportedTickerRepository,
 )
@@ -128,6 +129,169 @@ def test_fundamentals_repository_normalizes_provider(tmp_path):
 
     assert repo.symbols("EODHD") == ["FOO.LSE"]
     assert repo.symbols("eodhd") == ["FOO.LSE"]
+
+
+def test_fundamentals_repository_classifies_and_purges_secondary_listings(tmp_path):
+    db_path = tmp_path / "listing-status.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock"}],
+    )
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "LSE",
+        [
+            {"Code": "AAA", "Name": "AAA plc", "Type": "Common Stock"},
+            {"Code": "BBB", "Name": "BBB plc", "Type": "Common Stock"},
+        ],
+    )
+    by_symbol = {row.symbol: row for row in ticker_repo.list_for_provider("EODHD")}
+
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    fact_repo.replace_facts(
+        "AAA.LSE",
+        [
+            FactRecord(
+                symbol="AAA.LSE",
+                concept="Assets",
+                fiscal_period="FY",
+                end_date="2024-12-31",
+                unit="GBP",
+                value=100.0,
+                currency="GBP",
+            )
+        ],
+    )
+    FinancialFactsRefreshStateRepository(db_path).mark_security_refreshed(
+        by_symbol["AAA.LSE"].security_id,
+        refreshed_at="2025-01-01T00:00:00+00:00",
+    )
+    MarketDataRepository(db_path).upsert_prices(
+        [
+            MarketDataUpdate(
+                security_id=by_symbol["AAA.LSE"].security_id,
+                symbol="AAA.LSE",
+                as_of="2025-01-02",
+                price=10.0,
+                volume=100,
+                currency="GBP",
+            )
+        ]
+    )
+    MetricsRepository(db_path).upsert(
+        "AAA.LSE",
+        "market_cap",
+        1000.0,
+        "2025-01-02",
+        unit_kind="monetary",
+        currency="GBP",
+    )
+    MetricComputeStatusRepository(db_path).upsert_many(
+        [
+            MetricComputeStatusRecord(
+                symbol="AAA.LSE",
+                metric_id="market_cap",
+                status="success",
+                attempted_at="2025-01-02T00:00:00+00:00",
+                value_as_of="2025-01-02",
+            )
+        ]
+    )
+    FundamentalsNormalizationStateRepository(db_path).mark_success(
+        "EODHD",
+        "AAA.LSE",
+        by_symbol["AAA.LSE"].security_id,
+        "2025-01-01T00:00:00+00:00",
+    )
+    MarketDataFetchStateRepository(db_path).mark_success(
+        "EODHD",
+        "AAA.LSE",
+        fetched_at="2025-01-02T00:00:00+00:00",
+    )
+
+    repo = FundamentalsRepository(db_path)
+    repo.upsert(
+        "EODHD",
+        "AAA.US",
+        {"General": {"Name": "AAA", "PrimaryTicker": "AAA.US"}},
+        exchange="US",
+    )
+    repo.upsert(
+        "EODHD",
+        "AAA.LSE",
+        {"General": {"Name": "AAA plc", "PrimaryTicker": "AAA.US"}},
+        exchange="LSE",
+    )
+    repo.upsert(
+        "EODHD",
+        "BBB.LSE",
+        {"General": {"Name": "BBB plc"}},
+        exchange="LSE",
+    )
+
+    status_repo = SecurityListingStatusRepository(db_path)
+    reconciled = status_repo.reconcile_eodhd_fundamentals()
+    assert reconciled == []
+
+    with sqlite3.connect(db_path) as conn:
+        statuses = conn.execute(
+            """
+            SELECT provider_symbol, is_primary_listing, primary_provider_symbol, classification_basis
+            FROM security_listing_status
+            ORDER BY provider_symbol
+            """
+        ).fetchall()
+        fact_rows = conn.execute(
+            "SELECT COUNT(*) FROM financial_facts WHERE security_id = ?",
+            (by_symbol["AAA.LSE"].security_id,),
+        ).fetchone()[0]
+        refresh_rows = conn.execute(
+            "SELECT COUNT(*) FROM financial_facts_refresh_state WHERE security_id = ?",
+            (by_symbol["AAA.LSE"].security_id,),
+        ).fetchone()[0]
+        market_rows = conn.execute(
+            "SELECT COUNT(*) FROM market_data WHERE security_id = ?",
+            (by_symbol["AAA.LSE"].security_id,),
+        ).fetchone()[0]
+        metric_rows = conn.execute(
+            "SELECT COUNT(*) FROM metrics WHERE security_id = ?",
+            (by_symbol["AAA.LSE"].security_id,),
+        ).fetchone()[0]
+        status_rows = conn.execute(
+            "SELECT COUNT(*) FROM metric_compute_status WHERE security_id = ?",
+            (by_symbol["AAA.LSE"].security_id,),
+        ).fetchone()[0]
+        normalization_rows = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM fundamentals_normalization_state
+            WHERE provider = 'EODHD' AND provider_symbol = 'AAA.LSE'
+            """
+        ).fetchone()[0]
+        market_state_rows = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM market_data_fetch_state
+            WHERE provider = 'EODHD' AND provider_symbol = 'AAA.LSE'
+            """
+        ).fetchone()[0]
+
+    assert statuses == [
+        ("AAA.LSE", 0, "AAA.US", "different_primary_ticker"),
+        ("AAA.US", 1, "AAA.US", "matched_primary_ticker"),
+        ("BBB.LSE", 1, None, "missing_primary_ticker"),
+    ]
+    assert fact_rows == 0
+    assert refresh_rows == 0
+    assert market_rows == 0
+    assert metric_rows == 0
+    assert status_rows == 0
+    assert normalization_rows == 0
+    assert market_state_rows == 0
 
 
 def test_supported_exchange_repository_replaces_rows_per_provider(tmp_path):
@@ -754,6 +918,62 @@ def test_supported_ticker_repository_lists_market_data_symbols_missing_then_olde
     )
 
     assert [row.symbol for row in rows] == ["AAA.US", "CCC.US", "DDD.US"]
+
+
+def test_supported_ticker_repository_primary_only_filters_secondary_listings(
+    tmp_path,
+):
+    db_path = tmp_path / "supported-primary-only.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock"}],
+    )
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "LSE",
+        [
+            {"Code": "AAA", "Name": "AAA plc", "Type": "Common Stock"},
+            {"Code": "BBB", "Name": "BBB plc", "Type": "Common Stock"},
+        ],
+    )
+
+    repo = FundamentalsRepository(db_path)
+    repo.initialize_schema()
+    repo.upsert(
+        "EODHD",
+        "AAA.US",
+        {"General": {"PrimaryTicker": "AAA.US"}},
+        exchange="US",
+    )
+    repo.upsert(
+        "EODHD",
+        "AAA.LSE",
+        {"General": {"PrimaryTicker": "AAA.US"}},
+        exchange="LSE",
+    )
+    repo.upsert(
+        "EODHD",
+        "BBB.LSE",
+        {"General": {"Name": "BBB plc"}},
+        exchange="LSE",
+    )
+
+    assert ticker_repo.list_symbols_by_exchange("EODHD", "LSE") == [
+        "AAA.LSE",
+        "BBB.LSE",
+    ]
+    assert ticker_repo.list_symbols_by_exchange(
+        "EODHD",
+        "LSE",
+        primary_only=True,
+    ) == ["BBB.LSE"]
+    assert ticker_repo.list_canonical_symbols(primary_only=True) == [
+        "AAA.US",
+        "BBB.LSE",
+    ]
 
 
 def test_market_data_fetch_state_repository_tracks_success_and_failure(tmp_path):
@@ -1627,6 +1847,55 @@ def test_fx_rates_repository_latest_on_or_before_and_discover_currencies(tmp_pat
         date(2024, 1, 1),
         date(2024, 1, 1),
     ) == {"EUR"}
+
+
+def test_fx_rates_repository_discover_currencies_excludes_secondary_supported_tickers(
+    tmp_path,
+):
+    db_path = tmp_path / "fx-secondary-supported.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock"}],
+    )
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "LSE",
+        [{"Code": "AAA", "Name": "AAA plc", "Type": "Common Stock", "Currency": "GBP"}],
+    )
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "JSE",
+        [{"Code": "BBB", "Name": "BBB Ltd", "Type": "Common Stock", "Currency": "ZAC"}],
+    )
+
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD",
+        "AAA.US",
+        {"General": {"PrimaryTicker": "AAA.US"}},
+        exchange="US",
+    )
+    fund_repo.upsert(
+        "EODHD",
+        "AAA.LSE",
+        {"General": {"PrimaryTicker": "AAA.US"}},
+        exchange="LSE",
+    )
+    fund_repo.upsert(
+        "EODHD",
+        "BBB.JSE",
+        {"General": {"Name": "BBB Ltd"}},
+        exchange="JSE",
+    )
+
+    repo = FXRatesRepository(db_path)
+    repo.initialize_schema()
+
+    assert repo.discover_currencies() == ["ZAR"]
 
 
 def test_security_repository_upserts_sector_and_industry_metadata(tmp_path):

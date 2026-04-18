@@ -110,6 +110,7 @@ from pyvalue.storage import (
     MetricRecord,
     MetricsRepository,
     SecurityRepository,
+    SecurityListingStatusRepository,
     SecurityMetadataUpdate,
     StoredFactRow,
     StoredMetricRow,
@@ -628,12 +629,35 @@ def _normalize_canonical_scope_symbol(symbol: str) -> str:
     return candidate
 
 
+def _reconcile_eodhd_listing_scope(
+    database: str,
+    *,
+    provider_symbols: Optional[Sequence[str]] = None,
+    exchange_codes: Optional[Sequence[str]] = None,
+    security_ids: Optional[Sequence[int]] = None,
+) -> None:
+    repo = SecurityListingStatusRepository(database)
+    updates = repo.reconcile_eodhd_fundamentals(
+        provider_symbols=provider_symbols,
+        exchange_codes=exchange_codes,
+        security_ids=security_ids,
+    )
+    secondary_updates = [update for update in updates if not update.is_primary_listing]
+    if secondary_updates:
+        repo.purge_secondary_security_data(
+            security_ids=[update.security_id for update in secondary_updates],
+            provider_symbols=[update.provider_symbol for update in secondary_updates],
+        )
+
+
 def _resolve_provider_scope_rows(
     database: str,
     provider: str,
     symbols: Optional[Sequence[str]],
     exchange_codes: Optional[Sequence[str]],
     all_supported: bool,
+    *,
+    primary_only: bool = False,
 ) -> Tuple[List["SupportedTicker"], Optional[List[str]], Optional[List[str]]]:
     provider_norm = _normalize_provider(provider)
     symbol_filters, exchange_filters = _validate_scope_selector(
@@ -658,16 +682,46 @@ def _resolve_provider_scope_rows(
                 f"Unsupported tickers for provider {provider_norm}: {', '.join(missing)}. "
                 f"{_catalog_bootstrap_guidance(provider_norm)}"
             )
+        if primary_only and provider_norm == "EODHD":
+            _reconcile_eodhd_listing_scope(
+                database,
+                provider_symbols=normalized_symbols,
+            )
+            rows = ticker_repo.list_for_provider(
+                provider_norm,
+                provider_symbols=normalized_symbols,
+                primary_only=True,
+            )
+            primary_found = {row.symbol.upper() for row in rows}
+            secondary = [
+                symbol for symbol in normalized_symbols if symbol not in primary_found
+            ]
+            if secondary:
+                raise SystemExit(
+                    "Secondary listings are excluded for provider EODHD once raw "
+                    f"fundamentals classification is available: {', '.join(secondary)}"
+                )
         return rows, normalized_symbols, None
 
+    if primary_only and provider_norm == "EODHD":
+        _reconcile_eodhd_listing_scope(
+            database,
+            exchange_codes=exchange_filters,
+        )
     rows = ticker_repo.list_for_provider(
         provider_norm,
         exchange_codes=exchange_filters,
+        primary_only=primary_only and provider_norm == "EODHD",
     )
     if not rows:
         scope_label = (
             ", ".join(exchange_filters) if exchange_filters else "all supported tickers"
         )
+        if primary_only and provider_norm == "EODHD":
+            raise SystemExit(
+                f"No primary supported tickers found for provider {provider_norm} in scope {scope_label}. "
+                f"{_catalog_bootstrap_guidance(provider_norm)}"
+            )
         raise SystemExit(
             f"No supported tickers found for provider {provider_norm} in scope {scope_label}. "
             f"{_catalog_bootstrap_guidance(provider_norm)}"
@@ -680,6 +734,8 @@ def _resolve_canonical_scope_symbols(
     symbols: Optional[Sequence[str]],
     exchange_codes: Optional[Sequence[str]],
     all_supported: bool,
+    *,
+    primary_only: bool = True,
 ) -> Tuple[List[str], Optional[List[str]], Optional[List[str]]]:
     symbol_filters, exchange_filters = _validate_scope_selector(
         symbols, exchange_codes, all_supported
@@ -697,13 +753,43 @@ def _resolve_canonical_scope_symbols(
             raise SystemExit(
                 f"Unsupported canonical tickers: {', '.join(missing)}. Populate supported_tickers first."
             )
+        if primary_only:
+            _reconcile_eodhd_listing_scope(
+                database,
+                provider_symbols=normalized_symbols,
+            )
+            primary_supported = set(
+                ticker_repo.list_canonical_symbols(primary_only=True)
+            )
+            secondary = [
+                symbol
+                for symbol in normalized_symbols
+                if symbol not in primary_supported
+            ]
+            if secondary:
+                raise SystemExit(
+                    "Secondary listings are excluded once raw fundamentals "
+                    f"classification is available: {', '.join(secondary)}"
+                )
         return normalized_symbols, normalized_symbols, None
 
-    canonical_symbols = ticker_repo.list_canonical_symbols(exchange_filters)
+    if primary_only:
+        _reconcile_eodhd_listing_scope(
+            database,
+            exchange_codes=exchange_filters,
+        )
+    canonical_symbols = ticker_repo.list_canonical_symbols(
+        exchange_filters,
+        primary_only=primary_only,
+    )
     if not canonical_symbols:
         scope_label = (
             ", ".join(exchange_filters) if exchange_filters else "all supported tickers"
         )
+        if primary_only:
+            raise SystemExit(
+                f"No primary canonical supported tickers found in scope {scope_label}. Populate supported_tickers first."
+            )
         raise SystemExit(
             f"No canonical supported tickers found in scope {scope_label}. Populate supported_tickers first."
         )
@@ -1336,9 +1422,15 @@ def _select_listing_symbols_by_exchange(
     database: str,
     provider: str,
     exchange_code: str,
+    *,
+    primary_only: bool = False,
 ) -> List[str]:
     ticker_repo = SupportedTickerRepository(database)
-    return ticker_repo.list_symbols_by_exchange(provider, exchange_code)
+    return ticker_repo.list_symbols_by_exchange(
+        provider,
+        exchange_code,
+        primary_only=primary_only,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2281,6 +2373,12 @@ def cmd_update_market_data_global(
         return 0
 
     ticker_repo = SupportedTickerRepository(database)
+    _reconcile_eodhd_listing_scope(
+        database,
+        exchange_codes=sorted(requested_exchange_codes)
+        if requested_exchange_codes
+        else None,
+    )
     eligible = ticker_repo.list_eligible_for_market_data(
         provider=provider_norm,
         exchange_codes=sorted(requested_exchange_codes)
@@ -2289,6 +2387,7 @@ def cmd_update_market_data_global(
         max_age_days=max_age_days,
         max_symbols=request_budget,
         respect_backoff=respect_backoff,
+        primary_only=True,
     )
     if not eligible:
         scope = (
@@ -2372,10 +2471,15 @@ def cmd_report_market_data_progress(
     effective_max_age_days = max_age_days or 7
 
     ticker_repo = SupportedTickerRepository(database)
+    _reconcile_eodhd_listing_scope(
+        database,
+        exchange_codes=selected_exchanges,
+    )
     breakdown = ticker_repo.market_data_progress_by_exchange(
         provider=provider_norm,
         exchange_codes=selected_exchanges,
         max_age_days=effective_max_age_days,
+        primary_only=True,
     )
     summary = _summarize_progress_breakdown(breakdown)
     failures = (
@@ -2383,6 +2487,7 @@ def cmd_report_market_data_progress(
             provider=provider_norm,
             exchange_codes=selected_exchanges,
             limit=10,
+            primary_only=True,
         )
         if summary.error_rows > 0
         else []
@@ -2658,6 +2763,7 @@ def cmd_update_market_data_stage(
         symbols,
         exchange_codes,
         all_supported,
+        primary_only=True,
     )
     scope_label = _scope_label(symbol_filters, resolved_exchange_codes)
     config = Config()
@@ -2686,6 +2792,7 @@ def cmd_update_market_data_stage(
         max_symbols=max_symbols,
         respect_backoff=respect_backoff,
         provider_symbols=symbol_filters,
+        primary_only=True,
     )
     if not eligible:
         print(
@@ -2911,6 +3018,7 @@ def cmd_normalize_fundamentals_stage(
         symbols,
         exchange_codes,
         all_supported,
+        primary_only=provider_norm == "EODHD",
     )
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
@@ -5892,6 +6000,26 @@ def cmd_normalize_eodhd_fundamentals_bulk(
         if not symbols:
             raise SystemExit("No symbols provided for EODHD normalization.")
 
+    _reconcile_eodhd_listing_scope(database, provider_symbols=symbols)
+    ticker_repo = SupportedTickerRepository(database)
+    supported_rows = ticker_repo.list_for_provider(
+        "EODHD",
+        provider_symbols=symbols,
+    )
+    primary_rows = ticker_repo.list_for_provider(
+        "EODHD",
+        provider_symbols=symbols,
+        primary_only=True,
+    )
+    excluded_supported = {row.symbol.upper() for row in supported_rows} - {
+        row.symbol.upper() for row in primary_rows
+    }
+    symbols = [symbol for symbol in symbols if symbol.upper() not in excluded_supported]
+    if not symbols:
+        raise SystemExit(
+            "No primary EODHD symbols remain after secondary-listing filtering."
+        )
+
     requested_total = len(symbols)
     if force:
         print(
@@ -6001,6 +6129,7 @@ def cmd_normalize_fundamentals_bulk(
         database=database,
         provider=provider_norm,
         exchange_code=exchange_norm,
+        primary_only=provider_norm == "EODHD",
     )
     if not symbols_for_exchange:
         raise SystemExit(
@@ -6162,6 +6291,16 @@ def cmd_update_market_data_bulk(
     ticker_repo.initialize_schema()
     exchange_norm = exchange_code.upper()
     listing_rows = ticker_repo.list_symbols_by_exchange(provider_norm, exchange_norm)
+    if provider_norm == "EODHD":
+        _reconcile_eodhd_listing_scope(
+            database,
+            exchange_codes=[exchange_norm],
+        )
+        listing_rows = ticker_repo.list_symbols_by_exchange(
+            provider_norm,
+            exchange_norm,
+            primary_only=True,
+        )
     if not listing_rows:
         raise SystemExit(
             f"No supported tickers found for provider {provider_norm} on exchange {exchange_norm}. "
@@ -6261,7 +6400,16 @@ def cmd_compute_metrics_bulk(
         raise SystemExit("--exchange-code is required for bulk metric computation.")
 
     exchange_norm = exchange_code.upper()
-    symbols = ticker_repo.list_symbols_by_exchange(provider_norm, exchange_norm)
+    if provider_norm == "EODHD":
+        _reconcile_eodhd_listing_scope(
+            str(db_path),
+            exchange_codes=[exchange_norm],
+        )
+    symbols = ticker_repo.list_symbols_by_exchange(
+        provider_norm,
+        exchange_norm,
+        primary_only=provider_norm == "EODHD",
+    )
     if not symbols:
         raise SystemExit(
             f"No supported tickers found for provider {provider_norm} on exchange {exchange_norm}. "
@@ -7494,7 +7642,16 @@ def cmd_run_screen_bulk(
     output_csv = output_csv or _default_screen_results_path(
         provider_norm, exchange_norm
     )
-    symbols = ticker_repo.list_symbols_by_exchange(provider_norm, exchange_norm)
+    if provider_norm == "EODHD":
+        _reconcile_eodhd_listing_scope(
+            database,
+            exchange_codes=[exchange_norm],
+        )
+    symbols = ticker_repo.list_symbols_by_exchange(
+        provider_norm,
+        exchange_norm,
+        primary_only=provider_norm == "EODHD",
+    )
     if not symbols:
         raise SystemExit(
             f"No supported tickers found for provider {provider_norm} on exchange {exchange_norm}. "
@@ -7523,7 +7680,9 @@ def cmd_run_screen_bulk(
     entity_repo.initialize_schema()
 
     name_rows = ticker_repo.list_symbol_name_pairs_by_exchange(
-        provider_norm, exchange_norm
+        provider_norm,
+        exchange_norm,
+        primary_only=provider_norm == "EODHD",
     )
     universe_names = {row[0].upper(): (row[1] or row[0].upper()) for row in name_rows}
     evaluation_metrics_repo = _PreloadedMetricsRepository(
@@ -8116,6 +8275,7 @@ def _cmd_refresh_fx_rates_frankfurter(
         "Discovering FX currencies from supported_tickers, financial_facts, and market_data...",
         flush=True,
     )
+    _reconcile_eodhd_listing_scope(database)
     currencies = [
         code for code in repo.discover_currencies() if code != service.pivot_currency
     ]

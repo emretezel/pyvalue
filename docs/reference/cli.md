@@ -24,6 +24,13 @@ Provider rules:
   `report-screen-failures`, and `recalc-market-cap`
   are provider-agnostic and operate on canonical symbols
 
+For EODHD-backed symbols, downstream stage commands and canonical-scope
+commands also apply cached primary-listing classification from raw
+fundamentals. Listings classified as secondary through `General.PrimaryTicker`
+are excluded from normalization, market-data refresh, metric, screening,
+metadata-refresh, and canonical reporting scopes. Missing or unusable
+`PrimaryTicker` values are treated as primary.
+
 ## Catalog Commands
 
 ### `refresh-supported-exchanges`
@@ -92,6 +99,8 @@ Notes:
 - `EODHD` rate is symbols per minute
 - `EODHD` uses the stored supported-ticker catalog plus daily quota checks,
   a concurrent worker pool, and retry backoff for multi-day runs
+- storing an EODHD raw payload also refreshes cached primary-vs-secondary
+  listing classification for that symbol
 - retry backoff is respected by default; use `--retry-failed-now` to ignore it
 - the default EODHD fundamentals rate is `950 req/min`, leaving a small buffer
   under the `1000 req/min` provider limit
@@ -136,6 +145,8 @@ Notes:
 
 - bulk runs over `--exchange-codes` or `--all-supported` parallelize automatically
 - only symbols with stored raw fundamentals are normalized
+- EODHD listings already classified as secondary are excluded from the
+  requested scope before normalization starts
 - by default, normalization skips symbols whose raw `fundamentals_raw.fetched_at`
   has not changed since the last successful normalization for that provider
 - bulk runs with `--force` skip the freshness scan and start re-normalizing the
@@ -172,6 +183,8 @@ Notes:
   `1`, while exchange-bulk refreshes cost `100` for the exchange
 - the command is freshness-based by default and selects missing symbols first,
   then the oldest stale symbols
+- EODHD listings already classified as secondary are excluded before refresh
+  planning and progress accounting
 - retry backoff is respected by default; use `--retry-failed-now` to ignore it
 - large exchange and all-supported runs may use exchange-bulk fetches and then
   fall back to individual symbols when needed
@@ -227,6 +240,8 @@ Notes:
 
 - stored metric rows now include explicit `unit_kind`, optional `currency`, and
   optional `unit_label`
+- canonical metric/screen/report scopes exclude EODHD listings already
+  classified as secondary from raw fundamentals
 - monetary and per-share metrics are FX-aware; ratio, percent, multiple, and
   count metrics remain non-monetary outputs
 - every metric attempt also updates `metric_compute_status`, which stores the
@@ -246,6 +261,8 @@ Notes:
 
 - with the default `EODHD` provider, the command syncs the FOREX catalog into
   `fx_supported_pairs` first
+- the legacy Frankfurter discovery path only considers supported-ticker
+  currencies from listings that are primary after EODHD raw classification
 - EODHD refresh iterates canonical six-letter pairs only; three-letter
   shorthand aliases such as `EUR` are tracked as aliases to `USDEUR` and are
   not refreshed separately
