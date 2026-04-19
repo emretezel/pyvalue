@@ -39,6 +39,9 @@ Upgrade note:
 - `pyvalue reconcile-listing-status --all-supported` backfills the cached
   primary/secondary listing table from existing `fundamentals_raw` without
   downloading fundamentals or market data again
+- read-only canonical/report commands backfill only missing cached
+  primary/secondary rows in scope; run `reconcile-listing-status` after an
+  upgrade if you want an immediate full listing-status sweep
 
 ## What pyvalue does
 

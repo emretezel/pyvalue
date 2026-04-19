@@ -7778,6 +7778,86 @@ criteria:
     assert csv_contents[1] == "AAA.LSE,AAA PLC,AAA description,N/A,N/A,100"
 
 
+def test_cmd_run_screen_bulk_backfills_missing_listing_status_without_full_reconcile(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "screen_exchange_missing_listing_status.db"
+    store_catalog_listings(
+        db_path,
+        "LSE",
+        [
+            Listing(symbol="AAA.LSE", security_name="AAA PLC", exchange="LSE"),
+            Listing(symbol="BBB.LSE", security_name="BBB PLC", exchange="LSE"),
+        ],
+        provider="EODHD",
+    )
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD",
+        "AAA.LSE",
+        {"General": {"Name": "AAA plc", "PrimaryTicker": "AAA.US"}},
+        exchange="LSE",
+    )
+    fund_repo.upsert(
+        "EODHD",
+        "BBB.LSE",
+        {"General": {"Name": "BBB plc"}},
+        exchange="LSE",
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM security_listing_status")
+
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+    metrics_repo.upsert("AAA.LSE", "working_capital", 100.0, "2023-12-31")
+    metrics_repo.upsert("BBB.LSE", "working_capital", 100.0, "2023-12-31")
+
+    screen_path = tmp_path / "screen.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Working capital minimum"
+    left:
+      metric: working_capital
+    operator: ">="
+    right:
+      value: 75
+"""
+    )
+
+    def fail_full_reconcile(*args, **kwargs):
+        pytest.fail("unexpected full reconcile in read-only bulk screening")
+
+    monkeypatch.setattr(cli, "_reconcile_eodhd_listing_scope", fail_full_reconcile)
+
+    rc = cli.cmd_run_screen_bulk(
+        config_path=str(screen_path),
+        provider="EODHD",
+        database=str(db_path),
+        output_csv=None,
+        exchange_code="LSE",
+    )
+
+    assert rc == 0
+    with sqlite3.connect(db_path) as conn:
+        statuses = conn.execute(
+            """
+            SELECT provider_symbol, is_primary_listing, classification_basis
+            FROM security_listing_status
+            ORDER BY provider_symbol
+            """
+        ).fetchall()
+
+    assert statuses == [
+        ("AAA.LSE", 0, "different_primary_ticker"),
+        ("BBB.LSE", 1, "missing_primary_ticker"),
+    ]
+    output = capsys.readouterr().out
+    assert "BBB.LSE" in output
+    assert "AAA.LSE" not in output
+
+
 def test_cmd_run_screen_stage_reports_progress_for_multi_symbol_scope(
     monkeypatch, tmp_path, capsys
 ):
@@ -7988,6 +8068,102 @@ ranking:
     assert any("BBB.US" in line for line in output)
 
 
+def test_cmd_run_screen_stage_defers_ranking_metric_loads_until_after_filtering(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "screen-stage-ranked-loads.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+            Listing(symbol="CCC.US", security_name="CCC Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+    metrics_repo.upsert("AAA.US", "working_capital", 100.0, "2023-12-31")
+    metrics_repo.upsert("BBB.US", "working_capital", 100.0, "2023-12-31")
+    metrics_repo.upsert("CCC.US", "working_capital", 50.0, "2023-12-31")
+    metrics_repo.upsert("AAA.US", "primary_score", 10.0, "2023-12-31")
+    metrics_repo.upsert("BBB.US", "primary_score", 20.0, "2023-12-31")
+    metrics_repo.upsert("CCC.US", "primary_score", 30.0, "2023-12-31")
+    metrics_repo.upsert("AAA.US", "oey_ev_norm", 0.05, "2023-12-31")
+    metrics_repo.upsert("BBB.US", "oey_ev_norm", 0.07, "2023-12-31")
+    metrics_repo.upsert("CCC.US", "oey_ev_norm", 0.09, "2023-12-31")
+    metrics_repo.upsert("AAA.US", "net_debt_to_ebitda", 1.5, "2023-12-31")
+    metrics_repo.upsert("BBB.US", "net_debt_to_ebitda", 0.5, "2023-12-31")
+    metrics_repo.upsert("CCC.US", "net_debt_to_ebitda", 0.1, "2023-12-31")
+
+    screen_path = tmp_path / "ranked-screen.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Working capital minimum"
+    left:
+      metric: working_capital
+    operator: ">="
+    right:
+      value: 75
+ranking:
+  peer_group: sector
+  min_sector_peers: 10
+  winsorize:
+    lower_percentile: 5
+    upper_percentile: 95
+  metrics:
+    - metric: primary_score
+      weight: 1.0
+      direction: higher
+  tie_breakers:
+    - metric: oey_ev_norm
+      direction: descending
+    - metric: net_debt_to_ebitda
+      direction: ascending
+    - metric: canonical_symbol
+      direction: ascending
+"""
+    )
+
+    calls = []
+    original_fetch_many = cli._StatusAwareMetricsRepository.fetch_many_for_symbols
+
+    def wrapped_fetch_many(self, symbols, metric_ids, chunk_size=500):
+        calls.append((tuple(symbols), tuple(metric_ids)))
+        return original_fetch_many(
+            self,
+            symbols,
+            metric_ids,
+            chunk_size=chunk_size,
+        )
+
+    monkeypatch.setattr(
+        cli._StatusAwareMetricsRepository,
+        "fetch_many_for_symbols",
+        wrapped_fetch_many,
+    )
+
+    rc = cli.cmd_run_screen_stage(
+        config_path=str(screen_path),
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=["US"],
+        all_supported=False,
+        output_csv=None,
+    )
+
+    assert rc == 0
+    assert calls == [
+        (("AAA.US", "BBB.US", "CCC.US"), ("working_capital",)),
+        (
+            ("AAA.US", "BBB.US"),
+            ("primary_score", "oey_ev_norm", "net_debt_to_ebitda"),
+        ),
+    ]
+
+
 def test_cmd_run_screen_stage_limits_console_preview_and_truncates_description(
     monkeypatch, tmp_path, capsys
 ):
@@ -8138,6 +8314,87 @@ criteria:
     )
 
     assert rc == 0
+
+
+def test_cmd_run_screen_stage_backfills_missing_listing_status_without_full_reconcile(
+    monkeypatch, tmp_path, capsys
+):
+    db_path = tmp_path / "screen-stage-missing-listing-status.db"
+    store_catalog_listings(
+        db_path,
+        "LSE",
+        [
+            Listing(symbol="AAA.LSE", security_name="AAA PLC", exchange="LSE"),
+            Listing(symbol="BBB.LSE", security_name="BBB PLC", exchange="LSE"),
+        ],
+        provider="EODHD",
+    )
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD",
+        "AAA.LSE",
+        {"General": {"Name": "AAA plc", "PrimaryTicker": "AAA.US"}},
+        exchange="LSE",
+    )
+    fund_repo.upsert(
+        "EODHD",
+        "BBB.LSE",
+        {"General": {"Name": "BBB plc"}},
+        exchange="LSE",
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM security_listing_status")
+
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+    metrics_repo.upsert("AAA.LSE", "working_capital", 100.0, "2024-12-31")
+    metrics_repo.upsert("BBB.LSE", "working_capital", 100.0, "2024-12-31")
+
+    screen_path = tmp_path / "screen.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Working capital minimum"
+    left:
+      metric: working_capital
+    operator: ">="
+    right:
+      value: 75
+"""
+    )
+
+    def fail_full_reconcile(*args, **kwargs):
+        pytest.fail("unexpected full reconcile in read-only canonical screening")
+
+    monkeypatch.setattr(cli, "_reconcile_eodhd_listing_scope", fail_full_reconcile)
+
+    rc = cli.cmd_run_screen_stage(
+        config_path=str(screen_path),
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=None,
+        all_supported=False,
+        output_csv=None,
+    )
+
+    assert rc == 0
+    with sqlite3.connect(db_path) as conn:
+        statuses = conn.execute(
+            """
+            SELECT provider_symbol, is_primary_listing, classification_basis
+            FROM security_listing_status
+            ORDER BY provider_symbol
+            """
+        ).fetchall()
+
+    assert statuses == [
+        ("AAA.LSE", 0, "different_primary_ticker"),
+        ("BBB.LSE", 1, "missing_primary_ticker"),
+    ]
+    output = capsys.readouterr().out
+    assert "Entity: BBB PLC" in output
+    assert "AAA.LSE" not in output
 
 
 def test_cmd_run_screen_stage_failure_status_shadows_stored_metric_value(tmp_path):

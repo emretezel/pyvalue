@@ -652,6 +652,60 @@ def _reconcile_eodhd_listing_scope(
     return updates
 
 
+def _ensure_eodhd_listing_scope_cached(
+    database: str,
+    *,
+    provider_symbols: Optional[Sequence[str]] = None,
+    exchange_codes: Optional[Sequence[str]] = None,
+    security_ids: Optional[Sequence[int]] = None,
+) -> List[SecurityListingStatusRecord]:
+    """Backfill only missing cached listing-status rows for an EODHD scope."""
+
+    repo = SecurityListingStatusRepository(database)
+    missing_provider_symbols = repo.list_missing_eodhd_provider_symbols(
+        provider_symbols=provider_symbols,
+        exchange_codes=exchange_codes,
+        security_ids=security_ids,
+    )
+    if not missing_provider_symbols:
+        return []
+    updates = repo.reconcile_eodhd_fundamentals(
+        provider_symbols=missing_provider_symbols,
+    )
+    secondary_updates = [update for update in updates if not update.is_primary_listing]
+    if secondary_updates:
+        repo.purge_secondary_security_data(
+            security_ids=[update.security_id for update in secondary_updates],
+            provider_symbols=[update.provider_symbol for update in secondary_updates],
+        )
+    return updates
+
+
+def _sync_eodhd_listing_scope(
+    database: str,
+    *,
+    listing_status_mode: Literal["full", "ensure_missing"] = "full",
+    provider_symbols: Optional[Sequence[str]] = None,
+    exchange_codes: Optional[Sequence[str]] = None,
+    security_ids: Optional[Sequence[int]] = None,
+) -> List[SecurityListingStatusRecord]:
+    if listing_status_mode == "full":
+        return _reconcile_eodhd_listing_scope(
+            database,
+            provider_symbols=provider_symbols,
+            exchange_codes=exchange_codes,
+            security_ids=security_ids,
+        )
+    if listing_status_mode == "ensure_missing":
+        return _ensure_eodhd_listing_scope_cached(
+            database,
+            provider_symbols=provider_symbols,
+            exchange_codes=exchange_codes,
+            security_ids=security_ids,
+        )
+    raise ValueError(f"Unsupported listing_status_mode: {listing_status_mode}")
+
+
 def cmd_reconcile_listing_status(
     provider: str,
     database: str,
@@ -783,6 +837,7 @@ def _resolve_canonical_scope_symbols(
     all_supported: bool,
     *,
     primary_only: bool = True,
+    listing_status_mode: Literal["full", "ensure_missing"] = "full",
 ) -> Tuple[List[str], Optional[List[str]], Optional[List[str]]]:
     symbol_filters, exchange_filters = _validate_scope_selector(
         symbols, exchange_codes, all_supported
@@ -801,8 +856,9 @@ def _resolve_canonical_scope_symbols(
                 f"Unsupported canonical tickers: {', '.join(missing)}. Populate supported_tickers first."
             )
         if primary_only:
-            _reconcile_eodhd_listing_scope(
+            _sync_eodhd_listing_scope(
                 database,
+                listing_status_mode=listing_status_mode,
                 provider_symbols=normalized_symbols,
             )
             primary_supported = set(
@@ -821,8 +877,9 @@ def _resolve_canonical_scope_symbols(
         return normalized_symbols, normalized_symbols, None
 
     if primary_only:
-        _reconcile_eodhd_listing_scope(
+        _sync_eodhd_listing_scope(
             database,
+            listing_status_mode=listing_status_mode,
             exchange_codes=exchange_filters,
         )
     canonical_symbols = ticker_repo.list_canonical_symbols(
@@ -2539,7 +2596,7 @@ def cmd_report_market_data_progress(
     effective_max_age_days = max_age_days or 7
 
     ticker_repo = SupportedTickerRepository(database)
-    _reconcile_eodhd_listing_scope(
+    _ensure_eodhd_listing_scope_cached(
         database,
         exchange_codes=selected_exchanges,
     )
@@ -4867,21 +4924,45 @@ def _ordered_unique_metric_ids(*metric_id_lists: Sequence[str]) -> List[str]:
     return ordered
 
 
-def _screen_requested_metric_ids(definition) -> List[str]:
-    metric_ids = _ordered_unique_metric_ids(
-        screen_metric_ids(definition),
-        ranking_metric_ids(definition),
-    )
+_SCREEN_SYMBOL_TIE_BREAKER_IDS = frozenset(
+    {"canonical_symbol", "symbol", "ticker", "id"}
+)
+
+
+def _screen_filter_metric_ids(definition) -> List[str]:
+    return screen_metric_ids(definition)
+
+
+def _screen_ranking_extra_metric_ids(definition) -> List[str]:
     ranking = getattr(definition, "ranking", None)
     if ranking is None:
-        return metric_ids
+        return []
+
+    metric_ids = list(ranking_metric_ids(definition))
     for tie_breaker in ranking.tie_breakers:
         metric_id = str(tie_breaker.metric_id).strip()
-        if metric_id in {"canonical_symbol", "symbol", "ticker", "id"}:
+        if metric_id in _SCREEN_SYMBOL_TIE_BREAKER_IDS:
             continue
         if metric_id not in metric_ids:
             metric_ids.append(metric_id)
-    return metric_ids
+
+    filter_metric_ids = set(_screen_filter_metric_ids(definition))
+    return [metric_id for metric_id in metric_ids if metric_id not in filter_metric_ids]
+
+
+def _screen_requested_metric_ids(definition) -> List[str]:
+    return _ordered_unique_metric_ids(
+        _screen_filter_metric_ids(definition),
+        _screen_ranking_extra_metric_ids(definition),
+    )
+
+
+def _merge_metric_rows_by_symbol(
+    existing_rows: Dict[str, Dict[str, MetricRecord]],
+    additional_rows: Mapping[str, Mapping[str, MetricRecord]],
+) -> None:
+    for symbol, metric_rows in additional_rows.items():
+        existing_rows.setdefault(symbol, {}).update(metric_rows)
 
 
 def _evaluate_screen_scope(
@@ -4955,7 +5036,7 @@ def _rank_screen_passers(
 
     metric_ids = ranking_metric_ids(definition)
     for tie_breaker in definition.ranking.tie_breakers:
-        if tie_breaker.metric_id in {"canonical_symbol", "symbol", "ticker", "id"}:
+        if tie_breaker.metric_id in _SCREEN_SYMBOL_TIE_BREAKER_IDS:
             continue
         if tie_breaker.metric_id not in metric_ids:
             metric_ids.append(tie_breaker.metric_id)
@@ -4965,7 +5046,7 @@ def _rank_screen_passers(
     tie_breaker_config = {
         tie_breaker.metric_id: tie_breaker
         for tie_breaker in definition.ranking.tie_breakers
-        if tie_breaker.metric_id not in {"canonical_symbol", "symbol", "ticker", "id"}
+        if tie_breaker.metric_id not in _SCREEN_SYMBOL_TIE_BREAKER_IDS
     }
     fx_service = FXService(metrics_repo.db_path)
     metric_values: Dict[str, Dict[str, float]] = {}
@@ -5151,10 +5232,16 @@ def cmd_run_screen_stage(
             symbols,
             exchange_codes,
             all_supported,
+            listing_status_mode="ensure_missing",
         )
     )
     definition = load_screen(config_path)
-    requested_metric_ids = _screen_requested_metric_ids(definition)
+    filter_metric_ids = _screen_filter_metric_ids(definition)
+    ranking_extra_metric_ids = _screen_ranking_extra_metric_ids(definition)
+    requested_metric_ids = _ordered_unique_metric_ids(
+        filter_metric_ids,
+        ranking_extra_metric_ids,
+    )
     include_market_data = any(
         getattr(REGISTRY.get(metric_id), "uses_market_data", False)
         for metric_id in requested_metric_ids
@@ -5197,14 +5284,18 @@ def cmd_run_screen_stage(
 
         ticker_repo = SupportedTickerRepository(db_path)
         universe_names = dict(
-            ticker_repo.list_canonical_symbol_name_pairs(resolved_exchange_codes)
+            ticker_repo.list_canonical_symbol_name_pairs(
+                resolved_exchange_codes,
+                primary_only=True,
+            )
+        )
+        metric_rows_by_symbol = metrics_repo.fetch_many_for_symbols(
+            canonical_symbols,
+            filter_metric_ids,
         )
         evaluation_metrics_repo = _PreloadedMetricsRepository(
             db_path,
-            metrics_repo.fetch_many_for_symbols(
-                canonical_symbols,
-                requested_metric_ids,
-            ),
+            metric_rows_by_symbol,
         )
         passed_symbols, criterion_values, entity_labels = _evaluate_screen_scope(
             definition,
@@ -5231,6 +5322,21 @@ def cmd_run_screen_stage(
                     output_csv,
                 )
             return 1
+
+        if ranking_extra_metric_ids:
+            ranking_metric_rows = metrics_repo.fetch_many_for_symbols(
+                passed_symbols,
+                ranking_extra_metric_ids,
+            )
+            if ranking_metric_rows:
+                _merge_metric_rows_by_symbol(
+                    metric_rows_by_symbol,
+                    ranking_metric_rows,
+                )
+                evaluation_metrics_repo = _PreloadedMetricsRepository(
+                    db_path,
+                    metric_rows_by_symbol,
+                )
 
         ordered_symbols, extra_rows = _rank_screen_passers(
             definition,
@@ -6513,6 +6619,7 @@ def cmd_report_fact_freshness(
             symbols,
             exchange_codes,
             all_supported,
+            listing_status_mode="ensure_missing",
         )
     )
 
@@ -6571,6 +6678,7 @@ def cmd_report_metric_coverage(
             symbols,
             exchange_codes,
             all_supported,
+            listing_status_mode="ensure_missing",
         )
     )
 
@@ -7106,6 +7214,7 @@ def cmd_report_metric_failures(
             symbols,
             exchange_codes,
             all_supported,
+            listing_status_mode="ensure_missing",
         )
     )
 
@@ -7278,6 +7387,7 @@ def cmd_report_screen_failures(
             symbols,
             exchange_codes,
             all_supported,
+            listing_status_mode="ensure_missing",
         )
     )
     selected_symbols = [symbol.upper() for symbol in selected_symbols]
@@ -7711,7 +7821,7 @@ def cmd_run_screen_bulk(
         provider_norm, exchange_norm
     )
     if provider_norm == "EODHD":
-        _reconcile_eodhd_listing_scope(
+        _ensure_eodhd_listing_scope_cached(
             database,
             exchange_codes=[exchange_norm],
         )
@@ -7726,7 +7836,12 @@ def cmd_run_screen_bulk(
             f"{_catalog_bootstrap_guidance(provider_norm)}"
         )
 
-    requested_metric_ids = _screen_requested_metric_ids(definition)
+    filter_metric_ids = _screen_filter_metric_ids(definition)
+    ranking_extra_metric_ids = _screen_ranking_extra_metric_ids(definition)
+    requested_metric_ids = _ordered_unique_metric_ids(
+        filter_metric_ids,
+        ranking_extra_metric_ids,
+    )
     include_market_data = any(
         getattr(REGISTRY.get(metric_id), "uses_market_data", False)
         for metric_id in requested_metric_ids
@@ -7753,16 +7868,18 @@ def cmd_run_screen_bulk(
         primary_only=provider_norm == "EODHD",
     )
     universe_names = {row[0].upper(): (row[1] or row[0].upper()) for row in name_rows}
+    selected_symbols = [symbol.upper() for symbol in symbols]
+    metric_rows_by_symbol = metrics_repo.fetch_many_for_symbols(
+        selected_symbols,
+        filter_metric_ids,
+    )
     evaluation_metrics_repo = _PreloadedMetricsRepository(
         database,
-        metrics_repo.fetch_many_for_symbols(
-            [symbol.upper() for symbol in symbols],
-            requested_metric_ids,
-        ),
+        metric_rows_by_symbol,
     )
     passed_symbols, criterion_values, entity_labels = _evaluate_screen_scope(
         definition,
-        [symbol.upper() for symbol in symbols],
+        selected_symbols,
         evaluation_metrics_repo,
         fact_repo,
         market_repo,
@@ -7776,6 +7893,18 @@ def cmd_run_screen_bulk(
         if output_csv:
             _write_screen_csv(definition.criteria, [], {}, {}, {}, {}, {}, output_csv)
         return 1
+
+    if ranking_extra_metric_ids:
+        ranking_metric_rows = metrics_repo.fetch_many_for_symbols(
+            passed_symbols,
+            ranking_extra_metric_ids,
+        )
+        if ranking_metric_rows:
+            _merge_metric_rows_by_symbol(metric_rows_by_symbol, ranking_metric_rows)
+            evaluation_metrics_repo = _PreloadedMetricsRepository(
+                database,
+                metric_rows_by_symbol,
+            )
 
     ordered_symbols, extra_rows = _rank_screen_passers(
         definition,

@@ -97,6 +97,10 @@ again, run:
 pyvalue reconcile-listing-status --all-supported
 ```
 
+Read-only canonical/report commands backfill only missing cached listing-status
+rows in scope. Run `reconcile-listing-status` when you want an immediate full
+backfill sweep from stored raw fundamentals.
+
 `ingest-fundamentals` checks the EODHD user/quota endpoint
 before each multi-symbol run, subtracts the configured daily buffer, throttles
 by requests per minute, and exits cleanly when the remaining daily allowance is

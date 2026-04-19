@@ -20,6 +20,7 @@ from pyvalue.storage import (
     MetricsRepository,
     SecurityMetadataUpdate,
     SecurityRepository,
+    SecurityListingStatusRecord,
     SecurityListingStatusRepository,
     SupportedExchangeRepository,
     SupportedTickerRepository,
@@ -974,6 +975,65 @@ def test_supported_ticker_repository_primary_only_filters_secondary_listings(
         "AAA.US",
         "BBB.LSE",
     ]
+
+
+def test_security_listing_status_repository_lists_missing_provider_symbols(tmp_path):
+    db_path = tmp_path / "missing-listing-status.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock"}],
+    )
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "LSE",
+        [
+            {"Code": "AAA", "Name": "AAA plc", "Type": "Common Stock"},
+            {"Code": "BBB", "Name": "BBB plc", "Type": "Common Stock"},
+        ],
+    )
+    by_symbol = {row.symbol: row for row in ticker_repo.list_for_provider("EODHD")}
+
+    status_repo = SecurityListingStatusRepository(db_path)
+    status_repo.initialize_schema()
+    status_repo.upsert_many(
+        [
+            SecurityListingStatusRecord(
+                security_id=by_symbol["AAA.US"].security_id,
+                source_provider="EODHD",
+                provider_symbol="AAA.US",
+                raw_fetched_at="2025-01-01T00:00:00+00:00",
+                is_primary_listing=True,
+                primary_provider_symbol="AAA.US",
+                classification_basis="matched_primary_ticker",
+            ),
+            SecurityListingStatusRecord(
+                security_id=by_symbol["BBB.LSE"].security_id,
+                source_provider="EODHD",
+                provider_symbol="BBB.LSE",
+                raw_fetched_at="2025-01-01T00:00:00+00:00",
+                is_primary_listing=True,
+                primary_provider_symbol=None,
+                classification_basis="missing_primary_ticker",
+            ),
+        ]
+    )
+
+    assert status_repo.list_missing_eodhd_provider_symbols() == ["AAA.LSE"]
+    assert status_repo.list_missing_eodhd_provider_symbols(
+        exchange_codes=["LSE"],
+    ) == ["AAA.LSE"]
+    assert (
+        status_repo.list_missing_eodhd_provider_symbols(
+            exchange_codes=["US"],
+        )
+        == []
+    )
+    assert status_repo.list_missing_eodhd_provider_symbols(
+        provider_symbols=["AAA.LSE", "BBB.LSE"],
+    ) == ["AAA.LSE"]
 
 
 def test_market_data_fetch_state_repository_tracks_success_and_failure(tmp_path):

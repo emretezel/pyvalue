@@ -2793,6 +2793,73 @@ class SecurityListingStatusRepository(SQLiteStore):
         self.upsert_many(records, connection=connection)
         return records
 
+    def list_missing_eodhd_provider_symbols(
+        self,
+        *,
+        provider_symbols: Optional[Sequence[str]] = None,
+        exchange_codes: Optional[Sequence[str]] = None,
+        security_ids: Optional[Sequence[int]] = None,
+        chunk_size: int = 500,
+    ) -> List[str]:
+        """Return supported EODHD symbols missing cached listing status."""
+
+        self.initialize_schema()
+        provider_norm = _PRIMARY_LISTING_SOURCE_PROVIDER
+        normalized_symbols = _normalized_codes(provider_symbols)
+        normalized_exchanges = _normalized_codes(exchange_codes)
+        normalized_security_ids = sorted(
+            {int(security_id) for security_id in security_ids or () if security_id}
+        )
+
+        def _select_rows(
+            conn: sqlite3.Connection,
+            *,
+            symbols_chunk: Optional[Sequence[str]] = None,
+            security_chunk: Optional[Sequence[int]] = None,
+        ) -> List[sqlite3.Row]:
+            params: List[Any] = [provider_norm]
+            query = [
+                "SELECT st.provider_symbol",
+                "FROM supported_tickers st",
+                _primary_listing_left_join(security_alias="st"),
+                "WHERE st.provider = ?",
+                "AND sls.security_id IS NULL",
+            ]
+            if normalized_exchanges:
+                placeholders = ", ".join("?" for _ in normalized_exchanges)
+                query.append(f"AND st.provider_exchange_code IN ({placeholders})")
+                params.extend(normalized_exchanges)
+            if symbols_chunk:
+                placeholders = ", ".join("?" for _ in symbols_chunk)
+                query.append(f"AND st.provider_symbol IN ({placeholders})")
+                params.extend(symbols_chunk)
+            if security_chunk:
+                placeholders = ", ".join("?" for _ in security_chunk)
+                query.append(f"AND st.security_id IN ({placeholders})")
+                params.extend(security_chunk)
+            query.append("ORDER BY st.provider_symbol ASC")
+            return conn.execute(" ".join(query), params).fetchall()
+
+        missing_provider_symbols: List[str] = []
+        with self._connect() as conn:
+            if normalized_symbols:
+                for symbol_chunk in _batched(normalized_symbols, chunk_size):
+                    missing_provider_symbols.extend(
+                        str(row["provider_symbol"])
+                        for row in _select_rows(conn, symbols_chunk=symbol_chunk)
+                    )
+            elif normalized_security_ids:
+                for security_chunk in _batched(normalized_security_ids, chunk_size):
+                    missing_provider_symbols.extend(
+                        str(row["provider_symbol"])
+                        for row in _select_rows(conn, security_chunk=security_chunk)
+                    )
+            else:
+                missing_provider_symbols.extend(
+                    str(row["provider_symbol"]) for row in _select_rows(conn)
+                )
+        return missing_provider_symbols
+
     def reconcile_eodhd_fundamentals(
         self,
         *,

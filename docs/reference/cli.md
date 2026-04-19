@@ -30,7 +30,10 @@ commands also apply cached primary-listing classification from raw
 fundamentals. Listings classified as secondary through `General.PrimaryTicker`
 are excluded from normalization, market-data refresh, metric, screening,
 metadata-refresh, and canonical reporting scopes. Missing or unusable
-`PrimaryTicker` values are treated as primary.
+`PrimaryTicker` values are treated as primary. Read-only canonical/report
+commands backfill missing cached listing-status rows in scope; use
+`reconcile-listing-status` when you want a full backfill sweep from stored raw
+fundamentals.
 
 ## Catalog Commands
 
@@ -125,6 +128,9 @@ Notes:
 - this command does not download fundamentals or market data
 - it reads existing `fundamentals_raw` payloads and writes
   `security_listing_status`
+- use this command after upgrading an existing database if you want to refresh
+  the full cached listing-status table immediately instead of waiting for
+  read-only commands to backfill missing rows on demand
 - listings classified as secondary via `General.PrimaryTicker` trigger
   downstream cleanup of normalized facts, market data, metrics, and related
   refresh-state rows for that listing
@@ -422,6 +428,8 @@ Notes:
   ranking columns such as `qarp_rank` and `qarp_score`, and sorts passing
   symbols
   by the configured ranking rules
+- ranked multi-symbol screens load ranking-only metrics only for passers after
+  the initial criteria filter
 - monetary and per-share comparisons apply FX only where needed; ratio-like
   metrics are compared directly
 - monetary constants can optionally declare a currency in YAML
