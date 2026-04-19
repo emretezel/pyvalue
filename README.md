@@ -110,6 +110,7 @@ Core pages:
 - [Metrics Catalog](docs/reference/metrics.md)
 - [Screening Guide](docs/guides/screening.md)
 - [Architecture Overview](docs/architecture/data-model-and-storage.md)
+- [Database Review Guide](docs/architecture/database/README.md)
 - [Normalization and Facts](docs/architecture/normalization-and-facts.md)
 - [Development Guide](docs/development/local-development.md)
 - [Testing and Quality Checks](docs/development/testing-and-quality.md)

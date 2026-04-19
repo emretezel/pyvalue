@@ -1,0 +1,42 @@
+# Relationships
+
+`pyvalue` uses a fast SQLite design with logical references instead of enforced foreign keys.
+
+## Canonical Identity Flow
+
+```mermaid
+flowchart LR
+    supported_exchanges --> supported_tickers
+    securities --> supported_tickers
+    supported_tickers --> fundamentals_fetch_state
+    supported_tickers --> fundamentals_raw
+    supported_tickers --> fundamentals_normalization_state
+    supported_tickers --> market_data_fetch_state
+    fundamentals_raw --> security_listing_status
+    securities --> security_listing_status
+    fundamentals_raw --> financial_facts
+    securities --> financial_facts
+    securities --> financial_facts_refresh_state
+    securities --> market_data
+    securities --> metrics
+    securities --> metric_compute_status
+```
+
+## FX Flow
+
+```mermaid
+flowchart LR
+    supported_tickers --> fx_rates
+    financial_facts --> fx_rates
+    market_data --> fx_rates
+    fx_supported_pairs --> fx_refresh_state
+    fx_refresh_state --> fx_rates
+```
+
+## Relationship Notes
+
+- `securities.security_id` is the canonical key for downstream facts, market data, and metrics.
+- `supported_tickers` is the provider-facing hub. Most provider-scoped state tables key off `(provider, provider_symbol)` rather than `security_id`.
+- `security_listing_status` is intentionally keyed by `security_id` so downstream scope filters can work from canonical identity.
+- FX discovery reads currencies from `supported_tickers`, `financial_facts`, and `market_data`, but FX storage itself is not keyed back to a security.
+- Because physical foreign keys are absent, orphan prevention depends on application logic, migrations, and periodic integrity checks.

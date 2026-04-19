@@ -4,6 +4,10 @@
 
 `pyvalue` stores operational data in SQLite.
 
+For a human-readable table-by-table schema review, including columns, primary
+keys, logical foreign keys, indexes, and query hotspots, use the
+[Database Review Guide](database/README.md).
+
 The main persisted layers are:
 - supported exchange catalogs
 - canonical security identities

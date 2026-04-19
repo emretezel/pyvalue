@@ -26,6 +26,7 @@ This directory is the main documentation home for `pyvalue`. Each file owns one 
 ## Architecture
 
 - [Data Model and Storage](architecture/data-model-and-storage.md): SQLite tables and persistence flow.
+- [Database Review Guide](architecture/database/README.md): table-by-table schema review, indexes, and query hotspots.
 - [Normalization and Facts](architecture/normalization-and-facts.md): provider-agnostic concept model and metric inputs.
 
 ## Development
