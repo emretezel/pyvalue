@@ -5,6 +5,7 @@ Author: Emre Tezel
 
 from datetime import date, timedelta
 
+from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS
 from pyvalue.normalization import SECFactsNormalizer
 
 
@@ -426,7 +427,7 @@ def test_normalizer_derives_earnings_per_share_from_diluted():
 
 
 def test_normalizer_derives_earnings_per_share_from_stale_fallback():
-    stale = (date.today() - timedelta(days=400)).isoformat()
+    stale = (date.today() - timedelta(days=MAX_FACT_AGE_DAYS)).isoformat()
     payload = {
         "facts": {
             "us-gaap": {
@@ -1353,7 +1354,7 @@ def test_normalizer_derives_long_term_debt_from_operating_lease_liability_noncur
 
 
 def test_normalizer_skips_stale_long_term_debt_records():
-    stale = (date.today() - timedelta(days=400)).isoformat()
+    stale = (date.today() - timedelta(days=MAX_FACT_AGE_DAYS + 1)).isoformat()
     payload = {
         "facts": {
             "us-gaap": {
