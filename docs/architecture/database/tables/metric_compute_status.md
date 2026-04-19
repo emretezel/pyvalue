@@ -64,6 +64,78 @@ One row per `(security_id, metric_id)`.
 - `market_data_as_of`: same idea for market-data date.
 - `market_data_updated_at`: same idea for market-data write freshness.
 
+## Sample Rows
+
+<!-- BEGIN generated_sample_rows -->
+- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+- Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
+
+```json
+[
+  {
+    "security_id": 38347,
+    "metric_id": "net_debt_to_ebitda",
+    "status": "failure",
+    "reason_code": "net_debt_to_ebitda: missing D&A for quarter 2025-12-31 (<symbol>)",
+    "reason_detail": null,
+    "attempted_at": "2026-04-17T18:24:20.971203+00:00",
+    "value_as_of": null,
+    "facts_refreshed_at": "2026-04-13T14:59:41.320561+00:00",
+    "market_data_as_of": "2026-04-10",
+    "market_data_updated_at": "2026-04-13T16:12:29.084722+00:00"
+  },
+  {
+    "security_id": 38364,
+    "metric_id": "net_debt_to_ebitda",
+    "status": "failure",
+    "reason_code": "net_debt_to_ebitda: missing D&A for quarter 2025-12-31 (<symbol>)",
+    "reason_detail": null,
+    "attempted_at": "2026-04-17T18:24:36.075627+00:00",
+    "value_as_of": null,
+    "facts_refreshed_at": "2026-04-13T14:59:45.387404+00:00",
+    "market_data_as_of": "2026-04-10",
+    "market_data_updated_at": "2026-04-13T16:12:29.084722+00:00"
+  },
+  {
+    "security_id": 38367,
+    "metric_id": "net_debt_to_ebitda",
+    "status": "failure",
+    "reason_code": "net_debt_to_ebitda: missing D&A for quarter 2025-09-30 (<symbol>)",
+    "reason_detail": null,
+    "attempted_at": "2026-04-17T18:24:38.575026+00:00",
+    "value_as_of": null,
+    "facts_refreshed_at": "2026-04-13T14:59:44.895002+00:00",
+    "market_data_as_of": "2026-04-10",
+    "market_data_updated_at": "2026-04-13T16:12:29.084722+00:00"
+  },
+  {
+    "security_id": 38375,
+    "metric_id": "net_debt_to_ebitda",
+    "status": "failure",
+    "reason_code": "net_debt_to_ebitda: missing D&A for quarter 2025-09-30 (<symbol>)",
+    "reason_detail": null,
+    "attempted_at": "2026-04-17T18:24:24.248185+00:00",
+    "value_as_of": null,
+    "facts_refreshed_at": "2026-04-13T14:59:47.275271+00:00",
+    "market_data_as_of": "2026-04-10",
+    "market_data_updated_at": "2026-04-13T16:12:29.084722+00:00"
+  },
+  {
+    "security_id": 38380,
+    "metric_id": "net_debt_to_ebitda",
+    "status": "failure",
+    "reason_code": "net_debt_to_ebitda: missing D&A for quarter 2025-09-30 (<symbol>)",
+    "reason_detail": null,
+    "attempted_at": "2026-04-17T18:24:30.114811+00:00",
+    "value_as_of": null,
+    "facts_refreshed_at": "2026-04-13T14:59:48.409774+00:00",
+    "market_data_as_of": "2026-04-10",
+    "market_data_updated_at": "2026-04-13T16:12:29.084722+00:00"
+  }
+]
+```
+<!-- END generated_sample_rows -->
+
 ## Review Notes
 
 - Stores only the latest attempt, not a full attempt history

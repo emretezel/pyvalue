@@ -60,6 +60,12 @@ One row per `(provider, provider_symbol)`, containing the latest fetched raw pay
 - `data`: the raw JSON blob read by normalization, listing classification, and metadata refresh logic.
 - `fetched_at`: incremental watermark for normalization and listing-status reconciliation.
 
+## Sample Rows
+
+<!-- BEGIN generated_sample_rows -->
+Wide-table sample rows live in the [Sample Rows appendix](../sample-rows.md#fundamentals_raw).
+<!-- END generated_sample_rows -->
+
 ## Review Notes
 
 - The `data` column is the widest row in the schema and a natural I/O hotspot

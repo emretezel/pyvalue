@@ -47,6 +47,38 @@ One row per `security_id`.
 - `security_id`: canonical join key for freshness checks.
 - `refreshed_at`: compared in metric freshness logic and reused in diagnostics.
 
+## Sample Rows
+
+<!-- BEGIN generated_sample_rows -->
+- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+- Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
+
+```json
+[
+  {
+    "security_id": 1,
+    "refreshed_at": "2026-04-13T13:51:55.355558+00:00"
+  },
+  {
+    "security_id": 2,
+    "refreshed_at": "2026-04-13T13:51:54.046069+00:00"
+  },
+  {
+    "security_id": 3,
+    "refreshed_at": "2026-04-13T13:51:54.401028+00:00"
+  },
+  {
+    "security_id": 4,
+    "refreshed_at": "2026-04-13T13:51:54.688817+00:00"
+  },
+  {
+    "security_id": 5,
+    "refreshed_at": "2026-04-13T13:51:54.185290+00:00"
+  }
+]
+```
+<!-- END generated_sample_rows -->
+
 ## Review Notes
 
 - Very small table

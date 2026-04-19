@@ -60,6 +60,68 @@ One row per `security_id`.
 - `classification_basis`: explains why the row was classified as primary or secondary.
 - `updated_at`: last classification timestamp.
 
+## Sample Rows
+
+<!-- BEGIN generated_sample_rows -->
+- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+- Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
+
+```json
+[
+  {
+    "security_id": 1,
+    "source_provider": "EODHD",
+    "provider_symbol": "AALB.AS",
+    "raw_fetched_at": "2026-03-22T13:53:47.387172+00:00",
+    "is_primary_listing": 1,
+    "primary_provider_symbol": "AALB.AS",
+    "classification_basis": "matched_primary_ticker",
+    "updated_at": "2026-04-19T00:09:24.569416+00:00"
+  },
+  {
+    "security_id": 2,
+    "source_provider": "EODHD",
+    "provider_symbol": "ABN.AS",
+    "raw_fetched_at": "2026-03-22T13:53:47.613748+00:00",
+    "is_primary_listing": 1,
+    "primary_provider_symbol": "ABN.AS",
+    "classification_basis": "matched_primary_ticker",
+    "updated_at": "2026-04-19T00:09:25.284663+00:00"
+  },
+  {
+    "security_id": 3,
+    "source_provider": "EODHD",
+    "provider_symbol": "ACOMO.AS",
+    "raw_fetched_at": "2026-03-22T13:53:47.909077+00:00",
+    "is_primary_listing": 1,
+    "primary_provider_symbol": "ACOMO.AS",
+    "classification_basis": "matched_primary_ticker",
+    "updated_at": "2026-04-19T00:09:26.129977+00:00"
+  },
+  {
+    "security_id": 4,
+    "source_provider": "EODHD",
+    "provider_symbol": "AD.AS",
+    "raw_fetched_at": "2026-03-22T13:53:48.236603+00:00",
+    "is_primary_listing": 1,
+    "primary_provider_symbol": "AD.AS",
+    "classification_basis": "matched_primary_ticker",
+    "updated_at": "2026-04-19T00:09:26.484400+00:00"
+  },
+  {
+    "security_id": 5,
+    "source_provider": "EODHD",
+    "provider_symbol": "ADYEN.AS",
+    "raw_fetched_at": "2026-03-22T13:53:48.456762+00:00",
+    "is_primary_listing": 1,
+    "primary_provider_symbol": "ADYEN.AS",
+    "classification_basis": "matched_primary_ticker",
+    "updated_at": "2026-04-19T00:09:27.344101+00:00"
+  }
+]
+```
+<!-- END generated_sample_rows -->
+
 ## Review Notes
 
 - This table exists to keep downstream scopes index-friendly instead of reparsing JSON in `fundamentals_raw`

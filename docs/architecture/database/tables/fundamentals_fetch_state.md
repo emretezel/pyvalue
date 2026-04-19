@@ -59,6 +59,63 @@ One row per `(provider, provider_symbol)`.
 - `next_eligible_at`: central backoff watermark used by scheduling queries.
 - `attempts`: retry counter surfaced in diagnostics and backoff logic.
 
+## Sample Rows
+
+<!-- BEGIN generated_sample_rows -->
+- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+- Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
+
+```json
+[
+  {
+    "provider": "EODHD",
+    "provider_symbol": "A.US",
+    "last_fetched_at": "2026-03-28T08:42:24.642741+00:00",
+    "last_status": "ok",
+    "last_error": null,
+    "next_eligible_at": null,
+    "attempts": 0
+  },
+  {
+    "provider": "EODHD",
+    "provider_symbol": "AA.US",
+    "last_fetched_at": "2026-03-28T08:42:24.864302+00:00",
+    "last_status": "ok",
+    "last_error": null,
+    "next_eligible_at": null,
+    "attempts": 0
+  },
+  {
+    "provider": "EODHD",
+    "provider_symbol": "AABB.US",
+    "last_fetched_at": "2026-03-28T08:42:25.079226+00:00",
+    "last_status": "ok",
+    "last_error": null,
+    "next_eligible_at": null,
+    "attempts": 0
+  },
+  {
+    "provider": "EODHD",
+    "provider_symbol": "AABVF.US",
+    "last_fetched_at": "2026-03-28T08:42:25.695568+00:00",
+    "last_status": "ok",
+    "last_error": null,
+    "next_eligible_at": null,
+    "attempts": 0
+  },
+  {
+    "provider": "EODHD",
+    "provider_symbol": "AACAF.US",
+    "last_fetched_at": "2026-03-28T08:42:25.949311+00:00",
+    "last_status": "ok",
+    "last_error": null,
+    "next_eligible_at": null,
+    "attempts": 0
+  }
+]
+```
+<!-- END generated_sample_rows -->
+
 ## Review Notes
 
 - This is a narrow operational table and likely cheap to keep

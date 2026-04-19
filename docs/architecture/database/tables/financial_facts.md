@@ -76,6 +76,98 @@ One row per fact version keyed by security, concept, period/date, unit, and acce
 - `currency`: used by FX discovery and monetary-fact normalization logic.
 - `source_provider`: provenance marker, not a common filter.
 
+## Sample Rows
+
+<!-- BEGIN generated_sample_rows -->
+- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+- Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
+
+```json
+[
+  {
+    "security_id": 28479,
+    "cik": null,
+    "concept": "Assets",
+    "fiscal_period": "FY",
+    "end_date": "2004-12-31",
+    "unit": "EUR",
+    "value": 47782000.0,
+    "accn": null,
+    "filed": "2004-12-31",
+    "frame": "CY2004",
+    "start_date": null,
+    "accounting_standard": null,
+    "currency": "EUR",
+    "source_provider": null
+  },
+  {
+    "security_id": 28479,
+    "cik": null,
+    "concept": "Assets",
+    "fiscal_period": "FY",
+    "end_date": "2005-12-31",
+    "unit": "EUR",
+    "value": 47932000.0,
+    "accn": null,
+    "filed": "2005-12-31",
+    "frame": "CY2005",
+    "start_date": null,
+    "accounting_standard": null,
+    "currency": "EUR",
+    "source_provider": null
+  },
+  {
+    "security_id": 28479,
+    "cik": null,
+    "concept": "Assets",
+    "fiscal_period": "FY",
+    "end_date": "2006-12-31",
+    "unit": "EUR",
+    "value": 51546000.0,
+    "accn": null,
+    "filed": "2006-12-31",
+    "frame": "CY2006",
+    "start_date": null,
+    "accounting_standard": null,
+    "currency": "EUR",
+    "source_provider": null
+  },
+  {
+    "security_id": 28479,
+    "cik": null,
+    "concept": "Assets",
+    "fiscal_period": "FY",
+    "end_date": "2007-12-31",
+    "unit": "EUR",
+    "value": 54154000.0,
+    "accn": null,
+    "filed": "2007-12-31",
+    "frame": "CY2007",
+    "start_date": null,
+    "accounting_standard": null,
+    "currency": "EUR",
+    "source_provider": null
+  },
+  {
+    "security_id": 28479,
+    "cik": null,
+    "concept": "Assets",
+    "fiscal_period": "FY",
+    "end_date": "2008-12-31",
+    "unit": "EUR",
+    "value": 55372000.0,
+    "accn": null,
+    "filed": "2008-12-31",
+    "frame": "CY2008",
+    "start_date": null,
+    "accounting_standard": null,
+    "currency": "EUR",
+    "source_provider": null
+  }
+]
+```
+<!-- END generated_sample_rows -->
+
 ## Review Notes
 
 - This is the hottest analytical table in the repo

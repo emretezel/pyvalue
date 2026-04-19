@@ -62,6 +62,78 @@ One row per `(provider, rate_date, base_currency, quote_currency)`.
 - `created_at`: insert timestamp.
 - `updated_at`: update timestamp.
 
+## Sample Rows
+
+<!-- BEGIN generated_sample_rows -->
+- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+- Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
+
+```json
+[
+  {
+    "provider": "FRANKFURTER",
+    "rate_date": "2026-03-12",
+    "base_currency": "EUR",
+    "quote_currency": "USD",
+    "rate_text": "1.1563",
+    "fetched_at": "Sun, 05 Apr 2026 15:37:24 GMT",
+    "source_kind": "provider",
+    "meta_json": "{\"provider\": \"FRANKFURTER\"}",
+    "created_at": "2026-04-05T15:37:24.141920+00:00",
+    "updated_at": "2026-04-05T15:37:24.141920+00:00"
+  },
+  {
+    "provider": "FRANKFURTER",
+    "rate_date": "2026-03-13",
+    "base_currency": "EUR",
+    "quote_currency": "USD",
+    "rate_text": "1.1495",
+    "fetched_at": "Sun, 05 Apr 2026 15:37:24 GMT",
+    "source_kind": "provider",
+    "meta_json": "{\"provider\": \"FRANKFURTER\"}",
+    "created_at": "2026-04-05T15:37:24.141920+00:00",
+    "updated_at": "2026-04-05T15:37:24.141920+00:00"
+  },
+  {
+    "provider": "FRANKFURTER",
+    "rate_date": "2026-03-14",
+    "base_currency": "EUR",
+    "quote_currency": "USD",
+    "rate_text": "1.1466",
+    "fetched_at": "Sun, 05 Apr 2026 15:37:24 GMT",
+    "source_kind": "provider",
+    "meta_json": "{\"provider\": \"FRANKFURTER\"}",
+    "created_at": "2026-04-05T15:37:24.141920+00:00",
+    "updated_at": "2026-04-05T15:37:24.141920+00:00"
+  },
+  {
+    "provider": "FRANKFURTER",
+    "rate_date": "2026-03-15",
+    "base_currency": "EUR",
+    "quote_currency": "USD",
+    "rate_text": "1.1476",
+    "fetched_at": "Sun, 05 Apr 2026 15:37:24 GMT",
+    "source_kind": "provider",
+    "meta_json": "{\"provider\": \"FRANKFURTER\"}",
+    "created_at": "2026-04-05T15:37:24.141920+00:00",
+    "updated_at": "2026-04-05T15:37:24.141920+00:00"
+  },
+  {
+    "provider": "FRANKFURTER",
+    "rate_date": "2026-03-16",
+    "base_currency": "EUR",
+    "quote_currency": "USD",
+    "rate_text": "1.1473",
+    "fetched_at": "Sun, 05 Apr 2026 15:37:24 GMT",
+    "source_kind": "provider",
+    "meta_json": "{\"provider\": \"FRANKFURTER\"}",
+    "created_at": "2026-04-05T15:37:24.141920+00:00",
+    "updated_at": "2026-04-05T15:37:24.141920+00:00"
+  }
+]
+```
+<!-- END generated_sample_rows -->
+
 ## Review Notes
 
 - This can become large, so pair/date access path matters more than almost any descriptive concern

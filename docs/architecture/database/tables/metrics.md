@@ -58,6 +58,63 @@ One row per `(security_id, metric_id)`.
 - `currency`: present for monetary/per-share metrics and used by display and validation helpers.
 - `unit_label`: optional presentation hint, mainly for display/reporting.
 
+## Sample Rows
+
+<!-- BEGIN generated_sample_rows -->
+- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+- Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
+
+```json
+[
+  {
+    "security_id": 28127,
+    "metric_id": "working_capital",
+    "value": -278959824.0,
+    "as_of": "2025-12-31",
+    "unit_kind": "monetary",
+    "currency": "USD",
+    "unit_label": null
+  },
+  {
+    "security_id": 28127,
+    "metric_id": "current_ratio",
+    "value": 0.9751913595536019,
+    "as_of": "2025-12-31",
+    "unit_kind": "ratio",
+    "currency": null,
+    "unit_label": null
+  },
+  {
+    "security_id": 28127,
+    "metric_id": "long_term_debt",
+    "value": 4740028436.0,
+    "as_of": "2025-12-31",
+    "unit_kind": "monetary",
+    "currency": "USD",
+    "unit_label": null
+  },
+  {
+    "security_id": 28127,
+    "metric_id": "eps_streak",
+    "value": 0.0,
+    "as_of": "2025-12-31",
+    "unit_kind": "count",
+    "currency": null,
+    "unit_label": null
+  },
+  {
+    "security_id": 28127,
+    "metric_id": "eps_ttm",
+    "value": -1.9099350926193535,
+    "as_of": "2025-12-31",
+    "unit_kind": "per_share",
+    "currency": "USD",
+    "unit_label": "per_share"
+  }
+]
+```
+<!-- END generated_sample_rows -->
+
 ## Review Notes
 
 - This table is intentionally latest-only to keep screening fast

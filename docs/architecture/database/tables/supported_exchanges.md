@@ -64,6 +64,78 @@ One row per provider exchange code.
 - `country_iso3`: normalized metadata only.
 - `updated_at`: refresh watermark, mainly useful for debugging and catalog freshness checks.
 
+## Sample Rows
+
+<!-- BEGIN generated_sample_rows -->
+- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+- Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
+
+```json
+[
+  {
+    "provider": "EODHD",
+    "provider_exchange_code": "AS",
+    "canonical_exchange_code": "AS",
+    "name": "Euronext Amsterdam",
+    "country": "Netherlands",
+    "currency": "EUR",
+    "operating_mic": "XAMS",
+    "country_iso2": "NL",
+    "country_iso3": "NLD",
+    "updated_at": "2026-03-22T10:57:47.052304+00:00"
+  },
+  {
+    "provider": "EODHD",
+    "provider_exchange_code": "AT",
+    "canonical_exchange_code": "AT",
+    "name": "Athens Exchange",
+    "country": "Greece",
+    "currency": "EUR",
+    "operating_mic": "ASEX",
+    "country_iso2": "GR",
+    "country_iso3": "GRC",
+    "updated_at": "2026-03-22T10:57:47.052304+00:00"
+  },
+  {
+    "provider": "EODHD",
+    "provider_exchange_code": "AU",
+    "canonical_exchange_code": "AU",
+    "name": "Australian Securities Exchange",
+    "country": "Australia",
+    "currency": "AUD",
+    "operating_mic": "XASX",
+    "country_iso2": "AU",
+    "country_iso3": "AUS",
+    "updated_at": "2026-03-22T10:57:47.052304+00:00"
+  },
+  {
+    "provider": "EODHD",
+    "provider_exchange_code": "BA",
+    "canonical_exchange_code": "BA",
+    "name": "Buenos Aires Exchange",
+    "country": "Argentina",
+    "currency": "ARS",
+    "operating_mic": "XBUE",
+    "country_iso2": "AR",
+    "country_iso3": "ARG",
+    "updated_at": "2026-03-22T10:57:47.052304+00:00"
+  },
+  {
+    "provider": "EODHD",
+    "provider_exchange_code": "BC",
+    "canonical_exchange_code": "BC",
+    "name": "Casablanca Stock Exchange",
+    "country": "Morocco",
+    "currency": "MAD",
+    "operating_mic": "XCAS",
+    "country_iso2": "MA",
+    "country_iso3": "MAR",
+    "updated_at": "2026-03-22T10:57:47.052304+00:00"
+  }
+]
+```
+<!-- END generated_sample_rows -->
+
 ## Review Notes
 
 - Low write volume and low read volume

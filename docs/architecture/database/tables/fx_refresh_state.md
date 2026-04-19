@@ -60,6 +60,73 @@ One row per `(provider, canonical_symbol)`.
 - `last_error`: diagnostic detail only.
 - `attempts`: retry counter.
 
+## Sample Rows
+
+<!-- BEGIN generated_sample_rows -->
+- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+- Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
+
+```json
+[
+  {
+    "provider": "EODHD",
+    "canonical_symbol": "AEDAUD",
+    "min_rate_date": "2009-12-28",
+    "max_rate_date": "2026-04-10",
+    "full_history_backfilled": 1,
+    "last_fetched_at": "2026-04-11T09:54:35.254617+00:00",
+    "last_status": "ok",
+    "last_error": null,
+    "attempts": 0
+  },
+  {
+    "provider": "EODHD",
+    "canonical_symbol": "AEDCAD",
+    "min_rate_date": "2009-12-28",
+    "max_rate_date": "2026-04-10",
+    "full_history_backfilled": 1,
+    "last_fetched_at": "2026-04-11T09:54:35.482293+00:00",
+    "last_status": "ok",
+    "last_error": null,
+    "attempts": 0
+  },
+  {
+    "provider": "EODHD",
+    "canonical_symbol": "AEDCHF",
+    "min_rate_date": "2008-10-16",
+    "max_rate_date": "2026-04-10",
+    "full_history_backfilled": 1,
+    "last_fetched_at": "2026-04-11T09:54:35.785982+00:00",
+    "last_status": "ok",
+    "last_error": null,
+    "attempts": 0
+  },
+  {
+    "provider": "EODHD",
+    "canonical_symbol": "AEDEUR",
+    "min_rate_date": "2004-10-28",
+    "max_rate_date": "2026-04-10",
+    "full_history_backfilled": 1,
+    "last_fetched_at": "2026-04-11T09:54:36.025301+00:00",
+    "last_status": "ok",
+    "last_error": null,
+    "attempts": 0
+  },
+  {
+    "provider": "EODHD",
+    "canonical_symbol": "AEDGBP",
+    "min_rate_date": "2009-12-28",
+    "max_rate_date": "2026-04-10",
+    "full_history_backfilled": 1,
+    "last_fetched_at": "2026-04-11T09:54:36.263020+00:00",
+    "last_status": "ok",
+    "last_error": null,
+    "attempts": 0
+  }
+]
+```
+<!-- END generated_sample_rows -->
+
 ## Review Notes
 
 - This table exists because FX refresh needs coverage state, not just last-attempt state

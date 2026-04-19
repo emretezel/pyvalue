@@ -42,6 +42,21 @@ Append-only version rows, though operationally the table is expected to behave l
 
 - `version`: compared by the migration bootstrap to determine which schema upgrades still need to run.
 
+## Sample Rows
+
+<!-- BEGIN generated_sample_rows -->
+- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+- Sample window: first `1` rows returned by SQLite using `LIMIT` with no `ORDER BY`
+
+```json
+[
+  {
+    "version": 31
+  }
+]
+```
+<!-- END generated_sample_rows -->
+
 ## Review Notes
 
 - Low priority for performance

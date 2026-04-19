@@ -62,6 +62,68 @@ One row per `(security_id, as_of)` snapshot date.
 - `source_provider`: provenance marker only.
 - `updated_at`: freshness/audit timestamp used in status tracking.
 
+## Sample Rows
+
+<!-- BEGIN generated_sample_rows -->
+- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+- Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
+
+```json
+[
+  {
+    "security_id": 28127,
+    "as_of": "2025-11-28",
+    "price": 5.49,
+    "volume": 418054,
+    "market_cap": 12242944947.33,
+    "currency": "USD",
+    "source_provider": "EODHD",
+    "updated_at": "2026-03-23T08:31:54.350977+00:00"
+  },
+  {
+    "security_id": 28134,
+    "as_of": "2025-11-28",
+    "price": 53.86,
+    "volume": 1810,
+    "market_cap": 129528604808.36,
+    "currency": "EUR",
+    "source_provider": "EODHD",
+    "updated_at": "2026-03-23T08:31:54.350977+00:00"
+  },
+  {
+    "security_id": 28151,
+    "as_of": "2025-11-28",
+    "price": 1.4469999999999998,
+    "volume": 8407,
+    "market_cap": 199541299.99999997,
+    "currency": "GBP",
+    "source_provider": "EODHD",
+    "updated_at": "2026-03-23T08:31:54.350977+00:00"
+  },
+  {
+    "security_id": 28152,
+    "as_of": "2025-11-28",
+    "price": 1.018,
+    "volume": 549,
+    "market_cap": 110047836.0,
+    "currency": "GBP",
+    "source_provider": "EODHD",
+    "updated_at": "2026-03-23T08:31:54.350977+00:00"
+  },
+  {
+    "security_id": 28156,
+    "as_of": "2025-11-28",
+    "price": 1.035,
+    "volume": 1157,
+    "market_cap": 228298333.49999997,
+    "currency": "GBP",
+    "source_provider": "EODHD",
+    "updated_at": "2026-03-23T08:31:54.350977+00:00"
+  }
+]
+```
+<!-- END generated_sample_rows -->
+
 ## Review Notes
 
 - `idx_market_data_latest` is essential because many call sites need only the newest row

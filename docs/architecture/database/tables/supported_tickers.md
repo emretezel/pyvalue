@@ -74,6 +74,88 @@ One row per `(provider, provider_symbol)`.
 - `isin`: provenance metadata with light read use.
 - `updated_at`: refresh watermark and provider row freshness marker.
 
+## Sample Rows
+
+<!-- BEGIN generated_sample_rows -->
+- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+- Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
+
+```json
+[
+  {
+    "provider": "EODHD",
+    "provider_symbol": "AALB.AS",
+    "provider_ticker": "AALB",
+    "provider_exchange_code": "AS",
+    "security_id": 1,
+    "listing_exchange": "AS",
+    "security_name": "Aalberts Industries NV",
+    "security_type": "Common Stock",
+    "country": "Netherlands",
+    "currency": "EUR",
+    "isin": "NL0000852564",
+    "updated_at": "2026-03-22T11:53:36.234022+00:00"
+  },
+  {
+    "provider": "EODHD",
+    "provider_symbol": "ABN.AS",
+    "provider_ticker": "ABN",
+    "provider_exchange_code": "AS",
+    "security_id": 2,
+    "listing_exchange": "AS",
+    "security_name": "ABN Amro Group NV",
+    "security_type": "Common Stock",
+    "country": "Netherlands",
+    "currency": "EUR",
+    "isin": "NL0011540547",
+    "updated_at": "2026-03-22T11:53:36.234022+00:00"
+  },
+  {
+    "provider": "EODHD",
+    "provider_symbol": "ACOMO.AS",
+    "provider_ticker": "ACOMO",
+    "provider_exchange_code": "AS",
+    "security_id": 3,
+    "listing_exchange": "AS",
+    "security_name": "Amsterdam Commodities NV",
+    "security_type": "Common Stock",
+    "country": "Netherlands",
+    "currency": "EUR",
+    "isin": "NL0000313286",
+    "updated_at": "2026-03-22T11:53:36.234022+00:00"
+  },
+  {
+    "provider": "EODHD",
+    "provider_symbol": "AD.AS",
+    "provider_ticker": "AD",
+    "provider_exchange_code": "AS",
+    "security_id": 4,
+    "listing_exchange": "AS",
+    "security_name": "Koninklijke Ahold Delhaize NV",
+    "security_type": "Common Stock",
+    "country": "Netherlands",
+    "currency": "EUR",
+    "isin": "NL0011794037",
+    "updated_at": "2026-03-22T11:53:36.234022+00:00"
+  },
+  {
+    "provider": "EODHD",
+    "provider_symbol": "ADYEN.AS",
+    "provider_ticker": "ADYEN",
+    "provider_exchange_code": "AS",
+    "security_id": 5,
+    "listing_exchange": "AS",
+    "security_name": "Adyen NV",
+    "security_type": "Common Stock",
+    "country": "Netherlands",
+    "currency": "EUR",
+    "isin": "NL0012969182",
+    "updated_at": "2026-03-22T11:53:36.234022+00:00"
+  }
+]
+```
+<!-- END generated_sample_rows -->
+
 ## Review Notes
 
 - This is the highest-value catalog table to review because many stages start here

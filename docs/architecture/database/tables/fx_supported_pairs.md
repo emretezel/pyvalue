@@ -60,6 +60,73 @@ One row per provider FX symbol.
 - `is_refreshable`: used directly by refresh planning to pick fetchable pairs.
 - `last_seen_at`: catalog freshness marker.
 
+## Sample Rows
+
+<!-- BEGIN generated_sample_rows -->
+- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+- Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
+
+```json
+[
+  {
+    "provider": "EODHD",
+    "symbol": "AED",
+    "canonical_symbol": "USDAED",
+    "base_currency": "USD",
+    "quote_currency": "AED",
+    "name": "US Dollar/United Arab Emirates dirham FX Spot Rate",
+    "is_alias": 1,
+    "is_refreshable": 0,
+    "last_seen_at": "2026-04-11T09:54:34.997203+00:00"
+  },
+  {
+    "provider": "EODHD",
+    "symbol": "AEDAUD",
+    "canonical_symbol": "AEDAUD",
+    "base_currency": "AED",
+    "quote_currency": "AUD",
+    "name": "UAE Dirham/Australian Dollar",
+    "is_alias": 0,
+    "is_refreshable": 1,
+    "last_seen_at": "2026-04-11T09:54:34.997203+00:00"
+  },
+  {
+    "provider": "EODHD",
+    "symbol": "AEDCAD",
+    "canonical_symbol": "AEDCAD",
+    "base_currency": "AED",
+    "quote_currency": "CAD",
+    "name": "UAE Dirham/Canadian Dollar",
+    "is_alias": 0,
+    "is_refreshable": 1,
+    "last_seen_at": "2026-04-11T09:54:34.997203+00:00"
+  },
+  {
+    "provider": "EODHD",
+    "symbol": "AEDCHF",
+    "canonical_symbol": "AEDCHF",
+    "base_currency": "AED",
+    "quote_currency": "CHF",
+    "name": "UAE Dirham/Swiss Franc",
+    "is_alias": 0,
+    "is_refreshable": 1,
+    "last_seen_at": "2026-04-11T09:54:34.997203+00:00"
+  },
+  {
+    "provider": "EODHD",
+    "symbol": "AEDEUR",
+    "canonical_symbol": "AEDEUR",
+    "base_currency": "AED",
+    "quote_currency": "EUR",
+    "name": "UAE Dirham/Euro FX Cross Rate",
+    "is_alias": 0,
+    "is_refreshable": 1,
+    "last_seen_at": "2026-04-11T09:54:34.997203+00:00"
+  }
+]
+```
+<!-- END generated_sample_rows -->
+
 ## Review Notes
 
 - Alias support is useful, but it also makes the model less obvious than a single canonical-pair table

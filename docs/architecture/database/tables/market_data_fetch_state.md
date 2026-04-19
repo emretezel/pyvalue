@@ -57,6 +57,63 @@ One row per `(provider, provider_symbol)`.
 - `next_eligible_at`: core backoff watermark for market-data retry scheduling.
 - `attempts`: retry counter for diagnostics and backoff progression.
 
+## Sample Rows
+
+<!-- BEGIN generated_sample_rows -->
+- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+- Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
+
+```json
+[
+  {
+    "provider": "EODHD",
+    "provider_symbol": "AALB.AS",
+    "last_fetched_at": "2026-04-11T08:25:55.378209+00:00",
+    "last_status": "ok",
+    "last_error": null,
+    "next_eligible_at": null,
+    "attempts": 0
+  },
+  {
+    "provider": "EODHD",
+    "provider_symbol": "ABN.AS",
+    "last_fetched_at": "2026-04-11T08:25:55.378209+00:00",
+    "last_status": "ok",
+    "last_error": null,
+    "next_eligible_at": null,
+    "attempts": 0
+  },
+  {
+    "provider": "EODHD",
+    "provider_symbol": "ACOMO.AS",
+    "last_fetched_at": "2026-04-11T08:25:55.378209+00:00",
+    "last_status": "ok",
+    "last_error": null,
+    "next_eligible_at": null,
+    "attempts": 0
+  },
+  {
+    "provider": "EODHD",
+    "provider_symbol": "AD.AS",
+    "last_fetched_at": "2026-04-11T08:25:55.378209+00:00",
+    "last_status": "ok",
+    "last_error": null,
+    "next_eligible_at": null,
+    "attempts": 0
+  },
+  {
+    "provider": "EODHD",
+    "provider_symbol": "ADYEN.AS",
+    "last_fetched_at": "2026-04-11T08:25:55.378209+00:00",
+    "last_status": "ok",
+    "last_error": null,
+    "next_eligible_at": null,
+    "attempts": 0
+  }
+]
+```
+<!-- END generated_sample_rows -->
+
 ## Review Notes
 
 - Structurally similar to `fundamentals_fetch_state`

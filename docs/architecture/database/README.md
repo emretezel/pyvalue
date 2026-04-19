@@ -47,3 +47,9 @@ Supporting review pages:
 - [Indexes](indexes.md)
 - [Query Hotspots](query-hotspots.md)
 - [Review Checklist](review-checklist.md)
+- [Sample Rows Appendix](sample-rows.md)
+
+Sample-row refresh notes:
+
+- Sample rows are intentionally cheap snapshots: first 5 rows returned by SQLite using `LIMIT` with no `ORDER BY`.
+- Use `python scripts/generate_database_review_docs.py --sample-rows-only` to refresh sample rows without recomputing live table stats.
