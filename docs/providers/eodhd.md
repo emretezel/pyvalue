@@ -89,6 +89,14 @@ pyvalue refresh-supported-tickers --all-supported
 pyvalue ingest-fundamentals --all-supported
 ```
 
+If you upgrade an existing database and need to backfill the cached
+primary-vs-secondary listing classification without downloading anything
+again, run:
+
+```bash
+pyvalue reconcile-listing-status --all-supported
+```
+
 `ingest-fundamentals` checks the EODHD user/quota endpoint
 before each multi-symbol run, subtracts the configured daily buffer, throttles
 by requests per minute, and exits cleanly when the remaining daily allowance is

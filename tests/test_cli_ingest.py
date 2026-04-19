@@ -293,6 +293,50 @@ def test_main_dispatches_ingest_fundamentals_with_default_provider_and_max_age_d
         )
 
 
+def test_build_parser_reconcile_listing_status_defaults_provider():
+    args = cli.build_parser().parse_args(["reconcile-listing-status"])
+
+    assert args.command == "reconcile-listing-status"
+    assert args.provider == "EODHD"
+    assert args.symbols is None
+    assert args.exchange_codes is None
+    assert args.all_supported is False
+
+
+def test_main_dispatches_reconcile_listing_status(monkeypatch):
+    calls = {}
+
+    def fake_cmd(provider, database, symbols, exchange_codes, all_supported):
+        calls["provider"] = provider
+        calls["database"] = database
+        calls["symbols"] = symbols
+        calls["exchange_codes"] = exchange_codes
+        calls["all_supported"] = all_supported
+        return 0
+
+    monkeypatch.setattr(cli, "setup_logging", lambda: None)
+    monkeypatch.setattr(cli, "cmd_reconcile_listing_status", fake_cmd)
+
+    rc = cli.main(
+        [
+            "reconcile-listing-status",
+            "--exchange-codes",
+            "US",
+            "--database",
+            "data/custom.db",
+        ]
+    )
+
+    assert rc == 0
+    assert calls == {
+        "provider": "EODHD",
+        "database": "data/custom.db",
+        "symbols": None,
+        "exchange_codes": ["US"],
+        "all_supported": False,
+    }
+
+
 def test_build_parser_normalize_fundamentals_defaults_provider():
     args = cli.build_parser().parse_args(["normalize-fundamentals"])
 
@@ -2666,6 +2710,137 @@ def test_cmd_update_market_data_stage_skips_secondary_listings(monkeypatch, tmp_
     assert market_repo.latest_snapshot("AAA.US") is not None
     assert market_repo.latest_snapshot("BBB.LSE") is not None
     assert market_repo.latest_snapshot("AAA.LSE") is None
+
+
+def test_cmd_reconcile_listing_status_backfills_from_raw_only(tmp_path, capsys):
+    db_path = tmp_path / "reconcile-listing-status.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[{"Code": "AAA", "Exchange": "US", "Type": "Common Stock"}],
+    )
+    store_supported_tickers(
+        db_path,
+        "LSE",
+        rows=[
+            {"Code": "AAA", "Exchange": "LSE", "Type": "Common Stock"},
+            {"Code": "BBB", "Exchange": "LSE", "Type": "Common Stock"},
+        ],
+    )
+
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD",
+        "AAA.US",
+        {"General": {"Name": "AAA", "PrimaryTicker": "AAA.US"}},
+        exchange="US",
+    )
+    fund_repo.upsert(
+        "EODHD",
+        "AAA.LSE",
+        {"General": {"Name": "AAA plc", "PrimaryTicker": "AAA.US"}},
+        exchange="LSE",
+    )
+    fund_repo.upsert(
+        "EODHD",
+        "BBB.LSE",
+        {"General": {"Name": "BBB plc"}},
+        exchange="LSE",
+    )
+
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    fact_repo.replace_facts(
+        "AAA.LSE",
+        [
+            make_fact(
+                symbol="AAA.LSE",
+                concept="Assets",
+                end_date="2024-12-31",
+                value=100.0,
+                unit="GBP",
+                currency="GBP",
+            )
+        ],
+        source_provider="EODHD",
+    )
+    store_market_data(db_path, "AAA.LSE", "2025-01-02", currency="GBP")
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+    metrics_repo.upsert(
+        "AAA.LSE",
+        "market_cap",
+        1000.0,
+        "2025-01-02",
+        unit_kind="monetary",
+        currency="GBP",
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM security_listing_status")
+
+    rc = cli.cmd_reconcile_listing_status(
+        provider="EODHD",
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=None,
+        all_supported=False,
+    )
+
+    assert rc == 0
+    with sqlite3.connect(db_path) as conn:
+        statuses = conn.execute(
+            """
+            SELECT provider_symbol, is_primary_listing, classification_basis
+            FROM security_listing_status
+            ORDER BY provider_symbol
+            """
+        ).fetchall()
+        fact_rows = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM financial_facts ff
+            JOIN securities s ON s.security_id = ff.security_id
+            WHERE s.canonical_symbol = 'AAA.LSE'
+            """
+        ).fetchone()[0]
+        market_rows = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM market_data md
+            JOIN securities s ON s.security_id = md.security_id
+            WHERE s.canonical_symbol = 'AAA.LSE'
+            """
+        ).fetchone()[0]
+        metric_rows = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM metrics m
+            JOIN securities s ON s.security_id = m.security_id
+            WHERE s.canonical_symbol = 'AAA.LSE'
+            """
+        ).fetchone()[0]
+
+    assert statuses == [
+        ("AAA.LSE", 0, "different_primary_ticker"),
+        ("AAA.US", 1, "matched_primary_ticker"),
+        ("BBB.LSE", 1, "missing_primary_ticker"),
+    ]
+    assert fact_rows == 0
+    assert market_rows == 0
+    assert metric_rows == 0
+
+    output = capsys.readouterr().out.splitlines()
+    assert output == [
+        "EODHD listing-status reconciliation",
+        f"Database: {db_path}",
+        "Scope: all supported tickers",
+        "Supported tickers in scope: 3",
+        "Listing-status rows upserted: 3",
+        "Primary listings classified: 2",
+        "Secondary listings classified: 1",
+    ]
 
 
 def test_cmd_update_market_data_stage_retries_missing_bulk_symbol_individually(

@@ -110,6 +110,7 @@ from pyvalue.storage import (
     MetricRecord,
     MetricsRepository,
     SecurityRepository,
+    SecurityListingStatusRecord,
     SecurityListingStatusRepository,
     SecurityMetadataUpdate,
     StoredFactRow,
@@ -635,7 +636,7 @@ def _reconcile_eodhd_listing_scope(
     provider_symbols: Optional[Sequence[str]] = None,
     exchange_codes: Optional[Sequence[str]] = None,
     security_ids: Optional[Sequence[int]] = None,
-) -> None:
+) -> List[SecurityListingStatusRecord]:
     repo = SecurityListingStatusRepository(database)
     updates = repo.reconcile_eodhd_fundamentals(
         provider_symbols=provider_symbols,
@@ -648,6 +649,52 @@ def _reconcile_eodhd_listing_scope(
             security_ids=[update.security_id for update in secondary_updates],
             provider_symbols=[update.provider_symbol for update in secondary_updates],
         )
+    return updates
+
+
+def cmd_reconcile_listing_status(
+    provider: str,
+    database: str,
+    symbols: Optional[Sequence[str]],
+    exchange_codes: Optional[Sequence[str]],
+    all_supported: bool,
+) -> int:
+    """Backfill cached EODHD listing classification from stored raw fundamentals."""
+
+    provider_norm = _normalize_provider(provider)
+    if provider_norm != "EODHD":
+        raise SystemExit(
+            "reconcile-listing-status currently only supports provider=EODHD."
+        )
+
+    db_path = _resolve_database_path(database)
+    scope_rows, symbol_filters, resolved_exchange_codes = _resolve_provider_scope_rows(
+        str(db_path),
+        provider_norm,
+        symbols,
+        exchange_codes,
+        all_supported,
+        primary_only=False,
+    )
+    scope_label = _scope_label(symbol_filters, resolved_exchange_codes)
+    updates = _reconcile_eodhd_listing_scope(
+        str(db_path),
+        provider_symbols=symbol_filters,
+        exchange_codes=resolved_exchange_codes,
+    )
+    primary_updates = sum(1 for update in updates if update.is_primary_listing)
+    secondary_updates = len(updates) - primary_updates
+
+    print("EODHD listing-status reconciliation")
+    print(f"Database: {db_path}")
+    print(f"Scope: {scope_label}")
+    print(f"Supported tickers in scope: {len(scope_rows)}")
+    print(f"Listing-status rows upserted: {len(updates)}")
+    print(f"Primary listings classified: {primary_updates}")
+    print(f"Secondary listings classified: {secondary_updates}")
+    if not updates:
+        print("No stored raw fundamentals needed reconciliation.")
+    return 0
 
 
 def _resolve_provider_scope_rows(
@@ -1616,6 +1663,27 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Ignore retry backoff and retry previously failed symbols immediately.",
     )
+
+    reconcile_listing_status = subparsers.add_parser(
+        "reconcile-listing-status",
+        help=(
+            "Backfill cached EODHD primary/secondary listing classification from "
+            "stored raw fundamentals without downloading data."
+        ),
+    )
+    reconcile_listing_status.add_argument(
+        "--provider",
+        default="EODHD",
+        choices=["EODHD"],
+        help="Listing-classification provider to reconcile (default: %(default)s).",
+    )
+    add_scope_args(reconcile_listing_status)
+    reconcile_listing_status.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
+    )
+
     fundamentals_progress = subparsers.add_parser(
         "report-fundamentals-progress",
         help="Report EODHD fundamentals ingest progress across supported tickers.",
@@ -8624,6 +8692,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 database=args.database,
                 start_date=args.start_date,
                 end_date=args.end_date,
+            )
+        if args.command == "reconcile-listing-status":
+            return cmd_reconcile_listing_status(
+                provider=args.provider,
+                database=args.database,
+                symbols=args.symbols,
+                exchange_codes=args.exchange_codes,
+                all_supported=args.all_supported,
             )
         if args.command == "ingest-fundamentals":
             return cmd_ingest_fundamentals_stage(

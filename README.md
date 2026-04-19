@@ -35,6 +35,11 @@ Default CLI behavior:
   `General.PrimaryTicker`, downstream stage commands skip it; missing or
   unusable `PrimaryTicker` is treated as primary
 
+Upgrade note:
+- `pyvalue reconcile-listing-status --all-supported` backfills the cached
+  primary/secondary listing table from existing `fundamentals_raw` without
+  downloading fundamentals or market data again
+
 ## What pyvalue does
 
 - Load canonical provider ticker catalogs into SQLite.

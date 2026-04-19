@@ -17,8 +17,9 @@ universe. When you do provide a selector, provide at most one of:
 Provider rules:
 
 - `refresh-supported-exchanges`, `refresh-supported-tickers`,
-  `ingest-fundamentals`, `normalize-fundamentals`, and `update-market-data`
-  accept `--provider` and default it to `EODHD`
+  `ingest-fundamentals`, `reconcile-listing-status`,
+  `normalize-fundamentals`, and `update-market-data` accept `--provider` and
+  default it to `EODHD`
 - `compute-metrics`, `run-screen`, `report-fact-freshness`,
   `report-metric-coverage`, `report-metric-failures`,
   `report-screen-failures`, and `recalc-market-cap`
@@ -106,6 +107,28 @@ Notes:
   under the `1000 req/min` provider limit
 - omitted `--max-age-days` now means the same 30-day freshness window used by
   the other CLI freshness filters
+
+### `reconcile-listing-status`
+
+Backfill cached EODHD primary-vs-secondary listing classification from stored
+raw fundamentals only.
+
+Key options:
+
+- `--provider {EODHD}`
+- optional scope selector: `--symbols`, `--exchange-codes`, or
+  `--all-supported` (defaults to the full supported universe)
+- `--database <path>`
+
+Notes:
+
+- this command does not download fundamentals or market data
+- it reads existing `fundamentals_raw` payloads and writes
+  `security_listing_status`
+- listings classified as secondary via `General.PrimaryTicker` trigger
+  downstream cleanup of normalized facts, market data, metrics, and related
+  refresh-state rows for that listing
+- missing or unusable `General.PrimaryTicker` values are treated as primary
 
 ### `report-fundamentals-progress`
 
