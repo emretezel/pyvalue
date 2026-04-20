@@ -4,7 +4,7 @@
 
 The core data pipeline is:
 
-1. refresh provider catalogs into `supported_exchanges` and `supported_tickers`
+1. refresh provider catalogs into `exchange`, `exchange_provider`, and `supported_tickers`
 2. ingest raw provider payloads into `fundamentals_raw`
 3. normalize provider payloads into canonical `financial_facts`
 4. compute metrics from `financial_facts`

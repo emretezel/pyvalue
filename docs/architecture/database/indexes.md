@@ -4,9 +4,9 @@ This page lists the current secondary indexes from the live schema. Primary keys
 
 ## Identity And Catalog
 
-- `supported_exchanges`
-  - `idx_supported_exchanges_canonical (canonical_exchange_code)`
-    - supports exchange-code lookups from canonical scopes
+- `exchange_provider`
+  - `idx_exchange_provider_exchange (exchange_id)`
+    - supports joins from provider exchange codes to canonical exchange identity
 - `securities`
   - `idx_securities_exchange (canonical_exchange_code)`
     - supports exchange-scoped symbol resolution

@@ -11,6 +11,12 @@ Use this file to capture recurring mistake patterns after user corrections so fu
 
 ## Lessons
 
+- Date: 2026-04-20
+- User correction: The canonical exchange table must be named exactly `exchange`, and the new provider mapping layer should use enforced foreign keys back to `providers` and `exchange`.
+- Recurring pattern: When refactoring schema structure, I can drift into inferred naming or prior repo conventions instead of locking onto the exact table names and constraint expectations the user already specified.
+- Preventive rule: For schema refactors in `pyvalue`, treat user-provided table names and explicit FK requirements as fixed API unless I confirm a change first; do not pluralize, rename, or relax constraints by assumption.
+- Resulting action: Renamed the canonical table plan to `exchange`, kept `exchange_provider` as the provider-owned mapping layer, added the two explicit foreign keys, and recorded the rule here.
+
 - Date: 2026-04-13
 - User correction: When investigating `opm_10y_min` failure causes here, only consider the `EODHD` provider rather than mixing provider-specific conclusions.
 - Recurring pattern: Starting a broad cross-provider audit before locking the requested provider scope can waste time and introduce irrelevant findings.

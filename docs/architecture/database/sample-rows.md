@@ -6,7 +6,7 @@ per-table docs difficult to read.
 <!-- BEGIN generated_sample_rows_appendix -->
 ## `fundamentals_raw`
 
-- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+- Snapshot source: `data/pyvalue.db` on `2026-04-20`
 - Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
 
 ```json

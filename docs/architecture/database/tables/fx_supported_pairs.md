@@ -10,10 +10,12 @@ One row per provider FX symbol.
 
 ## Live Stats
 
-- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+<!-- BEGIN generated_live_stats -->
+- Snapshot source: `data/pyvalue.db` on `2026-04-20`
 - Row count: `990`
 - Table size: `102,400 bytes` (`100.0 KiB`)
 - Approximate bytes per row: `103.4`
+<!-- END generated_live_stats -->
 
 ## Columns
 
@@ -63,7 +65,7 @@ One row per provider FX symbol.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+- Snapshot source: `data/pyvalue.db` on `2026-04-20`
 - Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
 
 ```json

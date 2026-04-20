@@ -4,6 +4,8 @@ from datetime import date, timedelta
 import pyvalue.storage as storage
 from pyvalue.storage import (
     EntityMetadataRepository,
+    ExchangeProviderRepository,
+    ExchangeRepository,
     FXRateRecord,
     FXRatesRepository,
     FinancialFactsRefreshStateRepository,
@@ -22,7 +24,6 @@ from pyvalue.storage import (
     SecurityRepository,
     SecurityListingStatusRecord,
     SecurityListingStatusRepository,
-    SupportedExchangeRepository,
     SupportedTickerRepository,
 )
 from pyvalue.marketdata import MarketDataUpdate
@@ -295,8 +296,9 @@ def test_fundamentals_repository_classifies_and_purges_secondary_listings(tmp_pa
     assert market_state_rows == 0
 
 
-def test_supported_exchange_repository_replaces_rows_per_provider(tmp_path):
-    repo = SupportedExchangeRepository(tmp_path / "supported-exchanges.db")
+def test_exchange_provider_repository_replaces_rows_per_provider(tmp_path):
+    db_path = tmp_path / "exchange-provider.db"
+    repo = ExchangeProviderRepository(db_path)
     repo.initialize_schema()
     repo.replace_for_provider(
         "EODHD",
@@ -306,8 +308,8 @@ def test_supported_exchange_repository_replaces_rows_per_provider(tmp_path):
         ],
     )
     repo.replace_for_provider(
-        "OTHER",
-        [{"Code": "TSX", "Name": "Toronto Exchange"}],
+        "SEC",
+        [{"Code": "US", "Name": "United States"}],
     )
 
     inserted = repo.replace_for_provider(
@@ -320,14 +322,16 @@ def test_supported_exchange_repository_replaces_rows_per_provider(tmp_path):
     assert [(row.provider, row.code, row.name) for row in rows] == [
         ("EODHD", "LSE", "London Exchange Refreshed"),
     ]
-    other_rows = repo.list_all("OTHER")
-    assert [(row.provider, row.code, row.name) for row in other_rows] == [
-        ("OTHER", "TSX", "Toronto Exchange")
+    sec_rows = repo.list_all("SEC")
+    assert [(row.provider, row.code, row.name) for row in sec_rows] == [
+        ("SEC", "US", "United States")
     ]
+    exchange_rows = ExchangeRepository(db_path).list_all()
+    assert [row.code for row in exchange_rows] == ["LSE", "US"]
 
 
-def test_supported_exchange_repository_fetch_normalizes_code(tmp_path):
-    repo = SupportedExchangeRepository(tmp_path / "supported-exchanges.db")
+def test_exchange_provider_repository_fetch_normalizes_code(tmp_path):
+    repo = ExchangeProviderRepository(tmp_path / "exchange-provider.db")
     repo.initialize_schema()
     repo.replace_for_provider(
         "EODHD",
@@ -348,6 +352,7 @@ def test_supported_exchange_repository_fetch_normalizes_code(tmp_path):
 
     assert record is not None
     assert record.provider == "EODHD"
+    assert record.exchange_code == "LSE"
     assert record.code == "LSE"
     assert record.name == "London Exchange"
     assert record.country == "UK"

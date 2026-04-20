@@ -139,12 +139,27 @@ class Security:
 
 
 @dataclass(frozen=True)
-class SupportedExchange:
+class Exchange:
+    """Canonical exchange identity."""
+
+    exchange_id: int
+    exchange_code: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+    @property
+    def code(self) -> str:
+        return self.exchange_code
+
+
+@dataclass(frozen=True)
+class ExchangeProvider:
     """Persisted provider-supported exchange metadata."""
 
     provider: str
     provider_exchange_code: str
-    canonical_exchange_code: str
+    exchange_id: int
+    exchange_code: str
     name: Optional[str] = None
     country: Optional[str] = None
     currency: Optional[str] = None
@@ -156,6 +171,10 @@ class SupportedExchange:
     @property
     def code(self) -> str:
         return self.provider_exchange_code
+
+    @property
+    def canonical_exchange_code(self) -> str:
+        return self.exchange_code
 
 
 @dataclass(frozen=True)
@@ -474,9 +493,8 @@ class SQLiteStore:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._security_repo_cache: Optional[SecurityRepository] = None
         self._supported_ticker_repo_cache: Optional[SupportedTickerRepository] = None
-        self._supported_exchange_repo_cache: Optional[SupportedExchangeRepository] = (
-            None
-        )
+        self._exchange_repo_cache: Optional[ExchangeRepository] = None
+        self._exchange_provider_repo_cache: Optional[ExchangeProviderRepository] = None
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(
@@ -510,6 +528,7 @@ class SQLiteStore:
 
         conn.row_factory = sqlite3.Row
         conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+        conn.execute("PRAGMA foreign_keys=ON")
         # Performance pragmas applied to every connection. journal_mode=WAL is
         # safe to set repeatedly (no-op when already enabled) and lets readers
         # run while a writer holds the database. synchronous=NORMAL is the
@@ -569,12 +588,17 @@ class SQLiteStore:
             self._security_repo_cache = SecurityRepository(self.db_path)
         return self._security_repo_cache
 
-    def _supported_exchange_repo(self) -> SupportedExchangeRepository:
-        if self._supported_exchange_repo_cache is None:
-            self._supported_exchange_repo_cache = SupportedExchangeRepository(
+    def _exchange_repo(self) -> ExchangeRepository:
+        if self._exchange_repo_cache is None:
+            self._exchange_repo_cache = ExchangeRepository(self.db_path)
+        return self._exchange_repo_cache
+
+    def _exchange_provider_repo(self) -> ExchangeProviderRepository:
+        if self._exchange_provider_repo_cache is None:
+            self._exchange_provider_repo_cache = ExchangeProviderRepository(
                 self.db_path
             )
-        return self._supported_exchange_repo_cache
+        return self._exchange_provider_repo_cache
 
     def _supported_ticker_repo(self) -> SupportedTickerRepository:
         if self._supported_ticker_repo_cache is None:
@@ -1063,18 +1087,106 @@ class SecurityRepository(SQLiteStore):
         self._by_symbol[security.canonical_symbol] = security
 
 
-class SupportedExchangeRepository(SQLiteStore):
-    """Store exchange catalogs published by data providers."""
+class ExchangeRepository(SQLiteStore):
+    """Persist canonical exchange identities."""
 
     def initialize_schema(self) -> None:
         apply_migrations(self.db_path)
         with self._connect() as conn:
             conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS supported_exchanges (
+                CREATE TABLE IF NOT EXISTS "exchange" (
+                    exchange_id INTEGER PRIMARY KEY,
+                    exchange_code TEXT NOT NULL UNIQUE CHECK (
+                        exchange_code = UPPER(TRIM(exchange_code))
+                        AND LENGTH(TRIM(exchange_code)) > 0
+                    ),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+
+    def ensure(
+        self,
+        exchange_code: str,
+        *,
+        connection: Optional[sqlite3.Connection] = None,
+    ) -> Exchange:
+        self.initialize_schema()
+        code_norm = _normalize_required_text(exchange_code, "exchange_code").upper()
+        now = _utc_now_iso()
+
+        def _ensure(conn: sqlite3.Connection) -> Exchange:
+            conn.execute(
+                """
+                INSERT INTO "exchange" (
+                    exchange_code,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?)
+                ON CONFLICT(exchange_code) DO UPDATE SET
+                    updated_at = excluded.updated_at
+                """,
+                (code_norm, now, now),
+            )
+            row = conn.execute(
+                """
+                SELECT exchange_id, exchange_code, created_at, updated_at
+                FROM "exchange"
+                WHERE exchange_code = ?
+                """,
+                (code_norm,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError(f"Failed to persist exchange {code_norm}")
+            return Exchange(*row)
+
+        if connection is not None:
+            return _ensure(connection)
+        with self._connect() as conn:
+            return _ensure(conn)
+
+    def fetch(self, exchange_code: str) -> Optional[Exchange]:
+        self.initialize_schema()
+        code_norm = exchange_code.strip().upper()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT exchange_id, exchange_code, created_at, updated_at
+                FROM "exchange"
+                WHERE exchange_code = ?
+                """,
+                (code_norm,),
+            ).fetchone()
+        return Exchange(*row) if row else None
+
+    def list_all(self) -> List[Exchange]:
+        self.initialize_schema()
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT exchange_id, exchange_code, created_at, updated_at
+                FROM "exchange"
+                ORDER BY exchange_code
+                """
+            ).fetchall()
+        return [Exchange(*row) for row in rows]
+
+
+class ExchangeProviderRepository(SQLiteStore):
+    """Store exchange catalogs published by data providers."""
+
+    def initialize_schema(self) -> None:
+        apply_migrations(self.db_path)
+        self._exchange_repo().initialize_schema()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS exchange_provider (
                     provider TEXT NOT NULL,
                     provider_exchange_code TEXT NOT NULL,
-                    canonical_exchange_code TEXT NOT NULL,
+                    exchange_id INTEGER NOT NULL,
                     name TEXT,
                     country TEXT,
                     currency TEXT,
@@ -1082,14 +1194,16 @@ class SupportedExchangeRepository(SQLiteStore):
                     country_iso2 TEXT,
                     country_iso3 TEXT,
                     updated_at TEXT NOT NULL,
-                    PRIMARY KEY (provider, provider_exchange_code)
+                    PRIMARY KEY (provider, provider_exchange_code),
+                    FOREIGN KEY (provider) REFERENCES providers(provider_code),
+                    FOREIGN KEY (exchange_id) REFERENCES "exchange"(exchange_id)
                 )
                 """
             )
             conn.execute(
                 """
-                CREATE INDEX IF NOT EXISTS idx_supported_exchanges_canonical
-                ON supported_exchanges(canonical_exchange_code)
+                CREATE INDEX IF NOT EXISTS idx_exchange_provider_exchange
+                ON exchange_provider(exchange_id)
                 """
             )
 
@@ -1102,51 +1216,58 @@ class SupportedExchangeRepository(SQLiteStore):
         provider_norm = provider.strip().upper()
         updated_at = _utc_now_iso()
         payload: List[Tuple[object, ...]] = []
-        for row in rows:
-            code = _normalize_optional_text(
-                row.get("Code") or row.get("provider_exchange_code")
-            )
-            if not code:
-                continue
-            code_norm = code.upper()
-            canonical_exchange_code = _normalize_optional_text(
-                row.get("CanonicalExchangeCode") or row.get("canonical_exchange_code")
-            )
-            payload.append(
-                (
-                    provider_norm,
-                    code_norm,
-                    (canonical_exchange_code or code_norm).upper(),
-                    _normalize_optional_text(row.get("Name") or row.get("name")),
-                    _normalize_optional_text(row.get("Country") or row.get("country")),
-                    _normalize_optional_text(
-                        row.get("Currency") or row.get("currency")
-                    ),
-                    _normalize_optional_text(
-                        row.get("OperatingMIC") or row.get("operating_mic")
-                    ),
-                    _normalize_optional_text(
-                        row.get("CountryISO2") or row.get("country_iso2")
-                    ),
-                    _normalize_optional_text(
-                        row.get("CountryISO3") or row.get("country_iso3")
-                    ),
-                    updated_at,
-                )
-            )
-
         with self._connect() as conn:
+            for row in rows:
+                code = _normalize_optional_text(
+                    row.get("Code") or row.get("provider_exchange_code")
+                )
+                if not code:
+                    continue
+                code_norm = code.upper()
+                canonical_exchange_code = _normalize_optional_text(
+                    row.get("CanonicalExchangeCode")
+                    or row.get("canonical_exchange_code")
+                )
+                exchange = self._exchange_repo().ensure(
+                    (canonical_exchange_code or code_norm).upper(),
+                    connection=conn,
+                )
+                payload.append(
+                    (
+                        provider_norm,
+                        code_norm,
+                        exchange.exchange_id,
+                        _normalize_optional_text(row.get("Name") or row.get("name")),
+                        _normalize_optional_text(
+                            row.get("Country") or row.get("country")
+                        ),
+                        _normalize_optional_text(
+                            row.get("Currency") or row.get("currency")
+                        ),
+                        _normalize_optional_text(
+                            row.get("OperatingMIC") or row.get("operating_mic")
+                        ),
+                        _normalize_optional_text(
+                            row.get("CountryISO2") or row.get("country_iso2")
+                        ),
+                        _normalize_optional_text(
+                            row.get("CountryISO3") or row.get("country_iso3")
+                        ),
+                        updated_at,
+                    )
+                )
+
             conn.execute(
-                "DELETE FROM supported_exchanges WHERE UPPER(provider) = ?",
+                "DELETE FROM exchange_provider WHERE UPPER(provider) = ?",
                 (provider_norm,),
             )
             if payload:
                 conn.executemany(
                     """
-                    INSERT INTO supported_exchanges (
+                    INSERT INTO exchange_provider (
                         provider,
                         provider_exchange_code,
-                        canonical_exchange_code,
+                        exchange_id,
                         name,
                         country,
                         currency,
@@ -1171,12 +1292,16 @@ class SupportedExchangeRepository(SQLiteStore):
     ) -> None:
         self.initialize_schema()
         with self._connect() as conn:
+            exchange = self._exchange_repo().ensure(
+                canonical_exchange_code.strip().upper(),
+                connection=conn,
+            )
             conn.execute(
                 """
-                INSERT INTO supported_exchanges (
+                INSERT INTO exchange_provider (
                     provider,
                     provider_exchange_code,
-                    canonical_exchange_code,
+                    exchange_id,
                     name,
                     country,
                     currency,
@@ -1186,16 +1311,16 @@ class SupportedExchangeRepository(SQLiteStore):
                     updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?)
                 ON CONFLICT(provider, provider_exchange_code) DO UPDATE SET
-                    canonical_exchange_code = excluded.canonical_exchange_code,
-                    name = COALESCE(excluded.name, supported_exchanges.name),
-                    country = COALESCE(excluded.country, supported_exchanges.country),
-                    currency = COALESCE(excluded.currency, supported_exchanges.currency),
+                    exchange_id = excluded.exchange_id,
+                    name = COALESCE(excluded.name, exchange_provider.name),
+                    country = COALESCE(excluded.country, exchange_provider.country),
+                    currency = COALESCE(excluded.currency, exchange_provider.currency),
                     updated_at = excluded.updated_at
                 """,
                 (
                     provider.strip().upper(),
                     provider_exchange_code.strip().upper(),
-                    canonical_exchange_code.strip().upper(),
+                    exchange.exchange_id,
                     _normalize_optional_text(name),
                     _normalize_optional_text(country),
                     _normalize_optional_text(currency),
@@ -1203,43 +1328,55 @@ class SupportedExchangeRepository(SQLiteStore):
                 ),
             )
 
-    def fetch(self, provider: str, code: str) -> Optional[SupportedExchange]:
+    def fetch(self, provider: str, code: str) -> Optional[ExchangeProvider]:
         self.initialize_schema()
         provider_norm = provider.strip().upper()
         code_norm = code.strip().upper()
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT provider, provider_exchange_code, canonical_exchange_code, name,
-                       country, currency, operating_mic, country_iso2, country_iso3,
-                       updated_at
-                FROM supported_exchanges
-                WHERE UPPER(provider) = ? AND UPPER(provider_exchange_code) = ?
+                SELECT
+                    ep.provider,
+                    ep.provider_exchange_code,
+                    ep.exchange_id,
+                    e.exchange_code,
+                    ep.name,
+                    ep.country,
+                    ep.currency,
+                    ep.operating_mic,
+                    ep.country_iso2,
+                    ep.country_iso3,
+                    ep.updated_at
+                FROM exchange_provider ep
+                JOIN "exchange" e ON e.exchange_id = ep.exchange_id
+                WHERE UPPER(ep.provider) = ? AND UPPER(ep.provider_exchange_code) = ?
                 """,
                 (provider_norm, code_norm),
             ).fetchone()
-        return SupportedExchange(*row) if row else None
+        return ExchangeProvider(*row) if row else None
 
-    def list_all(self, provider: Optional[str] = None) -> List[SupportedExchange]:
+    def list_all(self, provider: Optional[str] = None) -> List[ExchangeProvider]:
         self.initialize_schema()
         params: List[object] = []
         query = [
-            "SELECT provider, provider_exchange_code, canonical_exchange_code, name,",
-            "country, currency, operating_mic, country_iso2, country_iso3, updated_at",
-            "FROM supported_exchanges",
+            "SELECT ep.provider, ep.provider_exchange_code, ep.exchange_id,",
+            "e.exchange_code, ep.name, ep.country, ep.currency, ep.operating_mic,",
+            "ep.country_iso2, ep.country_iso3, ep.updated_at",
+            "FROM exchange_provider ep",
+            'JOIN "exchange" e ON e.exchange_id = ep.exchange_id',
         ]
         if provider:
-            query.append("WHERE UPPER(provider) = ?")
+            query.append("WHERE UPPER(ep.provider) = ?")
             params.append(provider.strip().upper())
-        query.append("ORDER BY provider, provider_exchange_code")
+        query.append("ORDER BY ep.provider, ep.provider_exchange_code")
         with self._connect() as conn:
             rows = conn.execute(" ".join(query), params).fetchall()
-        return [SupportedExchange(*row) for row in rows]
+        return [ExchangeProvider(*row) for row in rows]
 
     def resolve_canonical_code(self, provider: str, provider_exchange_code: str) -> str:
         record = self.fetch(provider, provider_exchange_code)
         if record is not None:
-            return record.canonical_exchange_code
+            return record.exchange_code
         return provider_exchange_code.strip().upper()
 
 
@@ -1248,7 +1385,7 @@ class SupportedTickerRepository(SQLiteStore):
 
     def initialize_schema(self) -> None:
         apply_migrations(self.db_path)
-        self._supported_exchange_repo().initialize_schema()
+        self._exchange_provider_repo().initialize_schema()
         self._security_repo().initialize_schema()
         with self._connect() as conn:
             conn.execute(
@@ -1999,7 +2136,7 @@ class SupportedTickerRepository(SQLiteStore):
             provider_symbol = self._normalize_provider_symbol(
                 provider_ticker, provider_exchange_code
             )
-        canonical_exchange = self._supported_exchange_repo().resolve_canonical_code(
+        canonical_exchange = self._exchange_provider_repo().resolve_canonical_code(
             provider, provider_exchange_code
         )
         security = self._security_repo().ensure(
@@ -2044,7 +2181,7 @@ class SupportedTickerRepository(SQLiteStore):
         if provider == "SEC":
             provider_exchange_code = "US"
             provider_symbol = f"{provider_ticker}.US"
-        canonical_exchange = self._supported_exchange_repo().resolve_canonical_code(
+        canonical_exchange = self._exchange_provider_repo().resolve_canonical_code(
             provider, provider_exchange_code
         )
         security = self._security_repo().ensure(
@@ -2620,7 +2757,7 @@ class FundamentalsRepository(SQLiteStore):
             if not provider_exchange_code:
                 return None, None, None
             provider_symbol = f"{ticker}.{provider_exchange_code}"
-        canonical_exchange = self._supported_exchange_repo().resolve_canonical_code(
+        canonical_exchange = self._exchange_provider_repo().resolve_canonical_code(
             provider_norm, provider_exchange_code
         )
         if create:
@@ -5430,6 +5567,10 @@ def _normalized_codes(values: Optional[Sequence[str]]) -> List[str]:
 
 
 __all__ = [
+    "Exchange",
+    "ExchangeProvider",
+    "ExchangeProviderRepository",
+    "ExchangeRepository",
     "FXRateRecord",
     "FXRatesRepository",
     "Security",
@@ -5437,8 +5578,6 @@ __all__ = [
     "SecurityMetadataUpdate",
     "SecurityRepository",
     "FundamentalsRepository",
-    "SupportedExchange",
-    "SupportedExchangeRepository",
     "IngestProgressSummary",
     "IngestProgressExchange",
     "IngestProgressFailure",

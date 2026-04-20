@@ -10,10 +10,12 @@ One row per `(provider, provider_symbol)`.
 
 ## Live Stats
 
-- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+<!-- BEGIN generated_live_stats -->
+- Snapshot source: `data/pyvalue.db` on `2026-04-20`
 - Row count: `75,848`
 - Table size: `9,736,192 bytes` (`9.3 MiB`)
 - Approximate bytes per row: `128.4`
+<!-- END generated_live_stats -->
 
 ## Columns
 
@@ -37,7 +39,7 @@ One row per `(provider, provider_symbol)`.
 - Primary key: `(provider, provider_symbol)`
 - Unique index: `(provider, provider_exchange_code, provider_ticker)`
 - Logical references:
-  - `provider_exchange_code` to `supported_exchanges`
+  - `(provider, provider_exchange_code)` to `exchange_provider`
   - `security_id` to `securities`
   - `(provider, provider_symbol)` reused by fetch/state/raw tables
 
@@ -77,7 +79,7 @@ One row per `(provider, provider_symbol)`.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+- Snapshot source: `data/pyvalue.db` on `2026-04-20`
 - Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
 
 ```json

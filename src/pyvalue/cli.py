@@ -87,6 +87,7 @@ from pyvalue.logging_utils import (
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.storage import (
     EntityMetadataRepository,
+    ExchangeProviderRepository,
     FXRefreshStateRepository,
     FXRatesRepository,
     FXSupportedPairRecord,
@@ -115,7 +116,6 @@ from pyvalue.storage import (
     SecurityMetadataUpdate,
     StoredFactRow,
     StoredMetricRow,
-    SupportedExchangeRepository,
     SupportedTicker,
     SupportedTickerRepository,
 )
@@ -937,7 +937,7 @@ def _refresh_supported_exchanges_for_provider(
         raise SystemExit(
             "refresh-supported-exchanges currently only supports provider=EODHD."
         )
-    repo = SupportedExchangeRepository(database)
+    repo = ExchangeProviderRepository(database)
     repo.initialize_schema()
     rows = client.list_exchanges()
     return repo.replace_for_provider(provider_norm, rows)
@@ -950,7 +950,7 @@ def _resolve_eodhd_exchange_metadata(
 ) -> Optional[Dict[str, Optional[str]]]:
     """Resolve exchange metadata from the local catalog, bootstrapping on miss."""
 
-    repo = SupportedExchangeRepository(database)
+    repo = ExchangeProviderRepository(database)
     record = repo.fetch("EODHD", exchange_code)
     if record is None:
         _refresh_supported_exchanges_for_provider(
@@ -1470,7 +1470,7 @@ def _list_eodhd_exchange_codes(
     database: str,
     client: EODHDFundamentalsClient,
 ) -> List[str]:
-    repo = SupportedExchangeRepository(database)
+    repo = ExchangeProviderRepository(database)
     exchanges = repo.list_all("EODHD")
     if not exchanges:
         _refresh_supported_exchanges_for_provider(database, "EODHD", client)
@@ -2158,7 +2158,7 @@ def cmd_refresh_supported_exchanges(provider: str, database: str) -> int:
     """Refresh the persisted supported exchange catalog."""
 
     provider_norm = provider.strip().upper()
-    repo = SupportedExchangeRepository(database)
+    repo = ExchangeProviderRepository(database)
     repo.initialize_schema()
     if provider_norm == "SEC":
         repo.ensure_fixed_exchange(
@@ -2199,7 +2199,7 @@ def cmd_refresh_supported_tickers(
         if requested_exchanges and requested_exchanges != {"US"}:
             raise SystemExit("provider=SEC only supports --exchange-codes US.")
         exchange_list = ["US"]
-        repo = SupportedExchangeRepository(database)
+        repo = ExchangeProviderRepository(database)
         repo.initialize_schema()
         repo.ensure_fixed_exchange(
             provider="SEC",

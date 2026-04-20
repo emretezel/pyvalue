@@ -10,7 +10,8 @@ keys, logical foreign keys, indexes, and query hotspots, use the
 
 The main persisted layers are:
 - provider registry
-- supported exchange catalogs
+- canonical exchange identities
+- provider exchange catalogs
 - canonical security identities
 - supported ticker catalogs
 - raw fundamentals
@@ -47,13 +48,22 @@ Purpose:
 - keep provider-local fetch keys such as `provider_symbol` and `provider_exchange_code`
 - map each raw payload to canonical `security_id`
 
-### `supported_exchanges`
+### `exchange`
+
+Canonical exchange identities live here.
+
+Purpose:
+- assign a stable canonical key to each exchange code
+- dedupe shared canonical exchanges such as `US` across providers
+- keep the canonical exchange layer narrow while the rest of the schema still uses `canonical_exchange_code`
+
+### `exchange_provider`
 
 Provider-published exchange catalogs live here.
 
 Purpose:
 - cache provider exchange metadata such as code, country, currency, and MIC
-- map provider exchange codes to canonical exchange codes
+- map provider exchange codes to canonical `exchange_id`
 - avoid re-fetching exchange-list metadata on every EODHD lookup
 - support explicit catalog refreshes from the CLI
 
@@ -224,7 +234,7 @@ Metric rows also persist unit metadata:
 A normal run looks like:
 
 1. provider registry seeded into `providers`
-2. provider catalogs refreshed into `supported_exchanges`, `securities`, and `supported_tickers`
+2. provider catalogs refreshed into `exchange`, `exchange_provider`, `securities`, and `supported_tickers`
 3. raw fundamentals fetched into `fundamentals_raw`
 4. EODHD raw writes refresh `security_listing_status` from `General.PrimaryTicker`
 5. provider-specific normalization writes canonical `financial_facts`

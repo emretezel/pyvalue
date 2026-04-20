@@ -10,10 +10,12 @@ One row per `(provider, provider_symbol)`, containing the latest fetched raw pay
 
 ## Live Stats
 
-- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+<!-- BEGIN generated_live_stats -->
+- Snapshot source: `data/pyvalue.db` on `2026-04-20`
 - Row count: `77,045`
 - Table size: `18,079,010,816 bytes` (`16.84 GiB`)
 - Approximate bytes per row: `234,655.2`
+<!-- END generated_live_stats -->
 
 ## Columns
 

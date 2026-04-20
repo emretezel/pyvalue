@@ -10,10 +10,12 @@ One row per fact version keyed by security, concept, period/date, unit, and acce
 
 ## Live Stats
 
-- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+<!-- BEGIN generated_live_stats -->
+- Snapshot source: `data/pyvalue.db` on `2026-04-20`
 - Row count: `103,188,287`
 - Table size: `9,316,958,208 bytes` (`8.68 GiB`)
 - Approximate bytes per row: `90.3`
+<!-- END generated_live_stats -->
 
 ## Columns
 
@@ -79,7 +81,7 @@ One row per fact version keyed by security, concept, period/date, unit, and acce
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+- Snapshot source: `data/pyvalue.db` on `2026-04-20`
 - Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
 
 ```json

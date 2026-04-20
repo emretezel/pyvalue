@@ -176,7 +176,8 @@ def test_sync_table_inventory_page_replaces_generated_body(tmp_path: Path) -> No
 
     stats_by_table = {
         "providers": TableStats(1, 1024),
-        "supported_exchanges": TableStats(1, 1024),
+        "exchange": TableStats(2, 2048),
+        "exchange_provider": TableStats(3, 3072),
         "securities": TableStats(2, 2048),
         "supported_tickers": TableStats(3, 3072),
         "fundamentals_raw": TableStats(4, 4096),
@@ -204,7 +205,8 @@ def test_sync_table_inventory_page_replaces_generated_body(tmp_path: Path) -> No
     text = inventory.read_text(encoding="utf-8")
     assert "<!-- BEGIN generated_table_inventory -->" in text
     assert "[providers](tables/providers.md)" in text
-    assert "[supported_exchanges](tables/supported_exchanges.md)" in text
+    assert "[exchange](tables/exchange.md)" in text
+    assert "[exchange_provider](tables/exchange_provider.md)" in text
     assert "`1.0 KiB`" in text
 
 

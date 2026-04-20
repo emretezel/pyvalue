@@ -4,10 +4,11 @@ This page maps the end-to-end pipeline to the tables and indexes that matter mos
 
 ## 1. Refresh Supported Exchanges
 
-- Reads provider payloads and rewrites `supported_exchanges`
+- Reads provider payloads and rewrites provider slices in `exchange_provider`
+- Upserts canonical rows in `exchange`
 - Main concerns:
   - full-table replace cost is usually small
-  - `idx_supported_exchanges_canonical` matters only after load
+  - canonical exchange upserts should stay cheap because the table is intentionally narrow
 
 ## 2. Refresh Supported Tickers
 

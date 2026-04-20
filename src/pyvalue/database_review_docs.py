@@ -47,9 +47,14 @@ TABLE_GROUPS: tuple[tuple[str, tuple[TableInventoryEntry, ...]], ...] = (
                 review_focus="keep the registry narrow and avoid leaking runtime config into it",
             ),
             TableInventoryEntry(
-                table_name="supported_exchanges",
-                logical_refs="referenced by `supported_tickers.provider_exchange_code`",
-                review_focus="check whether provider metadata columns all earn their keep",
+                table_name="exchange",
+                logical_refs="referenced physically by `exchange_provider.exchange_id`",
+                review_focus="keep the canonical exchange table narrow while it coexists with `canonical_exchange_code` elsewhere",
+            ),
+            TableInventoryEntry(
+                table_name="exchange_provider",
+                logical_refs="maps provider exchange codes to canonical exchange identity",
+                review_focus="check whether provider-owned exchange metadata belongs here and whether exchange-slice rewrites stay cheap",
             ),
             TableInventoryEntry(
                 table_name="securities",
@@ -535,7 +540,8 @@ def render_table_inventory_block(
 def _primary_key_display(table_name: str) -> Sequence[str]:
     mapping: dict[str, Sequence[str]] = {
         "providers": ("provider_code",),
-        "supported_exchanges": ("provider", "provider_exchange_code"),
+        "exchange": ("exchange_id",),
+        "exchange_provider": ("provider", "provider_exchange_code"),
         "securities": ("security_id",),
         "supported_tickers": ("provider", "provider_symbol"),
         "fundamentals_raw": ("provider", "provider_symbol"),

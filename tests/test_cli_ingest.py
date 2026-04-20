@@ -24,6 +24,7 @@ from pyvalue.metrics.base import MetricCurrencyInvariantError, MetricResult
 from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS
 from pyvalue.storage import (
     EntityMetadataRepository,
+    ExchangeProviderRepository,
     FinancialFactsRefreshStateRepository,
     FundamentalsNormalizationStateRepository,
     FundamentalsRepository,
@@ -37,7 +38,6 @@ from pyvalue.storage import (
     MetricsRepository,
     SecurityRepository,
     SupportedTicker,
-    SupportedExchangeRepository,
     SupportedTickerRepository,
 )
 from pyvalue.universe import Listing
@@ -78,7 +78,7 @@ def store_supported_exchanges(
     rows=None,
     provider: str = "EODHD",
 ):
-    repo = SupportedExchangeRepository(db_path)
+    repo = ExchangeProviderRepository(db_path)
     repo.initialize_schema()
     repo.replace_for_provider(
         provider,
@@ -1130,7 +1130,7 @@ def test_cmd_refresh_supported_exchanges(monkeypatch, tmp_path):
     assert rc == 0
     assert calls == {"api_key": "TOKEN", "list_exchanges": 1}
 
-    repo = SupportedExchangeRepository(db_path)
+    repo = ExchangeProviderRepository(db_path)
     repo.initialize_schema()
     record = repo.fetch("eodhd", "LSE")
     assert record is not None

@@ -10,10 +10,12 @@ One row per canonical symbol, defined by `canonical_ticker + canonical_exchange_
 
 ## Live Stats
 
-- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+<!-- BEGIN generated_live_stats -->
+- Snapshot source: `data/pyvalue.db` on `2026-04-20`
 - Row count: `77,484`
 - Table size: `81,268,736 bytes` (`77.5 MiB`)
 - Approximate bytes per row: `1,048.8`
+<!-- END generated_live_stats -->
 
 ## Columns
 
@@ -70,7 +72,7 @@ One row per canonical symbol, defined by `canonical_ticker + canonical_exchange_
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+- Snapshot source: `data/pyvalue.db` on `2026-04-20`
 - Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
 
 ```json

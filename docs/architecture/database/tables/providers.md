@@ -11,7 +11,10 @@ One row per provider code.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-Pending the next live database docs refresh after the provider-registry migration is applied to a snapshot.
+- Snapshot source: `data/pyvalue.db` on `2026-04-20`
+- Row count: `3`
+- Table size: `4,096 bytes` (`4.0 KiB`)
+- Approximate bytes per row: `1,365.3`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -28,10 +31,12 @@ Pending the next live database docs refresh after the provider-registry migratio
 ## Keys And Relationships
 
 - Primary key: `provider_code`
+- Physical references:
+  - `exchange_provider.provider`
 - Logical references:
-  - provider-scoped tables keyed by `provider`
+  - most provider-scoped tables keyed by `provider`
   - provenance columns such as `financial_facts.source_provider` and `market_data.source_provider`
-- No enforced foreign keys
+- No outbound foreign keys
 
 ## Secondary Indexes
 
@@ -58,10 +63,40 @@ Pending the next live database docs refresh after the provider-registry migratio
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-Pending the next live database docs refresh after the provider-registry migration is applied to a snapshot.
+- Snapshot source: `data/pyvalue.db` on `2026-04-20`
+- Sample window: first `3` rows returned by SQLite using `LIMIT` with no `ORDER BY`
+
+```json
+[
+  {
+    "provider_code": "EODHD",
+    "display_name": "EOD Historical Data",
+    "description": "Exchange, fundamentals, market-data, and FX provider.",
+    "status": "active",
+    "created_at": "2026-04-20T19:42:44.073280+00:00",
+    "updated_at": "2026-04-20T19:42:44.073280+00:00"
+  },
+  {
+    "provider_code": "SEC",
+    "display_name": "US SEC Company Facts",
+    "description": "US issuer fundamentals provider backed by SEC company facts.",
+    "status": "active",
+    "created_at": "2026-04-20T19:42:44.073280+00:00",
+    "updated_at": "2026-04-20T19:42:44.073280+00:00"
+  },
+  {
+    "provider_code": "FRANKFURTER",
+    "display_name": "Frankfurter FX",
+    "description": "FX rates provider used for direct currency history refreshes.",
+    "status": "active",
+    "created_at": "2026-04-20T19:42:44.073280+00:00",
+    "updated_at": "2026-04-20T19:42:44.073280+00:00"
+  }
+]
+```
 <!-- END generated_sample_rows -->
 
 ## Review Notes
 
 - Keep this table narrow and stable; runtime config and provider capabilities belong elsewhere.
-- Prefer referencing `providers(provider_code)` only when a table is already being rebuilt for another reason.
+- `exchange_provider` already references this registry physically; keep the rest of the schema on logical provider keys until a table is otherwise being rebuilt.

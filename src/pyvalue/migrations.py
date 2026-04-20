@@ -133,6 +133,7 @@ def apply_migrations(db_path: Union[str, Path]) -> int:
     conn = sqlite3.connect(db_path)
     try:
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
         current = _current_version(conn)
         target = len(MIGRATIONS)
         conn.commit()
@@ -2146,6 +2147,140 @@ def _migration_032_create_providers_registry(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_033_split_exchange_catalog(conn: sqlite3.Connection) -> None:
+    """Split supported_exchanges into canonical exchange and exchange_provider."""
+
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS "exchange" (
+            exchange_id INTEGER PRIMARY KEY,
+            exchange_code TEXT NOT NULL UNIQUE CHECK (
+                exchange_code = UPPER(TRIM(exchange_code))
+                AND LENGTH(TRIM(exchange_code)) > 0
+            ),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS exchange_provider (
+            provider TEXT NOT NULL,
+            provider_exchange_code TEXT NOT NULL,
+            exchange_id INTEGER NOT NULL,
+            name TEXT,
+            country TEXT,
+            currency TEXT,
+            operating_mic TEXT,
+            country_iso2 TEXT,
+            country_iso3 TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (provider, provider_exchange_code),
+            FOREIGN KEY (provider) REFERENCES providers(provider_code),
+            FOREIGN KEY (exchange_id) REFERENCES "exchange"(exchange_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_exchange_provider_exchange
+        ON exchange_provider(exchange_id)
+        """
+    )
+
+    if not _table_exists(conn, "supported_exchanges"):
+        return
+
+    rows = conn.execute(
+        """
+        SELECT
+            provider,
+            provider_exchange_code,
+            canonical_exchange_code,
+            name,
+            country,
+            currency,
+            operating_mic,
+            country_iso2,
+            country_iso3,
+            updated_at
+        FROM supported_exchanges
+        ORDER BY provider, provider_exchange_code
+        """
+    ).fetchall()
+
+    exchange_id_by_code: Dict[str, int] = {}
+    canonical_rows = {
+        _normalize_upper(row["canonical_exchange_code"]) or "": row
+        for row in rows
+        if _normalize_upper(row["canonical_exchange_code"]) is not None
+    }
+    for exchange_code, row in canonical_rows.items():
+        exchange_timestamp = _normalize_optional_text(row["updated_at"]) or now
+        conn.execute(
+            """
+            INSERT INTO "exchange" (
+                exchange_code,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?)
+            ON CONFLICT(exchange_code) DO UPDATE SET
+                updated_at = excluded.updated_at
+            """,
+            (exchange_code, exchange_timestamp, exchange_timestamp),
+        )
+        exchange_row = conn.execute(
+            """
+            SELECT exchange_id
+            FROM "exchange"
+            WHERE exchange_code = ?
+            """,
+            (exchange_code,),
+        ).fetchone()
+        if exchange_row is None:
+            raise RuntimeError(f"Failed to persist canonical exchange {exchange_code}")
+        exchange_id_by_code[exchange_code] = int(exchange_row[0])
+
+    conn.executemany(
+        """
+        INSERT INTO exchange_provider (
+            provider,
+            provider_exchange_code,
+            exchange_id,
+            name,
+            country,
+            currency,
+            operating_mic,
+            country_iso2,
+            country_iso3,
+            updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                _normalize_upper(row["provider"]),
+                _normalize_upper(row["provider_exchange_code"]),
+                exchange_id_by_code[
+                    _normalize_upper(row["canonical_exchange_code"]) or ""
+                ],
+                _normalize_optional_text(row["name"]),
+                _normalize_optional_text(row["country"]),
+                _normalize_optional_text(row["currency"]),
+                _normalize_optional_text(row["operating_mic"]),
+                _normalize_optional_text(row["country_iso2"]),
+                _normalize_optional_text(row["country_iso3"]),
+                _normalize_optional_text(row["updated_at"]) or now,
+            )
+            for row in rows
+        ],
+    )
+
+    conn.execute("DROP INDEX IF EXISTS idx_supported_exchanges_canonical")
+    conn.execute("DROP TABLE IF EXISTS supported_exchanges")
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -2179,6 +2314,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_030_add_metric_compute_status_tables,
     _migration_031_add_security_listing_status_table,
     _migration_032_create_providers_registry,
+    _migration_033_split_exchange_catalog,
 ]
 
 

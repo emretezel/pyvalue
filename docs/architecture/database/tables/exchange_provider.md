@@ -1,31 +1,33 @@
-# `supported_exchanges`
+# `exchange_provider`
 
 ## Purpose
 
-Caches provider-published exchange metadata such as code, country, currency, and MIC.
+Stores the provider-published exchange catalog and maps provider exchange codes to canonical exchange identity.
 
 ## Grain
 
-One row per provider exchange code.
+One row per `(provider, provider_exchange_code)`.
 
 ## Live Stats
 
-- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+<!-- BEGIN generated_live_stats -->
+- Snapshot source: `data/pyvalue.db` on `2026-04-20`
 - Row count: `74`
 - Table size: `12,288 bytes` (`12.0 KiB`)
 - Approximate bytes per row: `166.1`
+<!-- END generated_live_stats -->
 
 ## Columns
 
 | Column | Type | Null | Key | Notes |
 | --- | --- | --- | --- | --- |
-| `provider` | `TEXT` | no | PK | provider namespace such as `EODHD` |
+| `provider` | `TEXT` | no | PK, FK | provider namespace such as `EODHD` or `SEC` |
 | `provider_exchange_code` | `TEXT` | no | PK | provider-local exchange code |
-| `canonical_exchange_code` | `TEXT` | no |  | canonical exchange code used across the app |
+| `exchange_id` | `INTEGER` | no | FK, idx | canonical exchange identity |
 | `name` | `TEXT` | yes |  | provider display name |
 | `country` | `TEXT` | yes |  | provider country label |
-| `currency` | `TEXT` | yes |  | provider currency code |
-| `operating_mic` | `TEXT` | yes |  | MIC when provided |
+| `currency` | `TEXT` | yes |  | provider trading currency hint |
+| `operating_mic` | `TEXT` | yes |  | MIC when supplied by the provider |
 | `country_iso2` | `TEXT` | yes |  | normalized country code |
 | `country_iso3` | `TEXT` | yes |  | normalized country code |
 | `updated_at` | `TEXT` | no |  | last refresh timestamp |
@@ -33,41 +35,44 @@ One row per provider exchange code.
 ## Keys And Relationships
 
 - Primary key: `(provider, provider_exchange_code)`
+- Physical references:
+  - `provider` -> `providers.provider_code`
+  - `exchange_id` -> `exchange.exchange_id`
 - Logical references:
-  - `supported_tickers.provider_exchange_code`
-- No enforced foreign keys
+  - `(provider, provider_exchange_code)` is reused by `supported_tickers`
 
 ## Secondary Indexes
 
-- `idx_supported_exchanges_canonical (canonical_exchange_code)`
-  - supports canonical exchange lookups
+- `idx_exchange_provider_exchange (exchange_id)`
+  - supports joins from provider exchange slices to canonical exchange identity
 
 ## Main Read Paths
 
-- exchange catalog refresh reporting
-- canonical exchange filtering when resolving provider exchange codes
+- provider exchange-code resolution during supported-ticker refreshes
+- canonical exchange lookup for provider-scoped ingest and metadata helpers
 
 ## Main Write Paths
 
 - `refresh-supported-exchanges`
+- migration-time backfill from legacy `supported_exchanges`
 
 ## Column Usage Notes
 
-- `provider`: namespace key used in refresh and lookup methods.
-- `provider_exchange_code`: join/filter key when resolving provider exchange slices.
-- `canonical_exchange_code`: consumed when mapping provider exchange codes into canonical scopes.
-- `name`: display metadata only.
-- `country`: descriptive metadata; not part of hot query predicates.
-- `currency`: exchange-level provider currency hint; not a common join key.
-- `operating_mic`: descriptive metadata for exchange identity review.
+- `provider`: provider namespace and enforced link back to `providers`.
+- `provider_exchange_code`: provider-scoped exchange filter used throughout catalog refresh workflows.
+- `exchange_id`: canonical exchange link used to resolve `exchange.exchange_code`.
+- `name`: provider-facing label only.
+- `country`: provider-owned metadata.
+- `currency`: provider exchange-currency hint; not the canonical trading-currency source for securities.
+- `operating_mic`: descriptive exchange metadata for review and diagnostics.
 - `country_iso2`: normalized metadata only.
 - `country_iso3`: normalized metadata only.
-- `updated_at`: refresh watermark, mainly useful for debugging and catalog freshness checks.
+- `updated_at`: provider catalog refresh watermark.
 
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+- Snapshot source: `data/pyvalue.db` on `2026-04-20`
 - Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
 
 ```json
@@ -75,7 +80,7 @@ One row per provider exchange code.
   {
     "provider": "EODHD",
     "provider_exchange_code": "AS",
-    "canonical_exchange_code": "AS",
+    "exchange_id": 1,
     "name": "Euronext Amsterdam",
     "country": "Netherlands",
     "currency": "EUR",
@@ -87,7 +92,7 @@ One row per provider exchange code.
   {
     "provider": "EODHD",
     "provider_exchange_code": "AT",
-    "canonical_exchange_code": "AT",
+    "exchange_id": 2,
     "name": "Athens Exchange",
     "country": "Greece",
     "currency": "EUR",
@@ -99,7 +104,7 @@ One row per provider exchange code.
   {
     "provider": "EODHD",
     "provider_exchange_code": "AU",
-    "canonical_exchange_code": "AU",
+    "exchange_id": 3,
     "name": "Australian Securities Exchange",
     "country": "Australia",
     "currency": "AUD",
@@ -111,7 +116,7 @@ One row per provider exchange code.
   {
     "provider": "EODHD",
     "provider_exchange_code": "BA",
-    "canonical_exchange_code": "BA",
+    "exchange_id": 4,
     "name": "Buenos Aires Exchange",
     "country": "Argentina",
     "currency": "ARS",
@@ -123,7 +128,7 @@ One row per provider exchange code.
   {
     "provider": "EODHD",
     "provider_exchange_code": "BC",
-    "canonical_exchange_code": "BC",
+    "exchange_id": 5,
     "name": "Casablanca Stock Exchange",
     "country": "Morocco",
     "currency": "MAD",
@@ -138,5 +143,5 @@ One row per provider exchange code.
 
 ## Review Notes
 
-- Low write volume and low read volume
-- Check whether all country and MIC columns are actually consumed in production workflows
+- Provider-owned descriptive metadata belongs here, not on `exchange`.
+- Slice replacement must stay cheap because EODHD refresh rewrites one provider's exchange catalog at a time.

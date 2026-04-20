@@ -11,7 +11,7 @@ Use it in this order:
 
 Important structural notes:
 
-- SQLite foreign-key constraints are not currently enforced across the operational schema. These docs therefore distinguish between physical keys and logical references.
+- Most of the operational schema still uses logical references instead of enforced foreign keys, but `exchange_provider` now enforces foreign keys to `providers` and `exchange`.
 - `securities` is the canonical identity root for downstream tables.
 - `supported_tickers` is the operational root for provider-scoped ingestion and market-data workflows.
 - `fundamentals_raw`, `metrics`, and `metric_compute_status` each store the latest row per logical key, not a full history.
@@ -20,7 +20,8 @@ Table groups:
 
 - Identity and catalog
   - [providers](tables/providers.md)
-  - [supported_exchanges](tables/supported_exchanges.md)
+  - [exchange](tables/exchange.md)
+  - [exchange_provider](tables/exchange_provider.md)
   - [securities](tables/securities.md)
   - [supported_tickers](tables/supported_tickers.md)
 - Raw ingestion and state

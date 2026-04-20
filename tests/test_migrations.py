@@ -69,8 +69,8 @@ def test_apply_migrations_is_idempotent(tmp_path):
     assert second == 0
 
 
-def test_migration_creates_supported_exchanges_table(tmp_path):
-    db_path = tmp_path / "supported-exchanges.sqlite"
+def test_migration_creates_exchange_catalog_tables(tmp_path):
+    db_path = tmp_path / "exchange-catalog.sqlite"
 
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
@@ -79,14 +79,38 @@ def test_migration_creates_supported_exchanges_table(tmp_path):
     assert second == 0
 
     with sqlite3.connect(db_path) as conn:
-        info = conn.execute("PRAGMA table_info(supported_exchanges)").fetchall()
-        columns = {row[1] for row in info}
-        pk_cols = [row[1] for row in info if row[5]]
+        supported_exchanges_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='supported_exchanges'"
+        ).fetchone()
+        exchange_info = conn.execute('PRAGMA table_info("exchange")').fetchall()
+        exchange_columns = {row[1] for row in exchange_info}
+        exchange_pk_cols = [row[1] for row in exchange_info if row[5]]
+        exchange_provider_info = conn.execute(
+            "PRAGMA table_info(exchange_provider)"
+        ).fetchall()
+        exchange_provider_columns = {row[1] for row in exchange_provider_info}
+        exchange_provider_pk_cols = [row[1] for row in exchange_provider_info if row[5]]
+        exchange_provider_indexes = conn.execute(
+            "PRAGMA index_list(exchange_provider)"
+        ).fetchall()
+        exchange_provider_index_names = {row[1] for row in exchange_provider_indexes}
+        exchange_provider_fks = conn.execute(
+            "PRAGMA foreign_key_list(exchange_provider)"
+        ).fetchall()
+        fk_targets = {row[2] for row in exchange_provider_fks}
 
-    assert columns == {
+    assert supported_exchanges_exists is None
+    assert exchange_columns == {
+        "exchange_id",
+        "exchange_code",
+        "created_at",
+        "updated_at",
+    }
+    assert exchange_pk_cols == ["exchange_id"]
+    assert exchange_provider_columns == {
         "provider",
         "provider_exchange_code",
-        "canonical_exchange_code",
+        "exchange_id",
         "name",
         "country",
         "currency",
@@ -95,7 +119,194 @@ def test_migration_creates_supported_exchanges_table(tmp_path):
         "country_iso3",
         "updated_at",
     }
-    assert pk_cols == ["provider", "provider_exchange_code"]
+    assert exchange_provider_pk_cols == ["provider", "provider_exchange_code"]
+    assert "idx_exchange_provider_exchange" in exchange_provider_index_names
+    assert fk_targets == {"exchange", "providers"}
+
+
+def test_migration_splits_supported_exchanges_into_exchange_provider(tmp_path):
+    db_path = tmp_path / "exchange-provider-backfill.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE providers (
+                provider_code TEXT NOT NULL PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                description TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO providers (
+                provider_code,
+                display_name,
+                description,
+                status,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "EODHD",
+                    "EOD Historical Data",
+                    None,
+                    "active",
+                    "2026-01-01T00:00:00+00:00",
+                    "2026-01-01T00:00:00+00:00",
+                ),
+                (
+                    "SEC",
+                    "US SEC Company Facts",
+                    None,
+                    "active",
+                    "2026-01-01T00:00:00+00:00",
+                    "2026-01-01T00:00:00+00:00",
+                ),
+            ],
+        )
+        conn.execute(
+            """
+            CREATE TABLE supported_exchanges (
+                provider TEXT NOT NULL,
+                provider_exchange_code TEXT NOT NULL,
+                canonical_exchange_code TEXT NOT NULL,
+                name TEXT,
+                country TEXT,
+                currency TEXT,
+                operating_mic TEXT,
+                country_iso2 TEXT,
+                country_iso3 TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (provider, provider_exchange_code)
+            )
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO supported_exchanges (
+                provider,
+                provider_exchange_code,
+                canonical_exchange_code,
+                name,
+                country,
+                currency,
+                operating_mic,
+                country_iso2,
+                country_iso3,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "EODHD",
+                    "LSE",
+                    "LSE",
+                    "London Exchange",
+                    "UK",
+                    "GBP",
+                    "XLON",
+                    "GB",
+                    "GBR",
+                    "2026-01-01T00:00:00+00:00",
+                ),
+                (
+                    "EODHD",
+                    "US",
+                    "US",
+                    "USA Stocks",
+                    "USA",
+                    "USD",
+                    "XNAS, XNYS",
+                    "US",
+                    "USA",
+                    "2026-01-01T00:00:00+00:00",
+                ),
+                (
+                    "SEC",
+                    "US",
+                    "US",
+                    "United States",
+                    "US",
+                    "USD",
+                    None,
+                    "US",
+                    "USA",
+                    "2026-01-01T00:00:00+00:00",
+                ),
+            ],
+        )
+        conn.execute("CREATE TABLE schema_migrations (version INTEGER NOT NULL)")
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (32)")
+
+    applied = apply_migrations(db_path)
+
+    assert applied == 1
+    with sqlite3.connect(db_path) as conn:
+        supported_exchanges_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='supported_exchanges'"
+        ).fetchone()
+        exchange_rows = conn.execute(
+            'SELECT exchange_code FROM "exchange" ORDER BY exchange_code'
+        ).fetchall()
+        exchange_provider_rows = conn.execute(
+            """
+            SELECT
+                ep.provider,
+                ep.provider_exchange_code,
+                e.exchange_code,
+                ep.name,
+                ep.country,
+                ep.currency
+            FROM exchange_provider ep
+            JOIN "exchange" e ON e.exchange_id = ep.exchange_id
+            ORDER BY ep.provider, ep.provider_exchange_code
+            """
+        ).fetchall()
+
+    assert supported_exchanges_exists is None
+    assert exchange_rows == [("LSE",), ("US",)]
+    assert exchange_provider_rows == [
+        ("EODHD", "LSE", "LSE", "London Exchange", "UK", "GBP"),
+        ("EODHD", "US", "US", "USA Stocks", "USA", "USD"),
+        ("SEC", "US", "US", "United States", "US", "USD"),
+    ]
+
+
+def test_exchange_provider_foreign_keys_are_enforced(tmp_path):
+    db_path = tmp_path / "exchange-provider-fk.sqlite"
+    apply_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys=ON")
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO exchange_provider (
+                    provider,
+                    provider_exchange_code,
+                    exchange_id,
+                    updated_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                ("UNKNOWN", "US", 1, "2026-01-01T00:00:00+00:00"),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO exchange_provider (
+                    provider,
+                    provider_exchange_code,
+                    exchange_id,
+                    updated_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                ("EODHD", "US", 999999, "2026-01-01T00:00:00+00:00"),
+            )
 
 
 def test_migration_creates_and_seeds_providers_table(tmp_path):
@@ -252,7 +463,7 @@ def test_migration_preserves_existing_provider_rows_when_adding_registry(tmp_pat
 
     applied = apply_migrations(db_path)
 
-    assert applied == 1
+    assert applied == 2
     with sqlite3.connect(db_path) as conn:
         supported_ticker_count = conn.execute(
             "SELECT COUNT(*) FROM supported_tickers"

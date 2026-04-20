@@ -10,10 +10,12 @@ One row per `(provider, provider_symbol)`.
 
 ## Live Stats
 
-- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+<!-- BEGIN generated_live_stats -->
+- Snapshot source: `data/pyvalue.db` on `2026-04-20`
 - Row count: `61,092`
 - Table size: `4,476,928 bytes` (`4.3 MiB`)
 - Approximate bytes per row: `73.3`
+<!-- END generated_live_stats -->
 
 ## Columns
 
@@ -60,7 +62,7 @@ One row per `(provider, provider_symbol)`.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-19`
+- Snapshot source: `data/pyvalue.db` on `2026-04-20`
 - Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
 
 ```json
