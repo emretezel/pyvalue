@@ -42,6 +42,11 @@ TABLE_GROUPS: tuple[tuple[str, tuple[TableInventoryEntry, ...]], ...] = (
         "Identity And Catalog",
         (
             TableInventoryEntry(
+                table_name="providers",
+                logical_refs="referenced logically by provider-scoped tables",
+                review_focus="keep the registry narrow and avoid leaking runtime config into it",
+            ),
+            TableInventoryEntry(
                 table_name="supported_exchanges",
                 logical_refs="referenced by `supported_tickers.provider_exchange_code`",
                 review_focus="check whether provider metadata columns all earn their keep",
@@ -529,6 +534,7 @@ def render_table_inventory_block(
 
 def _primary_key_display(table_name: str) -> Sequence[str]:
     mapping: dict[str, Sequence[str]] = {
+        "providers": ("provider_code",),
         "supported_exchanges": ("provider", "provider_exchange_code"),
         "securities": ("security_id",),
         "supported_tickers": ("provider", "provider_symbol"),

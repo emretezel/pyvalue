@@ -25,6 +25,27 @@ _US_VENUE_CODES = {
     "US",
 }
 
+_PROVIDER_REGISTRY_ROWS: Tuple[Tuple[str, str, Optional[str], str], ...] = (
+    (
+        "EODHD",
+        "EOD Historical Data",
+        "Exchange, fundamentals, market-data, and FX provider.",
+        "active",
+    ),
+    (
+        "SEC",
+        "US SEC Company Facts",
+        "US issuer fundamentals provider backed by SEC company facts.",
+        "active",
+    ),
+    (
+        "FRANKFURTER",
+        "Frankfurter FX",
+        "FX rates provider used for direct currency history refreshes.",
+        "active",
+    ),
+)
+
 
 def _ensure_migrations_table(conn: sqlite3.Connection) -> None:
     conn.execute(
@@ -2081,6 +2102,50 @@ def _migration_031_add_security_listing_status_table(
     )
 
 
+def _migration_032_create_providers_registry(conn: sqlite3.Connection) -> None:
+    """Create and seed the provider registry."""
+
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS providers (
+            provider_code TEXT NOT NULL PRIMARY KEY CHECK (
+                provider_code = UPPER(TRIM(provider_code))
+                AND LENGTH(TRIM(provider_code)) > 0
+            ),
+            display_name TEXT NOT NULL,
+            description TEXT,
+            status TEXT NOT NULL DEFAULT 'active' CHECK (
+                status IN ('active', 'deprecated', 'disabled')
+            ),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO providers (
+            provider_code,
+            display_name,
+            description,
+            status,
+            created_at,
+            updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(provider_code) DO UPDATE SET
+            display_name = excluded.display_name,
+            description = excluded.description,
+            status = excluded.status,
+            updated_at = excluded.updated_at
+        """,
+        [
+            (provider_code, display_name, description, status, now, now)
+            for provider_code, display_name, description, status in _PROVIDER_REGISTRY_ROWS
+        ],
+    )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -2113,6 +2178,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_029_add_fin_facts_security_concept_latest_index,
     _migration_030_add_metric_compute_status_tables,
     _migration_031_add_security_listing_status_table,
+    _migration_032_create_providers_registry,
 ]
 
 

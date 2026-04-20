@@ -9,6 +9,7 @@ keys, logical foreign keys, indexes, and query hotspots, use the
 [Database Review Guide](database/README.md).
 
 The main persisted layers are:
+- provider registry
 - supported exchange catalogs
 - canonical security identities
 - supported ticker catalogs
@@ -24,6 +25,16 @@ The main persisted layers are:
 - computed metrics
 
 ## Core Tables
+
+### `providers`
+
+Global provider metadata lives here.
+
+Purpose:
+- define the stable provider namespaces used elsewhere in the schema
+- keep human-readable provider labels and lifecycle status in one narrow registry
+- support future provider joins without rewriting existing provider-scoped tables
+- avoid mixing runtime config such as API keys or rate limits into the operational schema
 
 ### `fundamentals_raw`
 
@@ -212,12 +223,13 @@ Metric rows also persist unit metadata:
 
 A normal run looks like:
 
-1. provider catalogs refreshed into `supported_exchanges`, `securities`, and `supported_tickers`
-2. raw fundamentals fetched into `fundamentals_raw`
-3. EODHD raw writes refresh `security_listing_status` from `General.PrimaryTicker`
-4. provider-specific normalization writes canonical `financial_facts`
-5. market refresh writes canonical `market_data`
-6. retry/backoff state updates `fundamentals_fetch_state` and `market_data_fetch_state`
+1. provider registry seeded into `providers`
+2. provider catalogs refreshed into `supported_exchanges`, `securities`, and `supported_tickers`
+3. raw fundamentals fetched into `fundamentals_raw`
+4. EODHD raw writes refresh `security_listing_status` from `General.PrimaryTicker`
+5. provider-specific normalization writes canonical `financial_facts`
+6. market refresh writes canonical `market_data`
+7. retry/backoff state updates `fundamentals_fetch_state` and `market_data_fetch_state`
 7. metric computation writes `metrics`
 8. screens read from canonical metrics
 

@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 from pyvalue.migrations import MIGRATIONS, apply_migrations
 
 
@@ -94,6 +96,260 @@ def test_migration_creates_supported_exchanges_table(tmp_path):
         "updated_at",
     }
     assert pk_cols == ["provider", "provider_exchange_code"]
+
+
+def test_migration_creates_and_seeds_providers_table(tmp_path):
+    db_path = tmp_path / "providers.sqlite"
+
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0
+
+    with sqlite3.connect(db_path) as conn:
+        info = conn.execute("PRAGMA table_info(providers)").fetchall()
+        columns = {row[1] for row in info}
+        pk_cols = [row[1] for row in info if row[5]]
+        rows = conn.execute(
+            """
+            SELECT provider_code, display_name, status
+            FROM providers
+            ORDER BY provider_code
+            """
+        ).fetchall()
+
+    assert columns == {
+        "provider_code",
+        "display_name",
+        "description",
+        "status",
+        "created_at",
+        "updated_at",
+    }
+    assert pk_cols == ["provider_code"]
+    assert rows == [
+        ("EODHD", "EOD Historical Data", "active"),
+        ("FRANKFURTER", "Frankfurter FX", "active"),
+        ("SEC", "US SEC Company Facts", "active"),
+    ]
+
+
+def test_migration_preserves_existing_provider_rows_when_adding_registry(tmp_path):
+    db_path = tmp_path / "providers-backfill.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE supported_tickers (
+                provider TEXT NOT NULL,
+                provider_symbol TEXT NOT NULL,
+                PRIMARY KEY (provider, provider_symbol)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE fundamentals_raw (
+                provider TEXT NOT NULL,
+                provider_symbol TEXT NOT NULL,
+                data TEXT NOT NULL,
+                fetched_at TEXT NOT NULL,
+                PRIMARY KEY (provider, provider_symbol)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE market_data (
+                security_id INTEGER NOT NULL,
+                as_of TEXT NOT NULL,
+                price REAL NOT NULL,
+                source_provider TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (security_id, as_of)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE fx_rates (
+                provider TEXT NOT NULL,
+                rate_date TEXT NOT NULL,
+                base_currency TEXT NOT NULL,
+                quote_currency TEXT NOT NULL,
+                rate_text TEXT NOT NULL,
+                fetched_at TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (provider, rate_date, base_currency, quote_currency)
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO supported_tickers (provider, provider_symbol) VALUES (?, ?)",
+            [("EODHD", "AAA.US"), ("SEC", "BBB.US")],
+        )
+        conn.executemany(
+            """
+            INSERT INTO fundamentals_raw (
+                provider, provider_symbol, data, fetched_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            [
+                ("EODHD", "AAA.US", "{}", "2026-01-01T00:00:00+00:00"),
+                ("SEC", "BBB.US", "{}", "2026-01-01T00:00:00+00:00"),
+            ],
+        )
+        conn.execute(
+            """
+            INSERT INTO market_data (
+                security_id, as_of, price, source_provider, updated_at
+            ) VALUES (1, '2026-01-02', 10.0, 'EODHD', '2026-01-02T00:00:00+00:00')
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO fx_rates (
+                provider,
+                rate_date,
+                base_currency,
+                quote_currency,
+                rate_text,
+                fetched_at,
+                source_kind,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "EODHD",
+                    "2026-01-02",
+                    "USD",
+                    "EUR",
+                    "0.91",
+                    "2026-01-02T00:00:00+00:00",
+                    "provider",
+                    "2026-01-02T00:00:00+00:00",
+                    "2026-01-02T00:00:00+00:00",
+                ),
+                (
+                    "FRANKFURTER",
+                    "2026-01-02",
+                    "USD",
+                    "GBP",
+                    "0.80",
+                    "2026-01-02T00:00:00+00:00",
+                    "provider",
+                    "2026-01-02T00:00:00+00:00",
+                    "2026-01-02T00:00:00+00:00",
+                ),
+            ],
+        )
+        conn.execute("CREATE TABLE schema_migrations (version INTEGER NOT NULL)")
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (31)")
+
+    applied = apply_migrations(db_path)
+
+    assert applied == 1
+    with sqlite3.connect(db_path) as conn:
+        supported_ticker_count = conn.execute(
+            "SELECT COUNT(*) FROM supported_tickers"
+        ).fetchone()[0]
+        fundamentals_raw_count = conn.execute(
+            "SELECT COUNT(*) FROM fundamentals_raw"
+        ).fetchone()[0]
+        market_data_count = conn.execute("SELECT COUNT(*) FROM market_data").fetchone()[
+            0
+        ]
+        fx_rates_count = conn.execute("SELECT COUNT(*) FROM fx_rates").fetchone()[0]
+        supported_ticker_join_count = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM supported_tickers st
+            JOIN providers p ON p.provider_code = st.provider
+            """
+        ).fetchone()[0]
+        fundamentals_raw_join_count = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM fundamentals_raw fr
+            JOIN providers p ON p.provider_code = fr.provider
+            """
+        ).fetchone()[0]
+        market_data_join_count = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM market_data md
+            JOIN providers p ON p.provider_code = md.source_provider
+            """
+        ).fetchone()[0]
+        fx_rates_join_count = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM fx_rates fx
+            JOIN providers p ON p.provider_code = fx.provider
+            """
+        ).fetchone()[0]
+
+    assert supported_ticker_count == 2
+    assert fundamentals_raw_count == 2
+    assert market_data_count == 1
+    assert fx_rates_count == 2
+    assert supported_ticker_join_count == 2
+    assert fundamentals_raw_join_count == 2
+    assert market_data_join_count == 1
+    assert fx_rates_join_count == 2
+
+
+def test_providers_table_rejects_invalid_provider_codes(tmp_path):
+    db_path = tmp_path / "providers-invalid.sqlite"
+    apply_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO providers (
+                    provider_code,
+                    display_name,
+                    description,
+                    status,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "eodhd",
+                    "Lowercase provider",
+                    None,
+                    "active",
+                    "2026-01-01T00:00:00+00:00",
+                    "2026-01-01T00:00:00+00:00",
+                ),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO providers (
+                    provider_code,
+                    display_name,
+                    description,
+                    status,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "",
+                    "Blank provider",
+                    None,
+                    "active",
+                    "2026-01-01T00:00:00+00:00",
+                    "2026-01-01T00:00:00+00:00",
+                ),
+            )
 
 
 def test_migration_creates_supported_tickers_table(tmp_path):
@@ -195,7 +451,7 @@ def test_migration_adds_sector_and_industry_to_securities(tmp_path):
 
     applied = apply_migrations(db_path)
 
-    assert applied == 7
+    assert applied == len(MIGRATIONS) - 24
     with sqlite3.connect(db_path) as conn:
         info = conn.execute("PRAGMA table_info(securities)").fetchall()
         columns = {row[1] for row in info}
@@ -350,7 +606,7 @@ def test_migration_adds_metric_status_and_facts_refresh_tables(tmp_path):
 
     applied = apply_migrations(db_path)
 
-    assert applied == 2
+    assert applied == len(MIGRATIONS) - 29
     with sqlite3.connect(db_path) as conn:
         refresh_columns = {
             row[1]
@@ -432,7 +688,7 @@ def test_migration_does_not_overwrite_existing_supported_tickers(tmp_path):
 
     applied = apply_migrations(db_path)
 
-    assert applied == 11
+    assert applied == len(MIGRATIONS) - 20
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
             """

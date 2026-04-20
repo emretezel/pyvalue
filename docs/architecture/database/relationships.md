@@ -6,6 +6,14 @@
 
 ```mermaid
 flowchart LR
+    providers --> supported_exchanges
+    providers --> supported_tickers
+    providers --> fundamentals_fetch_state
+    providers --> fundamentals_raw
+    providers --> fundamentals_normalization_state
+    providers --> market_data_fetch_state
+    providers --> financial_facts
+    providers --> market_data
     supported_exchanges --> supported_tickers
     securities --> supported_tickers
     supported_tickers --> fundamentals_fetch_state
@@ -26,6 +34,9 @@ flowchart LR
 
 ```mermaid
 flowchart LR
+    providers --> fx_supported_pairs
+    providers --> fx_refresh_state
+    providers --> fx_rates
     supported_tickers --> fx_rates
     financial_facts --> fx_rates
     market_data --> fx_rates
@@ -35,6 +46,7 @@ flowchart LR
 
 ## Relationship Notes
 
+- `providers.provider_code` is a narrow registry key for the provider namespaces already denormalized across the rest of the schema.
 - `securities.security_id` is the canonical key for downstream facts, market data, and metrics.
 - `supported_tickers` is the provider-facing hub. Most provider-scoped state tables key off `(provider, provider_symbol)` rather than `security_id`.
 - `security_listing_status` is intentionally keyed by `security_id` so downstream scope filters can work from canonical identity.

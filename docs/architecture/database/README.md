@@ -19,6 +19,7 @@ Important structural notes:
 Table groups:
 
 - Identity and catalog
+  - [providers](tables/providers.md)
   - [supported_exchanges](tables/supported_exchanges.md)
   - [securities](tables/securities.md)
   - [supported_tickers](tables/supported_tickers.md)
