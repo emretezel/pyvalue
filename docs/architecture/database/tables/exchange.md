@@ -31,7 +31,8 @@ One row per canonical exchange code.
 - Primary key: `exchange_id`
 - Unique key: `exchange_code`
 - Physical references:
-  - `exchange_provider.exchange_id`
+  - `provider_exchange.exchange_id`
+  - `listing.exchange_id`
 - No outbound foreign keys
 
 ## Secondary Indexes
@@ -99,5 +100,5 @@ One row per canonical exchange code.
 
 ## Review Notes
 
-- Keep this table narrow while downstream tables still use `canonical_exchange_code`.
+- Keep this table narrow; provider-owned exchange metadata belongs in `provider_exchange`.
 - Avoid drifting provider-owned metadata into the canonical exchange layer.

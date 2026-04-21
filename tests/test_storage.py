@@ -67,16 +67,26 @@ def test_supported_ticker_repository_replace_from_listings_persists_rows(tmp_pat
     with sqlite3.connect(tmp_path / "universe.db") as conn:
         rows = conn.execute(
             """
-            SELECT provider_symbol, provider_exchange_code, listing_exchange, security_type
-            FROM supported_tickers
-            ORDER BY provider_symbol
+            SELECT p.provider_code, px.provider_exchange_code, pl.provider_symbol,
+                   e.exchange_code, pl.currency
+            FROM provider_listing pl
+            JOIN provider p ON p.provider_id = pl.provider_id
+            JOIN provider_exchange px
+              ON px.provider_exchange_id = pl.provider_exchange_id
+            JOIN listing l ON l.listing_id = pl.listing_id
+            JOIN "exchange" e ON e.exchange_id = l.exchange_id
+            ORDER BY pl.provider_symbol
             """
         ).fetchall()
+        provider_listing_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(provider_listing)")
+        }
 
     assert rows == [
-        ("AAA.US", "US", "NYSE", "Common Stock"),
-        ("BBB.US", "US", "NYSE", "ETF"),
+        ("SEC", "US", "AAA", "US", None),
+        ("SEC", "US", "BBB", "US", None),
     ]
+    assert "security_type" not in provider_listing_columns
 
 
 def test_supported_ticker_repository_replace_from_listings_overwrites_exchange_slice(
@@ -248,23 +258,23 @@ def test_fundamentals_repository_classifies_and_purges_secondary_listings(tmp_pa
             """
         ).fetchall()
         fact_rows = conn.execute(
-            "SELECT COUNT(*) FROM financial_facts WHERE security_id = ?",
+            "SELECT COUNT(*) FROM financial_facts WHERE listing_id = ?",
             (by_symbol["AAA.LSE"].security_id,),
         ).fetchone()[0]
         refresh_rows = conn.execute(
-            "SELECT COUNT(*) FROM financial_facts_refresh_state WHERE security_id = ?",
+            "SELECT COUNT(*) FROM financial_facts_refresh_state WHERE listing_id = ?",
             (by_symbol["AAA.LSE"].security_id,),
         ).fetchone()[0]
         market_rows = conn.execute(
-            "SELECT COUNT(*) FROM market_data WHERE security_id = ?",
+            "SELECT COUNT(*) FROM market_data WHERE listing_id = ?",
             (by_symbol["AAA.LSE"].security_id,),
         ).fetchone()[0]
         metric_rows = conn.execute(
-            "SELECT COUNT(*) FROM metrics WHERE security_id = ?",
+            "SELECT COUNT(*) FROM metrics WHERE listing_id = ?",
             (by_symbol["AAA.LSE"].security_id,),
         ).fetchone()[0]
         status_rows = conn.execute(
-            "SELECT COUNT(*) FROM metric_compute_status WHERE security_id = ?",
+            "SELECT COUNT(*) FROM metric_compute_status WHERE listing_id = ?",
             (by_symbol["AAA.LSE"].security_id,),
         ).fetchone()[0]
         normalization_rows = conn.execute(
@@ -477,11 +487,11 @@ def test_financial_facts_repository_replace_fact_rows_matches_replace_facts(tmp_
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute(
             """
-            SELECT s.canonical_symbol, ff.concept, ff.value, ff.source_provider
-            FROM financial_facts ff
-            JOIN securities s ON s.security_id = ff.security_id
-            ORDER BY ff.concept
-            """
+                SELECT s.canonical_symbol, ff.concept, ff.value, ff.source_provider
+                FROM financial_facts ff
+                JOIN securities s ON s.security_id = ff.listing_id
+                ORDER BY ff.concept
+                """
         ).fetchall()
 
     assert rows == [("AAA.US", "Liabilities", 40.0, None)]
@@ -546,11 +556,11 @@ def test_financial_facts_repository_replace_fact_rows_persists_source_provider(
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
             """
-            SELECT ff.source_provider
-            FROM financial_facts ff
-            JOIN securities s ON s.security_id = ff.security_id
-            WHERE s.canonical_symbol = 'AAA.US'
-            """
+                SELECT ff.source_provider
+                FROM financial_facts ff
+                JOIN securities s ON s.security_id = ff.listing_id
+                WHERE s.canonical_symbol = 'AAA.US'
+                """
         ).fetchone()
 
     assert row == ("SEC",)
@@ -743,12 +753,12 @@ def test_financial_facts_repository_replace_fact_rows_replaces_symbol_slice(tmp_
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute(
             """
-            SELECT ff.concept, ff.value
-            FROM financial_facts ff
-            JOIN securities s ON s.security_id = ff.security_id
-            WHERE s.canonical_symbol = 'AAA.US'
-            ORDER BY ff.concept
-            """
+                SELECT ff.concept, ff.value
+                FROM financial_facts ff
+                JOIN securities s ON s.security_id = ff.listing_id
+                WHERE s.canonical_symbol = 'AAA.US'
+                ORDER BY ff.concept
+                """
         ).fetchall()
 
     assert rows == [("StockholdersEquity", 45.0)]
@@ -1042,7 +1052,15 @@ def test_security_listing_status_repository_lists_missing_provider_symbols(tmp_p
 
 
 def test_market_data_fetch_state_repository_tracks_success_and_failure(tmp_path):
-    repo = MarketDataFetchStateRepository(tmp_path / "market-state.db")
+    db_path = tmp_path / "market-state.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock"}],
+    )
+    repo = MarketDataFetchStateRepository(db_path)
     repo.initialize_schema()
 
     repo.mark_failure("eodhd", "aaa.us", "boom", base_backoff_seconds=60)
@@ -1107,7 +1125,18 @@ def test_market_data_repository_upsert_prices_batches_rows(tmp_path):
 
 
 def test_market_data_fetch_state_repository_batch_methods(tmp_path):
-    repo = MarketDataFetchStateRepository(tmp_path / "market-state-batch.db")
+    db_path = tmp_path / "market-state-batch.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [
+            {"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock"},
+            {"Code": "BBB", "Name": "BBB Inc", "Type": "Common Stock"},
+        ],
+    )
+    repo = MarketDataFetchStateRepository(db_path)
     repo.initialize_schema()
 
     repo.mark_failure_many(
@@ -1550,11 +1579,11 @@ def test_market_data_repository_update_market_caps_many_matches_single_update(tm
     with sqlite3.connect(db_path) as conn:
         historical = conn.execute(
             """
-            SELECT market_cap
-            FROM market_data md
-            JOIN securities s ON s.security_id = md.security_id
-            WHERE s.canonical_symbol = 'AAA.US' AND md.as_of = '2026-03-28'
-            """
+                SELECT market_cap
+                FROM market_data md
+                JOIN securities s ON s.security_id = md.listing_id
+                WHERE s.canonical_symbol = 'AAA.US' AND md.as_of = '2026-03-28'
+                """
         ).fetchone()[0]
     assert historical == 900.0
 

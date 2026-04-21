@@ -9,218 +9,120 @@ keys, logical foreign keys, indexes, and query hotspots, use the
 [Database Review Guide](database/README.md).
 
 The main persisted layers are:
+
 - provider registry
 - canonical exchange identities
 - provider exchange catalogs
-- canonical security identities
-- supported ticker catalogs
+- issuer metadata
+- canonical listings
+- provider listings
 - raw fundamentals
 - listing classification state
-- fundamentals fetch state
+- provider-scoped fetch and normalization state
 - normalized financial facts
 - market data snapshots
-- FX rates
-- FX provider catalogs
-- FX refresh state
-- market data fetch state
-- computed metrics
+- FX rates and FX provider catalogs
+- computed metrics and metric attempt status
 
 ## Core Tables
 
-### `providers`
+### `provider`
 
-Global provider metadata lives here.
-
-Purpose:
-- define the stable provider namespaces used elsewhere in the schema
-- keep human-readable provider labels and lifecycle status in one narrow registry
-- support future provider joins without rewriting existing provider-scoped tables
-- avoid mixing runtime config such as API keys or rate limits into the operational schema
-
-### `fundamentals_raw`
-
-Raw provider payloads are stored here.
-
-Purpose:
-- preserve source payloads as received
-- support re-normalization when normalization logic changes
-- separate provider-fetch concerns from metric computation
-- keep provider-local fetch keys such as `provider_symbol` and `provider_exchange_code`
-- map each raw payload to canonical `security_id`
+Global provider metadata lives here. `provider_id` is the physical FK key, while
+`provider_code` remains the stable external namespace string such as `EODHD`,
+`SEC`, or `FRANKFURTER`.
 
 ### `exchange`
 
-Canonical exchange identities live here.
+Canonical exchange identities live here. Provider-owned exchange metadata does
+not belong in this table.
+
+### `provider_exchange`
+
+Provider-published exchange catalogs live here. Each row maps a
+provider-local exchange code to `exchange.exchange_id` and stores provider-owned
+exchange metadata such as country, currency, and MIC.
+
+### `issuer`
+
+Issuer-level descriptive metadata lives here. Moving this data out of canonical
+listing identity keeps `listing` narrow and lets metadata be refreshed without
+changing canonical listing keys.
+
+### `listing`
+
+Canonical listing identity lives here. A listing is defined by
+`(exchange_id, symbol)`, and user-facing canonical symbols such as `AAPL.US`
+are derived from `listing.symbol + exchange.exchange_code`.
+
+### `provider_listing`
+
+Provider-facing listing identity lives here. Rows are unique by
+`(provider_exchange_id, provider_symbol)`, where `provider_symbol` is the bare
+provider catalog symbol such as `AAPL`, not `AAPL.US`.
+
+`provider_listing` intentionally does not store provider-side descriptive
+columns such as security type, provider name, country, ISIN, or refresh
+timestamp. ETF filtering remains a load-time decision before insert.
+
+### `fundamentals_raw`
+
+Raw provider payloads are stored by `provider_listing_id` and `listing_id`.
 
 Purpose:
-- assign a stable canonical key to each exchange code
-- dedupe shared canonical exchanges such as `US` across providers
-- keep the canonical exchange layer narrow while the rest of the schema still uses `canonical_exchange_code`
 
-### `exchange_provider`
-
-Provider-published exchange catalogs live here.
-
-Purpose:
-- cache provider exchange metadata such as code, country, currency, and MIC
-- map provider exchange codes to canonical `exchange_id`
-- avoid re-fetching exchange-list metadata on every EODHD lookup
-- support explicit catalog refreshes from the CLI
-
-### `securities`
-
-Canonical security identities live here.
-
-Purpose:
-- provide the provider-agnostic key used by downstream tables
-- define security identity as `canonical_ticker + canonical_exchange_code`
-- store display metadata such as `entity_name` and `description`
-- keep canonical symbol display stable even when provider-specific symbol formats differ
-
-### `supported_tickers`
-
-Provider-published ticker catalogs live here, keyed by provider and provider symbol.
-
-Purpose:
-- cache provider-published symbol catalogs by provider and exchange
-- store provider-local fetch keys such as `provider_symbol`, `provider_ticker`,
-  and `provider_exchange_code`
-- link each provider row to canonical `security_id`
-- drive exchange-level and all-supported provider workflows from one operational catalog table
-- store SEC US universe membership and EODHD exchange membership in the same layer
-
-When a provider drops a symbol, it is removed from this operational catalog, but
-historical raw and derived tables are retained.
+- preserve source payloads as received
+- support re-normalization when normalization logic changes
+- separate provider-fetch concerns from metric computation
+- map each raw payload to canonical `listing_id`
 
 ### `fundamentals_fetch_state`
 
-Operational fetch progress and retry backoff live here.
-
-Purpose:
-- track retry state for failed fundamentals fetches
-- support resumable bulk ingestion
-- avoid repeatedly hitting symbols that are still inside backoff
+Operational fundamentals fetch progress and retry backoff live here, keyed by
+`provider_listing_id`.
 
 ### `security_listing_status`
 
-Cached EODHD primary-vs-secondary listing classification lives here.
-
-Purpose:
-- record whether a listing is primary or secondary once raw EODHD
-  fundamentals have been stored
-- cache the provider-reported `General.PrimaryTicker` decision outside the raw
-  JSON payload so downstream scope queries stay index-friendly
-- treat missing or unusable `PrimaryTicker` values as primary instead of
-  blocking the symbol
-- let downstream stages exclude secondary listings without re-parsing
-  `fundamentals_raw.data`
-- provide a stable place to trigger purge logic for downstream canonical rows
-  that should not remain for secondary listings
+Cached EODHD primary-vs-secondary listing classification lives here, keyed by
+canonical `listing_id`. It lets downstream stages exclude secondary listings
+without re-parsing `fundamentals_raw.data`.
 
 ### `fundamentals_normalization_state`
 
-Successful normalization watermarks live here.
-
-Purpose:
-- track which raw payload timestamp was last normalized for each
-  `(provider, provider_symbol)`
-- support incremental `normalize-fundamentals` runs that skip unchanged raw payloads
-- keep provider-local normalization state even though `financial_facts` are canonical
+Successful normalization watermarks live here, keyed by `provider_listing_id`
+with a canonical `listing_id` column for downstream joins.
 
 ### `financial_facts`
 
-Normalized provider-agnostic facts live here.
-
-Purpose:
-- give metrics a common input model
-- isolate metric logic from SEC vs EODHD raw schemas
-- store concept, fiscal period, end date, unit/currency, and value
-- key facts by canonical `security_id`
-- retain `source_provider` for provenance
+Normalized provider-agnostic facts live here, keyed by canonical `listing_id`.
 
 Currency and unit semantics:
 
 - monetary facts store a real ISO `currency`
-- non-monetary facts do not invent currencies; they keep meaningful `unit`
-  values such as `shares`
-- provider catalogs such as `supported_tickers.currency` keep the raw provider
-  code for provenance; monetary facts, market data, metrics, and FX rows use
-  normalized base currencies
-- a narrow legacy fallback still treats exact currency-like `unit` values as the
-  fact currency when the explicit `currency` column is empty
+- non-monetary facts keep meaningful `unit` values such as `shares`
+- `provider_listing.currency` keeps catalog hints only; monetary facts, market
+  data, metrics, and FX rows use normalized base currencies
 - configured subunit currencies are normalized before arithmetic and
   persistence: `GBX`/`GBP0.01` -> `GBP`, `ZAC` -> `ZAR`, `ILA` -> `ILS`
 
 ### `market_data`
 
-Stores latest quote and market-cap snapshot information.
-
-Purpose:
-- support market-cap and EV-based valuation metrics
-- decouple market refresh cadence from fundamentals cadence
-- store canonical rows keyed by `security_id`
-- retain `source_provider` for provenance
-
-### `fx_rates`
-
-Stores direct FX rates fetched from the configured provider.
-
-Purpose:
-
-- support direct, inverse, and triangulated FX conversion
-- keep FX storage separate from market snapshots and financial facts
-- enable historical as-of lookups using latest available rate on or before a
-  requested date
-
-Key semantics:
-
-- stored direction is always `1 base_currency = rate quote_currency`
-- only direct provider rows are stored
-- inverse and triangulated rates are derived at lookup time
-- a unique constraint protects `(provider, rate_date, base_currency, quote_currency)`
-- lookup indexes are designed for pair/date searches ordered by newest
-
-### `fx_supported_pairs`
-
-Stores the provider-published FX instrument catalog.
-
-Purpose:
-
-- cache the current EODHD FOREX symbol list locally
-- distinguish canonical refreshable six-letter pairs from alias symbols
-- map three-letter EODHD shorthand symbols such as `EUR` to canonical pairs
-  such as `USDEUR`
-- avoid re-scraping provider docs to discover supported pairs
-
-### `fx_refresh_state`
-
-Stores FX refresh coverage and retry state per canonical provider symbol.
-
-Purpose:
-
-- track the stored min/max historical coverage for each canonical pair
-- record whether full available history has already been backfilled
-- support first-full-then-incremental refresh planning
-- capture retry/error state for provider failures without inferring everything
-  from `fx_rates`
+Stores latest quote and market-cap snapshot information by `listing_id`.
+`market_data.currency` is authoritative for price and market-cap arithmetic.
 
 ### `market_data_fetch_state`
 
-Operational market-data refresh progress and retry backoff live here.
+Operational market-data refresh progress and retry backoff live here, keyed by
+`provider_listing_id`.
 
-Purpose:
-- track retry state for failed market-data fetches
-- support resumable global market-data refreshes
-- avoid repeatedly hitting symbols that are still inside backoff
+### `fx_rates`, `fx_supported_pairs`, and `fx_refresh_state`
 
-### `metrics`
+FX storage remains provider-code keyed. FX discovery reads currencies from
+`provider_listing`, `financial_facts`, and `market_data`.
 
-Stores computed metric results.
+### `metrics` and `metric_compute_status`
 
-Purpose:
-- cache reusable metric outputs
-- support bulk screen runs without recomputing everything on demand
-- keep downstream computation provider-agnostic through `security_id`
+Metrics and metric attempt status are keyed by canonical `listing_id`.
 
 Metric rows also persist unit metadata:
 
@@ -233,24 +135,27 @@ Metric rows also persist unit metadata:
 
 A normal run looks like:
 
-1. provider registry seeded into `providers`
-2. provider catalogs refreshed into `exchange`, `exchange_provider`, `securities`, and `supported_tickers`
-3. raw fundamentals fetched into `fundamentals_raw`
-4. EODHD raw writes refresh `security_listing_status` from `General.PrimaryTicker`
-5. provider-specific normalization writes canonical `financial_facts`
-6. market refresh writes canonical `market_data`
-7. retry/backoff state updates `fundamentals_fetch_state` and `market_data_fetch_state`
-7. metric computation writes `metrics`
-8. screens read from canonical metrics
+1. Provider registry is seeded into `provider`.
+2. Provider exchange catalogs are refreshed into `exchange` and `provider_exchange`.
+3. Provider listing catalogs are refreshed into `issuer`, `listing`, and `provider_listing`.
+4. Raw fundamentals are fetched into `fundamentals_raw`.
+5. EODHD raw writes refresh `security_listing_status` from `General.PrimaryTicker`.
+6. Provider-specific normalization writes canonical `financial_facts`.
+7. Market refresh writes canonical `market_data`.
+8. Retry/backoff state updates `fundamentals_fetch_state` and `market_data_fetch_state`.
+9. Metric computation writes `metrics` and `metric_compute_status`.
+10. Screens read from canonical metrics and derived canonical symbols.
 
-If an EODHD listing is classified as secondary at step 3, downstream rows for
-that `security_id` are deleted from `financial_facts`, `market_data`,
-`metrics`, and related downstream refresh-state tables. The raw payload and
-catalog row remain.
+If an EODHD listing is classified as secondary, downstream rows for that
+`listing_id` are deleted from `financial_facts`, `market_data`, `metrics`, and
+related downstream refresh-state tables.
 
 ## Migration Notes
 
-Schema and migrations are handled in the storage and migration modules, not in the docs layer. See the development docs if you are changing persistence behavior.
+Schema and migrations are handled in the storage and migration modules, not in
+the docs layer. The catalog refactor migrates existing data in place so
+fundamentals, market data, and FX rates are not re-downloaded just to adopt the
+new keys.
 
 ## Related Docs
 

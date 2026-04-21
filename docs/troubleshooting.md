@@ -77,7 +77,7 @@ freshness window.
 ## Market Data Global Refresh Progress
 
 Typical causes:
-- `supported_tickers` was not refreshed first
+- `provider_listing` was not refreshed first
 - old `market_data.as_of` snapshots are outside the freshness window
 - some symbols are still inside retry backoff
 - today’s EODHD quota is exhausted

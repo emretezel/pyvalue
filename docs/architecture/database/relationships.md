@@ -1,44 +1,41 @@
 # Relationships
 
-`pyvalue` still mostly uses logical references instead of enforced foreign keys, but the exchange-catalog split now enforces two physical links inside `exchange_provider`.
+The identity/catalog layer now uses physical foreign keys. Large downstream tables still mostly rely on application-maintained logical references because those tables are rebuilt and migrated carefully around the live SQLite database.
 
 ## Canonical Identity Flow
 
 ```mermaid
 flowchart LR
-    providers --> exchange_provider
-    exchange --> exchange_provider
-    providers --> supported_tickers
-    providers --> fundamentals_fetch_state
-    providers --> fundamentals_raw
-    providers --> fundamentals_normalization_state
-    providers --> market_data_fetch_state
-    providers --> financial_facts
-    providers --> market_data
-    exchange_provider --> supported_tickers
-    securities --> supported_tickers
-    supported_tickers --> fundamentals_fetch_state
-    supported_tickers --> fundamentals_raw
-    supported_tickers --> fundamentals_normalization_state
-    supported_tickers --> market_data_fetch_state
-    fundamentals_raw --> security_listing_status
-    securities --> security_listing_status
-    fundamentals_raw --> financial_facts
-    securities --> financial_facts
-    securities --> financial_facts_refresh_state
-    securities --> market_data
-    securities --> metrics
-    securities --> metric_compute_status
+    provider --> provider_exchange
+    exchange --> provider_exchange
+    issuer --> listing
+    exchange --> listing
+    provider --> provider_listing
+    provider_exchange --> provider_listing
+    listing --> provider_listing
+    provider_listing --> fundamentals_fetch_state
+    provider_listing --> fundamentals_raw
+    provider_listing --> fundamentals_normalization_state
+    provider_listing --> market_data_fetch_state
+    provider_listing --> security_listing_status
+    listing --> fundamentals_raw
+    listing --> fundamentals_normalization_state
+    listing --> security_listing_status
+    listing --> financial_facts
+    listing --> financial_facts_refresh_state
+    listing --> market_data
+    listing --> metrics
+    listing --> metric_compute_status
 ```
 
 ## FX Flow
 
 ```mermaid
 flowchart LR
-    providers --> fx_supported_pairs
-    providers --> fx_refresh_state
-    providers --> fx_rates
-    supported_tickers --> fx_rates
+    provider --> fx_supported_pairs
+    provider --> fx_refresh_state
+    provider --> fx_rates
+    provider_listing --> fx_rates
     financial_facts --> fx_rates
     market_data --> fx_rates
     fx_supported_pairs --> fx_refresh_state
@@ -47,11 +44,9 @@ flowchart LR
 
 ## Relationship Notes
 
-- `providers.provider_code` is a narrow registry key for the provider namespaces already denormalized across the rest of the schema.
-- `exchange_provider.provider -> providers.provider_code` and `exchange_provider.exchange_id -> exchange.exchange_id` are the only enforced exchange-catalog foreign keys today.
-- `exchange.exchange_id` is the new canonical exchange key, but downstream tables still continue to use `canonical_exchange_code` in this phase.
-- `securities.security_id` is the canonical key for downstream facts, market data, and metrics.
-- `supported_tickers` is the provider-facing hub. Most provider-scoped state tables key off `(provider, provider_symbol)` rather than `security_id`.
-- `security_listing_status` is intentionally keyed by `security_id` so downstream scope filters can work from canonical identity.
-- FX discovery reads currencies from `supported_tickers`, `financial_facts`, and `market_data`, but FX storage itself is not keyed back to a security.
-- Outside `exchange_provider`, orphan prevention still depends on application logic, migrations, and periodic integrity checks.
+- `provider.provider_id` is the catalog FK key; `provider.provider_code` remains the stable external namespace.
+- `provider_exchange` maps provider exchange codes to canonical `exchange.exchange_id`.
+- `listing.listing_id` replaces `securities.security_id` as the canonical downstream key.
+- `provider_listing.provider_listing_id` replaces `(provider, provider_symbol)` as the durable provider-scoped raw/state key.
+- User-facing canonical symbols such as `AAPL.US` are derived from `listing.symbol` plus `exchange.exchange_code`.
+- FX discovery reads currencies from `provider_listing`, `financial_facts`, and `market_data`, but FX storage itself is not keyed back to a listing.

@@ -4,7 +4,7 @@
 
 The core data pipeline is:
 
-1. refresh provider catalogs into `exchange`, `exchange_provider`, and `supported_tickers`
+1. refresh provider catalogs into `exchange`, `provider_exchange`, `issuer`, `listing`, and `provider_listing`
 2. ingest raw provider payloads into `fundamentals_raw`
 3. normalize provider payloads into canonical `financial_facts`
 4. compute metrics from `financial_facts`
@@ -68,10 +68,8 @@ pyvalue ingest-fundamentals --all-supported --max-age-days 90
 ## What Ingestion Does
 
 Ingestion stores raw provider payloads as received, keyed by:
-- provider
-- provider symbol
-- provider exchange code
-- resolved canonical `security_id`
+- `provider_listing_id`
+- resolved canonical `listing_id`
 
 This stage is useful because it preserves source payloads for later re-normalization.
 
@@ -81,7 +79,7 @@ provider-symbol replaces the previous raw payload for that provider-symbol.
 ## What Normalization Does
 
 Normalization converts provider-specific raw payloads into provider-agnostic
-facts in `financial_facts`, keyed by canonical `security_id`.
+facts in `financial_facts`, keyed by canonical `listing_id`.
 
 That gives metrics a stable input model regardless of whether facts came from SEC or EODHD.
 
@@ -96,7 +94,7 @@ canonical security, regardless of provider.
 
 That means:
 - metrics always consume the latest normalized facts
-- switching providers for the same canonical symbol overwrites normalized facts for that security
+- switching providers for the same canonical symbol overwrites normalized facts for that listing
 - default normalization is incremental: a symbol is skipped unless its raw
   `fundamentals_raw.fetched_at` is newer than the last successful
   normalization for that provider, or the current facts are owned by a

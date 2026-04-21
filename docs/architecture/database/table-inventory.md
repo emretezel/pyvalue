@@ -3,37 +3,38 @@
 This page is the quickest way to inspect the current schema before going table by table.
 
 <!-- BEGIN generated_table_inventory -->
-All row counts and table sizes below come from the live `data/pyvalue.db` snapshot on `2026-04-20`. Sizes refer to the table object's own pages, not the size of its secondary indexes.
+Catalog row counts below are mapped from the pre-refactor live `data/pyvalue.db` snapshot. Sizes for renamed or split tables should be refreshed after the live DB migration.
 
 ## Identity And Catalog
 
 | Table | Rows | Table size | Primary key | Main logical refs | Initial review focus |
 | --- | --- | --- | --- | --- | --- |
-| [providers](tables/providers.md) | `3` | `4.0 KiB` | `provider_code` | referenced logically by provider-scoped tables | keep the registry narrow and avoid leaking runtime config into it |
-| [exchange](tables/exchange.md) | `73` | `12.0 KiB` | `exchange_id` | referenced physically by `exchange_provider.exchange_id` | keep the canonical exchange table narrow while it coexists with `canonical_exchange_code` elsewhere |
-| [exchange_provider](tables/exchange_provider.md) | `74` | `12.0 KiB` | `provider`, `provider_exchange_code` | maps provider exchange codes to canonical exchange identity | check whether provider-owned exchange metadata belongs here and whether exchange-slice rewrites stay cheap |
-| [securities](tables/securities.md) | `77,484` | `77.5 MiB` | `security_id` | referenced logically by most downstream tables | check whether display metadata belongs here or in a separate cache |
-| [supported_tickers](tables/supported_tickers.md) | `75,848` | `9.3 MiB` | `provider`, `provider_symbol` | links provider catalog rows to `security_id` | highest-priority catalog table; review duplicate metadata and scope indexes |
+| [provider](tables/provider.md) | `3` | refresh after migration | `provider_id` | referenced physically by `provider_exchange` and `provider_listing` | keep the registry narrow and avoid leaking runtime config into it |
+| [exchange](tables/exchange.md) | `73` | `12.0 KiB` | `exchange_id` | referenced physically by `provider_exchange.exchange_id` and `listing.exchange_id` | keep the canonical exchange table narrow and indexed for provider-catalog resolution |
+| [provider_exchange](tables/provider_exchange.md) | `74` | refresh after migration | `provider_exchange_id` | maps provider exchange codes to canonical exchange identity | check whether provider-owned exchange metadata belongs here and whether exchange-slice rewrites stay cheap |
+| [issuer](tables/issuer.md) | `77,484` | refresh after migration | `issuer_id` | referenced physically by `listing.issuer_id` | separate issuer metadata from listing identity and keep updates cheap |
+| [listing](tables/listing.md) | `77,484` | refresh after migration | `listing_id` | canonical root for facts, prices, metrics, and statuses | maintain fast lookup by `(exchange_id, symbol)` and keep canonical rows narrow |
+| [provider_listing](tables/provider_listing.md) | `75,848` | refresh after migration | `provider_listing_id` | links provider catalog rows to canonical `listing_id` | highest-priority provider catalog table; review provider slice rewrites and lookup indexes |
 
 ## Raw Ingestion And State
 
 | Table | Rows | Table size | Primary key | Main logical refs | Initial review focus |
 | --- | --- | --- | --- | --- | --- |
-| [fundamentals_raw](tables/fundamentals_raw.md) | `77,045` | `16.84 GiB` | `provider`, `provider_symbol` | provider symbol in `supported_tickers`, `security_id` in `securities` | wide-row storage, JSON payload size, and latest-row-only semantics |
-| [fundamentals_fetch_state](tables/fundamentals_fetch_state.md) | `77,045` | `4.5 MiB` | `provider`, `provider_symbol` | provider symbol in `supported_tickers` | retry/backoff query shape vs index set |
-| [security_listing_status](tables/security_listing_status.md) | `75,848` | `9.5 MiB` | `security_id` | `security_id` in `securities` | primary-listing filter cost and purge trigger responsibilities |
-| [fundamentals_normalization_state](tables/fundamentals_normalization_state.md) | `61,092` | `6.0 MiB` | `provider`, `provider_symbol` | provider symbol in `supported_tickers`, `security_id` in `securities` | whether this watermark table is minimal and sufficient |
-| [market_data_fetch_state](tables/market_data_fetch_state.md) | `61,092` | `4.3 MiB` | `provider`, `provider_symbol` | provider symbol in `supported_tickers` | same pattern as fundamentals state; check duplication vs simplicity |
+| [fundamentals_raw](tables/fundamentals_raw.md) | `77,045` | `16.84 GiB` | `payload_id` | `provider_listing_id` in `provider_listing`, `listing_id` in `listing` | wide-row storage, JSON payload size, and latest-row-only semantics |
+| [fundamentals_fetch_state](tables/fundamentals_fetch_state.md) | `77,045` | `4.5 MiB` | `provider_listing_id` | `provider_listing_id` in `provider_listing` | retry/backoff query shape vs index set |
+| [security_listing_status](tables/security_listing_status.md) | `75,848` | `9.5 MiB` | `listing_id` | `listing_id` in `listing`, `provider_listing_id` in `provider_listing` | primary-listing filter cost and purge trigger responsibilities |
+| [fundamentals_normalization_state](tables/fundamentals_normalization_state.md) | `61,092` | `6.0 MiB` | `provider_listing_id` | `provider_listing_id` in `provider_listing`, `listing_id` in `listing` | whether this watermark table is minimal and sufficient |
+| [market_data_fetch_state](tables/market_data_fetch_state.md) | `61,092` | `4.3 MiB` | `provider_listing_id` | `provider_listing_id` in `provider_listing` | same pattern as fundamentals state; check duplication vs simplicity |
 
 ## Canonical Analytics
 
 | Table | Rows | Table size | Primary key | Main logical refs | Initial review focus |
 | --- | --- | --- | --- | --- | --- |
-| [financial_facts](tables/financial_facts.md) | `103,188,287` | `8.68 GiB` | `security_id`, `concept`, `fiscal_period`, `end_date`, `unit`, `accn` | `security_id` in `securities` | hottest fact table; check row width, nullable PK parts, and latest-fact indexes |
-| [financial_facts_refresh_state](tables/financial_facts_refresh_state.md) | `61,987` | `3.0 MiB` | `security_id` | `security_id` in `securities` | verify it still adds value beyond `fundamentals_normalization_state` |
-| [market_data](tables/market_data.md) | `223,034` | `20.0 MiB` | `security_id`, `as_of` | `security_id` in `securities` | latest-snapshot access and time-series retention |
-| [metrics](tables/metrics.md) | `2,422,916` | `158.9 MiB` | `security_id`, `metric_id` | `security_id` in `securities` | screen-read performance and lack of historical versions |
-| [metric_compute_status](tables/metric_compute_status.md) | `4,887,360` | `936.0 MiB` | `security_id`, `metric_id` | `security_id` in `securities` | failure-report read shape and duplication with `metrics` freshness |
+| [financial_facts](tables/financial_facts.md) | `103,188,287` | `8.68 GiB` | `listing_id`, `concept`, `fiscal_period`, `end_date`, `unit`, `accn` | `listing_id` in `listing` | hottest fact table; check row width, nullable PK parts, and latest-fact indexes |
+| [financial_facts_refresh_state](tables/financial_facts_refresh_state.md) | `61,987` | `3.0 MiB` | `listing_id` | `listing_id` in `listing` | verify it still adds value beyond `fundamentals_normalization_state` |
+| [market_data](tables/market_data.md) | `223,034` | `20.0 MiB` | `listing_id`, `as_of` | `listing_id` in `listing` | latest-snapshot access and time-series retention |
+| [metrics](tables/metrics.md) | `2,422,916` | `158.9 MiB` | `listing_id`, `metric_id` | `listing_id` in `listing` | screen-read performance and lack of historical versions |
+| [metric_compute_status](tables/metric_compute_status.md) | `4,887,360` | `936.0 MiB` | `listing_id`, `metric_id` | `listing_id` in `listing` | failure-report read shape and duplication with `metrics` freshness |
 
 ## FX
 

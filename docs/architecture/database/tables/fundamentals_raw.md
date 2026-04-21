@@ -2,74 +2,56 @@
 
 ## Purpose
 
-Stores the latest raw fundamentals payload per provider symbol.
+Stores the latest raw fundamentals payload for each provider listing.
 
 ## Grain
 
-One row per `(provider, provider_symbol)`, containing the latest fetched raw payload.
+One row per `provider_listing_id`; historical payload versions are not retained.
 
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-20`
+- Snapshot source: pre-refactor `data/pyvalue.db` raw payload table on `2026-04-21`
 - Row count: `77,045`
-- Table size: `18,079,010,816 bytes` (`16.84 GiB`)
-- Approximate bytes per row: `234,655.2`
+- Table size: approximately `16.84 GiB` before the catalog-key refactor
 <!-- END generated_live_stats -->
 
 ## Columns
 
 | Column | Type | Null | Key | Notes |
 | --- | --- | --- | --- | --- |
-| `provider` | `TEXT` | no | PK | provider namespace |
-| `provider_symbol` | `TEXT` | no | PK | provider fetch key |
-| `security_id` | `INTEGER` | no | idx | canonical identity link |
-| `provider_exchange_code` | `TEXT` | yes |  | provider exchange code at fetch time |
+| `payload_id` | `INTEGER` | no | PK | raw payload surrogate key |
+| `provider_listing_id` | `INTEGER` | no | unique, FK | provider listing identity |
+| `listing_id` | `INTEGER` | no | FK, idx | canonical listing link |
 | `currency` | `TEXT` | yes |  | provider payload currency hint |
 | `data` | `TEXT` | no |  | raw JSON payload |
-| `fetched_at` | `TEXT` | no | idx | last fetch timestamp |
+| `fetched_at` | `TEXT` | no | idx | latest fetch timestamp |
 
 ## Keys And Relationships
 
-- Primary key: `(provider, provider_symbol)`
-- Logical references:
-  - `security_id` to `securities`
-  - `(provider, provider_symbol)` to `supported_tickers`
+- Primary key: `payload_id`
+- Unique constraint: `provider_listing_id`
+- Physical foreign keys:
+  - `provider_listing_id -> provider_listing.provider_listing_id`
+  - `listing_id -> listing.listing_id`
 
 ## Secondary Indexes
 
-- `idx_fundamentals_raw_security (security_id)`
-- `idx_fundamentals_raw_provider_fetched (provider, fetched_at)`
+- `idx_fundamentals_raw_security (listing_id)`
+- `idx_fundamentals_raw_provider_fetched (fetched_at)`
 
 ## Main Read Paths
 
-- normalization reads by provider symbol or canonical security
-- security metadata refresh
-- listing-status reconciliation
+- normalization reads by provider listing or canonical listing
+- issuer metadata refresh from stored raw payloads
+- primary-listing reconciliation
 
 ## Main Write Paths
 
 - `ingest-fundamentals`
-- `reconcile-listing-status` reads existing rows but does not re-download
-
-## Column Usage Notes
-
-- `provider`: first-stage filter for raw ingest and reconciliation.
-- `provider_symbol`: operational key used to pull one stored provider payload back out for normalization and metadata refresh.
-- `security_id`: canonical link used by normalization and purge logic.
-- `provider_exchange_code`: retained for exchange-scoped reconciliation and audit context.
-- `currency`: fallback payload currency hint; not a hot filter.
-- `data`: the raw JSON blob read by normalization, listing classification, and metadata refresh logic.
-- `fetched_at`: incremental watermark for normalization and listing-status reconciliation.
-
-## Sample Rows
-
-<!-- BEGIN generated_sample_rows -->
-Wide-table sample rows live in the [Sample Rows appendix](../sample-rows.md#fundamentals_raw).
-<!-- END generated_sample_rows -->
+- migration-time backfill from legacy `(provider, provider_symbol)` raw rows
 
 ## Review Notes
 
-- The `data` column is the widest row in the schema and a natural I/O hotspot
-- This table stores only the latest raw payload, not a historical chain of payload versions
-- Check whether `provider_exchange_code` and `currency` are still worth storing outside the JSON payload
+- The `data` column is the widest row in the schema and a major I/O hotspot.
+- The durable provider key is now `provider_listing_id`, not `(provider, provider_symbol)`.

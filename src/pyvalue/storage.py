@@ -101,6 +101,111 @@ def _coerce_int(value: Any) -> int:
     return int(value)
 
 
+def _normalize_provider_identity(
+    provider: str,
+    symbol: str,
+    exchange_code: Optional[str] = None,
+) -> Tuple[str, str, str, str]:
+    provider_norm = _normalize_required_text(provider, "provider").upper()
+    symbol_norm = _normalize_required_text(symbol, "symbol").upper()
+    explicit_exchange = _normalize_optional_text(exchange_code)
+    if explicit_exchange is not None:
+        provider_exchange_code = explicit_exchange.upper()
+        suffix = f".{provider_exchange_code}"
+        bare_symbol = (
+            symbol_norm[: -len(suffix)] if symbol_norm.endswith(suffix) else symbol_norm
+        )
+    else:
+        provider_symbol, inferred_exchange = _normalize_symbol_base(symbol_norm)
+        bare_symbol = _normalize_required_text(provider_symbol, "symbol").upper()
+        provider_exchange_code = inferred_exchange or ""
+    if provider_norm == "SEC":
+        provider_exchange_code = "US"
+        if bare_symbol.endswith(".US"):
+            bare_symbol = bare_symbol[:-3]
+    elif not provider_exchange_code:
+        raise ValueError(
+            f"Could not infer provider exchange code for {provider_norm}:{symbol}"
+        )
+    return (
+        provider_norm,
+        bare_symbol,
+        provider_exchange_code,
+        f"{bare_symbol}.{provider_exchange_code}",
+    )
+
+
+def _ensure_provider_listing_catalog_views(conn: sqlite3.Connection) -> None:
+    """Create compatibility catalog views over the physical provider_listing table."""
+
+    def create_view(sql: str) -> None:
+        try:
+            conn.execute(sql)
+        except sqlite3.OperationalError as exc:
+            if "already exists" not in str(exc).lower():
+                raise
+
+    conn.execute("DROP VIEW IF EXISTS supported_tickers")
+    conn.execute("DROP VIEW IF EXISTS provider_listing_catalog")
+    create_view(
+        """
+        CREATE VIEW provider_listing_catalog AS
+        SELECT
+            pl.provider_listing_id,
+            p.provider_id,
+            p.provider_code AS provider,
+            px.provider_exchange_id,
+            px.provider_exchange_code,
+            CASE
+                WHEN p.provider_code = 'SEC' THEN pl.provider_symbol || '.US'
+                ELSE pl.provider_symbol || '.' || px.provider_exchange_code
+            END AS provider_symbol,
+            pl.provider_symbol AS provider_ticker,
+            l.listing_id AS security_id,
+            e.exchange_code AS listing_exchange,
+            i.name AS security_name,
+            NULL AS security_type,
+            i.country AS country,
+            COALESCE(pl.currency, l.currency) AS currency,
+            NULL AS isin,
+            NULL AS updated_at
+        FROM provider_listing pl
+        JOIN provider p ON p.provider_id = pl.provider_id
+        JOIN provider_exchange px
+          ON px.provider_exchange_id = pl.provider_exchange_id
+        JOIN listing l ON l.listing_id = pl.listing_id
+        JOIN issuer i ON i.issuer_id = l.issuer_id
+        JOIN "exchange" e ON e.exchange_id = l.exchange_id
+        """
+    )
+    create_view(
+        """
+        CREATE VIEW supported_tickers AS
+        SELECT
+            provider,
+            provider_symbol,
+            provider_ticker,
+            provider_exchange_code,
+            security_id,
+            listing_exchange,
+            security_name,
+            security_type,
+            country,
+            currency,
+            isin,
+            updated_at
+        FROM provider_listing_catalog
+        """
+    )
+
+
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    return {
+        str(row["name"])
+        for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
+
+
 def _batched(values: Sequence[Any], size: int) -> Iterable[Sequence[Any]]:
     for start in range(0, len(values), size):
         yield values[start : start + size]
@@ -113,7 +218,7 @@ def _primary_listing_left_join(
 ) -> str:
     return (
         "LEFT JOIN security_listing_status "
-        f"{status_alias} ON {status_alias}.security_id = {security_alias}.security_id "
+        f"{status_alias} ON {status_alias}.listing_id = {security_alias}.security_id "
         f"AND {status_alias}.source_provider = '{_PRIMARY_LISTING_SOURCE_PROVIDER}'"
     )
 
@@ -150,6 +255,19 @@ class Exchange:
     @property
     def code(self) -> str:
         return self.exchange_code
+
+
+@dataclass(frozen=True)
+class Provider:
+    """Persisted provider registry entry."""
+
+    provider_id: int
+    provider_code: str
+    display_name: str
+    description: Optional[str] = None
+    status: str = "active"
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -491,6 +609,7 @@ class SQLiteStore:
         self.db_path = Path(db_path)
         if self.db_path.parent:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._provider_repo_cache: Optional[ProviderRepository] = None
         self._security_repo_cache: Optional[SecurityRepository] = None
         self._supported_ticker_repo_cache: Optional[SupportedTickerRepository] = None
         self._exchange_repo_cache: Optional[ExchangeRepository] = None
@@ -588,6 +707,11 @@ class SQLiteStore:
             self._security_repo_cache = SecurityRepository(self.db_path)
         return self._security_repo_cache
 
+    def _provider_repo(self) -> ProviderRepository:
+        if self._provider_repo_cache is None:
+            self._provider_repo_cache = ProviderRepository(self.db_path)
+        return self._provider_repo_cache
+
     def _exchange_repo(self) -> ExchangeRepository:
         if self._exchange_repo_cache is None:
             self._exchange_repo_cache = ExchangeRepository(self.db_path)
@@ -615,8 +739,9 @@ class SQLiteStore:
                 """
                 SELECT md.currency
                 FROM market_data md
-                JOIN securities s ON s.security_id = md.security_id
-                WHERE UPPER(s.canonical_symbol) = ?
+                JOIN listing l ON l.listing_id = md.listing_id
+                JOIN "exchange" e ON e.exchange_id = l.exchange_id
+                WHERE UPPER(l.symbol || '.' || e.exchange_code) = ?
                   AND md.currency IS NOT NULL
                 ORDER BY md.as_of DESC
                 LIMIT 1
@@ -624,6 +749,152 @@ class SQLiteStore:
                 (symbol_norm,),
             ).fetchone()
         return normalize_currency_code(row[0]) if row else None
+
+
+class ProviderRepository(SQLiteStore):
+    """Persist and resolve provider registry rows."""
+
+    def initialize_schema(self) -> None:
+        apply_migrations(self.db_path)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS provider (
+                    provider_id INTEGER PRIMARY KEY,
+                    provider_code TEXT NOT NULL UNIQUE CHECK (
+                        provider_code = UPPER(TRIM(provider_code))
+                        AND LENGTH(TRIM(provider_code)) > 0
+                    ),
+                    display_name TEXT NOT NULL,
+                    description TEXT,
+                    status TEXT NOT NULL DEFAULT 'active' CHECK (
+                        status IN ('active', 'deprecated', 'disabled')
+                    ),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute("DROP VIEW IF EXISTS providers")
+            conn.execute(
+                """
+                CREATE VIEW providers AS
+                SELECT
+                    provider_code,
+                    display_name,
+                    description,
+                    status,
+                    created_at,
+                    updated_at
+                FROM provider
+                """
+            )
+
+    def ensure(
+        self,
+        provider_code: str,
+        display_name: Optional[str] = None,
+        description: Optional[str] = None,
+        status: str = "active",
+        *,
+        connection: Optional[sqlite3.Connection] = None,
+    ) -> Provider:
+        if connection is None:
+            self.initialize_schema()
+        provider_norm = _normalize_required_text(provider_code, "provider_code").upper()
+        now = _utc_now_iso()
+        name = _normalize_optional_text(display_name) or provider_norm
+
+        def _ensure(conn: sqlite3.Connection) -> Provider:
+            conn.execute(
+                """
+                INSERT INTO provider (
+                    provider_code,
+                    display_name,
+                    description,
+                    status,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(provider_code) DO UPDATE SET
+                    display_name = COALESCE(excluded.display_name, provider.display_name),
+                    description = COALESCE(excluded.description, provider.description),
+                    status = excluded.status,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    provider_norm,
+                    name,
+                    _normalize_optional_text(description),
+                    status,
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT
+                    provider_id,
+                    provider_code,
+                    display_name,
+                    description,
+                    status,
+                    created_at,
+                    updated_at
+                FROM provider
+                WHERE provider_code = ?
+                """,
+                (provider_norm,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError(f"Failed to persist provider {provider_norm}")
+            return Provider(*row)
+
+        if connection is not None:
+            return _ensure(connection)
+        with self._connect() as conn:
+            return _ensure(conn)
+
+    def fetch(self, provider_code: str) -> Optional[Provider]:
+        self.initialize_schema()
+        provider_norm = provider_code.strip().upper()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    provider_id,
+                    provider_code,
+                    display_name,
+                    description,
+                    status,
+                    created_at,
+                    updated_at
+                FROM provider
+                WHERE provider_code = ?
+                """,
+                (provider_norm,),
+            ).fetchone()
+        return Provider(*row) if row else None
+
+    def resolve_id(
+        self,
+        provider_code: str,
+        *,
+        connection: Optional[sqlite3.Connection] = None,
+    ) -> Optional[int]:
+        provider_norm = provider_code.strip().upper()
+        if connection is not None:
+            row = connection.execute(
+                """
+                SELECT provider_id
+                FROM provider
+                WHERE provider_code = ?
+                """,
+                (provider_norm,),
+            ).fetchone()
+            return int(row["provider_id"]) if row else None
+        provider = self.fetch(provider_norm)
+        return provider.provider_id if provider else None
 
 
 class SecurityRepository(SQLiteStore):
@@ -636,31 +907,95 @@ class SecurityRepository(SQLiteStore):
 
     def initialize_schema(self) -> None:
         apply_migrations(self.db_path)
+        self._exchange_repo().initialize_schema()
         with self._connect() as conn:
             conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS securities (
-                    security_id INTEGER PRIMARY KEY,
-                    canonical_ticker TEXT NOT NULL,
-                    canonical_exchange_code TEXT NOT NULL,
-                    canonical_symbol TEXT NOT NULL,
-                    entity_name TEXT,
+                CREATE TABLE IF NOT EXISTS issuer (
+                    issuer_id INTEGER PRIMARY KEY,
+                    name TEXT,
                     description TEXT,
                     sector TEXT,
                     industry TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE (canonical_exchange_code, canonical_ticker),
-                    UNIQUE (canonical_symbol)
+                    country TEXT
                 )
                 """
             )
             conn.execute(
                 """
-                CREATE INDEX IF NOT EXISTS idx_securities_exchange
-                ON securities(canonical_exchange_code)
+                CREATE TABLE IF NOT EXISTS listing (
+                    listing_id INTEGER PRIMARY KEY,
+                    issuer_id INTEGER NOT NULL,
+                    exchange_id INTEGER NOT NULL,
+                    symbol TEXT NOT NULL,
+                    currency TEXT,
+                    UNIQUE (exchange_id, symbol),
+                    FOREIGN KEY (issuer_id) REFERENCES issuer(issuer_id),
+                    FOREIGN KEY (exchange_id) REFERENCES "exchange"(exchange_id)
+                )
                 """
             )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_listing_exchange
+                ON listing(exchange_id)
+                """
+            )
+            conn.execute("DROP VIEW IF EXISTS securities")
+            conn.execute(
+                """
+                CREATE VIEW securities AS
+                SELECT
+                    l.listing_id AS security_id,
+                    l.symbol AS canonical_ticker,
+                    e.exchange_code AS canonical_exchange_code,
+                    l.symbol || '.' || e.exchange_code AS canonical_symbol,
+                    i.name AS entity_name,
+                    i.description,
+                    i.sector,
+                    i.industry,
+                    NULL AS created_at,
+                    NULL AS updated_at
+                FROM listing l
+                JOIN issuer i ON i.issuer_id = l.issuer_id
+                JOIN "exchange" e ON e.exchange_id = l.exchange_id
+                """
+            )
+
+    def _select_identity_sql(self, where_sql: str) -> str:
+        return f"""
+            SELECT
+                l.listing_id AS security_id,
+                l.symbol AS canonical_ticker,
+                e.exchange_code AS canonical_exchange_code,
+                l.symbol || '.' || e.exchange_code AS canonical_symbol,
+                i.name AS entity_name,
+                i.description,
+                i.sector,
+                i.industry,
+                NULL AS created_at,
+                NULL AS updated_at
+            FROM listing l
+            JOIN issuer i ON i.issuer_id = l.issuer_id
+            JOIN "exchange" e ON e.exchange_id = l.exchange_id
+            WHERE {where_sql}
+        """
+
+    def _load_by_exchange_and_symbol(
+        self,
+        conn: sqlite3.Connection,
+        exchange_id: int,
+        ticker: str,
+    ) -> Optional[Security]:
+        row = conn.execute(
+            self._select_identity_sql("l.exchange_id = ? AND l.symbol = ?"),
+            (exchange_id, ticker),
+        ).fetchone()
+        if row is None:
+            return None
+        security = Security(*row)
+        self._remember(security)
+        return security
 
     def ensure(
         self,
@@ -670,8 +1005,11 @@ class SecurityRepository(SQLiteStore):
         description: Optional[str] = None,
         sector: Optional[str] = None,
         industry: Optional[str] = None,
+        *,
+        connection: Optional[sqlite3.Connection] = None,
     ) -> Security:
-        self.initialize_schema()
+        if connection is None:
+            self.initialize_schema()
         ticker = _normalize_required_text(canonical_ticker, "canonical_ticker").upper()
         exchange_code = _normalize_required_text(
             canonical_exchange_code, "canonical_exchange_code"
@@ -681,55 +1019,73 @@ class SecurityRepository(SQLiteStore):
         description = _normalize_optional_text(description)
         sector = _normalize_optional_text(sector)
         industry = _normalize_optional_text(industry)
-        now = _utc_now_iso()
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO securities (
-                    canonical_ticker,
-                    canonical_exchange_code,
-                    canonical_symbol,
-                    entity_name,
-                    description,
-                    sector,
-                    industry,
-                    created_at,
-                    updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(canonical_exchange_code, canonical_ticker) DO UPDATE SET
-                    entity_name = COALESCE(excluded.entity_name, securities.entity_name),
-                    description = COALESCE(excluded.description, securities.description),
-                    sector = COALESCE(excluded.sector, securities.sector),
-                    industry = COALESCE(excluded.industry, securities.industry),
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    ticker,
-                    exchange_code,
-                    canonical_symbol,
-                    entity_name,
-                    description,
-                    sector,
-                    industry,
-                    now,
-                    now,
-                ),
+
+        def _ensure(conn: sqlite3.Connection) -> Optional[Security]:
+            exchange = self._exchange_repo().ensure(exchange_code, connection=conn)
+            security = self._load_by_exchange_and_symbol(
+                conn, exchange.exchange_id, ticker
             )
-            row = conn.execute(
-                """
-                SELECT security_id, canonical_ticker, canonical_exchange_code,
-                       canonical_symbol, entity_name, description, sector, industry,
-                       created_at, updated_at
-                FROM securities
-                WHERE canonical_exchange_code = ? AND canonical_ticker = ?
-                """,
-                (exchange_code, ticker),
-            ).fetchone()
-        if row is None:  # pragma: no cover - defensive
+            if security is None:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO issuer (
+                        name,
+                        description,
+                        sector,
+                        industry,
+                        country
+                    ) VALUES (?, ?, ?, ?, NULL)
+                    """,
+                    (entity_name, description, sector, industry),
+                )
+                if cursor.lastrowid is None:
+                    raise RuntimeError(
+                        f"Failed to create issuer for {canonical_symbol}"
+                    )
+                issuer_id = int(cursor.lastrowid)
+                conn.execute(
+                    """
+                    INSERT INTO listing (
+                        issuer_id,
+                        exchange_id,
+                        symbol,
+                        currency
+                    ) VALUES (?, ?, ?, NULL)
+                    """,
+                    (issuer_id, exchange.exchange_id, ticker),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE issuer
+                    SET name = COALESCE(?, name),
+                        description = COALESCE(?, description),
+                        sector = COALESCE(?, sector),
+                        industry = COALESCE(?, industry)
+                    WHERE issuer_id = (
+                        SELECT issuer_id
+                        FROM listing
+                        WHERE listing_id = ?
+                    )
+                    """,
+                    (
+                        entity_name,
+                        description,
+                        sector,
+                        industry,
+                        security.security_id,
+                    ),
+                )
+            return self._load_by_exchange_and_symbol(conn, exchange.exchange_id, ticker)
+
+        if connection is not None:
+            loaded = _ensure(connection)
+        else:
+            with self._connect() as conn:
+                loaded = _ensure(conn)
+        if loaded is None:  # pragma: no cover - defensive
             raise RuntimeError(f"Failed to create or load security {canonical_symbol}")
-        security = Security(*row)
-        self._remember(security)
-        return security
+        return loaded
 
     def ensure_from_symbol(
         self,
@@ -739,6 +1095,8 @@ class SecurityRepository(SQLiteStore):
         description: Optional[str] = None,
         sector: Optional[str] = None,
         industry: Optional[str] = None,
+        *,
+        connection: Optional[sqlite3.Connection] = None,
     ) -> Security:
         ticker, suffix = _normalize_symbol_base(symbol)
         canonical_exchange = (exchange_code or suffix or "").strip().upper()
@@ -753,6 +1111,7 @@ class SecurityRepository(SQLiteStore):
             description=description,
             sector=sector,
             industry=industry,
+            connection=connection,
         )
 
     def fetch_by_symbol(self, symbol: str) -> Optional[Security]:
@@ -763,13 +1122,9 @@ class SecurityRepository(SQLiteStore):
             return cached
         with self._connect() as conn:
             row = conn.execute(
-                """
-                SELECT security_id, canonical_ticker, canonical_exchange_code,
-                       canonical_symbol, entity_name, description, sector, industry,
-                       created_at, updated_at
-                FROM securities
-                WHERE canonical_symbol = ?
-                """,
+                self._select_identity_sql(
+                    "UPPER(l.symbol || '.' || e.exchange_code) = ?"
+                ),
                 (normalized,),
             ).fetchone()
         if row is None:
@@ -785,13 +1140,7 @@ class SecurityRepository(SQLiteStore):
             return cached
         with self._connect() as conn:
             row = conn.execute(
-                """
-                SELECT security_id, canonical_ticker, canonical_exchange_code,
-                       canonical_symbol, entity_name, description, sector, industry,
-                       created_at, updated_at
-                FROM securities
-                WHERE security_id = ?
-                """,
+                self._select_identity_sql("l.listing_id = ?"),
                 (security_id,),
             ).fetchone()
         if row is None:
@@ -811,7 +1160,8 @@ class SecurityRepository(SQLiteStore):
         *,
         connection: Optional[sqlite3.Connection] = None,
     ) -> Dict[str, int]:
-        self.initialize_schema()
+        if connection is None:
+            self.initialize_schema()
         normalized = _normalized_codes(symbols)
         if not normalized:
             return {}
@@ -832,9 +1182,12 @@ class SecurityRepository(SQLiteStore):
                 placeholders = ", ".join("?" for _ in chunk)
                 rows = conn.execute(
                     f"""
-                    SELECT security_id, canonical_symbol
-                    FROM securities
-                    WHERE canonical_symbol IN ({placeholders})
+                    SELECT
+                        l.listing_id AS security_id,
+                        l.symbol || '.' || e.exchange_code AS canonical_symbol
+                    FROM listing l
+                    JOIN "exchange" e ON e.exchange_id = l.exchange_id
+                    WHERE UPPER(l.symbol || '.' || e.exchange_code) IN ({placeholders})
                     """,
                     list(chunk),
                 ).fetchall()
@@ -874,11 +1227,21 @@ class SecurityRepository(SQLiteStore):
                 placeholders = ", ".join("?" for _ in chunk)
                 rows = conn.execute(
                     f"""
-                    SELECT security_id, canonical_ticker, canonical_exchange_code,
-                           canonical_symbol, entity_name, description, sector,
-                           industry, created_at, updated_at
-                    FROM securities
-                    WHERE canonical_symbol IN ({placeholders})
+                    SELECT
+                        l.listing_id AS security_id,
+                        l.symbol AS canonical_ticker,
+                        e.exchange_code AS canonical_exchange_code,
+                        l.symbol || '.' || e.exchange_code AS canonical_symbol,
+                        i.name AS entity_name,
+                        i.description,
+                        i.sector,
+                        i.industry,
+                        NULL AS created_at,
+                        NULL AS updated_at
+                    FROM listing l
+                    JOIN issuer i ON i.issuer_id = l.issuer_id
+                    JOIN "exchange" e ON e.exchange_id = l.exchange_id
+                    WHERE UPPER(l.symbol || '.' || e.exchange_code) IN ({placeholders})
                     """,
                     list(chunk),
                 ).fetchall()
@@ -916,11 +1279,21 @@ class SecurityRepository(SQLiteStore):
                 placeholders = ", ".join("?" for _ in chunk)
                 rows = conn.execute(
                     f"""
-                    SELECT security_id, canonical_ticker, canonical_exchange_code,
-                           canonical_symbol, entity_name, description, sector,
-                           industry, created_at, updated_at
-                    FROM securities
-                    WHERE security_id IN ({placeholders})
+                    SELECT
+                        l.listing_id AS security_id,
+                        l.symbol AS canonical_ticker,
+                        e.exchange_code AS canonical_exchange_code,
+                        l.symbol || '.' || e.exchange_code AS canonical_symbol,
+                        i.name AS entity_name,
+                        i.description,
+                        i.sector,
+                        i.industry,
+                        NULL AS created_at,
+                        NULL AS updated_at
+                    FROM listing l
+                    JOIN issuer i ON i.issuer_id = l.issuer_id
+                    JOIN "exchange" e ON e.exchange_id = l.exchange_id
+                    WHERE l.listing_id IN ({placeholders})
                     """,
                     list(chunk),
                 ).fetchall()
@@ -960,14 +1333,12 @@ class SecurityRepository(SQLiteStore):
         """Persist many canonical metadata updates in one transaction."""
 
         self.initialize_schema()
-        now = _utc_now_iso()
         rows = [
             (
                 _normalize_optional_text(update.entity_name),
                 _normalize_optional_text(update.description),
                 _normalize_optional_text(update.sector),
                 _normalize_optional_text(update.industry),
-                now,
                 int(update.security_id),
             )
             for update in updates
@@ -987,13 +1358,16 @@ class SecurityRepository(SQLiteStore):
             before = conn.total_changes
             conn.executemany(
                 """
-                UPDATE securities
-                SET entity_name = COALESCE(?, entity_name),
+                UPDATE issuer
+                SET name = COALESCE(?, name),
                     description = COALESCE(?, description),
                     sector = COALESCE(?, sector),
-                    industry = COALESCE(?, industry),
-                    updated_at = ?
-                WHERE security_id = ?
+                    industry = COALESCE(?, industry)
+                WHERE issuer_id = (
+                    SELECT issuer_id
+                    FROM listing
+                    WHERE listing_id = ?
+                )
                 """,
                 rows,
             )
@@ -1031,22 +1405,27 @@ class SecurityRepository(SQLiteStore):
         self.initialize_schema()
         params: List[object] = []
         query = [
-            "SELECT DISTINCT s.canonical_symbol",
-            "FROM supported_tickers st",
-            "JOIN securities s ON s.security_id = st.security_id",
+            "SELECT DISTINCT l.symbol || '.' || e.exchange_code AS canonical_symbol",
+            "FROM provider_listing pl",
+            "JOIN listing l ON l.listing_id = pl.listing_id",
+            'JOIN "exchange" e ON e.exchange_id = l.exchange_id',
         ]
         if primary_only:
-            query.append(_primary_listing_left_join(security_alias="st"))
+            query.append(
+                "LEFT JOIN security_listing_status sls "
+                "ON sls.listing_id = l.listing_id "
+                f"AND sls.source_provider = '{_PRIMARY_LISTING_SOURCE_PROVIDER}'"
+            )
         normalized = _normalized_codes(exchange_codes)
         if normalized:
             placeholders = ", ".join("?" for _ in normalized)
-            query.append(f"WHERE UPPER(s.canonical_exchange_code) IN ({placeholders})")
+            query.append(f"WHERE UPPER(e.exchange_code) IN ({placeholders})")
             params.extend(normalized)
             if primary_only:
                 query.append(f"AND {_primary_listing_predicate()}")
         elif primary_only:
             query.append(f"WHERE {_primary_listing_predicate()}")
-        query.append("ORDER BY s.canonical_symbol")
+        query.append("ORDER BY canonical_symbol")
         with self._connect() as conn:
             rows = conn.execute(" ".join(query), params).fetchall()
         return [row[0] for row in rows]
@@ -1060,24 +1439,30 @@ class SecurityRepository(SQLiteStore):
         self.initialize_schema()
         params: List[object] = []
         query = [
-            "SELECT s.canonical_symbol,",
-            "COALESCE(s.entity_name, MAX(st.security_name), s.canonical_symbol) AS entity_name",
-            "FROM supported_tickers st",
-            "JOIN securities s ON s.security_id = st.security_id",
+            "SELECT l.symbol || '.' || e.exchange_code AS canonical_symbol,",
+            "COALESCE(i.name, l.symbol || '.' || e.exchange_code) AS entity_name",
+            "FROM provider_listing pl",
+            "JOIN listing l ON l.listing_id = pl.listing_id",
+            "JOIN issuer i ON i.issuer_id = l.issuer_id",
+            'JOIN "exchange" e ON e.exchange_id = l.exchange_id',
         ]
         if primary_only:
-            query.append(_primary_listing_left_join(security_alias="st"))
+            query.append(
+                "LEFT JOIN security_listing_status sls "
+                "ON sls.listing_id = l.listing_id "
+                f"AND sls.source_provider = '{_PRIMARY_LISTING_SOURCE_PROVIDER}'"
+            )
         normalized = _normalized_codes(exchange_codes)
         if normalized:
             placeholders = ", ".join("?" for _ in normalized)
-            query.append(f"WHERE UPPER(s.canonical_exchange_code) IN ({placeholders})")
+            query.append(f"WHERE UPPER(e.exchange_code) IN ({placeholders})")
             params.extend(normalized)
             if primary_only:
                 query.append(f"AND {_primary_listing_predicate()}")
         elif primary_only:
             query.append(f"WHERE {_primary_listing_predicate()}")
-        query.append("GROUP BY s.security_id, s.canonical_symbol, s.entity_name")
-        query.append("ORDER BY s.canonical_symbol")
+        query.append("GROUP BY l.listing_id, canonical_symbol, i.name")
+        query.append("ORDER BY canonical_symbol")
         with self._connect() as conn:
             rows = conn.execute(" ".join(query), params).fetchall()
         return [(row["canonical_symbol"], row["entity_name"]) for row in rows]
@@ -1113,7 +1498,8 @@ class ExchangeRepository(SQLiteStore):
         *,
         connection: Optional[sqlite3.Connection] = None,
     ) -> Exchange:
-        self.initialize_schema()
+        if connection is None:
+            self.initialize_schema()
         code_norm = _normalize_required_text(exchange_code, "exchange_code").upper()
         now = _utc_now_iso()
 
@@ -1179,12 +1565,14 @@ class ExchangeProviderRepository(SQLiteStore):
 
     def initialize_schema(self) -> None:
         apply_migrations(self.db_path)
+        self._provider_repo().initialize_schema()
         self._exchange_repo().initialize_schema()
         with self._connect() as conn:
             conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS exchange_provider (
-                    provider TEXT NOT NULL,
+                CREATE TABLE IF NOT EXISTS provider_exchange (
+                    provider_exchange_id INTEGER PRIMARY KEY,
+                    provider_id INTEGER NOT NULL,
                     provider_exchange_code TEXT NOT NULL,
                     exchange_id INTEGER NOT NULL,
                     name TEXT,
@@ -1194,16 +1582,36 @@ class ExchangeProviderRepository(SQLiteStore):
                     country_iso2 TEXT,
                     country_iso3 TEXT,
                     updated_at TEXT NOT NULL,
-                    PRIMARY KEY (provider, provider_exchange_code),
-                    FOREIGN KEY (provider) REFERENCES providers(provider_code),
+                    UNIQUE (provider_id, provider_exchange_code),
+                    UNIQUE (provider_exchange_id, provider_id),
+                    FOREIGN KEY (provider_id) REFERENCES provider(provider_id),
                     FOREIGN KEY (exchange_id) REFERENCES "exchange"(exchange_id)
                 )
                 """
             )
             conn.execute(
                 """
-                CREATE INDEX IF NOT EXISTS idx_exchange_provider_exchange
-                ON exchange_provider(exchange_id)
+                CREATE INDEX IF NOT EXISTS idx_provider_exchange_exchange
+                ON provider_exchange(exchange_id)
+                """
+            )
+            conn.execute("DROP VIEW IF EXISTS exchange_provider")
+            conn.execute(
+                """
+                CREATE VIEW exchange_provider AS
+                SELECT
+                    p.provider_code AS provider,
+                    ep.provider_exchange_code,
+                    ep.exchange_id,
+                    ep.name,
+                    ep.country,
+                    ep.currency,
+                    ep.operating_mic,
+                    ep.country_iso2,
+                    ep.country_iso3,
+                    ep.updated_at
+                FROM provider_exchange ep
+                JOIN provider p ON p.provider_id = ep.provider_id
                 """
             )
 
@@ -1217,6 +1625,10 @@ class ExchangeProviderRepository(SQLiteStore):
         updated_at = _utc_now_iso()
         payload: List[Tuple[object, ...]] = []
         with self._connect() as conn:
+            provider_row = self._provider_repo().ensure(
+                provider_norm,
+                connection=conn,
+            )
             for row in rows:
                 code = _normalize_optional_text(
                     row.get("Code") or row.get("provider_exchange_code")
@@ -1234,7 +1646,7 @@ class ExchangeProviderRepository(SQLiteStore):
                 )
                 payload.append(
                     (
-                        provider_norm,
+                        provider_row.provider_id,
                         code_norm,
                         exchange.exchange_id,
                         _normalize_optional_text(row.get("Name") or row.get("name")),
@@ -1257,15 +1669,11 @@ class ExchangeProviderRepository(SQLiteStore):
                     )
                 )
 
-            conn.execute(
-                "DELETE FROM exchange_provider WHERE UPPER(provider) = ?",
-                (provider_norm,),
-            )
             if payload:
                 conn.executemany(
                     """
-                    INSERT INTO exchange_provider (
-                        provider,
+                    INSERT INTO provider_exchange (
+                        provider_id,
                         provider_exchange_code,
                         exchange_id,
                         name,
@@ -1276,9 +1684,58 @@ class ExchangeProviderRepository(SQLiteStore):
                         country_iso3,
                         updated_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(provider_id, provider_exchange_code) DO UPDATE SET
+                        exchange_id = excluded.exchange_id,
+                        name = excluded.name,
+                        country = excluded.country,
+                        currency = excluded.currency,
+                        operating_mic = excluded.operating_mic,
+                        country_iso2 = excluded.country_iso2,
+                        country_iso3 = excluded.country_iso3,
+                        updated_at = excluded.updated_at
                     """,
                     payload,
                 )
+            retained_codes = {row[1] for row in payload}
+            stale_rows = conn.execute(
+                """
+                SELECT provider_exchange_id
+                FROM provider_exchange
+                WHERE provider_id = ?
+                """,
+                (provider_row.provider_id,),
+            ).fetchall()
+            for stale_row in stale_rows:
+                provider_exchange_id = int(stale_row["provider_exchange_id"])
+                current = conn.execute(
+                    """
+                    SELECT provider_exchange_code
+                    FROM provider_exchange
+                    WHERE provider_exchange_id = ?
+                    """,
+                    (provider_exchange_id,),
+                ).fetchone()
+                if current is None:
+                    continue
+                if str(current["provider_exchange_code"]) in retained_codes:
+                    continue
+                provider_listing_ref = conn.execute(
+                    """
+                    SELECT 1
+                    FROM provider_listing
+                    WHERE provider_exchange_id = ?
+                    LIMIT 1
+                    """,
+                    (provider_exchange_id,),
+                ).fetchone()
+                if provider_listing_ref is None:
+                    conn.execute(
+                        """
+                        DELETE FROM provider_exchange
+                        WHERE provider_exchange_id = ?
+                        """,
+                        (provider_exchange_id,),
+                    )
         return len(payload)
 
     def ensure_fixed_exchange(
@@ -1292,14 +1749,18 @@ class ExchangeProviderRepository(SQLiteStore):
     ) -> None:
         self.initialize_schema()
         with self._connect() as conn:
+            provider_row = self._provider_repo().ensure(
+                provider.strip().upper(),
+                connection=conn,
+            )
             exchange = self._exchange_repo().ensure(
                 canonical_exchange_code.strip().upper(),
                 connection=conn,
             )
             conn.execute(
                 """
-                INSERT INTO exchange_provider (
-                    provider,
+                INSERT INTO provider_exchange (
+                    provider_id,
                     provider_exchange_code,
                     exchange_id,
                     name,
@@ -1310,15 +1771,15 @@ class ExchangeProviderRepository(SQLiteStore):
                     country_iso3,
                     updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?)
-                ON CONFLICT(provider, provider_exchange_code) DO UPDATE SET
+                ON CONFLICT(provider_id, provider_exchange_code) DO UPDATE SET
                     exchange_id = excluded.exchange_id,
-                    name = COALESCE(excluded.name, exchange_provider.name),
-                    country = COALESCE(excluded.country, exchange_provider.country),
-                    currency = COALESCE(excluded.currency, exchange_provider.currency),
+                    name = COALESCE(excluded.name, provider_exchange.name),
+                    country = COALESCE(excluded.country, provider_exchange.country),
+                    currency = COALESCE(excluded.currency, provider_exchange.currency),
                     updated_at = excluded.updated_at
                 """,
                 (
-                    provider.strip().upper(),
+                    provider_row.provider_id,
                     provider_exchange_code.strip().upper(),
                     exchange.exchange_id,
                     _normalize_optional_text(name),
@@ -1336,7 +1797,7 @@ class ExchangeProviderRepository(SQLiteStore):
             row = conn.execute(
                 """
                 SELECT
-                    ep.provider,
+                    p.provider_code AS provider,
                     ep.provider_exchange_code,
                     ep.exchange_id,
                     e.exchange_code,
@@ -1347,9 +1808,10 @@ class ExchangeProviderRepository(SQLiteStore):
                     ep.country_iso2,
                     ep.country_iso3,
                     ep.updated_at
-                FROM exchange_provider ep
+                FROM provider_exchange ep
+                JOIN provider p ON p.provider_id = ep.provider_id
                 JOIN "exchange" e ON e.exchange_id = ep.exchange_id
-                WHERE UPPER(ep.provider) = ? AND UPPER(ep.provider_exchange_code) = ?
+                WHERE UPPER(p.provider_code) = ? AND UPPER(ep.provider_exchange_code) = ?
                 """,
                 (provider_norm, code_norm),
             ).fetchone()
@@ -1359,16 +1821,17 @@ class ExchangeProviderRepository(SQLiteStore):
         self.initialize_schema()
         params: List[object] = []
         query = [
-            "SELECT ep.provider, ep.provider_exchange_code, ep.exchange_id,",
+            "SELECT p.provider_code AS provider, ep.provider_exchange_code, ep.exchange_id,",
             "e.exchange_code, ep.name, ep.country, ep.currency, ep.operating_mic,",
             "ep.country_iso2, ep.country_iso3, ep.updated_at",
-            "FROM exchange_provider ep",
+            "FROM provider_exchange ep",
+            "JOIN provider p ON p.provider_id = ep.provider_id",
             'JOIN "exchange" e ON e.exchange_id = ep.exchange_id',
         ]
         if provider:
-            query.append("WHERE UPPER(ep.provider) = ?")
+            query.append("WHERE UPPER(p.provider_code) = ?")
             params.append(provider.strip().upper())
-        query.append("ORDER BY ep.provider, ep.provider_exchange_code")
+        query.append("ORDER BY p.provider_code, ep.provider_exchange_code")
         with self._connect() as conn:
             rows = conn.execute(" ".join(query), params).fetchall()
         return [ExchangeProvider(*row) for row in rows]
@@ -1385,57 +1848,257 @@ class SupportedTickerRepository(SQLiteStore):
 
     def initialize_schema(self) -> None:
         apply_migrations(self.db_path)
+        self._provider_repo().initialize_schema()
         self._exchange_provider_repo().initialize_schema()
         self._security_repo().initialize_schema()
         with self._connect() as conn:
             conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS supported_tickers (
-                    provider TEXT NOT NULL,
+                CREATE TABLE IF NOT EXISTS provider_listing (
+                    provider_listing_id INTEGER PRIMARY KEY,
+                    provider_id INTEGER NOT NULL,
+                    provider_exchange_id INTEGER NOT NULL,
                     provider_symbol TEXT NOT NULL,
-                    provider_ticker TEXT NOT NULL,
-                    provider_exchange_code TEXT NOT NULL,
-                    security_id INTEGER NOT NULL,
-                    listing_exchange TEXT,
-                    security_name TEXT,
-                    security_type TEXT,
-                    country TEXT,
                     currency TEXT,
-                    isin TEXT,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY (provider, provider_symbol)
+                    listing_id INTEGER NOT NULL,
+                    UNIQUE (provider_exchange_id, provider_symbol),
+                    FOREIGN KEY (provider_id) REFERENCES provider(provider_id),
+                    FOREIGN KEY (provider_exchange_id) REFERENCES provider_exchange(provider_exchange_id),
+                    FOREIGN KEY (listing_id) REFERENCES listing(listing_id),
+                    FOREIGN KEY (provider_exchange_id, provider_id)
+                        REFERENCES provider_exchange(provider_exchange_id, provider_id)
                 )
                 """
             )
             conn.execute(
                 """
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_supported_tickers_provider_exchange_ticker
-                ON supported_tickers(provider, provider_exchange_code, provider_ticker)
+                CREATE INDEX IF NOT EXISTS idx_provider_listing_provider
+                ON provider_listing(provider_id)
                 """
             )
             conn.execute(
                 """
-                CREATE INDEX IF NOT EXISTS idx_supported_tickers_provider_exchange
-                ON supported_tickers(provider, provider_exchange_code)
+                CREATE INDEX IF NOT EXISTS idx_provider_listing_listing
+                ON provider_listing(listing_id)
                 """
             )
             conn.execute(
                 """
-                CREATE INDEX IF NOT EXISTS idx_supported_tickers_security
-                ON supported_tickers(security_id)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_supported_tickers_currency_nonnull
-                ON supported_tickers(currency)
+                CREATE INDEX IF NOT EXISTS idx_provider_listing_currency_nonnull
+                ON provider_listing(currency)
                 WHERE currency IS NOT NULL
                 """
             )
+            _ensure_provider_listing_catalog_views(conn)
         FundamentalsRepository(self.db_path).initialize_schema()
         FundamentalsFetchStateRepository(self.db_path).initialize_schema()
         MarketDataRepository(self.db_path).initialize_schema()
         MarketDataFetchStateRepository(self.db_path).initialize_schema()
+
+    @staticmethod
+    def _catalog_select_columns(alias: str = "catalog") -> str:
+        return (
+            f"{alias}.provider, {alias}.provider_exchange_code, "
+            f"{alias}.provider_symbol, {alias}.provider_ticker, "
+            f"{alias}.security_id, {alias}.listing_exchange, "
+            f"{alias}.security_name, {alias}.security_type, "
+            f"{alias}.country, {alias}.currency, {alias}.isin, {alias}.updated_at"
+        )
+
+    def _ensure_provider_exchange_row(
+        self,
+        conn: sqlite3.Connection,
+        provider: str,
+        provider_exchange_code: str,
+        *,
+        canonical_exchange_code: Optional[str] = None,
+        name: Optional[str] = None,
+        country: Optional[str] = None,
+        currency: Optional[str] = None,
+        operating_mic: Optional[str] = None,
+        country_iso2: Optional[str] = None,
+        country_iso3: Optional[str] = None,
+    ) -> sqlite3.Row:
+        provider_row = self._provider_repo().ensure(provider, connection=conn)
+        exchange_code = (
+            _normalize_optional_text(canonical_exchange_code) or provider_exchange_code
+        ).upper()
+        exchange = self._exchange_repo().ensure(exchange_code, connection=conn)
+        now = _utc_now_iso()
+        conn.execute(
+            """
+            INSERT INTO provider_exchange (
+                provider_id,
+                provider_exchange_code,
+                exchange_id,
+                name,
+                country,
+                currency,
+                operating_mic,
+                country_iso2,
+                country_iso3,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(provider_id, provider_exchange_code) DO UPDATE SET
+                exchange_id = excluded.exchange_id,
+                name = COALESCE(excluded.name, provider_exchange.name),
+                country = COALESCE(excluded.country, provider_exchange.country),
+                currency = COALESCE(excluded.currency, provider_exchange.currency),
+                operating_mic = COALESCE(excluded.operating_mic, provider_exchange.operating_mic),
+                country_iso2 = COALESCE(excluded.country_iso2, provider_exchange.country_iso2),
+                country_iso3 = COALESCE(excluded.country_iso3, provider_exchange.country_iso3),
+                updated_at = excluded.updated_at
+            """,
+            (
+                provider_row.provider_id,
+                provider_exchange_code,
+                exchange.exchange_id,
+                _normalize_optional_text(name),
+                _normalize_optional_text(country),
+                _normalize_optional_text(currency),
+                _normalize_optional_text(operating_mic),
+                _normalize_optional_text(country_iso2),
+                _normalize_optional_text(country_iso3),
+                now,
+            ),
+        )
+        row = conn.execute(
+            """
+            SELECT
+                ep.provider_exchange_id,
+                ep.provider_id,
+                ep.provider_exchange_code,
+                e.exchange_code
+            FROM provider_exchange ep
+            JOIN "exchange" e ON e.exchange_id = ep.exchange_id
+            WHERE ep.provider_id = ? AND ep.provider_exchange_code = ?
+            """,
+            (provider_row.provider_id, provider_exchange_code),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(
+                f"Failed to persist provider exchange {provider}:{provider_exchange_code}"
+            )
+        return row
+
+    def _ensure_provider_listing(
+        self,
+        conn: sqlite3.Connection,
+        provider: str,
+        symbol: str,
+        *,
+        exchange_code: Optional[str] = None,
+        currency: Optional[str] = None,
+        entity_name: Optional[str] = None,
+    ) -> sqlite3.Row:
+        provider_norm, bare_symbol, provider_exchange_code, _ = (
+            _normalize_provider_identity(
+                provider,
+                symbol,
+                exchange_code,
+            )
+        )
+        provider_exchange_row = self._ensure_provider_exchange_row(
+            conn,
+            provider_norm,
+            provider_exchange_code,
+        )
+        security = self._security_repo().ensure(
+            bare_symbol,
+            str(provider_exchange_row["exchange_code"]),
+            entity_name=entity_name,
+            connection=conn,
+        )
+        conn.execute(
+            """
+            INSERT INTO provider_listing (
+                provider_id,
+                provider_exchange_id,
+                provider_symbol,
+                currency,
+                listing_id
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(provider_exchange_id, provider_symbol) DO UPDATE SET
+                currency = COALESCE(excluded.currency, provider_listing.currency),
+                listing_id = excluded.listing_id
+            """,
+            (
+                int(provider_exchange_row["provider_id"]),
+                int(provider_exchange_row["provider_exchange_id"]),
+                bare_symbol,
+                _normalize_optional_text(currency.upper() if currency else None),
+                security.security_id,
+            ),
+        )
+        row = conn.execute(
+            """
+            SELECT *
+            FROM provider_listing_catalog
+            WHERE provider = ?
+              AND provider_exchange_code = ?
+              AND provider_ticker = ?
+            """,
+            (provider_norm, provider_exchange_code, bare_symbol),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(
+                f"Failed to persist provider listing {provider_norm}:{bare_symbol}.{provider_exchange_code}"
+            )
+        return row
+
+    def _delete_provider_listing_ids(
+        self,
+        conn: sqlite3.Connection,
+        provider_listing_ids: Sequence[int],
+    ) -> None:
+        normalized = sorted({int(value) for value in provider_listing_ids if value})
+        if not normalized:
+            return
+        for chunk in _batched(normalized, 500):
+            placeholders = ", ".join("?" for _ in chunk)
+            conn.execute(
+                f"""
+                DELETE FROM fundamentals_raw
+                WHERE provider_listing_id IN ({placeholders})
+                """,
+                list(chunk),
+            )
+            conn.execute(
+                f"""
+                DELETE FROM fundamentals_fetch_state
+                WHERE provider_listing_id IN ({placeholders})
+                """,
+                list(chunk),
+            )
+            conn.execute(
+                f"""
+                DELETE FROM fundamentals_normalization_state
+                WHERE provider_listing_id IN ({placeholders})
+                """,
+                list(chunk),
+            )
+            conn.execute(
+                f"""
+                DELETE FROM market_data_fetch_state
+                WHERE provider_listing_id IN ({placeholders})
+                """,
+                list(chunk),
+            )
+            conn.execute(
+                f"""
+                DELETE FROM security_listing_status
+                WHERE provider_listing_id IN ({placeholders})
+                   OR primary_provider_listing_id IN ({placeholders})
+                """,
+                [*chunk, *chunk],
+            )
+            conn.execute(
+                f"""
+                DELETE FROM provider_listing
+                WHERE provider_listing_id IN ({placeholders})
+                """,
+                list(chunk),
+            )
 
     def replace_from_listings(
         self,
@@ -1446,13 +2109,42 @@ class SupportedTickerRepository(SQLiteStore):
         self.initialize_schema()
         provider_norm = provider.strip().upper()
         provider_exchange_code = exchange_code.strip().upper()
-        payload = [
-            self._payload_from_listing(provider_norm, provider_exchange_code, listing)
-            for listing in listings
-        ]
-        rows = [row for row in payload if row is not None]
-        self._replace_payload(provider_norm, provider_exchange_code, rows)
-        return len(rows)
+        retained_tickers: List[str] = []
+        with self._connect() as conn:
+            provider_exchange_row = self._ensure_provider_exchange_row(
+                conn,
+                provider_norm,
+                provider_exchange_code,
+            )
+            for listing in listings:
+                symbol = listing.symbol.strip().upper()
+                bare_symbol, _ = _normalize_symbol_base(symbol)
+                if not bare_symbol:
+                    continue
+                retained_tickers.append(bare_symbol)
+                self._ensure_provider_listing(
+                    conn,
+                    provider_norm,
+                    symbol,
+                    exchange_code=provider_exchange_code,
+                    currency=listing.currency,
+                    entity_name=listing.security_name,
+                )
+            existing_rows = conn.execute(
+                """
+                SELECT provider_listing_id, provider_symbol
+                FROM provider_listing
+                WHERE provider_exchange_id = ?
+                """,
+                (int(provider_exchange_row["provider_exchange_id"]),),
+            ).fetchall()
+            to_delete = [
+                int(row["provider_listing_id"])
+                for row in existing_rows
+                if str(row["provider_symbol"]) not in set(retained_tickers)
+            ]
+            self._delete_provider_listing_ids(conn, to_delete)
+        return len(retained_tickers)
 
     def replace_for_exchange(
         self,
@@ -1463,15 +2155,58 @@ class SupportedTickerRepository(SQLiteStore):
         self.initialize_schema()
         provider_norm = provider.strip().upper()
         provider_exchange_code = exchange_code.strip().upper()
-        payload: List[Tuple[object, ...]] = []
-        for row in rows:
-            prepared = self._payload_from_row(
-                provider_norm, provider_exchange_code, row
+        retained_tickers: List[str] = []
+        with self._connect() as conn:
+            provider_exchange_row = self._ensure_provider_exchange_row(
+                conn,
+                provider_norm,
+                provider_exchange_code,
             )
-            if prepared is not None:
-                payload.append(prepared)
-        self._replace_payload(provider_norm, provider_exchange_code, payload)
-        return len(payload)
+            for row in rows:
+                code = _normalize_optional_text(row.get("Code") or row.get("code"))
+                if not code:
+                    continue
+                bare_symbol = code.upper()
+                retained_tickers.append(bare_symbol)
+                self._ensure_provider_exchange_row(
+                    conn,
+                    provider_norm,
+                    provider_exchange_code,
+                    canonical_exchange_code=(
+                        row.get("CanonicalExchangeCode")
+                        or row.get("canonical_exchange_code")
+                    ),
+                    name=row.get("Name") or row.get("name"),
+                    country=row.get("Country") or row.get("country"),
+                    currency=row.get("Currency") or row.get("currency"),
+                    operating_mic=row.get("OperatingMIC") or row.get("operating_mic"),
+                    country_iso2=row.get("CountryISO2") or row.get("country_iso2"),
+                    country_iso3=row.get("CountryISO3") or row.get("country_iso3"),
+                )
+                self._ensure_provider_listing(
+                    conn,
+                    provider_norm,
+                    bare_symbol,
+                    exchange_code=provider_exchange_code,
+                    currency=row.get("Currency") or row.get("currency"),
+                    entity_name=row.get("Name") or row.get("name"),
+                )
+            existing_rows = conn.execute(
+                """
+                SELECT provider_listing_id, provider_symbol
+                FROM provider_listing
+                WHERE provider_exchange_id = ?
+                """,
+                (int(provider_exchange_row["provider_exchange_id"]),),
+            ).fetchall()
+            retained = set(retained_tickers)
+            to_delete = [
+                int(row["provider_listing_id"])
+                for row in existing_rows
+                if str(row["provider_symbol"]) not in retained
+            ]
+            self._delete_provider_listing_ids(conn, to_delete)
+        return len(retained_tickers)
 
     def fetch_for_symbol(self, provider: str, symbol: str) -> Optional[SupportedTicker]:
         self.initialize_schema()
@@ -1479,12 +2214,10 @@ class SupportedTickerRepository(SQLiteStore):
         symbol_norm = symbol.strip().upper()
         with self._connect() as conn:
             row = conn.execute(
-                """
-                SELECT provider, provider_exchange_code, provider_symbol, provider_ticker,
-                       security_id, listing_exchange, security_name, security_type,
-                       country, currency, isin, updated_at
-                FROM supported_tickers
-                WHERE UPPER(provider) = ? AND UPPER(provider_symbol) = ?
+                f"""
+                SELECT {self._catalog_select_columns()}
+                FROM provider_listing_catalog catalog
+                WHERE UPPER(catalog.provider) = ? AND UPPER(catalog.provider_symbol) = ?
                 """,
                 (provider_norm, symbol_norm),
             ).fetchone()
@@ -1504,27 +2237,31 @@ class SupportedTickerRepository(SQLiteStore):
         provider_norm = provider.strip().upper()
         params: List[object] = [provider_norm]
         query = [
-            "SELECT st.provider, st.provider_exchange_code, st.provider_symbol, st.provider_ticker,",
-            "st.security_id, st.listing_exchange, st.security_name, st.security_type,",
-            "st.country, st.currency, st.isin, st.updated_at",
-            "FROM supported_tickers st",
+            f"SELECT {self._catalog_select_columns('catalog')}",
+            "FROM provider_listing_catalog catalog",
         ]
         if primary_only:
-            query.append(_primary_listing_left_join(security_alias="st"))
-        query.append("WHERE UPPER(st.provider) = ?")
+            query.append(
+                "LEFT JOIN security_listing_status sls "
+                "ON sls.listing_id = catalog.security_id "
+                f"AND sls.source_provider = '{_PRIMARY_LISTING_SOURCE_PROVIDER}'"
+            )
+        query.append("WHERE UPPER(catalog.provider) = ?")
         normalized_codes = _normalized_codes(exchange_codes)
         if normalized_codes:
             placeholders = ", ".join("?" for _ in normalized_codes)
-            query.append(f"AND UPPER(st.provider_exchange_code) IN ({placeholders})")
+            query.append(
+                f"AND UPPER(catalog.provider_exchange_code) IN ({placeholders})"
+            )
             params.extend(normalized_codes)
         normalized_symbols = _normalized_codes(provider_symbols)
         if normalized_symbols:
             placeholders = ", ".join("?" for _ in normalized_symbols)
-            query.append(f"AND UPPER(st.provider_symbol) IN ({placeholders})")
+            query.append(f"AND UPPER(catalog.provider_symbol) IN ({placeholders})")
             params.extend(normalized_symbols)
         if primary_only:
             query.append(f"AND {_primary_listing_predicate()}")
-        query.append("ORDER BY st.provider_exchange_code, st.provider_symbol")
+        query.append("ORDER BY catalog.provider_exchange_code, catalog.provider_symbol")
         with self._connect() as conn:
             rows = conn.execute(" ".join(query), params).fetchall()
         return [SupportedTicker(*row) for row in rows]
@@ -1582,7 +2319,7 @@ class SupportedTickerRepository(SQLiteStore):
     def available_exchanges(self, provider: Optional[str] = None) -> List[str]:
         self.initialize_schema()
         params: List[object] = []
-        query = ["SELECT DISTINCT provider_exchange_code FROM supported_tickers"]
+        query = ["SELECT DISTINCT provider_exchange_code FROM provider_listing_catalog"]
         if provider:
             query.append("WHERE UPPER(provider) = ?")
             params.append(provider.strip().upper())
@@ -1597,17 +2334,21 @@ class SupportedTickerRepository(SQLiteStore):
         exchange_code: Optional[str] = None,
     ) -> int:
         self.initialize_schema()
-        params: List[object] = []
-        query = ["DELETE FROM supported_tickers WHERE 1 = 1"]
-        if provider:
-            query.append("AND UPPER(provider) = ?")
-            params.append(provider.strip().upper())
-        if exchange_code:
-            query.append("AND UPPER(provider_exchange_code) = ?")
-            params.append(exchange_code.strip().upper())
         with self._connect() as conn:
-            cursor = conn.execute(" ".join(query), params)
-        return int(cursor.rowcount or 0)
+            params: List[object] = []
+            query = [
+                "SELECT provider_listing_id FROM provider_listing_catalog WHERE 1 = 1"
+            ]
+            if provider:
+                query.append("AND UPPER(provider) = ?")
+                params.append(provider.strip().upper())
+            if exchange_code:
+                query.append("AND UPPER(provider_exchange_code) = ?")
+                params.append(exchange_code.strip().upper())
+            rows = conn.execute(" ".join(query), params).fetchall()
+            provider_listing_ids = [int(row["provider_listing_id"]) for row in rows]
+            self._delete_provider_listing_ids(conn, provider_listing_ids)
+        return len(provider_listing_ids)
 
     def delete_symbols(self, provider: str, symbols: Sequence[str]) -> int:
         self.initialize_schema()
@@ -1616,14 +2357,17 @@ class SupportedTickerRepository(SQLiteStore):
             return 0
         placeholders = ", ".join("?" for _ in normalized)
         with self._connect() as conn:
-            cursor = conn.execute(
+            rows = conn.execute(
                 f"""
-                DELETE FROM supported_tickers
+                SELECT provider_listing_id
+                FROM provider_listing_catalog
                 WHERE UPPER(provider) = ? AND UPPER(provider_symbol) IN ({placeholders})
                 """,
                 [provider.strip().upper(), *normalized],
-            )
-        return int(cursor.rowcount or 0)
+            ).fetchall()
+            provider_listing_ids = [int(row["provider_listing_id"]) for row in rows]
+            self._delete_provider_listing_ids(conn, provider_listing_ids)
+        return len(provider_listing_ids)
 
     def list_for_exchange(
         self,
@@ -1645,19 +2389,23 @@ class SupportedTickerRepository(SQLiteStore):
     ) -> Optional[str]:
         self.initialize_schema()
         symbol_norm = symbol.strip().upper()
-        params: List[object] = [symbol_norm, symbol_norm]
+        params: List[object] = []
         query = [
-            "SELECT st.currency",
-            "FROM supported_tickers st",
-            "JOIN securities s ON s.security_id = st.security_id",
-            "WHERE st.currency IS NOT NULL",
-            "AND (UPPER(st.provider_symbol) = ? OR UPPER(s.canonical_symbol) = ?)",
+            "SELECT catalog.currency",
+            "FROM provider_listing_catalog catalog",
+            "JOIN listing l ON l.listing_id = catalog.security_id",
+            'JOIN "exchange" e ON e.exchange_id = l.exchange_id',
+            "WHERE catalog.currency IS NOT NULL",
         ]
         if provider:
-            query.append("AND UPPER(st.provider) = ?")
             params.append(provider.strip().upper())
+            query.append("AND UPPER(catalog.provider) = ?")
+        params.extend([symbol_norm, symbol_norm])
         query.append(
-            "ORDER BY CASE WHEN st.provider = 'EODHD' THEN 0 WHEN st.provider = 'SEC' THEN 1 ELSE 2 END, st.updated_at DESC"
+            "AND (UPPER(catalog.provider_symbol) = ? OR UPPER(l.symbol || '.' || e.exchange_code) = ?)"
+        )
+        query.append(
+            "ORDER BY CASE WHEN catalog.provider = 'EODHD' THEN 0 WHEN catalog.provider = 'SEC' THEN 1 ELSE 2 END"
         )
         query.append("LIMIT 1")
         with self._connect() as conn:
@@ -1686,22 +2434,21 @@ class SupportedTickerRepository(SQLiteStore):
         def _apply_scope_filters(query: List[str], params: List[object]) -> None:
             if normalized_codes:
                 placeholders = ", ".join("?" for _ in normalized_codes)
-                query.append(f"AND st.provider_exchange_code IN ({placeholders})")
+                query.append(f"AND catalog.provider_exchange_code IN ({placeholders})")
                 params.extend(normalized_codes)
             if normalized_symbols:
                 placeholders = ", ".join("?" for _ in normalized_symbols)
-                query.append(f"AND st.provider_symbol IN ({placeholders})")
+                query.append(f"AND catalog.provider_symbol IN ({placeholders})")
                 params.extend(normalized_symbols)
 
         def _fetch_missing(limit: Optional[int]) -> List[SupportedTicker]:
-            params: List[object] = [provider_norm, provider_norm]
+            params: List[object] = [provider_norm]
             query = [
-                "SELECT st.provider, st.provider_exchange_code, st.provider_symbol, st.provider_ticker,",
-                "st.security_id, st.listing_exchange, st.security_name, st.security_type,",
-                "st.country, st.currency, st.isin, st.updated_at",
-                "FROM supported_tickers st",
-                "LEFT JOIN fundamentals_fetch_state fs ON fs.provider = ? AND fs.provider_symbol = st.provider_symbol",
-                "WHERE st.provider = ?",
+                f"SELECT {self._catalog_select_columns('catalog')}",
+                "FROM provider_listing_catalog catalog",
+                "LEFT JOIN fundamentals_fetch_state fs "
+                "ON fs.provider_listing_id = catalog.provider_listing_id",
+                "WHERE catalog.provider = ?",
                 "AND fs.last_fetched_at IS NULL",
             ]
             _apply_scope_filters(query, params)
@@ -1710,7 +2457,7 @@ class SupportedTickerRepository(SQLiteStore):
                     "AND (fs.next_eligible_at IS NULL OR fs.next_eligible_at <= ?)"
                 )
                 params.append(now.isoformat())
-            query.append("ORDER BY st.provider_symbol ASC")
+            query.append("ORDER BY catalog.provider_symbol ASC")
             if limit is not None:
                 query.append("LIMIT ?")
                 params.append(limit)
@@ -1719,15 +2466,13 @@ class SupportedTickerRepository(SQLiteStore):
             return [SupportedTicker(*row) for row in rows]
 
         def _fetch_stale(limit: Optional[int], cutoff: str) -> List[SupportedTicker]:
-            params: List[object] = [provider_norm, provider_norm, cutoff]
+            params: List[object] = [provider_norm, cutoff]
             query = [
-                "SELECT st.provider, st.provider_exchange_code, st.provider_symbol, st.provider_ticker,",
-                "st.security_id, st.listing_exchange, st.security_name, st.security_type,",
-                "st.country, st.currency, st.isin, st.updated_at",
+                f"SELECT {self._catalog_select_columns('catalog')}",
                 "FROM fundamentals_fetch_state fs",
-                "JOIN supported_tickers st ON st.provider = fs.provider AND st.provider_symbol = fs.provider_symbol",
-                "WHERE fs.provider = ?",
-                "AND st.provider = ?",
+                "JOIN provider_listing_catalog catalog "
+                "ON catalog.provider_listing_id = fs.provider_listing_id",
+                "WHERE catalog.provider = ?",
                 "AND fs.last_fetched_at IS NOT NULL",
                 "AND fs.last_fetched_at <= ?",
             ]
@@ -1737,7 +2482,7 @@ class SupportedTickerRepository(SQLiteStore):
                     "AND (fs.next_eligible_at IS NULL OR fs.next_eligible_at <= ?)"
                 )
                 params.append(now.isoformat())
-            query.append("ORDER BY fs.last_fetched_at ASC, fs.provider_symbol ASC")
+            query.append("ORDER BY fs.last_fetched_at ASC, catalog.provider_symbol ASC")
             if limit is not None:
                 query.append("LIMIT ?")
                 params.append(limit)
@@ -1746,14 +2491,13 @@ class SupportedTickerRepository(SQLiteStore):
             return [SupportedTicker(*row) for row in rows]
 
         if max_age_days is None and not missing_only:
-            params: List[object] = [provider_norm, provider_norm]
+            params: List[object] = [provider_norm]
             query = [
-                "SELECT st.provider, st.provider_exchange_code, st.provider_symbol, st.provider_ticker,",
-                "st.security_id, st.listing_exchange, st.security_name, st.security_type,",
-                "st.country, st.currency, st.isin, st.updated_at",
-                "FROM supported_tickers st",
-                "LEFT JOIN fundamentals_fetch_state fs ON fs.provider = ? AND fs.provider_symbol = st.provider_symbol",
-                "WHERE st.provider = ?",
+                f"SELECT {self._catalog_select_columns('catalog')}",
+                "FROM provider_listing_catalog catalog",
+                "LEFT JOIN fundamentals_fetch_state fs "
+                "ON fs.provider_listing_id = catalog.provider_listing_id",
+                "WHERE catalog.provider = ?",
             ]
             _apply_scope_filters(query, params)
             if respect_backoff:
@@ -1761,7 +2505,7 @@ class SupportedTickerRepository(SQLiteStore):
                     "AND (fs.next_eligible_at IS NULL OR fs.next_eligible_at <= ?)"
                 )
                 params.append(now.isoformat())
-            query.append("ORDER BY st.provider_symbol ASC")
+            query.append("ORDER BY catalog.provider_symbol ASC")
             if max_symbols is not None:
                 query.append("LIMIT ?")
                 params.append(max_symbols)
@@ -1830,23 +2574,24 @@ class SupportedTickerRepository(SQLiteStore):
         normalized_codes = _normalized_codes(exchange_codes)
         query = [
             "SELECT",
-            "st.provider_exchange_code AS exchange_code,",
+            "catalog.provider_exchange_code AS exchange_code,",
             "COUNT(*) AS total_supported,",
             "SUM(CASE WHEN fs.last_fetched_at IS NOT NULL THEN 1 ELSE 0 END) AS stored,",
             "SUM(CASE WHEN fs.last_fetched_at IS NULL THEN 1 ELSE 0 END) AS missing,",
             f"{stale_expr} AS stale,",
             "SUM(CASE WHEN fs.next_eligible_at IS NOT NULL AND fs.next_eligible_at > ? THEN 1 ELSE 0 END) AS blocked,",
             "SUM(CASE WHEN fs.last_status = 'error' THEN 1 ELSE 0 END) AS error_rows",
-            "FROM supported_tickers st",
-            "LEFT JOIN fundamentals_fetch_state fs ON fs.provider = st.provider AND fs.provider_symbol = st.provider_symbol",
-            "WHERE st.provider = ?",
+            "FROM provider_listing_catalog catalog",
+            "LEFT JOIN fundamentals_fetch_state fs "
+            "ON fs.provider_listing_id = catalog.provider_listing_id",
+            "WHERE catalog.provider = ?",
         ]
         if normalized_codes:
             placeholders = ", ".join("?" for _ in normalized_codes)
-            query.append(f"AND st.provider_exchange_code IN ({placeholders})")
+            query.append(f"AND catalog.provider_exchange_code IN ({placeholders})")
             params.extend(normalized_codes)
-        query.append("GROUP BY st.provider_exchange_code")
-        query.append("ORDER BY st.provider_exchange_code")
+        query.append("GROUP BY catalog.provider_exchange_code")
+        query.append("ORDER BY catalog.provider_exchange_code")
         with self._connect() as conn:
             rows = conn.execute(" ".join(query), params).fetchall()
         return [
@@ -1870,21 +2615,23 @@ class SupportedTickerRepository(SQLiteStore):
     ) -> List[IngestProgressFailure]:
         self.initialize_schema()
         provider_norm = provider.strip().upper()
-        params: List[object] = [provider_norm, provider_norm]
+        params: List[object] = [provider_norm]
         query = [
-            "SELECT st.provider_symbol AS symbol, st.provider_exchange_code AS exchange_code,",
+            "SELECT catalog.provider_symbol AS symbol, catalog.provider_exchange_code AS exchange_code,",
             "fs.last_status, fs.last_error, fs.next_eligible_at, fs.attempts",
-            "FROM supported_tickers st",
-            "JOIN fundamentals_fetch_state fs ON fs.provider = ? AND fs.provider_symbol = st.provider_symbol",
-            "WHERE st.provider = ? AND fs.last_status = 'error'",
+            "FROM provider_listing_catalog catalog",
+            "JOIN fundamentals_fetch_state fs "
+            "ON fs.provider_listing_id = catalog.provider_listing_id",
+            "WHERE catalog.provider = ? AND fs.last_status = 'error'",
         ]
         normalized_codes = _normalized_codes(exchange_codes)
         if normalized_codes:
             placeholders = ", ".join("?" for _ in normalized_codes)
-            query.append(f"AND st.provider_exchange_code IN ({placeholders})")
+            query.append(f"AND catalog.provider_exchange_code IN ({placeholders})")
             params.extend(normalized_codes)
         query.append(
-            "ORDER BY CASE WHEN fs.next_eligible_at IS NULL THEN 1 ELSE 0 END, fs.next_eligible_at ASC, st.provider_symbol ASC"
+            "ORDER BY CASE WHEN fs.next_eligible_at IS NULL THEN 1 ELSE 0 END, "
+            "fs.next_eligible_at ASC, catalog.provider_symbol ASC"
         )
         query.append("LIMIT ?")
         params.append(limit)
@@ -1917,31 +2664,35 @@ class SupportedTickerRepository(SQLiteStore):
         provider_norm = provider.strip().upper()
         now = datetime.now(timezone.utc)
         cutoff = (now.date() - timedelta(days=max_age_days)).isoformat()
-        params: List[object] = [provider_norm, provider_norm]
+        params: List[object] = [provider_norm]
         query = [
-            "SELECT st.provider, st.provider_exchange_code, st.provider_symbol, st.provider_ticker,",
-            "st.security_id, st.listing_exchange, st.security_name, st.security_type,",
-            "st.country, st.currency, st.isin, st.updated_at",
-            "FROM supported_tickers st",
+            f"SELECT {self._catalog_select_columns('catalog')}",
+            "FROM provider_listing_catalog catalog",
             "LEFT JOIN (",
-            "    SELECT security_id, MAX(as_of) AS latest_as_of",
+            "    SELECT listing_id, MAX(as_of) AS latest_as_of",
             "    FROM market_data",
-            "    GROUP BY security_id",
-            ") md ON md.security_id = st.security_id",
-            "LEFT JOIN market_data_fetch_state ms ON ms.provider = ? AND ms.provider_symbol = st.provider_symbol",
-            "WHERE st.provider = ?",
+            "    GROUP BY listing_id",
+            ") md ON md.listing_id = catalog.security_id",
+            "LEFT JOIN market_data_fetch_state ms "
+            "ON ms.provider_listing_id = catalog.provider_listing_id",
+            "WHERE catalog.provider = ?",
         ]
         if primary_only:
-            query.insert(4, _primary_listing_left_join(security_alias="st"))
+            query.insert(
+                2,
+                "LEFT JOIN security_listing_status sls "
+                "ON sls.listing_id = catalog.security_id "
+                f"AND sls.source_provider = '{_PRIMARY_LISTING_SOURCE_PROVIDER}'",
+            )
         normalized_codes = _normalized_codes(exchange_codes)
         if normalized_codes:
             placeholders = ", ".join("?" for _ in normalized_codes)
-            query.append(f"AND st.provider_exchange_code IN ({placeholders})")
+            query.append(f"AND catalog.provider_exchange_code IN ({placeholders})")
             params.extend(normalized_codes)
         normalized_symbols = _normalized_codes(provider_symbols)
         if normalized_symbols:
             placeholders = ", ".join("?" for _ in normalized_symbols)
-            query.append(f"AND st.provider_symbol IN ({placeholders})")
+            query.append(f"AND catalog.provider_symbol IN ({placeholders})")
             params.extend(normalized_symbols)
         if primary_only:
             query.append(f"AND {_primary_listing_predicate()}")
@@ -1953,7 +2704,8 @@ class SupportedTickerRepository(SQLiteStore):
             )
             params.append(now.isoformat())
         query.append(
-            "ORDER BY CASE WHEN md.latest_as_of IS NULL THEN 0 ELSE 1 END, md.latest_as_of ASC, st.provider_exchange_code ASC, st.provider_symbol ASC"
+            "ORDER BY CASE WHEN md.latest_as_of IS NULL THEN 0 ELSE 1 END, "
+            "md.latest_as_of ASC, catalog.provider_exchange_code ASC, catalog.provider_symbol ASC"
         )
         if max_symbols is not None:
             query.append("LIMIT ?")
@@ -1976,7 +2728,7 @@ class SupportedTickerRepository(SQLiteStore):
         cutoff = (
             datetime.now(timezone.utc).date() - timedelta(days=max_age_days)
         ).isoformat()
-        params: List[object] = [cutoff, now, provider_norm, provider_norm]
+        params: List[object] = [cutoff, now, provider_norm]
         query = [
             "SELECT",
             "COUNT(*) AS total_supported,",
@@ -1985,21 +2737,27 @@ class SupportedTickerRepository(SQLiteStore):
             "SUM(CASE WHEN md.latest_as_of IS NOT NULL AND md.latest_as_of <= ? THEN 1 ELSE 0 END) AS stale,",
             "SUM(CASE WHEN ms.next_eligible_at IS NOT NULL AND ms.next_eligible_at > ? THEN 1 ELSE 0 END) AS blocked,",
             "SUM(CASE WHEN ms.last_status = 'error' THEN 1 ELSE 0 END) AS error_rows",
-            "FROM supported_tickers st",
+            "FROM provider_listing_catalog catalog",
             "LEFT JOIN (",
-            "    SELECT security_id, MAX(as_of) AS latest_as_of",
+            "    SELECT listing_id, MAX(as_of) AS latest_as_of",
             "    FROM market_data",
-            "    GROUP BY security_id",
-            ") md ON md.security_id = st.security_id",
-            "LEFT JOIN market_data_fetch_state ms ON ms.provider = ? AND ms.provider_symbol = st.provider_symbol",
-            "WHERE st.provider = ?",
+            "    GROUP BY listing_id",
+            ") md ON md.listing_id = catalog.security_id",
+            "LEFT JOIN market_data_fetch_state ms "
+            "ON ms.provider_listing_id = catalog.provider_listing_id",
+            "WHERE catalog.provider = ?",
         ]
         if primary_only:
-            query.insert(8, _primary_listing_left_join(security_alias="st"))
+            query.insert(
+                8,
+                "LEFT JOIN security_listing_status sls "
+                "ON sls.listing_id = catalog.security_id "
+                f"AND sls.source_provider = '{_PRIMARY_LISTING_SOURCE_PROVIDER}'",
+            )
         normalized_codes = _normalized_codes(exchange_codes)
         if normalized_codes:
             placeholders = ", ".join("?" for _ in normalized_codes)
-            query.append(f"AND st.provider_exchange_code IN ({placeholders})")
+            query.append(f"AND catalog.provider_exchange_code IN ({placeholders})")
             params.extend(normalized_codes)
         if primary_only:
             query.append(f"AND {_primary_listing_predicate()}")
@@ -2028,36 +2786,42 @@ class SupportedTickerRepository(SQLiteStore):
         cutoff = (
             datetime.now(timezone.utc).date() - timedelta(days=max_age_days)
         ).isoformat()
-        params: List[object] = [cutoff, now, provider_norm, provider_norm]
+        params: List[object] = [cutoff, now, provider_norm]
         query = [
             "SELECT",
-            "st.provider_exchange_code AS exchange_code,",
+            "catalog.provider_exchange_code AS exchange_code,",
             "COUNT(*) AS total_supported,",
             "SUM(CASE WHEN md.latest_as_of IS NOT NULL THEN 1 ELSE 0 END) AS stored,",
             "SUM(CASE WHEN md.latest_as_of IS NULL THEN 1 ELSE 0 END) AS missing,",
             "SUM(CASE WHEN md.latest_as_of IS NOT NULL AND md.latest_as_of <= ? THEN 1 ELSE 0 END) AS stale,",
             "SUM(CASE WHEN ms.next_eligible_at IS NOT NULL AND ms.next_eligible_at > ? THEN 1 ELSE 0 END) AS blocked,",
             "SUM(CASE WHEN ms.last_status = 'error' THEN 1 ELSE 0 END) AS error_rows",
-            "FROM supported_tickers st",
+            "FROM provider_listing_catalog catalog",
             "LEFT JOIN (",
-            "    SELECT security_id, MAX(as_of) AS latest_as_of",
+            "    SELECT listing_id, MAX(as_of) AS latest_as_of",
             "    FROM market_data",
-            "    GROUP BY security_id",
-            ") md ON md.security_id = st.security_id",
-            "LEFT JOIN market_data_fetch_state ms ON ms.provider = ? AND ms.provider_symbol = st.provider_symbol",
-            "WHERE st.provider = ?",
+            "    GROUP BY listing_id",
+            ") md ON md.listing_id = catalog.security_id",
+            "LEFT JOIN market_data_fetch_state ms "
+            "ON ms.provider_listing_id = catalog.provider_listing_id",
+            "WHERE catalog.provider = ?",
         ]
         if primary_only:
-            query.insert(9, _primary_listing_left_join(security_alias="st"))
+            query.insert(
+                9,
+                "LEFT JOIN security_listing_status sls "
+                "ON sls.listing_id = catalog.security_id "
+                f"AND sls.source_provider = '{_PRIMARY_LISTING_SOURCE_PROVIDER}'",
+            )
         normalized_codes = _normalized_codes(exchange_codes)
         if normalized_codes:
             placeholders = ", ".join("?" for _ in normalized_codes)
-            query.append(f"AND st.provider_exchange_code IN ({placeholders})")
+            query.append(f"AND catalog.provider_exchange_code IN ({placeholders})")
             params.extend(normalized_codes)
         if primary_only:
             query.append(f"AND {_primary_listing_predicate()}")
-        query.append("GROUP BY st.provider_exchange_code")
-        query.append("ORDER BY st.provider_exchange_code")
+        query.append("GROUP BY catalog.provider_exchange_code")
+        query.append("ORDER BY catalog.provider_exchange_code")
         with self._connect() as conn:
             rows = conn.execute(" ".join(query), params).fetchall()
         return [
@@ -2083,25 +2847,32 @@ class SupportedTickerRepository(SQLiteStore):
     ) -> List[IngestProgressFailure]:
         self.initialize_schema()
         provider_norm = provider.strip().upper()
-        params: List[object] = [provider_norm, provider_norm]
+        params: List[object] = [provider_norm]
         query = [
-            "SELECT st.provider_symbol AS symbol, st.provider_exchange_code AS exchange_code,",
+            "SELECT catalog.provider_symbol AS symbol, catalog.provider_exchange_code AS exchange_code,",
             "ms.last_status, ms.last_error, ms.next_eligible_at, ms.attempts",
-            "FROM supported_tickers st",
-            "JOIN market_data_fetch_state ms ON ms.provider = ? AND ms.provider_symbol = st.provider_symbol",
-            "WHERE st.provider = ? AND ms.last_status = 'error'",
+            "FROM provider_listing_catalog catalog",
+            "JOIN market_data_fetch_state ms "
+            "ON ms.provider_listing_id = catalog.provider_listing_id",
+            "WHERE catalog.provider = ? AND ms.last_status = 'error'",
         ]
         if primary_only:
-            query.insert(4, _primary_listing_left_join(security_alias="st"))
+            query.insert(
+                4,
+                "LEFT JOIN security_listing_status sls "
+                "ON sls.listing_id = catalog.security_id "
+                f"AND sls.source_provider = '{_PRIMARY_LISTING_SOURCE_PROVIDER}'",
+            )
         normalized_codes = _normalized_codes(exchange_codes)
         if normalized_codes:
             placeholders = ", ".join("?" for _ in normalized_codes)
-            query.append(f"AND st.provider_exchange_code IN ({placeholders})")
+            query.append(f"AND catalog.provider_exchange_code IN ({placeholders})")
             params.extend(normalized_codes)
         if primary_only:
             query.append(f"AND {_primary_listing_predicate()}")
         query.append(
-            "ORDER BY CASE WHEN ms.next_eligible_at IS NULL THEN 1 ELSE 0 END, ms.next_eligible_at ASC, st.provider_symbol ASC"
+            "ORDER BY CASE WHEN ms.next_eligible_at IS NULL THEN 1 ELSE 0 END, "
+            "ms.next_eligible_at ASC, catalog.provider_symbol ASC"
         )
         query.append("LIMIT ?")
         params.append(limit)
@@ -2119,144 +2890,6 @@ class SupportedTickerRepository(SQLiteStore):
             for row in rows
         ]
 
-    def _payload_from_listing(
-        self,
-        provider: str,
-        provider_exchange_code: str,
-        listing: Listing,
-    ) -> Optional[Tuple[object, ...]]:
-        symbol = listing.symbol.strip().upper()
-        provider_ticker, _ = _normalize_symbol_base(symbol)
-        if not provider_ticker:
-            return None
-        if provider == "SEC":
-            provider_exchange_code = "US"
-            provider_symbol = f"{provider_ticker}.US"
-        else:
-            provider_symbol = self._normalize_provider_symbol(
-                provider_ticker, provider_exchange_code
-            )
-        canonical_exchange = self._exchange_provider_repo().resolve_canonical_code(
-            provider, provider_exchange_code
-        )
-        security = self._security_repo().ensure(
-            provider_ticker,
-            canonical_exchange,
-            entity_name=_normalize_optional_text(listing.security_name),
-        )
-        listing_exchange = _normalize_optional_text(listing.exchange)
-        if listing_exchange is not None:
-            listing_exchange = listing_exchange.upper()
-        currency = _normalize_optional_text(listing.currency)
-        if currency is not None:
-            currency = currency.upper()
-        return (
-            provider,
-            provider_symbol,
-            provider_ticker,
-            provider_exchange_code,
-            security.security_id,
-            listing_exchange,
-            _normalize_optional_text(listing.security_name),
-            "ETF" if listing.is_etf else "Common Stock",
-            None,
-            currency,
-            _normalize_optional_text(listing.isin),
-            _utc_now_iso(),
-        )
-
-    def _payload_from_row(
-        self,
-        provider: str,
-        provider_exchange_code: str,
-        row: Dict[str, Any],
-    ) -> Optional[Tuple[object, ...]]:
-        code = _normalize_optional_text(row.get("Code") or row.get("code"))
-        if not code:
-            return None
-        provider_ticker = code.upper()
-        provider_symbol = self._normalize_provider_symbol(
-            provider_ticker, provider_exchange_code
-        )
-        if provider == "SEC":
-            provider_exchange_code = "US"
-            provider_symbol = f"{provider_ticker}.US"
-        canonical_exchange = self._exchange_provider_repo().resolve_canonical_code(
-            provider, provider_exchange_code
-        )
-        security = self._security_repo().ensure(
-            provider_ticker,
-            canonical_exchange,
-            entity_name=_normalize_optional_text(row.get("Name") or row.get("name")),
-        )
-        listing_exchange = _normalize_optional_text(
-            row.get("Exchange") or row.get("exchange")
-        )
-        if listing_exchange is not None:
-            listing_exchange = listing_exchange.upper()
-        currency = _normalize_optional_text(row.get("Currency") or row.get("currency"))
-        if currency is not None:
-            currency = currency.upper()
-        isin = _normalize_optional_text(
-            row.get("ISIN") or row.get("Isin") or row.get("isin")
-        )
-        return (
-            provider,
-            provider_symbol,
-            provider_ticker,
-            provider_exchange_code,
-            security.security_id,
-            listing_exchange,
-            _normalize_optional_text(row.get("Name") or row.get("name")),
-            _normalize_optional_text(row.get("Type") or row.get("security_type")),
-            _normalize_optional_text(row.get("Country") or row.get("country")),
-            currency,
-            isin,
-            _utc_now_iso(),
-        )
-
-    def _replace_payload(
-        self,
-        provider: str,
-        provider_exchange_code: str,
-        payload: Sequence[Tuple[object, ...]],
-    ) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """
-                DELETE FROM supported_tickers
-                WHERE UPPER(provider) = ? AND UPPER(provider_exchange_code) = ?
-                """,
-                (provider, provider_exchange_code),
-            )
-            if payload:
-                conn.executemany(
-                    """
-                    INSERT INTO supported_tickers (
-                        provider,
-                        provider_symbol,
-                        provider_ticker,
-                        provider_exchange_code,
-                        security_id,
-                        listing_exchange,
-                        security_name,
-                        security_type,
-                        country,
-                        currency,
-                        isin,
-                        updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    payload,
-                )
-
-    @staticmethod
-    def _normalize_provider_symbol(
-        provider_ticker: str,
-        provider_exchange_code: str,
-    ) -> str:
-        return f"{provider_ticker.strip().upper()}.{provider_exchange_code.strip().upper()}"
-
 
 class FundamentalsRepository(SQLiteStore):
     """Persist raw fundamentals payloads by provider."""
@@ -2268,17 +2901,60 @@ class FundamentalsRepository(SQLiteStore):
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS fundamentals_raw (
+                    payload_id INTEGER PRIMARY KEY,
+                    provider_listing_id INTEGER NOT NULL UNIQUE,
                     provider TEXT NOT NULL,
                     provider_symbol TEXT NOT NULL,
                     security_id INTEGER NOT NULL,
+                    listing_id INTEGER NOT NULL,
                     provider_exchange_code TEXT,
                     currency TEXT,
                     data TEXT NOT NULL,
                     fetched_at TEXT NOT NULL,
-                    PRIMARY KEY (provider, provider_symbol)
+                    UNIQUE (provider, provider_symbol)
                 )
                 """
             )
+            columns = _table_columns(conn, "fundamentals_raw")
+            alter_statements = [
+                (
+                    "payload_id",
+                    "ALTER TABLE fundamentals_raw ADD COLUMN payload_id INTEGER",
+                ),
+                (
+                    "provider_listing_id",
+                    """
+                    ALTER TABLE fundamentals_raw
+                    ADD COLUMN provider_listing_id INTEGER
+                    """,
+                ),
+                (
+                    "provider",
+                    "ALTER TABLE fundamentals_raw ADD COLUMN provider TEXT",
+                ),
+                (
+                    "provider_symbol",
+                    "ALTER TABLE fundamentals_raw ADD COLUMN provider_symbol TEXT",
+                ),
+                (
+                    "security_id",
+                    "ALTER TABLE fundamentals_raw ADD COLUMN security_id INTEGER",
+                ),
+                (
+                    "listing_id",
+                    "ALTER TABLE fundamentals_raw ADD COLUMN listing_id INTEGER",
+                ),
+                (
+                    "provider_exchange_code",
+                    """
+                    ALTER TABLE fundamentals_raw
+                    ADD COLUMN provider_exchange_code TEXT
+                    """,
+                ),
+            ]
+            for column_name, statement in alter_statements:
+                if column_name not in columns:
+                    conn.execute(statement)
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_fundamentals_raw_security
@@ -2289,6 +2965,43 @@ class FundamentalsRepository(SQLiteStore):
                 """
                 CREATE INDEX IF NOT EXISTS idx_fundamentals_raw_provider_fetched
                 ON fundamentals_raw(provider, fetched_at)
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_fundamentals_raw_provider_symbol
+                ON fundamentals_raw(provider, provider_symbol)
+                """
+            )
+            _ensure_provider_listing_catalog_views(conn)
+            conn.execute(
+                """
+                UPDATE fundamentals_raw
+                SET provider = (
+                        SELECT catalog.provider
+                        FROM provider_listing_catalog catalog
+                        WHERE catalog.provider_listing_id = fundamentals_raw.provider_listing_id
+                    ),
+                    provider_symbol = (
+                        SELECT catalog.provider_symbol
+                        FROM provider_listing_catalog catalog
+                        WHERE catalog.provider_listing_id = fundamentals_raw.provider_listing_id
+                    ),
+                    provider_exchange_code = COALESCE(
+                        provider_exchange_code,
+                        (
+                            SELECT catalog.provider_exchange_code
+                            FROM provider_listing_catalog catalog
+                            WHERE catalog.provider_listing_id = fundamentals_raw.provider_listing_id
+                        )
+                    ),
+                    security_id = COALESCE(security_id, listing_id)
+                WHERE provider_listing_id IS NOT NULL
+                  AND (
+                      provider IS NULL
+                      OR provider_symbol IS NULL
+                      OR security_id IS NULL
+                  )
                 """
             )
 
@@ -2334,39 +3047,69 @@ class FundamentalsRepository(SQLiteStore):
     ) -> None:
         self.initialize_schema()
         provider_norm = provider.strip().upper()
-        rows = [
-            (
-                provider_norm,
-                update.provider_symbol.strip().upper(),
-                int(update.security_id),
-                _normalize_optional_text(update.provider_exchange_code),
-                _normalize_optional_text(
-                    update.currency.upper() if update.currency else None
-                ),
-                update.data,
-                update.fetched_at,
-            )
-            for update in updates
-            if update.provider_symbol and update.security_id
-        ]
-        if not rows:
-            return
         listing_repo = SecurityListingStatusRepository(self.db_path)
+        listing_repo.initialize_schema()
         listing_updates: List[SecurityListingStatusRecord] = []
         with self._connect() as conn:
+            rows = []
+            ticker_repo = self._supported_ticker_repo()
+            for update in updates:
+                if not update.provider_symbol:
+                    continue
+                provider_symbol = update.provider_symbol.strip().upper()
+                provider_listing_row = conn.execute(
+                    """
+                    SELECT provider_listing_id, security_id, provider_exchange_code
+                    FROM provider_listing_catalog
+                    WHERE provider = ? AND provider_symbol = ?
+                    """,
+                    (provider_norm, provider_symbol),
+                ).fetchone()
+                if provider_listing_row is None:
+                    provider_listing_row = ticker_repo._ensure_provider_listing(
+                        conn,
+                        provider_norm,
+                        provider_symbol,
+                        exchange_code=update.provider_exchange_code,
+                        currency=update.currency,
+                    )
+                rows.append(
+                    (
+                        int(provider_listing_row["provider_listing_id"]),
+                        provider_norm,
+                        provider_symbol,
+                        int(update.security_id or provider_listing_row["security_id"]),
+                        int(provider_listing_row["security_id"]),
+                        _normalize_optional_text(
+                            update.provider_exchange_code
+                            or provider_listing_row["provider_exchange_code"]
+                        ),
+                        _normalize_optional_text(
+                            update.currency.upper() if update.currency else None
+                        ),
+                        update.data,
+                        update.fetched_at,
+                    )
+                )
+            if not rows:
+                return
             conn.executemany(
                 """
                 INSERT INTO fundamentals_raw (
+                    provider_listing_id,
                     provider,
                     provider_symbol,
                     security_id,
+                    listing_id,
                     provider_exchange_code,
                     currency,
                     data,
                     fetched_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(provider, provider_symbol) DO UPDATE SET
+                    provider_listing_id = excluded.provider_listing_id,
                     security_id = excluded.security_id,
+                    listing_id = excluded.listing_id,
                     provider_exchange_code = COALESCE(excluded.provider_exchange_code, fundamentals_raw.provider_exchange_code),
                     currency = COALESCE(excluded.currency, fundamentals_raw.currency),
                     data = excluded.data,
@@ -2594,6 +3337,7 @@ class FundamentalsRepository(SQLiteStore):
         chunk_size: int = 500,
     ) -> Dict[str, FundamentalsNormalizationCandidate]:
         self.initialize_schema()
+        FundamentalsNormalizationStateRepository(self.db_path).initialize_schema()
         provider_norm = provider.strip().upper()
         normalized = _normalized_codes(symbols)
         if not normalized:
@@ -2672,11 +3416,11 @@ class FundamentalsRepository(SQLiteStore):
                 provider_rows = conn.execute(
                     f"""
                     SELECT
-                        security_id,
+                        listing_id AS security_id,
                         MAX(source_provider) AS current_source_provider
                     FROM financial_facts
-                    WHERE security_id IN ({provider_placeholders})
-                    GROUP BY security_id
+                    WHERE listing_id IN ({provider_placeholders})
+                    GROUP BY listing_id
                     """,
                     list(security_chunk),
                 ).fetchall()
@@ -2745,26 +3489,23 @@ class FundamentalsRepository(SQLiteStore):
         exchange: Optional[str],
         create: bool = True,
     ) -> Tuple[Optional[str], Optional[str], Optional[int]]:
-        provider_norm = provider.strip().upper()
-        ticker, suffix = _normalize_symbol_base(symbol)
-        if not ticker:
+        try:
+            (
+                provider_norm,
+                provider_ticker,
+                provider_exchange_code,
+                provider_symbol,
+            ) = _normalize_provider_identity(provider, symbol, exchange)
+        except ValueError:
             return None, None, None
-        if provider_norm == "SEC":
-            provider_exchange_code = "US"
-            provider_symbol = f"{ticker}.US"
-        else:
-            provider_exchange_code = (exchange or suffix or "").strip().upper()
-            if not provider_exchange_code:
-                return None, None, None
-            provider_symbol = f"{ticker}.{provider_exchange_code}"
         canonical_exchange = self._exchange_provider_repo().resolve_canonical_code(
             provider_norm, provider_exchange_code
         )
         if create:
-            security = self._security_repo().ensure(ticker, canonical_exchange)
+            security = self._security_repo().ensure(provider_ticker, canonical_exchange)
             return provider_symbol, provider_exchange_code, security.security_id
         existing_security = self._security_repo().fetch_by_symbol(
-            f"{ticker}.{canonical_exchange}"
+            f"{provider_ticker}.{canonical_exchange}"
         )
         return (
             provider_symbol,
@@ -2783,11 +3524,14 @@ class SecurityListingStatusRepository(SQLiteStore):
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS security_listing_status (
-                    security_id INTEGER NOT NULL PRIMARY KEY,
+                    listing_id INTEGER NOT NULL PRIMARY KEY,
+                    security_id INTEGER NOT NULL UNIQUE,
                     source_provider TEXT NOT NULL,
+                    provider_listing_id INTEGER NOT NULL,
                     provider_symbol TEXT NOT NULL,
                     raw_fetched_at TEXT NOT NULL,
                     is_primary_listing INTEGER NOT NULL CHECK (is_primary_listing IN (0, 1)),
+                    primary_provider_listing_id INTEGER,
                     primary_provider_symbol TEXT,
                     classification_basis TEXT NOT NULL CHECK (
                         classification_basis IN (
@@ -2800,10 +3544,76 @@ class SecurityListingStatusRepository(SQLiteStore):
                 )
                 """
             )
+            columns = _table_columns(conn, "security_listing_status")
+            alter_statements = [
+                (
+                    "listing_id",
+                    "ALTER TABLE security_listing_status ADD COLUMN listing_id INTEGER",
+                ),
+                (
+                    "security_id",
+                    "ALTER TABLE security_listing_status ADD COLUMN security_id INTEGER",
+                ),
+                (
+                    "provider_symbol",
+                    "ALTER TABLE security_listing_status ADD COLUMN provider_symbol TEXT",
+                ),
+                (
+                    "provider_listing_id",
+                    """
+                    ALTER TABLE security_listing_status
+                    ADD COLUMN provider_listing_id INTEGER
+                    """,
+                ),
+                (
+                    "primary_provider_listing_id",
+                    """
+                    ALTER TABLE security_listing_status
+                    ADD COLUMN primary_provider_listing_id INTEGER
+                    """,
+                ),
+                (
+                    "primary_provider_symbol",
+                    """
+                    ALTER TABLE security_listing_status
+                    ADD COLUMN primary_provider_symbol TEXT
+                    """,
+                ),
+            ]
+            for column_name, statement in alter_statements:
+                if column_name not in columns:
+                    conn.execute(statement)
+            _ensure_provider_listing_catalog_views(conn)
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_security_listing_status_primary
                 ON security_listing_status(is_primary_listing, security_id)
+                """
+            )
+            conn.execute(
+                """
+                UPDATE security_listing_status
+                SET listing_id = COALESCE(listing_id, security_id),
+                    security_id = COALESCE(security_id, listing_id),
+                    provider_symbol = COALESCE(
+                        provider_symbol,
+                        (
+                            SELECT catalog.provider_symbol
+                            FROM provider_listing_catalog catalog
+                            WHERE catalog.provider_listing_id = security_listing_status.provider_listing_id
+                        )
+                    ),
+                    primary_provider_symbol = COALESCE(
+                        primary_provider_symbol,
+                        (
+                            SELECT catalog.provider_symbol
+                            FROM provider_listing_catalog catalog
+                            WHERE catalog.provider_listing_id = security_listing_status.primary_provider_listing_id
+                        )
+                    )
+                WHERE listing_id IS NULL
+                   OR security_id IS NULL
+                   OR provider_symbol IS NULL
                 """
             )
 
@@ -2857,48 +3667,94 @@ class SecurityListingStatusRepository(SQLiteStore):
         *,
         connection: Optional[sqlite3.Connection] = None,
     ) -> int:
-        self.initialize_schema()
+        if connection is None:
+            self.initialize_schema()
         if not rows:
             return 0
-        payload = [
-            (
-                int(row.security_id),
-                row.source_provider.strip().upper(),
-                row.provider_symbol.strip().upper(),
-                row.raw_fetched_at,
-                1 if row.is_primary_listing else 0,
-                _normalize_qualified_symbol(row.primary_provider_symbol),
-                row.classification_basis,
-                row.updated_at or _utc_now_iso(),
-            )
-            for row in rows
-        ]
+        payload = [row for row in rows if row.provider_symbol]
+        if not payload:
+            return 0
+
+        def _build_payload(conn: sqlite3.Connection) -> List[Tuple[object, ...]]:
+            built_rows: List[Tuple[object, ...]] = []
+            for row in payload:
+                provider_symbol = row.provider_symbol.strip().upper()
+                provider_listing_row = conn.execute(
+                    """
+                    SELECT provider_listing_id
+                    FROM provider_listing_catalog
+                    WHERE provider = ? AND provider_symbol = ?
+                    """,
+                    (row.source_provider.strip().upper(), provider_symbol),
+                ).fetchone()
+                if provider_listing_row is None:
+                    continue
+                primary_provider_symbol = _normalize_qualified_symbol(
+                    row.primary_provider_symbol
+                )
+                primary_provider_listing_id: Optional[int] = None
+                if primary_provider_symbol is not None:
+                    primary_row = conn.execute(
+                        """
+                        SELECT provider_listing_id
+                        FROM provider_listing_catalog
+                        WHERE provider = ? AND provider_symbol = ?
+                        """,
+                        (row.source_provider.strip().upper(), primary_provider_symbol),
+                    ).fetchone()
+                    primary_provider_listing_id = (
+                        int(primary_row["provider_listing_id"]) if primary_row else None
+                    )
+                built_rows.append(
+                    (
+                        int(row.security_id),
+                        int(row.security_id),
+                        row.source_provider.strip().upper(),
+                        int(provider_listing_row["provider_listing_id"]),
+                        provider_symbol,
+                        row.raw_fetched_at,
+                        1 if row.is_primary_listing else 0,
+                        primary_provider_listing_id,
+                        primary_provider_symbol,
+                        row.classification_basis,
+                        row.updated_at or _utc_now_iso(),
+                    )
+                )
+            return built_rows
+
         sql = """
             INSERT INTO security_listing_status (
+                listing_id,
                 security_id,
                 source_provider,
+                provider_listing_id,
                 provider_symbol,
                 raw_fetched_at,
                 is_primary_listing,
+                primary_provider_listing_id,
                 primary_provider_symbol,
                 classification_basis,
                 updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(security_id) DO UPDATE SET
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(listing_id) DO UPDATE SET
+                security_id = excluded.security_id,
                 source_provider = excluded.source_provider,
+                provider_listing_id = excluded.provider_listing_id,
                 provider_symbol = excluded.provider_symbol,
                 raw_fetched_at = excluded.raw_fetched_at,
                 is_primary_listing = excluded.is_primary_listing,
+                primary_provider_listing_id = excluded.primary_provider_listing_id,
                 primary_provider_symbol = excluded.primary_provider_symbol,
                 classification_basis = excluded.classification_basis,
                 updated_at = excluded.updated_at
         """
         if connection is not None:
-            connection.executemany(sql, payload)
+            connection.executemany(sql, _build_payload(connection))
             return len(payload)
         with self._connect() as conn:
-            conn.executemany(sql, payload)
-        return len(payload)
+            built_payload = _build_payload(conn)
+            conn.executemany(sql, built_payload)
+        return len(built_payload)
 
     def upsert_many_from_fundamentals_updates(
         self,
@@ -3105,7 +3961,7 @@ class SecurityListingStatusRepository(SQLiteStore):
             for security_chunk in _batched(normalized_security_ids, 500):
                 placeholders = ", ".join("?" for _ in security_chunk)
                 conn.execute(
-                    f"DELETE FROM {table_name} WHERE security_id IN ({placeholders})",
+                    f"DELETE FROM {table_name} WHERE listing_id IN ({placeholders})",
                     list(security_chunk),
                 )
 
@@ -3148,6 +4004,7 @@ class _FetchStateRepository(SQLiteStore):
             conn.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {self.table_name} (
+                    provider_listing_id INTEGER NOT NULL PRIMARY KEY,
                     provider TEXT NOT NULL,
                     provider_symbol TEXT NOT NULL,
                     last_fetched_at TEXT,
@@ -3155,16 +4012,71 @@ class _FetchStateRepository(SQLiteStore):
                     last_error TEXT,
                     next_eligible_at TEXT,
                     attempts INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY (provider, provider_symbol)
+                    UNIQUE (provider, provider_symbol)
                 )
                 """
             )
+            columns = _table_columns(conn, self.table_name)
+            alter_statements = [
+                (
+                    "provider_listing_id",
+                    f"ALTER TABLE {self.table_name} ADD COLUMN provider_listing_id INTEGER",
+                ),
+                ("provider", f"ALTER TABLE {self.table_name} ADD COLUMN provider TEXT"),
+                (
+                    "provider_symbol",
+                    f"ALTER TABLE {self.table_name} ADD COLUMN provider_symbol TEXT",
+                ),
+            ]
+            for column_name, statement in alter_statements:
+                if column_name not in columns:
+                    conn.execute(statement)
             conn.execute(
                 f"""
                 CREATE INDEX IF NOT EXISTS {self.index_name}
                 ON {self.table_name}(provider, next_eligible_at)
                 """
             )
+            conn.execute(
+                f"""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_{self.table_name}_provider_symbol
+                ON {self.table_name}(provider, provider_symbol)
+                """
+            )
+            _ensure_provider_listing_catalog_views(conn)
+            conn.execute(
+                f"""
+                UPDATE {self.table_name}
+                SET provider = (
+                        SELECT catalog.provider
+                        FROM provider_listing_catalog catalog
+                        WHERE catalog.provider_listing_id = {self.table_name}.provider_listing_id
+                    ),
+                    provider_symbol = (
+                        SELECT catalog.provider_symbol
+                        FROM provider_listing_catalog catalog
+                        WHERE catalog.provider_listing_id = {self.table_name}.provider_listing_id
+                    )
+                WHERE provider_listing_id IS NOT NULL
+                  AND (provider IS NULL OR provider_symbol IS NULL)
+                """
+            )
+
+    def _resolve_provider_listing_id(
+        self,
+        conn: sqlite3.Connection,
+        provider: str,
+        symbol: str,
+    ) -> Optional[int]:
+        row = conn.execute(
+            """
+            SELECT provider_listing_id
+            FROM provider_listing_catalog
+            WHERE provider = ? AND provider_symbol = ?
+            """,
+            (provider.strip().upper(), symbol.strip().upper()),
+        ).fetchone()
+        return int(row["provider_listing_id"]) if row else None
 
     def fetch(
         self, provider: str, symbol: str
@@ -3198,9 +4110,15 @@ class _FetchStateRepository(SQLiteStore):
         self.initialize_schema()
         timestamp = fetched_at or _utc_now_iso()
         with self._connect() as conn:
+            provider_listing_id = self._resolve_provider_listing_id(
+                conn, provider, symbol
+            )
+            if provider_listing_id is None:
+                return
             conn.execute(
                 f"""
                 INSERT INTO {self.table_name} (
+                    provider_listing_id,
                     provider,
                     provider_symbol,
                     last_fetched_at,
@@ -3208,15 +4126,21 @@ class _FetchStateRepository(SQLiteStore):
                     last_error,
                     next_eligible_at,
                     attempts
-                ) VALUES (?, ?, ?, 'ok', NULL, NULL, 0)
+                ) VALUES (?, ?, ?, ?, 'ok', NULL, NULL, 0)
                 ON CONFLICT(provider, provider_symbol) DO UPDATE SET
+                    provider_listing_id = excluded.provider_listing_id,
                     last_fetched_at = excluded.last_fetched_at,
                     last_status = 'ok',
                     last_error = NULL,
                     next_eligible_at = NULL,
                     attempts = 0
                 """,
-                (provider.strip().upper(), symbol.strip().upper(), timestamp),
+                (
+                    provider_listing_id,
+                    provider.strip().upper(),
+                    symbol.strip().upper(),
+                    timestamp,
+                ),
             )
 
     def mark_success_many(
@@ -3231,11 +4155,19 @@ class _FetchStateRepository(SQLiteStore):
             return
         provider_norm = provider.strip().upper()
         timestamp = fetched_at or _utc_now_iso()
-        rows = [(provider_norm, symbol, timestamp) for symbol in normalized]
         with self._connect() as conn:
+            rows = []
+            for symbol in normalized:
+                provider_listing_id = self._resolve_provider_listing_id(
+                    conn, provider_norm, symbol
+                )
+                if provider_listing_id is None:
+                    continue
+                rows.append((provider_listing_id, provider_norm, symbol, timestamp))
             conn.executemany(
                 f"""
                 INSERT INTO {self.table_name} (
+                    provider_listing_id,
                     provider,
                     provider_symbol,
                     last_fetched_at,
@@ -3243,8 +4175,9 @@ class _FetchStateRepository(SQLiteStore):
                     last_error,
                     next_eligible_at,
                     attempts
-                ) VALUES (?, ?, ?, 'ok', NULL, NULL, 0)
+                ) VALUES (?, ?, ?, ?, 'ok', NULL, NULL, 0)
                 ON CONFLICT(provider, provider_symbol) DO UPDATE SET
+                    provider_listing_id = excluded.provider_listing_id,
                     last_fetched_at = excluded.last_fetched_at,
                     last_status = 'ok',
                     last_error = NULL,
@@ -3271,9 +4204,15 @@ class _FetchStateRepository(SQLiteStore):
         next_eligible_at = (now + timedelta(seconds=backoff)).isoformat()
         last_fetched_at = state.get("last_fetched_at") if state else None
         with self._connect() as conn:
+            provider_listing_id = self._resolve_provider_listing_id(
+                conn, provider, symbol
+            )
+            if provider_listing_id is None:
+                return
             conn.execute(
                 f"""
                 INSERT INTO {self.table_name} (
+                    provider_listing_id,
                     provider,
                     provider_symbol,
                     last_fetched_at,
@@ -3281,8 +4220,9 @@ class _FetchStateRepository(SQLiteStore):
                     last_error,
                     next_eligible_at,
                     attempts
-                ) VALUES (?, ?, ?, 'error', ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, 'error', ?, ?, ?)
                 ON CONFLICT(provider, provider_symbol) DO UPDATE SET
+                    provider_listing_id = excluded.provider_listing_id,
                     last_fetched_at = COALESCE(excluded.last_fetched_at, {self.table_name}.last_fetched_at),
                     last_status = 'error',
                     last_error = excluded.last_error,
@@ -3290,6 +4230,7 @@ class _FetchStateRepository(SQLiteStore):
                     attempts = excluded.attempts
                 """,
                 (
+                    provider_listing_id,
                     provider.strip().upper(),
                     symbol.strip().upper(),
                     last_fetched_at,
@@ -3337,6 +4278,11 @@ class _FetchStateRepository(SQLiteStore):
             now = datetime.now(timezone.utc)
             rows = []
             for symbol, error in normalized_errors:
+                provider_listing_id = self._resolve_provider_listing_id(
+                    conn, provider_norm, symbol
+                )
+                if provider_listing_id is None:
+                    continue
                 state = state_by_symbol.get(symbol)
                 attempts = int(state.get("attempts") or 0) if state else 0
                 attempts += 1
@@ -3348,6 +4294,7 @@ class _FetchStateRepository(SQLiteStore):
                 last_fetched_at = state.get("last_fetched_at") if state else None
                 rows.append(
                     (
+                        provider_listing_id,
                         provider_norm,
                         symbol,
                         last_fetched_at,
@@ -3359,6 +4306,7 @@ class _FetchStateRepository(SQLiteStore):
             conn.executemany(
                 f"""
                 INSERT INTO {self.table_name} (
+                    provider_listing_id,
                     provider,
                     provider_symbol,
                     last_fetched_at,
@@ -3366,8 +4314,9 @@ class _FetchStateRepository(SQLiteStore):
                     last_error,
                     next_eligible_at,
                     attempts
-                ) VALUES (?, ?, ?, 'error', ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, 'error', ?, ?, ?)
                 ON CONFLICT(provider, provider_symbol) DO UPDATE SET
+                    provider_listing_id = excluded.provider_listing_id,
                     last_fetched_at = COALESCE(excluded.last_fetched_at, {self.table_name}.last_fetched_at),
                     last_status = 'error',
                     last_error = excluded.last_error,
@@ -3417,19 +4366,93 @@ class FundamentalsNormalizationStateRepository(SQLiteStore):
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS fundamentals_normalization_state (
+                    provider_listing_id INTEGER NOT NULL PRIMARY KEY,
                     provider TEXT NOT NULL,
                     provider_symbol TEXT NOT NULL,
                     security_id INTEGER NOT NULL,
+                    listing_id INTEGER NOT NULL,
                     raw_fetched_at TEXT NOT NULL,
                     last_normalized_at TEXT NOT NULL,
-                    PRIMARY KEY (provider, provider_symbol)
+                    UNIQUE (provider, provider_symbol)
                 )
                 """
             )
+            columns = _table_columns(conn, "fundamentals_normalization_state")
+            alter_statements = [
+                (
+                    "provider_listing_id",
+                    """
+                    ALTER TABLE fundamentals_normalization_state
+                    ADD COLUMN provider_listing_id INTEGER
+                    """,
+                ),
+                (
+                    "provider",
+                    """
+                    ALTER TABLE fundamentals_normalization_state
+                    ADD COLUMN provider TEXT
+                    """,
+                ),
+                (
+                    "provider_symbol",
+                    """
+                    ALTER TABLE fundamentals_normalization_state
+                    ADD COLUMN provider_symbol TEXT
+                    """,
+                ),
+                (
+                    "security_id",
+                    """
+                    ALTER TABLE fundamentals_normalization_state
+                    ADD COLUMN security_id INTEGER
+                    """,
+                ),
+                (
+                    "listing_id",
+                    """
+                    ALTER TABLE fundamentals_normalization_state
+                    ADD COLUMN listing_id INTEGER
+                    """,
+                ),
+            ]
+            for column_name, statement in alter_statements:
+                if column_name not in columns:
+                    conn.execute(statement)
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_fundamentals_norm_state_security
                 ON fundamentals_normalization_state(security_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_fundamentals_norm_state_provider_symbol
+                ON fundamentals_normalization_state(provider, provider_symbol)
+                """
+            )
+            _ensure_provider_listing_catalog_views(conn)
+            conn.execute(
+                """
+                UPDATE fundamentals_normalization_state
+                SET provider = (
+                        SELECT catalog.provider
+                        FROM provider_listing_catalog catalog
+                        WHERE catalog.provider_listing_id = fundamentals_normalization_state.provider_listing_id
+                    ),
+                    provider_symbol = (
+                        SELECT catalog.provider_symbol
+                        FROM provider_listing_catalog catalog
+                        WHERE catalog.provider_listing_id = fundamentals_normalization_state.provider_listing_id
+                    ),
+                    listing_id = COALESCE(listing_id, security_id),
+                    security_id = COALESCE(security_id, listing_id)
+                WHERE provider_listing_id IS NOT NULL
+                  AND (
+                      provider IS NULL
+                      OR provider_symbol IS NULL
+                      OR security_id IS NULL
+                      OR listing_id IS NULL
+                  )
                 """
             )
 
@@ -3464,23 +4487,39 @@ class FundamentalsNormalizationStateRepository(SQLiteStore):
     ) -> None:
         self.initialize_schema()
         with self._connect() as conn:
+            provider_listing_row = conn.execute(
+                """
+                SELECT provider_listing_id
+                FROM provider_listing_catalog
+                WHERE provider = ? AND provider_symbol = ?
+                """,
+                (provider.strip().upper(), symbol.strip().upper()),
+            ).fetchone()
+            if provider_listing_row is None:
+                return
             conn.execute(
                 """
                 INSERT INTO fundamentals_normalization_state (
+                    provider_listing_id,
                     provider,
                     provider_symbol,
                     security_id,
+                    listing_id,
                     raw_fetched_at,
                     last_normalized_at
-                ) VALUES (?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(provider, provider_symbol) DO UPDATE SET
+                    provider_listing_id = excluded.provider_listing_id,
                     security_id = excluded.security_id,
+                    listing_id = excluded.listing_id,
                     raw_fetched_at = excluded.raw_fetched_at,
                     last_normalized_at = excluded.last_normalized_at
                 """,
                 (
+                    int(provider_listing_row["provider_listing_id"]),
                     provider.strip().upper(),
                     symbol.strip().upper(),
+                    int(security_id),
                     int(security_id),
                     raw_fetched_at,
                     normalized_at or _utc_now_iso(),
@@ -3514,7 +4553,7 @@ class FinancialFactsRefreshStateRepository(SQLiteStore):
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS financial_facts_refresh_state (
-                    security_id INTEGER NOT NULL PRIMARY KEY,
+                    listing_id INTEGER NOT NULL PRIMARY KEY,
                     refreshed_at TEXT NOT NULL
                 )
                 """
@@ -3530,10 +4569,10 @@ class FinancialFactsRefreshStateRepository(SQLiteStore):
         timestamp = refreshed_at or _utc_now_iso()
         sql = """
             INSERT INTO financial_facts_refresh_state (
-                security_id,
+                listing_id,
                 refreshed_at
             ) VALUES (?, ?)
-            ON CONFLICT(security_id) DO UPDATE SET
+            ON CONFLICT(listing_id) DO UPDATE SET
                 refreshed_at = excluded.refreshed_at
         """
         if connection is not None:
@@ -3553,7 +4592,7 @@ class FinancialFactsRefreshStateRepository(SQLiteStore):
                 """
                 SELECT refreshed_at
                 FROM financial_facts_refresh_state
-                WHERE security_id = ?
+                WHERE listing_id = ?
                 """,
                 (security_id,),
             ).fetchone()
@@ -3600,14 +4639,14 @@ class FinancialFactsRefreshStateRepository(SQLiteStore):
                 placeholders = ", ".join("?" for _ in security_chunk)
                 rows = conn.execute(
                     f"""
-                    SELECT security_id, refreshed_at
+                    SELECT listing_id, refreshed_at
                     FROM financial_facts_refresh_state
-                    WHERE security_id IN ({placeholders})
+                    WHERE listing_id IN ({placeholders})
                     """,
                     list(security_chunk),
                 ).fetchall()
                 for row in rows:
-                    symbol = symbol_by_security_id[row["security_id"]]
+                    symbol = symbol_by_security_id[row["listing_id"]]
                     rows_by_symbol[symbol] = FinancialFactsRefreshStateRecord(
                         symbol=symbol,
                         refreshed_at=row["refreshed_at"],
@@ -3632,7 +4671,7 @@ class FinancialFactsRepository(SQLiteStore):
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS financial_facts (
-                    security_id INTEGER NOT NULL,
+                    listing_id INTEGER NOT NULL,
                     cik TEXT,
                     concept TEXT NOT NULL,
                     fiscal_period TEXT,
@@ -3646,14 +4685,14 @@ class FinancialFactsRepository(SQLiteStore):
                     accounting_standard TEXT,
                     currency TEXT,
                     source_provider TEXT,
-                    PRIMARY KEY (security_id, concept, fiscal_period, end_date, unit, accn)
+                    PRIMARY KEY (listing_id, concept, fiscal_period, end_date, unit, accn)
                 )
                 """
             )
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_fin_facts_security_concept
-                ON financial_facts(security_id, concept)
+                ON financial_facts(listing_id, concept)
                 """
             )
             conn.execute(
@@ -3675,7 +4714,7 @@ class FinancialFactsRepository(SQLiteStore):
                 conn.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_fin_facts_security_concept_latest
-                    ON financial_facts(security_id, concept, end_date DESC, filed DESC)
+                    ON financial_facts(listing_id, concept, end_date DESC, filed DESC)
                     """
                 )
             except sqlite3.OperationalError as exc:
@@ -3761,14 +4800,14 @@ class FinancialFactsRepository(SQLiteStore):
         ]
         with self._connect() as conn:
             conn.execute(
-                "DELETE FROM financial_facts WHERE security_id = ?",
+                "DELETE FROM financial_facts WHERE listing_id = ?",
                 (security.security_id,),
             )
             if prepared_rows:
                 conn.executemany(
                     """
                     INSERT OR REPLACE INTO financial_facts (
-                        security_id, cik, concept, fiscal_period, end_date, unit,
+                        listing_id, cik, concept, fiscal_period, end_date, unit,
                         value, accn, filed, frame, start_date, accounting_standard,
                         currency, source_provider
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -3797,8 +4836,8 @@ class FinancialFactsRepository(SQLiteStore):
                        ff.end_date, ff.unit, ff.value, ff.accn, ff.filed, ff.frame,
                        ff.start_date, ff.accounting_standard, ff.currency
                 FROM financial_facts ff
-                JOIN securities s ON s.security_id = ff.security_id
-                WHERE ff.security_id = ? AND ff.concept = ?
+                JOIN securities s ON s.security_id = ff.listing_id
+                WHERE ff.listing_id = ? AND ff.concept = ?
                 ORDER BY ff.end_date DESC, ff.filed DESC
                 LIMIT 1
                 """,
@@ -3823,8 +4862,8 @@ class FinancialFactsRepository(SQLiteStore):
             "SELECT s.canonical_symbol, ff.cik, ff.concept, ff.fiscal_period, ff.end_date,",
             "ff.unit, ff.value, ff.accn, ff.filed, ff.frame, ff.start_date, ff.accounting_standard, ff.currency",
             "FROM financial_facts ff",
-            "JOIN securities s ON s.security_id = ff.security_id",
-            "WHERE ff.security_id = ? AND ff.concept = ?",
+            "JOIN securities s ON s.security_id = ff.listing_id",
+            "WHERE ff.listing_id = ? AND ff.concept = ?",
         ]
         params: List[Any] = [security_id, concept]
         if fiscal_period:
@@ -3850,8 +4889,8 @@ class FinancialFactsRepository(SQLiteStore):
                        ff.end_date, ff.unit, ff.value, ff.accn, ff.filed, ff.frame,
                        ff.start_date, ff.accounting_standard, ff.currency
                 FROM financial_facts ff
-                JOIN securities s ON s.security_id = ff.security_id
-                WHERE ff.security_id = ?
+                JOIN securities s ON s.security_id = ff.listing_id
+                WHERE ff.listing_id = ?
                 ORDER BY ff.concept, ff.end_date DESC, ff.filed DESC
                 """,
                 (security_id,),
@@ -3933,7 +4972,7 @@ class FinancialFactsRepository(SQLiteStore):
                 cursor = conn.execute(
                     f"""
                     SELECT
-                        ff.security_id,
+                        ff.listing_id,
                         ff.cik,
                         ff.concept,
                         ff.fiscal_period,
@@ -3947,13 +4986,13 @@ class FinancialFactsRepository(SQLiteStore):
                         ff.accounting_standard,
                         ff.currency
                     FROM financial_facts ff INDEXED BY idx_fin_facts_security_concept_latest
-                    WHERE ff.security_id IN ({placeholders}){concept_clause}
-                    ORDER BY ff.security_id, ff.concept, ff.end_date DESC, ff.filed DESC
+                    WHERE ff.listing_id IN ({placeholders}){concept_clause}
+                    ORDER BY ff.listing_id, ff.concept, ff.end_date DESC, ff.filed DESC
                     """,
                     params,
                 )
                 for row in cursor:
-                    symbol = symbol_by_security_id[row["security_id"]]
+                    symbol = symbol_by_security_id[row["listing_id"]]
                     grouped[symbol].append(
                         FactRecord(
                             symbol=symbol,
@@ -4014,7 +5053,7 @@ class FinancialFactsRepository(SQLiteStore):
         conn.execute(
             """
             CREATE TEMP TABLE temp_selected_securities (
-                security_id INTEGER PRIMARY KEY,
+                listing_id INTEGER PRIMARY KEY,
                 canonical_symbol TEXT NOT NULL
             )
             """
@@ -4027,7 +5066,7 @@ class FinancialFactsRepository(SQLiteStore):
         for chunk in _batched(rows, chunk_size):
             conn.executemany(
                 """
-                INSERT INTO temp_selected_securities (security_id, canonical_symbol)
+                INSERT INTO temp_selected_securities (listing_id, canonical_symbol)
                 VALUES (?, ?)
                 """,
                 list(chunk),
@@ -4046,7 +5085,7 @@ class FinancialFactsRepository(SQLiteStore):
                 (
                     SELECT ff.value
                     FROM financial_facts ff INDEXED BY idx_fin_facts_security_concept_latest
-                    WHERE ff.security_id = selected.security_id
+                    WHERE ff.listing_id = selected.listing_id
                       AND ff.concept = ?
                     ORDER BY ff.end_date DESC, ff.filed DESC
                     LIMIT 1
@@ -4078,7 +5117,7 @@ class FinancialFactsRepository(SQLiteStore):
                 (
                     SELECT ff.value
                     FROM financial_facts ff INDEXED BY idx_fin_facts_security_concept_latest
-                    WHERE ff.security_id = selected.security_id
+                    WHERE ff.listing_id = selected.listing_id
                       AND ff.concept IN (?, ?)
                     ORDER BY ff.end_date DESC,
                              CASE ff.concept
@@ -4205,6 +5244,7 @@ class FXRatesRepository(SQLiteStore):
                 ON fx_rates(provider, base_currency, quote_currency, rate_date DESC)
                 """
             )
+            _ensure_provider_listing_catalog_views(conn)
 
     def upsert(self, record: FXRateRecord) -> None:
         self.upsert_many([record])
@@ -4759,14 +5799,14 @@ class MetricsRepository(SQLiteStore):
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS metrics (
-                    security_id INTEGER NOT NULL,
+                    listing_id INTEGER NOT NULL,
                     metric_id TEXT NOT NULL,
                     value REAL NOT NULL,
                     as_of TEXT NOT NULL,
                     unit_kind TEXT NOT NULL DEFAULT 'other',
                     currency TEXT,
                     unit_label TEXT,
-                    PRIMARY KEY (security_id, metric_id)
+                    PRIMARY KEY (listing_id, metric_id)
                 )
                 """
             )
@@ -4835,11 +5875,13 @@ class MetricsRepository(SQLiteStore):
             if symbol in security_ids:
                 continue
             # Slow path: a metric row references a symbol that does not yet
-            # exist in the canonical securities table. Falls back to a fresh
-            # connection regardless of whether the caller supplied one,
-            # because ensure_from_symbol writes through SecurityRepository's
-            # own connection plumbing.
-            security = self._security_repo().ensure_from_symbol(symbol)
+            # exist in the canonical listing table. When the caller supplied a
+            # write connection, create the row through that same transaction to
+            # avoid self-locking SQLite during batched metric writes.
+            security = self._security_repo().ensure_from_symbol(
+                symbol,
+                connection=connection,
+            )
             security_ids[symbol] = security.security_id
         persisted_rows = [
             (
@@ -4867,7 +5909,7 @@ class MetricsRepository(SQLiteStore):
 
         upsert_sql = """
             INSERT INTO metrics (
-                security_id,
+                listing_id,
                 metric_id,
                 value,
                 as_of,
@@ -4876,7 +5918,7 @@ class MetricsRepository(SQLiteStore):
                 unit_label
             )
             VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(security_id, metric_id) DO UPDATE SET
+            ON CONFLICT(listing_id, metric_id) DO UPDATE SET
                 value = excluded.value,
                 as_of = excluded.as_of,
                 unit_kind = excluded.unit_kind,
@@ -4909,7 +5951,7 @@ class MetricsRepository(SQLiteStore):
                 """
                 SELECT value, as_of, unit_kind, currency, unit_label
                 FROM metrics
-                WHERE security_id = ? AND metric_id = ?
+                WHERE listing_id = ? AND metric_id = ?
                 """,
                 (security_id, metric_id),
             ).fetchone()
@@ -4976,15 +6018,15 @@ class MetricsRepository(SQLiteStore):
                     metric_placeholders = ", ".join("?" for _ in metric_chunk)
                     rows = conn.execute(
                         f"""
-                        SELECT security_id, metric_id, value, as_of, unit_kind, currency, unit_label
+                        SELECT listing_id, metric_id, value, as_of, unit_kind, currency, unit_label
                         FROM metrics
-                        WHERE security_id IN ({security_placeholders})
+                        WHERE listing_id IN ({security_placeholders})
                           AND metric_id IN ({metric_placeholders})
                         """,
                         list(security_chunk) + list(metric_chunk),
                     ).fetchall()
                     for row in rows:
-                        symbol = symbol_by_security_id[row["security_id"]]
+                        symbol = symbol_by_security_id[row["listing_id"]]
                         metric_rows_by_symbol.setdefault(symbol, {})[
                             row["metric_id"]
                         ] = MetricRecord(
@@ -5010,7 +6052,7 @@ class MetricComputeStatusRepository(SQLiteStore):
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS metric_compute_status (
-                    security_id INTEGER NOT NULL,
+                    listing_id INTEGER NOT NULL,
                     metric_id TEXT NOT NULL,
                     status TEXT NOT NULL,
                     reason_code TEXT,
@@ -5020,7 +6062,7 @@ class MetricComputeStatusRepository(SQLiteStore):
                     facts_refreshed_at TEXT,
                     market_data_as_of TEXT,
                     market_data_updated_at TEXT,
-                    PRIMARY KEY (security_id, metric_id)
+                    PRIMARY KEY (listing_id, metric_id)
                 )
                 """
             )
@@ -5060,7 +6102,10 @@ class MetricComputeStatusRepository(SQLiteStore):
         for symbol in unique_symbols:
             if symbol in security_ids:
                 continue
-            security = self._security_repo().ensure_from_symbol(symbol)
+            security = self._security_repo().ensure_from_symbol(
+                symbol,
+                connection=connection,
+            )
             security_ids[symbol] = security.security_id
 
         payload = [
@@ -5084,7 +6129,7 @@ class MetricComputeStatusRepository(SQLiteStore):
 
         upsert_sql = """
             INSERT INTO metric_compute_status (
-                security_id,
+                listing_id,
                 metric_id,
                 status,
                 reason_code,
@@ -5095,7 +6140,7 @@ class MetricComputeStatusRepository(SQLiteStore):
                 market_data_as_of,
                 market_data_updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(security_id, metric_id) DO UPDATE SET
+            ON CONFLICT(listing_id, metric_id) DO UPDATE SET
                 status = excluded.status,
                 reason_code = excluded.reason_code,
                 reason_detail = excluded.reason_detail,
@@ -5131,7 +6176,7 @@ class MetricComputeStatusRepository(SQLiteStore):
                        value_as_of, facts_refreshed_at, market_data_as_of,
                        market_data_updated_at
                 FROM metric_compute_status
-                WHERE security_id = ? AND metric_id = ?
+                WHERE listing_id = ? AND metric_id = ?
                 """,
                 (security_id, metric_id),
             ).fetchone()
@@ -5197,17 +6242,17 @@ class MetricComputeStatusRepository(SQLiteStore):
                     metric_placeholders = ", ".join("?" for _ in metric_chunk)
                     rows = conn.execute(
                         f"""
-                        SELECT security_id, metric_id, status, reason_code, reason_detail,
+                        SELECT listing_id, metric_id, status, reason_code, reason_detail,
                                attempted_at, value_as_of, facts_refreshed_at,
                                market_data_as_of, market_data_updated_at
                         FROM metric_compute_status
-                        WHERE security_id IN ({security_placeholders})
+                        WHERE listing_id IN ({security_placeholders})
                           AND metric_id IN ({metric_placeholders})
                         """,
                         list(security_chunk) + list(metric_chunk),
                     ).fetchall()
                     for row in rows:
-                        symbol = symbol_by_security_id[row["security_id"]]
+                        symbol = symbol_by_security_id[row["listing_id"]]
                         rows_by_symbol.setdefault(symbol, {})[row["metric_id"]] = (
                             MetricComputeStatusRecord(
                                 symbol=symbol,
@@ -5235,7 +6280,7 @@ class MarketDataRepository(SQLiteStore):
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS market_data (
-                    security_id INTEGER NOT NULL,
+                    listing_id INTEGER NOT NULL,
                     as_of DATE NOT NULL,
                     price REAL NOT NULL,
                     volume INTEGER,
@@ -5243,14 +6288,14 @@ class MarketDataRepository(SQLiteStore):
                     currency TEXT,
                     source_provider TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    PRIMARY KEY (security_id, as_of)
+                    PRIMARY KEY (listing_id, as_of)
                 )
                 """
             )
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_market_data_latest
-                ON market_data(security_id, as_of DESC)
+                ON market_data(listing_id, as_of DESC)
                 """
             )
             conn.execute(
@@ -5310,7 +6355,7 @@ class MarketDataRepository(SQLiteStore):
             conn.executemany(
                 """
                 INSERT INTO market_data (
-                    security_id,
+                    listing_id,
                     as_of,
                     price,
                     volume,
@@ -5319,7 +6364,7 @@ class MarketDataRepository(SQLiteStore):
                     source_provider,
                     updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(security_id, as_of) DO UPDATE SET
+                ON CONFLICT(listing_id, as_of) DO UPDATE SET
                     price = excluded.price,
                     volume = excluded.volume,
                     market_cap = excluded.market_cap,
@@ -5357,11 +6402,11 @@ class MarketDataRepository(SQLiteStore):
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT s.canonical_symbol, md.security_id, md.as_of, md.price, md.volume,
+                SELECT s.canonical_symbol, md.listing_id AS security_id, md.as_of, md.price, md.volume,
                        md.market_cap, md.currency, md.updated_at
                 FROM market_data md
-                JOIN securities s ON s.security_id = md.security_id
-                WHERE md.security_id = ?
+                JOIN securities s ON s.security_id = md.listing_id
+                WHERE md.listing_id = ?
                 ORDER BY md.as_of DESC
                 LIMIT 1
                 """,
@@ -5420,14 +6465,14 @@ class MarketDataRepository(SQLiteStore):
                     f"""
                     WITH latest AS (
                         SELECT
-                            security_id,
+                            listing_id,
                             MAX(as_of) AS as_of
                         FROM market_data INDEXED BY idx_market_data_latest
-                        WHERE security_id IN ({placeholders})
-                        GROUP BY security_id
+                        WHERE listing_id IN ({placeholders})
+                        GROUP BY listing_id
                     )
                     SELECT
-                        md.security_id,
+                        md.listing_id AS security_id,
                         md.as_of,
                         md.price,
                         md.volume,
@@ -5436,9 +6481,9 @@ class MarketDataRepository(SQLiteStore):
                         md.updated_at
                     FROM latest
                     JOIN market_data md
-                      ON md.security_id = latest.security_id
+                      ON md.listing_id = latest.listing_id
                      AND md.as_of = latest.as_of
-                    ORDER BY md.security_id
+                    ORDER BY md.listing_id
                     """,
                     list(symbol_by_security_id),
                 )
@@ -5472,11 +6517,11 @@ class MarketDataRepository(SQLiteStore):
                 """
                 UPDATE market_data
                 SET market_cap = ?, updated_at = ?
-                WHERE security_id = ?
+                WHERE listing_id = ?
                   AND as_of = (
                       SELECT MAX(as_of)
                       FROM market_data
-                      WHERE security_id = ?
+                      WHERE listing_id = ?
                   )
                 """,
                 (market_cap, _utc_now_iso(), security_id, security_id),
@@ -5501,7 +6546,7 @@ class MarketDataRepository(SQLiteStore):
                 """
                 UPDATE market_data
                 SET market_cap = ?, updated_at = ?
-                WHERE security_id = ? AND as_of = ?
+                WHERE listing_id = ? AND as_of = ?
                 """,
                 payload,
             )
@@ -5549,6 +6594,12 @@ class EntityMetadataRepository(SQLiteStore):
         return self._security_repo().fetch_many_by_symbol(symbols)
 
 
+ListingRepository = SecurityRepository
+ProviderExchangeRepository = ExchangeProviderRepository
+ProviderListingRepository = SupportedTickerRepository
+ProviderListing = SupportedTicker
+
+
 def _normalized_codes(values: Optional[Sequence[str]]) -> List[str]:
     if not values:
         return []
@@ -5577,12 +6628,16 @@ __all__ = [
     "SecurityMetadataCandidate",
     "SecurityMetadataUpdate",
     "SecurityRepository",
+    "ListingRepository",
     "FundamentalsRepository",
     "IngestProgressSummary",
     "IngestProgressExchange",
     "IngestProgressFailure",
     "SupportedTicker",
     "SupportedTickerRepository",
+    "ProviderExchangeRepository",
+    "ProviderListing",
+    "ProviderListingRepository",
     "FundamentalsFetchStateRepository",
     "MarketDataFetchStateRepository",
     "FinancialFactsRepository",

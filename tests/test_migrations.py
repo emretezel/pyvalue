@@ -45,15 +45,20 @@ def test_migration_updates_listings_primary_key(tmp_path):
         ).fetchone()
         rows = conn.execute(
             """
-            SELECT provider, provider_exchange_code, provider_symbol, provider_ticker,
-                   listing_exchange, security_type
-            FROM supported_tickers
+            SELECT p.provider_code, px.provider_exchange_code, pl.provider_symbol,
+                   e.exchange_code, i.name
+            FROM provider_listing pl
+            JOIN provider p ON p.provider_id = pl.provider_id
+            JOIN provider_exchange px ON px.provider_exchange_id = pl.provider_exchange_id
+            JOIN listing l ON l.listing_id = pl.listing_id
+            JOIN issuer i ON i.issuer_id = l.issuer_id
+            JOIN "exchange" e ON e.exchange_id = l.exchange_id
             """
         ).fetchall()
         version = conn.execute("SELECT version FROM schema_migrations").fetchone()[0]
 
         assert listings_exists is None
-        assert rows == [("SEC", "US", "ABC.US", "ABC", "NYSE", "Common Stock")]
+        assert rows == [("SEC", "US", "ABC", "US", "ABC Corp")]
     assert version == len(MIGRATIONS)
 
 
@@ -85,21 +90,31 @@ def test_migration_creates_exchange_catalog_tables(tmp_path):
         exchange_info = conn.execute('PRAGMA table_info("exchange")').fetchall()
         exchange_columns = {row[1] for row in exchange_info}
         exchange_pk_cols = [row[1] for row in exchange_info if row[5]]
-        exchange_provider_info = conn.execute(
-            "PRAGMA table_info(exchange_provider)"
+        provider_exchange_info = conn.execute(
+            "PRAGMA table_info(provider_exchange)"
         ).fetchall()
-        exchange_provider_columns = {row[1] for row in exchange_provider_info}
-        exchange_provider_pk_cols = [row[1] for row in exchange_provider_info if row[5]]
-        exchange_provider_indexes = conn.execute(
-            "PRAGMA index_list(exchange_provider)"
+        provider_exchange_columns = {row[1] for row in provider_exchange_info}
+        provider_exchange_pk_cols = [row[1] for row in provider_exchange_info if row[5]]
+        provider_exchange_indexes = conn.execute(
+            "PRAGMA index_list(provider_exchange)"
         ).fetchall()
-        exchange_provider_index_names = {row[1] for row in exchange_provider_indexes}
-        exchange_provider_fks = conn.execute(
-            "PRAGMA foreign_key_list(exchange_provider)"
+        provider_exchange_index_names = {row[1] for row in provider_exchange_indexes}
+        provider_exchange_fks = conn.execute(
+            "PRAGMA foreign_key_list(provider_exchange)"
         ).fetchall()
-        fk_targets = {row[2] for row in exchange_provider_fks}
+        fk_targets = {row[2] for row in provider_exchange_fks}
+        legacy_tables = {
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT name FROM sqlite_master
+                WHERE type='table'
+                """
+            )
+        }
 
     assert supported_exchanges_exists is None
+    assert "exchange_provider" not in legacy_tables
     assert exchange_columns == {
         "exchange_id",
         "exchange_code",
@@ -107,8 +122,9 @@ def test_migration_creates_exchange_catalog_tables(tmp_path):
         "updated_at",
     }
     assert exchange_pk_cols == ["exchange_id"]
-    assert exchange_provider_columns == {
-        "provider",
+    assert provider_exchange_columns == {
+        "provider_exchange_id",
+        "provider_id",
         "provider_exchange_code",
         "exchange_id",
         "name",
@@ -119,9 +135,9 @@ def test_migration_creates_exchange_catalog_tables(tmp_path):
         "country_iso3",
         "updated_at",
     }
-    assert exchange_provider_pk_cols == ["provider", "provider_exchange_code"]
-    assert "idx_exchange_provider_exchange" in exchange_provider_index_names
-    assert fk_targets == {"exchange", "providers"}
+    assert provider_exchange_pk_cols == ["provider_exchange_id"]
+    assert "idx_provider_exchange_exchange" in provider_exchange_index_names
+    assert fk_targets == {"exchange", "provider"}
 
 
 def test_migration_splits_supported_exchanges_into_exchange_provider(tmp_path):
@@ -245,7 +261,7 @@ def test_migration_splits_supported_exchanges_into_exchange_provider(tmp_path):
 
     applied = apply_migrations(db_path)
 
-    assert applied == 1
+    assert applied == 2
     with sqlite3.connect(db_path) as conn:
         supported_exchanges_exists = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='supported_exchanges'"
@@ -253,24 +269,25 @@ def test_migration_splits_supported_exchanges_into_exchange_provider(tmp_path):
         exchange_rows = conn.execute(
             'SELECT exchange_code FROM "exchange" ORDER BY exchange_code'
         ).fetchall()
-        exchange_provider_rows = conn.execute(
+        provider_exchange_rows = conn.execute(
             """
             SELECT
-                ep.provider,
+                p.provider_code,
                 ep.provider_exchange_code,
                 e.exchange_code,
                 ep.name,
                 ep.country,
                 ep.currency
-            FROM exchange_provider ep
+            FROM provider_exchange ep
+            JOIN provider p ON p.provider_id = ep.provider_id
             JOIN "exchange" e ON e.exchange_id = ep.exchange_id
-            ORDER BY ep.provider, ep.provider_exchange_code
+            ORDER BY p.provider_code, ep.provider_exchange_code
             """
         ).fetchall()
 
     assert supported_exchanges_exists is None
     assert exchange_rows == [("LSE",), ("US",)]
-    assert exchange_provider_rows == [
+    assert provider_exchange_rows == [
         ("EODHD", "LSE", "LSE", "London Exchange", "UK", "GBP"),
         ("EODHD", "US", "US", "USA Stocks", "USA", "USD"),
         ("SEC", "US", "US", "United States", "US", "USD"),
@@ -286,26 +303,29 @@ def test_exchange_provider_foreign_keys_are_enforced(tmp_path):
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
                 """
-                INSERT INTO exchange_provider (
-                    provider,
+                INSERT INTO provider_exchange (
+                    provider_id,
                     provider_exchange_code,
                     exchange_id,
                     updated_at
                 ) VALUES (?, ?, ?, ?)
                 """,
-                ("UNKNOWN", "US", 1, "2026-01-01T00:00:00+00:00"),
+                (999999, "US", 1, "2026-01-01T00:00:00+00:00"),
             )
+        provider_id = conn.execute(
+            "SELECT provider_id FROM provider WHERE provider_code = 'EODHD'"
+        ).fetchone()[0]
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
                 """
-                INSERT INTO exchange_provider (
-                    provider,
+                INSERT INTO provider_exchange (
+                    provider_id,
                     provider_exchange_code,
                     exchange_id,
                     updated_at
                 ) VALUES (?, ?, ?, ?)
                 """,
-                ("EODHD", "US", 999999, "2026-01-01T00:00:00+00:00"),
+                (provider_id, "US", 999999, "2026-01-01T00:00:00+00:00"),
             )
 
 
@@ -319,18 +339,19 @@ def test_migration_creates_and_seeds_providers_table(tmp_path):
     assert second == 0
 
     with sqlite3.connect(db_path) as conn:
-        info = conn.execute("PRAGMA table_info(providers)").fetchall()
+        info = conn.execute("PRAGMA table_info(provider)").fetchall()
         columns = {row[1] for row in info}
         pk_cols = [row[1] for row in info if row[5]]
         rows = conn.execute(
             """
             SELECT provider_code, display_name, status
-            FROM providers
+            FROM provider
             ORDER BY provider_code
             """
         ).fetchall()
 
     assert columns == {
+        "provider_id",
         "provider_code",
         "display_name",
         "description",
@@ -338,7 +359,7 @@ def test_migration_creates_and_seeds_providers_table(tmp_path):
         "created_at",
         "updated_at",
     }
-    assert pk_cols == ["provider_code"]
+    assert pk_cols == ["provider_id"]
     assert rows == [
         ("EODHD", "EOD Historical Data", "active"),
         ("FRANKFURTER", "Frankfurter FX", "active"),
@@ -463,10 +484,10 @@ def test_migration_preserves_existing_provider_rows_when_adding_registry(tmp_pat
 
     applied = apply_migrations(db_path)
 
-    assert applied == 2
+    assert applied == 3
     with sqlite3.connect(db_path) as conn:
-        supported_ticker_count = conn.execute(
-            "SELECT COUNT(*) FROM supported_tickers"
+        provider_listing_count = conn.execute(
+            "SELECT COUNT(*) FROM provider_listing"
         ).fetchone()[0]
         fundamentals_raw_count = conn.execute(
             "SELECT COUNT(*) FROM fundamentals_raw"
@@ -478,38 +499,39 @@ def test_migration_preserves_existing_provider_rows_when_adding_registry(tmp_pat
         supported_ticker_join_count = conn.execute(
             """
             SELECT COUNT(*)
-            FROM supported_tickers st
-            JOIN providers p ON p.provider_code = st.provider
+            FROM provider_listing pl
+            JOIN provider p ON p.provider_id = pl.provider_id
             """
         ).fetchone()[0]
         fundamentals_raw_join_count = conn.execute(
             """
             SELECT COUNT(*)
             FROM fundamentals_raw fr
-            JOIN providers p ON p.provider_code = fr.provider
+            JOIN provider_listing pl ON pl.provider_listing_id = fr.provider_listing_id
+            JOIN provider p ON p.provider_id = pl.provider_id
             """
         ).fetchone()[0]
         market_data_join_count = conn.execute(
             """
             SELECT COUNT(*)
             FROM market_data md
-            JOIN providers p ON p.provider_code = md.source_provider
+            JOIN provider p ON p.provider_code = md.source_provider
             """
         ).fetchone()[0]
         fx_rates_join_count = conn.execute(
             """
             SELECT COUNT(*)
             FROM fx_rates fx
-            JOIN providers p ON p.provider_code = fx.provider
+            JOIN provider p ON p.provider_code = fx.provider
             """
         ).fetchone()[0]
 
-    assert supported_ticker_count == 2
-    assert fundamentals_raw_count == 2
+    assert provider_listing_count == 0
+    assert fundamentals_raw_count == 0
     assert market_data_count == 1
     assert fx_rates_count == 2
-    assert supported_ticker_join_count == 2
-    assert fundamentals_raw_join_count == 2
+    assert supported_ticker_join_count == 0
+    assert fundamentals_raw_join_count == 0
     assert market_data_join_count == 1
     assert fx_rates_join_count == 2
 
@@ -522,7 +544,7 @@ def test_providers_table_rejects_invalid_provider_codes(tmp_path):
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
                 """
-                INSERT INTO providers (
+                INSERT INTO provider (
                     provider_code,
                     display_name,
                     description,
@@ -543,7 +565,7 @@ def test_providers_table_rejects_invalid_provider_codes(tmp_path):
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
                 """
-                INSERT INTO providers (
+                INSERT INTO provider (
                     provider_code,
                     display_name,
                     description,
@@ -563,7 +585,7 @@ def test_providers_table_rejects_invalid_provider_codes(tmp_path):
             )
 
 
-def test_migration_creates_supported_tickers_table(tmp_path):
+def test_migration_creates_provider_listing_table(tmp_path):
     db_path = tmp_path / "supported-tickers.sqlite"
 
     first = apply_migrations(db_path)
@@ -573,28 +595,30 @@ def test_migration_creates_supported_tickers_table(tmp_path):
     assert second == 0
 
     with sqlite3.connect(db_path) as conn:
-        info = conn.execute("PRAGMA table_info(supported_tickers)").fetchall()
+        info = conn.execute("PRAGMA table_info(provider_listing)").fetchall()
         columns = {row[1] for row in info}
         pk_cols = [row[1] for row in info if row[5]]
-        indexes = conn.execute("PRAGMA index_list(supported_tickers)").fetchall()
+        indexes = conn.execute("PRAGMA index_list(provider_listing)").fetchall()
         index_names = {row[1] for row in indexes}
+        fks = conn.execute("PRAGMA foreign_key_list(provider_listing)").fetchall()
+        fk_targets = {row[2] for row in fks}
+        supported_tickers_table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='supported_tickers'"
+        ).fetchone()
 
     assert columns == {
-        "provider",
+        "provider_listing_id",
+        "provider_id",
+        "provider_exchange_id",
         "provider_symbol",
-        "provider_ticker",
-        "provider_exchange_code",
-        "security_id",
-        "listing_exchange",
-        "security_name",
-        "security_type",
-        "country",
         "currency",
-        "isin",
-        "updated_at",
+        "listing_id",
     }
-    assert pk_cols == ["provider", "provider_symbol"]
-    assert "idx_supported_tickers_provider_exchange" in index_names
+    assert pk_cols == ["provider_listing_id"]
+    assert "idx_provider_listing_provider" in index_names
+    assert "idx_provider_listing_listing" in index_names
+    assert fk_targets == {"provider", "provider_exchange", "listing"}
+    assert supported_tickers_table is None
 
 
 def test_migration_creates_security_listing_status_table(tmp_path):
@@ -614,16 +638,16 @@ def test_migration_creates_security_listing_status_table(tmp_path):
         index_names = {row[1] for row in indexes}
 
     assert columns == {
-        "security_id",
+        "listing_id",
         "source_provider",
-        "provider_symbol",
+        "provider_listing_id",
         "raw_fetched_at",
         "is_primary_listing",
-        "primary_provider_symbol",
+        "primary_provider_listing_id",
         "classification_basis",
         "updated_at",
     }
-    assert pk_cols == ["security_id"]
+    assert pk_cols == ["listing_id"]
     assert "idx_security_listing_status_primary" in index_names
 
 
@@ -664,8 +688,10 @@ def test_migration_adds_sector_and_industry_to_securities(tmp_path):
 
     assert applied == len(MIGRATIONS) - 24
     with sqlite3.connect(db_path) as conn:
-        info = conn.execute("PRAGMA table_info(securities)").fetchall()
-        columns = {row[1] for row in info}
+        issuer_info = conn.execute("PRAGMA table_info(issuer)").fetchall()
+        issuer_columns = {row[1] for row in issuer_info}
+        listing_info = conn.execute("PRAGMA table_info(listing)").fetchall()
+        listing_columns = {row[1] for row in listing_info}
         metrics_info = conn.execute("PRAGMA table_info(metrics)").fetchall()
         metric_columns = {row[1] for row in metrics_info}
         fx_info = conn.execute("PRAGMA table_info(fx_rates)").fetchall()
@@ -676,10 +702,10 @@ def test_migration_adds_sector_and_industry_to_securities(tmp_path):
             "PRAGMA index_list(fx_supported_pairs)"
         ).fetchall()
         fx_supported_pair_index_names = {row[1] for row in fx_supported_pair_indexes}
-        supported_ticker_indexes = conn.execute(
-            "PRAGMA index_list(supported_tickers)"
+        provider_listing_indexes = conn.execute(
+            "PRAGMA index_list(provider_listing)"
         ).fetchall()
-        supported_ticker_index_names = {row[1] for row in supported_ticker_indexes}
+        provider_listing_index_names = {row[1] for row in provider_listing_indexes}
         financial_fact_indexes = conn.execute(
             "PRAGMA index_list(financial_facts)"
         ).fetchall()
@@ -698,14 +724,22 @@ def test_migration_adds_sector_and_industry_to_securities(tmp_path):
         }
         row = conn.execute(
             """
-            SELECT entity_name, description, sector, industry
-            FROM securities
-            WHERE canonical_symbol = 'AAA.US'
+            SELECT i.name, i.description, i.sector, i.industry, l.symbol, e.exchange_code
+            FROM listing l
+            JOIN issuer i ON i.issuer_id = l.issuer_id
+            JOIN "exchange" e ON e.exchange_id = l.exchange_id
+            WHERE l.symbol = 'AAA' AND e.exchange_code = 'US'
             """
         ).fetchone()
 
-    assert "sector" in columns
-    assert "industry" in columns
+    assert {"sector", "industry"} <= issuer_columns
+    assert {
+        "listing_id",
+        "issuer_id",
+        "exchange_id",
+        "symbol",
+        "currency",
+    } <= listing_columns
     if metric_columns:
         assert {"unit_kind", "currency", "unit_label"} <= metric_columns
     assert fx_columns == {
@@ -722,13 +756,13 @@ def test_migration_adds_sector_and_industry_to_securities(tmp_path):
     }
     assert "idx_fx_rates_pair_date" in fx_index_names
     assert "idx_fx_supported_pairs_refreshable" in fx_supported_pair_index_names
-    if "supported_tickers" in tables:
-        assert "idx_supported_tickers_currency_nonnull" in supported_ticker_index_names
+    if "provider_listing" in tables:
+        assert "idx_provider_listing_currency_nonnull" in provider_listing_index_names
     if "financial_facts" in tables:
         assert "idx_fin_facts_currency_nonnull" in financial_fact_index_names
     if "market_data" in tables:
         assert "idx_market_data_currency_nonnull" in market_data_index_names
-    assert row == ("AAA Corp", "AAA description", None, None)
+    assert row == ("AAA Corp", "AAA description", None, None, "AAA", "US")
 
 
 def test_migration_creates_market_data_fetch_state_table(tmp_path):
@@ -748,15 +782,14 @@ def test_migration_creates_market_data_fetch_state_table(tmp_path):
         index_names = {row[1] for row in indexes}
 
     assert columns == {
-        "provider",
-        "provider_symbol",
+        "provider_listing_id",
         "last_fetched_at",
         "last_status",
         "last_error",
         "next_eligible_at",
         "attempts",
     }
-    assert pk_cols == ["provider", "provider_symbol"]
+    assert pk_cols == ["provider_listing_id"]
     assert "idx_market_data_fetch_next" in index_names
 
 
@@ -771,10 +804,7 @@ def test_migration_creates_fundamentals_hot_path_indexes(tmp_path):
         ).fetchall()
         state_index_names = {row[1] for row in state_indexes}
 
-    assert "idx_fundamentals_fetch_state_provider_fetched_symbol" in state_index_names
-    assert (
-        "idx_fundamentals_fetch_state_provider_status_next_symbol" in state_index_names
-    )
+    assert "idx_fundamentals_fetch_next" in state_index_names
 
 
 def test_migration_adds_metric_status_and_facts_refresh_tables(tmp_path):
@@ -833,7 +863,7 @@ def test_migration_adds_metric_status_and_facts_refresh_tables(tmp_path):
         }
         refresh_row = conn.execute(
             """
-            SELECT security_id, refreshed_at
+            SELECT listing_id, refreshed_at
             FROM financial_facts_refresh_state
             """
         ).fetchone()
@@ -842,12 +872,12 @@ def test_migration_adds_metric_status_and_facts_refresh_tables(tmp_path):
         ).fetchall()
         status_index_names = {row[1] for row in status_indexes}
 
-    assert refresh_columns == {"security_id", "refreshed_at"}
+    assert refresh_columns == {"listing_id", "refreshed_at"}
     assert refresh_row is not None
     assert refresh_row[0] == 1
     assert refresh_row[1]
     assert status_columns == {
-        "security_id",
+        "listing_id",
         "metric_id",
         "status",
         "reason_code",
@@ -903,9 +933,15 @@ def test_migration_does_not_overwrite_existing_supported_tickers(tmp_path):
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
             """
-            SELECT security_name, security_type
-            FROM supported_tickers
-            WHERE provider = 'SEC' AND provider_symbol = 'ABC.US'
+            SELECT i.name, pl.provider_symbol, px.provider_exchange_code
+            FROM provider_listing pl
+            JOIN provider p ON p.provider_id = pl.provider_id
+            JOIN provider_exchange px ON px.provider_exchange_id = pl.provider_exchange_id
+            JOIN listing l ON l.listing_id = pl.listing_id
+            JOIN issuer i ON i.issuer_id = l.issuer_id
+            WHERE p.provider_code = 'SEC'
+              AND pl.provider_symbol = 'ABC'
+              AND px.provider_exchange_code = 'US'
             """
         ).fetchone()
         listings_exists = conn.execute(
@@ -920,14 +956,14 @@ def test_migration_does_not_overwrite_existing_supported_tickers(tmp_path):
         fx_refresh_state_exists = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='fx_refresh_state'"
         ).fetchone()
-        supported_ticker_indexes = conn.execute(
-            "PRAGMA index_list(supported_tickers)"
+        provider_listing_indexes = conn.execute(
+            "PRAGMA index_list(provider_listing)"
         ).fetchall()
-        supported_ticker_index_names = {index[1] for index in supported_ticker_indexes}
+        provider_listing_index_names = {index[1] for index in provider_listing_indexes}
 
-    assert row == ("Preserved Name", "ETF")
+    assert row == ("Preserved Name", "ABC", "US")
     assert listings_exists is None
     assert fx_exists == ("fx_rates",)
     assert fx_supported_pairs_exists == ("fx_supported_pairs",)
     assert fx_refresh_state_exists == ("fx_refresh_state",)
-    assert "idx_supported_tickers_currency_nonnull" in supported_ticker_index_names
+    assert "idx_provider_listing_currency_nonnull" in provider_listing_index_names

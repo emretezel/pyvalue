@@ -11,6 +11,12 @@ Use this file to capture recurring mistake patterns after user corrections so fu
 
 ## Lessons
 
+- Date: 2026-04-21
+- User correction: The catalog refactor must use the exact singular table names `provider`, `provider_exchange`, `listing`, and `provider_listing`, and provider-scoped raw/state tables must key by `provider_listing_id` rather than `(provider, provider_symbol)`.
+- Recurring pattern: Preserving compatibility names too deeply can accidentally keep old physical identities alive after the user has asked for a real schema cutover.
+- Preventive rule: For DB refactors, distinguish compatibility views/API aliases from physical tables; tests and docs must assert the new physical schema and only use old names where deliberately marked compatibility.
+- Resulting action: Updated migrations, storage repositories, tests, docs, and this lesson to treat `listing_id` and `provider_listing_id` as the durable physical identities.
+
 - Date: 2026-04-20
 - User correction: The canonical exchange table must be named exactly `exchange`, and the new provider mapping layer should use enforced foreign keys back to `providers` and `exchange`.
 - Recurring pattern: When refactoring schema structure, I can drift into inferred naming or prior repo conventions instead of locking onto the exact table names and constraint expectations the user already specified.

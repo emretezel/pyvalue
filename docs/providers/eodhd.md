@@ -28,7 +28,7 @@ exchange list from EODHD:
 pyvalue refresh-supported-exchanges
 ```
 
-`pyvalue` also stores a per-exchange `supported_tickers` catalog for EODHD.
+`pyvalue` also stores a per-exchange `provider_listing` catalog for EODHD.
 Refresh one exchange:
 
 ```bash
@@ -43,9 +43,8 @@ pyvalue refresh-supported-tickers --all-supported
 
 Ticker refresh keeps only `Common Stock`, `Preferred Stock`, and `Stock`.
 ETF, fund, and other security types are excluded from the operational catalog.
-When a ticker disappears from EODHD, it is removed from `supported_tickers` and
-stale fetch-state rows, but historical fundamentals, market data, and derived
-tables are kept.
+When a ticker disappears from EODHD, it is removed from `provider_listing` and
+provider-scoped fetch/raw state tied to that provider listing is pruned.
 
 Example:
 
@@ -73,7 +72,7 @@ Quota-aware all-supported run across the stored supported-ticker catalog:
 pyvalue ingest-fundamentals --all-supported
 ```
 
-EODHD ingestion always reads from stored `supported_tickers`, not from a live
+EODHD ingestion always reads from stored `provider_listing`, not from a live
 symbol-list request. Refresh the ticker catalog before running it:
 
 ```bash
@@ -135,9 +134,9 @@ and caches whether that listing is primary or secondary. Missing, blank, or
 otherwise unusable `PrimaryTicker` values are treated as primary. Once a
 listing is classified as secondary, downstream normalization, market-data,
 metric, screening, metadata-refresh, and FX-discovery scopes exclude it. The
-raw `fundamentals_raw` row and `supported_tickers` catalog row are retained for
-provenance and future reclassification, but downstream normalized facts, market
-data, metrics, and related refresh state for that listing are purged.
+raw `fundamentals_raw` row is retained for the provider listing while the row
+remains in `provider_listing`; downstream normalized facts, market data,
+metrics, and related refresh state for secondary listings are purged.
 
 Important fundamentals options:
 
@@ -203,7 +202,7 @@ pyvalue normalize-fundamentals --all-supported --force
 ```
 
 Normalization converts raw EODHD payloads into provider-agnostic
-`financial_facts` records keyed by canonical `security_id`.
+`financial_facts` records keyed by canonical `listing_id`.
 Exchange and all-supported normalization runs parallelize automatically.
 By default, normalization skips symbols whose raw payload has not changed since
 the last successful EODHD normalization.

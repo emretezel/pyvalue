@@ -35,6 +35,7 @@ from pyvalue.storage import (
     MarketDataRepository,
     MetricComputeStatusRecord,
     MetricComputeStatusRepository,
+    MetricRecord,
     MetricsRepository,
     SecurityRepository,
     SupportedTicker,
@@ -1083,9 +1084,8 @@ def test_cmd_load_universe_sec_stores_supported_tickers(monkeypatch, tmp_path):
     assert rc == 0
     repo = SupportedTickerRepository(db_path)
     rows = repo.list_for_exchange("SEC", "US")
-    assert [(row.symbol, row.listing_exchange, row.security_type) for row in rows] == [
-        ("AAA.US", "NASDAQ", "Common Stock")
-    ]
+    assert [row.symbol for row in rows] == ["AAA.US"]
+    assert [row.security_type for row in rows] == [None]
 
 
 def test_cmd_refresh_supported_exchanges(monkeypatch, tmp_path):
@@ -1254,7 +1254,7 @@ def test_cmd_refresh_supported_tickers_filters_types_and_cleans_catalog(
     ticker_repo = SupportedTickerRepository(db_path)
     rows = ticker_repo.list_for_exchange("EODHD", "LSE")
     assert [row.symbol for row in rows] == ["KEEP.LSE", "PREF.LSE"]
-    assert [row.security_type for row in rows] == ["Common Stock", "Preferred Stock"]
+    assert [row.security_type for row in rows] == [None, None]
     with ticker_repo._connect() as conn:
         listings_table = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='listings'"
@@ -1262,7 +1262,7 @@ def test_cmd_refresh_supported_tickers_filters_types_and_cleans_catalog(
 
     assert state_repo.fetch("EODHD", "OLD.LSE") is None
     assert state_repo.fetch("EODHD", "KEEP.LSE") is not None
-    assert fund_repo.fetch("EODHD", "OLD.LSE") is not None
+    assert fund_repo.fetch("EODHD", "OLD.LSE") is None
     assert listings_table is None
 
 
@@ -2801,7 +2801,7 @@ def test_cmd_reconcile_listing_status_backfills_from_raw_only(tmp_path, capsys):
             """
             SELECT COUNT(*)
             FROM financial_facts ff
-            JOIN securities s ON s.security_id = ff.security_id
+            JOIN securities s ON s.security_id = ff.listing_id
             WHERE s.canonical_symbol = 'AAA.LSE'
             """
         ).fetchone()[0]
@@ -2809,7 +2809,7 @@ def test_cmd_reconcile_listing_status_backfills_from_raw_only(tmp_path, capsys):
             """
             SELECT COUNT(*)
             FROM market_data md
-            JOIN securities s ON s.security_id = md.security_id
+            JOIN securities s ON s.security_id = md.listing_id
             WHERE s.canonical_symbol = 'AAA.LSE'
             """
         ).fetchone()[0]
@@ -2817,7 +2817,7 @@ def test_cmd_reconcile_listing_status_backfills_from_raw_only(tmp_path, capsys):
             """
             SELECT COUNT(*)
             FROM metrics m
-            JOIN securities s ON s.security_id = m.security_id
+            JOIN securities s ON s.security_id = m.listing_id
             WHERE s.canonical_symbol = 'AAA.LSE'
             """
         ).fetchone()[0]
@@ -3901,7 +3901,7 @@ def test_cmd_compute_metrics_bulk_with_exchange(monkeypatch, tmp_path):
             """
             SELECT s.canonical_symbol
             FROM metrics m
-            JOIN securities s ON s.security_id = m.security_id
+            JOIN securities s ON s.security_id = m.listing_id
             ORDER BY s.canonical_symbol
             """
         )
@@ -3910,7 +3910,7 @@ def test_cmd_compute_metrics_bulk_with_exchange(monkeypatch, tmp_path):
     assert [row[0] for row in rows] == ["CCC.LSE"]
 
 
-def test_cmd_compute_metrics_bulk_requires_supported_tickers(monkeypatch, tmp_path):
+def test_cmd_compute_metrics_bulk_uses_minimal_provider_listing(monkeypatch, tmp_path):
     db_path = tmp_path / "fundmetrics.db"
     # No listings stored; only fundamentals exist.
     fund_repo = FundamentalsRepository(db_path)
@@ -3946,15 +3946,19 @@ def test_cmd_compute_metrics_bulk_requires_supported_tickers(monkeypatch, tmp_pa
 
     monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
 
-    with pytest.raises(SystemExit) as exc:
-        cli.cmd_compute_metrics_bulk(
-            provider="EODHD",
-            database=str(db_path),
-            metric_ids=None,
-            exchange_code="LSE",
-        )
-    assert "No supported tickers found for provider EODHD on exchange LSE" in str(
-        exc.value
+    rc = cli.cmd_compute_metrics_bulk(
+        provider="EODHD",
+        database=str(db_path),
+        metric_ids=None,
+        exchange_code="LSE",
+    )
+    assert rc == 0
+    assert metrics_repo.fetch("AAA.LSE", "dummy_metric") == MetricRecord(
+        value=len("AAA.LSE"),
+        as_of="2024-01-01",
+        unit_kind="other",
+        currency=None,
+        unit_label=None,
     )
 
 
@@ -5808,7 +5812,7 @@ def test_cmd_normalize_fundamentals_sec(monkeypatch, tmp_path):
             """
             SELECT ff.concept, ff.value, ff.source_provider
             FROM financial_facts ff
-            JOIN securities s ON s.security_id = ff.security_id
+                JOIN securities s ON s.security_id = ff.listing_id
             WHERE s.canonical_symbol = 'AAPL.US'
             """
         )
@@ -5984,7 +5988,7 @@ def test_cmd_normalize_fundamentals_bulk_sec(monkeypatch, tmp_path):
         """
         SELECT s.canonical_symbol, ff.value
         FROM financial_facts ff
-        JOIN securities s ON s.security_id = ff.security_id
+        JOIN securities s ON s.security_id = ff.listing_id
         ORDER BY s.canonical_symbol
         """
     )
@@ -6134,7 +6138,7 @@ def test_cmd_normalize_fundamentals_bulk_with_exchange(monkeypatch, tmp_path):
             , ff.concept
             , ff.value
             FROM financial_facts ff
-            JOIN securities s ON s.security_id = ff.security_id
+            JOIN securities s ON s.security_id = ff.listing_id
             WHERE ff.concept = 'NetIncomeLoss'
             ORDER BY s.canonical_symbol
             """
@@ -6212,7 +6216,7 @@ def test_cmd_normalize_fundamentals_eodhd(monkeypatch, tmp_path):
             """
             SELECT ff.concept, ff.value, ff.source_provider
             FROM financial_facts ff
-            JOIN securities s ON s.security_id = ff.security_id
+            JOIN securities s ON s.security_id = ff.listing_id
             WHERE s.canonical_symbol = 'SHEL.LSE'
             """
         )
@@ -6285,7 +6289,7 @@ def test_cmd_normalize_fundamentals_eodhd_drops_old_missing_fx_periods(tmp_path)
             """
             SELECT ff.end_date, ff.value, ff.currency, ff.unit
             FROM financial_facts ff
-            JOIN securities s ON s.security_id = ff.security_id
+            JOIN securities s ON s.security_id = ff.listing_id
             WHERE s.canonical_symbol = 'AALB.AS' AND ff.concept = 'Assets'
             ORDER BY ff.end_date
             """
@@ -6751,7 +6755,7 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_continues_after_symbol_failure_wi
             """
             SELECT s.canonical_symbol
             FROM financial_facts ff
-            JOIN securities s ON s.security_id = ff.security_id
+            JOIN securities s ON s.security_id = ff.listing_id
             ORDER BY s.canonical_symbol
             """
         )
@@ -6840,7 +6844,7 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_interrupts_cleanly(
             """
             SELECT s.canonical_symbol
             FROM financial_facts ff
-            JOIN securities s ON s.security_id = ff.security_id
+            JOIN securities s ON s.security_id = ff.listing_id
             ORDER BY s.canonical_symbol
             """
         )
@@ -6905,7 +6909,7 @@ def test_cmd_normalize_sec_facts_bulk_with_inline_executor(monkeypatch, tmp_path
             """
             SELECT s.canonical_symbol, ff.value
             FROM financial_facts ff
-            JOIN securities s ON s.security_id = ff.security_id
+            JOIN securities s ON s.security_id = ff.listing_id
             ORDER BY s.canonical_symbol
             """
         )
@@ -7012,7 +7016,7 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_process_pool_smoke(
             """
             SELECT s.canonical_symbol, ff.concept, ff.value
             FROM financial_facts ff
-            JOIN securities s ON s.security_id = ff.security_id
+            JOIN securities s ON s.security_id = ff.listing_id
             WHERE ff.concept = 'Assets'
             ORDER BY s.canonical_symbol
             """
@@ -7074,7 +7078,7 @@ def test_cmd_normalize_sec_facts_bulk_process_pool_smoke(monkeypatch, tmp_path):
             """
             SELECT s.canonical_symbol, ff.concept, ff.value
             FROM financial_facts ff
-            JOIN securities s ON s.security_id = ff.security_id
+            JOIN securities s ON s.security_id = ff.listing_id
             WHERE ff.concept = 'NetIncomeLoss'
             ORDER BY s.canonical_symbol
             """
@@ -7131,7 +7135,7 @@ def test_cmd_recalc_market_cap(tmp_path):
             """
             SELECT market_cap
             FROM market_data md
-            JOIN securities s ON s.security_id = md.security_id
+            JOIN securities s ON s.security_id = md.listing_id
             WHERE s.canonical_symbol = 'AAA.US' AND md.as_of = '2023-12-31'
             """
         ).fetchone()[0]

@@ -2002,10 +2002,12 @@ def _migration_029_add_fin_facts_security_concept_latest_index(
     ).fetchone()
     if not table_exists:
         return
+    columns = _table_columns(conn, "financial_facts")
+    key_column = "listing_id" if "listing_id" in columns else "security_id"
     conn.execute(
-        """
+        f"""
         CREATE INDEX IF NOT EXISTS idx_fin_facts_security_concept_latest
-        ON financial_facts(security_id, concept, end_date DESC, filed DESC)
+        ON financial_facts({key_column}, concept, end_date DESC, filed DESC)
         """
     )
 
@@ -2028,18 +2030,24 @@ def _migration_030_add_metric_compute_status_tables(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='financial_facts'"
     ).fetchone()
     if table_exists:
+        refresh_columns = _table_columns(conn, "financial_facts_refresh_state")
+        fact_columns = _table_columns(conn, "financial_facts")
+        key_column = "listing_id" if "listing_id" in fact_columns else "security_id"
+        refresh_key_column = (
+            "listing_id" if "listing_id" in refresh_columns else "security_id"
+        )
         conn.execute(
-            """
+            f"""
             INSERT INTO financial_facts_refresh_state (
-                security_id,
+                {refresh_key_column},
                 refreshed_at
             )
-            SELECT DISTINCT ff.security_id, ?
+            SELECT DISTINCT ff.{key_column}, ?
             FROM financial_facts ff
             WHERE NOT EXISTS (
                 SELECT 1
                 FROM financial_facts_refresh_state ffrs
-                WHERE ffrs.security_id = ff.security_id
+                WHERE ffrs.{refresh_key_column} = ff.{key_column}
             )
             """,
             (now,),
@@ -2281,6 +2289,1184 @@ def _migration_033_split_exchange_catalog(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE IF EXISTS supported_exchanges")
 
 
+def _migration_034_rename_catalog_identity_tables(conn: sqlite3.Connection) -> None:
+    """Rename the catalog identity layer around provider/listing/provider_listing."""
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS provider (
+            provider_id INTEGER PRIMARY KEY,
+            provider_code TEXT NOT NULL UNIQUE CHECK (
+                provider_code = UPPER(TRIM(provider_code))
+                AND LENGTH(TRIM(provider_code)) > 0
+            ),
+            display_name TEXT NOT NULL,
+            description TEXT,
+            status TEXT NOT NULL DEFAULT 'active' CHECK (
+                status IN ('active', 'deprecated', 'disabled')
+            ),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS issuer (
+            issuer_id INTEGER PRIMARY KEY,
+            name TEXT,
+            description TEXT,
+            sector TEXT,
+            industry TEXT,
+            country TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS listing (
+            listing_id INTEGER PRIMARY KEY,
+            issuer_id INTEGER NOT NULL,
+            exchange_id INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            currency TEXT,
+            UNIQUE (exchange_id, symbol),
+            FOREIGN KEY (issuer_id) REFERENCES issuer(issuer_id),
+            FOREIGN KEY (exchange_id) REFERENCES "exchange"(exchange_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_listing_exchange
+        ON listing(exchange_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS provider_exchange (
+            provider_exchange_id INTEGER PRIMARY KEY,
+            provider_id INTEGER NOT NULL,
+            provider_exchange_code TEXT NOT NULL,
+            exchange_id INTEGER NOT NULL,
+            name TEXT,
+            country TEXT,
+            currency TEXT,
+            operating_mic TEXT,
+            country_iso2 TEXT,
+            country_iso3 TEXT,
+            updated_at TEXT NOT NULL,
+            UNIQUE (provider_id, provider_exchange_code),
+            UNIQUE (provider_exchange_id, provider_id),
+            FOREIGN KEY (provider_id) REFERENCES provider(provider_id),
+            FOREIGN KEY (exchange_id) REFERENCES "exchange"(exchange_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_provider_exchange_exchange
+        ON provider_exchange(exchange_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS provider_listing (
+            provider_listing_id INTEGER PRIMARY KEY,
+            provider_id INTEGER NOT NULL,
+            provider_exchange_id INTEGER NOT NULL,
+            provider_symbol TEXT NOT NULL,
+            currency TEXT,
+            listing_id INTEGER NOT NULL,
+            UNIQUE (provider_exchange_id, provider_symbol),
+            FOREIGN KEY (provider_id) REFERENCES provider(provider_id),
+            FOREIGN KEY (provider_exchange_id) REFERENCES provider_exchange(provider_exchange_id),
+            FOREIGN KEY (listing_id) REFERENCES listing(listing_id),
+            FOREIGN KEY (provider_exchange_id, provider_id)
+                REFERENCES provider_exchange(provider_exchange_id, provider_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_provider_listing_provider
+        ON provider_listing(provider_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_provider_listing_listing
+        ON provider_listing(listing_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_provider_listing_currency_nonnull
+        ON provider_listing(currency)
+        WHERE currency IS NOT NULL
+        """
+    )
+
+    provider_rows = []
+    if _table_exists(conn, "providers"):
+        provider_rows = conn.execute(
+            """
+            SELECT
+                provider_code,
+                display_name,
+                description,
+                status,
+                created_at,
+                updated_at
+            FROM providers
+            ORDER BY provider_code
+            """
+        ).fetchall()
+    if provider_rows:
+        conn.executemany(
+            """
+            INSERT INTO provider (
+                provider_code,
+                display_name,
+                description,
+                status,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(provider_code) DO UPDATE SET
+                display_name = excluded.display_name,
+                description = excluded.description,
+                status = excluded.status,
+                updated_at = excluded.updated_at
+            """,
+            [
+                (
+                    _normalize_upper(row["provider_code"]),
+                    _normalize_optional_text(row["display_name"]) or "",
+                    _normalize_optional_text(row["description"]),
+                    _normalize_optional_text(row["status"]) or "active",
+                    _normalize_optional_text(row["created_at"]) or now,
+                    _normalize_optional_text(row["updated_at"]) or now,
+                )
+                for row in provider_rows
+            ],
+        )
+    else:
+        conn.executemany(
+            """
+            INSERT INTO provider (
+                provider_code,
+                display_name,
+                description,
+                status,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(provider_code) DO UPDATE SET
+                display_name = excluded.display_name,
+                description = excluded.description,
+                status = excluded.status,
+                updated_at = excluded.updated_at
+            """,
+            [
+                (provider_code, display_name, description, status, now, now)
+                for provider_code, display_name, description, status in _PROVIDER_REGISTRY_ROWS
+            ],
+        )
+
+    provider_id_by_code = {
+        str(row["provider_code"]): int(row["provider_id"])
+        for row in conn.execute(
+            """
+            SELECT provider_id, provider_code
+            FROM provider
+            """
+        ).fetchall()
+    }
+
+    if _table_exists(conn, "exchange_provider"):
+        exchange_provider_rows = conn.execute(
+            """
+            SELECT
+                provider,
+                provider_exchange_code,
+                exchange_id,
+                name,
+                country,
+                currency,
+                operating_mic,
+                country_iso2,
+                country_iso3,
+                updated_at
+            FROM exchange_provider
+            ORDER BY provider, provider_exchange_code
+            """
+        ).fetchall()
+        conn.executemany(
+            """
+            INSERT INTO provider_exchange (
+                provider_id,
+                provider_exchange_code,
+                exchange_id,
+                name,
+                country,
+                currency,
+                operating_mic,
+                country_iso2,
+                country_iso3,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(provider_id, provider_exchange_code) DO UPDATE SET
+                exchange_id = excluded.exchange_id,
+                name = excluded.name,
+                country = excluded.country,
+                currency = excluded.currency,
+                operating_mic = excluded.operating_mic,
+                country_iso2 = excluded.country_iso2,
+                country_iso3 = excluded.country_iso3,
+                updated_at = excluded.updated_at
+            """,
+            [
+                (
+                    provider_id_by_code[_normalize_upper(row["provider"]) or ""],
+                    _normalize_upper(row["provider_exchange_code"]),
+                    int(row["exchange_id"]),
+                    _normalize_optional_text(row["name"]),
+                    _normalize_optional_text(row["country"]),
+                    _normalize_optional_text(row["currency"]),
+                    _normalize_optional_text(row["operating_mic"]),
+                    _normalize_optional_text(row["country_iso2"]),
+                    _normalize_optional_text(row["country_iso3"]),
+                    _normalize_optional_text(row["updated_at"]) or now,
+                )
+                for row in exchange_provider_rows
+                if _normalize_upper(row["provider"]) in provider_id_by_code
+                and _normalize_upper(row["provider_exchange_code"]) is not None
+            ],
+        )
+
+    if _table_exists(conn, "securities"):
+        security_catalog_rows = {}
+        supported_ticker_columns = _table_columns(conn, "supported_tickers")
+        if supported_ticker_columns and "security_id" in supported_ticker_columns:
+            country_expr = (
+                "country" if "country" in supported_ticker_columns else "NULL"
+            )
+            currency_expr = (
+                "currency" if "currency" in supported_ticker_columns else "NULL"
+            )
+            security_catalog_rows = {
+                int(row["security_id"]): {
+                    "country": _normalize_optional_text(row["country"]),
+                    "currency": _normalize_upper(row["currency"]),
+                }
+                for row in conn.execute(
+                    f"""
+                    SELECT
+                        security_id,
+                        MAX({country_expr}) AS country,
+                        MAX({currency_expr}) AS currency
+                    FROM supported_tickers
+                    GROUP BY security_id
+                    """
+                ).fetchall()
+            }
+
+        securities_rows = conn.execute(
+            """
+            SELECT
+                security_id,
+                canonical_ticker,
+                canonical_exchange_code,
+                entity_name,
+                description,
+                sector,
+                industry
+            FROM securities
+            ORDER BY security_id
+            """
+        ).fetchall()
+        conn.executemany(
+            """
+            INSERT INTO issuer (
+                issuer_id,
+                name,
+                description,
+                sector,
+                industry,
+                country
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(issuer_id) DO UPDATE SET
+                name = excluded.name,
+                description = excluded.description,
+                sector = excluded.sector,
+                industry = excluded.industry,
+                country = excluded.country
+            """,
+            [
+                (
+                    int(row["security_id"]),
+                    _normalize_optional_text(row["entity_name"]),
+                    _normalize_optional_text(row["description"]),
+                    _normalize_optional_text(row["sector"]),
+                    _normalize_optional_text(row["industry"]),
+                    security_catalog_rows.get(int(row["security_id"]), {}).get(
+                        "country"
+                    ),
+                )
+                for row in securities_rows
+            ],
+        )
+        exchange_codes = {
+            exchange_code
+            for exchange_code in (
+                _normalize_upper(row["canonical_exchange_code"])
+                for row in securities_rows
+            )
+            if exchange_code is not None
+        }
+        conn.executemany(
+            """
+            INSERT INTO "exchange" (
+                exchange_code,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?)
+            ON CONFLICT(exchange_code) DO UPDATE SET
+                updated_at = excluded.updated_at
+            """,
+            [(exchange_code, now, now) for exchange_code in sorted(exchange_codes)],
+        )
+        exchange_id_by_code = {
+            str(row["exchange_code"]): int(row["exchange_id"])
+            for row in conn.execute(
+                """
+                SELECT exchange_id, exchange_code
+                FROM "exchange"
+                """
+            ).fetchall()
+        }
+        conn.executemany(
+            """
+            INSERT INTO listing (
+                listing_id,
+                issuer_id,
+                exchange_id,
+                symbol,
+                currency
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(listing_id) DO UPDATE SET
+                issuer_id = excluded.issuer_id,
+                exchange_id = excluded.exchange_id,
+                symbol = excluded.symbol,
+                currency = excluded.currency
+            """,
+            [
+                (
+                    int(row["security_id"]),
+                    int(row["security_id"]),
+                    exchange_id_by_code[
+                        _normalize_upper(row["canonical_exchange_code"]) or ""
+                    ],
+                    _normalize_upper(row["canonical_ticker"]),
+                    security_catalog_rows.get(int(row["security_id"]), {}).get(
+                        "currency"
+                    ),
+                )
+                for row in securities_rows
+                if _normalize_upper(row["canonical_exchange_code"])
+                in exchange_id_by_code
+            ],
+        )
+
+    provider_exchange_id_by_key = {
+        (int(row["provider_id"]), str(row["provider_exchange_code"])): int(
+            row["provider_exchange_id"]
+        )
+        for row in conn.execute(
+            """
+            SELECT
+                provider_exchange_id,
+                provider_id,
+                provider_exchange_code
+            FROM provider_exchange
+            """
+        ).fetchall()
+    }
+
+    def _ensure_provider_exchange_mapping(
+        provider_id: int,
+        provider_exchange_code: str,
+    ) -> Optional[int]:
+        key = (provider_id, provider_exchange_code)
+        provider_exchange_id = provider_exchange_id_by_key.get(key)
+        if provider_exchange_id is not None:
+            return provider_exchange_id
+        exchange_code = provider_exchange_code
+        exchange_row = conn.execute(
+            """
+            SELECT exchange_id
+            FROM "exchange"
+            WHERE exchange_code = ?
+            """,
+            (exchange_code,),
+        ).fetchone()
+        if exchange_row is None:
+            cursor = conn.execute(
+                """
+                INSERT INTO "exchange" (
+                    exchange_code,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?)
+                """,
+                (exchange_code, now, now),
+            )
+            if cursor.lastrowid is None:
+                raise RuntimeError(f"Failed to create exchange {exchange_code}")
+            exchange_id = int(cursor.lastrowid)
+        else:
+            exchange_id = int(exchange_row["exchange_id"])
+        cursor = conn.execute(
+            """
+            INSERT INTO provider_exchange (
+                provider_id,
+                provider_exchange_code,
+                exchange_id,
+                name,
+                country,
+                currency,
+                operating_mic,
+                country_iso2,
+                country_iso3,
+                updated_at
+            ) VALUES (?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?)
+            ON CONFLICT(provider_id, provider_exchange_code) DO UPDATE SET
+                exchange_id = excluded.exchange_id,
+                updated_at = excluded.updated_at
+            """,
+            (provider_id, provider_exchange_code, exchange_id, now),
+        )
+        provider_exchange_id = int(cursor.lastrowid or 0)
+        if provider_exchange_id == 0:
+            row = conn.execute(
+                """
+                SELECT provider_exchange_id
+                FROM provider_exchange
+                WHERE provider_id = ? AND provider_exchange_code = ?
+                """,
+                (provider_id, provider_exchange_code),
+            ).fetchone()
+            provider_exchange_id = int(row["provider_exchange_id"]) if row else 0
+        if provider_exchange_id:
+            provider_exchange_id_by_key[key] = provider_exchange_id
+            return provider_exchange_id
+        return None
+
+    if _table_exists(conn, "supported_tickers"):
+        supported_ticker_columns = _table_columns(conn, "supported_tickers")
+        provider_symbol_expr = (
+            "provider_symbol"
+            if "provider_symbol" in supported_ticker_columns
+            else "symbol"
+            if "symbol" in supported_ticker_columns
+            else "code"
+            if "code" in supported_ticker_columns
+            else "NULL"
+        )
+        provider_ticker_expr = (
+            "provider_ticker"
+            if "provider_ticker" in supported_ticker_columns
+            else "code"
+            if "code" in supported_ticker_columns
+            else "NULL"
+        )
+        provider_exchange_expr = (
+            "provider_exchange_code"
+            if "provider_exchange_code" in supported_ticker_columns
+            else "exchange_code"
+            if "exchange_code" in supported_ticker_columns
+            else "NULL"
+        )
+        security_id_expr = (
+            "security_id" if "security_id" in supported_ticker_columns else "NULL"
+        )
+        currency_expr = "currency" if "currency" in supported_ticker_columns else "NULL"
+        provider_listing_rows = conn.execute(
+            f"""
+            SELECT
+                provider,
+                {provider_symbol_expr} AS provider_symbol,
+                {provider_ticker_expr} AS provider_ticker,
+                {provider_exchange_expr} AS provider_exchange_code,
+                {security_id_expr} AS security_id,
+                {currency_expr} AS currency
+            FROM supported_tickers
+            ORDER BY provider, provider_exchange_code, provider_ticker, provider_symbol
+            """
+        ).fetchall()
+        payload = []
+        for row in provider_listing_rows:
+            provider_code = _normalize_upper(row["provider"])
+            provider_symbol_text = _normalize_upper(row["provider_symbol"]) or ""
+            provider_exchange_code = _normalize_upper(row["provider_exchange_code"])
+            if provider_exchange_code is None:
+                provider_exchange_code = _infer_canonical_exchange(provider_symbol_text)
+            if provider_code == "SEC":
+                provider_exchange_code = "US"
+            if provider_code is None or provider_exchange_code is None:
+                continue
+            provider_id = provider_id_by_code.get(provider_code)
+            if provider_id is None:
+                continue
+            provider_exchange_id = _ensure_provider_exchange_mapping(
+                provider_id,
+                provider_exchange_code,
+            )
+            if provider_exchange_id is None:
+                continue
+            bare_symbol = _normalize_upper(row["provider_ticker"])
+            if bare_symbol is None:
+                if provider_symbol_text.endswith(f".{provider_exchange_code}"):
+                    bare_symbol = provider_symbol_text[
+                        : -(len(provider_exchange_code) + 1)
+                    ]
+                else:
+                    bare_symbol, _ = _split_symbol(provider_symbol_text)
+            if not bare_symbol:
+                continue
+            listing_id = row["security_id"]
+            if listing_id is None:
+                listing_row = conn.execute(
+                    """
+                    SELECT l.listing_id
+                    FROM listing l
+                    JOIN "exchange" e ON e.exchange_id = l.exchange_id
+                    WHERE e.exchange_code = ? AND l.symbol = ?
+                    """,
+                    (provider_exchange_code, bare_symbol),
+                ).fetchone()
+                if listing_row is None:
+                    continue
+                listing_id = listing_row["listing_id"]
+            payload.append(
+                (
+                    provider_id,
+                    provider_exchange_id,
+                    bare_symbol,
+                    _normalize_upper(row["currency"]),
+                    int(listing_id),
+                )
+            )
+        conn.executemany(
+            """
+            INSERT INTO provider_listing (
+                provider_id,
+                provider_exchange_id,
+                provider_symbol,
+                currency,
+                listing_id
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(provider_exchange_id, provider_symbol) DO UPDATE SET
+                currency = COALESCE(excluded.currency, provider_listing.currency),
+                listing_id = excluded.listing_id
+            """,
+            payload,
+        )
+
+    def _ensure_provider_scoped_table(
+        table_name: str,
+        ddl: str,
+        index_ddls: Sequence[str],
+        legacy_insert_sql: Optional[str] = None,
+    ) -> None:
+        columns = _table_columns(conn, table_name)
+        if not columns:
+            conn.execute(ddl)
+            for index_ddl in index_ddls:
+                conn.execute(index_ddl)
+            return
+        if "provider_listing_id" in columns or (
+            table_name == "security_listing_status" and "listing_id" in columns
+        ):
+            return
+
+        temp_table = f"{table_name}__new"
+        conn.execute(ddl.replace(table_name, temp_table, 1))
+        if (
+            legacy_insert_sql is not None
+            and _table_exists(conn, "supported_tickers")
+            and "provider_ticker" in _table_columns(conn, "supported_tickers")
+        ):
+            conn.execute(legacy_insert_sql.replace(table_name, temp_table, 1))
+        conn.execute(f"DROP TABLE {table_name}")
+        conn.execute(f"ALTER TABLE {temp_table} RENAME TO {table_name}")
+        for index_ddl in index_ddls:
+            conn.execute(index_ddl)
+
+    def _ensure_listing_rooted_table(
+        table_name: str,
+        ddl: str,
+        index_ddls: Sequence[str],
+        insert_select_sql: Optional[str] = None,
+    ) -> None:
+        columns = _table_columns(conn, table_name)
+        if not columns:
+            conn.execute(ddl)
+            for index_ddl in index_ddls:
+                conn.execute(index_ddl)
+            return
+        if "listing_id" in columns:
+            return
+
+        temp_table = f"{table_name}__new"
+        conn.execute(ddl.replace(table_name, temp_table, 1))
+        if insert_select_sql is not None:
+            conn.execute(insert_select_sql.replace(table_name, temp_table, 1))
+        conn.execute(f"DROP TABLE {table_name}")
+        conn.execute(f"ALTER TABLE {temp_table} RENAME TO {table_name}")
+        for index_ddl in index_ddls:
+            conn.execute(index_ddl)
+
+    _ensure_provider_scoped_table(
+        "fundamentals_raw",
+        """
+        CREATE TABLE fundamentals_raw (
+            payload_id INTEGER PRIMARY KEY,
+            provider_listing_id INTEGER NOT NULL UNIQUE,
+            listing_id INTEGER NOT NULL,
+            currency TEXT,
+            data TEXT NOT NULL,
+            fetched_at TEXT NOT NULL,
+            FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id),
+            FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
+        )
+        """,
+        [
+            """
+            CREATE INDEX IF NOT EXISTS idx_fundamentals_raw_security
+            ON fundamentals_raw(listing_id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_fundamentals_raw_provider_fetched
+            ON fundamentals_raw(fetched_at)
+            """,
+        ],
+        legacy_insert_sql="""
+        INSERT INTO fundamentals_raw (
+            provider_listing_id,
+            listing_id,
+            currency,
+            data,
+            fetched_at
+        )
+        SELECT
+            pl.provider_listing_id,
+            pl.listing_id,
+            fr.currency,
+            fr.data,
+            fr.fetched_at
+        FROM fundamentals_raw fr
+        JOIN supported_tickers st
+          ON st.provider = fr.provider
+         AND st.provider_symbol = fr.provider_symbol
+        JOIN provider p
+          ON p.provider_code = st.provider
+        JOIN provider_exchange px
+          ON px.provider_id = p.provider_id
+         AND px.provider_exchange_code = st.provider_exchange_code
+        JOIN provider_listing pl
+          ON pl.provider_id = p.provider_id
+         AND pl.provider_exchange_id = px.provider_exchange_id
+         AND pl.provider_symbol = st.provider_ticker
+        """,
+    )
+    _ensure_provider_scoped_table(
+        "fundamentals_fetch_state",
+        """
+        CREATE TABLE fundamentals_fetch_state (
+            provider_listing_id INTEGER NOT NULL PRIMARY KEY,
+            last_fetched_at TEXT,
+            last_status TEXT,
+            last_error TEXT,
+            next_eligible_at TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
+        )
+        """,
+        [
+            """
+            CREATE INDEX IF NOT EXISTS idx_fundamentals_fetch_next
+            ON fundamentals_fetch_state(next_eligible_at)
+            """,
+        ],
+        legacy_insert_sql="""
+        INSERT INTO fundamentals_fetch_state (
+            provider_listing_id,
+            last_fetched_at,
+            last_status,
+            last_error,
+            next_eligible_at,
+            attempts
+        )
+        SELECT
+            pl.provider_listing_id,
+            fs.last_fetched_at,
+            fs.last_status,
+            fs.last_error,
+            fs.next_eligible_at,
+            fs.attempts
+        FROM fundamentals_fetch_state fs
+        JOIN supported_tickers st
+          ON st.provider = fs.provider
+         AND st.provider_symbol = fs.provider_symbol
+        JOIN provider p
+          ON p.provider_code = st.provider
+        JOIN provider_exchange px
+          ON px.provider_id = p.provider_id
+         AND px.provider_exchange_code = st.provider_exchange_code
+        JOIN provider_listing pl
+          ON pl.provider_id = p.provider_id
+         AND pl.provider_exchange_id = px.provider_exchange_id
+         AND pl.provider_symbol = st.provider_ticker
+        """,
+    )
+    _ensure_provider_scoped_table(
+        "market_data_fetch_state",
+        """
+        CREATE TABLE market_data_fetch_state (
+            provider_listing_id INTEGER NOT NULL PRIMARY KEY,
+            last_fetched_at TEXT,
+            last_status TEXT,
+            last_error TEXT,
+            next_eligible_at TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
+        )
+        """,
+        [
+            """
+            CREATE INDEX IF NOT EXISTS idx_market_data_fetch_next
+            ON market_data_fetch_state(next_eligible_at)
+            """,
+        ],
+        legacy_insert_sql="""
+        INSERT INTO market_data_fetch_state (
+            provider_listing_id,
+            last_fetched_at,
+            last_status,
+            last_error,
+            next_eligible_at,
+            attempts
+        )
+        SELECT
+            pl.provider_listing_id,
+            fs.last_fetched_at,
+            fs.last_status,
+            fs.last_error,
+            fs.next_eligible_at,
+            fs.attempts
+        FROM market_data_fetch_state fs
+        JOIN supported_tickers st
+          ON st.provider = fs.provider
+         AND st.provider_symbol = fs.provider_symbol
+        JOIN provider p
+          ON p.provider_code = st.provider
+        JOIN provider_exchange px
+          ON px.provider_id = p.provider_id
+         AND px.provider_exchange_code = st.provider_exchange_code
+        JOIN provider_listing pl
+          ON pl.provider_id = p.provider_id
+         AND pl.provider_exchange_id = px.provider_exchange_id
+         AND pl.provider_symbol = st.provider_ticker
+        """,
+    )
+    _ensure_provider_scoped_table(
+        "fundamentals_normalization_state",
+        """
+        CREATE TABLE fundamentals_normalization_state (
+            provider_listing_id INTEGER NOT NULL PRIMARY KEY,
+            listing_id INTEGER NOT NULL,
+            raw_fetched_at TEXT NOT NULL,
+            last_normalized_at TEXT NOT NULL,
+            FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id),
+            FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
+        )
+        """,
+        [
+            """
+            CREATE INDEX IF NOT EXISTS idx_fundamentals_norm_state_security
+            ON fundamentals_normalization_state(listing_id)
+            """,
+        ],
+        legacy_insert_sql="""
+        INSERT INTO fundamentals_normalization_state (
+            provider_listing_id,
+            listing_id,
+            raw_fetched_at,
+            last_normalized_at
+        )
+        SELECT
+            pl.provider_listing_id,
+            pl.listing_id,
+            ns.raw_fetched_at,
+            ns.last_normalized_at
+        FROM fundamentals_normalization_state ns
+        JOIN supported_tickers st
+          ON st.provider = ns.provider
+         AND st.provider_symbol = ns.provider_symbol
+        JOIN provider p
+          ON p.provider_code = st.provider
+        JOIN provider_exchange px
+          ON px.provider_id = p.provider_id
+         AND px.provider_exchange_code = st.provider_exchange_code
+        JOIN provider_listing pl
+          ON pl.provider_id = p.provider_id
+         AND pl.provider_exchange_id = px.provider_exchange_id
+         AND pl.provider_symbol = st.provider_ticker
+        """,
+    )
+    _ensure_provider_scoped_table(
+        "security_listing_status",
+        """
+        CREATE TABLE security_listing_status (
+            listing_id INTEGER NOT NULL PRIMARY KEY,
+            source_provider TEXT NOT NULL,
+            provider_listing_id INTEGER NOT NULL,
+            raw_fetched_at TEXT NOT NULL,
+            is_primary_listing INTEGER NOT NULL CHECK (is_primary_listing IN (0, 1)),
+            primary_provider_listing_id INTEGER,
+            classification_basis TEXT NOT NULL CHECK (
+                classification_basis IN (
+                    'matched_primary_ticker',
+                    'different_primary_ticker',
+                    'missing_primary_ticker'
+                )
+            ),
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (listing_id) REFERENCES listing(listing_id),
+            FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id),
+            FOREIGN KEY (primary_provider_listing_id) REFERENCES provider_listing(provider_listing_id)
+        )
+        """,
+        [
+            """
+            CREATE INDEX IF NOT EXISTS idx_security_listing_status_primary
+            ON security_listing_status(is_primary_listing, listing_id)
+            """,
+        ],
+        legacy_insert_sql="""
+        INSERT INTO security_listing_status (
+            listing_id,
+            source_provider,
+            provider_listing_id,
+            raw_fetched_at,
+            is_primary_listing,
+            primary_provider_listing_id,
+            classification_basis,
+            updated_at
+        )
+        SELECT
+            sls.security_id,
+            sls.source_provider,
+            pl.provider_listing_id,
+            sls.raw_fetched_at,
+            sls.is_primary_listing,
+            primary_pl.provider_listing_id,
+            sls.classification_basis,
+            sls.updated_at
+        FROM security_listing_status sls
+        JOIN supported_tickers st
+          ON st.provider = sls.source_provider
+         AND st.provider_symbol = sls.provider_symbol
+        JOIN provider p
+          ON p.provider_code = st.provider
+        JOIN provider_exchange px
+          ON px.provider_id = p.provider_id
+         AND px.provider_exchange_code = st.provider_exchange_code
+        JOIN provider_listing pl
+          ON pl.provider_id = p.provider_id
+         AND pl.provider_exchange_id = px.provider_exchange_id
+         AND pl.provider_symbol = st.provider_ticker
+        LEFT JOIN supported_tickers primary_st
+          ON primary_st.provider = sls.source_provider
+         AND primary_st.provider_symbol = sls.primary_provider_symbol
+        LEFT JOIN provider primary_p
+          ON primary_p.provider_code = primary_st.provider
+        LEFT JOIN provider_exchange primary_px
+          ON primary_px.provider_id = primary_p.provider_id
+         AND primary_px.provider_exchange_code = primary_st.provider_exchange_code
+        LEFT JOIN provider_listing primary_pl
+          ON primary_pl.provider_id = primary_p.provider_id
+         AND primary_pl.provider_exchange_id = primary_px.provider_exchange_id
+         AND primary_pl.provider_symbol = primary_st.provider_ticker
+        """,
+    )
+    _ensure_listing_rooted_table(
+        "financial_facts_refresh_state",
+        """
+        CREATE TABLE financial_facts_refresh_state (
+            listing_id INTEGER NOT NULL PRIMARY KEY,
+            refreshed_at TEXT NOT NULL
+        )
+        """,
+        [],
+        insert_select_sql="""
+        INSERT INTO financial_facts_refresh_state (
+            listing_id,
+            refreshed_at
+        )
+        SELECT
+            security_id,
+            refreshed_at
+        FROM financial_facts_refresh_state
+        """,
+    )
+    _ensure_listing_rooted_table(
+        "financial_facts",
+        """
+        CREATE TABLE financial_facts (
+            listing_id INTEGER NOT NULL,
+            cik TEXT,
+            concept TEXT NOT NULL,
+            fiscal_period TEXT,
+            end_date TEXT NOT NULL,
+            unit TEXT NOT NULL,
+            value REAL NOT NULL,
+            accn TEXT,
+            filed TEXT,
+            frame TEXT,
+            start_date TEXT,
+            accounting_standard TEXT,
+            currency TEXT,
+            source_provider TEXT,
+            PRIMARY KEY (listing_id, concept, fiscal_period, end_date, unit, accn)
+        )
+        """,
+        [
+            """
+            CREATE INDEX IF NOT EXISTS idx_fin_facts_security_concept
+            ON financial_facts(listing_id, concept)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_fin_facts_concept
+            ON financial_facts(concept)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_fin_facts_security_concept_latest
+            ON financial_facts(listing_id, concept, end_date DESC, filed DESC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_fin_facts_currency_nonnull
+            ON financial_facts(currency)
+            WHERE currency IS NOT NULL
+            """,
+        ],
+        insert_select_sql="""
+        INSERT INTO financial_facts (
+            listing_id,
+            cik,
+            concept,
+            fiscal_period,
+            end_date,
+            unit,
+            value,
+            accn,
+            filed,
+            frame,
+            start_date,
+            accounting_standard,
+            currency,
+            source_provider
+        )
+        SELECT
+            security_id,
+            cik,
+            concept,
+            fiscal_period,
+            end_date,
+            unit,
+            value,
+            accn,
+            filed,
+            frame,
+            start_date,
+            accounting_standard,
+            currency,
+            source_provider
+        FROM financial_facts
+        """,
+    )
+    market_data_columns = _table_columns(conn, "market_data")
+    market_volume_expr = "volume" if "volume" in market_data_columns else "NULL"
+    market_cap_expr = "market_cap" if "market_cap" in market_data_columns else "NULL"
+    market_currency_expr = "currency" if "currency" in market_data_columns else "NULL"
+    _ensure_listing_rooted_table(
+        "market_data",
+        """
+        CREATE TABLE market_data (
+            listing_id INTEGER NOT NULL,
+            as_of DATE NOT NULL,
+            price REAL NOT NULL,
+            volume INTEGER,
+            market_cap REAL,
+            currency TEXT,
+            source_provider TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (listing_id, as_of)
+        )
+        """,
+        [
+            """
+            CREATE INDEX IF NOT EXISTS idx_market_data_latest
+            ON market_data(listing_id, as_of DESC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_market_data_currency_nonnull
+            ON market_data(currency)
+            WHERE currency IS NOT NULL
+            """,
+        ],
+        insert_select_sql=f"""
+        INSERT INTO market_data (
+            listing_id,
+            as_of,
+            price,
+            volume,
+            market_cap,
+            currency,
+            source_provider,
+            updated_at
+        )
+        SELECT
+            security_id,
+            as_of,
+            price,
+            {market_volume_expr},
+            {market_cap_expr},
+            {market_currency_expr},
+            source_provider,
+            updated_at
+        FROM market_data
+        """,
+    )
+    _ensure_listing_rooted_table(
+        "metrics",
+        """
+        CREATE TABLE metrics (
+            listing_id INTEGER NOT NULL,
+            metric_id TEXT NOT NULL,
+            value REAL NOT NULL,
+            as_of TEXT NOT NULL,
+            unit_kind TEXT NOT NULL DEFAULT 'other',
+            currency TEXT,
+            unit_label TEXT,
+            PRIMARY KEY (listing_id, metric_id)
+        )
+        """,
+        [
+            """
+            CREATE INDEX IF NOT EXISTS idx_metrics_metric_id
+            ON metrics(metric_id)
+            """,
+        ],
+        insert_select_sql="""
+        INSERT INTO metrics (
+            listing_id,
+            metric_id,
+            value,
+            as_of,
+            unit_kind,
+            currency,
+            unit_label
+        )
+        SELECT
+            security_id,
+            metric_id,
+            value,
+            as_of,
+            unit_kind,
+            currency,
+            unit_label
+        FROM metrics
+        """,
+    )
+    _ensure_listing_rooted_table(
+        "metric_compute_status",
+        """
+        CREATE TABLE metric_compute_status (
+            listing_id INTEGER NOT NULL,
+            metric_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            reason_code TEXT,
+            reason_detail TEXT,
+            attempted_at TEXT NOT NULL,
+            value_as_of TEXT,
+            facts_refreshed_at TEXT,
+            market_data_as_of TEXT,
+            market_data_updated_at TEXT,
+            PRIMARY KEY (listing_id, metric_id)
+        )
+        """,
+        [
+            """
+            CREATE INDEX IF NOT EXISTS idx_metric_compute_status_metric_status
+            ON metric_compute_status(metric_id, status)
+            """,
+        ],
+        insert_select_sql="""
+        INSERT INTO metric_compute_status (
+            listing_id,
+            metric_id,
+            status,
+            reason_code,
+            reason_detail,
+            attempted_at,
+            value_as_of,
+            facts_refreshed_at,
+            market_data_as_of,
+            market_data_updated_at
+        )
+        SELECT
+            security_id,
+            metric_id,
+            status,
+            reason_code,
+            reason_detail,
+            attempted_at,
+            value_as_of,
+            facts_refreshed_at,
+            market_data_as_of,
+            market_data_updated_at
+        FROM metric_compute_status
+        """,
+    )
+
+    for legacy_name in (
+        "exchange_provider",
+        "providers",
+        "supported_tickers",
+        "securities",
+    ):
+        legacy_row = conn.execute(
+            """
+            SELECT type
+            FROM sqlite_master
+            WHERE name = ?
+              AND type IN ('table', 'view')
+            """,
+            (legacy_name,),
+        ).fetchone()
+        if legacy_row is None:
+            continue
+        if str(legacy_row["type"]) == "view":
+            conn.execute(f"DROP VIEW {legacy_name}")
+        else:
+            conn.execute(f"DROP TABLE {legacy_name}")
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -2315,6 +3501,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_031_add_security_listing_status_table,
     _migration_032_create_providers_registry,
     _migration_033_split_exchange_catalog,
+    _migration_034_rename_catalog_identity_tables,
 ]
 
 

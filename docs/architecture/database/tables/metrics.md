@@ -2,38 +2,36 @@
 
 ## Purpose
 
-Stores the latest computed value for each metric and security.
+Stores the latest computed metric value per canonical listing and metric.
 
 ## Grain
 
-One row per `(security_id, metric_id)`.
+One row per `(listing_id, metric_id)`.
 
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-20`
+- Snapshot source: pre-refactor `data/pyvalue.db` metrics table on `2026-04-21`
 - Row count: `2,422,916`
-- Table size: `166,580,224 bytes` (`158.9 MiB`)
-- Approximate bytes per row: `68.8`
+- Table size: approximately `158.9 MiB` before the `listing_id` rename
 <!-- END generated_live_stats -->
 
 ## Columns
 
 | Column | Type | Null | Key | Notes |
 | --- | --- | --- | --- | --- |
-| `security_id` | `INTEGER` | no | PK | canonical identity link |
+| `listing_id` | `INTEGER` | no | PK | canonical listing identity |
 | `metric_id` | `TEXT` | no | PK, idx | metric identifier |
 | `value` | `REAL` | no |  | computed metric value |
-| `as_of` | `TEXT` | no |  | metric timestamp |
-| `unit_kind` | `TEXT` | no |  | monetary, ratio, percent, and so on |
-| `currency` | `TEXT` | yes |  | only for currency-bearing metrics |
-| `unit_label` | `TEXT` | yes |  | optional display suffix |
+| `as_of` | `TEXT` | no |  | metric value date |
+| `unit_kind` | `TEXT` | no |  | metric unit category |
+| `currency` | `TEXT` | yes |  | metric currency when monetary |
+| `unit_label` | `TEXT` | yes |  | display unit label |
 
 ## Keys And Relationships
 
-- Primary key: `(security_id, metric_id)`
-- Logical references:
-  - `security_id` to `securities`
+- Primary key: `(listing_id, metric_id)`
+- Logical reference: `listing_id -> listing.listing_id`
 
 ## Secondary Indexes
 
@@ -41,83 +39,14 @@ One row per `(security_id, metric_id)`.
 
 ## Main Read Paths
 
-- `run-screen`
-- reporting commands that inspect stored metrics
-- reusable metric cache reads
+- screen and report queries by metric id
+- per-symbol metric lookup
 
 ## Main Write Paths
 
 - `compute-metrics`
-- purge when a listing becomes secondary
-
-## Column Usage Notes
-
-- `security_id`: canonical scope key for symbol-metric lookups.
-- `metric_id`: filter key for screen and reporting reads.
-- `value`: stored metric result used directly by screens and reports.
-- `as_of`: metric timestamp reused for freshness-sensitive reads.
-- `unit_kind`: tells readers whether currency metadata should be interpreted.
-- `currency`: present for monetary/per-share metrics and used by display and validation helpers.
-- `unit_label`: optional presentation hint, mainly for display/reporting.
-
-## Sample Rows
-
-<!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-20`
-- Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
-
-```json
-[
-  {
-    "security_id": 28127,
-    "metric_id": "working_capital",
-    "value": -278959824.0,
-    "as_of": "2025-12-31",
-    "unit_kind": "monetary",
-    "currency": "USD",
-    "unit_label": null
-  },
-  {
-    "security_id": 28127,
-    "metric_id": "current_ratio",
-    "value": 0.9751913595536019,
-    "as_of": "2025-12-31",
-    "unit_kind": "ratio",
-    "currency": null,
-    "unit_label": null
-  },
-  {
-    "security_id": 28127,
-    "metric_id": "long_term_debt",
-    "value": 4740028436.0,
-    "as_of": "2025-12-31",
-    "unit_kind": "monetary",
-    "currency": "USD",
-    "unit_label": null
-  },
-  {
-    "security_id": 28127,
-    "metric_id": "eps_streak",
-    "value": 0.0,
-    "as_of": "2025-12-31",
-    "unit_kind": "count",
-    "currency": null,
-    "unit_label": null
-  },
-  {
-    "security_id": 28127,
-    "metric_id": "eps_ttm",
-    "value": -1.9099350926193535,
-    "as_of": "2025-12-31",
-    "unit_kind": "per_share",
-    "currency": "USD",
-    "unit_label": "per_share"
-  }
-]
-```
-<!-- END generated_sample_rows -->
+- bulk metric recomputation
 
 ## Review Notes
 
-- This table is intentionally latest-only to keep screening fast
-- Review whether metric-oriented scans need a stronger secondary index than `metric_id` alone as the universe grows
+- This table stores latest values only. Historical metric versions would require a separate table or an expanded key.

@@ -4,40 +4,41 @@ This page maps the end-to-end pipeline to the tables and indexes that matter mos
 
 ## 1. Refresh Supported Exchanges
 
-- Reads provider payloads and rewrites provider slices in `exchange_provider`
+- Reads provider payloads and rewrites provider slices in `provider_exchange`
 - Upserts canonical rows in `exchange`
-- Main concerns:
-  - full-table replace cost is usually small
-  - canonical exchange upserts should stay cheap because the table is intentionally narrow
+- Critical structures:
+  - `provider_exchange` unique `(provider_id, provider_exchange_code)`
+  - `idx_provider_exchange_exchange`
+- Review focus:
+  - full-slice replace cost is small today, but the FK from `provider_listing` means provider exchanges with listings cannot be removed blindly
 
 ## 2. Refresh Supported Tickers
 
-- Reads provider catalog input and rewrites provider slices in `supported_tickers`
-- Reads and writes `securities` to maintain canonical identity
+- Reads provider catalog input and rewrites provider slices in `provider_listing`
+- Reads and writes `listing`, `issuer`, and `provider_exchange`
 - Critical structures:
-  - `supported_tickers` PK `(provider, provider_symbol)`
-  - `idx_supported_tickers_provider_exchange`
-  - `idx_supported_tickers_provider_exchange_ticker`
-  - `securities` unique constraints on canonical symbol and ticker/exchange
+  - `provider_listing` unique `(provider_exchange_id, provider_symbol)`
+  - `listing` unique `(exchange_id, symbol)`
+  - `idx_provider_listing_provider`
+  - `idx_provider_listing_listing`
 - Review focus:
-  - `supported_tickers` is the root table for most later provider-scoped work
-  - duplicated descriptive columns here can increase write cost and DB size
+  - `provider_listing` is the root table for provider-scoped work
+  - bare provider symbols are only unique within one provider exchange
 
 ## 3. Ingest Fundamentals
 
-- Reads `supported_tickers`
+- Reads `provider_listing`
 - Reads and writes `fundamentals_fetch_state`
 - Upserts `fundamentals_raw`
 - Reconciles `security_listing_status`
 - Critical structures:
-  - `idx_supported_tickers_provider_exchange`
-  - `idx_fundamentals_fetch_state_provider_fetched_symbol`
-  - `idx_fundamentals_fetch_state_provider_status_next_symbol`
-  - `idx_fundamentals_raw_provider_fetched`
+  - `provider_listing` unique `(provider_exchange_id, provider_symbol)`
+  - `idx_fundamentals_fetch_next`
+  - `idx_fundamentals_raw_security`
   - `idx_security_listing_status_primary`
 - Review focus:
   - `fundamentals_raw.data` is the widest operational row in the schema
-  - listing-status reconciliation should stay join-friendly and avoid JSON parsing in downstream scopes
+  - provider-scoped state tables are now keyed by `provider_listing_id`, so planning queries often join through `provider_listing`
 
 ## 4. Normalize Fundamentals
 
@@ -46,44 +47,44 @@ This page maps the end-to-end pipeline to the tables and indexes that matter mos
 - Rewrites canonical rows in `financial_facts`
 - Updates `financial_facts_refresh_state`
 - Critical structures:
-  - `fundamentals_raw` PK and `idx_fundamentals_raw_security`
+  - `fundamentals_raw` unique `provider_listing_id`
   - `idx_fundamentals_norm_state_security`
   - `financial_facts` PK and `idx_fin_facts_security_concept_latest`
 - Review focus:
   - `financial_facts` is the main fact table for metrics
-  - unnecessary columns or duplicate fact rows will compound downstream cost quickly
+  - unnecessary columns or duplicate fact rows compound downstream cost quickly
 
-## 5. Refresh Security Metadata
+## 5. Refresh Issuer Metadata
 
 - Reads `fundamentals_raw`
-- Writes display fields on `securities`
+- Writes display fields on `issuer`
 - Critical structures:
-  - `fundamentals_raw` PK by provider symbol
-  - `securities` PK and unique canonical symbol
+  - `fundamentals_raw` lookup by provider listing
+  - `listing -> issuer` join
 - Review focus:
-  - check whether `sector` and `industry` on `securities` are authoritative enough to belong on the identity table
+  - issuer metadata is separate from listing identity; avoid pushing provider-specific fields into `listing`
 
 ## 6. Update Market Data
 
-- Reads `supported_tickers`
+- Reads `provider_listing`
 - Applies primary-listing filter through `security_listing_status`
 - Reads and writes `market_data_fetch_state`
 - Upserts `market_data`
 - Critical structures:
-  - `idx_supported_tickers_provider_exchange`
+  - `idx_provider_listing_listing`
   - `idx_security_listing_status_primary`
   - `idx_market_data_fetch_next`
   - `idx_market_data_latest`
 - Review focus:
   - latest-snapshot queries should hit `idx_market_data_latest`
-  - stale planning currently aggregates `MAX(as_of)` by `security_id`, which makes `market_data` a hotspot on large universes
+  - stale planning aggregates by `listing_id`, making `market_data` a hotspot on large universes
 
 ## 7. Refresh FX Rates
 
-- Discovers currencies from `supported_tickers`, `financial_facts`, and `market_data`
+- Discovers currencies from `provider_listing`, `financial_facts`, and `market_data`
 - Reads and writes `fx_supported_pairs`, `fx_refresh_state`, and `fx_rates`
 - Critical structures:
-  - partial currency indexes on `supported_tickers`, `financial_facts`, `market_data`
+  - partial currency indexes on `provider_listing`, `financial_facts`, and `market_data`
   - `idx_fx_supported_pairs_refreshable`
   - `fx_refresh_state` PK
   - `idx_fx_rates_pair_date`
@@ -92,14 +93,15 @@ This page maps the end-to-end pipeline to the tables and indexes that matter mos
 
 ## 8. Compute Metrics
 
-- Resolves canonical symbols through `securities`
+- Resolves canonical symbols through `listing` plus `exchange`
 - Bulk-reads `financial_facts`
 - Bulk-reads latest `market_data` when required
 - Writes `metrics` and `metric_compute_status`
 - Critical structures:
+  - `listing` unique `(exchange_id, symbol)`
   - `idx_fin_facts_security_concept_latest`
   - `idx_market_data_latest`
-  - `metrics` PK `(security_id, metric_id)`
+  - `metrics` PK `(listing_id, metric_id)`
   - `idx_metric_compute_status_metric_status`
 - Review focus:
   - this is the hottest read path in the system
@@ -107,11 +109,11 @@ This page maps the end-to-end pipeline to the tables and indexes that matter mos
 
 ## 9. Screen And Report
 
-- Reads canonical symbol scope from `supported_tickers` plus `securities`
+- Reads canonical symbol scope from `provider_listing`, `listing`, and `exchange`
 - Reads `metrics`
 - Reads `metric_compute_status` for diagnostics
 - Critical structures:
-  - `supported_tickers` joins back to `securities`
+  - `provider_listing` joins back to `listing`
   - `idx_security_listing_status_primary`
   - `metrics` PK
   - `idx_metrics_metric_id`
@@ -122,6 +124,6 @@ This page maps the end-to-end pipeline to the tables and indexes that matter mos
 ## First Places To Look For Bottlenecks
 
 - `financial_facts`: largest analytical read surface and most index-sensitive query path
-- `supported_tickers`: root of many scope-building joins and provider-stage scans
+- `provider_listing`: root of many scope-building joins and provider-stage scans
 - `market_data`: latest-row access pattern must remain cheap as history grows
 - `fundamentals_raw`: JSON payload width can dominate I/O even when only a small subset of columns is needed

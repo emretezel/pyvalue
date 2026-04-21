@@ -2,108 +2,50 @@
 
 ## Purpose
 
-Tracks which raw payload timestamp was last normalized for each provider symbol.
+Tracks which raw payload timestamp has been normalized for a provider listing.
 
 ## Grain
 
-One row per `(provider, provider_symbol)`.
+One row per `provider_listing_id`.
 
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-20`
+- Snapshot source: pre-refactor `data/pyvalue.db` normalization-state table on `2026-04-21`
 - Row count: `61,092`
-- Table size: `6,266,880 bytes` (`6.0 MiB`)
-- Approximate bytes per row: `102.6`
+- Table size: approximately `6.0 MiB` before the catalog-key refactor
 <!-- END generated_live_stats -->
 
 ## Columns
 
 | Column | Type | Null | Key | Notes |
 | --- | --- | --- | --- | --- |
-| `provider` | `TEXT` | no | PK | provider namespace |
-| `provider_symbol` | `TEXT` | no | PK | provider fetch key |
-| `security_id` | `INTEGER` | no | idx | canonical identity link |
-| `raw_fetched_at` | `TEXT` | no |  | raw payload timestamp last normalized |
-| `last_normalized_at` | `TEXT` | no |  | normalization run timestamp |
+| `provider_listing_id` | `INTEGER` | no | PK, FK | provider listing identity |
+| `listing_id` | `INTEGER` | no | FK, idx | canonical listing identity |
+| `raw_fetched_at` | `TEXT` | no |  | raw payload watermark |
+| `last_normalized_at` | `TEXT` | no |  | normalization timestamp |
 
 ## Keys And Relationships
 
-- Primary key: `(provider, provider_symbol)`
-- Logical references:
-  - `security_id` to `securities`
-  - `(provider, provider_symbol)` to `supported_tickers`
+- Primary key: `provider_listing_id`
+- Physical foreign keys:
+  - `provider_listing_id -> provider_listing.provider_listing_id`
+  - `listing_id -> listing.listing_id`
 
 ## Secondary Indexes
 
-- `idx_fundamentals_norm_state_security (security_id)`
+- `idx_fundamentals_norm_state_security (listing_id)`
 
 ## Main Read Paths
 
 - incremental normalization planning
-- cleanup when a listing becomes secondary
+- stale normalization reporting
 
 ## Main Write Paths
 
 - `normalize-fundamentals`
-- secondary-listing purge logic
-
-## Column Usage Notes
-
-- `provider`: provider namespace for the watermark row.
-- `provider_symbol`: operational key used to skip already normalized raw payloads.
-- `security_id`: canonical link used by cleanup and some scope joins.
-- `raw_fetched_at`: compared against `fundamentals_raw.fetched_at` for incremental normalization.
-- `last_normalized_at`: audit timestamp for the successful normalization pass.
-
-## Sample Rows
-
-<!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-20`
-- Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
-
-```json
-[
-  {
-    "provider": "EODHD",
-    "provider_symbol": "ADYEN.AS",
-    "security_id": 5,
-    "raw_fetched_at": "2026-03-22T13:53:48.456762+00:00",
-    "last_normalized_at": "2026-04-13T13:51:54.204930+00:00"
-  },
-  {
-    "provider": "EODHD",
-    "provider_symbol": "ABN.AS",
-    "security_id": 2,
-    "raw_fetched_at": "2026-03-22T13:53:47.613748+00:00",
-    "last_normalized_at": "2026-04-13T13:51:54.070234+00:00"
-  },
-  {
-    "provider": "EODHD",
-    "provider_symbol": "AALB.AS",
-    "security_id": 1,
-    "raw_fetched_at": "2026-03-22T13:53:47.387172+00:00",
-    "last_normalized_at": "2026-04-13T13:51:55.370224+00:00"
-  },
-  {
-    "provider": "EODHD",
-    "provider_symbol": "ACOMO.AS",
-    "security_id": 3,
-    "raw_fetched_at": "2026-03-22T13:53:47.909077+00:00",
-    "last_normalized_at": "2026-04-13T13:51:54.419968+00:00"
-  },
-  {
-    "provider": "EODHD",
-    "provider_symbol": "AJAX.AS",
-    "security_id": 7,
-    "raw_fetched_at": "2026-03-22T13:53:48.978815+00:00",
-    "last_normalized_at": "2026-04-13T13:51:54.539664+00:00"
-  }
-]
-```
-<!-- END generated_sample_rows -->
+- migration-time backfill from legacy provider-symbol state rows
 
 ## Review Notes
 
-- Small, narrow watermark table
-- Review whether `security_id` is necessary here or whether provider-symbol scope alone would be enough for all call sites
+- `listing_id` is retained because normalization writes canonical facts and needs a cheap canonical join.

@@ -2,86 +2,46 @@
 
 ## Purpose
 
-Stores the latest time a security's canonical facts were refreshed.
+Tracks when normalized financial facts were last refreshed for a canonical listing.
 
 ## Grain
 
-One row per `security_id`.
+One row per `listing_id`.
 
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-20`
+- Snapshot source: pre-refactor `data/pyvalue.db` refresh-state table on `2026-04-21`
 - Row count: `61,987`
-- Table size: `3,104,768 bytes` (`3.0 MiB`)
-- Approximate bytes per row: `50.1`
+- Table size: approximately `3.0 MiB` before the `listing_id` rename
 <!-- END generated_live_stats -->
 
 ## Columns
 
 | Column | Type | Null | Key | Notes |
 | --- | --- | --- | --- | --- |
-| `security_id` | `INTEGER` | no | PK | canonical identity link |
-| `refreshed_at` | `TEXT` | no |  | last canonical fact refresh time |
+| `listing_id` | `INTEGER` | no | PK | canonical listing identity |
+| `refreshed_at` | `TEXT` | no |  | latest fact refresh timestamp |
 
 ## Keys And Relationships
 
-- Primary key: `security_id`
-- Logical references:
-  - `security_id` to `securities`
+- Primary key: `listing_id`
+- Logical reference: `listing_id -> listing.listing_id`
 
 ## Secondary Indexes
 
-- None beyond the primary key
+- None.
 
 ## Main Read Paths
 
-- metric freshness checks
-- reporting around fact recency
+- metric freshness and failure-status writes
+- refresh coverage reporting
 
 ## Main Write Paths
 
 - `normalize-fundamentals`
-- purge when a listing becomes secondary
-
-## Column Usage Notes
-
-- `security_id`: canonical join key for freshness checks.
-- `refreshed_at`: compared in metric freshness logic and reused in diagnostics.
-
-## Sample Rows
-
-<!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-20`
-- Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
-
-```json
-[
-  {
-    "security_id": 1,
-    "refreshed_at": "2026-04-13T13:51:55.355558+00:00"
-  },
-  {
-    "security_id": 2,
-    "refreshed_at": "2026-04-13T13:51:54.046069+00:00"
-  },
-  {
-    "security_id": 3,
-    "refreshed_at": "2026-04-13T13:51:54.401028+00:00"
-  },
-  {
-    "security_id": 4,
-    "refreshed_at": "2026-04-13T13:51:54.688817+00:00"
-  },
-  {
-    "security_id": 5,
-    "refreshed_at": "2026-04-13T13:51:54.185290+00:00"
-  }
-]
-```
-<!-- END generated_sample_rows -->
+- bulk normalization status updates
 
 ## Review Notes
 
-- Very small table
-- Review whether this table carries enough unique value compared with `fundamentals_normalization_state` to justify existing separately
+- This table is intentionally narrow; consider whether it remains useful alongside `fundamentals_normalization_state`.

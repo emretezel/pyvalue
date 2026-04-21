@@ -2,121 +2,50 @@
 
 ## Purpose
 
-Tracks retry state, backoff windows, and last fetch status for market-data refreshes.
+Tracks retry state, backoff windows, and last fetch status for provider market-data refreshes.
 
 ## Grain
 
-One row per `(provider, provider_symbol)`.
+One row per `provider_listing_id`.
 
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-20`
+- Snapshot source: pre-refactor `data/pyvalue.db` market-data fetch-state table on `2026-04-21`
 - Row count: `61,092`
-- Table size: `4,476,928 bytes` (`4.3 MiB`)
-- Approximate bytes per row: `73.3`
+- Table size: approximately `4.3 MiB` before the catalog-key refactor
 <!-- END generated_live_stats -->
 
 ## Columns
 
 | Column | Type | Null | Key | Notes |
 | --- | --- | --- | --- | --- |
-| `provider` | `TEXT` | no | PK | provider namespace |
-| `provider_symbol` | `TEXT` | no | PK | provider fetch key |
-| `last_fetched_at` | `TEXT` | yes |  | last attempted market-data fetch |
-| `last_status` | `TEXT` | yes |  | success or error |
+| `provider_listing_id` | `INTEGER` | no | PK, FK | provider listing identity |
+| `last_fetched_at` | `TEXT` | yes |  | last successful or attempted fetch time |
+| `last_status` | `TEXT` | yes |  | latest status |
 | `last_error` | `TEXT` | yes |  | latest provider error |
 | `next_eligible_at` | `TEXT` | yes | idx | retry/backoff watermark |
 | `attempts` | `INTEGER` | no |  | retry counter |
 
 ## Keys And Relationships
 
-- Primary key: `(provider, provider_symbol)`
-- Logical references:
-  - `(provider, provider_symbol)` to `supported_tickers`
+- Primary key: `provider_listing_id`
+- Physical foreign key: `provider_listing_id -> provider_listing.provider_listing_id`
 
 ## Secondary Indexes
 
-- `idx_market_data_fetch_next (provider, next_eligible_at)`
+- `idx_market_data_fetch_next (next_eligible_at)`
 
 ## Main Read Paths
 
-- market-data planning
-- market-data progress reporting
-- market-data failure reporting
+- stale market-data refresh planning
+- market-data progress and recent-failure reporting
 
 ## Main Write Paths
 
 - `update-market-data`
-
-## Column Usage Notes
-
-- `provider`: first filter in market-data scheduling queries.
-- `provider_symbol`: join key back to `supported_tickers`.
-- `last_fetched_at`: used for progress reporting and freshness tracking.
-- `last_status`: used when surfacing recent market-data failures.
-- `last_error`: diagnostic detail only.
-- `next_eligible_at`: core backoff watermark for market-data retry scheduling.
-- `attempts`: retry counter for diagnostics and backoff progression.
-
-## Sample Rows
-
-<!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-20`
-- Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
-
-```json
-[
-  {
-    "provider": "EODHD",
-    "provider_symbol": "AALB.AS",
-    "last_fetched_at": "2026-04-11T08:25:55.378209+00:00",
-    "last_status": "ok",
-    "last_error": null,
-    "next_eligible_at": null,
-    "attempts": 0
-  },
-  {
-    "provider": "EODHD",
-    "provider_symbol": "ABN.AS",
-    "last_fetched_at": "2026-04-11T08:25:55.378209+00:00",
-    "last_status": "ok",
-    "last_error": null,
-    "next_eligible_at": null,
-    "attempts": 0
-  },
-  {
-    "provider": "EODHD",
-    "provider_symbol": "ACOMO.AS",
-    "last_fetched_at": "2026-04-11T08:25:55.378209+00:00",
-    "last_status": "ok",
-    "last_error": null,
-    "next_eligible_at": null,
-    "attempts": 0
-  },
-  {
-    "provider": "EODHD",
-    "provider_symbol": "AD.AS",
-    "last_fetched_at": "2026-04-11T08:25:55.378209+00:00",
-    "last_status": "ok",
-    "last_error": null,
-    "next_eligible_at": null,
-    "attempts": 0
-  },
-  {
-    "provider": "EODHD",
-    "provider_symbol": "ADYEN.AS",
-    "last_fetched_at": "2026-04-11T08:25:55.378209+00:00",
-    "last_status": "ok",
-    "last_error": null,
-    "next_eligible_at": null,
-    "attempts": 0
-  }
-]
-```
-<!-- END generated_sample_rows -->
+- retry/backoff updates
 
 ## Review Notes
 
-- Structurally similar to `fundamentals_fetch_state`
-- Review whether keeping separate state tables is the simplest fast path, or whether a generic fetch-state table would reduce duplication without hurting clarity
+- Provider and symbol values are resolved through `provider_listing`, not duplicated in this state table.

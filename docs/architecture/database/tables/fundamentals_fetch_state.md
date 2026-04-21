@@ -6,119 +6,46 @@ Tracks retry state, backoff windows, and last fetch status for fundamentals inge
 
 ## Grain
 
-One row per `(provider, provider_symbol)`.
+One row per `provider_listing_id`.
 
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-20`
+- Snapshot source: pre-refactor `data/pyvalue.db` fetch-state table on `2026-04-21`
 - Row count: `77,045`
-- Table size: `4,698,112 bytes` (`4.5 MiB`)
-- Approximate bytes per row: `61.0`
+- Table size: approximately `4.5 MiB` before the catalog-key refactor
 <!-- END generated_live_stats -->
 
 ## Columns
 
 | Column | Type | Null | Key | Notes |
 | --- | --- | --- | --- | --- |
-| `provider` | `TEXT` | no | PK | provider namespace |
-| `provider_symbol` | `TEXT` | no | PK | provider fetch key |
-| `last_fetched_at` | `TEXT` | yes | idx | last successful or attempted fetch time |
-| `last_status` | `TEXT` | yes | idx | typically success or error |
+| `provider_listing_id` | `INTEGER` | no | PK, FK | provider listing identity |
+| `last_fetched_at` | `TEXT` | yes |  | last successful or attempted fetch time |
+| `last_status` | `TEXT` | yes |  | latest status |
 | `last_error` | `TEXT` | yes |  | latest provider error |
 | `next_eligible_at` | `TEXT` | yes | idx | retry/backoff watermark |
 | `attempts` | `INTEGER` | no |  | retry counter |
 
 ## Keys And Relationships
 
-- Primary key: `(provider, provider_symbol)`
-- Logical references:
-  - `(provider, provider_symbol)` to `supported_tickers`
+- Primary key: `provider_listing_id`
+- Physical foreign key: `provider_listing_id -> provider_listing.provider_listing_id`
 
 ## Secondary Indexes
 
-- `idx_fundamentals_fetch_next (provider, next_eligible_at)`
-- `idx_fundamentals_fetch_state_provider_fetched_symbol (provider, last_fetched_at, provider_symbol)`
-- `idx_fundamentals_fetch_state_provider_status_next_symbol (provider, last_status, next_eligible_at, provider_symbol)`
+- `idx_fundamentals_fetch_next (next_eligible_at)`
 
 ## Main Read Paths
 
 - stale and missing ingest planning
-- progress reporting
-- recent failure reporting
+- progress and recent-failure reporting
 
 ## Main Write Paths
 
 - `ingest-fundamentals`
-
-## Column Usage Notes
-
-- `provider`: first filter in retry and progress queries.
-- `provider_symbol`: join key back to `supported_tickers`.
-- `last_fetched_at`: used to distinguish missing vs stored rows and to identify stale rows.
-- `last_status`: used in progress summaries and recent failure reporting.
-- `last_error`: stored for diagnostics only.
-- `next_eligible_at`: central backoff watermark used by scheduling queries.
-- `attempts`: retry counter surfaced in diagnostics and backoff logic.
-
-## Sample Rows
-
-<!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-20`
-- Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
-
-```json
-[
-  {
-    "provider": "EODHD",
-    "provider_symbol": "A.US",
-    "last_fetched_at": "2026-03-28T08:42:24.642741+00:00",
-    "last_status": "ok",
-    "last_error": null,
-    "next_eligible_at": null,
-    "attempts": 0
-  },
-  {
-    "provider": "EODHD",
-    "provider_symbol": "AA.US",
-    "last_fetched_at": "2026-03-28T08:42:24.864302+00:00",
-    "last_status": "ok",
-    "last_error": null,
-    "next_eligible_at": null,
-    "attempts": 0
-  },
-  {
-    "provider": "EODHD",
-    "provider_symbol": "AABB.US",
-    "last_fetched_at": "2026-03-28T08:42:25.079226+00:00",
-    "last_status": "ok",
-    "last_error": null,
-    "next_eligible_at": null,
-    "attempts": 0
-  },
-  {
-    "provider": "EODHD",
-    "provider_symbol": "AABVF.US",
-    "last_fetched_at": "2026-03-28T08:42:25.695568+00:00",
-    "last_status": "ok",
-    "last_error": null,
-    "next_eligible_at": null,
-    "attempts": 0
-  },
-  {
-    "provider": "EODHD",
-    "provider_symbol": "AACAF.US",
-    "last_fetched_at": "2026-03-28T08:42:25.949311+00:00",
-    "last_status": "ok",
-    "last_error": null,
-    "next_eligible_at": null,
-    "attempts": 0
-  }
-]
-```
-<!-- END generated_sample_rows -->
+- retry/backoff updates
 
 ## Review Notes
 
-- This is a narrow operational table and likely cheap to keep
-- The main review question is whether all three scheduling/progress indexes are justified
+- Provider and symbol values are resolved through `provider_listing`, keeping the state row narrow.

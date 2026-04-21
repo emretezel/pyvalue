@@ -35,7 +35,7 @@ Use `--rate` to throttle symbols per minute.
 
 ## Global Multi-Day Update
 
-Refresh market data across the stored EODHD `supported_tickers` catalog:
+Refresh market data across the stored EODHD `provider_listing` catalog:
 
 ```bash
 pyvalue update-market-data --all-supported

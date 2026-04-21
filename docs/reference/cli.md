@@ -74,7 +74,7 @@ Notes:
   `Common Stock`, `Preferred Stock`, and `Stock`
 - `SEC` reads Nasdaq Trader symbol directories and materializes provider symbols
   as `TICKER.US`
-- Removed provider symbols are deleted from `supported_tickers` and the relevant
+- Removed provider symbols are deleted from `provider_listing` and the relevant
   fetch-state tables; historical fundamentals, market data, and metrics remain
 
 ## Fundamentals Commands
@@ -448,7 +448,7 @@ Key options:
 Notes:
 
 - offline only; makes no network requests
-- updates canonical `securities` metadata such as entity name, description,
+- updates canonical `issuer` metadata such as entity name, description,
   sector, and industry
 - intended for metadata backfills after ingesting raw fundamentals
 

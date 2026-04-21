@@ -496,7 +496,7 @@ def _catalog_bootstrap_guidance(provider: str) -> str:
         return "Run refresh-supported-exchanges --provider SEC and refresh-supported-tickers --provider SEC first."
     if provider_norm == "EODHD":
         return "Run refresh-supported-exchanges --provider EODHD and refresh-supported-tickers --provider EODHD first."
-    return "Populate supported_tickers first."
+    return "Populate provider_listing first."
 
 
 def _symbols_for_exchange_or_raise(
@@ -853,7 +853,7 @@ def _resolve_canonical_scope_symbols(
         missing = [symbol for symbol in normalized_symbols if symbol not in supported]
         if missing:
             raise SystemExit(
-                f"Unsupported canonical tickers: {', '.join(missing)}. Populate supported_tickers first."
+                f"Unsupported canonical tickers: {', '.join(missing)}. Populate provider_listing first."
             )
         if primary_only:
             _sync_eodhd_listing_scope(
@@ -892,10 +892,10 @@ def _resolve_canonical_scope_symbols(
         )
         if primary_only:
             raise SystemExit(
-                f"No primary canonical supported tickers found in scope {scope_label}. Populate supported_tickers first."
+                f"No primary canonical supported tickers found in scope {scope_label}. Populate provider_listing first."
             )
         raise SystemExit(
-            f"No canonical supported tickers found in scope {scope_label}. Populate supported_tickers first."
+            f"No canonical supported tickers found in scope {scope_label}. Populate provider_listing first."
         )
     return canonical_symbols, None, exchange_filters
 
@@ -2083,7 +2083,7 @@ def cmd_load_universe(
     currencies: Optional[Sequence[str]] = None,
     include_exchanges: Optional[Sequence[str]] = None,
 ) -> int:
-    """Load provider catalog data into the canonical supported_tickers table."""
+    """Load provider catalog data into the canonical provider_listing table."""
 
     provider_norm = _normalize_provider(provider)
     if provider_norm == "SEC":
@@ -2103,7 +2103,7 @@ def cmd_load_universe(
 
 
 def cmd_load_us_universe(database: str, include_etfs: bool) -> int:
-    """Load the SEC-supported US catalog into supported_tickers."""
+    """Load the SEC-supported US catalog into provider_listing."""
 
     loader = USUniverseLoader()
     listings = loader.load()
@@ -7578,11 +7578,11 @@ def cmd_purge_us_nonfilers(database: str, apply: bool) -> int:
     for sym in to_remove:
         print(f"- {sym}")
     if not apply:
-        print("Dry run only. Re-run with --apply to delete from supported_tickers.")
+        print("Dry run only. Re-run with --apply to delete from provider_listing.")
         return 0
 
     ticker_repo.delete_symbols("SEC", to_remove)
-    print(f"Deleted {len(to_remove)} SEC US supported tickers from supported_tickers.")
+    print(f"Deleted {len(to_remove)} SEC US supported tickers from provider_listing.")
     return 0
 
 
@@ -7675,13 +7675,13 @@ def cmd_recalc_market_cap(
 
 
 def cmd_clear_listings(database: str) -> int:
-    """Delete the canonical supported_tickers catalog (legacy command alias)."""
+    """Delete the canonical provider_listing catalog (legacy command alias)."""
 
     repo = SupportedTickerRepository(database)
     deleted = repo.clear()
     print(
-        f"Deprecated command: cleared {deleted} supported_tickers rows in {database}. "
-        "Use supported_tickers as the canonical catalog."
+        f"Deprecated command: cleared {deleted} provider_listing rows in {database}. "
+        "Use provider_listing as the canonical catalog."
     )
     return 0
 
@@ -8469,7 +8469,7 @@ def _cmd_refresh_fx_rates_frankfurter(
     service = FXService(db_path, repository=repo, provider_name="FRANKFURTER")
     provider = FrankfurterProvider()
     print(
-        "Discovering FX currencies from supported_tickers, financial_facts, and market_data...",
+        "Discovering FX currencies from provider_listing, financial_facts, and market_data...",
         flush=True,
     )
     _reconcile_eodhd_listing_scope(database)
