@@ -149,7 +149,6 @@ def test_migration_splits_supported_exchanges_into_exchange_provider(tmp_path):
                 provider_code TEXT NOT NULL PRIMARY KEY,
                 display_name TEXT NOT NULL,
                 description TEXT,
-                status TEXT NOT NULL DEFAULT 'active',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
@@ -161,17 +160,15 @@ def test_migration_splits_supported_exchanges_into_exchange_provider(tmp_path):
                 provider_code,
                 display_name,
                 description,
-                status,
                 created_at,
                 updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?)
             """,
             [
                 (
                     "EODHD",
                     "EOD Historical Data",
                     None,
-                    "active",
                     "2026-01-01T00:00:00+00:00",
                     "2026-01-01T00:00:00+00:00",
                 ),
@@ -179,7 +176,6 @@ def test_migration_splits_supported_exchanges_into_exchange_provider(tmp_path):
                     "SEC",
                     "US SEC Company Facts",
                     None,
-                    "active",
                     "2026-01-01T00:00:00+00:00",
                     "2026-01-01T00:00:00+00:00",
                 ),
@@ -261,7 +257,7 @@ def test_migration_splits_supported_exchanges_into_exchange_provider(tmp_path):
 
     applied = apply_migrations(db_path)
 
-    assert applied == 2
+    assert applied == 3
     with sqlite3.connect(db_path) as conn:
         supported_exchanges_exists = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='supported_exchanges'"
@@ -344,7 +340,7 @@ def test_migration_creates_and_seeds_providers_table(tmp_path):
         pk_cols = [row[1] for row in info if row[5]]
         rows = conn.execute(
             """
-            SELECT provider_code, display_name, status
+            SELECT provider_code, display_name
             FROM provider
             ORDER BY provider_code
             """
@@ -355,15 +351,14 @@ def test_migration_creates_and_seeds_providers_table(tmp_path):
         "provider_code",
         "display_name",
         "description",
-        "status",
         "created_at",
         "updated_at",
     }
     assert pk_cols == ["provider_id"]
     assert rows == [
-        ("EODHD", "EOD Historical Data", "active"),
-        ("FRANKFURTER", "Frankfurter FX", "active"),
-        ("SEC", "US SEC Company Facts", "active"),
+        ("EODHD", "EOD Historical Data"),
+        ("FRANKFURTER", "Frankfurter FX"),
+        ("SEC", "US SEC Company Facts"),
     ]
 
 
@@ -484,7 +479,7 @@ def test_migration_preserves_existing_provider_rows_when_adding_registry(tmp_pat
 
     applied = apply_migrations(db_path)
 
-    assert applied == 3
+    assert applied == 4
     with sqlite3.connect(db_path) as conn:
         provider_listing_count = conn.execute(
             "SELECT COUNT(*) FROM provider_listing"
@@ -548,16 +543,14 @@ def test_providers_table_rejects_invalid_provider_codes(tmp_path):
                     provider_code,
                     display_name,
                     description,
-                    status,
                     created_at,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?)
                 """,
                 (
                     "eodhd",
                     "Lowercase provider",
                     None,
-                    "active",
                     "2026-01-01T00:00:00+00:00",
                     "2026-01-01T00:00:00+00:00",
                 ),
@@ -569,20 +562,88 @@ def test_providers_table_rejects_invalid_provider_codes(tmp_path):
                     provider_code,
                     display_name,
                     description,
-                    status,
                     created_at,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?)
                 """,
                 (
                     "",
                     "Blank provider",
                     None,
-                    "active",
                     "2026-01-01T00:00:00+00:00",
                     "2026-01-01T00:00:00+00:00",
                 ),
             )
+
+
+def test_migration_drops_provider_status_from_version_34_db(tmp_path):
+    db_path = tmp_path / "provider-status-drop.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE schema_migrations (version INTEGER NOT NULL)")
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (34)")
+        conn.execute(
+            """
+            CREATE TABLE provider (
+                provider_id INTEGER PRIMARY KEY,
+                provider_code TEXT NOT NULL UNIQUE,
+                display_name TEXT NOT NULL,
+                description TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO provider (
+                provider_code,
+                display_name,
+                description,
+                status,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "EODHD",
+                "EOD Historical Data",
+                "Provider",
+                "active",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+
+    applied = apply_migrations(db_path)
+
+    assert applied == 1
+    with sqlite3.connect(db_path) as conn:
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(provider)").fetchall()
+        }
+        row = conn.execute(
+            """
+            SELECT provider_code, display_name, description, created_at, updated_at
+            FROM provider
+            """
+        ).fetchone()
+
+    assert columns == {
+        "provider_id",
+        "provider_code",
+        "display_name",
+        "description",
+        "created_at",
+        "updated_at",
+    }
+    assert row == (
+        "EODHD",
+        "EOD Historical Data",
+        "Provider",
+        "2026-01-01T00:00:00+00:00",
+        "2026-01-01T00:00:00+00:00",
+    )
 
 
 def test_migration_creates_provider_listing_table(tmp_path):

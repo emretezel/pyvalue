@@ -24,7 +24,6 @@ One row per provider.
 | `provider_code` | `TEXT` | no | unique | stable uppercase namespace such as `EODHD`, `SEC`, or `FRANKFURTER` |
 | `display_name` | `TEXT` | no |  | human-readable provider name |
 | `description` | `TEXT` | yes |  | optional provider summary |
-| `status` | `TEXT` | no |  | `active`, `deprecated`, or `disabled` |
 | `created_at` | `TEXT` | no |  | initial seed timestamp |
 | `updated_at` | `TEXT` | no |  | last metadata refresh timestamp |
 

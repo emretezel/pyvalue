@@ -25,24 +25,21 @@ _US_VENUE_CODES = {
     "US",
 }
 
-_PROVIDER_REGISTRY_ROWS: Tuple[Tuple[str, str, Optional[str], str], ...] = (
+_PROVIDER_REGISTRY_ROWS: Tuple[Tuple[str, str, Optional[str]], ...] = (
     (
         "EODHD",
         "EOD Historical Data",
         "Exchange, fundamentals, market-data, and FX provider.",
-        "active",
     ),
     (
         "SEC",
         "US SEC Company Facts",
         "US issuer fundamentals provider backed by SEC company facts.",
-        "active",
     ),
     (
         "FRANKFURTER",
         "Frankfurter FX",
         "FX rates provider used for direct currency history refreshes.",
-        "active",
     ),
 )
 
@@ -2124,9 +2121,6 @@ def _migration_032_create_providers_registry(conn: sqlite3.Connection) -> None:
             ),
             display_name TEXT NOT NULL,
             description TEXT,
-            status TEXT NOT NULL DEFAULT 'active' CHECK (
-                status IN ('active', 'deprecated', 'disabled')
-            ),
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
@@ -2138,19 +2132,17 @@ def _migration_032_create_providers_registry(conn: sqlite3.Connection) -> None:
             provider_code,
             display_name,
             description,
-            status,
             created_at,
             updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(provider_code) DO UPDATE SET
             display_name = excluded.display_name,
             description = excluded.description,
-            status = excluded.status,
             updated_at = excluded.updated_at
         """,
         [
-            (provider_code, display_name, description, status, now, now)
-            for provider_code, display_name, description, status in _PROVIDER_REGISTRY_ROWS
+            (provider_code, display_name, description, now, now)
+            for provider_code, display_name, description in _PROVIDER_REGISTRY_ROWS
         ],
     )
 
@@ -2304,9 +2296,6 @@ def _migration_034_rename_catalog_identity_tables(conn: sqlite3.Connection) -> N
             ),
             display_name TEXT NOT NULL,
             description TEXT,
-            status TEXT NOT NULL DEFAULT 'active' CHECK (
-                status IN ('active', 'deprecated', 'disabled')
-            ),
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
@@ -2417,7 +2406,6 @@ def _migration_034_rename_catalog_identity_tables(conn: sqlite3.Connection) -> N
                 provider_code,
                 display_name,
                 description,
-                status,
                 created_at,
                 updated_at
             FROM providers
@@ -2431,14 +2419,12 @@ def _migration_034_rename_catalog_identity_tables(conn: sqlite3.Connection) -> N
                 provider_code,
                 display_name,
                 description,
-                status,
                 created_at,
                 updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(provider_code) DO UPDATE SET
                 display_name = excluded.display_name,
                 description = excluded.description,
-                status = excluded.status,
                 updated_at = excluded.updated_at
             """,
             [
@@ -2446,7 +2432,6 @@ def _migration_034_rename_catalog_identity_tables(conn: sqlite3.Connection) -> N
                     _normalize_upper(row["provider_code"]),
                     _normalize_optional_text(row["display_name"]) or "",
                     _normalize_optional_text(row["description"]),
-                    _normalize_optional_text(row["status"]) or "active",
                     _normalize_optional_text(row["created_at"]) or now,
                     _normalize_optional_text(row["updated_at"]) or now,
                 )
@@ -2460,19 +2445,17 @@ def _migration_034_rename_catalog_identity_tables(conn: sqlite3.Connection) -> N
                 provider_code,
                 display_name,
                 description,
-                status,
                 created_at,
                 updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(provider_code) DO UPDATE SET
                 display_name = excluded.display_name,
                 description = excluded.description,
-                status = excluded.status,
                 updated_at = excluded.updated_at
             """,
             [
-                (provider_code, display_name, description, status, now, now)
-                for provider_code, display_name, description, status in _PROVIDER_REGISTRY_ROWS
+                (provider_code, display_name, description, now, now)
+                for provider_code, display_name, description in _PROVIDER_REGISTRY_ROWS
             ],
         )
 
@@ -3467,6 +3450,17 @@ def _migration_034_rename_catalog_identity_tables(conn: sqlite3.Connection) -> N
             conn.execute(f"DROP TABLE {legacy_name}")
 
 
+def _migration_035_drop_provider_status(conn: sqlite3.Connection) -> None:
+    """Drop the unused provider lifecycle status column."""
+
+    if not _table_exists(conn, "provider"):
+        return
+    if "status" not in _table_columns(conn, "provider"):
+        return
+    conn.execute("DROP VIEW IF EXISTS providers")
+    conn.execute("ALTER TABLE provider DROP COLUMN status")
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -3502,6 +3496,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_032_create_providers_registry,
     _migration_033_split_exchange_catalog,
     _migration_034_rename_catalog_identity_tables,
+    _migration_035_drop_provider_status,
 ]
 
 

@@ -265,7 +265,6 @@ class Provider:
     provider_code: str
     display_name: str
     description: Optional[str] = None
-    status: str = "active"
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -767,9 +766,6 @@ class ProviderRepository(SQLiteStore):
                     ),
                     display_name TEXT NOT NULL,
                     description TEXT,
-                    status TEXT NOT NULL DEFAULT 'active' CHECK (
-                        status IN ('active', 'deprecated', 'disabled')
-                    ),
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
@@ -783,7 +779,6 @@ class ProviderRepository(SQLiteStore):
                     provider_code,
                     display_name,
                     description,
-                    status,
                     created_at,
                     updated_at
                 FROM provider
@@ -795,7 +790,6 @@ class ProviderRepository(SQLiteStore):
         provider_code: str,
         display_name: Optional[str] = None,
         description: Optional[str] = None,
-        status: str = "active",
         *,
         connection: Optional[sqlite3.Connection] = None,
     ) -> Provider:
@@ -812,21 +806,18 @@ class ProviderRepository(SQLiteStore):
                     provider_code,
                     display_name,
                     description,
-                    status,
                     created_at,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(provider_code) DO UPDATE SET
                     display_name = COALESCE(excluded.display_name, provider.display_name),
                     description = COALESCE(excluded.description, provider.description),
-                    status = excluded.status,
                     updated_at = excluded.updated_at
                 """,
                 (
                     provider_norm,
                     name,
                     _normalize_optional_text(description),
-                    status,
                     now,
                     now,
                 ),
@@ -838,7 +829,6 @@ class ProviderRepository(SQLiteStore):
                     provider_code,
                     display_name,
                     description,
-                    status,
                     created_at,
                     updated_at
                 FROM provider
@@ -866,7 +856,6 @@ class ProviderRepository(SQLiteStore):
                     provider_code,
                     display_name,
                     description,
-                    status,
                     created_at,
                     updated_at
                 FROM provider

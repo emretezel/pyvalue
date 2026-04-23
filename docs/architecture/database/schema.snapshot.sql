@@ -161,9 +161,6 @@ CREATE TABLE provider (
             ),
             display_name TEXT NOT NULL,
             description TEXT,
-            status TEXT NOT NULL DEFAULT 'active' CHECK (
-                status IN ('active', 'deprecated', 'disabled')
-            ),
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );

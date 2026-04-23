@@ -190,3 +190,9 @@ Use this file to capture recurring mistake patterns after user corrections so fu
 - Recurring pattern: Narrowing a failure audit to one inferred exchange or updating only one copy of a duplicated skill can silently break the intended scope and leave skill behavior drifting between locations.
 - Preventive rule: For installed repo-specific skills, do not infer a single exchange from an example symbol when the requested audit should span all failed exchanges; derive the exchange list from live status rows or ask. When the installed skill is the source of truth, verify execution from the installed directory and remove duplicate copies in the repo in the same task.
 - Resulting action: Updated the installed `pyvalue-screen-failure-audit` bundle to derive failed exchanges and sample per exchange from `metric_compute_status`, verified execution from `~/.codex/skills/pyvalue-screen-failure-audit`, and removed the duplicate repo-side skill directory.
+
+- Date: 2026-04-23
+- User correction: The `provider` registry should not carry a `status` column because no provider payload supplies it and the application does not use it.
+- Recurring pattern: Adding lifecycle or config fields to narrow registry tables without a real source or runtime behavior creates schema noise and follow-up cleanup work.
+- Preventive rule: For registry tables in `pyvalue`, do not persist status/config metadata unless it is sourced from real provider data or already drives application behavior; keep the registry minimal by default.
+- Resulting action: Removed `provider.status` from migrations, storage schema, tests, and docs, and added a forward migration to drop the column from already-migrated databases.
