@@ -11,7 +11,7 @@ One row per canonical exchange code.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-20`
+- Snapshot source: `data/pyvalue.db` on `2026-04-23`
 - Row count: `73`
 - Table size: `12,288 bytes` (`12.0 KiB`)
 - Approximate bytes per row: `168.3`
@@ -28,16 +28,22 @@ One row per canonical exchange code.
 
 ## Keys And Relationships
 
+<!-- BEGIN generated_keys_and_relationships -->
 - Primary key: `exchange_id`
-- Unique key: `exchange_code`
-- Physical references:
-  - `provider_exchange.exchange_id`
-  - `listing.exchange_id`
-- No outbound foreign keys
+- Physical foreign keys: none
+- Physical references from other tables:
+  - `listing`.`exchange_id` -> `exchange_id`
+  - `provider_exchange`.`exchange_id` -> `exchange_id`
+- Unique constraints beyond the primary key:
+  - `exchange_code`
+- Main logical refs: referenced physically by `provider_exchange.exchange_id` and `listing.exchange_id`
+<!-- END generated_keys_and_relationships -->
 
 ## Secondary Indexes
 
-- None
+<!-- BEGIN generated_secondary_indexes -->
+- None beyond the primary key and unique constraints.
+<!-- END generated_secondary_indexes -->
 
 ## Main Read Paths
 
@@ -59,8 +65,8 @@ One row per canonical exchange code.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-20`
-- Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
+- Snapshot source: `data/pyvalue.db` on `2026-04-23`
+- Sample window: first `5` rows returned by SQLite ordered by `exchange_id ASC`
 
 ```json
 [
@@ -68,31 +74,31 @@ One row per canonical exchange code.
     "exchange_id": 1,
     "exchange_code": "AS",
     "created_at": "2026-03-22T10:57:47.052304+00:00",
-    "updated_at": "2026-03-22T10:57:47.052304+00:00"
+    "updated_at": "2026-04-23T16:33:15.433812+00:00"
   },
   {
     "exchange_id": 2,
     "exchange_code": "AT",
     "created_at": "2026-03-22T10:57:47.052304+00:00",
-    "updated_at": "2026-03-22T10:57:47.052304+00:00"
+    "updated_at": "2026-04-23T16:33:15.433812+00:00"
   },
   {
     "exchange_id": 3,
     "exchange_code": "AU",
     "created_at": "2026-03-22T10:57:47.052304+00:00",
-    "updated_at": "2026-03-22T10:57:47.052304+00:00"
+    "updated_at": "2026-04-23T16:33:15.433812+00:00"
   },
   {
     "exchange_id": 4,
     "exchange_code": "BA",
     "created_at": "2026-03-22T10:57:47.052304+00:00",
-    "updated_at": "2026-03-22T10:57:47.052304+00:00"
+    "updated_at": "2026-04-23T16:33:15.433812+00:00"
   },
   {
     "exchange_id": 5,
     "exchange_code": "BC",
     "created_at": "2026-03-22T10:57:47.052304+00:00",
-    "updated_at": "2026-03-22T10:57:47.052304+00:00"
+    "updated_at": "2026-04-23T16:33:15.433812+00:00"
   }
 ]
 ```

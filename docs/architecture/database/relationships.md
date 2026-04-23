@@ -46,7 +46,7 @@ flowchart LR
 
 - `provider.provider_id` is the catalog FK key; `provider.provider_code` remains the stable external namespace.
 - `provider_exchange` maps provider exchange codes to canonical `exchange.exchange_id`.
-- `listing.listing_id` replaces `securities.security_id` as the canonical downstream key.
+- `listing.listing_id` is the canonical downstream key for facts, prices, metrics, and listing status.
 - `provider_listing.provider_listing_id` replaces `(provider, provider_symbol)` as the durable provider-scoped raw/state key.
 - User-facing canonical symbols such as `AAPL.US` are derived from `listing.symbol` plus `exchange.exchange_code`.
 - FX discovery reads currencies from `provider_listing`, `financial_facts`, and `market_data`, but FX storage itself is not keyed back to a listing.

@@ -11,9 +11,10 @@ One row per `provider_listing_id`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: pre-refactor `data/pyvalue.db` market-data fetch-state table on `2026-04-21`
+- Snapshot source: `data/pyvalue.db` on `2026-04-23`
 - Row count: `61,092`
-- Table size: approximately `4.3 MiB` before the catalog-key refactor
+- Table size: `3,166,208 bytes` (`3.0 MiB`)
+- Approximate bytes per row: `51.8`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -29,12 +30,20 @@ One row per `provider_listing_id`.
 
 ## Keys And Relationships
 
+<!-- BEGIN generated_keys_and_relationships -->
 - Primary key: `provider_listing_id`
-- Physical foreign key: `provider_listing_id -> provider_listing.provider_listing_id`
+- Physical foreign keys:
+  - `provider_listing_id` -> `provider_listing`.`provider_listing_id`
+- Physical references from other tables: none
+- Unique constraints beyond the primary key: none
+- Main logical refs: `provider_listing_id` in `provider_listing`
+<!-- END generated_keys_and_relationships -->
 
 ## Secondary Indexes
 
+<!-- BEGIN generated_secondary_indexes -->
 - `idx_market_data_fetch_next (next_eligible_at)`
+<!-- END generated_secondary_indexes -->
 
 ## Main Read Paths
 
@@ -45,6 +54,58 @@ One row per `provider_listing_id`.
 
 - `update-market-data`
 - retry/backoff updates
+
+## Sample Rows
+
+<!-- BEGIN generated_sample_rows -->
+- Snapshot source: `data/pyvalue.db` on `2026-04-23`
+- Sample window: first `5` rows returned by SQLite ordered by `provider_listing_id ASC`
+
+```json
+[
+  {
+    "provider_listing_id": 1,
+    "last_fetched_at": "2026-04-11T08:25:55.378209+00:00",
+    "last_status": "ok",
+    "last_error": null,
+    "next_eligible_at": null,
+    "attempts": 0
+  },
+  {
+    "provider_listing_id": 2,
+    "last_fetched_at": "2026-04-11T08:25:55.378209+00:00",
+    "last_status": "ok",
+    "last_error": null,
+    "next_eligible_at": null,
+    "attempts": 0
+  },
+  {
+    "provider_listing_id": 3,
+    "last_fetched_at": "2026-04-11T08:25:55.378209+00:00",
+    "last_status": "ok",
+    "last_error": null,
+    "next_eligible_at": null,
+    "attempts": 0
+  },
+  {
+    "provider_listing_id": 4,
+    "last_fetched_at": "2026-04-11T08:25:55.378209+00:00",
+    "last_status": "ok",
+    "last_error": null,
+    "next_eligible_at": null,
+    "attempts": 0
+  },
+  {
+    "provider_listing_id": 5,
+    "last_fetched_at": "2026-04-11T08:25:55.378209+00:00",
+    "last_status": "ok",
+    "last_error": null,
+    "next_eligible_at": null,
+    "attempts": 0
+  }
+]
+```
+<!-- END generated_sample_rows -->
 
 ## Review Notes
 

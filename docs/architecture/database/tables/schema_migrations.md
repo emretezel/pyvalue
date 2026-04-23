@@ -11,7 +11,7 @@ Append-only version rows, though operationally the table is expected to behave l
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-20`
+- Snapshot source: `data/pyvalue.db` on `2026-04-23`
 - Row count: `1`
 - Table size: `4,096 bytes` (`4.0 KiB`)
 - Approximate bytes per row: `4,096.0`
@@ -25,12 +25,19 @@ Append-only version rows, though operationally the table is expected to behave l
 
 ## Keys And Relationships
 
-- No primary key
-- No foreign keys
+<!-- BEGIN generated_keys_and_relationships -->
+- Primary key: none
+- Physical foreign keys: none
+- Physical references from other tables: none
+- Unique constraints beyond the primary key: none
+- Main logical refs: none
+<!-- END generated_keys_and_relationships -->
 
 ## Secondary Indexes
 
-- None
+<!-- BEGIN generated_secondary_indexes -->
+- None beyond the primary key and unique constraints.
+<!-- END generated_secondary_indexes -->
 
 ## Main Read Paths
 
@@ -47,13 +54,13 @@ Append-only version rows, though operationally the table is expected to behave l
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-20`
-- Sample window: first `1` rows returned by SQLite using `LIMIT` with no `ORDER BY`
+- Snapshot source: `data/pyvalue.db` on `2026-04-23`
+- Sample window: first `1` rows returned by SQLite ordered by `version ASC`
 
 ```json
 [
   {
-    "version": 33
+    "version": 35
   }
 ]
 ```

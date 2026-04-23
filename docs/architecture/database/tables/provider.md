@@ -11,9 +11,10 @@ One row per provider.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: pre-refactor `data/pyvalue.db` provider registry on `2026-04-21`
+- Snapshot source: `data/pyvalue.db` on `2026-04-23`
 - Row count: `3`
-- Table size: carried forward from the old `providers` registry
+- Table size: `4,096 bytes` (`4.0 KiB`)
+- Approximate bytes per row: `1,365.3`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -29,17 +30,22 @@ One row per provider.
 
 ## Keys And Relationships
 
+<!-- BEGIN generated_keys_and_relationships -->
 - Primary key: `provider_id`
-- Unique constraint: `provider_code`
-- Physical references:
-  - `provider_exchange.provider_id`
-  - `provider_listing.provider_id`
-- Logical references:
-  - provenance columns such as `financial_facts.source_provider` and `market_data.source_provider`
+- Physical foreign keys: none
+- Physical references from other tables:
+  - `provider_exchange`.`provider_id` -> `provider_id`
+  - `provider_listing`.`provider_id` -> `provider_id`
+- Unique constraints beyond the primary key:
+  - `provider_code`
+- Main logical refs: referenced physically by `provider_exchange` and `provider_listing`
+<!-- END generated_keys_and_relationships -->
 
 ## Secondary Indexes
 
-- None beyond the unique provider-code constraint.
+<!-- BEGIN generated_secondary_indexes -->
+- None beyond the primary key and unique constraints.
+<!-- END generated_secondary_indexes -->
 
 ## Main Read Paths
 
@@ -49,6 +55,42 @@ One row per provider.
 ## Main Write Paths
 
 - migration-time seed and future registry maintenance
+
+## Sample Rows
+
+<!-- BEGIN generated_sample_rows -->
+- Snapshot source: `data/pyvalue.db` on `2026-04-23`
+- Sample window: first `3` rows returned by SQLite ordered by `provider_id ASC`
+
+```json
+[
+  {
+    "provider_id": 1,
+    "provider_code": "EODHD",
+    "display_name": "EOD Historical Data",
+    "description": "Exchange, fundamentals, market-data, and FX provider.",
+    "created_at": "2026-04-23T16:33:15.427807+00:00",
+    "updated_at": "2026-04-23T16:33:15.427807+00:00"
+  },
+  {
+    "provider_id": 2,
+    "provider_code": "FRANKFURTER",
+    "display_name": "Frankfurter FX",
+    "description": "FX rates provider used for direct currency history refreshes.",
+    "created_at": "2026-04-23T16:33:15.427807+00:00",
+    "updated_at": "2026-04-23T16:33:15.427807+00:00"
+  },
+  {
+    "provider_id": 3,
+    "provider_code": "SEC",
+    "display_name": "US SEC Company Facts",
+    "description": "US issuer fundamentals provider backed by SEC company facts.",
+    "created_at": "2026-04-23T16:33:15.427807+00:00",
+    "updated_at": "2026-04-23T16:33:15.427807+00:00"
+  }
+]
+```
+<!-- END generated_sample_rows -->
 
 ## Review Notes
 

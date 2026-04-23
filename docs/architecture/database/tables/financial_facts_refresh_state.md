@@ -11,9 +11,10 @@ One row per `listing_id`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: pre-refactor `data/pyvalue.db` refresh-state table on `2026-04-21`
+- Snapshot source: `data/pyvalue.db` on `2026-04-23`
 - Row count: `61,987`
-- Table size: approximately `3.0 MiB` before the `listing_id` rename
+- Table size: `2,564,096 bytes` (`2.4 MiB`)
+- Approximate bytes per row: `41.4`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -25,12 +26,19 @@ One row per `listing_id`.
 
 ## Keys And Relationships
 
+<!-- BEGIN generated_keys_and_relationships -->
 - Primary key: `listing_id`
-- Logical reference: `listing_id -> listing.listing_id`
+- Physical foreign keys: none
+- Physical references from other tables: none
+- Unique constraints beyond the primary key: none
+- Main logical refs: `listing_id` in `listing`
+<!-- END generated_keys_and_relationships -->
 
 ## Secondary Indexes
 
-- None.
+<!-- BEGIN generated_secondary_indexes -->
+- None beyond the primary key and unique constraints.
+<!-- END generated_secondary_indexes -->
 
 ## Main Read Paths
 
@@ -41,6 +49,38 @@ One row per `listing_id`.
 
 - `normalize-fundamentals`
 - bulk normalization status updates
+
+## Sample Rows
+
+<!-- BEGIN generated_sample_rows -->
+- Snapshot source: `data/pyvalue.db` on `2026-04-23`
+- Sample window: first `5` rows returned by SQLite ordered by `listing_id ASC`
+
+```json
+[
+  {
+    "listing_id": 1,
+    "refreshed_at": "2026-04-13T13:51:55.355558+00:00"
+  },
+  {
+    "listing_id": 2,
+    "refreshed_at": "2026-04-13T13:51:54.046069+00:00"
+  },
+  {
+    "listing_id": 3,
+    "refreshed_at": "2026-04-13T13:51:54.401028+00:00"
+  },
+  {
+    "listing_id": 4,
+    "refreshed_at": "2026-04-13T13:51:54.688817+00:00"
+  },
+  {
+    "listing_id": 5,
+    "refreshed_at": "2026-04-13T13:51:54.185290+00:00"
+  }
+]
+```
+<!-- END generated_sample_rows -->
 
 ## Review Notes
 

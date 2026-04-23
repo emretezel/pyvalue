@@ -11,7 +11,7 @@ One row per `(provider, rate_date, base_currency, quote_currency)`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-20`
+- Snapshot source: `data/pyvalue.db` on `2026-04-23`
 - Row count: `6,819,876`
 - Table size: `1,328,381,952 bytes` (`1.24 GiB`)
 - Approximate bytes per row: `194.8`
@@ -34,12 +34,19 @@ One row per `(provider, rate_date, base_currency, quote_currency)`.
 
 ## Keys And Relationships
 
-- Primary key: `(provider, rate_date, base_currency, quote_currency)`
-- No enforced foreign keys
+<!-- BEGIN generated_keys_and_relationships -->
+- Primary key: (`provider`, `rate_date`, `base_currency`, `quote_currency`)
+- Physical foreign keys: none
+- Physical references from other tables: none
+- Unique constraints beyond the primary key: none
+- Main logical refs: no enforced FK
+<!-- END generated_keys_and_relationships -->
 
 ## Secondary Indexes
 
+<!-- BEGIN generated_secondary_indexes -->
 - `idx_fx_rates_pair_date (provider, base_currency, quote_currency, rate_date DESC)`
+<!-- END generated_secondary_indexes -->
 
 ## Main Read Paths
 
@@ -67,70 +74,70 @@ One row per `(provider, rate_date, base_currency, quote_currency)`.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-20`
-- Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
+- Snapshot source: `data/pyvalue.db` on `2026-04-23`
+- Sample window: first `5` rows returned by SQLite ordered by `provider ASC, rate_date ASC, base_currency ASC, quote_currency ASC`
 
 ```json
 [
   {
-    "provider": "FRANKFURTER",
-    "rate_date": "2026-03-12",
+    "provider": "EODHD",
+    "rate_date": "1950-01-01",
     "base_currency": "EUR",
-    "quote_currency": "USD",
-    "rate_text": "1.1563",
-    "fetched_at": "Sun, 05 Apr 2026 15:37:24 GMT",
+    "quote_currency": "EUR",
+    "rate_text": "1",
+    "fetched_at": "Wed, 08 Apr 2026 21:32:03 GMT",
     "source_kind": "provider",
-    "meta_json": "{\"provider\": \"FRANKFURTER\"}",
-    "created_at": "2026-04-05T15:37:24.141920+00:00",
-    "updated_at": "2026-04-05T15:37:24.141920+00:00"
+    "meta_json": "{\"provider\": \"EODHD\", \"symbol\": \"EUREUR\"}",
+    "created_at": "2026-04-08T21:32:04.346014+00:00",
+    "updated_at": "2026-04-08T21:32:04.346014+00:00"
   },
   {
-    "provider": "FRANKFURTER",
-    "rate_date": "2026-03-13",
+    "provider": "EODHD",
+    "rate_date": "1950-01-02",
     "base_currency": "EUR",
-    "quote_currency": "USD",
-    "rate_text": "1.1495",
-    "fetched_at": "Sun, 05 Apr 2026 15:37:24 GMT",
+    "quote_currency": "EUR",
+    "rate_text": "1",
+    "fetched_at": "Wed, 08 Apr 2026 21:32:03 GMT",
     "source_kind": "provider",
-    "meta_json": "{\"provider\": \"FRANKFURTER\"}",
-    "created_at": "2026-04-05T15:37:24.141920+00:00",
-    "updated_at": "2026-04-05T15:37:24.141920+00:00"
+    "meta_json": "{\"provider\": \"EODHD\", \"symbol\": \"EUREUR\"}",
+    "created_at": "2026-04-08T21:32:04.346014+00:00",
+    "updated_at": "2026-04-08T21:32:04.346014+00:00"
   },
   {
-    "provider": "FRANKFURTER",
-    "rate_date": "2026-03-14",
+    "provider": "EODHD",
+    "rate_date": "1950-01-03",
     "base_currency": "EUR",
-    "quote_currency": "USD",
-    "rate_text": "1.1466",
-    "fetched_at": "Sun, 05 Apr 2026 15:37:24 GMT",
+    "quote_currency": "EUR",
+    "rate_text": "1",
+    "fetched_at": "Wed, 08 Apr 2026 21:32:03 GMT",
     "source_kind": "provider",
-    "meta_json": "{\"provider\": \"FRANKFURTER\"}",
-    "created_at": "2026-04-05T15:37:24.141920+00:00",
-    "updated_at": "2026-04-05T15:37:24.141920+00:00"
+    "meta_json": "{\"provider\": \"EODHD\", \"symbol\": \"EUREUR\"}",
+    "created_at": "2026-04-08T21:32:04.346014+00:00",
+    "updated_at": "2026-04-08T21:32:04.346014+00:00"
   },
   {
-    "provider": "FRANKFURTER",
-    "rate_date": "2026-03-15",
+    "provider": "EODHD",
+    "rate_date": "1950-01-04",
     "base_currency": "EUR",
-    "quote_currency": "USD",
-    "rate_text": "1.1476",
-    "fetched_at": "Sun, 05 Apr 2026 15:37:24 GMT",
+    "quote_currency": "EUR",
+    "rate_text": "1",
+    "fetched_at": "Wed, 08 Apr 2026 21:32:03 GMT",
     "source_kind": "provider",
-    "meta_json": "{\"provider\": \"FRANKFURTER\"}",
-    "created_at": "2026-04-05T15:37:24.141920+00:00",
-    "updated_at": "2026-04-05T15:37:24.141920+00:00"
+    "meta_json": "{\"provider\": \"EODHD\", \"symbol\": \"EUREUR\"}",
+    "created_at": "2026-04-08T21:32:04.346014+00:00",
+    "updated_at": "2026-04-08T21:32:04.346014+00:00"
   },
   {
-    "provider": "FRANKFURTER",
-    "rate_date": "2026-03-16",
+    "provider": "EODHD",
+    "rate_date": "1950-01-05",
     "base_currency": "EUR",
-    "quote_currency": "USD",
-    "rate_text": "1.1473",
-    "fetched_at": "Sun, 05 Apr 2026 15:37:24 GMT",
+    "quote_currency": "EUR",
+    "rate_text": "1",
+    "fetched_at": "Wed, 08 Apr 2026 21:32:03 GMT",
     "source_kind": "provider",
-    "meta_json": "{\"provider\": \"FRANKFURTER\"}",
-    "created_at": "2026-04-05T15:37:24.141920+00:00",
-    "updated_at": "2026-04-05T15:37:24.141920+00:00"
+    "meta_json": "{\"provider\": \"EODHD\", \"symbol\": \"EUREUR\"}",
+    "created_at": "2026-04-08T21:32:04.346014+00:00",
+    "updated_at": "2026-04-08T21:32:04.346014+00:00"
   }
 ]
 ```

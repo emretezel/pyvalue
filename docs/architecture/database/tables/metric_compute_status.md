@@ -11,9 +11,10 @@ One row per `(listing_id, metric_id)`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: pre-refactor `data/pyvalue.db` metric-status table on `2026-04-21`
+- Snapshot source: `data/pyvalue.db` on `2026-04-23`
 - Row count: `4,887,360`
-- Table size: approximately `936.0 MiB` before the `listing_id` rename
+- Table size: `924,540,928 bytes` (`881.7 MiB`)
+- Approximate bytes per row: `189.2`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -33,12 +34,19 @@ One row per `(listing_id, metric_id)`.
 
 ## Keys And Relationships
 
-- Primary key: `(listing_id, metric_id)`
-- Logical reference: `listing_id -> listing.listing_id`
+<!-- BEGIN generated_keys_and_relationships -->
+- Primary key: (`listing_id`, `metric_id`)
+- Physical foreign keys: none
+- Physical references from other tables: none
+- Unique constraints beyond the primary key: none
+- Main logical refs: `listing_id` in `listing`
+<!-- END generated_keys_and_relationships -->
 
 ## Secondary Indexes
 
+<!-- BEGIN generated_secondary_indexes -->
 - `idx_metric_compute_status_metric_status (metric_id, status)`
+<!-- END generated_secondary_indexes -->
 
 ## Main Read Paths
 
@@ -49,6 +57,78 @@ One row per `(listing_id, metric_id)`.
 
 - `compute-metrics`
 - bulk metric recomputation
+
+## Sample Rows
+
+<!-- BEGIN generated_sample_rows -->
+- Snapshot source: `data/pyvalue.db` on `2026-04-23`
+- Sample window: first `5` rows returned by SQLite ordered by `listing_id ASC, metric_id ASC`
+
+```json
+[
+  {
+    "listing_id": 1,
+    "metric_id": "accruals_ratio",
+    "status": "success",
+    "reason_code": null,
+    "reason_detail": null,
+    "attempted_at": "2026-04-17T18:56:28.316700+00:00",
+    "value_as_of": "2025-12-31",
+    "facts_refreshed_at": "2026-04-13T13:51:55.355558+00:00",
+    "market_data_as_of": "2026-04-10",
+    "market_data_updated_at": "2026-04-13T16:12:29.084722+00:00"
+  },
+  {
+    "listing_id": 1,
+    "metric_id": "avg_ic",
+    "status": "success",
+    "reason_code": null,
+    "reason_detail": null,
+    "attempted_at": "2026-04-17T18:56:28.703489+00:00",
+    "value_as_of": "2025-12-31",
+    "facts_refreshed_at": "2026-04-13T13:51:55.355558+00:00",
+    "market_data_as_of": "2026-04-10",
+    "market_data_updated_at": "2026-04-13T16:12:29.084722+00:00"
+  },
+  {
+    "listing_id": 1,
+    "metric_id": "cfo_to_ni_10y_median",
+    "status": "success",
+    "reason_code": null,
+    "reason_detail": null,
+    "attempted_at": "2026-04-17T18:56:28.314753+00:00",
+    "value_as_of": "2025-12-31",
+    "facts_refreshed_at": "2026-04-13T13:51:55.355558+00:00",
+    "market_data_as_of": "2026-04-10",
+    "market_data_updated_at": "2026-04-13T16:12:29.084722+00:00"
+  },
+  {
+    "listing_id": 1,
+    "metric_id": "cfo_to_ni_ttm",
+    "status": "success",
+    "reason_code": null,
+    "reason_detail": null,
+    "attempted_at": "2026-04-17T18:56:28.314595+00:00",
+    "value_as_of": "2025-12-31",
+    "facts_refreshed_at": "2026-04-13T13:51:55.355558+00:00",
+    "market_data_as_of": "2026-04-10",
+    "market_data_updated_at": "2026-04-13T16:12:29.084722+00:00"
+  },
+  {
+    "listing_id": 1,
+    "metric_id": "current_ratio",
+    "status": "success",
+    "reason_code": null,
+    "reason_detail": null,
+    "attempted_at": "2026-04-17T18:56:28.314074+00:00",
+    "value_as_of": "2025-12-31",
+    "facts_refreshed_at": "2026-04-13T13:51:55.355558+00:00",
+    "market_data_as_of": "2026-04-10",
+    "market_data_updated_at": "2026-04-13T16:12:29.084722+00:00"
+  }
+]
+```
+<!-- END generated_sample_rows -->
 
 ## Review Notes
 

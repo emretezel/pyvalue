@@ -11,9 +11,10 @@ One row per `(listing_id, metric_id)`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: pre-refactor `data/pyvalue.db` metrics table on `2026-04-21`
+- Snapshot source: `data/pyvalue.db` on `2026-04-23`
 - Row count: `2,422,916`
-- Table size: approximately `158.9 MiB` before the `listing_id` rename
+- Table size: `136,704,000 bytes` (`130.4 MiB`)
+- Approximate bytes per row: `56.4`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -30,12 +31,19 @@ One row per `(listing_id, metric_id)`.
 
 ## Keys And Relationships
 
-- Primary key: `(listing_id, metric_id)`
-- Logical reference: `listing_id -> listing.listing_id`
+<!-- BEGIN generated_keys_and_relationships -->
+- Primary key: (`listing_id`, `metric_id`)
+- Physical foreign keys: none
+- Physical references from other tables: none
+- Unique constraints beyond the primary key: none
+- Main logical refs: `listing_id` in `listing`
+<!-- END generated_keys_and_relationships -->
 
 ## Secondary Indexes
 
+<!-- BEGIN generated_secondary_indexes -->
 - `idx_metrics_metric_id (metric_id)`
+<!-- END generated_secondary_indexes -->
 
 ## Main Read Paths
 
@@ -46,6 +54,63 @@ One row per `(listing_id, metric_id)`.
 
 - `compute-metrics`
 - bulk metric recomputation
+
+## Sample Rows
+
+<!-- BEGIN generated_sample_rows -->
+- Snapshot source: `data/pyvalue.db` on `2026-04-23`
+- Sample window: first `5` rows returned by SQLite ordered by `listing_id ASC, metric_id ASC`
+
+```json
+[
+  {
+    "listing_id": 1,
+    "metric_id": "accruals_ratio",
+    "value": -0.1261966826029527,
+    "as_of": "2025-12-31",
+    "unit_kind": "ratio",
+    "currency": null,
+    "unit_label": null
+  },
+  {
+    "listing_id": 1,
+    "metric_id": "avg_ic",
+    "value": 3125299999.5,
+    "as_of": "2025-12-31",
+    "unit_kind": "monetary",
+    "currency": "EUR",
+    "unit_label": null
+  },
+  {
+    "listing_id": 1,
+    "metric_id": "cfo_to_ni_10y_median",
+    "value": 1.658532819876974,
+    "as_of": "2025-12-31",
+    "unit_kind": "ratio",
+    "currency": null,
+    "unit_label": null
+  },
+  {
+    "listing_id": 1,
+    "metric_id": "cfo_to_ni_ttm",
+    "value": 3.0156833457804333,
+    "as_of": "2025-12-31",
+    "unit_kind": "ratio",
+    "currency": null,
+    "unit_label": null
+  },
+  {
+    "listing_id": 1,
+    "metric_id": "current_ratio",
+    "value": 1.5236842105263158,
+    "as_of": "2025-12-31",
+    "unit_kind": "ratio",
+    "currency": null,
+    "unit_label": null
+  }
+]
+```
+<!-- END generated_sample_rows -->
 
 ## Review Notes
 

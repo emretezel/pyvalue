@@ -79,12 +79,13 @@ private/
 .env.*
 secret*/
 data/logs/
+data/backups/
 data/output/*
 !data/output/.gitkeep
 data/screen_results*.csv
-data/*.db-journal
-data/*.db-wal
-data/*.db-shm
+*.db-journal
+*.db-wal
+*.db-shm
 
 # Log files
 *.log

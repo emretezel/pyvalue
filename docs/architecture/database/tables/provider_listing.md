@@ -11,9 +11,10 @@ One row per `(provider_exchange_id, provider_symbol)`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: pre-refactor `data/pyvalue.db` `supported_tickers` catalog on `2026-04-21`
+- Snapshot source: `data/pyvalue.db` on `2026-04-23`
 - Row count: `75,848`
-- Table size: expected to be narrower than the old provider catalog because descriptive provider columns were dropped
+- Table size: `1,798,144 bytes` (`1.7 MiB`)
+- Approximate bytes per row: `23.7`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -22,32 +23,39 @@ One row per `(provider_exchange_id, provider_symbol)`.
 | --- | --- | --- | --- | --- |
 | `provider_listing_id` | `INTEGER` | no | PK | durable provider-listing identity for raw/state rows |
 | `provider_id` | `INTEGER` | no | FK, idx | provider namespace |
-| `provider_exchange_id` | `INTEGER` | no | FK, unique | provider exchange mapping |
-| `provider_symbol` | `TEXT` | no | unique | bare provider symbol from catalog payloads such as `AAPL` |
+| `provider_exchange_id` | `INTEGER` | no | FK | provider exchange mapping; part of composite unique key |
+| `provider_symbol` | `TEXT` | no |  | bare provider symbol from catalog payloads such as `AAPL`; part of composite unique key |
 | `currency` | `TEXT` | yes | partial idx | provider catalog currency hint |
 | `listing_id` | `INTEGER` | no | FK, idx | canonical listing link |
 
 ## Keys And Relationships
 
+<!-- BEGIN generated_keys_and_relationships -->
 - Primary key: `provider_listing_id`
-- Unique constraint: `(provider_exchange_id, provider_symbol)`
 - Physical foreign keys:
-  - `provider_id -> provider.provider_id`
-  - `provider_exchange_id -> provider_exchange.provider_exchange_id`
-  - `listing_id -> listing.listing_id`
-  - `(provider_exchange_id, provider_id) -> provider_exchange(provider_exchange_id, provider_id)`
-- Physical references:
-  - `fundamentals_raw.provider_listing_id`
-  - `fundamentals_fetch_state.provider_listing_id`
-  - `fundamentals_normalization_state.provider_listing_id`
-  - `market_data_fetch_state.provider_listing_id`
-  - `security_listing_status.provider_listing_id`
+  - (`provider_exchange_id`, `provider_id`) -> `provider_exchange`.(`provider_exchange_id`, `provider_id`)
+  - `listing_id` -> `listing`.`listing_id`
+  - `provider_exchange_id` -> `provider_exchange`.`provider_exchange_id`
+  - `provider_id` -> `provider`.`provider_id`
+- Physical references from other tables:
+  - `fundamentals_fetch_state`.`provider_listing_id` -> `provider_listing_id`
+  - `fundamentals_normalization_state`.`provider_listing_id` -> `provider_listing_id`
+  - `fundamentals_raw`.`provider_listing_id` -> `provider_listing_id`
+  - `market_data_fetch_state`.`provider_listing_id` -> `provider_listing_id`
+  - `security_listing_status`.`primary_provider_listing_id` -> `provider_listing_id`
+  - `security_listing_status`.`provider_listing_id` -> `provider_listing_id`
+- Unique constraints beyond the primary key:
+  - (`provider_exchange_id`, `provider_symbol`)
+- Main logical refs: links provider catalog rows to canonical `listing_id`
+<!-- END generated_keys_and_relationships -->
 
 ## Secondary Indexes
 
-- `idx_provider_listing_provider (provider_id)`
+<!-- BEGIN generated_secondary_indexes -->
+- `idx_provider_listing_currency_nonnull (currency)` WHERE currency IS NOT NULL
 - `idx_provider_listing_listing (listing_id)`
-- `idx_provider_listing_currency_nonnull (currency) WHERE currency IS NOT NULL`
+- `idx_provider_listing_provider (provider_id)`
+<!-- END generated_secondary_indexes -->
 
 ## Main Read Paths
 
@@ -60,6 +68,58 @@ One row per `(provider_exchange_id, provider_symbol)`.
 - `refresh-supported-tickers`
 - migration-time backfill from legacy provider catalog rows
 - raw fundamentals upserts that need to materialize a minimal provider listing
+
+## Sample Rows
+
+<!-- BEGIN generated_sample_rows -->
+- Snapshot source: `data/pyvalue.db` on `2026-04-23`
+- Sample window: first `5` rows returned by SQLite ordered by `provider_listing_id ASC`
+
+```json
+[
+  {
+    "provider_listing_id": 1,
+    "provider_id": 1,
+    "provider_exchange_id": 1,
+    "provider_symbol": "AALB",
+    "currency": "EUR",
+    "listing_id": 1
+  },
+  {
+    "provider_listing_id": 2,
+    "provider_id": 1,
+    "provider_exchange_id": 1,
+    "provider_symbol": "ABN",
+    "currency": "EUR",
+    "listing_id": 2
+  },
+  {
+    "provider_listing_id": 3,
+    "provider_id": 1,
+    "provider_exchange_id": 1,
+    "provider_symbol": "ACOMO",
+    "currency": "EUR",
+    "listing_id": 3
+  },
+  {
+    "provider_listing_id": 4,
+    "provider_id": 1,
+    "provider_exchange_id": 1,
+    "provider_symbol": "AD",
+    "currency": "EUR",
+    "listing_id": 4
+  },
+  {
+    "provider_listing_id": 5,
+    "provider_id": 1,
+    "provider_exchange_id": 1,
+    "provider_symbol": "ADYEN",
+    "currency": "EUR",
+    "listing_id": 5
+  }
+]
+```
+<!-- END generated_sample_rows -->
 
 ## Review Notes
 

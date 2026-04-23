@@ -11,7 +11,7 @@ One row per `(provider, canonical_symbol)`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-20`
+- Snapshot source: `data/pyvalue.db` on `2026-04-23`
 - Row count: `937`
 - Table size: `81,920 bytes` (`80.0 KiB`)
 - Approximate bytes per row: `87.4`
@@ -33,13 +33,19 @@ One row per `(provider, canonical_symbol)`.
 
 ## Keys And Relationships
 
-- Primary key: `(provider, canonical_symbol)`
-- Logical references:
-  - canonical pair identity from `fx_supported_pairs`
+<!-- BEGIN generated_keys_and_relationships -->
+- Primary key: (`provider`, `canonical_symbol`)
+- Physical foreign keys: none
+- Physical references from other tables: none
+- Unique constraints beyond the primary key: none
+- Main logical refs: logical ref to canonical pairs in provider catalog
+<!-- END generated_keys_and_relationships -->
 
 ## Secondary Indexes
 
-- None beyond the primary key
+<!-- BEGIN generated_secondary_indexes -->
+- None beyond the primary key and unique constraints.
+<!-- END generated_secondary_indexes -->
 
 ## Main Read Paths
 
@@ -65,8 +71,8 @@ One row per `(provider, canonical_symbol)`.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-20`
-- Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
+- Snapshot source: `data/pyvalue.db` on `2026-04-23`
+- Sample window: first `5` rows returned by SQLite ordered by `provider ASC, canonical_symbol ASC`
 
 ```json
 [

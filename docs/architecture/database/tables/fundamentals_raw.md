@@ -11,9 +11,10 @@ One row per `provider_listing_id`; historical payload versions are not retained.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: pre-refactor `data/pyvalue.db` raw payload table on `2026-04-21`
-- Row count: `77,045`
-- Table size: approximately `16.84 GiB` before the catalog-key refactor
+- Snapshot source: `data/pyvalue.db` on `2026-04-23`
+- Row count: `75,848`
+- Table size: `17,852,588,032 bytes` (`16.63 GiB`)
+- Approximate bytes per row: `235,373.2`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -29,16 +30,23 @@ One row per `provider_listing_id`; historical payload versions are not retained.
 
 ## Keys And Relationships
 
+<!-- BEGIN generated_keys_and_relationships -->
 - Primary key: `payload_id`
-- Unique constraint: `provider_listing_id`
 - Physical foreign keys:
-  - `provider_listing_id -> provider_listing.provider_listing_id`
-  - `listing_id -> listing.listing_id`
+  - `listing_id` -> `listing`.`listing_id`
+  - `provider_listing_id` -> `provider_listing`.`provider_listing_id`
+- Physical references from other tables: none
+- Unique constraints beyond the primary key:
+  - `provider_listing_id`
+- Main logical refs: `provider_listing_id` in `provider_listing`, `listing_id` in `listing`
+<!-- END generated_keys_and_relationships -->
 
 ## Secondary Indexes
 
-- `idx_fundamentals_raw_security (listing_id)`
+<!-- BEGIN generated_secondary_indexes -->
 - `idx_fundamentals_raw_provider_fetched (fetched_at)`
+- `idx_fundamentals_raw_security (listing_id)`
+<!-- END generated_secondary_indexes -->
 
 ## Main Read Paths
 
@@ -50,6 +58,12 @@ One row per `provider_listing_id`; historical payload versions are not retained.
 
 - `ingest-fundamentals`
 - migration-time backfill from legacy `(provider, provider_symbol)` raw rows
+
+## Sample Rows
+
+<!-- BEGIN generated_sample_rows -->
+Wide-table sample rows live in the [Sample Rows appendix](../sample-rows.md#fundamentals_raw).
+<!-- END generated_sample_rows -->
 
 ## Review Notes
 

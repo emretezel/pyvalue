@@ -11,7 +11,7 @@ One row per provider FX symbol.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-20`
+- Snapshot source: `data/pyvalue.db` on `2026-04-23`
 - Row count: `990`
 - Table size: `102,400 bytes` (`100.0 KiB`)
 - Approximate bytes per row: `103.4`
@@ -33,13 +33,19 @@ One row per provider FX symbol.
 
 ## Keys And Relationships
 
-- Primary key: `(provider, symbol)`
-- Logical references:
-  - canonical pair names feed `fx_refresh_state`
+<!-- BEGIN generated_keys_and_relationships -->
+- Primary key: (`provider`, `symbol`)
+- Physical foreign keys: none
+- Physical references from other tables: none
+- Unique constraints beyond the primary key: none
+- Main logical refs: canonical pair used by `fx_refresh_state`
+<!-- END generated_keys_and_relationships -->
 
 ## Secondary Indexes
 
+<!-- BEGIN generated_secondary_indexes -->
 - `idx_fx_supported_pairs_refreshable (provider, is_refreshable, canonical_symbol)`
+<!-- END generated_secondary_indexes -->
 
 ## Main Read Paths
 
@@ -65,8 +71,8 @@ One row per provider FX symbol.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-20`
-- Sample window: first `5` rows returned by SQLite using `LIMIT` with no `ORDER BY`
+- Snapshot source: `data/pyvalue.db` on `2026-04-23`
+- Sample window: first `5` rows returned by SQLite ordered by `provider ASC, symbol ASC`
 
 ```json
 [

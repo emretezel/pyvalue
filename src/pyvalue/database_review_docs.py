@@ -37,6 +37,43 @@ class TableInventoryEntry:
     logical_refs: str
 
 
+@dataclass(frozen=True)
+class ForeignKeyMetadata:
+    """One outgoing foreign-key relationship."""
+
+    from_columns: tuple[str, ...]
+    ref_table: str
+    ref_columns: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class IncomingForeignKeyMetadata:
+    """One incoming foreign-key reference from another table."""
+
+    from_table: str
+    from_columns: tuple[str, ...]
+    target_columns: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class IndexMetadata:
+    """One documented SQLite index."""
+
+    name: str
+    columns: tuple[str, ...]
+    where_clause: str | None = None
+
+
+@dataclass(frozen=True)
+class TableSchema:
+    """Schema metadata needed for documentation generation."""
+
+    primary_key: tuple[str, ...]
+    foreign_keys: tuple[ForeignKeyMetadata, ...]
+    unique_constraints: tuple[tuple[str, ...], ...]
+    secondary_indexes: tuple[IndexMetadata, ...]
+
+
 TABLE_GROUPS: tuple[tuple[str, tuple[TableInventoryEntry, ...]], ...] = (
     (
         "Identity And Catalog",
@@ -169,6 +206,9 @@ TABLE_GROUPS: tuple[tuple[str, tuple[TableInventoryEntry, ...]], ...] = (
 TABLE_SEQUENCE = tuple(
     entry.table_name for _, entries in TABLE_GROUPS for entry in entries
 )
+TABLE_ENTRY_BY_NAME = {
+    entry.table_name: entry for _, entries in TABLE_GROUPS for entry in entries
+}
 
 
 def _quote_ident(value: str) -> str:
@@ -201,6 +241,10 @@ def _normalized_sample_value(value: Any, truncate_chars: int = TRUNCATE_CHARS) -
     if isinstance(value, str):
         return _truncate_string(value, limit=truncate_chars)
     return value
+
+
+def _normalize_sql_whitespace(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip())
 
 
 def _snapshot_date() -> str:
@@ -272,28 +316,240 @@ def load_all_table_stats(
     }
 
 
+def _load_index_columns(
+    conn: sqlite3.Connection,
+    index_name: str,
+    *,
+    include_sort_order: bool,
+) -> tuple[str, ...]:
+    rows = conn.execute(f"PRAGMA index_xinfo({_quote_ident(index_name)})").fetchall()
+    columns: list[str] = []
+    ordered_rows = sorted(
+        (
+            row
+            for row in rows
+            if int(row["key"]) == 1 and int(row["cid"]) >= 0 and row["name"] is not None
+        ),
+        key=lambda row: int(row["seqno"]),
+    )
+    for row in ordered_rows:
+        column_name = str(row["name"])
+        if include_sort_order and int(row["desc"]):
+            columns.append(f"{column_name} DESC")
+        else:
+            columns.append(column_name)
+    return tuple(columns)
+
+
+def _load_index_where_clause(
+    conn: sqlite3.Connection,
+    index_name: str,
+) -> str | None:
+    row = conn.execute(
+        """
+        SELECT sql
+        FROM sqlite_master
+        WHERE type = 'index' AND name = ?
+        """,
+        (index_name,),
+    ).fetchone()
+    sql = None if row is None else row["sql"]
+    if sql is None:
+        return None
+    match = re.search(r"\bWHERE\b(?P<predicate>.+)$", str(sql), re.DOTALL)
+    if match is None:
+        return None
+    return _normalize_sql_whitespace(match.group("predicate"))
+
+
+def load_table_schema(
+    conn: sqlite3.Connection,
+    table_name: str,
+) -> TableSchema:
+    """Load schema metadata for one documented table."""
+
+    table_info = conn.execute(
+        f"PRAGMA table_info({_quote_ident(table_name)})"
+    ).fetchall()
+    primary_key = tuple(
+        str(row["name"])
+        for row in sorted(
+            (row for row in table_info if int(row["pk"]) > 0),
+            key=lambda row: int(row["pk"]),
+        )
+    )
+
+    fk_rows = conn.execute(
+        f"PRAGMA foreign_key_list({_quote_ident(table_name)})"
+    ).fetchall()
+    grouped_fks: dict[int, list[sqlite3.Row]] = {}
+    for row in fk_rows:
+        grouped_fks.setdefault(int(row["id"]), []).append(row)
+    foreign_keys = tuple(
+        ForeignKeyMetadata(
+            from_columns=tuple(str(row["from"]) for row in ordered_rows),
+            ref_table=str(ordered_rows[0]["table"]),
+            ref_columns=tuple(
+                str(row["to"]) if row["to"] is not None else "rowid"
+                for row in ordered_rows
+            ),
+        )
+        for _, ordered_rows in sorted(
+            (
+                (
+                    fk_id,
+                    sorted(rows, key=lambda row: int(row["seq"])),
+                )
+                for fk_id, rows in grouped_fks.items()
+            ),
+            key=lambda item: item[0],
+        )
+    )
+
+    index_rows = conn.execute(
+        f"PRAGMA index_list({_quote_ident(table_name)})"
+    ).fetchall()
+    unique_constraints: list[tuple[str, ...]] = []
+    secondary_indexes: list[IndexMetadata] = []
+    for row in index_rows:
+        index_name = str(row["name"])
+        is_unique = bool(row["unique"])
+        if is_unique:
+            if str(row["origin"]) == "pk":
+                continue
+            unique_constraints.append(
+                _load_index_columns(
+                    conn,
+                    index_name,
+                    include_sort_order=False,
+                )
+            )
+            continue
+        secondary_indexes.append(
+            IndexMetadata(
+                name=index_name,
+                columns=_load_index_columns(
+                    conn,
+                    index_name,
+                    include_sort_order=True,
+                ),
+                where_clause=_load_index_where_clause(conn, index_name),
+            )
+        )
+    return TableSchema(
+        primary_key=primary_key,
+        foreign_keys=foreign_keys,
+        unique_constraints=tuple(unique_constraints),
+        secondary_indexes=tuple(secondary_indexes),
+    )
+
+
+def load_all_table_schemas(
+    conn: sqlite3.Connection,
+    table_names: Sequence[str],
+) -> dict[str, TableSchema]:
+    """Load schema metadata for many tables."""
+
+    return {
+        table_name: load_table_schema(conn, table_name) for table_name in table_names
+    }
+
+
+def build_incoming_foreign_keys(
+    schema_by_table: Mapping[str, TableSchema],
+) -> dict[str, tuple[IncomingForeignKeyMetadata, ...]]:
+    """Build reverse foreign-key references for each documented table."""
+
+    incoming: dict[str, list[IncomingForeignKeyMetadata]] = {
+        table_name: [] for table_name in schema_by_table
+    }
+    for table_name, schema in schema_by_table.items():
+        for foreign_key in schema.foreign_keys:
+            if foreign_key.ref_table not in incoming:
+                continue
+            incoming[foreign_key.ref_table].append(
+                IncomingForeignKeyMetadata(
+                    from_table=table_name,
+                    from_columns=foreign_key.from_columns,
+                    target_columns=foreign_key.ref_columns,
+                )
+            )
+    return {
+        table_name: tuple(
+            sorted(
+                refs,
+                key=lambda ref: (ref.from_table, ref.from_columns, ref.target_columns),
+            )
+        )
+        for table_name, refs in incoming.items()
+    }
+
+
+def _sample_order_display(
+    table_name: str,
+    schema: TableSchema,
+) -> tuple[str, ...]:
+    if table_name == "schema_migrations":
+        return ("version ASC",)
+    if schema.primary_key:
+        return tuple(f"{column} ASC" for column in schema.primary_key)
+    return ("rowid ASC",)
+
+
+def _sample_order_sql(
+    table_name: str,
+    schema: TableSchema,
+) -> tuple[str, ...]:
+    if table_name == "schema_migrations":
+        return ('"version" ASC',)
+    if schema.primary_key:
+        return tuple(f"{_quote_ident(column)} ASC" for column in schema.primary_key)
+    return ("rowid ASC",)
+
+
+def _normalized_sample_row(
+    table_name: str,
+    row: sqlite3.Row,
+    *,
+    truncate_chars: int,
+) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for key in row.keys():
+        value = row[key]
+        if (
+            table_name == "fundamentals_raw"
+            and key == "data"
+            and isinstance(value, str)
+        ):
+            normalized[key] = "<omitted>"
+            normalized["data_bytes"] = len(value.encode("utf-8"))
+            continue
+        normalized[key] = _normalized_sample_value(value, truncate_chars=truncate_chars)
+    return normalized
+
+
 def fetch_sample_rows(
     conn: sqlite3.Connection,
     table_name: str,
     *,
+    table_schema: TableSchema,
     limit: int = 5,
     truncate_chars: int = TRUNCATE_CHARS,
 ) -> list[dict[str, Any]]:
-    """Return a cheap first-N sample window without explicit ordering."""
+    """Return the deterministic first-N sample window for one table."""
 
+    order_by = ", ".join(_sample_order_sql(table_name, table_schema))
     rows = conn.execute(
         f"""
         SELECT *
         FROM {_quote_ident(table_name)}
+        ORDER BY {order_by}
         LIMIT ?
         """,
         (limit,),
     ).fetchall()
     return [
-        {
-            key: _normalized_sample_value(row[key], truncate_chars=truncate_chars)
-            for key in row.keys()
-        }
+        _normalized_sample_row(table_name, row, truncate_chars=truncate_chars)
         for row in rows
     ]
 
@@ -322,6 +578,7 @@ def render_sample_rows_block(
     rows: Sequence[dict[str, Any]],
     *,
     snapshot_date: str,
+    order_description: Sequence[str],
 ) -> str:
     """Render the generated sample-row section body for one table page."""
 
@@ -331,7 +588,7 @@ def render_sample_rows_block(
             f"- Snapshot source: `data/pyvalue.db` on `{snapshot_date}`",
             (
                 f"- Sample window: first `{len(rows)}` rows returned by SQLite "
-                "using `LIMIT` with no `ORDER BY`"
+                f"ordered by `{', '.join(order_description)}`"
             ),
             "",
             "```json",
@@ -355,6 +612,7 @@ def render_sample_rows_appendix(
     samples_by_table: Mapping[str, Sequence[dict[str, Any]]],
     *,
     snapshot_date: str,
+    order_by_table: Mapping[str, Sequence[str]],
 ) -> str:
     """Render the appendix body for tables whose samples stay out of line."""
 
@@ -370,8 +628,10 @@ def render_sample_rows_appendix(
                 f"- Snapshot source: `data/pyvalue.db` on `{snapshot_date}`",
                 (
                     f"- Sample window: first `{len(samples_by_table[table_name])}` "
-                    "rows returned by SQLite using `LIMIT` with no `ORDER BY`"
+                    f"rows returned by SQLite ordered by "
+                    f"`{', '.join(order_by_table[table_name])}`"
                 ),
+                "- Wide payload columns are omitted and replaced with payload size metadata.",
                 "",
                 "```json",
                 sample_json,
@@ -380,6 +640,80 @@ def render_sample_rows_appendix(
             ]
         )
     return "\n".join(sections).rstrip()
+
+
+def _format_column_tuple(columns: Sequence[str]) -> str:
+    formatted = ", ".join(f"`{column}`" for column in columns)
+    if len(columns) == 1:
+        return formatted
+    return f"({formatted})"
+
+
+def render_keys_and_relationships_block(
+    *,
+    table_name: str,
+    table_schema: TableSchema,
+    incoming_foreign_keys: Sequence[IncomingForeignKeyMetadata],
+    logical_refs: str,
+) -> str:
+    """Render the schema-derived keys/relationships section for one table page."""
+
+    lines = [
+        (
+            f"- Primary key: {_format_column_tuple(table_schema.primary_key)}"
+            if table_schema.primary_key
+            else "- Primary key: none"
+        )
+    ]
+    if table_schema.foreign_keys:
+        lines.append("- Physical foreign keys:")
+        lines.extend(
+            [
+                f"  - {_format_column_tuple(foreign_key.from_columns)} -> "
+                f"`{foreign_key.ref_table}`.{_format_column_tuple(foreign_key.ref_columns)}"
+                for foreign_key in table_schema.foreign_keys
+            ]
+        )
+    else:
+        lines.append("- Physical foreign keys: none")
+    if incoming_foreign_keys:
+        lines.append("- Physical references from other tables:")
+        lines.extend(
+            [
+                f"  - `{incoming_ref.from_table}`."
+                f"{_format_column_tuple(incoming_ref.from_columns)} -> "
+                f"{_format_column_tuple(incoming_ref.target_columns)}"
+                for incoming_ref in incoming_foreign_keys
+            ]
+        )
+    else:
+        lines.append("- Physical references from other tables: none")
+    if table_schema.unique_constraints:
+        lines.append("- Unique constraints beyond the primary key:")
+        lines.extend(
+            [
+                f"  - {_format_column_tuple(unique_columns)}"
+                for unique_columns in table_schema.unique_constraints
+            ]
+        )
+    else:
+        lines.append("- Unique constraints beyond the primary key: none")
+    lines.append(f"- Main logical refs: {logical_refs}")
+    return "\n".join(lines)
+
+
+def render_secondary_indexes_block(table_schema: TableSchema) -> str:
+    """Render the schema-derived secondary-index section for one table page."""
+
+    if not table_schema.secondary_indexes:
+        return "- None beyond the primary key and unique constraints."
+    return "\n".join(
+        [
+            f"- `{index.name} ({', '.join(index.columns)})`"
+            + (f" WHERE {index.where_clause}" if index.where_clause is not None else "")
+            for index in table_schema.secondary_indexes
+        ]
+    )
 
 
 def _marker_block(marker_name: str, content: str) -> str:
@@ -457,6 +791,7 @@ def sync_table_sample_rows(
     table_name: str,
     sample_rows: Sequence[dict[str, Any]],
     snapshot_date: str,
+    order_description: Sequence[str],
 ) -> None:
     """Update one table page with the generated sample-row block."""
 
@@ -468,6 +803,7 @@ def sync_table_sample_rows(
             table_name,
             sample_rows,
             snapshot_date=snapshot_date,
+            order_description=order_description,
         )
     )
     text = _upsert_section(
@@ -480,11 +816,47 @@ def sync_table_sample_rows(
     path.write_text(text, encoding="utf-8")
 
 
+def sync_table_schema_sections(
+    path: Path,
+    *,
+    table_name: str,
+    table_schema: TableSchema,
+    incoming_foreign_keys: Sequence[IncomingForeignKeyMetadata],
+    logical_refs: str,
+) -> None:
+    """Update one table page with generated schema-derived relationship data."""
+
+    text = path.read_text(encoding="utf-8")
+    text = _upsert_section(
+        text,
+        heading="Keys And Relationships",
+        marker_name="generated_keys_and_relationships",
+        content=render_keys_and_relationships_block(
+            table_name=table_name,
+            table_schema=table_schema,
+            incoming_foreign_keys=incoming_foreign_keys,
+            logical_refs=logical_refs,
+        ),
+        insert_before_heading="Secondary Indexes",
+    )
+    text = _upsert_section(
+        text,
+        heading="Secondary Indexes",
+        marker_name="generated_secondary_indexes",
+        content=render_secondary_indexes_block(table_schema),
+        insert_before_heading="Main Read Paths",
+    )
+    path.write_text(text, encoding="utf-8")
+
+
 def sync_table_doc_page(
     path: Path,
     *,
     table_name: str,
     stats: TableStats,
+    table_schema: TableSchema,
+    incoming_foreign_keys: Sequence[IncomingForeignKeyMetadata],
+    logical_refs: str,
     sample_rows: Sequence[dict[str, Any]],
     snapshot_date: str,
 ) -> None:
@@ -496,11 +868,19 @@ def sync_table_doc_page(
         stats=stats,
         snapshot_date=snapshot_date,
     )
+    sync_table_schema_sections(
+        path,
+        table_name=table_name,
+        table_schema=table_schema,
+        incoming_foreign_keys=incoming_foreign_keys,
+        logical_refs=logical_refs,
+    )
     sync_table_sample_rows(
         path,
         table_name=table_name,
         sample_rows=sample_rows,
         snapshot_date=snapshot_date,
+        order_description=_sample_order_display(table_name, table_schema),
     )
 
 
@@ -508,6 +888,7 @@ def render_table_inventory_block(
     *,
     snapshot_date: str,
     stats_by_table: dict[str, TableStats],
+    schema_by_table: Mapping[str, TableSchema],
 ) -> str:
     """Render the generated inventory tables grouped by schema area."""
 
@@ -526,8 +907,11 @@ def render_table_inventory_block(
         )
         for entry in entries:
             stats = stats_by_table[entry.table_name]
-            pk_columns = ", ".join(
-                f"`{column}`" for column in _primary_key_display(entry.table_name)
+            primary_key = schema_by_table[entry.table_name].primary_key
+            pk_columns = (
+                ", ".join(f"`{column}`" for column in primary_key)
+                if primary_key
+                else "`none`"
             )
             lines.append(
                 "| "
@@ -542,44 +926,12 @@ def render_table_inventory_block(
     return "\n".join(lines).rstrip()
 
 
-def _primary_key_display(table_name: str) -> Sequence[str]:
-    mapping: dict[str, Sequence[str]] = {
-        "provider": ("provider_id",),
-        "exchange": ("exchange_id",),
-        "provider_exchange": ("provider_exchange_id",),
-        "issuer": ("issuer_id",),
-        "listing": ("listing_id",),
-        "provider_listing": ("provider_listing_id",),
-        "fundamentals_raw": ("payload_id",),
-        "fundamentals_fetch_state": ("provider_listing_id",),
-        "security_listing_status": ("listing_id",),
-        "fundamentals_normalization_state": ("provider_listing_id",),
-        "market_data_fetch_state": ("provider_listing_id",),
-        "financial_facts": (
-            "listing_id",
-            "concept",
-            "fiscal_period",
-            "end_date",
-            "unit",
-            "accn",
-        ),
-        "financial_facts_refresh_state": ("listing_id",),
-        "market_data": ("listing_id", "as_of"),
-        "metrics": ("listing_id", "metric_id"),
-        "metric_compute_status": ("listing_id", "metric_id"),
-        "fx_supported_pairs": ("provider", "symbol"),
-        "fx_refresh_state": ("provider", "canonical_symbol"),
-        "fx_rates": ("provider", "rate_date", "base_currency", "quote_currency"),
-        "schema_migrations": ("none; append-only version rows",),
-    }
-    return mapping[table_name]
-
-
 def sync_table_inventory_page(
     path: Path,
     *,
     snapshot_date: str,
     stats_by_table: dict[str, TableStats],
+    schema_by_table: Mapping[str, TableSchema],
 ) -> None:
     """Update the table inventory page with generated live row counts and sizes."""
 
@@ -587,6 +939,7 @@ def sync_table_inventory_page(
     generated = render_table_inventory_block(
         snapshot_date=snapshot_date,
         stats_by_table=stats_by_table,
+        schema_by_table=schema_by_table,
     )
     marker_name = "generated_table_inventory"
     if f"<!-- BEGIN {marker_name} -->" in text:
@@ -605,6 +958,7 @@ def sync_sample_rows_appendix(
     *,
     snapshot_date: str,
     samples_by_table: Mapping[str, Sequence[dict[str, Any]]],
+    order_by_table: Mapping[str, Sequence[str]],
 ) -> None:
     """Update the appendix page for wide-table samples."""
 
@@ -612,6 +966,7 @@ def sync_sample_rows_appendix(
         APPENDIX_SAMPLE_TABLES,
         samples_by_table,
         snapshot_date=snapshot_date,
+        order_by_table=order_by_table,
     )
     if path.exists():
         text = path.read_text(encoding="utf-8")
@@ -633,6 +988,29 @@ def sync_sample_rows_appendix(
     path.write_text(text, encoding="utf-8")
 
 
+def render_schema_snapshot(conn: sqlite3.Connection) -> str:
+    """Render a deterministic SQL schema snapshot from sqlite_master."""
+
+    rows = conn.execute(
+        """
+        SELECT type, name, sql
+        FROM sqlite_master
+        WHERE sql IS NOT NULL
+          AND type IN ('table', 'index')
+          AND name NOT LIKE 'sqlite_%'
+        ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END, name
+        """
+    ).fetchall()
+    statements = [str(row["sql"]).strip().rstrip(";") + ";" for row in rows]
+    return "\n".join(statements) + "\n"
+
+
+def sync_schema_snapshot(path: Path, *, schema_sql: str) -> None:
+    """Write the generated schema snapshot SQL."""
+
+    path.write_text(schema_sql, encoding="utf-8")
+
+
 def generate_database_review_docs(
     *,
     database_path: Path,
@@ -644,13 +1022,24 @@ def generate_database_review_docs(
     conn = connect_database_readonly(database_path)
     try:
         snapshot_date = _snapshot_date()
+        schema_by_table = load_all_table_schemas(conn, TABLE_SEQUENCE)
+        incoming_foreign_keys = build_incoming_foreign_keys(schema_by_table)
+        order_by_table = {
+            table_name: _sample_order_display(table_name, schema_by_table[table_name])
+            for table_name in TABLE_SEQUENCE
+        }
         samples_by_table = {
-            table_name: fetch_sample_rows(conn, table_name)
+            table_name: fetch_sample_rows(
+                conn,
+                table_name,
+                table_schema=schema_by_table[table_name],
+            )
             for table_name in TABLE_SEQUENCE
         }
         stats_by_table = (
             {} if sample_rows_only else load_all_table_stats(conn, TABLE_SEQUENCE)
         )
+        schema_snapshot_sql = "" if sample_rows_only else render_schema_snapshot(conn)
     finally:
         conn.close()
 
@@ -665,12 +1054,16 @@ def generate_database_review_docs(
                 table_name=table_name,
                 sample_rows=samples_by_table[table_name],
                 snapshot_date=snapshot_date,
+                order_description=order_by_table[table_name],
             )
         else:
             sync_table_doc_page(
                 path,
                 table_name=table_name,
                 stats=stats_by_table[table_name],
+                table_schema=schema_by_table[table_name],
+                incoming_foreign_keys=incoming_foreign_keys[table_name],
+                logical_refs=TABLE_ENTRY_BY_NAME[table_name].logical_refs,
                 sample_rows=samples_by_table[table_name],
                 snapshot_date=snapshot_date,
             )
@@ -679,12 +1072,19 @@ def generate_database_review_docs(
             docs_root / "table-inventory.md",
             snapshot_date=snapshot_date,
             stats_by_table=stats_by_table,
+            schema_by_table=schema_by_table,
         )
     sync_sample_rows_appendix(
         docs_root / "sample-rows.md",
         snapshot_date=snapshot_date,
         samples_by_table=samples_by_table,
+        order_by_table=order_by_table,
     )
+    if not sample_rows_only:
+        sync_schema_snapshot(
+            docs_root / "schema.snapshot.sql",
+            schema_sql=schema_snapshot_sql,
+        )
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
