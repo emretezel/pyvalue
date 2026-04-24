@@ -11,6 +11,19 @@ Use this file to capture recurring mistake patterns after user corrections so fu
 
 ## Lessons
 
+- Date: 2026-04-24
+- User correction: A broad `LIKE` scan over the 16.6 GiB `fundamentals_raw.data`
+  table was running during a schema/currency refactor, and the user asked why
+  it was running.
+- Recurring pattern: Using exploratory SQL against wide raw JSON columns can
+  create long-running I/O-heavy work when code and tests would answer the
+  implementation question safely.
+- Preventive rule: Before querying wide SQLite payload tables, check table size
+  and access pattern; avoid unindexed raw JSON scans unless the user explicitly
+  asks for live-data inspection or the scan is bounded and justified.
+- Resulting action: Killed the scan, continued with code/test inspection, and
+  recorded this rule before further verification.
+
 - Date: 2026-04-21
 - User correction: The catalog refactor must use the exact singular table names `provider`, `provider_exchange`, `listing`, and `provider_listing`, and provider-scoped raw/state tables must key by `provider_listing_id` rather than `(provider, provider_symbol)`.
 - Recurring pattern: Preserving compatibility names too deeply can accidentally keep old physical identities alive after the user has asked for a real schema cutover.

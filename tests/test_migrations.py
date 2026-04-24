@@ -877,7 +877,6 @@ def test_migration_creates_fundamentals_hot_path_indexes(tmp_path):
     assert raw_columns == {
         "payload_id",
         "provider_listing_id",
-        "currency",
         "data",
         "fetched_at",
     }
@@ -888,7 +887,7 @@ def test_migration_creates_fundamentals_hot_path_indexes(tmp_path):
 
 def test_migration_drops_fundamentals_raw_listing_identity_columns(tmp_path):
     db_path = tmp_path / "fundamentals-raw-drop-listing.sqlite"
-    previous_version = len(MIGRATIONS) - 1
+    previous_version = len(MIGRATIONS) - 2
     with sqlite3.connect(db_path) as conn:
         conn.execute(
             """
@@ -961,6 +960,79 @@ def test_migration_drops_fundamentals_raw_listing_identity_columns(tmp_path):
 
     applied = apply_migrations(db_path)
 
+    assert applied == 2
+    with sqlite3.connect(db_path) as conn:
+        columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(fundamentals_raw)").fetchall()
+        }
+        indexes = conn.execute("PRAGMA index_list(fundamentals_raw)").fetchall()
+        index_names = {row[1] for row in indexes}
+        row = conn.execute(
+            """
+            SELECT payload_id, provider_listing_id, data, fetched_at
+            FROM fundamentals_raw
+            """
+        ).fetchone()
+
+    assert columns == {
+        "payload_id",
+        "provider_listing_id",
+        "data",
+        "fetched_at",
+    }
+    assert "idx_fundamentals_raw_provider_fetched" in index_names
+    assert "idx_fundamentals_raw_security" not in index_names
+    assert "idx_fundamentals_raw_provider_symbol" not in index_names
+    assert row == (10, 1, "{}", "2026-01-01T00:00:00+00:00")
+
+
+def test_migration_drops_fundamentals_raw_currency_from_current_schema(tmp_path):
+    db_path = tmp_path / "fundamentals-raw-drop-currency.sqlite"
+    previous_version = len(MIGRATIONS) - 1
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE provider_listing (
+                provider_listing_id INTEGER PRIMARY KEY,
+                listing_id INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE fundamentals_raw (
+                payload_id INTEGER PRIMARY KEY,
+                provider_listing_id INTEGER NOT NULL UNIQUE,
+                currency TEXT,
+                data TEXT NOT NULL,
+                fetched_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX idx_fundamentals_raw_provider_fetched
+            ON fundamentals_raw(fetched_at)
+            """
+        )
+        conn.execute(
+            "INSERT INTO provider_listing (provider_listing_id, listing_id) VALUES (1, 100)"
+        )
+        conn.execute(
+            """
+            INSERT INTO fundamentals_raw (
+                payload_id, provider_listing_id, currency, data, fetched_at
+            ) VALUES (10, 1, 'USD', '{}', '2026-01-01T00:00:00+00:00')
+            """
+        )
+        conn.execute("CREATE TABLE schema_migrations (version INTEGER NOT NULL)")
+        conn.execute(
+            "INSERT INTO schema_migrations (version) VALUES (?)", (previous_version,)
+        )
+
+    applied = apply_migrations(db_path)
+
     assert applied == 1
     with sqlite3.connect(db_path) as conn:
         columns = {
@@ -971,22 +1043,14 @@ def test_migration_drops_fundamentals_raw_listing_identity_columns(tmp_path):
         index_names = {row[1] for row in indexes}
         row = conn.execute(
             """
-            SELECT payload_id, provider_listing_id, currency, data, fetched_at
+            SELECT payload_id, provider_listing_id, data, fetched_at
             FROM fundamentals_raw
             """
         ).fetchone()
 
-    assert columns == {
-        "payload_id",
-        "provider_listing_id",
-        "currency",
-        "data",
-        "fetched_at",
-    }
+    assert columns == {"payload_id", "provider_listing_id", "data", "fetched_at"}
     assert "idx_fundamentals_raw_provider_fetched" in index_names
-    assert "idx_fundamentals_raw_security" not in index_names
-    assert "idx_fundamentals_raw_provider_symbol" not in index_names
-    assert row == (10, 1, "USD", "{}", "2026-01-01T00:00:00+00:00")
+    assert row == (10, 1, "{}", "2026-01-01T00:00:00+00:00")
 
 
 def test_migration_adds_metric_status_and_facts_refresh_tables(tmp_path):

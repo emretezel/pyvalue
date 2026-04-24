@@ -103,6 +103,9 @@ Notes:
 - `EODHD` rate is symbols per minute
 - `EODHD` uses the stored supported-ticker catalog plus daily quota checks,
   a concurrent worker pool, and retry backoff for multi-day runs
+- EODHD raw writes do not store or infer listing currency from
+  `General.CurrencyCode`; listing currency remains catalog metadata on
+  `provider_listing`/`listing`
 - storing an EODHD raw payload also refreshes cached primary-vs-secondary
   listing classification for that symbol
 - retry backoff is respected by default; use `--retry-failed-now` to ignore it
@@ -176,6 +179,11 @@ Notes:
 - only symbols with stored raw fundamentals are normalized
 - EODHD listings already classified as secondary are excluded from the
   requested scope before normalization starts
+- EODHD normalization resolves target currency from `provider_listing.currency`
+  first, then `listing.currency`; raw payload currencies are used only as fact
+  source currencies
+- fact source-currency lookup uses entry-level currency keys, then direct
+  statement-level currency, then payload-level `General.CurrencyCode`
 - by default, normalization skips symbols whose raw `fundamentals_raw.fetched_at`
   has not changed since the last successful normalization for that provider
 - bulk runs with `--force` skip the freshness scan and start re-normalizing the

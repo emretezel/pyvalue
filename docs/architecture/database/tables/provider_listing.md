@@ -25,7 +25,7 @@ One row per `(provider_exchange_id, provider_symbol)`.
 | `provider_id` | `INTEGER` | no | FK, idx | provider namespace |
 | `provider_exchange_id` | `INTEGER` | no | FK | provider exchange mapping; part of composite unique key |
 | `provider_symbol` | `TEXT` | no |  | bare provider symbol from catalog payloads such as `AAPL`; part of composite unique key |
-| `currency` | `TEXT` | yes | partial idx | provider catalog currency hint |
+| `currency` | `TEXT` | yes | partial idx | primary listing currency source for normalization and metrics |
 | `listing_id` | `INTEGER` | no | FK, idx | canonical listing link |
 
 ## Keys And Relationships
@@ -61,7 +61,8 @@ One row per `(provider_exchange_id, provider_symbol)`.
 
 - provider/exchange scope resolution for ingestion, market-data refreshes, metrics, and screens
 - durable lookup from provider raw/state tables to canonical `listing`
-- FX currency discovery from provider catalog hints
+- listing-currency resolution for normalization and metric currency invariants
+- FX currency discovery from provider/listing catalog currencies
 
 ## Main Write Paths
 
@@ -125,3 +126,4 @@ One row per `(provider_exchange_id, provider_symbol)`.
 
 - Provider descriptive fields such as security type, name, country, ISIN, listing exchange, and refresh timestamp are intentionally not persisted here.
 - Bare provider symbols are only unique inside a provider exchange. Symbols such as `MRK` can exist on multiple EODHD exchanges.
+- `provider_listing.currency` takes precedence over `listing.currency`.

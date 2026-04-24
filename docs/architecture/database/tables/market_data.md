@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Stores price, volume, market-cap, and trading-currency snapshots for canonical listings.
+Stores price, volume, market-cap, and quote-currency snapshots for canonical listings.
 
 ## Grain
 
@@ -26,7 +26,7 @@ One row per `(listing_id, as_of)` snapshot date.
 | `price` | `REAL` | no |  | latest close or provider price |
 | `volume` | `INTEGER` | yes |  | provider volume |
 | `market_cap` | `REAL` | yes |  | market capitalization |
-| `currency` | `TEXT` | yes | partial idx | authoritative trading currency for metric arithmetic |
+| `currency` | `TEXT` | yes | partial idx | quote-row currency for this price/market-cap snapshot |
 | `source_provider` | `TEXT` | no |  | provenance |
 | `updated_at` | `TEXT` | no |  | write timestamp |
 
@@ -49,7 +49,7 @@ One row per `(listing_id, as_of)` snapshot date.
 
 ## Main Read Paths
 
-- latest market data lookup for metrics
+- latest market data lookup for price and market-cap metrics
 - market-cap recalculation
 - FX currency discovery
 
@@ -122,4 +122,6 @@ One row per `(listing_id, as_of)` snapshot date.
 
 ## Review Notes
 
-- `market_data.currency` is authoritative for price and market-cap arithmetic; catalog currencies are hints only.
+- `market_data.currency` describes the stored quote row. Listing-currency
+  metadata comes from `provider_listing.currency` first, then
+  `listing.currency`.

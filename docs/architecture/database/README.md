@@ -11,7 +11,7 @@ Use it in this order:
 
 Snapshot caveat:
 
-- The documented schema target is version `36`, but this migrated `data/pyvalue.db` has a verified `fundamentals_raw` preservation discrepancy: `75,848` current rows versus `77,045` in the pre-migration backup.
+- The documented schema target is version `37`, but this migrated `data/pyvalue.db` has a verified `fundamentals_raw` preservation discrepancy: `75,848` current rows versus `77,045` in the pre-migration backup.
 - Treat the `fundamentals_raw` counts and first-five samples in this section as documentation of the current live file, not as proof that the migration preserved every raw payload.
 
 Important structural notes:

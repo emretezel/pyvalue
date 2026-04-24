@@ -69,9 +69,10 @@ pyvalue ingest-fundamentals --all-supported --max-age-days 90
 
 Ingestion stores raw provider payloads as received, keyed by:
 - `provider_listing_id`
-- resolved canonical `listing_id`
 
 This stage is useful because it preserves source payloads for later re-normalization.
+The raw table does not store currency. Listing currency must come from catalog
+metadata: `provider_listing.currency` first, then `listing.currency`.
 
 For repeated fundamentals ingestion, the latest raw payload for the same
 provider-symbol replaces the previous raw payload for that provider-symbol.
@@ -86,6 +87,10 @@ That gives metrics a stable input model regardless of whether facts came from SE
 Bulk normalization runs over `--exchange-codes` or `--all-supported`
 parallelize automatically. The stage normalizes only symbols that already have
 stored raw fundamentals in `fundamentals_raw`.
+EODHD normalization requires a stored listing currency and converts monetary
+facts into that currency when raw fact-level, statement-level, or payload-level
+currencies differ. Raw `General.CurrencyCode` is never used as a fallback
+listing currency.
 
 ## Re-Normalization Behavior
 

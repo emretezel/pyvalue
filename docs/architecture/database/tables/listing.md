@@ -25,7 +25,7 @@ One row per `(exchange_id, symbol)`.
 | `issuer_id` | `INTEGER` | no | FK | issuer metadata link |
 | `exchange_id` | `INTEGER` | no | FK, idx | canonical exchange link; part of composite unique key |
 | `symbol` | `TEXT` | no |  | bare canonical listing symbol such as `AAPL`; part of composite unique key |
-| `currency` | `TEXT` | yes |  | catalog currency hint only |
+| `currency` | `TEXT` | yes |  | fallback listing currency when provider listing currency is missing |
 
 ## Keys And Relationships
 
@@ -110,4 +110,7 @@ One row per `(exchange_id, symbol)`.
 ## Review Notes
 
 - Canonical user-facing symbols such as `AAPL.US` are derived, not stored.
-- `market_data.currency` remains authoritative for metric arithmetic; `listing.currency` is only a catalog hint.
+- Listing currency resolution uses `provider_listing.currency` first, then this
+  table's `currency`.
+- `market_data.currency` stores quote-row currency only and is not used as
+  listing-currency metadata.

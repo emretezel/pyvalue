@@ -840,7 +840,7 @@ def test_fundamentals_repository_upsert_many_uses_resolved_metadata_and_overwrit
                 security_id=tickers["AAA.US"].security_id,
                 provider_symbol="AAA.US",
                 provider_exchange_code="US",
-                currency="USD",
+                listing_currency="USD",
                 data='{"General": {"CurrencyCode": "USD", "Name": "AAA"}}',
                 fetched_at="2026-03-30T00:00:00+00:00",
             ),
@@ -848,7 +848,7 @@ def test_fundamentals_repository_upsert_many_uses_resolved_metadata_and_overwrit
                 security_id=tickers["BBB.US"].security_id,
                 provider_symbol="BBB.US",
                 provider_exchange_code="US",
-                currency="USD",
+                listing_currency="USD",
                 data='{"General": {"CurrencyCode": "USD", "Name": "BBB"}}',
                 fetched_at="2026-03-30T00:00:00+00:00",
             ),
@@ -861,7 +861,7 @@ def test_fundamentals_repository_upsert_many_uses_resolved_metadata_and_overwrit
                 security_id=tickers["AAA.US"].security_id,
                 provider_symbol="AAA.US",
                 provider_exchange_code="US",
-                currency="USD",
+                listing_currency="USD",
                 data='{"General": {"CurrencyCode": "USD", "Name": "AAA Updated"}}',
                 fetched_at="2026-03-31T00:00:00+00:00",
             )
@@ -878,7 +878,7 @@ def test_fundamentals_repository_upsert_many_uses_resolved_metadata_and_overwrit
                 catalog.provider_symbol,
                 catalog.security_id,
                 catalog.provider_exchange_code,
-                fr.currency,
+                catalog.currency,
                 fr.fetched_at
             FROM fundamentals_raw fr
             JOIN provider_listing_catalog catalog
@@ -889,6 +889,7 @@ def test_fundamentals_repository_upsert_many_uses_resolved_metadata_and_overwrit
 
     assert "listing_id" not in raw_columns
     assert "security_id" not in raw_columns
+    assert "currency" not in raw_columns
     assert rows == [
         (
             "AAA.US",

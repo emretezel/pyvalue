@@ -33,11 +33,17 @@ That means:
 
 For EODHD monetary fields, currency resolution follows one shared precedence:
 
-1. row-level currency on the specific statement or earnings entry
-2. statement-level currency
-3. payload-level default currency
+1. entry/field-level keys on the specific statement or earnings row:
+   `currency`, `currency_symbol`, or `CurrencyCode`
+2. direct statement-level keys on the statement payload
+3. payload-level `General.CurrencyCode`
 4. a narrow documented legacy fallback only when the fact `unit` already stores
    the ISO currency code
+
+The target currency for EODHD normalization is the listing currency from
+`provider_listing.currency` first, then `listing.currency`. Raw payload
+currency values are source currencies for facts only; they never become listing
+metadata.
 
 If a monetary field still cannot be assigned a currency, normalization logs a
 warning and skips only that fact or derived fact.
@@ -54,7 +60,8 @@ Derived facts are also currency-aware:
 
 - same-period accounting derivations prefer the statement/reporting currency for
   that period
-- market-linked derivations prefer the market-data currency
+- market-linked and target-currency derivations align to the catalog listing
+  currency, not `market_data.currency`
 - mixed-currency monetary inputs are converted before arithmetic
 - missing currency skips only the affected derived fact and logs structured
   context

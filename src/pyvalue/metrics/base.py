@@ -205,7 +205,7 @@ class MetricCurrencyInvariantError(RuntimeError):
     @property
     def summary_reason(self) -> str:
         if self.reason_code == "missing_trading_currency":
-            return "currency invariant: missing trading currency"
+            return "currency invariant: missing listing currency"
         if self.reason_code == "missing_input_currency":
             return f"currency invariant: missing currency on {self.input_name}"
         if self.reason_code == "currency_mismatch":

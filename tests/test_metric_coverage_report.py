@@ -21,8 +21,18 @@ def _seed_universe(db_path):
         "SEC",
         "US",
         [
-            Listing(symbol="AAA.US", security_name="AAA", exchange="NYSE"),
-            Listing(symbol="BBB.US", security_name="BBB", exchange="NYSE"),
+            Listing(
+                symbol="AAA.US",
+                security_name="AAA",
+                exchange="NYSE",
+                currency="USD",
+            ),
+            Listing(
+                symbol="BBB.US",
+                security_name="BBB",
+                exchange="NYSE",
+                currency="USD",
+            ),
         ],
     )
 

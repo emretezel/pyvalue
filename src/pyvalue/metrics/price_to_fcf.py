@@ -150,7 +150,7 @@ class PriceToFCFMetric:
         repo: FinancialFactsRepository,
         records: list[FactRecord],
     ) -> tuple[list[float], str]:
-        """Normalize subunit records and assert ticker-currency consistency."""
+        """Normalize subunit records and assert listing-currency consistency."""
 
         currency = require_metric_ticker_currency(
             symbol,

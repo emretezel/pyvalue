@@ -117,9 +117,10 @@ def resolve_metric_ticker_currency(
     *objects: object,
     candidate_currencies: Iterable[Optional[str]] = (),
 ) -> Optional[str]:
-    """Return the stored trading currency for metric-side currency assertions.
+    """Return the stored listing currency for metric-side currency assertions.
 
-    Trading currency is defined strictly as the symbol's stored ``market_data.currency``.
+    Listing currency is defined by ``provider_listing.currency`` first, then
+    ``listing.currency``.
     ``candidate_currencies`` is accepted for backwards-compatible call sites but is
     intentionally ignored here so metrics cannot silently infer a currency from facts.
     """
@@ -140,11 +141,11 @@ def require_metric_ticker_currency(
     symbol: str,
     *objects: object,
     metric_id: str,
-    input_name: str = "trading_currency",
+    input_name: str = "listing_currency",
     as_of: Optional[str] = None,
     candidate_currencies: Iterable[Optional[str]] = (),
 ) -> str:
-    """Return the stored trading currency or raise a structured invariant error."""
+    """Return the stored listing currency or raise a structured invariant error."""
 
     resolved = resolve_metric_ticker_currency(
         symbol,
@@ -259,7 +260,7 @@ def normalize_metric_amount(
     contexts: Sequence[object] = (),
     fallback_currencies: Iterable[Optional[str]] = (),
 ) -> tuple[float, str]:
-    """Normalize one monetary/per-share input and assert ticker-currency equality."""
+    """Normalize one monetary/per-share input and assert listing-currency equality."""
 
     normalized_amount, normalized_currency = normalize_money_value(amount, currency)
     if normalized_amount is None:
@@ -318,7 +319,7 @@ def align_metric_money_values(
     expected_currency: Optional[str] = None,
     contexts: Sequence[object] = (),
 ) -> tuple[list[float], str]:
-    """Return metric inputs after enforcing a shared ticker-currency invariant."""
+    """Return metric inputs after enforcing a shared listing-currency invariant."""
 
     collected = list(values)
     resolved_currency = normalize_currency_code(
@@ -331,7 +332,7 @@ def align_metric_money_values(
         _raise_currency_invariant(
             metric_id=metric_id,
             symbol=symbol,
-            input_name="trading_currency",
+            input_name="listing_currency",
             reason_code="missing_trading_currency",
             as_of=collected[0][2] if collected else None,
         )

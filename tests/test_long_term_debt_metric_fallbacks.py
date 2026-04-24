@@ -7,7 +7,12 @@ from datetime import date, timedelta
 
 from pyvalue.metrics.long_term_debt import LongTermDebtMetric
 from pyvalue.normalization import SECFactsNormalizer
-from pyvalue.storage import FinancialFactsRepository, MarketDataRepository
+from pyvalue.storage import (
+    FinancialFactsRepository,
+    MarketDataRepository,
+    SupportedTickerRepository,
+)
+from pyvalue.universe import Listing
 
 
 def _recent_date() -> str:
@@ -15,6 +20,20 @@ def _recent_date() -> str:
 
 
 def _store_market_currency(db_path, symbol: str, as_of: str, currency: str = "USD"):
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    ticker_repo.replace_from_listings(
+        "SEC",
+        "US",
+        [
+            Listing(
+                symbol=symbol,
+                security_name=symbol,
+                exchange="NYSE",
+                currency=currency,
+            )
+        ],
+    )
     repo = MarketDataRepository(db_path)
     repo.initialize_schema()
     repo.upsert_price(symbol, as_of, 10.0, currency=currency)

@@ -31,7 +31,7 @@ def normalize_fact_value(
     expected_currency: Optional[str],
     contexts: tuple[object, ...],
 ) -> tuple[float, str]:
-    """Normalize one EV fact and enforce the ticker-currency invariant."""
+    """Normalize one EV fact and enforce the listing-currency invariant."""
 
     normalized_value, normalized_currency = normalize_metric_record(
         record,

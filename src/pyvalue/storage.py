@@ -520,7 +520,7 @@ class FundamentalsUpdate:
     security_id: int
     provider_symbol: str
     provider_exchange_code: Optional[str]
-    currency: Optional[str]
+    listing_currency: Optional[str]
     data: str
     fetched_at: str
 
@@ -729,20 +729,33 @@ class SQLiteStore:
         return self._supported_ticker_repo_cache
 
     def ticker_currency(self, symbol: str) -> Optional[str]:
-        """Return the latest non-null stored market-data currency for ``symbol``."""
+        """Return the catalog listing currency for ``symbol``.
+
+        Provider-listing currency is preferred over canonical listing currency.
+        Market data rows store quote-row currency only and are not a source of
+        truth for the listing's normalization/metric currency.
+        """
 
         apply_migrations(self.db_path)
         symbol_norm = symbol.strip().upper()
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT md.currency
-                FROM market_data md
-                JOIN listing l ON l.listing_id = md.listing_id
+                SELECT COALESCE(pl.currency, l.currency) AS currency
+                FROM listing l
                 JOIN "exchange" e ON e.exchange_id = l.exchange_id
+                LEFT JOIN provider_listing pl ON pl.listing_id = l.listing_id
+                LEFT JOIN provider p ON p.provider_id = pl.provider_id
                 WHERE UPPER(l.symbol || '.' || e.exchange_code) = ?
-                  AND md.currency IS NOT NULL
-                ORDER BY md.as_of DESC
+                  AND COALESCE(pl.currency, l.currency) IS NOT NULL
+                ORDER BY
+                    CASE WHEN pl.currency IS NOT NULL THEN 0 ELSE 1 END,
+                    CASE
+                        WHEN p.provider_code = 'EODHD' THEN 0
+                        WHEN p.provider_code = 'SEC' THEN 1
+                        ELSE 2
+                    END,
+                    pl.provider_listing_id
                 LIMIT 1
                 """,
                 (symbol_norm,),
@@ -2376,6 +2389,8 @@ class SupportedTickerRepository(SQLiteStore):
         symbol: str,
         provider: Optional[str] = None,
     ) -> Optional[str]:
+        """Return listing currency from provider-listing/catalog metadata."""
+
         self.initialize_schema()
         symbol_norm = symbol.strip().upper()
         params: List[object] = []
@@ -2399,7 +2414,7 @@ class SupportedTickerRepository(SQLiteStore):
         query.append("LIMIT 1")
         with self._connect() as conn:
             row = conn.execute(" ".join(query), params).fetchone()
-        return row[0] if row else None
+        return normalize_currency_code(row[0]) if row else None
 
     def list_all_exchanges(self, provider: str) -> List[str]:
         return self.available_exchanges(provider)
@@ -2892,7 +2907,6 @@ class FundamentalsRepository(SQLiteStore):
                 CREATE TABLE IF NOT EXISTS fundamentals_raw (
                     payload_id INTEGER PRIMARY KEY,
                     provider_listing_id INTEGER NOT NULL UNIQUE,
-                    currency TEXT,
                     data TEXT NOT NULL,
                     fetched_at TEXT NOT NULL,
                     FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
@@ -2914,7 +2928,7 @@ class FundamentalsRepository(SQLiteStore):
         provider: str,
         symbol: str,
         payload: Dict[str, Any],
-        currency: Optional[str] = None,
+        listing_currency: Optional[str] = None,
         exchange: Optional[str] = None,
     ) -> None:
         self.initialize_schema()
@@ -2930,8 +2944,8 @@ class FundamentalsRepository(SQLiteStore):
                     security_id=int(security_id or 0),
                     provider_symbol=str(provider_symbol or ""),
                     provider_exchange_code=provider_exchange_code,
-                    currency=_normalize_optional_text(
-                        currency.upper() if currency else None
+                    listing_currency=_normalize_optional_text(
+                        listing_currency.upper() if listing_currency else None
                     ),
                     data=json.dumps(payload),
                     fetched_at=fetched_at,
@@ -2969,20 +2983,17 @@ class FundamentalsRepository(SQLiteStore):
                     """,
                     (provider_norm, provider_symbol),
                 ).fetchone()
-                if provider_listing_row is None:
+                if provider_listing_row is None or update.listing_currency is not None:
                     provider_listing_row = ticker_repo._ensure_provider_listing(
                         conn,
                         provider_norm,
                         provider_symbol,
                         exchange_code=update.provider_exchange_code,
-                        currency=update.currency,
+                        currency=update.listing_currency,
                     )
                 rows.append(
                     (
                         int(provider_listing_row["provider_listing_id"]),
-                        _normalize_optional_text(
-                            update.currency.upper() if update.currency else None
-                        ),
                         update.data,
                         update.fetched_at,
                     )
@@ -2993,12 +3004,10 @@ class FundamentalsRepository(SQLiteStore):
                 """
                 INSERT INTO fundamentals_raw (
                     provider_listing_id,
-                    currency,
                     data,
                     fetched_at
-                ) VALUES (?, ?, ?, ?)
+                ) VALUES (?, ?, ?)
                 ON CONFLICT(provider_listing_id) DO UPDATE SET
-                    currency = COALESCE(excluded.currency, fundamentals_raw.currency),
                     data = excluded.data,
                     fetched_at = excluded.fetched_at
                 """,

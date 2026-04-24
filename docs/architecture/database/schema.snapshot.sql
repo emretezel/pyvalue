@@ -48,7 +48,6 @@ CREATE TABLE "fundamentals_normalization_state" (
 CREATE TABLE fundamentals_raw (
             payload_id INTEGER PRIMARY KEY,
             provider_listing_id INTEGER NOT NULL UNIQUE,
-            currency TEXT,
             data TEXT NOT NULL,
             fetched_at TEXT NOT NULL,
             FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)

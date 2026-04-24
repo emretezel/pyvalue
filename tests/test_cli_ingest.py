@@ -10,6 +10,7 @@ import threading
 import time
 import concurrent.futures.thread as thread_futures
 from concurrent.futures import Future, ProcessPoolExecutor
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -99,6 +100,21 @@ def store_supported_exchanges(
     return repo
 
 
+def default_listing_currency(
+    symbol: str, exchange_code: str | None = None
+) -> str | None:
+    suffix = symbol.rsplit(".", 1)[-1].upper() if "." in symbol else None
+    code = (exchange_code or suffix or "").upper()
+    return {
+        "AS": "EUR",
+        "AMS": "EUR",
+        "LSE": "GBP",
+        "NASDAQ": "USD",
+        "NYSE": "USD",
+        "US": "USD",
+    }.get(code)
+
+
 def store_supported_tickers(
     db_path,
     exchange_code: str,
@@ -107,19 +123,27 @@ def store_supported_tickers(
 ):
     repo = SupportedTickerRepository(db_path)
     repo.initialize_schema()
+    normalized_rows = []
+    for row in rows or [
+        {
+            "Code": "AAA",
+            "Name": "AAA plc",
+            "Exchange": exchange_code,
+            "Type": "Common Stock",
+            "Currency": "GBP",
+        }
+    ]:
+        normalized = dict(row)
+        if not normalized.get("Currency"):
+            normalized["Currency"] = default_listing_currency(
+                str(normalized.get("Code") or ""),
+                str(normalized.get("Exchange") or exchange_code),
+            )
+        normalized_rows.append(normalized)
     repo.replace_for_exchange(
         provider,
         exchange_code,
-        rows
-        or [
-            {
-                "Code": "AAA",
-                "Name": "AAA plc",
-                "Exchange": exchange_code,
-                "Type": "Common Stock",
-                "Currency": "GBP",
-            }
-        ],
+        normalized_rows,
     )
     return repo
 
@@ -132,7 +156,16 @@ def store_catalog_listings(
 ):
     repo = SupportedTickerRepository(db_path)
     repo.initialize_schema()
-    repo.replace_from_listings(provider, exchange_code, listings)
+    listings_with_currency = [
+        listing
+        if listing.currency is not None
+        else replace(
+            listing,
+            currency=default_listing_currency(listing.symbol, exchange_code),
+        )
+        for listing in listings
+    ]
+    repo.replace_from_listings(provider, exchange_code, listings_with_currency)
     return repo
 
 
@@ -864,14 +897,14 @@ def test_cmd_ingest_fundamentals_eodhd(monkeypatch, tmp_path):
     with repo._connect() as conn:
         row = conn.execute(
             """
-            SELECT fr.currency, catalog.provider_exchange_code
+            SELECT catalog.currency, catalog.provider_exchange_code
             FROM fundamentals_raw fr
             JOIN provider_listing_catalog catalog
               ON catalog.provider_listing_id = fr.provider_listing_id
             WHERE catalog.provider='EODHD' AND catalog.provider_symbol='SHEL.LSE'
             """
         ).fetchone()
-    assert row[0] == "USD"
+    assert row[0] is None
     assert row[1] == "LSE"
 
 
@@ -1965,7 +1998,7 @@ def test_cmd_ingest_fundamentals_global_batches_success_state_updates(
         )
 
     def fail_single_upsert(
-        self, provider, symbol, payload, currency=None, exchange=None
+        self, provider, symbol, payload, listing_currency=None, exchange=None
     ):
         raise AssertionError("multi-symbol ingestion should not call upsert")
 
@@ -4100,6 +4133,19 @@ def test_compute_metrics_for_symbol_reuses_fact_and_market_cache(monkeypatch, tm
 
 def test_compute_metrics_for_symbol_matches_real_metrics(tmp_path):
     db_path = tmp_path / "metric-correctness.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(
+                symbol="AAA.US",
+                security_name="AAA Inc",
+                exchange="NYSE",
+                currency="USD",
+            )
+        ],
+        provider="SEC",
+    )
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
     recent = (date.today() - timedelta(days=15)).isoformat()
@@ -4296,7 +4342,7 @@ def test_suppress_console_missing_fx_warnings_filters_only_missing_fx_noise(
             )
             logging.getLogger("pyvalue.money").warning(
                 "Missing FX rate for monetary conversion | operation=%s symbol=%s field=%s from=%s to=%s as_of=%s",
-                "ticker_currency_alignment",
+                "listing_currency_alignment",
                 "AALB.AS",
                 "Assets",
                 "NLG",
@@ -4440,7 +4486,7 @@ def test_cmd_compute_metrics_stage_prints_currency_invariant_summary_when_warnin
             raise MetricCurrencyInvariantError(
                 metric_id=self.id,
                 symbol=symbol,
-                input_name="market_data.currency",
+                input_name="listing_currency",
                 reason_code="missing_trading_currency",
             )
 
@@ -6193,6 +6239,7 @@ def test_cmd_normalize_fundamentals_eodhd(monkeypatch, tmp_path):
             },
             "Financials": {},
         },
+        listing_currency="GBP",
     )
     store_market_data(
         db_path,
@@ -6291,6 +6338,7 @@ def test_cmd_normalize_fundamentals_eodhd_drops_old_missing_fx_periods(tmp_path)
                 }
             },
         },
+        listing_currency="EUR",
     )
     store_market_data(
         db_path,
@@ -6338,6 +6386,7 @@ def test_cmd_normalize_fundamentals_eodhd_zero_row_normalization_records_state(
         "EODHD",
         "SHEL.LSE",
         {"General": {"Name": "Shell PLC"}, "Financials": {}},
+        listing_currency="GBP",
     )
     store_market_data(
         db_path,
@@ -6382,8 +6431,8 @@ def test_cmd_normalize_fundamentals_eodhd_zero_row_normalization_records_state(
     assert "already up to date" in capsys.readouterr().out
 
 
-def test_cmd_normalize_fundamentals_eodhd_requires_market_data_currency(tmp_path):
-    db_path = tmp_path / "funds-missing-market-currency.db"
+def test_cmd_normalize_fundamentals_eodhd_requires_listing_currency(tmp_path):
+    db_path = tmp_path / "funds-missing-listing-currency.db"
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     fund_repo.upsert(
@@ -6402,7 +6451,7 @@ def test_cmd_normalize_fundamentals_eodhd_requires_market_data_currency(tmp_path
         currency=None,
     )
 
-    with pytest.raises(SystemExit, match="missing trading currency in market_data"):
+    with pytest.raises(SystemExit, match="missing listing/provider-listing currency"):
         cli.cmd_normalize_fundamentals(
             provider="EODHD",
             symbol="LANDM.US",
@@ -6421,6 +6470,7 @@ def test_cmd_normalize_fundamentals_cross_provider_reruns_when_facts_owned_by_ot
         "EODHD",
         "AAA.US",
         {"General": {"Name": "AAA"}, "Financials": {}},
+        listing_currency="USD",
         exchange="US",
     )
     store_market_data(db_path, "AAA.US", "2024-12-31", currency="USD")
@@ -6574,6 +6624,7 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_reports_freshness_scan(
             "EODHD",
             symbol,
             {"General": {"Name": symbol}, "Financials": {}},
+            listing_currency="USD",
             exchange="US",
         )
         store_market_data(db_path, symbol, "2024-12-31", currency="USD")
@@ -6607,6 +6658,7 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_force_skips_freshness_scan(
             "EODHD",
             symbol,
             {"General": {"Name": symbol}, "Financials": {}},
+            listing_currency="USD",
             exchange="US",
         )
         store_market_data(db_path, symbol, "2024-12-31", currency="USD")
@@ -6680,6 +6732,7 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_suppresses_missing_fx_warnings_on
                 }
             },
         },
+        listing_currency="EUR",
         exchange="AS",
     )
     store_market_data(db_path, "AALB.AS", "2024-12-31", currency="EUR")
@@ -6725,6 +6778,7 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_continues_after_symbol_failure_wi
             "EODHD",
             symbol,
             {"General": {"Name": symbol}, "Financials": {}},
+            listing_currency="USD",
             exchange="US",
         )
         store_market_data(db_path, symbol, "2024-12-31", currency="USD")
@@ -6802,6 +6856,7 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_interrupts_cleanly(
             "EODHD",
             symbol,
             {"General": {"Name": symbol}, "Financials": {}},
+            listing_currency="USD",
             exchange="US",
         )
         store_market_data(db_path, symbol, "2024-12-31", currency="USD")
@@ -7018,6 +7073,7 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_process_pool_smoke(
                     }
                 },
             },
+            listing_currency="USD",
             exchange="US",
         )
         store_market_data(db_path, symbol, "2024-12-31", currency="USD")
@@ -9465,6 +9521,19 @@ criteria:
 
 def test_cmd_compute_metrics(tmp_path):
     db_path = tmp_path / "facts.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(
+                symbol="AAPL.US",
+                security_name="Apple Inc",
+                exchange="NASDAQ",
+                currency="USD",
+            )
+        ],
+        provider="SEC",
+    )
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
     recent = (date.today() - timedelta(days=15)).isoformat()
@@ -9644,6 +9713,19 @@ def test_cmd_compute_metrics_persists_metric_compute_status_success_and_failure(
 
 def test_cmd_compute_metrics_all(tmp_path):
     db_path = tmp_path / "runall.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(
+                symbol="AAPL.US",
+                security_name="Apple Inc",
+                exchange="NASDAQ",
+                currency="USD",
+            )
+        ],
+        provider="SEC",
+    )
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
     records = []
@@ -10191,7 +10273,7 @@ def test_cmd_compute_metrics_all(tmp_path):
 
 
 def test_resolve_ticker_target_currency_from_supported_tickers(tmp_path):
-    """Trading currency resolves from stored market data only."""
+    """Listing currency resolves from provider-listing catalog metadata."""
 
     db_path = tmp_path / "resolve.db"
     ticker_repo = SupportedTickerRepository(db_path)
@@ -10214,7 +10296,7 @@ def test_resolve_ticker_target_currency_from_supported_tickers(tmp_path):
         "TEST.LSE",
         "2025-01-31",
         price=10.0,
-        currency="GBX",
+        currency="USD",
     )
 
     result = cli._resolve_ticker_target_currency(str(db_path), "TEST.LSE")
@@ -10222,7 +10304,7 @@ def test_resolve_ticker_target_currency_from_supported_tickers(tmp_path):
 
 
 def test_resolve_ticker_target_currency_does_not_fall_back_to_payload(tmp_path):
-    """Payload currency must not act as trading-currency fallback."""
+    """Payload currency must not act as listing-currency fallback."""
 
     db_path = tmp_path / "resolve.db"
 
@@ -10232,7 +10314,7 @@ def test_resolve_ticker_target_currency_does_not_fall_back_to_payload(tmp_path):
 
 
 def test_resolve_ticker_target_currency_returns_none_when_unresolvable(tmp_path):
-    """Returns None when no stored market-data currency exists for the symbol."""
+    """Returns None when no listing/provider-listing currency exists."""
 
     db_path = tmp_path / "resolve.db"
     ticker_repo = SupportedTickerRepository(db_path)

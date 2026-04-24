@@ -62,6 +62,10 @@ Provider-facing listing identity lives here. Rows are unique by
 `(provider_exchange_id, provider_symbol)`, where `provider_symbol` is the bare
 provider catalog symbol such as `AAPL`, not `AAPL.US`.
 
+`provider_listing.currency` is the first source of truth for a listing's
+normalization and metric currency. If it is missing, code falls back to
+`listing.currency`.
+
 `provider_listing` intentionally does not store provider-side descriptive
 columns such as security type, provider name, country, ISIN, or refresh
 timestamp. ETF filtering remains a load-time decision before insert.
@@ -70,6 +74,8 @@ timestamp. ETF filtering remains a load-time decision before insert.
 
 Raw provider payloads are stored by `provider_listing_id`. Canonical
 `listing_id` is derived by joining through `provider_listing`.
+The table intentionally does not store currency; raw payload currencies are
+used only as source currencies for individual normalized facts.
 
 Purpose:
 
@@ -102,15 +108,18 @@ Currency and unit semantics:
 
 - monetary facts store a real ISO `currency`
 - non-monetary facts keep meaningful `unit` values such as `shares`
-- `provider_listing.currency` keeps catalog hints only; monetary facts, market
-  data, metrics, and FX rows use normalized base currencies
+- listing currency is resolved from `provider_listing.currency` first, then
+  `listing.currency`; raw fundamentals and `market_data.currency` are not
+  listing-currency sources
 - configured subunit currencies are normalized before arithmetic and
   persistence: `GBX`/`GBP0.01` -> `GBP`, `ZAC` -> `ZAR`, `ILA` -> `ILS`
 
 ### `market_data`
 
 Stores latest quote and market-cap snapshot information by `listing_id`.
-`market_data.currency` is authoritative for price and market-cap arithmetic.
+`market_data.currency` stores the quote row currency for price and market-cap
+snapshots. It is not used as listing-currency metadata for normalization or
+metric currency invariants.
 
 ### `market_data_fetch_state`
 

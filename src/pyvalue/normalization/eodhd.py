@@ -227,9 +227,10 @@ class EODHDFactsNormalizer:
                     field_map,
                     symbol=symbol,
                     accounting_standard=accounting_standard,
-                    default_currency=self._normalize_statement_currency(
-                        statement_payload, currency_code
+                    statement_currency=self._normalize_statement_currency(
+                        statement_payload
                     ),
+                    payload_currency=currency_code,
                 )
             )
 
@@ -369,7 +370,8 @@ class EODHDFactsNormalizer:
         field_map: Dict[str, List[str]],
         symbol: str,
         accounting_standard: Optional[str],
-        default_currency: Optional[str],
+        statement_currency: Optional[str],
+        payload_currency: Optional[str],
     ) -> List[FactRecord]:
         records: List[FactRecord] = []
         for frequency, fiscal_period in (("yearly", "FY"), ("quarterly", None)):
@@ -381,8 +383,8 @@ class EODHDFactsNormalizer:
                     continue
                 currency_resolution = resolve_eodhd_currency(
                     entry,
-                    statement_currency=default_currency,
-                    payload_currency=None,
+                    statement_currency=statement_currency,
+                    payload_currency=payload_currency,
                 )
                 currency = currency_resolution.currency_code
                 period_code = fiscal_period or self._infer_quarter(entry)
@@ -693,7 +695,7 @@ class EODHDFactsNormalizer:
             statement_payload = financials.get(statement_name)
             if not isinstance(statement_payload, dict):
                 continue
-            code = self._normalize_statement_currency(statement_payload, None)
+            code = self._normalize_statement_currency(statement_payload)
             if code is not None:
                 return code
         return None
@@ -825,7 +827,11 @@ class EODHDFactsNormalizer:
         if not end_date:
             return []
 
-        currency = _normalize_currency_code(default_currency)
+        currency_resolution = resolve_eodhd_currency(
+            highlights if isinstance(highlights, Mapping) else None,
+            payload_currency=default_currency,
+        )
+        currency = currency_resolution.currency_code
         normalized_value, normalized_currency = self._normalize_value_currency(
             raw_value, currency
         )
@@ -1031,10 +1037,7 @@ class EODHDFactsNormalizer:
         income_statement = (payload.get("Financials") or {}).get(
             "Income_Statement"
         ) or {}
-        statement_currency = (
-            _normalize_currency_code(income_statement.get("currency_symbol"))
-            or general_currency
-        )
+        statement_currency = self._normalize_statement_currency(income_statement)
         statement_eps_quarterly = self._collect_statement_eps_dates(
             income_statement.get("quarterly")
         )
@@ -1079,6 +1082,7 @@ class EODHDFactsNormalizer:
             currency = (
                 _normalize_currency_code(currency_hint)
                 or earnings_currency
+                or statement_currency
                 or general_currency
             )
             normalized_value, normalized_currency = self._normalize_value_currency(
@@ -1190,9 +1194,7 @@ class EODHDFactsNormalizer:
                 value = _to_float(entry.get("epsActual"))
                 if value is None:
                     continue
-                currency = (
-                    _normalize_currency_code(entry.get("currency")) or normalized_base
-                )
+                currency = self._entry_currency_code(entry) or normalized_base
                 normalized_value, normalized_currency = self._normalize_value_currency(
                     value, currency
                 )
@@ -2024,7 +2026,7 @@ class EODHDFactsNormalizer:
         target_currency: str,
         symbol: str,
     ) -> List[FactRecord]:
-        """Convert all monetary facts to the ticker's canonical trading currency.
+        """Convert all monetary facts to the listing currency.
 
         Non-monetary facts (shares, unitless) pass through unchanged.
         Facts already in the target currency pass through unchanged.
@@ -2033,7 +2035,7 @@ class EODHDFactsNormalizer:
 
         if self.fx_service is None:
             LOGGER.warning(
-                "FX service unavailable for ticker-centric conversion | "
+                "FX service unavailable for listing-currency conversion | "
                 "symbol=%s target=%s",
                 symbol,
                 target_currency,
@@ -2055,7 +2057,7 @@ class EODHDFactsNormalizer:
                 as_of=record.end_date,
                 fx_service=self.fx_service,
                 logger=LOGGER,
-                operation="ticker_currency_alignment",
+                operation="listing_currency_alignment",
                 symbol=symbol,
                 field_name=record.concept,
                 raise_on_missing_fx=False,
@@ -2091,18 +2093,19 @@ class EODHDFactsNormalizer:
             return False
         return True
 
-    def _normalize_statement_currency(
-        self, statement_payload: Dict, default: Optional[str]
-    ) -> Optional[str]:
-        """Prefer an explicit currency_symbol in the statement over General currency."""
+    def _normalize_statement_currency(self, statement_payload: Dict) -> Optional[str]:
+        """Return direct statement-level currency metadata when present."""
 
-        for key in ("yearly", "quarterly"):
-            entries = self._iter_entries(statement_payload.get(key))
-            for entry in entries:
-                code = _normalize_currency_code(entry.get("currency_symbol"))
-                if code:
-                    return code
-        return _normalize_currency_code(default)
+        for key in ("currency", "currency_symbol", "CurrencyCode"):
+            code = _normalize_currency_code(statement_payload.get(key))
+            if code:
+                return code
+        return None
+
+    def _entry_currency_code(self, entry: Mapping[str, Any]) -> Optional[str]:
+        """Return entry-level currency metadata using the shared EODHD precedence."""
+
+        return resolve_eodhd_currency(entry).currency_code
 
     def _latest_earnings_currency(self, history: Dict, annual: Dict) -> Optional[str]:
         """Return the most recent non-null earnings currency."""

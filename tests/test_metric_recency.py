@@ -10,10 +10,30 @@ from pyvalue.metrics.eps_average import EPSAverageSixYearMetric
 from pyvalue.metrics.long_term_debt import LongTermDebtMetric
 from pyvalue.metrics.roc_greenblatt import ROCGreenblattMetric
 from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS
-from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
+from pyvalue.storage import (
+    FactRecord,
+    FinancialFactsRepository,
+    MarketDataRepository,
+    SupportedTickerRepository,
+)
+from pyvalue.universe import Listing
 
 
 def _store_market_currency(db_path, symbol: str, as_of: str, currency: str = "USD"):
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    ticker_repo.replace_from_listings(
+        "SEC",
+        "US",
+        [
+            Listing(
+                symbol=symbol,
+                security_name=symbol,
+                exchange="NYSE",
+                currency=currency,
+            )
+        ],
+    )
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
     market_repo.upsert_price(symbol, as_of, 10.0, currency=currency)

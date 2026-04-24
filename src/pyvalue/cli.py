@@ -131,9 +131,9 @@ def _resolve_ticker_target_currency(
     *,
     ticker_repo: Optional[SupportedTickerRepository] = None,
 ) -> Optional[str]:
-    """Resolve the trading currency for a ticker from stored market data only."""
+    """Resolve the listing currency from provider/catalog metadata only."""
 
-    del payload  # Trading currency must never fall back to fundamentals payloads.
+    del payload  # Listing currency must never fall back to fundamentals payloads.
     repo = ticker_repo or SupportedTickerRepository(database)
     resolver = getattr(repo, "ticker_currency", None)
     if not callable(resolver):
@@ -1139,18 +1139,11 @@ def _build_fundamentals_update(
     ticker: SupportedTicker,
     payload: Dict[str, object],
 ) -> FundamentalsUpdate:
-    general = payload.get("General")
-    currency = ticker.currency
-    if isinstance(general, Mapping):
-        currency = (
-            str(general.get("CurrencyCode") or ticker.currency or "").strip()
-            or ticker.currency
-        )
     return FundamentalsUpdate(
         security_id=ticker.security_id,
         provider_symbol=ticker.symbol,
         provider_exchange_code=ticker.exchange_code,
-        currency=currency,
+        listing_currency=ticker.currency,
         data=json.dumps(payload),
         fetched_at=datetime.now(timezone.utc).isoformat(),
     )
@@ -5383,12 +5376,13 @@ def cmd_ingest_eodhd_fundamentals(
     storage_symbol = qualified_symbol
     repo = FundamentalsRepository(database)
     repo.initialize_schema()
-    general = payload.get("General") or {}
+    ticker_repo = SupportedTickerRepository(database)
+    listing_currency = ticker_repo.fetch_currency(storage_symbol, provider="EODHD")
     repo.upsert(
         "EODHD",
         storage_symbol,
         payload,
-        currency=general.get("CurrencyCode"),
+        listing_currency=listing_currency,
         exchange=exch_code,
     )
     print(f"Stored EODHD fundamentals for {storage_symbol} in {database}")
@@ -5864,7 +5858,7 @@ def _normalize_eodhd_symbol_worker(
         database, symbol, payload, ticker_repo=_get_or_create_ticker_repo(database)
     )
     if target_currency is None:
-        raise ValueError(f"Missing trading currency in market_data for {symbol}")
+        raise ValueError(f"Missing listing/provider-listing currency for {symbol}")
     fx_service = _get_or_create_fx_service(database)
     normalizer = EODHDFactsNormalizer(fx_service=fx_service)
     with suppress_console_missing_fx_warnings(True):
@@ -6105,7 +6099,7 @@ def cmd_normalize_eodhd_fundamentals(
     if target_currency is None:
         raise SystemExit(
             "EODHD normalization failed for "
-            f"{symbol_upper}: missing trading currency in market_data"
+            f"{symbol_upper}: missing listing/provider-listing currency"
         )
     fx_repo = _SchemaReadyFXRatesRepository(database)
     fx_service = FXService(database, repository=fx_repo)

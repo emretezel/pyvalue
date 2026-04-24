@@ -853,11 +853,11 @@ def test_eodhd_enterprise_value_uses_statement_currency_when_general_missing():
         "Valuation": {"EnterpriseValue": 777.0},
         "Financials": {
             "Income_Statement": {
+                "CurrencyCode": "USD",
                 "quarterly": [
                     {
                         "date": "2025-09-30",
                         "totalRevenue": 300.0,
-                        "currency_symbol": "USD",
                     }
                 ],
             }
@@ -1068,6 +1068,57 @@ def test_eodhd_normalize_target_currency_identity():
     assert assets
     assert assets[0].value == 1000.0
     assert assets[0].currency == "USD"
+
+
+def test_eodhd_normalize_uses_entry_currency_before_statement_and_payload():
+    """Entry-level currency wins over statement and payload defaults."""
+
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Balance_Sheet": {
+                "CurrencyCode": "EUR",
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "totalAssets": 1000.0,
+                        "currency_symbol": "USD",
+                    }
+                ],
+            }
+        },
+        "General": {"CurrencyCode": "JPY"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+    assets = [r for r in records if r.concept == "Assets"]
+    assert assets
+    assert assets[0].currency == "USD"
+
+
+def test_eodhd_normalize_uses_statement_currency_before_payload():
+    """Direct statement-level currency is used when the entry has no currency."""
+
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Balance_Sheet": {
+                "currency_symbol": "EUR",
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "totalAssets": 1000.0,
+                    }
+                ],
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.EU")
+    assets = [r for r in records if r.concept == "Assets"]
+    assert assets
+    assert assets[0].currency == "EUR"
 
 
 def test_eodhd_normalize_converts_monetary_facts_to_target_currency(tmp_path):
