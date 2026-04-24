@@ -864,9 +864,11 @@ def test_cmd_ingest_fundamentals_eodhd(monkeypatch, tmp_path):
     with repo._connect() as conn:
         row = conn.execute(
             """
-            SELECT currency, provider_exchange_code
-            FROM fundamentals_raw
-            WHERE provider='EODHD' AND provider_symbol='SHEL.LSE'
+            SELECT fr.currency, catalog.provider_exchange_code
+            FROM fundamentals_raw fr
+            JOIN provider_listing_catalog catalog
+              ON catalog.provider_listing_id = fr.provider_listing_id
+            WHERE catalog.provider='EODHD' AND catalog.provider_symbol='SHEL.LSE'
             """
         ).fetchone()
     assert row[0] == "USD"
@@ -1621,12 +1623,25 @@ def test_cmd_ingest_fundamentals_global_max_age_days_refreshes_only_stale_or_mis
         conn.execute(
             """
             UPDATE fundamentals_raw
-            SET fetched_at = CASE provider_symbol
-                WHEN 'AAA.US' THEN ?
-                WHEN 'BBB.US' THEN ?
+            SET fetched_at = CASE provider_listing_id
+                WHEN (
+                    SELECT provider_listing_id
+                    FROM provider_listing_catalog
+                    WHERE provider = 'EODHD' AND provider_symbol = 'AAA.US'
+                ) THEN ?
+                WHEN (
+                    SELECT provider_listing_id
+                    FROM provider_listing_catalog
+                    WHERE provider = 'EODHD' AND provider_symbol = 'BBB.US'
+                ) THEN ?
                 ELSE fetched_at
             END
-            WHERE provider = 'EODHD'
+            WHERE provider_listing_id IN (
+                SELECT provider_listing_id
+                FROM provider_listing_catalog
+                WHERE provider = 'EODHD'
+                  AND provider_symbol IN ('AAA.US', 'BBB.US')
+            )
             """,
             (fresh_at, stale_at),
         )
@@ -1765,7 +1780,11 @@ def test_cmd_ingest_fundamentals_global_default_mode_remains_missing_only(
             """
             UPDATE fundamentals_raw
             SET fetched_at = ?
-            WHERE provider = 'EODHD' AND provider_symbol = 'AAA.US'
+            WHERE provider_listing_id = (
+                SELECT provider_listing_id
+                FROM provider_listing_catalog
+                WHERE provider = 'EODHD' AND provider_symbol = 'AAA.US'
+            )
             """,
             (stale_at,),
         )
@@ -2197,7 +2216,11 @@ def test_cmd_report_ingest_progress_default_mode_treats_old_data_as_stale(
             """
             UPDATE fundamentals_raw
             SET fetched_at = ?
-            WHERE provider = 'EODHD' AND provider_symbol = 'AAA.US'
+            WHERE provider_listing_id = (
+                SELECT provider_listing_id
+                FROM provider_listing_catalog
+                WHERE provider = 'EODHD' AND provider_symbol = 'AAA.US'
+            )
             """,
             (stale_at,),
         )
@@ -2254,7 +2277,11 @@ def test_cmd_report_ingest_progress_missing_only_ignores_staleness(
             """
             UPDATE fundamentals_raw
             SET fetched_at = ?
-            WHERE provider = 'EODHD' AND provider_symbol = 'AAA.US'
+            WHERE provider_listing_id = (
+                SELECT provider_listing_id
+                FROM provider_listing_catalog
+                WHERE provider = 'EODHD' AND provider_symbol = 'AAA.US'
+            )
             """,
             (stale_at,),
         )

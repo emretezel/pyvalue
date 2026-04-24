@@ -2892,107 +2892,22 @@ class FundamentalsRepository(SQLiteStore):
                 CREATE TABLE IF NOT EXISTS fundamentals_raw (
                     payload_id INTEGER PRIMARY KEY,
                     provider_listing_id INTEGER NOT NULL UNIQUE,
-                    provider TEXT NOT NULL,
-                    provider_symbol TEXT NOT NULL,
-                    security_id INTEGER NOT NULL,
-                    listing_id INTEGER NOT NULL,
-                    provider_exchange_code TEXT,
                     currency TEXT,
                     data TEXT NOT NULL,
                     fetched_at TEXT NOT NULL,
-                    UNIQUE (provider, provider_symbol)
+                    FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
                 )
                 """
             )
-            columns = _table_columns(conn, "fundamentals_raw")
-            alter_statements = [
-                (
-                    "payload_id",
-                    "ALTER TABLE fundamentals_raw ADD COLUMN payload_id INTEGER",
-                ),
-                (
-                    "provider_listing_id",
-                    """
-                    ALTER TABLE fundamentals_raw
-                    ADD COLUMN provider_listing_id INTEGER
-                    """,
-                ),
-                (
-                    "provider",
-                    "ALTER TABLE fundamentals_raw ADD COLUMN provider TEXT",
-                ),
-                (
-                    "provider_symbol",
-                    "ALTER TABLE fundamentals_raw ADD COLUMN provider_symbol TEXT",
-                ),
-                (
-                    "security_id",
-                    "ALTER TABLE fundamentals_raw ADD COLUMN security_id INTEGER",
-                ),
-                (
-                    "listing_id",
-                    "ALTER TABLE fundamentals_raw ADD COLUMN listing_id INTEGER",
-                ),
-                (
-                    "provider_exchange_code",
-                    """
-                    ALTER TABLE fundamentals_raw
-                    ADD COLUMN provider_exchange_code TEXT
-                    """,
-                ),
-            ]
-            for column_name, statement in alter_statements:
-                if column_name not in columns:
-                    conn.execute(statement)
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_fundamentals_raw_security
-                ON fundamentals_raw(security_id)
-                """
-            )
+            conn.execute("DROP INDEX IF EXISTS idx_fundamentals_raw_security")
+            conn.execute("DROP INDEX IF EXISTS idx_fundamentals_raw_provider_symbol")
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_fundamentals_raw_provider_fetched
-                ON fundamentals_raw(provider, fetched_at)
-                """
-            )
-            conn.execute(
-                """
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_fundamentals_raw_provider_symbol
-                ON fundamentals_raw(provider, provider_symbol)
+                ON fundamentals_raw(fetched_at)
                 """
             )
             _ensure_provider_listing_catalog_views(conn)
-            conn.execute(
-                """
-                UPDATE fundamentals_raw
-                SET provider = (
-                        SELECT catalog.provider
-                        FROM provider_listing_catalog catalog
-                        WHERE catalog.provider_listing_id = fundamentals_raw.provider_listing_id
-                    ),
-                    provider_symbol = (
-                        SELECT catalog.provider_symbol
-                        FROM provider_listing_catalog catalog
-                        WHERE catalog.provider_listing_id = fundamentals_raw.provider_listing_id
-                    ),
-                    provider_exchange_code = COALESCE(
-                        provider_exchange_code,
-                        (
-                            SELECT catalog.provider_exchange_code
-                            FROM provider_listing_catalog catalog
-                            WHERE catalog.provider_listing_id = fundamentals_raw.provider_listing_id
-                        )
-                    ),
-                    security_id = COALESCE(security_id, listing_id)
-                WHERE provider_listing_id IS NOT NULL
-                  AND (
-                      provider IS NULL
-                      OR provider_symbol IS NULL
-                      OR security_id IS NULL
-                  )
-                """
-            )
 
     def upsert(
         self,
@@ -3065,14 +2980,6 @@ class FundamentalsRepository(SQLiteStore):
                 rows.append(
                     (
                         int(provider_listing_row["provider_listing_id"]),
-                        provider_norm,
-                        provider_symbol,
-                        int(update.security_id or provider_listing_row["security_id"]),
-                        int(provider_listing_row["security_id"]),
-                        _normalize_optional_text(
-                            update.provider_exchange_code
-                            or provider_listing_row["provider_exchange_code"]
-                        ),
                         _normalize_optional_text(
                             update.currency.upper() if update.currency else None
                         ),
@@ -3086,20 +2993,11 @@ class FundamentalsRepository(SQLiteStore):
                 """
                 INSERT INTO fundamentals_raw (
                     provider_listing_id,
-                    provider,
-                    provider_symbol,
-                    security_id,
-                    listing_id,
-                    provider_exchange_code,
                     currency,
                     data,
                     fetched_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(provider, provider_symbol) DO UPDATE SET
-                    provider_listing_id = excluded.provider_listing_id,
-                    security_id = excluded.security_id,
-                    listing_id = excluded.listing_id,
-                    provider_exchange_code = COALESCE(excluded.provider_exchange_code, fundamentals_raw.provider_exchange_code),
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(provider_listing_id) DO UPDATE SET
                     currency = COALESCE(excluded.currency, fundamentals_raw.currency),
                     data = excluded.data,
                     fetched_at = excluded.fetched_at
@@ -3132,8 +3030,11 @@ class FundamentalsRepository(SQLiteStore):
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT data FROM fundamentals_raw
-                WHERE provider = ? AND provider_symbol = ?
+                SELECT fr.data
+                FROM fundamentals_raw fr
+                JOIN provider_listing_catalog catalog
+                  ON catalog.provider_listing_id = fr.provider_listing_id
+                WHERE catalog.provider = ? AND catalog.provider_symbol = ?
                 """,
                 (provider.strip().upper(), provider_symbol),
             ).fetchone()
@@ -3175,8 +3076,11 @@ class FundamentalsRepository(SQLiteStore):
                     f"""
                     SELECT s.canonical_symbol, fr.data
                     FROM fundamentals_raw fr
-                    JOIN securities s ON s.security_id = fr.security_id
-                    WHERE fr.provider = ? AND fr.security_id IN ({placeholders})
+                    JOIN provider_listing_catalog catalog
+                      ON catalog.provider_listing_id = fr.provider_listing_id
+                    JOIN securities s ON s.security_id = catalog.security_id
+                    WHERE catalog.provider = ?
+                      AND catalog.security_id IN ({placeholders})
                     """,
                     query_params,
                 ).fetchall()
@@ -3204,10 +3108,12 @@ class FundamentalsRepository(SQLiteStore):
                 placeholders = ", ".join("?" for _ in chunk)
                 rows = conn.execute(
                     f"""
-                    SELECT fr.security_id, fr.provider, fr.data
+                    SELECT catalog.security_id, catalog.provider, fr.data
                     FROM fundamentals_raw fr
-                    WHERE fr.security_id IN ({placeholders})
-                    ORDER BY fr.security_id
+                    JOIN provider_listing_catalog catalog
+                      ON catalog.provider_listing_id = fr.provider_listing_id
+                    WHERE catalog.security_id IN ({placeholders})
+                    ORDER BY catalog.security_id
                     """,
                     list(chunk),
                 ).fetchall()
@@ -3259,9 +3165,11 @@ class FundamentalsRepository(SQLiteStore):
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT provider_symbol, provider_exchange_code, data
-                FROM fundamentals_raw
-                WHERE provider = ? AND provider_symbol = ?
+                SELECT catalog.provider_symbol, catalog.provider_exchange_code, fr.data
+                FROM fundamentals_raw fr
+                JOIN provider_listing_catalog catalog
+                  ON catalog.provider_listing_id = fr.provider_listing_id
+                WHERE catalog.provider = ? AND catalog.provider_symbol = ?
                 """,
                 (provider.strip().upper(), provider_symbol),
             ).fetchone()
@@ -3281,9 +3189,11 @@ class FundamentalsRepository(SQLiteStore):
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT data, fetched_at
-                FROM fundamentals_raw
-                WHERE provider = ? AND provider_symbol = ?
+                SELECT fr.data, fr.fetched_at
+                FROM fundamentals_raw fr
+                JOIN provider_listing_catalog catalog
+                  ON catalog.provider_listing_id = fr.provider_listing_id
+                WHERE catalog.provider = ? AND catalog.provider_symbol = ?
                 """,
                 (provider.strip().upper(), provider_symbol),
             ).fetchone()
@@ -3296,10 +3206,12 @@ class FundamentalsRepository(SQLiteStore):
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT provider_symbol
-                FROM fundamentals_raw
-                WHERE provider = ?
-                ORDER BY provider_symbol
+                SELECT catalog.provider_symbol
+                FROM fundamentals_raw fr
+                JOIN provider_listing_catalog catalog
+                  ON catalog.provider_listing_id = fr.provider_listing_id
+                WHERE catalog.provider = ?
+                ORDER BY catalog.provider_symbol
                 """,
                 (provider.strip().upper(),),
             ).fetchall()
@@ -3310,10 +3222,12 @@ class FundamentalsRepository(SQLiteStore):
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT provider_symbol, provider_exchange_code
-                FROM fundamentals_raw
-                WHERE provider = ?
-                ORDER BY provider_symbol
+                SELECT catalog.provider_symbol, catalog.provider_exchange_code
+                FROM fundamentals_raw fr
+                JOIN provider_listing_catalog catalog
+                  ON catalog.provider_listing_id = fr.provider_listing_id
+                WHERE catalog.provider = ?
+                ORDER BY catalog.provider_symbol
                 """,
                 (provider.strip().upper(),),
             ).fetchall()
@@ -3361,16 +3275,18 @@ class FundamentalsRepository(SQLiteStore):
         return conn.execute(
             f"""
             SELECT
-                fr.provider_symbol,
-                fr.security_id,
+                catalog.provider_symbol,
+                catalog.security_id,
                 fr.fetched_at,
                 ns.raw_fetched_at AS normalized_raw_fetched_at,
                 ns.last_normalized_at
             FROM fundamentals_raw fr
+            JOIN provider_listing_catalog catalog
+              ON catalog.provider_listing_id = fr.provider_listing_id
             LEFT JOIN fundamentals_normalization_state ns
-              ON ns.provider = fr.provider
-             AND ns.provider_symbol = fr.provider_symbol
-            WHERE fr.provider = ? AND fr.provider_symbol IN ({placeholders})
+              ON ns.provider_listing_id = fr.provider_listing_id
+            WHERE catalog.provider = ?
+              AND catalog.provider_symbol IN ({placeholders})
             """,
             [provider, *symbols],
         ).fetchall()
@@ -3449,16 +3365,17 @@ class FundamentalsRepository(SQLiteStore):
             rows = conn.execute(
                 """
                 SELECT
-                    fr.provider_symbol,
-                    fr.security_id,
+                    catalog.provider_symbol,
+                    catalog.security_id,
                     fr.fetched_at,
                     ns.raw_fetched_at AS normalized_raw_fetched_at,
                     ns.last_normalized_at
                 FROM fundamentals_raw fr
+                JOIN provider_listing_catalog catalog
+                  ON catalog.provider_listing_id = fr.provider_listing_id
                 LEFT JOIN fundamentals_normalization_state ns
-                  ON ns.provider = fr.provider
-                 AND ns.provider_symbol = fr.provider_symbol
-                WHERE fr.provider = ?
+                  ON ns.provider_listing_id = fr.provider_listing_id
+                WHERE catalog.provider = ?
                 """,
                 (provider,),
             ).fetchall()
@@ -3864,31 +3781,29 @@ class SecurityListingStatusRepository(SQLiteStore):
             symbols_chunk: Optional[Sequence[str]] = None,
             security_chunk: Optional[Sequence[int]] = None,
         ) -> List[sqlite3.Row]:
-            params: List[Any] = [provider_norm, provider_norm]
+            params: List[Any] = [provider_norm]
             query = [
-                "SELECT fr.security_id, fr.provider_symbol, fr.fetched_at, fr.data",
+                "SELECT catalog.security_id, catalog.provider_symbol, fr.fetched_at, fr.data",
                 "FROM fundamentals_raw fr",
-                "JOIN supported_tickers st",
-                "  ON st.provider = fr.provider",
-                " AND st.provider_symbol = fr.provider_symbol",
-                _primary_listing_left_join(security_alias="fr"),
-                "WHERE fr.provider = ?",
-                "AND st.provider = ?",
+                "JOIN provider_listing_catalog catalog",
+                "  ON catalog.provider_listing_id = fr.provider_listing_id",
+                _primary_listing_left_join(security_alias="catalog"),
+                "WHERE catalog.provider = ?",
                 "AND (sls.raw_fetched_at IS NULL OR sls.raw_fetched_at < fr.fetched_at)",
             ]
             if normalized_exchanges:
                 placeholders = ", ".join("?" for _ in normalized_exchanges)
-                query.append(f"AND st.provider_exchange_code IN ({placeholders})")
+                query.append(f"AND catalog.provider_exchange_code IN ({placeholders})")
                 params.extend(normalized_exchanges)
             if symbols_chunk:
                 placeholders = ", ".join("?" for _ in symbols_chunk)
-                query.append(f"AND fr.provider_symbol IN ({placeholders})")
+                query.append(f"AND catalog.provider_symbol IN ({placeholders})")
                 params.extend(symbols_chunk)
             if security_chunk:
                 placeholders = ", ".join("?" for _ in security_chunk)
-                query.append(f"AND fr.security_id IN ({placeholders})")
+                query.append(f"AND catalog.security_id IN ({placeholders})")
                 params.extend(security_chunk)
-            query.append("ORDER BY fr.provider_symbol ASC")
+            query.append("ORDER BY catalog.provider_symbol ASC")
             return conn.execute(" ".join(query), params).fetchall()
 
         fetched_rows: List[sqlite3.Row] = []

@@ -869,14 +869,26 @@ def test_fundamentals_repository_upsert_many_uses_resolved_metadata_and_overwrit
     )
 
     with sqlite3.connect(db_path) as conn:
+        raw_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(fundamentals_raw)")
+        }
         rows = conn.execute(
             """
-            SELECT provider_symbol, security_id, provider_exchange_code, currency, fetched_at
-            FROM fundamentals_raw
-            ORDER BY provider_symbol
+            SELECT
+                catalog.provider_symbol,
+                catalog.security_id,
+                catalog.provider_exchange_code,
+                fr.currency,
+                fr.fetched_at
+            FROM fundamentals_raw fr
+            JOIN provider_listing_catalog catalog
+              ON catalog.provider_listing_id = fr.provider_listing_id
+            ORDER BY catalog.provider_symbol
             """
         ).fetchall()
 
+    assert "listing_id" not in raw_columns
+    assert "security_id" not in raw_columns
     assert rows == [
         (
             "AAA.US",

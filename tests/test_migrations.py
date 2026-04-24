@@ -257,7 +257,7 @@ def test_migration_splits_supported_exchanges_into_exchange_provider(tmp_path):
 
     applied = apply_migrations(db_path)
 
-    assert applied == 3
+    assert applied == len(MIGRATIONS) - 32
     with sqlite3.connect(db_path) as conn:
         supported_exchanges_exists = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='supported_exchanges'"
@@ -479,7 +479,7 @@ def test_migration_preserves_existing_provider_rows_when_adding_registry(tmp_pat
 
     applied = apply_migrations(db_path)
 
-    assert applied == 4
+    assert applied == len(MIGRATIONS) - 31
     with sqlite3.connect(db_path) as conn:
         provider_listing_count = conn.execute(
             "SELECT COUNT(*) FROM provider_listing"
@@ -617,7 +617,7 @@ def test_migration_drops_provider_status_from_version_34_db(tmp_path):
 
     applied = apply_migrations(db_path)
 
-    assert applied == 1
+    assert applied == len(MIGRATIONS) - 34
     with sqlite3.connect(db_path) as conn:
         columns = {
             row[1] for row in conn.execute("PRAGMA table_info(provider)").fetchall()
@@ -864,8 +864,129 @@ def test_migration_creates_fundamentals_hot_path_indexes(tmp_path):
             "PRAGMA index_list(fundamentals_fetch_state)"
         ).fetchall()
         state_index_names = {row[1] for row in state_indexes}
+        raw_columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(fundamentals_raw)").fetchall()
+        }
+        raw_indexes = conn.execute("PRAGMA index_list(fundamentals_raw)").fetchall()
+        raw_index_names = {row[1] for row in raw_indexes}
+        raw_fks = conn.execute("PRAGMA foreign_key_list(fundamentals_raw)").fetchall()
+        raw_fk_targets = {row[2] for row in raw_fks}
 
     assert "idx_fundamentals_fetch_next" in state_index_names
+    assert raw_columns == {
+        "payload_id",
+        "provider_listing_id",
+        "currency",
+        "data",
+        "fetched_at",
+    }
+    assert "idx_fundamentals_raw_provider_fetched" in raw_index_names
+    assert "idx_fundamentals_raw_security" not in raw_index_names
+    assert raw_fk_targets == {"provider_listing"}
+
+
+def test_migration_drops_fundamentals_raw_listing_identity_columns(tmp_path):
+    db_path = tmp_path / "fundamentals-raw-drop-listing.sqlite"
+    previous_version = len(MIGRATIONS) - 1
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE provider_listing (
+                provider_listing_id INTEGER PRIMARY KEY,
+                listing_id INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE fundamentals_raw (
+                payload_id INTEGER PRIMARY KEY,
+                provider_listing_id INTEGER NOT NULL UNIQUE,
+                listing_id INTEGER NOT NULL,
+                security_id INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                provider_symbol TEXT NOT NULL,
+                provider_exchange_code TEXT,
+                currency TEXT,
+                data TEXT NOT NULL,
+                fetched_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX idx_fundamentals_raw_security
+            ON fundamentals_raw(listing_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX idx_fundamentals_raw_provider_symbol
+            ON fundamentals_raw(provider, provider_symbol)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX idx_fundamentals_raw_provider_fetched
+            ON fundamentals_raw(provider, fetched_at)
+            """
+        )
+        conn.execute(
+            "INSERT INTO provider_listing (provider_listing_id, listing_id) VALUES (1, 100)"
+        )
+        conn.execute(
+            """
+            INSERT INTO fundamentals_raw (
+                payload_id,
+                provider_listing_id,
+                listing_id,
+                security_id,
+                provider,
+                provider_symbol,
+                provider_exchange_code,
+                currency,
+                data,
+                fetched_at
+            ) VALUES (
+                10, 1, 100, 100, 'EODHD', 'AAA.US', 'US', 'USD', '{}',
+                '2026-01-01T00:00:00+00:00'
+            )
+            """
+        )
+        conn.execute("CREATE TABLE schema_migrations (version INTEGER NOT NULL)")
+        conn.execute(
+            "INSERT INTO schema_migrations (version) VALUES (?)", (previous_version,)
+        )
+
+    applied = apply_migrations(db_path)
+
+    assert applied == 1
+    with sqlite3.connect(db_path) as conn:
+        columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(fundamentals_raw)").fetchall()
+        }
+        indexes = conn.execute("PRAGMA index_list(fundamentals_raw)").fetchall()
+        index_names = {row[1] for row in indexes}
+        row = conn.execute(
+            """
+            SELECT payload_id, provider_listing_id, currency, data, fetched_at
+            FROM fundamentals_raw
+            """
+        ).fetchone()
+
+    assert columns == {
+        "payload_id",
+        "provider_listing_id",
+        "currency",
+        "data",
+        "fetched_at",
+    }
+    assert "idx_fundamentals_raw_provider_fetched" in index_names
+    assert "idx_fundamentals_raw_security" not in index_names
+    assert "idx_fundamentals_raw_provider_symbol" not in index_names
+    assert row == (10, 1, "USD", "{}", "2026-01-01T00:00:00+00:00")
 
 
 def test_migration_adds_metric_status_and_facts_refresh_tables(tmp_path):

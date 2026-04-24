@@ -23,7 +23,6 @@ One row per `provider_listing_id`; historical payload versions are not retained.
 | --- | --- | --- | --- | --- |
 | `payload_id` | `INTEGER` | no | PK | raw payload surrogate key |
 | `provider_listing_id` | `INTEGER` | no | unique, FK | provider listing identity |
-| `listing_id` | `INTEGER` | no | FK, idx | canonical listing link |
 | `currency` | `TEXT` | yes |  | provider payload currency hint |
 | `data` | `TEXT` | no |  | raw JSON payload |
 | `fetched_at` | `TEXT` | no | idx | latest fetch timestamp |
@@ -33,26 +32,24 @@ One row per `provider_listing_id`; historical payload versions are not retained.
 <!-- BEGIN generated_keys_and_relationships -->
 - Primary key: `payload_id`
 - Physical foreign keys:
-  - `listing_id` -> `listing`.`listing_id`
   - `provider_listing_id` -> `provider_listing`.`provider_listing_id`
 - Physical references from other tables: none
 - Unique constraints beyond the primary key:
   - `provider_listing_id`
-- Main logical refs: `provider_listing_id` in `provider_listing`, `listing_id` in `listing`
+- Main logical refs: `provider_listing_id` in `provider_listing`
 <!-- END generated_keys_and_relationships -->
 
 ## Secondary Indexes
 
 <!-- BEGIN generated_secondary_indexes -->
 - `idx_fundamentals_raw_provider_fetched (fetched_at)`
-- `idx_fundamentals_raw_security (listing_id)`
 <!-- END generated_secondary_indexes -->
 
 ## Main Read Paths
 
-- normalization reads by provider listing or canonical listing
-- issuer metadata refresh from stored raw payloads
-- primary-listing reconciliation
+- provider-scoped payload lookup through `provider_listing_id`
+- canonical listing lookup by joining through `provider_listing`
+- issuer metadata refresh and primary-listing reconciliation from stored raw payloads
 
 ## Main Write Paths
 

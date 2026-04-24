@@ -3461,6 +3461,85 @@ def _migration_035_drop_provider_status(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE provider DROP COLUMN status")
 
 
+def _migration_036_drop_fundamentals_raw_listing_columns(
+    conn: sqlite3.Connection,
+) -> None:
+    """Remove denormalized listing identity columns from raw fundamentals."""
+
+    columns = _table_columns(conn, "fundamentals_raw")
+    if not columns:
+        return
+
+    target_columns = {
+        "payload_id",
+        "provider_listing_id",
+        "currency",
+        "data",
+        "fetched_at",
+    }
+    conn.execute("DROP INDEX IF EXISTS idx_fundamentals_raw_security")
+    conn.execute("DROP INDEX IF EXISTS idx_fundamentals_raw_provider_symbol")
+    if columns == target_columns:
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_fundamentals_raw_provider_fetched
+            ON fundamentals_raw(fetched_at)
+            """
+        )
+        return
+
+    if "provider_listing_id" not in columns:
+        return
+
+    payload_id_expr = "payload_id" if "payload_id" in columns else "NULL"
+    currency_expr = "currency" if "currency" in columns else "NULL"
+    fetched_at_expr = (
+        "fetched_at" if "fetched_at" in columns else "'1970-01-01T00:00:00+00:00'"
+    )
+
+    conn.execute("DROP INDEX IF EXISTS idx_fundamentals_raw_provider_fetched")
+    conn.execute("ALTER TABLE fundamentals_raw RENAME TO fundamentals_raw_old")
+    conn.execute(
+        """
+        CREATE TABLE fundamentals_raw (
+            payload_id INTEGER PRIMARY KEY,
+            provider_listing_id INTEGER NOT NULL UNIQUE,
+            currency TEXT,
+            data TEXT NOT NULL,
+            fetched_at TEXT NOT NULL,
+            FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        INSERT INTO fundamentals_raw (
+            payload_id,
+            provider_listing_id,
+            currency,
+            data,
+            fetched_at
+        )
+        SELECT
+            {payload_id_expr},
+            provider_listing_id,
+            {currency_expr},
+            data,
+            {fetched_at_expr}
+        FROM fundamentals_raw_old
+        WHERE provider_listing_id IS NOT NULL
+          AND data IS NOT NULL
+        """
+    )
+    conn.execute("DROP TABLE fundamentals_raw_old")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fundamentals_raw_provider_fetched
+        ON fundamentals_raw(fetched_at)
+        """
+    )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -3497,6 +3576,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_033_split_exchange_catalog,
     _migration_034_rename_catalog_identity_tables,
     _migration_035_drop_provider_status,
+    _migration_036_drop_fundamentals_raw_listing_columns,
 ]
 
 

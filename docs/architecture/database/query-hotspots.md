@@ -33,8 +33,8 @@ This page maps the end-to-end pipeline to the tables and indexes that matter mos
 - Reconciles `security_listing_status`
 - Critical structures:
   - `provider_listing` unique `(provider_exchange_id, provider_symbol)`
+  - `fundamentals_raw` unique `provider_listing_id`
   - `idx_fundamentals_fetch_next`
-  - `idx_fundamentals_raw_security`
   - `idx_security_listing_status_primary`
 - Review focus:
   - `fundamentals_raw.data` is the widest operational row in the schema

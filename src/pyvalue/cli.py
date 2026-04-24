@@ -7532,9 +7532,11 @@ def _eligible_sec_filers(db_path: Path) -> List[str]:
     with repo._connect() as conn:
         rows = conn.execute(
             """
-            SELECT provider_symbol, data
-            FROM fundamentals_raw
-            WHERE provider = 'SEC'
+            SELECT catalog.provider_symbol, fr.data
+            FROM fundamentals_raw fr
+            JOIN provider_listing_catalog catalog
+              ON catalog.provider_listing_id = fr.provider_listing_id
+            WHERE catalog.provider = 'SEC'
             """
         ).fetchall()
     for symbol, payload_json in rows:

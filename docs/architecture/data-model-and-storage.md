@@ -68,14 +68,15 @@ timestamp. ETF filtering remains a load-time decision before insert.
 
 ### `fundamentals_raw`
 
-Raw provider payloads are stored by `provider_listing_id` and `listing_id`.
+Raw provider payloads are stored by `provider_listing_id`. Canonical
+`listing_id` is derived by joining through `provider_listing`.
 
 Purpose:
 
 - preserve source payloads as received
 - support re-normalization when normalization logic changes
 - separate provider-fetch concerns from metric computation
-- map each raw payload to canonical `listing_id`
+- preserve the provider-listing link needed to derive canonical `listing_id`
 
 ### `fundamentals_fetch_state`
 

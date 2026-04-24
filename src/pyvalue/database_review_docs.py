@@ -115,7 +115,7 @@ TABLE_GROUPS: tuple[tuple[str, tuple[TableInventoryEntry, ...]], ...] = (
         (
             TableInventoryEntry(
                 table_name="fundamentals_raw",
-                logical_refs="`provider_listing_id` in `provider_listing`, `listing_id` in `listing`",
+                logical_refs="`provider_listing_id` in `provider_listing`",
                 review_focus="wide-row storage, JSON payload size, and latest-row-only semantics",
             ),
             TableInventoryEntry(

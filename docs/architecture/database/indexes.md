@@ -21,8 +21,6 @@ This page lists the current secondary indexes from the post-refactor schema. Pri
 ## Raw Ingestion And State
 
 - `fundamentals_raw`
-  - `idx_fundamentals_raw_security (listing_id)`
-    - supports canonical lookups from raw payloads
   - `idx_fundamentals_raw_provider_fetched (fetched_at)`
     - supports staleness and reconciliation scans
 - `fundamentals_fetch_state`

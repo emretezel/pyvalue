@@ -18,7 +18,6 @@ the appendix stays readable.
   {
     "payload_id": 1,
     "provider_listing_id": 52836,
-    "listing_id": 53133,
     "currency": "USD",
     "data": "<omitted>",
     "data_bytes": 729107,
@@ -27,7 +26,6 @@ the appendix stays readable.
   {
     "payload_id": 2,
     "provider_listing_id": 52837,
-    "listing_id": 53134,
     "currency": "USD",
     "data": "<omitted>",
     "data_bytes": 355545,
@@ -36,7 +34,6 @@ the appendix stays readable.
   {
     "payload_id": 3,
     "provider_listing_id": 52838,
-    "listing_id": 53135,
     "currency": "USD",
     "data": "<omitted>",
     "data_bytes": 190638,
@@ -45,7 +42,6 @@ the appendix stays readable.
   {
     "payload_id": 4,
     "provider_listing_id": 52839,
-    "listing_id": 53136,
     "currency": "USD",
     "data": "<omitted>",
     "data_bytes": 549568,
@@ -54,7 +50,6 @@ the appendix stays readable.
   {
     "payload_id": 5,
     "provider_listing_id": 52840,
-    "listing_id": 53137,
     "currency": "USD",
     "data": "<omitted>",
     "data_bytes": 477300,

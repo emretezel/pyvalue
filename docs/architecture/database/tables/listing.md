@@ -36,7 +36,6 @@ One row per `(exchange_id, symbol)`.
   - `issuer_id` -> `issuer`.`issuer_id`
 - Physical references from other tables:
   - `fundamentals_normalization_state`.`listing_id` -> `listing_id`
-  - `fundamentals_raw`.`listing_id` -> `listing_id`
   - `provider_listing`.`listing_id` -> `listing_id`
   - `security_listing_status`.`listing_id` -> `listing_id`
 - Unique constraints beyond the primary key:

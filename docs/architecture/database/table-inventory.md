@@ -20,7 +20,7 @@ All row counts and table sizes below come from the live `data/pyvalue.db` snapsh
 
 | Table | Rows | Table size | Primary key | Main logical refs | Initial review focus |
 | --- | --- | --- | --- | --- | --- |
-| [fundamentals_raw](tables/fundamentals_raw.md) | `75,848` | `16.63 GiB` | `payload_id` | `provider_listing_id` in `provider_listing`, `listing_id` in `listing` | wide-row storage, JSON payload size, and latest-row-only semantics |
+| [fundamentals_raw](tables/fundamentals_raw.md) | `75,848` | `16.63 GiB` | `payload_id` | `provider_listing_id` in `provider_listing` | wide-row storage, JSON payload size, and latest-row-only semantics |
 | [fundamentals_fetch_state](tables/fundamentals_fetch_state.md) | `75,848` | `3.8 MiB` | `provider_listing_id` | `provider_listing_id` in `provider_listing` | retry/backoff query shape vs index set |
 | [security_listing_status](tables/security_listing_status.md) | `75,848` | `8.1 MiB` | `listing_id` | `listing_id` in `listing`, `provider_listing_id` in `provider_listing` | primary-listing filter cost and purge trigger responsibilities |
 | [fundamentals_normalization_state](tables/fundamentals_normalization_state.md) | `61,092` | `4.9 MiB` | `provider_listing_id` | `provider_listing_id` in `provider_listing`, `listing_id` in `listing` | whether this watermark table is minimal and sufficient |

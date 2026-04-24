@@ -45,15 +45,13 @@ CREATE TABLE "fundamentals_normalization_state" (
             FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id),
             FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
         );
-CREATE TABLE "fundamentals_raw" (
+CREATE TABLE fundamentals_raw (
             payload_id INTEGER PRIMARY KEY,
             provider_listing_id INTEGER NOT NULL UNIQUE,
-            listing_id INTEGER NOT NULL,
             currency TEXT,
             data TEXT NOT NULL,
             fetched_at TEXT NOT NULL,
-            FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id),
-            FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
+            FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
         );
 CREATE TABLE fx_rates (
             provider TEXT NOT NULL,
@@ -231,9 +229,7 @@ CREATE INDEX idx_fundamentals_fetch_next
 CREATE INDEX idx_fundamentals_norm_state_security
             ON fundamentals_normalization_state(listing_id);
 CREATE INDEX idx_fundamentals_raw_provider_fetched
-            ON fundamentals_raw(fetched_at);
-CREATE INDEX idx_fundamentals_raw_security
-            ON fundamentals_raw(listing_id);
+        ON fundamentals_raw(fetched_at);
 CREATE INDEX idx_fx_rates_pair_date
         ON fx_rates(provider, base_currency, quote_currency, rate_date DESC);
 CREATE INDEX idx_fx_supported_pairs_refreshable
