@@ -25,7 +25,6 @@ One row per `(provider_exchange_id, provider_symbol)`.
 | `provider_id` | `INTEGER` | no | FK, idx | provider namespace |
 | `provider_exchange_id` | `INTEGER` | no | FK | provider exchange mapping; part of composite unique key |
 | `provider_symbol` | `TEXT` | no |  | bare provider symbol from catalog payloads such as `AAPL`; part of composite unique key |
-| `currency` | `TEXT` | yes | partial idx | primary listing currency source for normalization and metrics |
 | `listing_id` | `INTEGER` | no | FK, idx | canonical listing link |
 
 ## Keys And Relationships
@@ -50,7 +49,6 @@ One row per `(provider_exchange_id, provider_symbol)`.
 ## Secondary Indexes
 
 <!-- BEGIN generated_secondary_indexes -->
-- `idx_provider_listing_currency_nonnull (currency)` WHERE currency IS NOT NULL
 - `idx_provider_listing_listing (listing_id)`
 - `idx_provider_listing_provider (provider_id)`
 <!-- END generated_secondary_indexes -->
@@ -59,8 +57,7 @@ One row per `(provider_exchange_id, provider_symbol)`.
 
 - provider/exchange scope resolution for ingestion, market-data refreshes, metrics, and screens
 - durable lookup from provider raw/state tables to canonical `listing`
-- listing-currency resolution for normalization and metric currency invariants
-- FX currency discovery from provider/listing catalog currencies
+- compatibility catalog views that expose `listing.currency` alongside provider symbols
 
 ## Main Write Paths
 
@@ -81,7 +78,6 @@ One row per `(provider_exchange_id, provider_symbol)`.
     "provider_id": 1,
     "provider_exchange_id": 1,
     "provider_symbol": "AALB",
-    "currency": "EUR",
     "listing_id": 1
   },
   {
@@ -89,7 +85,6 @@ One row per `(provider_exchange_id, provider_symbol)`.
     "provider_id": 1,
     "provider_exchange_id": 1,
     "provider_symbol": "ABN",
-    "currency": "EUR",
     "listing_id": 2
   },
   {
@@ -97,7 +92,6 @@ One row per `(provider_exchange_id, provider_symbol)`.
     "provider_id": 1,
     "provider_exchange_id": 1,
     "provider_symbol": "ACOMO",
-    "currency": "EUR",
     "listing_id": 3
   },
   {
@@ -105,7 +99,6 @@ One row per `(provider_exchange_id, provider_symbol)`.
     "provider_id": 1,
     "provider_exchange_id": 1,
     "provider_symbol": "AD",
-    "currency": "EUR",
     "listing_id": 4
   },
   {
@@ -113,7 +106,6 @@ One row per `(provider_exchange_id, provider_symbol)`.
     "provider_id": 1,
     "provider_exchange_id": 1,
     "provider_symbol": "ADYEN",
-    "currency": "EUR",
     "listing_id": 5
   }
 ]
@@ -124,4 +116,6 @@ One row per `(provider_exchange_id, provider_symbol)`.
 
 - Provider descriptive fields such as security type, name, country, ISIN, listing exchange, and refresh timestamp are intentionally not persisted here.
 - Bare provider symbols are only unique inside a provider exchange. Symbols such as `MRK` can exist on multiple EODHD exchanges.
-- `provider_listing.currency` takes precedence over `listing.currency`.
+- Provider-listing currency is not persisted here. Use `listing.currency` for
+  the canonical quote unit; compatibility catalog APIs expose it as `currency`
+  when needed.

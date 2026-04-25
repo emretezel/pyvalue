@@ -16,6 +16,7 @@ from pyvalue.storage import (
     FinancialFactsRepository,
     FundamentalsRepository,
     MarketDataRepository,
+    SupportedTickerRepository,
 )
 
 
@@ -134,6 +135,87 @@ def test_market_data_service_derives_market_cap_from_shares(tmp_path):
     assert snapshot.market_cap == 50000.0
 
 
+@pytest.mark.parametrize(
+    ("symbol", "exchange", "quote_currency", "price", "shares", "market_cap"),
+    [
+        ("SHEL.LSE", "LSE", "GBX", 2783.5, 50, 1391.75),
+        ("NPN.JSE", "JSE", "ZAC", 23750.0, 20, 4750.0),
+        ("BCOM.TA", "TA", "ILA", 1234.0, 10, 123.4),
+    ],
+)
+def test_market_data_service_stores_subunit_price_and_base_market_cap(
+    tmp_path,
+    symbol,
+    exchange,
+    quote_currency,
+    price,
+    shares,
+    market_cap,
+):
+    class DummyProvider:
+        def latest_price(self, requested_symbol):
+            return PriceData(
+                symbol=requested_symbol,
+                price=price,
+                as_of="2024-03-04",
+                volume=100,
+                currency=None,
+            )
+
+    class DummyConfig:
+        eodhd_api_key = None
+
+    db_path = tmp_path / f"{quote_currency.lower()}-market-data.db"
+    catalog_repo = SupportedTickerRepository(db_path)
+    catalog_repo.initialize_schema()
+    catalog_repo.replace_for_exchange(
+        "EODHD",
+        exchange,
+        [
+            {
+                "Code": symbol.split(".")[0],
+                "Name": f"{symbol} Plc",
+                "Type": "Common Stock",
+                "Currency": quote_currency,
+            }
+        ],
+    )
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    fact_repo.replace_facts(
+        symbol,
+        [
+            FactRecord(
+                symbol=symbol,
+                cik=None,
+                concept="CommonStockSharesOutstanding",
+                fiscal_period="FY",
+                end_date="2023-12-31",
+                unit="shares",
+                value=shares,
+                accn=None,
+                filed=None,
+                frame="CY2023",
+                start_date=None,
+            )
+        ],
+    )
+
+    service = MarketDataService(
+        db_path=db_path,
+        provider=DummyProvider(),
+        config=DummyConfig(),
+    )
+
+    service.refresh_symbol(symbol)
+
+    snapshot = MarketDataRepository(db_path).latest_snapshot(symbol)
+    assert snapshot is not None
+    assert snapshot.price == price
+    assert snapshot.market_cap == pytest.approx(market_cap)
+    assert snapshot.currency == quote_currency
+
+
 def test_market_data_service_prefers_share_unit_count_when_duplicates_exist(tmp_path):
     class DummyProvider:
         def latest_price(self, symbol):
@@ -194,7 +276,7 @@ def test_market_data_service_prefers_share_unit_count_when_duplicates_exist(tmp_
     assert snapshot.market_cap == 10000.0
 
 
-def test_eodhd_provider_converts_gbx_to_gbp():
+def test_eodhd_provider_preserves_gbx_quote_price():
     payload = [
         {"date": "2024-03-01", "Close": "99.0", "Volume": "1000", "currency": "GBX"},
     ]
@@ -203,11 +285,11 @@ def test_eodhd_provider_converts_gbx_to_gbp():
 
     data = provider.latest_price("SHEL.LSE")
 
-    assert data.price == 0.99
-    assert data.currency == "GBP"
+    assert data.price == 99.0
+    assert data.currency == "GBX"
 
 
-def test_eodhd_provider_converts_zac_to_zar():
+def test_eodhd_provider_preserves_zac_quote_price():
     payload = [
         {"date": "2024-03-01", "Close": "23750.0", "Volume": "1000", "currency": "ZAC"},
     ]
@@ -216,11 +298,11 @@ def test_eodhd_provider_converts_zac_to_zar():
 
     data = provider.latest_price("ABG.JSE")
 
-    assert data.price == 237.5
-    assert data.currency == "ZAR"
+    assert data.price == 23750.0
+    assert data.currency == "ZAC"
 
 
-def test_eodhd_provider_converts_gbx_by_suffix_when_currency_missing():
+def test_eodhd_provider_infers_gbx_by_suffix_when_currency_missing():
     payload = [
         {"date": "2024-03-01", "Close": "2783.5", "Volume": "1000"},
     ]
@@ -229,8 +311,8 @@ def test_eodhd_provider_converts_gbx_by_suffix_when_currency_missing():
 
     data = provider.latest_price("SHEL.LSE")
 
-    assert data.price == 27.835
-    assert data.currency == "GBP"
+    assert data.price == 2783.5
+    assert data.currency == "GBX"
 
 
 def test_market_data_service_uses_fundamentals_shares(tmp_path):
@@ -406,7 +488,8 @@ def test_eodhd_provider_parses_bulk_exchange_response():
 
     assert data["AAA.LSE"].price == 10.5
     assert data["AAA.LSE"].as_of == "2024-03-04"
-    assert data["SHEL.LSE"].price == 27.835
+    assert data["SHEL.LSE"].price == 2783.5
+    assert data["SHEL.LSE"].currency == "GBX"
     assert session.calls[0][0].endswith("/api/eod-bulk-last-day/LSE")
 
 
@@ -424,8 +507,25 @@ def test_market_data_service_prepare_price_data_uses_currency_hint(tmp_path):
     class DummyConfig:
         eodhd_api_key = None
 
+    db_path = tmp_path / "hint.db"
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    fact_repo.replace_facts(
+        "SHEL.LSE",
+        [
+            FactRecord(
+                symbol="SHEL.LSE",
+                cik="CIK",
+                concept="CommonStockSharesOutstanding",
+                fiscal_period="FY",
+                end_date="2024-01-01",
+                unit="shares",
+                value=50,
+            )
+        ],
+    )
     service = MarketDataService(
-        db_path=tmp_path / "hint.db",
+        db_path=db_path,
         provider=DummyProvider(),
         config=DummyConfig(),
     )
@@ -445,8 +545,9 @@ def test_market_data_service_prepare_price_data_uses_currency_hint(tmp_path):
         currency_hint="GBX",
     )
 
-    assert prepared.price == 27.835
-    assert prepared.currency == "GBP"
+    assert prepared.price == 2783.5
+    assert prepared.market_cap == 1391.75
+    assert prepared.currency == "GBX"
 
 
 def test_market_data_service_prepare_price_data_uses_ila_currency_hint(tmp_path):
@@ -484,5 +585,5 @@ def test_market_data_service_prepare_price_data_uses_ila_currency_hint(tmp_path)
         currency_hint="ILA",
     )
 
-    assert prepared.price == 12.34
-    assert prepared.currency == "ILS"
+    assert prepared.price == 1234.0
+    assert prepared.currency == "ILA"

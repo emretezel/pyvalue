@@ -31,6 +31,7 @@ from pyvalue.currency import (
     fact_currency_or_none,
     metric_currency_or_none,
     normalize_currency_code,
+    raw_currency_code,
 )
 from pyvalue.marketdata.base import MarketDataUpdate, PriceData
 from pyvalue.migrations import apply_migrations
@@ -169,7 +170,7 @@ def _ensure_provider_listing_catalog_views(conn: sqlite3.Connection) -> None:
             i.name AS security_name,
             NULL AS security_type,
             i.country AS country,
-            COALESCE(pl.currency, l.currency) AS currency,
+            l.currency AS currency,
             l.primary_listing_status,
             NULL AS isin,
             NULL AS updated_at
@@ -722,11 +723,10 @@ class SQLiteStore:
         return self._supported_ticker_repo_cache
 
     def ticker_currency(self, symbol: str) -> Optional[str]:
-        """Return the catalog listing currency for ``symbol``.
+        """Return the base monetary currency for ``symbol``.
 
-        Provider-listing currency is preferred over canonical listing currency.
-        Market data rows store quote-row currency only and are not a source of
-        truth for the listing's normalization/metric currency.
+        ``listing.currency`` stores the quote unit and may contain a configured
+        subunit such as GBX. Metrics and normalized facts use the base currency.
         """
 
         apply_migrations(self.db_path)
@@ -734,26 +734,35 @@ class SQLiteStore:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT COALESCE(pl.currency, l.currency) AS currency
+                SELECT l.currency
                 FROM listing l
                 JOIN "exchange" e ON e.exchange_id = l.exchange_id
-                LEFT JOIN provider_listing pl ON pl.listing_id = l.listing_id
-                LEFT JOIN provider p ON p.provider_id = pl.provider_id
                 WHERE UPPER(l.symbol || '.' || e.exchange_code) = ?
-                  AND COALESCE(pl.currency, l.currency) IS NOT NULL
-                ORDER BY
-                    CASE WHEN pl.currency IS NOT NULL THEN 0 ELSE 1 END,
-                    CASE
-                        WHEN p.provider_code = 'EODHD' THEN 0
-                        WHEN p.provider_code = 'SEC' THEN 1
-                        ELSE 2
-                    END,
-                    pl.provider_listing_id
+                  AND l.currency IS NOT NULL
                 LIMIT 1
                 """,
                 (symbol_norm,),
             ).fetchone()
         return normalize_currency_code(row[0]) if row else None
+
+    def listing_quote_currency(self, symbol: str) -> Optional[str]:
+        """Return the stored listing quote currency for ``symbol``."""
+
+        apply_migrations(self.db_path)
+        symbol_norm = symbol.strip().upper()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT l.currency
+                FROM listing l
+                JOIN "exchange" e ON e.exchange_id = l.exchange_id
+                WHERE UPPER(l.symbol || '.' || e.exchange_code) = ?
+                  AND l.currency IS NOT NULL
+                LIMIT 1
+                """,
+                (symbol_norm,),
+            ).fetchone()
+        return raw_currency_code(row[0]) if row else None
 
 
 class ProviderRepository(SQLiteStore):
@@ -945,6 +954,13 @@ class SecurityRepository(SQLiteStore):
                 """
                 CREATE INDEX IF NOT EXISTS idx_listing_exchange
                 ON listing(exchange_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_listing_currency_nonnull
+                ON listing(currency)
+                WHERE currency IS NOT NULL
                 """
             )
             conn.execute("DROP VIEW IF EXISTS securities")
@@ -1853,7 +1869,6 @@ class SupportedTickerRepository(SQLiteStore):
                     provider_id INTEGER NOT NULL,
                     provider_exchange_id INTEGER NOT NULL,
                     provider_symbol TEXT NOT NULL,
-                    currency TEXT,
                     listing_id INTEGER NOT NULL,
                     UNIQUE (provider_exchange_id, provider_symbol),
                     FOREIGN KEY (provider_id) REFERENCES provider(provider_id),
@@ -1874,13 +1889,6 @@ class SupportedTickerRepository(SQLiteStore):
                 """
                 CREATE INDEX IF NOT EXISTS idx_provider_listing_listing
                 ON provider_listing(listing_id)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_provider_listing_currency_nonnull
-                ON provider_listing(currency)
-                WHERE currency IS NOT NULL
                 """
             )
             _ensure_provider_listing_catalog_views(conn)
@@ -2003,24 +2011,31 @@ class SupportedTickerRepository(SQLiteStore):
             entity_name=entity_name,
             connection=conn,
         )
+        quote_currency = raw_currency_code(currency)
+        if quote_currency is not None:
+            conn.execute(
+                """
+                UPDATE listing
+                SET currency = ?
+                WHERE listing_id = ?
+                """,
+                (quote_currency, security.security_id),
+            )
         conn.execute(
             """
             INSERT INTO provider_listing (
                 provider_id,
                 provider_exchange_id,
                 provider_symbol,
-                currency,
                 listing_id
-            ) VALUES (?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?)
             ON CONFLICT(provider_exchange_id, provider_symbol) DO UPDATE SET
-                currency = COALESCE(excluded.currency, provider_listing.currency),
                 listing_id = excluded.listing_id
             """,
             (
                 int(provider_exchange_row["provider_id"]),
                 int(provider_exchange_row["provider_exchange_id"]),
                 bare_symbol,
-                _normalize_optional_text(currency.upper() if currency else None),
                 security.security_id,
             ),
         )
@@ -2367,7 +2382,7 @@ class SupportedTickerRepository(SQLiteStore):
         symbol: str,
         provider: Optional[str] = None,
     ) -> Optional[str]:
-        """Return listing currency from provider-listing/catalog metadata."""
+        """Return the stored listing quote currency from catalog metadata."""
 
         self.initialize_schema()
         symbol_norm = symbol.strip().upper()
@@ -2392,7 +2407,7 @@ class SupportedTickerRepository(SQLiteStore):
         query.append("LIMIT 1")
         with self._connect() as conn:
             row = conn.execute(" ".join(query), params).fetchone()
-        return normalize_currency_code(row[0]) if row else None
+        return raw_currency_code(row[0]) if row else None
 
     def list_all_exchanges(self, provider: str) -> List[str]:
         return self.available_exchanges(provider)
@@ -5213,19 +5228,18 @@ class FXRatesRepository(SQLiteStore):
                 code = normalize_currency_code(row["currency"])
                 if code is not None:
                     currencies.add(code)
-            for table_name in ("financial_facts", "market_data"):
-                rows = conn.execute(
-                    f"""
-                    SELECT DISTINCT currency
-                    FROM {table_name}
-                    WHERE currency IS NOT NULL
-                    ORDER BY currency
-                    """
-                ).fetchall()
-                for row in rows:
-                    code = normalize_currency_code(row["currency"])
-                    if code is not None:
-                        currencies.add(code)
+            rows = conn.execute(
+                """
+                SELECT DISTINCT currency
+                FROM financial_facts
+                WHERE currency IS NOT NULL
+                ORDER BY currency
+                """
+            ).fetchall()
+            for row in rows:
+                code = normalize_currency_code(row["currency"])
+                if code is not None:
+                    currencies.add(code)
         return sorted(currencies)
 
 
@@ -5988,7 +6002,6 @@ class MarketDataRepository(SQLiteStore):
                     price REAL NOT NULL,
                     volume INTEGER,
                     market_cap REAL,
-                    currency TEXT,
                     source_provider TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (listing_id, as_of)
@@ -5999,13 +6012,6 @@ class MarketDataRepository(SQLiteStore):
                 """
                 CREATE INDEX IF NOT EXISTS idx_market_data_latest
                 ON market_data(listing_id, as_of DESC)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_market_data_currency_nonnull
-                ON market_data(currency)
-                WHERE currency IS NOT NULL
                 """
             )
 
@@ -6048,7 +6054,6 @@ class MarketDataRepository(SQLiteStore):
                 row.price,
                 row.volume,
                 row.market_cap,
-                normalize_currency_code(row.currency),
                 row.source_provider.strip().upper(),
                 updated_at,
             )
@@ -6063,15 +6068,13 @@ class MarketDataRepository(SQLiteStore):
                     price,
                     volume,
                     market_cap,
-                    currency,
                     source_provider,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(listing_id, as_of) DO UPDATE SET
                     price = excluded.price,
                     volume = excluded.volume,
                     market_cap = excluded.market_cap,
-                    currency = excluded.currency,
                     source_provider = excluded.source_provider,
                     updated_at = excluded.updated_at
                 """,
@@ -6106,9 +6109,10 @@ class MarketDataRepository(SQLiteStore):
             row = conn.execute(
                 """
                 SELECT s.canonical_symbol, md.listing_id AS security_id, md.as_of, md.price, md.volume,
-                       md.market_cap, md.currency, md.updated_at
+                       md.market_cap, l.currency, md.updated_at
                 FROM market_data md
                 JOIN securities s ON s.security_id = md.listing_id
+                JOIN listing l ON l.listing_id = md.listing_id
                 WHERE md.listing_id = ?
                 ORDER BY md.as_of DESC
                 LIMIT 1
@@ -6180,12 +6184,13 @@ class MarketDataRepository(SQLiteStore):
                         md.price,
                         md.volume,
                         md.market_cap,
-                        md.currency,
+                        l.currency,
                         md.updated_at
                     FROM latest
                     JOIN market_data md
                       ON md.listing_id = latest.listing_id
                      AND md.as_of = latest.as_of
+                    JOIN listing l ON l.listing_id = md.listing_id
                     ORDER BY md.listing_id
                     """,
                     list(symbol_by_security_id),

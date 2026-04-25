@@ -12,9 +12,11 @@ from typing import Optional, Union
 
 from pyvalue.config import Config
 from pyvalue.currency import (
+    currency_subunit,
     is_subunit_currency,
-    normalize_currency_code,
     normalize_monetary_amount,
+    normalize_currency_code,
+    raw_currency_code,
 )
 from pyvalue.marketdata import (
     EODHDProvider,
@@ -113,6 +115,38 @@ class MarketDataService:
             return shares
         return self._shares_from_fundamentals(symbol)
 
+    @staticmethod
+    def _base_unit_amount(
+        amount: Optional[float],
+        quote_currency: Optional[str],
+    ) -> Optional[float]:
+        if amount is None:
+            return None
+        normalized_amount, _ = normalize_monetary_amount(amount, quote_currency)
+        if normalized_amount is None:
+            return amount
+        return float(normalized_amount)
+
+    @staticmethod
+    def _quote_unit_price(
+        price: float,
+        *,
+        source_currency: Optional[str],
+        quote_currency: Optional[str],
+    ) -> float:
+        source = raw_currency_code(source_currency or quote_currency)
+        quote = raw_currency_code(quote_currency or source)
+        if source is None or quote is None or source == quote:
+            return price
+        base_price, source_base = normalize_monetary_amount(price, source)
+        quote_base = normalize_currency_code(quote)
+        if base_price is None or source_base is None or source_base != quote_base:
+            return price
+        quote_subunit = currency_subunit(quote)
+        if quote_subunit is None:
+            return float(base_price)
+        return float(base_price * quote_subunit.divisor)
+
     def _validate_price_change(
         self,
         symbol: str,
@@ -163,7 +197,12 @@ class MarketDataService:
             current_shares = self._latest_share_count(symbol)
             previous_shares = None
             if previous_market_cap is not None:
-                previous_shares = previous_market_cap / previous.price
+                previous_base_price = self._base_unit_amount(
+                    previous.price,
+                    previous.currency,
+                )
+                if previous_base_price is not None and previous_base_price > 0:
+                    previous_shares = previous_market_cap / previous_base_price
             if (
                 current_shares is not None
                 and current_shares > 0
@@ -202,36 +241,35 @@ class MarketDataService:
             market_cap=data.market_cap,
             currency=data.currency,
         )
-        raw_effective_currency = (
-            prepared.currency
-            or currency_hint
+        quote_currency = raw_currency_code(
+            currency_hint
             or self.supported_ticker_repo.fetch_currency(normalized_symbol)
+            or prepared.currency
         )
-        effective_currency = normalize_currency_code(raw_effective_currency)
-        price = prepared.price
-        if is_subunit_currency(raw_effective_currency) and price is not None:
-            normalized_price, normalized_currency = normalize_monetary_amount(
-                price,
-                raw_effective_currency,
-            )
-            if normalized_price is not None:
-                price = float(normalized_price)
-            effective_currency = normalized_currency
+        price = self._quote_unit_price(
+            prepared.price,
+            source_currency=prepared.currency,
+            quote_currency=quote_currency,
+        )
         market_cap = prepared.market_cap
         if market_cap is None and price is not None:
             shares = self._latest_share_count(normalized_symbol)
             if shares is not None:
-                market_cap = shares * price
+                base_price = self._base_unit_amount(price, quote_currency)
+                if base_price is not None:
+                    market_cap = shares * base_price
+        elif is_subunit_currency(prepared.currency):
+            market_cap = self._base_unit_amount(market_cap, prepared.currency)
         self._validate_price_change(
             normalized_symbol,
             as_of=prepared.as_of,
             price=price,
-            currency=effective_currency or prepared.currency,
+            currency=quote_currency,
             market_cap=market_cap,
         )
         prepared.price = price
         prepared.market_cap = market_cap
-        prepared.currency = effective_currency or prepared.currency
+        prepared.currency = quote_currency
         return prepared
 
     def persist_updates(self, updates: list[MarketDataUpdate]) -> None:

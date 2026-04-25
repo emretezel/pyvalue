@@ -80,8 +80,8 @@ pyvalue refresh-supported-tickers --exchange-codes US
 pyvalue ingest-fundamentals --exchange-codes US
 ```
 
-Bulk fundamentals ingestion carries the stored supported-ticker currency into
-`provider_listing.currency`. Single-symbol ingestion uses an existing catalog
+Supported-ticker refresh stores catalog currency on `listing.currency` as the
+listing quote unit. Single-symbol fundamentals ingestion uses existing catalog
 currency when one is already present and otherwise leaves listing currency
 unset; it does not copy `General.CurrencyCode` from the raw payload into catalog
 metadata.
@@ -215,12 +215,12 @@ By default, normalization skips symbols whose raw payload has not changed since
 the last successful EODHD normalization.
 Listings already classified as secondary from `General.PrimaryTicker` are
 excluded from normalization scopes.
-EODHD normalization requires listing currency from `provider_listing.currency`
-or `listing.currency`. Raw payload currencies are source currencies only.
+EODHD normalization requires `listing.currency`. Raw payload currencies are
+source currencies only.
 Monetary fact currency lookup checks entry-level `currency`,
 `currency_symbol`, or `CurrencyCode`, then direct statement-level currency, then
-payload-level `General.CurrencyCode`; facts are converted to listing currency
-when the source currency differs.
+payload-level `General.CurrencyCode`; facts are converted to
+base(`listing.currency`) when the source currency differs.
 Normalization never fetches FX from the network. When a symbol needs currency
 conversion, each worker process preloads the full selected-provider FX table
 once and resolves direct, inverse, and USD/EUR triangulated rates from memory.

@@ -79,10 +79,10 @@ This page maps the end-to-end pipeline to the tables and indexes that matter mos
 
 ## 7. Refresh FX Rates
 
-- Discovers currencies from `provider_listing`, `financial_facts`, and `market_data`
+- Discovers currencies from `listing` and `financial_facts`
 - Reads and writes `fx_supported_pairs`, `fx_refresh_state`, and `fx_rates`
 - Critical structures:
-  - partial currency indexes on `provider_listing`, `financial_facts`, and `market_data`
+  - partial currency indexes on `listing` and `financial_facts`
   - `idx_fx_supported_pairs_refreshable`
   - `fx_refresh_state` PK
   - `idx_fx_rates_pair_date`

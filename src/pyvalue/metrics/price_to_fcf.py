@@ -13,7 +13,7 @@ import logging
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
     is_recent_fact,
-    normalize_metric_amount,
+    normalize_market_cap_amount,
     normalize_metric_record,
     require_metric_ticker_currency,
 )
@@ -57,12 +57,10 @@ class PriceToFCFMetric:
             LOGGER.warning("price_to_fcf: missing market cap for %s", symbol)
             return None
 
-        market_cap, _ = normalize_metric_amount(
+        market_cap, _ = normalize_market_cap_amount(
             snapshot.market_cap,
-            getattr(snapshot, "currency", None),
             metric_id=self.id,
             symbol=symbol,
-            input_name="market_cap",
             as_of=snapshot.as_of,
             expected_currency=fcf_result.currency,
             contexts=(market_repo, repo),

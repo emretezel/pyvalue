@@ -150,7 +150,7 @@ class USUniverseLoader:
             round_lot_size=round_lot,
             source=source,
             isin=None,
-            currency=None,
+            currency="USD",
         )
 
     def _normalize_exchange(self, row: Mapping[str, str]) -> str:

@@ -14,7 +14,6 @@ from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.enterprise_value import (
     EV_FALLBACK_REQUIRED_CONCEPTS,
     resolve_enterprise_value_denominator,
-    validate_denominator_amount,
 )
 from pyvalue.metrics.owner_earnings_enterprise import (
     REQUIRED_CONCEPTS as OE_EV_REQUIRED_CONCEPTS,
@@ -24,6 +23,7 @@ from pyvalue.metrics.owner_earnings_equity import (
     REQUIRED_CONCEPTS as OE_EQUITY_REQUIRED_CONCEPTS,
     OwnerEarningsEquityCalculator,
 )
+from pyvalue.metrics.utils import normalize_market_cap_amount
 from pyvalue.storage import FinancialFactsRepository, MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -49,15 +49,14 @@ def _denominator_market_cap(
         LOGGER.warning("%s: non-positive market cap snapshot for %s", context, symbol)
         return None
 
-    return validate_denominator_amount(
+    return normalize_market_cap_amount(
+        snapshot.market_cap,
+        metric_id=context,
         symbol=symbol,
-        amount=snapshot.market_cap,
-        source_currency=getattr(snapshot, "currency", None),
-        target_currency=target_currency,
         as_of=snapshot.as_of,
-        context=context,
+        expected_currency=target_currency,
         contexts=(market_repo,),
-    )
+    )[0]
 
 
 def _denominator_enterprise_value(

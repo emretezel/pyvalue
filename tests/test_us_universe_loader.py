@@ -55,6 +55,7 @@ def test_loader_combines_files(nasdaq_payload, other_payload, monkeypatch):
     assert berkshire.exchange == "NYSE"
     assert berkshire.round_lot_size == 1
     assert berkshire.is_etf is False
+    assert berkshire.currency == "USD"
 
     ivv = next(item for item in listings if item.symbol == "IVV.US")
     assert ivv.is_etf is True

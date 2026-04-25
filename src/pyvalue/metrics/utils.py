@@ -119,8 +119,8 @@ def resolve_metric_ticker_currency(
 ) -> Optional[str]:
     """Return the stored listing currency for metric-side currency assertions.
 
-    Listing currency is defined by ``provider_listing.currency`` first, then
-    ``listing.currency``.
+    Listing currency is stored as ``listing.currency`` and may be a quote-unit
+    subunit. Metric currency assertions use its normalized base currency.
     ``candidate_currencies`` is accepted for backwards-compatible call sites but is
     intentionally ignored here so metrics cannot silently infer a currency from facts.
     """
@@ -286,6 +286,42 @@ def normalize_metric_amount(
     return float(normalized_amount), resolved_currency
 
 
+def normalize_market_cap_amount(
+    amount: float,
+    *,
+    metric_id: str,
+    symbol: str,
+    input_name: str = "market_cap",
+    as_of: Optional[str],
+    expected_currency: Optional[str] = None,
+    contexts: Sequence[object] = (),
+) -> tuple[float, str]:
+    """Assert a stored market cap against the listing's base currency."""
+
+    base_currency = normalize_currency_code(
+        expected_currency
+    ) or resolve_metric_ticker_currency(symbol, *contexts)
+    if base_currency is None:
+        _raise_currency_invariant(
+            metric_id=metric_id,
+            symbol=symbol,
+            input_name=input_name,
+            reason_code="missing_trading_currency",
+            as_of=as_of,
+        )
+    assert base_currency is not None
+    return normalize_metric_amount(
+        amount,
+        base_currency,
+        metric_id=metric_id,
+        symbol=symbol,
+        input_name=input_name,
+        as_of=as_of,
+        expected_currency=base_currency,
+        contexts=contexts,
+    )
+
+
 def normalize_metric_record(
     record: FactRecord,
     *,
@@ -380,6 +416,7 @@ __all__ = [
     "has_recent_fact",
     "align_metric_money_values",
     "ensure_metric_currency",
+    "normalize_market_cap_amount",
     "normalize_metric_amount",
     "normalize_metric_record",
     "require_metric_ticker_currency",

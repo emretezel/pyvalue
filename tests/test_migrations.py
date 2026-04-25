@@ -672,7 +672,6 @@ def test_migration_creates_provider_listing_table(tmp_path):
         "provider_id",
         "provider_exchange_id",
         "provider_symbol",
-        "currency",
         "listing_id",
     }
     assert pk_cols == ["provider_listing_id"]
@@ -707,7 +706,7 @@ def test_migration_moves_primary_listing_status_to_listing(tmp_path):
 
 def test_migration_backfills_listing_primary_status_and_drops_legacy_table(tmp_path):
     db_path = tmp_path / "primary-listing-status-backfill.sqlite"
-    prior_version = len(MIGRATIONS) - 1
+    prior_version = 37
     with sqlite3.connect(db_path) as conn:
         conn.execute("CREATE TABLE schema_migrations (version INTEGER NOT NULL)")
         conn.execute(
@@ -744,7 +743,7 @@ def test_migration_backfills_listing_primary_status_and_drops_legacy_table(tmp_p
 
     applied = apply_migrations(db_path)
 
-    assert applied == 1
+    assert applied == len(MIGRATIONS) - prior_version
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute(
             """
@@ -759,6 +758,155 @@ def test_migration_backfills_listing_primary_status_and_drops_legacy_table(tmp_p
 
     assert rows == [(1, "primary"), (2, "secondary"), (3, "unknown")]
     assert status_table is None
+
+
+def test_migration_canonicalizes_listing_quote_currency_and_market_data(tmp_path):
+    db_path = tmp_path / "canonical-listing-currency.sqlite"
+    prior_version = 38
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE schema_migrations (version INTEGER NOT NULL)")
+        conn.execute(
+            "INSERT INTO schema_migrations (version) VALUES (?)",
+            (prior_version,),
+        )
+        conn.execute(
+            """
+            CREATE TABLE provider (
+                provider_id INTEGER PRIMARY KEY,
+                provider_code TEXT NOT NULL
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO provider (provider_id, provider_code) VALUES (?, ?)",
+            [(1, "SEC"), (2, "EODHD"), (3, "OTHER")],
+        )
+        conn.execute(
+            """
+            CREATE TABLE listing (
+                listing_id INTEGER PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                currency TEXT
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO listing (listing_id, symbol, currency) VALUES (?, ?, ?)",
+            [
+                (1, "AAA", None),
+                (2, "BBB", "OLD"),
+                (3, "CCC", "ZAC"),
+                (4, "DDD", "ILA"),
+            ],
+        )
+        conn.execute(
+            """
+            CREATE TABLE provider_listing (
+                provider_listing_id INTEGER PRIMARY KEY,
+                provider_id INTEGER NOT NULL,
+                listing_id INTEGER NOT NULL,
+                currency TEXT
+            )
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO provider_listing (
+                provider_listing_id, provider_id, listing_id, currency
+            ) VALUES (?, ?, ?, ?)
+            """,
+            [
+                (1, 1, 1, "USD"),
+                (2, 2, 1, "GBX"),
+                (3, 3, 2, "EUR"),
+            ],
+        )
+        conn.execute(
+            """
+            CREATE INDEX idx_provider_listing_currency_nonnull
+            ON provider_listing(currency)
+            WHERE currency IS NOT NULL
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE market_data (
+                listing_id INTEGER NOT NULL,
+                as_of DATE NOT NULL,
+                price REAL NOT NULL,
+                volume INTEGER,
+                market_cap REAL,
+                currency TEXT,
+                source_provider TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (listing_id, as_of)
+            )
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO market_data (
+                listing_id, as_of, price, volume, market_cap, currency,
+                source_provider, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 'EODHD', '2026-01-01T00:00:00+00:00')
+            """,
+            [
+                (1, "2026-01-01", 27.835, None, 1000.0, "GBP"),
+                (3, "2026-01-01", 1234.0, None, 123400.0, "ZAC"),
+                (4, "2026-01-01", 12.34, None, 500.0, "ILS"),
+            ],
+        )
+        conn.execute(
+            """
+            CREATE INDEX idx_market_data_currency_nonnull
+            ON market_data(currency)
+            WHERE currency IS NOT NULL
+            """
+        )
+
+    applied = apply_migrations(db_path)
+
+    assert applied == len(MIGRATIONS) - prior_version
+    with sqlite3.connect(db_path) as conn:
+        listing_rows = conn.execute(
+            "SELECT listing_id, currency FROM listing ORDER BY listing_id"
+        ).fetchall()
+        provider_listing_columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(provider_listing)").fetchall()
+        }
+        market_data_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(market_data)").fetchall()
+        }
+        provider_listing_index_names = {
+            row[1]
+            for row in conn.execute("PRAGMA index_list(provider_listing)").fetchall()
+        }
+        market_data_index_names = {
+            row[1] for row in conn.execute("PRAGMA index_list(market_data)").fetchall()
+        }
+        listing_index_names = {
+            row[1] for row in conn.execute("PRAGMA index_list(listing)").fetchall()
+        }
+        market_rows = conn.execute(
+            """
+            SELECT listing_id, price, market_cap
+            FROM market_data
+            ORDER BY listing_id
+            """
+        ).fetchall()
+
+    assert listing_rows == [(1, "GBX"), (2, "EUR"), (3, "ZAC"), (4, "ILA")]
+    assert "currency" not in provider_listing_columns
+    assert "currency" not in market_data_columns
+    assert "idx_provider_listing_currency_nonnull" not in provider_listing_index_names
+    assert "idx_market_data_currency_nonnull" not in market_data_index_names
+    assert "idx_listing_currency_nonnull" in listing_index_names
+    assert market_rows == [
+        (1, 2783.5, 1000.0),
+        (3, 1234.0, 1234.0),
+        (4, 1234.0, 500.0),
+    ]
 
 
 def test_migration_adds_sector_and_industry_to_securities(tmp_path):
@@ -867,11 +1015,13 @@ def test_migration_adds_sector_and_industry_to_securities(tmp_path):
     assert "idx_fx_rates_pair_date" in fx_index_names
     assert "idx_fx_supported_pairs_refreshable" in fx_supported_pair_index_names
     if "provider_listing" in tables:
-        assert "idx_provider_listing_currency_nonnull" in provider_listing_index_names
+        assert (
+            "idx_provider_listing_currency_nonnull" not in provider_listing_index_names
+        )
     if "financial_facts" in tables:
         assert "idx_fin_facts_currency_nonnull" in financial_fact_index_names
     if "market_data" in tables:
-        assert "idx_market_data_currency_nonnull" in market_data_index_names
+        assert "idx_market_data_currency_nonnull" not in market_data_index_names
     assert row == ("AAA Corp", "AAA description", None, None, "AAA", "US")
 
 
@@ -936,7 +1086,7 @@ def test_migration_creates_fundamentals_hot_path_indexes(tmp_path):
 
 def test_migration_drops_fundamentals_raw_listing_identity_columns(tmp_path):
     db_path = tmp_path / "fundamentals-raw-drop-listing.sqlite"
-    previous_version = len(MIGRATIONS) - 2
+    previous_version = 36
     with sqlite3.connect(db_path) as conn:
         conn.execute(
             """
@@ -1009,7 +1159,7 @@ def test_migration_drops_fundamentals_raw_listing_identity_columns(tmp_path):
 
     applied = apply_migrations(db_path)
 
-    assert applied == 2
+    assert applied == len(MIGRATIONS) - previous_version
     with sqlite3.connect(db_path) as conn:
         columns = {
             row[1]
@@ -1038,7 +1188,7 @@ def test_migration_drops_fundamentals_raw_listing_identity_columns(tmp_path):
 
 def test_migration_drops_fundamentals_raw_currency_from_current_schema(tmp_path):
     db_path = tmp_path / "fundamentals-raw-drop-currency.sqlite"
-    previous_version = len(MIGRATIONS) - 2
+    previous_version = 36
     with sqlite3.connect(db_path) as conn:
         conn.execute(
             """
@@ -1082,7 +1232,7 @@ def test_migration_drops_fundamentals_raw_currency_from_current_schema(tmp_path)
 
     applied = apply_migrations(db_path)
 
-    assert applied == 2
+    assert applied == len(MIGRATIONS) - previous_version
     with sqlite3.connect(db_path) as conn:
         columns = {
             row[1]
@@ -1261,4 +1411,4 @@ def test_migration_does_not_overwrite_existing_supported_tickers(tmp_path):
     assert fx_exists == ("fx_rates",)
     assert fx_supported_pairs_exists == ("fx_supported_pairs",)
     assert fx_refresh_state_exists == ("fx_refresh_state",)
-    assert "idx_provider_listing_currency_nonnull" in provider_listing_index_names
+    assert "idx_provider_listing_currency_nonnull" not in provider_listing_index_names

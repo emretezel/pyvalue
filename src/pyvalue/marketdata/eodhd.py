@@ -11,11 +11,7 @@ from typing import Dict, Optional
 
 import requests  # type: ignore[import-untyped]
 
-from pyvalue.currency import (
-    is_subunit_currency,
-    normalize_currency_code,
-    normalize_monetary_amount,
-)
+from pyvalue.currency import raw_currency_code
 from pyvalue.marketdata.base import MarketDataProvider, PriceData
 
 LOGGER = logging.getLogger(__name__)
@@ -127,30 +123,14 @@ class EODHDProvider(MarketDataProvider):
             raise ValueError(
                 f"Missing Close price in EODHD response for {symbol}: {entry}"
             )
-        currency = self._extract_text(entry, "currency", "Currency")
-        currency = normalize_currency_code(currency)
+        currency = raw_currency_code(self._extract_text(entry, "currency", "Currency"))
         suffix = exchange_hint or (symbol.split(".")[-1] if "." in symbol else "")
         if "." in suffix:
             suffix = suffix.split(".")[-1]
         suffix = suffix.upper()
-        raw_currency = self._extract_text(entry, "currency", "Currency")
         subunit_hint = EXCHANGE_SUBUNIT_HINTS.get(suffix)
-        if is_subunit_currency(raw_currency):
-            normalized_price, normalized_currency = normalize_monetary_amount(
-                price,
-                raw_currency,
-            )
-            if normalized_price is not None:
-                price = float(normalized_price)
-            currency = normalized_currency
-        elif subunit_hint and currency is None and price and price > 100:
-            normalized_price, normalized_currency = normalize_monetary_amount(
-                price,
-                subunit_hint,
-            )
-            if normalized_price is not None:
-                price = float(normalized_price)
-            currency = normalized_currency
+        if subunit_hint and currency is None and price and price > 100:
+            currency = subunit_hint
         as_of = self._extract_text(entry, "date", "Date")
         if as_of is None:
             raise ValueError(f"Missing date in EODHD response for {symbol}: {entry}")

@@ -71,8 +71,8 @@ Ingestion stores raw provider payloads as received, keyed by:
 - `provider_listing_id`
 
 This stage is useful because it preserves source payloads for later re-normalization.
-The raw table does not store currency. Listing currency must come from catalog
-metadata: `provider_listing.currency` first, then `listing.currency`.
+The raw table does not store listing currency. Listing currency is catalog
+metadata stored on `listing.currency` as the authoritative quote unit.
 
 For repeated fundamentals ingestion, the latest raw payload for the same
 provider-symbol replaces the previous raw payload for that provider-symbol.
@@ -88,9 +88,9 @@ Bulk normalization runs over `--exchange-codes` or `--all-supported`
 parallelize automatically. The stage normalizes only symbols that already have
 stored raw fundamentals in `fundamentals_raw`.
 EODHD normalization requires a stored listing currency and converts monetary
-facts into that currency when raw fact-level, statement-level, or payload-level
-currencies differ. Raw `General.CurrencyCode` is never used as a fallback
-listing currency.
+facts into base(`listing.currency`) when raw fact-level, statement-level, or
+payload-level currencies differ. Raw `General.CurrencyCode` is never used as a
+fallback listing currency.
 
 ## Re-Normalization Behavior
 

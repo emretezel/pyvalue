@@ -114,7 +114,6 @@ CREATE TABLE "market_data" (
             price REAL NOT NULL,
             volume INTEGER,
             market_cap REAL,
-            currency TEXT,
             source_provider TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             PRIMARY KEY (listing_id, as_of)
@@ -184,7 +183,6 @@ CREATE TABLE provider_listing (
             provider_id INTEGER NOT NULL,
             provider_exchange_id INTEGER NOT NULL,
             provider_symbol TEXT NOT NULL,
-            currency TEXT,
             listing_id INTEGER NOT NULL,
             UNIQUE (provider_exchange_id, provider_symbol),
             FOREIGN KEY (provider_id) REFERENCES provider(provider_id),
@@ -217,8 +215,8 @@ CREATE INDEX idx_fx_supported_pairs_refreshable
         ON fx_supported_pairs(provider, is_refreshable, canonical_symbol);
 CREATE INDEX idx_listing_exchange
         ON listing(exchange_id);
-CREATE INDEX idx_market_data_currency_nonnull
-            ON market_data(currency)
+CREATE INDEX idx_listing_currency_nonnull
+            ON listing(currency)
             WHERE currency IS NOT NULL;
 CREATE INDEX idx_market_data_fetch_next
             ON market_data_fetch_state(next_eligible_at);
@@ -230,9 +228,6 @@ CREATE INDEX idx_metrics_metric_id
             ON metrics(metric_id);
 CREATE INDEX idx_provider_exchange_exchange
         ON provider_exchange(exchange_id);
-CREATE INDEX idx_provider_listing_currency_nonnull
-        ON provider_listing(currency)
-        WHERE currency IS NOT NULL;
 CREATE INDEX idx_provider_listing_listing
         ON provider_listing(listing_id);
 CREATE INDEX idx_provider_listing_provider

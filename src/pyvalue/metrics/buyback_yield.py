@@ -15,7 +15,7 @@ from pyvalue.metrics.share_count_change import ShareCountChangeCalculator
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     is_recent_fact,
-    normalize_metric_amount,
+    normalize_market_cap_amount,
     normalize_metric_record,
     require_metric_ticker_currency,
 )
@@ -171,12 +171,10 @@ class NetBuybackYieldMetric:
             )
             return None
 
-        converted, _ = normalize_metric_amount(
+        converted, _ = normalize_market_cap_amount(
             snapshot.market_cap,
-            getattr(snapshot, "currency", None),
             metric_id=self.id,
             symbol=symbol,
-            input_name="market_cap",
             as_of=snapshot.as_of,
             expected_currency=target_currency,
             contexts=(market_repo,),

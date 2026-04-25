@@ -11,6 +11,23 @@ Use this file to capture recurring mistake patterns after user corrections so fu
 
 ## Lessons
 
+- Date: 2026-04-25
+- User correction: `listing.currency` should preserve the authoritative listing
+  quote unit, including subunits such as `GBX`, `ZAC`, and `ILA`; base currency
+  should be derived only when normalizing monetary facts, calculating market
+  cap, computing metrics, or discovering FX needs.
+- Recurring pattern: Collapsing a stored currency field to its base ISO code
+  can erase the distinction between quote units and monetary accounting units,
+  especially for UK, South African, and Israeli subunit quotes.
+- Preventive rule: In pyvalue currency work, keep persisted listing quote-unit
+  metadata separate from derived base-currency arithmetic; remove duplicate
+  persisted currency truth unless the user explicitly asks for a denormalized
+  performance copy.
+- Resulting action: Reworked the schema and ingestion plan so
+  `listing.currency` is canonical, `provider_listing` and `market_data` no
+  longer store duplicate currency columns, and all monetary calculations derive
+  base currency from the listing quote unit.
+
 - Date: 2026-04-24
 - User correction: A broad `LIKE` scan over the 16.6 GiB `fundamentals_raw.data`
   table was running during a schema/currency refactor, and the user asked why

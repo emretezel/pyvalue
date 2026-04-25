@@ -32,9 +32,8 @@ flowchart LR
     provider --> fx_supported_pairs
     provider --> fx_refresh_state
     provider --> fx_rates
-    provider_listing --> fx_rates
+    listing --> fx_rates
     financial_facts --> fx_rates
-    market_data --> fx_rates
     fx_supported_pairs --> fx_refresh_state
     fx_refresh_state --> fx_rates
 ```
@@ -46,4 +45,5 @@ flowchart LR
 - `listing.listing_id` is the canonical downstream key for facts, prices, metrics, and primary-listing status.
 - `provider_listing.provider_listing_id` replaces `(provider, provider_symbol)` as the durable provider-scoped raw/state key.
 - User-facing canonical symbols such as `AAPL.US` are derived from `listing.symbol` plus `exchange.exchange_code`.
-- FX discovery reads currencies from `provider_listing`, `financial_facts`, and `market_data`, but FX storage itself is not keyed back to a listing.
+- FX discovery reads currencies from `listing` and `financial_facts`, but FX
+  storage itself is not keyed back to a listing.

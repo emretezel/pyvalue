@@ -65,9 +65,9 @@ Provider-facing listing identity lives here. Rows are unique by
 `(provider_exchange_id, provider_symbol)`, where `provider_symbol` is the bare
 provider catalog symbol such as `AAPL`, not `AAPL.US`.
 
-`provider_listing.currency` is the first source of truth for a listing's
-normalization and metric currency. If it is missing, code falls back to
-`listing.currency`.
+Provider-listing rows do not store currency. The canonical listing quote unit
+lives on `listing.currency`, and compatibility catalog APIs expose that value
+when callers ask for provider-listing currency.
 
 `provider_listing` intentionally does not store provider-side descriptive
 columns such as security type, provider name, country, ISIN, or refresh
@@ -105,18 +105,19 @@ Currency and unit semantics:
 
 - monetary facts store a real ISO `currency`
 - non-monetary facts keep meaningful `unit` values such as `shares`
-- listing currency is resolved from `provider_listing.currency` first, then
-  `listing.currency`; raw fundamentals and `market_data.currency` are not
-  listing-currency sources
-- configured subunit currencies are normalized before arithmetic and
-  persistence: `GBX`/`GBP0.01` -> `GBP`, `ZAC` -> `ZAR`, `ILA` -> `ILS`
+- `listing.currency` is the only persisted listing-currency truth and preserves
+  the quote unit from catalog metadata
+- raw fundamentals and market-data rows are not listing-currency sources
+- configured subunit currencies are normalized before monetary arithmetic and
+  persistence of monetary facts: `GBX`/`GBP0.01` -> `GBP`, `ZAC` -> `ZAR`,
+  `ILA` -> `ILS`
 
 ### `market_data`
 
 Stores latest quote and market-cap snapshot information by `listing_id`.
-`market_data.currency` stores the quote row currency for price and market-cap
-snapshots. It is not used as listing-currency metadata for normalization or
-metric currency invariants.
+`market_data.price` is stored in the listing quote unit from `listing.currency`.
+`market_data.market_cap` is stored in base(`listing.currency`). The table does
+not persist a duplicate currency column.
 
 ### `market_data_fetch_state`
 
@@ -126,7 +127,7 @@ Operational market-data refresh progress and retry backoff live here, keyed by
 ### `fx_rates`, `fx_supported_pairs`, and `fx_refresh_state`
 
 FX storage remains provider-code keyed. FX discovery reads currencies from
-`provider_listing`, `financial_facts`, and `market_data`.
+`listing` and `financial_facts`.
 
 ### `metrics` and `metric_compute_status`
 

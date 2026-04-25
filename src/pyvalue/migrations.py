@@ -1926,7 +1926,9 @@ def _migration_027_add_currency_discovery_indexes(
             WHERE currency IS NOT NULL
             """
         )
-    if "market_data" in existing_tables:
+    if "market_data" in existing_tables and "currency" in _table_columns(
+        conn, "market_data"
+    ):
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_market_data_currency_nonnull
@@ -2390,13 +2392,17 @@ def _migration_034_rename_catalog_identity_tables(conn: sqlite3.Connection) -> N
         ON provider_listing(listing_id)
         """
     )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_provider_listing_currency_nonnull
-        ON provider_listing(currency)
-        WHERE currency IS NOT NULL
-        """
+    provider_listing_has_currency = "currency" in _table_columns(
+        conn, "provider_listing"
     )
+    if provider_listing_has_currency:
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_provider_listing_currency_nonnull
+            ON provider_listing(currency)
+            WHERE currency IS NOT NULL
+            """
+        )
 
     provider_rows = []
     if _table_exists(conn, "providers"):
@@ -2843,21 +2849,53 @@ def _migration_034_rename_catalog_identity_tables(conn: sqlite3.Connection) -> N
                     int(listing_id),
                 )
             )
-        conn.executemany(
-            """
-            INSERT INTO provider_listing (
-                provider_id,
-                provider_exchange_id,
-                provider_symbol,
-                currency,
-                listing_id
-            ) VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(provider_exchange_id, provider_symbol) DO UPDATE SET
-                currency = COALESCE(excluded.currency, provider_listing.currency),
-                listing_id = excluded.listing_id
-            """,
-            payload,
-        )
+        if provider_listing_has_currency:
+            conn.executemany(
+                """
+                INSERT INTO provider_listing (
+                    provider_id,
+                    provider_exchange_id,
+                    provider_symbol,
+                    currency,
+                    listing_id
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(provider_exchange_id, provider_symbol) DO UPDATE SET
+                    currency = COALESCE(excluded.currency, provider_listing.currency),
+                    listing_id = excluded.listing_id
+                """,
+                payload,
+            )
+        else:
+            conn.executemany(
+                """
+                UPDATE listing
+                SET currency = COALESCE(?, currency)
+                WHERE listing_id = ?
+                """,
+                [(currency, listing_id) for *_, currency, listing_id in payload],
+            )
+            conn.executemany(
+                """
+                INSERT INTO provider_listing (
+                    provider_id,
+                    provider_exchange_id,
+                    provider_symbol,
+                    listing_id
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(provider_exchange_id, provider_symbol) DO UPDATE SET
+                    listing_id = excluded.listing_id
+                """,
+                [
+                    (provider_id, provider_exchange_id, bare_symbol, listing_id)
+                    for (
+                        provider_id,
+                        provider_exchange_id,
+                        bare_symbol,
+                        _currency,
+                        listing_id,
+                    ) in payload
+                ],
+            )
 
     def _ensure_provider_scoped_table(
         table_name: str,
@@ -3654,6 +3692,101 @@ def _migration_038_move_primary_listing_status_to_listing(
         conn.execute("DROP TABLE security_listing_status")
 
 
+def _migration_039_canonical_listing_quote_currency(
+    conn: sqlite3.Connection,
+) -> None:
+    """Keep listing quote currency as the only persisted currency truth."""
+
+    conn.execute("DROP VIEW IF EXISTS supported_tickers")
+    conn.execute("DROP VIEW IF EXISTS provider_listing_catalog")
+
+    if _table_exists(conn, "listing") and "currency" in _table_columns(conn, "listing"):
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_listing_currency_nonnull
+            ON listing(currency)
+            WHERE currency IS NOT NULL
+            """
+        )
+
+    if _table_exists(conn, "provider_listing"):
+        provider_listing_columns = _table_columns(conn, "provider_listing")
+        if "currency" in provider_listing_columns and _table_exists(conn, "listing"):
+            conn.execute(
+                """
+                UPDATE listing
+                SET currency = (
+                    SELECT UPPER(TRIM(pl.currency))
+                    FROM provider_listing pl
+                    LEFT JOIN provider p ON p.provider_id = pl.provider_id
+                    WHERE pl.listing_id = listing.listing_id
+                      AND pl.currency IS NOT NULL
+                      AND TRIM(pl.currency) <> ''
+                    ORDER BY
+                        CASE
+                            WHEN p.provider_code = 'EODHD' THEN 0
+                            WHEN p.provider_code = 'SEC' THEN 1
+                            ELSE 2
+                        END,
+                        pl.provider_listing_id
+                    LIMIT 1
+                )
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM provider_listing pl
+                    WHERE pl.listing_id = listing.listing_id
+                      AND pl.currency IS NOT NULL
+                      AND TRIM(pl.currency) <> ''
+                )
+                """
+            )
+            conn.execute("DROP INDEX IF EXISTS idx_provider_listing_currency_nonnull")
+            conn.execute("ALTER TABLE provider_listing DROP COLUMN currency")
+
+    if _table_exists(conn, "market_data"):
+        market_data_columns = _table_columns(conn, "market_data")
+        if "currency" in market_data_columns:
+            conn.execute(
+                """
+                UPDATE market_data
+                SET
+                    price = CASE
+                        WHEN (
+                            SELECT UPPER(TRIM(l.currency))
+                            FROM listing l
+                            WHERE l.listing_id = market_data.listing_id
+                        ) IN ('GBX', 'GBP0.01')
+                         AND UPPER(TRIM(currency)) = 'GBP'
+                            THEN price * 100.0
+                        WHEN (
+                            SELECT UPPER(TRIM(l.currency))
+                            FROM listing l
+                            WHERE l.listing_id = market_data.listing_id
+                        ) = 'ZAC'
+                         AND UPPER(TRIM(currency)) = 'ZAR'
+                            THEN price * 100.0
+                        WHEN (
+                            SELECT UPPER(TRIM(l.currency))
+                            FROM listing l
+                            WHERE l.listing_id = market_data.listing_id
+                        ) = 'ILA'
+                         AND UPPER(TRIM(currency)) = 'ILS'
+                            THEN price * 100.0
+                        ELSE price
+                    END,
+                    market_cap = CASE
+                        WHEN market_cap IS NOT NULL
+                         AND UPPER(TRIM(currency)) IN ('GBX', 'GBP0.01', 'ZAC', 'ILA')
+                            THEN market_cap / 100.0
+                        ELSE market_cap
+                    END
+                WHERE currency IS NOT NULL
+                """
+            )
+            conn.execute("DROP INDEX IF EXISTS idx_market_data_currency_nonnull")
+            conn.execute("ALTER TABLE market_data DROP COLUMN currency")
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -3693,6 +3826,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_036_drop_fundamentals_raw_listing_columns,
     _migration_037_drop_fundamentals_raw_currency,
     _migration_038_move_primary_listing_status_to_listing,
+    _migration_039_canonical_listing_quote_currency,
 ]
 
 

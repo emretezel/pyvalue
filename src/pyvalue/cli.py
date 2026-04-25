@@ -47,6 +47,7 @@ from pyvalue.currency import (
     is_monetary_unit_kind,
     metric_currency_or_none,
     normalize_currency_code,
+    normalize_monetary_amount,
 )
 from pyvalue.ingestion import EODHDFundamentalsClient, SECCompanyFactsClient
 from pyvalue.fx import (
@@ -7652,8 +7653,15 @@ def cmd_recalc_market_cap(
                 LOGGER.warning("Skipping %s due to missing share count", symbol)
                 continue
             snapshot = snapshots_by_symbol[symbol]
+            base_price, _ = normalize_monetary_amount(
+                snapshot.price,
+                snapshot.currency,
+            )
+            if base_price is None:
+                LOGGER.warning("Skipping %s due to invalid price", symbol)
+                continue
             pending_updates.append(
-                (snapshot.security_id, snapshot.as_of, snapshot.price * shares)
+                (snapshot.security_id, snapshot.as_of, float(base_price) * shares)
             )
             updated_symbols.append((idx, symbol))
         print(

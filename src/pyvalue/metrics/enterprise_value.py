@@ -10,7 +10,11 @@ from typing import Optional
 import logging
 
 from pyvalue.metrics.base import MetricCurrencyInvariantError
-from pyvalue.metrics.utils import normalize_metric_amount, normalize_metric_record
+from pyvalue.metrics.utils import (
+    normalize_market_cap_amount,
+    normalize_metric_amount,
+    normalize_metric_record,
+)
 from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -108,15 +112,14 @@ def resolve_enterprise_value_denominator(
     if snapshot.market_cap <= 0:
         LOGGER.warning("%s: non-positive market cap snapshot for %s", context, symbol)
         return None
-    market_cap = validate_denominator_amount(
+    market_cap = normalize_market_cap_amount(
+        snapshot.market_cap,
+        metric_id=context,
         symbol=symbol,
-        amount=snapshot.market_cap,
-        source_currency=getattr(snapshot, "currency", None),
-        target_currency=target_currency,
         as_of=snapshot.as_of,
-        context=context,
+        expected_currency=target_currency,
         contexts=(market_repo, repo),
-    )
+    )[0]
 
     short_debt = repo.latest_fact(symbol, "ShortTermDebt")
     long_debt = repo.latest_fact(symbol, "LongTermDebt")

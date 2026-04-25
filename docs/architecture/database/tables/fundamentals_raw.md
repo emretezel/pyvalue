@@ -65,6 +65,6 @@ Wide-table sample rows live in the [Sample Rows appendix](../sample-rows.md#fund
 
 - The `data` column is the widest row in the schema and a major I/O hotspot.
 - The durable provider key is now `provider_listing_id`, not `(provider, provider_symbol)`.
-- Listing currency is intentionally not stored here. Use `provider_listing.currency`
-  first, then `listing.currency`; raw payload currencies are fact source
+- Listing currency is intentionally not stored here. Use `listing.currency` for
+  catalog quote-unit metadata; raw payload currencies are fact source
   currencies only.

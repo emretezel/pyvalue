@@ -10,7 +10,7 @@ import logging
 from typing import Optional
 
 from pyvalue.metrics.base import MetricResult
-from pyvalue.metrics.utils import normalize_metric_amount
+from pyvalue.metrics.utils import normalize_market_cap_amount
 from pyvalue.storage import FinancialFactsRepository, MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -36,12 +36,10 @@ class MarketCapitalizationMetric:
         if snapshot.market_cap <= 0:
             LOGGER.warning("market_cap: non-positive market cap for %s", symbol)
             return None
-        value, currency = normalize_metric_amount(
+        value, currency = normalize_market_cap_amount(
             snapshot.market_cap,
-            getattr(snapshot, "currency", None),
             metric_id=self.id,
             symbol=symbol,
-            input_name="market_cap",
             as_of=snapshot.as_of,
             contexts=(market_repo, repo),
         )

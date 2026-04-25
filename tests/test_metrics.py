@@ -208,23 +208,23 @@ def test_current_ratio_metric_returns_none_for_fact_currency_mismatch():
     assert metric.compute(symbol, repo) is None
 
 
-def test_market_capitalization_metric_returns_none_for_market_data_currency_mismatch():
+def test_market_capitalization_metric_uses_listing_currency_for_market_cap():
     metric = MarketCapitalizationMetric()
     symbol = "AAPL.US"
 
-    assert (
-        metric.compute(
-            symbol,
-            _OwnerEarningsRepo({}, ticker_currency="USD"),
-            _build_market_repo(
-                market_cap=100.0,
-                as_of=date.today().isoformat(),
-                currency="EUR",
-                ticker_currency="USD",
-            ),
-        )
-        is None
+    result = metric.compute(
+        symbol,
+        _OwnerEarningsRepo({}, ticker_currency="USD"),
+        _build_market_repo(
+            market_cap=100.0,
+            as_of=date.today().isoformat(),
+            currency="EUR",
+            ticker_currency="USD",
+        ),
     )
+    assert result is not None
+    assert result.value == 100.0
+    assert result.currency == "USD"
 
 
 def test_fx_rate_store_removed_from_public_api():
@@ -9016,7 +9016,7 @@ def test_oey_equity_metric_returns_none_when_numerator_missing():
     assert result is None
 
 
-def test_oey_equity_metric_returns_none_for_market_cap_currency_mismatch():
+def test_oey_equity_metric_uses_listing_currency_for_market_cap():
     metric = OwnerEarningsYieldEquityMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -9148,12 +9148,11 @@ def test_oey_equity_metric_returns_none_for_market_cap_currency_mismatch():
         def ticker_currency(self, symbol):
             return "USD"
 
-    assert (
-        metric.compute(
-            symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
-        )
-        is None
+    result = metric.compute(
+        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
     )
+    assert result is not None
+    assert result.value == 7.44
 
 
 def test_oey_equity_metric_allows_negative_values():
@@ -10957,7 +10956,7 @@ def test_net_buyback_yield_metric_returns_none_when_market_cap_missing_and_no_sh
     )
 
 
-def test_net_buyback_yield_metric_returns_none_for_market_cap_currency_mismatch():
+def test_net_buyback_yield_metric_uses_listing_currency_for_market_cap():
     metric = NetBuybackYieldMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -10977,19 +10976,18 @@ def test_net_buyback_yield_metric_returns_none_for_market_cap_currency_mismatch(
         }
     )
 
-    assert (
-        metric.compute(
-            symbol,
-            repo,
-            _build_market_repo(
-                market_cap=500.0,
-                as_of=q3,
-                currency="EUR",
-                ticker_currency="USD",
-            ),
-        )
-        is None
+    result = metric.compute(
+        symbol,
+        repo,
+        _build_market_repo(
+            market_cap=500.0,
+            as_of=q3,
+            currency="EUR",
+            ticker_currency="USD",
+        ),
     )
+    assert result is not None
+    assert result.value == 0.2
 
 
 def test_net_buyback_yield_metric_uses_share_count_fallback_when_market_cap_missing():

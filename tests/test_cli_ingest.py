@@ -7228,6 +7228,62 @@ def test_cmd_recalc_market_cap(tmp_path):
     assert snapshot_b.market_cap is None
 
 
+def test_cmd_recalc_market_cap_uses_base_currency_for_subunit_quote_prices(tmp_path):
+    db_path = tmp_path / "marketcap-subunits.db"
+    cases = [
+        ("AAA.LSE", "LSE", "GBX", 250.0, 100, 250.0),
+        ("BBB.JSE", "JSE", "ZAC", 1234.0, 20, 246.8),
+        ("CCC.TA", "TA", "ILA", 987.0, 10, 98.7),
+    ]
+    for symbol, exchange_code, currency, _price, _shares, _expected in cases:
+        store_catalog_listings(
+            db_path,
+            exchange_code,
+            [
+                Listing(
+                    symbol=symbol,
+                    security_name=f"{symbol} Ltd",
+                    exchange=exchange_code,
+                    currency=currency,
+                )
+            ],
+            provider="EODHD",
+        )
+
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    market_repo = MarketDataRepository(db_path)
+    market_repo.initialize_schema()
+    for symbol, _exchange_code, _currency, price, shares, _expected in cases:
+        fact_repo.replace_facts(
+            symbol,
+            [
+                make_fact(
+                    concept="CommonStockSharesOutstanding",
+                    end_date="2023-12-31",
+                    value=shares,
+                    symbol=symbol,
+                )
+            ],
+        )
+        market_repo.upsert_price(symbol, "2024-01-01", price=price)
+
+    rc = cli.cmd_recalc_market_cap(
+        database=str(db_path),
+        symbols=[case[0] for case in cases],
+        exchange_codes=None,
+        all_supported=False,
+    )
+
+    assert rc == 0
+    for symbol, _exchange_code, currency, price, _shares, expected in cases:
+        snapshot = market_repo.latest_snapshot(symbol)
+        assert snapshot is not None
+        assert snapshot.price == price
+        assert snapshot.currency == currency
+        assert snapshot.market_cap == pytest.approx(expected)
+
+
 def test_cmd_recalc_market_cap_prints_status_before_market_data_scan(
     monkeypatch, tmp_path, capsys
 ):

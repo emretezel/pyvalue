@@ -40,10 +40,10 @@ For EODHD monetary fields, currency resolution follows one shared precedence:
 4. a narrow documented legacy fallback only when the fact `unit` already stores
    the ISO currency code
 
-The target currency for EODHD normalization is the listing currency from
-`provider_listing.currency` first, then `listing.currency`. Raw payload
-currency values are source currencies for facts only; they never become listing
-metadata.
+The target currency for EODHD normalization is base(`listing.currency`).
+`listing.currency` preserves the catalog quote unit, including subunits such as
+`GBX`, `ZAC`, and `ILA`; raw payload currency values are source currencies for
+facts only and never become listing metadata.
 
 If a monetary field still cannot be assigned a currency, normalization logs a
 warning and skips only that fact or derived fact.
@@ -60,8 +60,8 @@ Derived facts are also currency-aware:
 
 - same-period accounting derivations prefer the statement/reporting currency for
   that period
-- market-linked and target-currency derivations align to the catalog listing
-  currency, not `market_data.currency`
+- market-linked and target-currency derivations align to
+  base(`listing.currency`)
 - mixed-currency monetary inputs are converted before arithmetic
 - missing currency skips only the affected derived fact and logs structured
   context

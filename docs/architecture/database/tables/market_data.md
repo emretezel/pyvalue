@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Stores price, volume, market-cap, and quote-currency snapshots for canonical listings.
+Stores price, volume, and market-cap snapshots for canonical listings.
 
 ## Grain
 
@@ -25,8 +25,7 @@ One row per `(listing_id, as_of)` snapshot date.
 | `as_of` | `DATE` | no | PK, idx | snapshot date |
 | `price` | `REAL` | no |  | latest close or provider price |
 | `volume` | `INTEGER` | yes |  | provider volume |
-| `market_cap` | `REAL` | yes |  | market capitalization |
-| `currency` | `TEXT` | yes | partial idx | quote-row currency for this price/market-cap snapshot |
+| `market_cap` | `REAL` | yes |  | market capitalization in base(`listing.currency`) |
 | `source_provider` | `TEXT` | no |  | provenance |
 | `updated_at` | `TEXT` | no |  | write timestamp |
 
@@ -43,7 +42,6 @@ One row per `(listing_id, as_of)` snapshot date.
 ## Secondary Indexes
 
 <!-- BEGIN generated_secondary_indexes -->
-- `idx_market_data_currency_nonnull (currency)` WHERE currency IS NOT NULL
 - `idx_market_data_latest (listing_id, as_of DESC)`
 <!-- END generated_secondary_indexes -->
 
@@ -51,7 +49,6 @@ One row per `(listing_id, as_of)` snapshot date.
 
 - latest market data lookup for price and market-cap metrics
 - market-cap recalculation
-- FX currency discovery
 
 ## Main Write Paths
 
@@ -72,7 +69,6 @@ One row per `(listing_id, as_of)` snapshot date.
     "price": 30.02,
     "volume": 349376,
     "market_cap": 3288961180.0,
-    "currency": "EUR",
     "source_provider": "EODHD",
     "updated_at": "2026-04-02T14:21:31.509182+00:00"
   },
@@ -82,7 +78,6 @@ One row per `(listing_id, as_of)` snapshot date.
     "price": 30.02,
     "volume": 350816,
     "market_cap": 3288961180.0,
-    "currency": "EUR",
     "source_provider": "EODHD",
     "updated_at": "2026-04-06T12:14:35.451739+00:00"
   },
@@ -92,7 +87,6 @@ One row per `(listing_id, as_of)` snapshot date.
     "price": 32.26,
     "volume": 387867,
     "market_cap": 3515662540.0,
-    "currency": "EUR",
     "source_provider": "EODHD",
     "updated_at": "2026-04-13T16:12:29.084722+00:00"
   },
@@ -102,7 +96,6 @@ One row per `(listing_id, as_of)` snapshot date.
     "price": 26.43,
     "volume": 11551525,
     "market_cap": 21926592300.0,
-    "currency": "EUR",
     "source_provider": "EODHD",
     "updated_at": "2026-04-02T14:21:31.509182+00:00"
   },
@@ -112,7 +105,6 @@ One row per `(listing_id, as_of)` snapshot date.
     "price": 27.94,
     "volume": 1975088,
     "market_cap": 23179303400.0,
-    "currency": "EUR",
     "source_provider": "EODHD",
     "updated_at": "2026-04-06T12:14:34.283301+00:00"
   }
@@ -122,6 +114,7 @@ One row per `(listing_id, as_of)` snapshot date.
 
 ## Review Notes
 
-- `market_data.currency` describes the stored quote row. Listing-currency
-  metadata comes from `provider_listing.currency` first, then
-  `listing.currency`.
+- `market_data.price` is stored in the listing quote unit from
+  `listing.currency`, including subunits such as `GBX`, `ZAC`, and `ILA`.
+- `market_data.market_cap` is stored in base(`listing.currency`).
+- Market-data rows do not persist a duplicate currency column.

@@ -13,6 +13,13 @@ This covers:
 - bulk quote refreshes
 - later market-cap recalculation using updated share counts
 
+Storage invariants:
+- `listing.currency` is the authoritative listing quote unit and may be a
+  subunit such as `GBX`, `ZAC`, or `ILA`
+- `market_data.price` is stored in that quote unit
+- `market_data.market_cap` is stored in base(`listing.currency`)
+- market-data rows do not persist a duplicate currency column
+
 ## Update One Symbol
 
 ```bash
@@ -94,8 +101,9 @@ If prices were ingested before useful share-count facts were available, recomput
 pyvalue recalc-market-cap --exchange-codes US
 ```
 
-This uses the latest price and latest normalized share count, and updates only
-the latest stored `market_data.as_of` row for each selected symbol.
+This uses the latest price, converts quote-unit subunit prices to
+base(`listing.currency`), multiplies by the latest normalized share count, and
+updates only the latest stored `market_data.as_of` row for each selected symbol.
 
 ## Operational Notes
 

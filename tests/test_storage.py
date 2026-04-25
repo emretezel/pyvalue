@@ -68,7 +68,7 @@ def test_supported_ticker_repository_replace_from_listings_persists_rows(tmp_pat
         rows = conn.execute(
             """
             SELECT p.provider_code, px.provider_exchange_code, pl.provider_symbol,
-                   e.exchange_code, pl.currency
+                   e.exchange_code, l.currency
             FROM provider_listing pl
             JOIN provider p ON p.provider_id = pl.provider_id
             JOIN provider_exchange px
@@ -87,6 +87,7 @@ def test_supported_ticker_repository_replace_from_listings_persists_rows(tmp_pat
         ("SEC", "US", "BBB", "US", None),
     ]
     assert "security_type" not in provider_listing_columns
+    assert "currency" not in provider_listing_columns
 
 
 def test_supported_ticker_repository_replace_from_listings_overwrites_exchange_slice(

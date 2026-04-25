@@ -69,17 +69,21 @@ metrics, and screening.
 
 Key rules:
 
-- configured subunit currencies are normalized before any arithmetic:
+- configured subunit currencies are normalized to their base currency before
+  monetary arithmetic:
   `GBX`/`GBP0.01` -> `GBP`, `ZAC` -> `ZAR`, `ILA` -> `ILS`
-- listing currency comes only from catalog metadata:
-  `provider_listing.currency` first, then `listing.currency`. Raw fundamentals
-  payloads never backfill listing currency.
+- listing currency is stored once on `listing.currency` as the authoritative
+  quote unit from catalog metadata. It can be a subunit such as `GBX`, `ZAC`,
+  or `ILA`; raw fundamentals payloads never backfill listing currency.
+- market-data prices are stored in the listing quote unit, while stored
+  market caps and monetary normalization targets use the base currency derived
+  from `listing.currency`.
 - EODHD monetary currency resolution uses explicit precedence:
   entry/field-level currency, then direct statement-level currency, then
   payload-level `General.CurrencyCode`, then a narrow documented repo fallback
   for legacy facts whose `unit` already stores the ISO currency code.
-- When EODHD source facts use a different currency than the listing currency,
-  normalization converts the fact into the listing currency using stored FX.
+- When EODHD source facts use a different currency than base(`listing.currency`),
+  normalization converts the fact into that base currency using stored FX.
 - Monetary facts retain a real `currency` value. Non-monetary facts keep a
   meaningful `unit` such as `shares`.
 - Monetary metrics persist explicit unit metadata and currency; ratio, percent,

@@ -10,13 +10,13 @@ This page lists the current secondary indexes from the post-refactor schema. Pri
 - `listing`
   - `idx_listing_exchange (exchange_id)`
     - supports exchange-scoped canonical listing resolution
+  - `idx_listing_currency_nonnull (currency) WHERE currency IS NOT NULL`
+    - narrows FX currency discovery and currency-scoped validation scans
 - `provider_listing`
   - `idx_provider_listing_provider (provider_id)`
     - supports provider-scoped catalog scans
   - `idx_provider_listing_listing (listing_id)`
     - supports canonical-listing joins back into provider rows
-  - `idx_provider_listing_currency_nonnull (currency) WHERE currency IS NOT NULL`
-    - narrows FX currency discovery scans
 
 ## Raw Ingestion And State
 
@@ -47,8 +47,6 @@ This page lists the current secondary indexes from the post-refactor schema. Pri
 - `market_data`
   - `idx_market_data_latest (listing_id, as_of DESC)`
     - critical latest-snapshot index for market-data reads and metrics
-  - `idx_market_data_currency_nonnull (currency) WHERE currency IS NOT NULL`
-    - narrows FX discovery scans
 - `metrics`
   - `idx_metrics_metric_id (metric_id)`
     - supports metric-oriented scans across the universe
@@ -70,4 +68,5 @@ This page lists the current secondary indexes from the post-refactor schema. Pri
 - Do provider-scoped fetch-state queries now need additional indexes through joins to `provider_listing`, or is the narrower `next_eligible_at` index enough?
 - Does `idx_fin_facts_concept` justify its write cost, or are most reads already scoped by `listing_id`?
 - Is `idx_metrics_metric_id` enough for screening workloads, or would some metric-heavy reports benefit from `(metric_id, listing_id)` ordering?
-- Are the partial currency indexes still worth keeping if FX discovery is a minor share of runtime?
+- Is the `listing.currency` partial index still worth keeping if FX discovery is
+  a minor share of runtime?

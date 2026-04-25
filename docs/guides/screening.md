@@ -186,7 +186,8 @@ the columns include:
 - `entity`
 - `description`
 - `price`
-- `price_currency`
+- `price_currency` (the listing quote unit, such as `GBX` for a pence-quoted
+  UK listing)
 - ranking fields such as `qarp_rank` and `qarp_score` when present
 - one column per screen criterion with the stored left-side metric value
 

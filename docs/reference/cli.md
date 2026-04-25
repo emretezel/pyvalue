@@ -105,7 +105,7 @@ Notes:
   a concurrent worker pool, and retry backoff for multi-day runs
 - EODHD raw writes do not store or infer listing currency from
   `General.CurrencyCode`; listing currency remains catalog metadata on
-  `provider_listing`/`listing`
+  `listing`
 - storing an EODHD raw payload also refreshes cached primary-vs-secondary
   listing classification for that symbol
 - retry backoff is respected by default; use `--retry-failed-now` to ignore it
@@ -179,9 +179,10 @@ Notes:
 - only symbols with stored raw fundamentals are normalized
 - EODHD listings already classified as secondary are excluded from the
   requested scope before normalization starts
-- EODHD normalization resolves target currency from `provider_listing.currency`
-  first, then `listing.currency`; raw payload currencies are used only as fact
-  source currencies
+- EODHD normalization resolves its target from base(`listing.currency`);
+  `listing.currency` itself preserves the catalog quote unit, including
+  subunits such as `GBX`, `ZAC`, and `ILA`
+- raw payload currencies are used only as fact source currencies
 - fact source-currency lookup uses entry-level currency keys, then direct
   statement-level currency, then payload-level `General.CurrencyCode`
 - by default, normalization skips symbols whose raw `fundamentals_raw.fetched_at`
@@ -431,7 +432,9 @@ Notes:
   to save or inspect the full result set
 - `--output-csv` writes a row-oriented file with one passing symbol per row,
   base columns such as `symbol`, `entity`, `description`, `price`, and
-  `price_currency`, then ranking columns and one column per criterion
+  `price_currency`, then ranking columns and one column per criterion.
+  `price_currency` is the listing quote unit; monetary metrics and market-cap
+  values use base(`listing.currency`)
 - if the screen YAML defines a `ranking` block, multi-symbol output also adds
   ranking columns such as `qarp_rank` and `qarp_score`, and sorts passing
   symbols

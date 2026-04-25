@@ -2,7 +2,8 @@
 
 ## Purpose
 
-Stores canonical exchange-specific listing identity.
+Stores canonical exchange-specific listing identity and the authoritative
+listing quote unit.
 
 ## Grain
 
@@ -25,7 +26,7 @@ One row per `(exchange_id, symbol)`.
 | `issuer_id` | `INTEGER` | no | FK | issuer metadata link |
 | `exchange_id` | `INTEGER` | no | FK, idx | canonical exchange link; part of composite unique key |
 | `symbol` | `TEXT` | no |  | bare canonical listing symbol such as `AAPL`; part of composite unique key |
-| `currency` | `TEXT` | yes |  | fallback listing currency when provider listing currency is missing |
+| `currency` | `TEXT` | yes | partial idx | authoritative listing quote unit, including subunits such as `GBX`, `ZAC`, and `ILA` |
 | `primary_listing_status` | `TEXT` | no |  | canonical primary-listing classification: `unknown`, `primary`, or `secondary` |
 
 ## Keys And Relationships
@@ -46,6 +47,7 @@ One row per `(exchange_id, symbol)`.
 ## Secondary Indexes
 
 <!-- BEGIN generated_secondary_indexes -->
+- `idx_listing_currency_nonnull (currency)` WHERE currency IS NOT NULL
 - `idx_listing_exchange (exchange_id)`
 <!-- END generated_secondary_indexes -->
 
@@ -53,6 +55,7 @@ One row per `(exchange_id, symbol)`.
 
 - canonical symbol resolution through `listing.symbol || '.' || exchange.exchange_code`
 - downstream joins from facts, market data, metrics, and primary-listing status
+- FX currency discovery and currency-scoped data checks
 
 ## Main Write Paths
 
@@ -115,9 +118,9 @@ One row per `(exchange_id, symbol)`.
 ## Review Notes
 
 - Canonical user-facing symbols such as `AAPL.US` are derived, not stored.
-- Listing currency resolution uses `provider_listing.currency` first, then this
-  table's `currency`.
-- `market_data.currency` stores quote-row currency only and is not used as
-  listing-currency metadata.
+- `listing.currency` is the only persisted listing-currency truth. It is a
+  quote unit and is not collapsed to base currency at storage time.
+- Monetary normalization, market-cap calculations, FX discovery, and monetary
+  metrics derive base currency from `listing.currency`.
 - Unknown primary-listing status is treated as eligible; downstream
   primary-only scopes exclude only `secondary`.

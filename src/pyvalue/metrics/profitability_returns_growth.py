@@ -23,6 +23,7 @@ from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     MAX_FY_FACT_AGE_DAYS,
     is_recent_fact,
+    normalize_market_cap_amount,
     normalize_metric_record,
     require_metric_ticker_currency,
 )
@@ -597,15 +598,14 @@ class ProfitabilityReturnsGrowthCalculator:
             LOGGER.warning("%s: missing market cap snapshot for %s", context, symbol)
             return None
 
-        market_cap = validate_denominator_amount(
+        market_cap = normalize_market_cap_amount(
+            snapshot.market_cap,
+            metric_id=context,
             symbol=symbol,
-            amount=snapshot.market_cap,
-            source_currency=getattr(snapshot, "currency", None),
-            target_currency=dividends_paid.currency,
             as_of=snapshot.as_of,
-            context=context,
+            expected_currency=dividends_paid.currency,
             contexts=(market_repo, repo),
-        )
+        )[0]
         if market_cap is None or market_cap <= 0:
             if market_cap is not None:
                 LOGGER.warning(
