@@ -29,27 +29,24 @@ CREATE TABLE "financial_facts_refresh_state" (
             refreshed_at TEXT NOT NULL
         );
 CREATE TABLE "fundamentals_fetch_state" (
-            provider_listing_id INTEGER NOT NULL PRIMARY KEY,
-            last_fetched_at TEXT,
-            last_status TEXT,
-            last_error TEXT,
-            next_eligible_at TEXT,
-            attempts INTEGER NOT NULL DEFAULT 0,
+            provider_listing_id INTEGER PRIMARY KEY,
+            failed_at TEXT NOT NULL,
+            error TEXT NOT NULL,
+            next_eligible_at TEXT NOT NULL,
+            attempts INTEGER NOT NULL CHECK (attempts > 0),
             FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
         );
 CREATE TABLE "fundamentals_normalization_state" (
-            provider_listing_id INTEGER NOT NULL PRIMARY KEY,
-            listing_id INTEGER NOT NULL,
-            raw_fetched_at TEXT NOT NULL,
-            last_normalized_at TEXT NOT NULL,
-            FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id),
-            FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
+            provider_listing_id INTEGER PRIMARY KEY,
+            normalized_payload_hash TEXT NOT NULL CHECK (length(normalized_payload_hash) = 64),
+            normalized_at TEXT NOT NULL,
+            FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
         );
 CREATE TABLE fundamentals_raw (
-            payload_id INTEGER PRIMARY KEY,
-            provider_listing_id INTEGER NOT NULL UNIQUE,
+            provider_listing_id INTEGER PRIMARY KEY,
             data TEXT NOT NULL,
-            fetched_at TEXT NOT NULL,
+            payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+            last_fetched_at TEXT NOT NULL,
             FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
         );
 CREATE TABLE fx_rates (
@@ -205,10 +202,8 @@ CREATE INDEX idx_fin_facts_security_concept_latest
             ON financial_facts(listing_id, concept, end_date DESC, filed DESC);
 CREATE INDEX idx_fundamentals_fetch_next
             ON fundamentals_fetch_state(next_eligible_at);
-CREATE INDEX idx_fundamentals_norm_state_security
-            ON fundamentals_normalization_state(listing_id);
-CREATE INDEX idx_fundamentals_raw_provider_fetched
-        ON fundamentals_raw(fetched_at);
+CREATE INDEX idx_fundamentals_raw_last_fetched
+        ON fundamentals_raw(last_fetched_at);
 CREATE INDEX idx_fx_rates_pair_date
         ON fx_rates(provider, base_currency, quote_currency, rate_date DESC);
 CREATE INDEX idx_fx_supported_pairs_refreshable

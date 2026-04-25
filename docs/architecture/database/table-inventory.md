@@ -20,9 +20,9 @@ All row counts and table sizes below come from the live `data/pyvalue.db` snapsh
 
 | Table | Rows | Table size | Primary key | Main logical refs | Initial review focus |
 | --- | --- | --- | --- | --- | --- |
-| [fundamentals_raw](tables/fundamentals_raw.md) | `75,848` | `16.63 GiB` | `payload_id` | `provider_listing_id` in `provider_listing` | wide-row storage, JSON payload size, and latest-row-only semantics |
-| [fundamentals_fetch_state](tables/fundamentals_fetch_state.md) | `75,848` | `3.8 MiB` | `provider_listing_id` | `provider_listing_id` in `provider_listing` | retry/backoff query shape vs index set |
-| [fundamentals_normalization_state](tables/fundamentals_normalization_state.md) | `61,092` | `4.9 MiB` | `provider_listing_id` | `provider_listing_id` in `provider_listing`, `listing_id` in `listing` | whether this watermark table is minimal and sufficient |
+| [fundamentals_raw](tables/fundamentals_raw.md) | `75,848` | `16.63 GiB` | `provider_listing_id` | `provider_listing_id` in `provider_listing` | wide-row storage, JSON payload size, hash versioning, and latest-row-only semantics |
+| [fundamentals_fetch_state](tables/fundamentals_fetch_state.md) | active failures only | n/a | `provider_listing_id` | `provider_listing_id` in `provider_listing` | active retry/backoff rows only; success is derived from raw payloads |
+| [fundamentals_normalization_state](tables/fundamentals_normalization_state.md) | `61,092` | `4.9 MiB` | `provider_listing_id` | `provider_listing_id` in `provider_listing` | payload-hash watermark minimality |
 | [market_data_fetch_state](tables/market_data_fetch_state.md) | `61,092` | `3.0 MiB` | `provider_listing_id` | `provider_listing_id` in `provider_listing` | same pattern as fundamentals state; check duplication vs simplicity |
 
 ## Canonical Analytics

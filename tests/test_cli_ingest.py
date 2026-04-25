@@ -951,7 +951,7 @@ def test_cmd_ingest_fundamentals_bulk_eodhd_with_exchange(monkeypatch, tmp_path)
         user_agent=None,
         max_symbols=None,
         max_age_days=None,
-        respect_backoff=True,
+        respect_backoff=False,
     )
     assert rc == 0
     assert set(calls["fetched"]) == {("AAA.LSE", None), ("CCC.LSE", None)}
@@ -1501,7 +1501,7 @@ def test_cmd_ingest_fundamentals_global_respects_budget_from_user_metadata(
         rate=None,
         max_symbols=None,
         max_age_days=None,
-        respect_backoff=True,
+        respect_backoff=False,
     )
 
     assert rc == 0
@@ -1656,7 +1656,7 @@ def test_cmd_ingest_fundamentals_global_max_age_days_refreshes_only_stale_or_mis
         conn.execute(
             """
             UPDATE fundamentals_raw
-            SET fetched_at = CASE provider_listing_id
+            SET last_fetched_at = CASE provider_listing_id
                 WHEN (
                     SELECT provider_listing_id
                     FROM provider_listing_catalog
@@ -1667,7 +1667,7 @@ def test_cmd_ingest_fundamentals_global_max_age_days_refreshes_only_stale_or_mis
                     FROM provider_listing_catalog
                     WHERE provider = 'EODHD' AND provider_symbol = 'BBB.US'
                 ) THEN ?
-                ELSE fetched_at
+                ELSE last_fetched_at
             END
             WHERE provider_listing_id IN (
                 SELECT provider_listing_id
@@ -1675,18 +1675,6 @@ def test_cmd_ingest_fundamentals_global_max_age_days_refreshes_only_stale_or_mis
                 WHERE provider = 'EODHD'
                   AND provider_symbol IN ('AAA.US', 'BBB.US')
             )
-            """,
-            (fresh_at, stale_at),
-        )
-        conn.execute(
-            """
-            UPDATE fundamentals_fetch_state
-            SET last_fetched_at = CASE provider_symbol
-                WHEN 'AAA.US' THEN ?
-                WHEN 'BBB.US' THEN ?
-                ELSE last_fetched_at
-            END
-            WHERE provider = 'EODHD'
             """,
             (fresh_at, stale_at),
         )
@@ -1812,20 +1800,12 @@ def test_cmd_ingest_fundamentals_global_default_mode_remains_missing_only(
         conn.execute(
             """
             UPDATE fundamentals_raw
-            SET fetched_at = ?
+            SET last_fetched_at = ?
             WHERE provider_listing_id = (
                 SELECT provider_listing_id
                 FROM provider_listing_catalog
                 WHERE provider = 'EODHD' AND provider_symbol = 'AAA.US'
             )
-            """,
-            (stale_at,),
-        )
-        conn.execute(
-            """
-            UPDATE fundamentals_fetch_state
-            SET last_fetched_at = ?
-            WHERE provider = 'EODHD' AND provider_symbol = 'AAA.US'
             """,
             (stale_at,),
         )
@@ -1959,7 +1939,7 @@ def test_cmd_ingest_fundamentals_global_uses_concurrent_workers(monkeypatch, tmp
     assert calls["max_in_flight"] > 1
 
 
-def test_cmd_ingest_fundamentals_global_batches_success_state_updates(
+def test_cmd_ingest_fundamentals_global_batches_raw_updates_and_clears_failures(
     monkeypatch, tmp_path
 ):
     db_path = tmp_path / "global-batch-state.db"
@@ -1971,8 +1951,9 @@ def test_cmd_ingest_fundamentals_global_batches_success_state_updates(
             {"Code": "BBB", "Exchange": "US", "Type": "Common Stock"},
         ],
     )
-    success_batches = []
-    original_mark_success_many = FundamentalsFetchStateRepository.mark_success_many
+    state_repo = FundamentalsFetchStateRepository(db_path)
+    state_repo.mark_failure("EODHD", "AAA.US", "temporary", base_backoff_seconds=60)
+    state_repo.mark_failure("EODHD", "BBB.US", "temporary", base_backoff_seconds=60)
 
     class FakeClient:
         def __init__(self, api_key):
@@ -1991,11 +1972,8 @@ def test_cmd_ingest_fundamentals_global_batches_success_state_updates(
     def fail_mark_success(self, provider, symbol, fetched_at=None):
         raise AssertionError("multi-symbol ingestion should not call mark_success")
 
-    def track_mark_success_many(self, provider, symbols, fetched_at=None):
-        success_batches.append(list(symbols))
-        return original_mark_success_many(
-            self, provider, symbols, fetched_at=fetched_at
-        )
+    def fail_mark_success_many(self, provider, symbols, fetched_at=None):
+        raise AssertionError("successful raw upserts should clear active failure rows")
 
     def fail_single_upsert(
         self, provider, symbol, payload, listing_currency=None, exchange=None
@@ -2018,7 +1996,7 @@ def test_cmd_ingest_fundamentals_global_batches_success_state_updates(
     monkeypatch.setattr(
         FundamentalsFetchStateRepository,
         "mark_success_many",
-        track_mark_success_many,
+        fail_mark_success_many,
     )
     monkeypatch.setattr(FundamentalsRepository, "upsert", fail_single_upsert)
 
@@ -2029,16 +2007,12 @@ def test_cmd_ingest_fundamentals_global_batches_success_state_updates(
         rate=None,
         max_symbols=None,
         max_age_days=None,
-        respect_backoff=True,
+        respect_backoff=False,
     )
 
     assert rc == 0
-    assert len(success_batches) == 1
-    assert set(success_batches[0]) == {"AAA.US", "BBB.US"}
-
-    state_repo = FundamentalsFetchStateRepository(db_path)
-    assert state_repo.fetch("EODHD", "AAA.US")["last_status"] == "ok"
-    assert state_repo.fetch("EODHD", "BBB.US")["last_status"] == "ok"
+    assert state_repo.fetch("EODHD", "AAA.US") is None
+    assert state_repo.fetch("EODHD", "BBB.US") is None
 
 
 def test_cmd_ingest_fundamentals_global_flushes_batches_on_keyboard_interrupt(
@@ -2248,20 +2222,12 @@ def test_cmd_report_ingest_progress_default_mode_treats_old_data_as_stale(
         conn.execute(
             """
             UPDATE fundamentals_raw
-            SET fetched_at = ?
+            SET last_fetched_at = ?
             WHERE provider_listing_id = (
                 SELECT provider_listing_id
                 FROM provider_listing_catalog
                 WHERE provider = 'EODHD' AND provider_symbol = 'AAA.US'
             )
-            """,
-            (stale_at,),
-        )
-        conn.execute(
-            """
-            UPDATE fundamentals_fetch_state
-            SET last_fetched_at = ?
-            WHERE provider = 'EODHD' AND provider_symbol = 'AAA.US'
             """,
             (stale_at,),
         )
@@ -2309,20 +2275,12 @@ def test_cmd_report_ingest_progress_missing_only_ignores_staleness(
         conn.execute(
             """
             UPDATE fundamentals_raw
-            SET fetched_at = ?
+            SET last_fetched_at = ?
             WHERE provider_listing_id = (
                 SELECT provider_listing_id
                 FROM provider_listing_catalog
                 WHERE provider = 'EODHD' AND provider_symbol = 'AAA.US'
             )
-            """,
-            (stale_at,),
-        )
-        conn.execute(
-            """
-            UPDATE fundamentals_fetch_state
-            SET last_fetched_at = ?
-            WHERE provider = 'EODHD' AND provider_symbol = 'AAA.US'
             """,
             (stale_at,),
         )
@@ -5710,11 +5668,13 @@ def test_cmd_clear_fundamentals_raw(tmp_path):
     repo.upsert("SEC", "AAA.US", {"facts": {}})
     state_repo = FundamentalsNormalizationStateRepository(db_path)
     security_id = repo._security_repo().ensure_from_symbol("AAA.US").security_id
+    raw_record = repo.fetch_payload_with_hash("SEC", "AAA.US")
+    assert raw_record is not None
     state_repo.mark_success(
         "SEC",
         "AAA.US",
         security_id=security_id,
-        raw_fetched_at="2024-01-01T00:00:00+00:00",
+        normalized_payload_hash=raw_record[1],
     )
 
     with repo._connect() as conn:
@@ -5760,11 +5720,16 @@ def test_cmd_clear_financial_facts_clears_normalization_state(tmp_path):
     refresh_state_repo = FinancialFactsRefreshStateRepository(db_path)
     metric_status_repo = MetricComputeStatusRepository(db_path)
     security_id = fact_repo._security_repo().ensure_from_symbol("AAA.US").security_id
+    FundamentalsRepository(db_path).upsert("SEC", "AAA.US", {"facts": {}})
+    raw_record = FundamentalsRepository(db_path).fetch_payload_with_hash(
+        "SEC", "AAA.US"
+    )
+    assert raw_record is not None
     state_repo.mark_success(
         "SEC",
         "AAA.US",
         security_id=security_id,
-        raw_fetched_at="2024-01-01T00:00:00+00:00",
+        normalized_payload_hash=raw_record[1],
     )
     assert refresh_state_repo.fetch("AAA.US") is not None
     metric_status_repo.upsert_many(
@@ -5901,8 +5866,10 @@ def test_cmd_normalize_fundamentals_sec(monkeypatch, tmp_path):
     state_repo = FundamentalsNormalizationStateRepository(db_path)
     state = state_repo.fetch("SEC", "AAPL.US")
     assert state is not None
-    assert state["raw_fetched_at"] is not None
-    assert state["last_normalized_at"] is not None
+    raw_record = fund_repo.fetch_payload_with_hash("SEC", "AAPL.US")
+    assert raw_record is not None
+    assert state["normalized_payload_hash"] == raw_record[1]
+    assert state["normalized_at"] is not None
     assert fx_service_preload_all == [False]
 
 
@@ -6144,9 +6111,25 @@ def test_cmd_normalize_fundamentals_bulk_sec_reprocesses_only_stale_symbols(
         )
         == 0
     )
+    assert calls == ["AAA.US", "BBB.US", "CCC.US"]
+    assert "already up to date" in capsys.readouterr().out
+
+    fund_repo.upsert(
+        "SEC",
+        "BBB.US",
+        {"entityName": "BBB Corp", "facts": {"changed": True}},
+    )
+
+    assert (
+        cli.cmd_normalize_fundamentals_bulk(
+            provider="SEC",
+            database=str(db_path),
+            exchange_code="US",
+        )
+        == 0
+    )
     assert calls == ["AAA.US", "BBB.US", "CCC.US", "BBB.US"]
     output = capsys.readouterr().out
-    assert "already up to date" in output
     assert "skipped=2" in output
 
 

@@ -6,6 +6,8 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
+import json
 from pathlib import Path
 import sqlite3
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union, cast
@@ -94,6 +96,20 @@ def _normalize_optional_text(value: object) -> Optional[str]:
 def _normalize_upper(value: object) -> Optional[str]:
     text = _normalize_optional_text(value)
     return text.upper() if text is not None else None
+
+
+def _canonical_json_hash(data: object) -> str:
+    text = "" if data is None else str(data)
+    try:
+        canonical = json.dumps(
+            json.loads(text),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+    except (TypeError, ValueError):
+        canonical = text
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _split_symbol(symbol: str) -> Tuple[str, Optional[str]]:
@@ -3787,6 +3803,273 @@ def _migration_039_canonical_listing_quote_currency(
             conn.execute("ALTER TABLE market_data DROP COLUMN currency")
 
 
+def _migration_040_pure_fundamentals_state(conn: sqlite3.Connection) -> None:
+    """Separate raw payload, active fetch failure, and normalization state."""
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    if _table_exists(conn, "fundamentals_raw"):
+        raw_columns = _table_columns(conn, "fundamentals_raw")
+        conn.execute("DROP INDEX IF EXISTS idx_fundamentals_raw_provider_fetched")
+        conn.execute("DROP INDEX IF EXISTS idx_fundamentals_raw_last_fetched")
+        conn.execute("DROP INDEX IF EXISTS idx_fundamentals_raw_security")
+        conn.execute("DROP INDEX IF EXISTS idx_fundamentals_raw_provider_symbol")
+        conn.execute("ALTER TABLE fundamentals_raw RENAME TO fundamentals_raw_old")
+        conn.execute(
+            """
+            CREATE TABLE fundamentals_raw (
+                provider_listing_id INTEGER PRIMARY KEY,
+                data TEXT NOT NULL,
+                payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+                last_fetched_at TEXT NOT NULL,
+                FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
+            )
+            """
+        )
+        select_columns = ["provider_listing_id", "data"]
+        if "payload_hash" in raw_columns:
+            select_columns.append("payload_hash")
+        if "last_fetched_at" in raw_columns:
+            select_columns.append("last_fetched_at")
+        if "fetched_at" in raw_columns:
+            select_columns.append("fetched_at")
+        rows = conn.execute(
+            f"""
+            SELECT {", ".join(select_columns)}
+            FROM fundamentals_raw_old
+            WHERE provider_listing_id IS NOT NULL
+              AND data IS NOT NULL
+            """
+        )
+        for row in rows:
+            data = str(row["data"])
+            payload_hash = (
+                str(row["payload_hash"])
+                if "payload_hash" in row.keys()
+                and _normalize_optional_text(row["payload_hash"]) is not None
+                else _canonical_json_hash(data)
+            )
+            last_fetched_at = (
+                _normalize_optional_text(row["last_fetched_at"])
+                if "last_fetched_at" in row.keys()
+                else None
+            )
+            if last_fetched_at is None and "fetched_at" in row.keys():
+                last_fetched_at = _normalize_optional_text(row["fetched_at"])
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO fundamentals_raw (
+                    provider_listing_id,
+                    data,
+                    payload_hash,
+                    last_fetched_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    int(row["provider_listing_id"]),
+                    data,
+                    payload_hash,
+                    last_fetched_at or now,
+                ),
+            )
+        conn.execute("DROP TABLE fundamentals_raw_old")
+    else:
+        conn.execute(
+            """
+            CREATE TABLE fundamentals_raw (
+                provider_listing_id INTEGER PRIMARY KEY,
+                data TEXT NOT NULL,
+                payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+                last_fetched_at TEXT NOT NULL,
+                FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
+            )
+            """
+        )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fundamentals_raw_last_fetched
+        ON fundamentals_raw(last_fetched_at)
+        """
+    )
+
+    if _table_exists(conn, "fundamentals_fetch_state"):
+        fetch_columns = _table_columns(conn, "fundamentals_fetch_state")
+        conn.execute("DROP INDEX IF EXISTS idx_fundamentals_fetch_next")
+        conn.execute(
+            "DROP INDEX IF EXISTS idx_fundamentals_fetch_state_provider_symbol"
+        )
+        conn.execute(
+            "DROP INDEX IF EXISTS idx_fundamentals_fetch_state_provider_fetched_symbol"
+        )
+        conn.execute(
+            "DROP INDEX IF EXISTS idx_fundamentals_fetch_state_provider_status_next_symbol"
+        )
+        conn.execute(
+            "ALTER TABLE fundamentals_fetch_state RENAME TO fundamentals_fetch_state_old"
+        )
+        conn.execute(
+            """
+            CREATE TABLE fundamentals_fetch_state (
+                provider_listing_id INTEGER PRIMARY KEY,
+                failed_at TEXT NOT NULL,
+                error TEXT NOT NULL,
+                next_eligible_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL CHECK (attempts > 0),
+                FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
+            )
+            """
+        )
+        if "provider_listing_id" in fetch_columns:
+            status_expr = "last_status" if "last_status" in fetch_columns else "'error'"
+            error_expr = (
+                "last_error"
+                if "last_error" in fetch_columns
+                else "error"
+                if "error" in fetch_columns
+                else "'unknown error'"
+            )
+            failed_expr = (
+                "failed_at"
+                if "failed_at" in fetch_columns
+                else (
+                    "last_fetched_at"
+                    if "last_fetched_at" in fetch_columns
+                    else f"'{now}'"
+                )
+            )
+            next_expr = (
+                "next_eligible_at"
+                if "next_eligible_at" in fetch_columns
+                else f"'{now}'"
+            )
+            attempts_expr = "attempts" if "attempts" in fetch_columns else "1"
+            rows = conn.execute(
+                f"""
+                SELECT
+                    provider_listing_id,
+                    {failed_expr} AS failed_at,
+                    {error_expr} AS error,
+                    {next_expr} AS next_eligible_at,
+                    {attempts_expr} AS attempts
+                FROM fundamentals_fetch_state_old
+                WHERE provider_listing_id IS NOT NULL
+                  AND {status_expr} = 'error'
+                """
+            )
+            for row in rows:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO fundamentals_fetch_state (
+                        provider_listing_id,
+                        failed_at,
+                        error,
+                        next_eligible_at,
+                        attempts
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        int(row["provider_listing_id"]),
+                        _normalize_optional_text(row["failed_at"]) or now,
+                        _normalize_optional_text(row["error"]) or "unknown error",
+                        _normalize_optional_text(row["next_eligible_at"]) or now,
+                        max(int(row["attempts"] or 1), 1),
+                    ),
+                )
+        conn.execute("DROP TABLE fundamentals_fetch_state_old")
+    else:
+        conn.execute(
+            """
+            CREATE TABLE fundamentals_fetch_state (
+                provider_listing_id INTEGER PRIMARY KEY,
+                failed_at TEXT NOT NULL,
+                error TEXT NOT NULL,
+                next_eligible_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL CHECK (attempts > 0),
+                FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
+            )
+            """
+        )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fundamentals_fetch_next
+        ON fundamentals_fetch_state(next_eligible_at)
+        """
+    )
+
+    if _table_exists(conn, "fundamentals_normalization_state"):
+        norm_columns = _table_columns(conn, "fundamentals_normalization_state")
+        conn.execute("DROP INDEX IF EXISTS idx_fundamentals_norm_state_security")
+        conn.execute("DROP INDEX IF EXISTS idx_fundamentals_norm_state_provider_symbol")
+        conn.execute(
+            "ALTER TABLE fundamentals_normalization_state RENAME TO fundamentals_normalization_state_old"
+        )
+        conn.execute(
+            """
+            CREATE TABLE fundamentals_normalization_state (
+                provider_listing_id INTEGER PRIMARY KEY,
+                normalized_payload_hash TEXT NOT NULL CHECK (length(normalized_payload_hash) = 64),
+                normalized_at TEXT NOT NULL,
+                FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
+            )
+            """
+        )
+        if "provider_listing_id" in norm_columns:
+            normalized_hash_expr = (
+                "ns.normalized_payload_hash"
+                if "normalized_payload_hash" in norm_columns
+                else "fr.payload_hash"
+            )
+            normalized_at_expr = (
+                "ns.normalized_at"
+                if "normalized_at" in norm_columns
+                else (
+                    "ns.last_normalized_at"
+                    if "last_normalized_at" in norm_columns
+                    else f"'{now}'"
+                )
+            )
+            rows = conn.execute(
+                f"""
+                SELECT
+                    ns.provider_listing_id,
+                    {normalized_hash_expr} AS normalized_payload_hash,
+                    {normalized_at_expr} AS normalized_at
+                FROM fundamentals_normalization_state_old ns
+                JOIN fundamentals_raw fr
+                  ON fr.provider_listing_id = ns.provider_listing_id
+                WHERE ns.provider_listing_id IS NOT NULL
+                  AND {normalized_hash_expr} IS NOT NULL
+                """
+            )
+            for row in rows:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO fundamentals_normalization_state (
+                        provider_listing_id,
+                        normalized_payload_hash,
+                        normalized_at
+                    ) VALUES (?, ?, ?)
+                    """,
+                    (
+                        int(row["provider_listing_id"]),
+                        str(row["normalized_payload_hash"]),
+                        _normalize_optional_text(row["normalized_at"]) or now,
+                    ),
+                )
+        conn.execute("DROP TABLE fundamentals_normalization_state_old")
+    else:
+        conn.execute(
+            """
+            CREATE TABLE fundamentals_normalization_state (
+                provider_listing_id INTEGER PRIMARY KEY,
+                normalized_payload_hash TEXT NOT NULL CHECK (length(normalized_payload_hash) = 64),
+                normalized_at TEXT NOT NULL,
+                FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
+            )
+            """
+        )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -3827,6 +4110,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_037_drop_fundamentals_raw_currency,
     _migration_038_move_primary_listing_status_to_listing,
     _migration_039_canonical_listing_quote_currency,
+    _migration_040_pure_fundamentals_state,
 ]
 
 

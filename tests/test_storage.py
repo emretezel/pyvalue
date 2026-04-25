@@ -218,7 +218,7 @@ def test_fundamentals_repository_classifies_and_purges_secondary_listings(tmp_pa
         "EODHD",
         "AAA.LSE",
         by_symbol["AAA.LSE"].security_id,
-        "2025-01-01T00:00:00+00:00",
+        "a" * 64,
     )
     MarketDataFetchStateRepository(db_path).mark_success(
         "EODHD",
@@ -287,7 +287,11 @@ def test_fundamentals_repository_classifies_and_purges_secondary_listings(tmp_pa
             """
             SELECT COUNT(*)
             FROM fundamentals_normalization_state
-            WHERE provider = 'EODHD' AND provider_symbol = 'AAA.LSE'
+            WHERE provider_listing_id = (
+                SELECT provider_listing_id
+                FROM provider_listing_catalog
+                WHERE provider = 'EODHD' AND provider_symbol = 'AAA.LSE'
+            )
             """
         ).fetchone()[0]
         market_state_rows = conn.execute(
@@ -594,15 +598,15 @@ def test_fundamentals_repository_normalization_candidates_match_state_and_facts(
         fund_repo._security_repo().ensure_from_symbol("BBB.US").security_id
     )
 
-    aaa_record = fund_repo.fetch_payload_with_fetched_at("SEC", "AAA.US")
+    aaa_record = fund_repo.fetch_payload_with_hash("SEC", "AAA.US")
     assert aaa_record is not None
-    _, aaa_fetched_at = aaa_record
-    bbb_record = fund_repo.fetch_payload_with_fetched_at("SEC", "BBB.US")
+    _, aaa_payload_hash = aaa_record
+    bbb_record = fund_repo.fetch_payload_with_hash("SEC", "BBB.US")
     assert bbb_record is not None
-    _, bbb_fetched_at = bbb_record
+    _, bbb_payload_hash = bbb_record
 
-    state_repo.mark_success("SEC", "AAA.US", aaa_security_id, aaa_fetched_at)
-    state_repo.mark_success("SEC", "BBB.US", bbb_security_id, bbb_fetched_at)
+    state_repo.mark_success("SEC", "AAA.US", aaa_security_id, aaa_payload_hash)
+    state_repo.mark_success("SEC", "BBB.US", bbb_security_id, bbb_payload_hash)
     fact_repo.replace_facts(
         "AAA.US",
         [
@@ -640,14 +644,14 @@ def test_fundamentals_repository_normalization_candidates_match_state_and_facts(
     assert candidates["AAA.US"] == FundamentalsNormalizationCandidate(
         provider_symbol="AAA.US",
         security_id=aaa_security_id,
-        raw_fetched_at=aaa_fetched_at,
-        normalized_raw_fetched_at=aaa_fetched_at,
-        last_normalized_at=candidates["AAA.US"].last_normalized_at,
+        raw_payload_hash=aaa_payload_hash,
+        normalized_payload_hash=aaa_payload_hash,
+        normalized_at=candidates["AAA.US"].normalized_at,
         current_source_provider="SEC",
     )
     assert candidates["BBB.US"].current_source_provider == "EODHD"
-    assert candidates["BBB.US"].normalized_raw_fetched_at == bbb_fetched_at
-    assert candidates["CCC.US"].normalized_raw_fetched_at is None
+    assert candidates["BBB.US"].normalized_payload_hash == bbb_payload_hash
+    assert candidates["CCC.US"].normalized_payload_hash is None
 
 
 def test_fundamentals_repository_normalization_candidates_skip_facts_scan_without_state(
@@ -692,7 +696,7 @@ def test_fundamentals_repository_normalization_candidates_skip_facts_scan_withou
 
     assert sorted(candidates) == ["AAA.US", "BBB.US"]
     assert all(
-        candidate.normalized_raw_fetched_at is None for candidate in candidates.values()
+        candidate.normalized_payload_hash is None for candidate in candidates.values()
     )
     assert not any("FROM financial_facts" in sql for sql in seen_sql)
 
@@ -794,26 +798,24 @@ def test_financial_facts_repository_initialize_schema_ignores_locked_perf_index(
     repo.initialize_schema()
 
 
-def test_fundamentals_repository_upsert_marks_fetch_state_success(tmp_path):
+def test_fundamentals_repository_upsert_clears_active_fetch_failure(tmp_path):
     db_path = tmp_path / "fundamentals-fetch-state.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock"}],
+    )
     repo = FundamentalsRepository(db_path)
     repo.initialize_schema()
+    state_repo = storage.FundamentalsFetchStateRepository(db_path)
+    state_repo.mark_failure("EODHD", "AAA.US", "boom", base_backoff_seconds=60)
+    assert state_repo.fetch("EODHD", "AAA.US") is not None
 
     repo.upsert("EODHD", "AAA.US", {"General": {"CurrencyCode": "USD"}}, exchange="US")
 
-    with sqlite3.connect(db_path) as conn:
-        row = conn.execute(
-            """
-            SELECT last_fetched_at, last_status, attempts
-            FROM fundamentals_fetch_state
-            WHERE provider = 'EODHD' AND provider_symbol = 'AAA.US'
-            """
-        ).fetchone()
-
-    assert row is not None
-    assert row[0] is not None
-    assert row[1] == "ok"
-    assert row[2] == 0
+    assert state_repo.fetch("EODHD", "AAA.US") is None
 
 
 def test_fundamentals_repository_upsert_many_uses_resolved_metadata_and_overwrites(
@@ -838,6 +840,9 @@ def test_fundamentals_repository_upsert_many_uses_resolved_metadata_and_overwrit
     repo._resolve_security = lambda *args, **kwargs: (_ for _ in ()).throw(
         AssertionError("upsert_many should not resolve securities per symbol")
     )
+    aaa_data = '{"General":{"CurrencyCode":"USD","Name":"AAA"}}'
+    bbb_data = '{"General":{"CurrencyCode":"USD","Name":"BBB"}}'
+    aaa_updated_data = '{"General":{"CurrencyCode":"USD","Name":"AAA Updated"}}'
 
     repo.upsert_many(
         "EODHD",
@@ -847,16 +852,18 @@ def test_fundamentals_repository_upsert_many_uses_resolved_metadata_and_overwrit
                 provider_symbol="AAA.US",
                 provider_exchange_code="US",
                 listing_currency="USD",
-                data='{"General": {"CurrencyCode": "USD", "Name": "AAA"}}',
-                fetched_at="2026-03-30T00:00:00+00:00",
+                data=aaa_data,
+                payload_hash=storage.fundamentals_payload_hash(aaa_data),
+                last_fetched_at="2026-03-30T00:00:00+00:00",
             ),
             FundamentalsUpdate(
                 security_id=tickers["BBB.US"].security_id,
                 provider_symbol="BBB.US",
                 provider_exchange_code="US",
                 listing_currency="USD",
-                data='{"General": {"CurrencyCode": "USD", "Name": "BBB"}}',
-                fetched_at="2026-03-30T00:00:00+00:00",
+                data=bbb_data,
+                payload_hash=storage.fundamentals_payload_hash(bbb_data),
+                last_fetched_at="2026-03-30T00:00:00+00:00",
             ),
         ],
     )
@@ -868,8 +875,9 @@ def test_fundamentals_repository_upsert_many_uses_resolved_metadata_and_overwrit
                 provider_symbol="AAA.US",
                 provider_exchange_code="US",
                 listing_currency="USD",
-                data='{"General": {"CurrencyCode": "USD", "Name": "AAA Updated"}}',
-                fetched_at="2026-03-31T00:00:00+00:00",
+                data=aaa_updated_data,
+                payload_hash=storage.fundamentals_payload_hash(aaa_updated_data),
+                last_fetched_at="2026-03-31T00:00:00+00:00",
             )
         ],
     )
@@ -885,7 +893,8 @@ def test_fundamentals_repository_upsert_many_uses_resolved_metadata_and_overwrit
                 catalog.security_id,
                 catalog.provider_exchange_code,
                 catalog.currency,
-                fr.fetched_at
+                fr.payload_hash,
+                fr.last_fetched_at
             FROM fundamentals_raw fr
             JOIN provider_listing_catalog catalog
               ON catalog.provider_listing_id = fr.provider_listing_id
@@ -896,12 +905,14 @@ def test_fundamentals_repository_upsert_many_uses_resolved_metadata_and_overwrit
     assert "listing_id" not in raw_columns
     assert "security_id" not in raw_columns
     assert "currency" not in raw_columns
+    assert "payload_id" not in raw_columns
     assert rows == [
         (
             "AAA.US",
             tickers["AAA.US"].security_id,
             "US",
             "USD",
+            storage.fundamentals_payload_hash(aaa_updated_data),
             "2026-03-31T00:00:00+00:00",
         ),
         (
@@ -909,6 +920,7 @@ def test_fundamentals_repository_upsert_many_uses_resolved_metadata_and_overwrit
             tickers["BBB.US"].security_id,
             "US",
             "USD",
+            storage.fundamentals_payload_hash(bbb_data),
             "2026-03-30T00:00:00+00:00",
         ),
     ]

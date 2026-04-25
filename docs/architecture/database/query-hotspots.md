@@ -33,11 +33,12 @@ This page maps the end-to-end pipeline to the tables and indexes that matter mos
 - Updates `listing.primary_listing_status`
 - Critical structures:
   - `provider_listing` unique `(provider_exchange_id, provider_symbol)`
-  - `fundamentals_raw` unique `provider_listing_id`
+  - `fundamentals_raw` primary key `provider_listing_id`
+  - `idx_fundamentals_raw_last_fetched`
   - `idx_fundamentals_fetch_next`
 - Review focus:
   - `fundamentals_raw.data` is the widest operational row in the schema
-  - provider-scoped state tables are now keyed by `provider_listing_id`, so planning queries often join through `provider_listing`
+  - `fundamentals_fetch_state` stores only active failures; successful fetch progress is derived from raw payload presence and age
 
 ## 4. Normalize Fundamentals
 
@@ -46,11 +47,12 @@ This page maps the end-to-end pipeline to the tables and indexes that matter mos
 - Rewrites canonical rows in `financial_facts`
 - Updates `financial_facts_refresh_state`
 - Critical structures:
-  - `fundamentals_raw` unique `provider_listing_id`
-  - `idx_fundamentals_norm_state_security`
+  - `fundamentals_raw` primary key `provider_listing_id`
+  - `fundamentals_raw.payload_hash`
   - `financial_facts` PK and `idx_fin_facts_security_concept_latest`
 - Review focus:
   - `financial_facts` is the main fact table for metrics
+  - normalization freshness compares payload hashes, not fetch timestamps
   - unnecessary columns or duplicate fact rows compound downstream cost quickly
 
 ## 5. Refresh Issuer Metadata

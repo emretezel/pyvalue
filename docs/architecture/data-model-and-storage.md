@@ -79,6 +79,9 @@ Raw provider payloads are stored by `provider_listing_id`. Canonical
 `listing_id` is derived by joining through `provider_listing`.
 The table intentionally does not store currency; raw payload currencies are
 used only as source currencies for individual normalized facts.
+`payload_hash` is the canonical JSON content version used to decide whether
+normalization must run again; `last_fetched_at` is only a fetch observation
+timestamp.
 
 Purpose:
 
@@ -89,13 +92,15 @@ Purpose:
 
 ### `fundamentals_fetch_state`
 
-Operational fundamentals fetch progress and retry backoff live here, keyed by
-`provider_listing_id`.
+Active fundamentals fetch failures and retry backoff live here, keyed by
+`provider_listing_id`. Successful fetch state is derived from
+`fundamentals_raw`, so successful fetches do not leave rows in this table.
 
 ### `fundamentals_normalization_state`
 
-Successful normalization watermarks live here, keyed by `provider_listing_id`
-with a canonical `listing_id` column for downstream joins.
+Successful normalization watermarks live here, keyed by `provider_listing_id`.
+The stored `normalized_payload_hash` records the exact raw payload version that
+was normalized.
 
 ### `financial_facts`
 

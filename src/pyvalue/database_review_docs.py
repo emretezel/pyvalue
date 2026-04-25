@@ -116,17 +116,17 @@ TABLE_GROUPS: tuple[tuple[str, tuple[TableInventoryEntry, ...]], ...] = (
             TableInventoryEntry(
                 table_name="fundamentals_raw",
                 logical_refs="`provider_listing_id` in `provider_listing`",
-                review_focus="wide-row storage, JSON payload size, and latest-row-only semantics",
+                review_focus="wide-row storage, JSON payload size, hash versioning, and latest-row-only semantics",
             ),
             TableInventoryEntry(
                 table_name="fundamentals_fetch_state",
                 logical_refs="`provider_listing_id` in `provider_listing`",
-                review_focus="retry/backoff query shape vs index set",
+                review_focus="active retry/backoff rows only; success is derived from raw payloads",
             ),
             TableInventoryEntry(
                 table_name="fundamentals_normalization_state",
-                logical_refs="`provider_listing_id` in `provider_listing`, `listing_id` in `listing`",
-                review_focus="whether this watermark table is minimal and sufficient",
+                logical_refs="`provider_listing_id` in `provider_listing`",
+                review_focus="payload-hash watermark minimality",
             ),
             TableInventoryEntry(
                 table_name="market_data_fetch_state",

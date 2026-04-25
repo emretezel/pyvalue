@@ -101,9 +101,9 @@ That means:
 - metrics always consume the latest normalized facts
 - switching providers for the same canonical symbol overwrites normalized facts for that listing
 - default normalization is incremental: a symbol is skipped unless its raw
-  `fundamentals_raw.fetched_at` is newer than the last successful
-  normalization for that provider, or the current facts are owned by a
-  different provider
+  `fundamentals_raw.payload_hash` differs from the payload hash recorded by
+  the last successful normalization for that provider, or the current facts are
+  owned by a different provider
 - use `pyvalue normalize-fundamentals --force ...` to bypass that skip logic
 - bulk `--force` runs skip the freshness scan entirely and start reprocessing
   the selected symbols immediately

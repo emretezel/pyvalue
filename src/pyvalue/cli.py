@@ -119,6 +119,8 @@ from pyvalue.storage import (
     StoredMetricRow,
     SupportedTicker,
     SupportedTickerRepository,
+    canonical_json_dumps,
+    fundamentals_payload_hash,
 )
 from pyvalue.universe import USUniverseLoader
 
@@ -233,7 +235,7 @@ class _PreparedFundamentalsRun:
 class _NormalizedFactsResult:
     symbol: str
     rows: Tuple[StoredFactRow, ...]
-    raw_fetched_at: str
+    payload_hash: str
     entity_name: Optional[str] = None
     entity_description: Optional[str] = None
     entity_sector: Optional[str] = None
@@ -1140,13 +1142,15 @@ def _build_fundamentals_update(
     ticker: SupportedTicker,
     payload: Dict[str, object],
 ) -> FundamentalsUpdate:
+    data = canonical_json_dumps(payload)
     return FundamentalsUpdate(
         security_id=ticker.security_id,
         provider_symbol=ticker.symbol,
         provider_exchange_code=ticker.exchange_code,
         listing_currency=ticker.currency,
-        data=json.dumps(payload),
-        fetched_at=datetime.now(timezone.utc).isoformat(),
+        data=data,
+        payload_hash=fundamentals_payload_hash(data),
+        last_fetched_at=datetime.now(timezone.utc).isoformat(),
     )
 
 
@@ -1158,10 +1162,6 @@ def _flush_fundamentals_batches(
 ) -> None:
     if success_updates:
         repo.upsert_many("EODHD", success_updates)
-        state_repo.mark_success_many(
-            "EODHD",
-            [update.provider_symbol for update in success_updates],
-        )
         success_updates.clear()
     if failures:
         state_repo.mark_failure_many("EODHD", failures)
@@ -3166,9 +3166,9 @@ def _normalization_required(
     provider: str,
 ) -> bool:
     provider_norm = provider.strip().upper()
-    if candidate.normalized_raw_fetched_at is None:
+    if candidate.normalized_payload_hash is None:
         return True
-    if candidate.raw_fetched_at > candidate.normalized_raw_fetched_at:
+    if candidate.raw_payload_hash != candidate.normalized_payload_hash:
         return True
     if candidate.current_source_provider is None:
         return False
@@ -5588,7 +5588,7 @@ def cmd_normalize_us_facts(
         symbols=[symbol.upper()],
         force=force,
     )
-    payload_record = fund_repo.fetch_payload_with_fetched_at("SEC", symbol.upper())
+    payload_record = fund_repo.fetch_payload_with_hash("SEC", symbol.upper())
     if payload_record is None:
         raise SystemExit(
             f"No raw SEC payload found for {symbol}. Run ingest-fundamentals --provider SEC before normalization."
@@ -5597,7 +5597,7 @@ def cmd_normalize_us_facts(
         _print_normalization_up_to_date("SEC", database)
         return 0
 
-    payload, raw_fetched_at = payload_record
+    payload, payload_hash = payload_record
     fx_repo = _SchemaReadyFXRatesRepository(database)
     fx_service = FXService(database, repository=fx_repo)
     normalizer = SECFactsNormalizer(fx_service=fx_service)
@@ -5628,7 +5628,7 @@ def cmd_normalize_us_facts(
         if candidate is not None
         else fact_repo._security_repo().ensure_from_symbol(symbol.upper()).security_id
     )
-    state_repo.mark_success("SEC", symbol.upper(), security_id, raw_fetched_at)
+    state_repo.mark_success("SEC", symbol.upper(), security_id, payload_hash)
     print(f"Stored {stored} normalized facts for {symbol.upper()} in {database}")
     return 0
 
@@ -5827,10 +5827,10 @@ def _normalize_sec_symbol_worker(
     """Normalize one stored SEC payload and return facts plus metadata."""
 
     fund_repo = FundamentalsRepository(database)
-    payload_record = fund_repo.fetch_payload_with_fetched_at("SEC", symbol)
+    payload_record = fund_repo.fetch_payload_with_hash("SEC", symbol)
     if payload_record is None:
         return None
-    payload, raw_fetched_at = payload_record
+    payload, payload_hash = payload_record
     fx_service = _get_or_create_fx_service(database)
     normalizer = SECFactsNormalizer(fx_service=fx_service)
     rows = tuple(
@@ -5840,7 +5840,7 @@ def _normalize_sec_symbol_worker(
     return _NormalizedFactsResult(
         symbol=symbol,
         rows=rows,
-        raw_fetched_at=raw_fetched_at,
+        payload_hash=payload_hash,
         entity_name=_extract_entity_name_from_sec(payload),
     )
 
@@ -5851,10 +5851,10 @@ def _normalize_eodhd_symbol_worker(
     """Normalize one stored EODHD payload and return facts plus metadata."""
 
     fund_repo = FundamentalsRepository(database)
-    payload_record = fund_repo.fetch_payload_with_fetched_at("EODHD", symbol)
+    payload_record = fund_repo.fetch_payload_with_hash("EODHD", symbol)
     if payload_record is None:
         return None
-    payload, raw_fetched_at = payload_record
+    payload, payload_hash = payload_record
     target_currency = _resolve_ticker_target_currency(
         database, symbol, payload, ticker_repo=_get_or_create_ticker_repo(database)
     )
@@ -5872,7 +5872,7 @@ def _normalize_eodhd_symbol_worker(
     return _NormalizedFactsResult(
         symbol=symbol,
         rows=rows,
-        raw_fetched_at=raw_fetched_at,
+        payload_hash=payload_hash,
         entity_name=_extract_entity_name_from_eodhd(payload),
         entity_description=_extract_entity_description_from_eodhd(payload),
         entity_sector=_extract_entity_sector_from_eodhd(payload),
@@ -5967,7 +5967,7 @@ def _run_bulk_normalization(
                     provider,
                     symbol,
                     security_id,
-                    result.raw_fetched_at,
+                    result.payload_hash,
                 )
                 processed += 1
                 print(
@@ -6034,7 +6034,7 @@ def _run_bulk_normalization(
                         provider,
                         symbol,
                         security_id,
-                        result.raw_fetched_at,
+                        result.payload_hash,
                     )
                     processed += 1
                     print(
@@ -6082,7 +6082,7 @@ def cmd_normalize_eodhd_fundamentals(
         symbols=[symbol_upper],
         force=force,
     )
-    payload_record = fund_repo.fetch_payload_with_fetched_at("EODHD", symbol_upper)
+    payload_record = fund_repo.fetch_payload_with_hash("EODHD", symbol_upper)
     if payload_record is None:
         raise SystemExit(
             f"No EODHD fundamentals found for {symbol}. Run ingest-fundamentals --provider EODHD first."
@@ -6091,7 +6091,7 @@ def cmd_normalize_eodhd_fundamentals(
         _print_normalization_up_to_date("EODHD", database)
         return 0
 
-    payload, raw_fetched_at = payload_record
+    payload, payload_hash = payload_record
 
     ticker_repo = _SchemaReadySupportedTickerRepository(database)
     target_currency = _resolve_ticker_target_currency(
@@ -6145,7 +6145,7 @@ def cmd_normalize_eodhd_fundamentals(
         if candidate is not None
         else fact_repo._security_repo().ensure_from_symbol(symbol_upper).security_id
     )
-    state_repo.mark_success("EODHD", symbol_upper, security_id, raw_fetched_at)
+    state_repo.mark_success("EODHD", symbol_upper, security_id, payload_hash)
     print(f"Stored {stored} normalized facts for {symbol_upper} in {database}")
     return 0
 

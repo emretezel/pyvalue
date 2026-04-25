@@ -285,9 +285,9 @@ def test_sync_table_doc_page_links_appendix_for_wide_tables(tmp_path: Path) -> N
         table_name="fundamentals_raw",
         stats=TableStats(row_count=1, size_bytes=2048),
         table_schema=TableSchema(
-            primary_key=("payload_id",),
+            primary_key=("provider_listing_id",),
             foreign_keys=(),
-            unique_constraints=(("provider_listing_id",),),
+            unique_constraints=(),
             secondary_indexes=(),
         ),
         incoming_foreign_keys=(),
@@ -424,17 +424,17 @@ def test_sync_sample_rows_appendix_renders_wide_table_section(tmp_path: Path) ->
         snapshot_date="2026-04-19",
         samples_by_table={
             "fundamentals_raw": [
-                {"provider": "EODHD", "data": "<omitted>", "data_bytes": 123}
+                {"provider_listing_id": 1, "data": "<omitted>", "data_bytes": 123}
             ]
         },
-        order_by_table={"fundamentals_raw": ("payload_id ASC",)},
+        order_by_table={"fundamentals_raw": ("provider_listing_id ASC",)},
     )
 
     text = appendix.read_text(encoding="utf-8")
     assert "## `fundamentals_raw`" in text
-    assert '"provider": "EODHD"' in text
+    assert '"provider_listing_id": 1' in text
     assert '"data_bytes": 123' in text
-    assert "ordered by `payload_id ASC`" in text
+    assert "ordered by `provider_listing_id ASC`" in text
     assert "payload size metadata" in text
     assert "<!-- BEGIN generated_sample_rows_appendix -->" in text
 

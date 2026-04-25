@@ -21,14 +21,11 @@ This page lists the current secondary indexes from the post-refactor schema. Pri
 ## Raw Ingestion And State
 
 - `fundamentals_raw`
-  - `idx_fundamentals_raw_provider_fetched (fetched_at)`
+  - `idx_fundamentals_raw_last_fetched (last_fetched_at)`
     - supports staleness and reconciliation scans
 - `fundamentals_fetch_state`
   - `idx_fundamentals_fetch_next (next_eligible_at)`
-    - supports backoff scheduling
-- `fundamentals_normalization_state`
-  - `idx_fundamentals_norm_state_security (listing_id)`
-    - supports canonical joins from normalization state
+    - supports active failure backoff scheduling
 - `market_data_fetch_state`
   - `idx_market_data_fetch_next (next_eligible_at)`
     - supports market-data scheduling and backoff

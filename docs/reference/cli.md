@@ -185,8 +185,9 @@ Notes:
 - raw payload currencies are used only as fact source currencies
 - fact source-currency lookup uses entry-level currency keys, then direct
   statement-level currency, then payload-level `General.CurrencyCode`
-- by default, normalization skips symbols whose raw `fundamentals_raw.fetched_at`
-  has not changed since the last successful normalization for that provider
+- by default, normalization skips symbols whose raw `fundamentals_raw.payload_hash`
+  matches the payload hash recorded by the last successful normalization for
+  that provider
 - bulk runs with `--force` skip the freshness scan and start re-normalizing the
   requested symbol set immediately
 - normalization never fetches FX from the network; run `refresh-fx-rates`

@@ -1,3 +1,4 @@
+import hashlib
 import sqlite3
 
 import pytest
@@ -1074,12 +1075,13 @@ def test_migration_creates_fundamentals_hot_path_indexes(tmp_path):
 
     assert "idx_fundamentals_fetch_next" in state_index_names
     assert raw_columns == {
-        "payload_id",
         "provider_listing_id",
         "data",
-        "fetched_at",
+        "payload_hash",
+        "last_fetched_at",
     }
-    assert "idx_fundamentals_raw_provider_fetched" in raw_index_names
+    assert "idx_fundamentals_raw_last_fetched" in raw_index_names
+    assert "idx_fundamentals_raw_provider_fetched" not in raw_index_names
     assert "idx_fundamentals_raw_security" not in raw_index_names
     assert raw_fk_targets == {"provider_listing"}
 
@@ -1169,21 +1171,26 @@ def test_migration_drops_fundamentals_raw_listing_identity_columns(tmp_path):
         index_names = {row[1] for row in indexes}
         row = conn.execute(
             """
-            SELECT payload_id, provider_listing_id, data, fetched_at
+            SELECT provider_listing_id, data, payload_hash, last_fetched_at
             FROM fundamentals_raw
             """
         ).fetchone()
 
     assert columns == {
-        "payload_id",
         "provider_listing_id",
         "data",
-        "fetched_at",
+        "payload_hash",
+        "last_fetched_at",
     }
-    assert "idx_fundamentals_raw_provider_fetched" in index_names
+    assert "idx_fundamentals_raw_last_fetched" in index_names
     assert "idx_fundamentals_raw_security" not in index_names
     assert "idx_fundamentals_raw_provider_symbol" not in index_names
-    assert row == (10, 1, "{}", "2026-01-01T00:00:00+00:00")
+    assert row == (
+        1,
+        "{}",
+        hashlib.sha256(b"{}").hexdigest(),
+        "2026-01-01T00:00:00+00:00",
+    )
 
 
 def test_migration_drops_fundamentals_raw_currency_from_current_schema(tmp_path):
@@ -1242,14 +1249,24 @@ def test_migration_drops_fundamentals_raw_currency_from_current_schema(tmp_path)
         index_names = {row[1] for row in indexes}
         row = conn.execute(
             """
-            SELECT payload_id, provider_listing_id, data, fetched_at
+            SELECT provider_listing_id, data, payload_hash, last_fetched_at
             FROM fundamentals_raw
             """
         ).fetchone()
 
-    assert columns == {"payload_id", "provider_listing_id", "data", "fetched_at"}
-    assert "idx_fundamentals_raw_provider_fetched" in index_names
-    assert row == (10, 1, "{}", "2026-01-01T00:00:00+00:00")
+    assert columns == {
+        "provider_listing_id",
+        "data",
+        "payload_hash",
+        "last_fetched_at",
+    }
+    assert "idx_fundamentals_raw_last_fetched" in index_names
+    assert row == (
+        1,
+        "{}",
+        hashlib.sha256(b"{}").hexdigest(),
+        "2026-01-01T00:00:00+00:00",
+    )
 
 
 def test_migration_adds_metric_status_and_facts_refresh_tables(tmp_path):

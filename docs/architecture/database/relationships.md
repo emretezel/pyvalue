@@ -17,7 +17,6 @@ flowchart LR
     provider_listing --> fundamentals_raw
     provider_listing --> fundamentals_normalization_state
     provider_listing --> market_data_fetch_state
-    listing --> fundamentals_normalization_state
     listing --> financial_facts
     listing --> financial_facts_refresh_state
     listing --> market_data

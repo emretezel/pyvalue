@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+import hashlib
 from pathlib import Path
 import json
 import sqlite3
@@ -65,6 +66,23 @@ _LISTING_CLASS_MISSING_PRIMARY = "missing_primary_ticker"
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def canonical_json_dumps(value: Any) -> str:
+    """Serialize JSON-compatible values in a stable form for hashing."""
+
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+
+
+def fundamentals_payload_hash(data: str) -> str:
+    """Return the SHA-256 hash for a canonical fundamentals payload string."""
+
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
 
 def _normalize_optional_text(value: Any) -> Optional[str]:
@@ -516,7 +534,8 @@ class FundamentalsUpdate:
     provider_exchange_code: Optional[str]
     listing_currency: Optional[str]
     data: str
-    fetched_at: str
+    payload_hash: str
+    last_fetched_at: str
 
 
 @dataclass(frozen=True)
@@ -578,9 +597,9 @@ class FundamentalsNormalizationCandidate:
 
     provider_symbol: str
     security_id: int
-    raw_fetched_at: str
-    normalized_raw_fetched_at: Optional[str] = None
-    last_normalized_at: Optional[str] = None
+    raw_payload_hash: str
+    normalized_payload_hash: Optional[str] = None
+    normalized_at: Optional[str] = None
     current_source_provider: Optional[str] = None
 
 
@@ -2443,10 +2462,12 @@ class SupportedTickerRepository(SQLiteStore):
             query = [
                 f"SELECT {self._catalog_select_columns('catalog')}",
                 "FROM provider_listing_catalog catalog",
+                "LEFT JOIN fundamentals_raw fr "
+                "ON fr.provider_listing_id = catalog.provider_listing_id",
                 "LEFT JOIN fundamentals_fetch_state fs "
                 "ON fs.provider_listing_id = catalog.provider_listing_id",
                 "WHERE catalog.provider = ?",
-                "AND fs.last_fetched_at IS NULL",
+                "AND fr.provider_listing_id IS NULL",
             ]
             _apply_scope_filters(query, params)
             if respect_backoff:
@@ -2466,12 +2487,13 @@ class SupportedTickerRepository(SQLiteStore):
             params: List[object] = [provider_norm, cutoff]
             query = [
                 f"SELECT {self._catalog_select_columns('catalog')}",
-                "FROM fundamentals_fetch_state fs",
+                "FROM fundamentals_raw fr",
                 "JOIN provider_listing_catalog catalog "
-                "ON catalog.provider_listing_id = fs.provider_listing_id",
+                "ON catalog.provider_listing_id = fr.provider_listing_id",
+                "LEFT JOIN fundamentals_fetch_state fs "
+                "ON fs.provider_listing_id = fr.provider_listing_id",
                 "WHERE catalog.provider = ?",
-                "AND fs.last_fetched_at IS NOT NULL",
-                "AND fs.last_fetched_at <= ?",
+                "AND fr.last_fetched_at <= ?",
             ]
             _apply_scope_filters(query, params)
             if respect_backoff:
@@ -2479,7 +2501,7 @@ class SupportedTickerRepository(SQLiteStore):
                     "AND (fs.next_eligible_at IS NULL OR fs.next_eligible_at <= ?)"
                 )
                 params.append(now.isoformat())
-            query.append("ORDER BY fs.last_fetched_at ASC, catalog.provider_symbol ASC")
+            query.append("ORDER BY fr.last_fetched_at ASC, catalog.provider_symbol ASC")
             if limit is not None:
                 query.append("LIMIT ?")
                 params.append(limit)
@@ -2563,7 +2585,7 @@ class SupportedTickerRepository(SQLiteStore):
                 datetime.now(timezone.utc) - timedelta(days=max_age_days)
             ).isoformat()
             stale_expr = (
-                "SUM(CASE WHEN fs.last_fetched_at IS NOT NULL AND fs.last_fetched_at <= ? "
+                "SUM(CASE WHEN fr.last_fetched_at IS NOT NULL AND fr.last_fetched_at <= ? "
                 "THEN 1 ELSE 0 END)"
             )
             params.append(cutoff)
@@ -2573,12 +2595,14 @@ class SupportedTickerRepository(SQLiteStore):
             "SELECT",
             "catalog.provider_exchange_code AS exchange_code,",
             "COUNT(*) AS total_supported,",
-            "SUM(CASE WHEN fs.last_fetched_at IS NOT NULL THEN 1 ELSE 0 END) AS stored,",
-            "SUM(CASE WHEN fs.last_fetched_at IS NULL THEN 1 ELSE 0 END) AS missing,",
+            "SUM(CASE WHEN fr.provider_listing_id IS NOT NULL THEN 1 ELSE 0 END) AS stored,",
+            "SUM(CASE WHEN fr.provider_listing_id IS NULL THEN 1 ELSE 0 END) AS missing,",
             f"{stale_expr} AS stale,",
             "SUM(CASE WHEN fs.next_eligible_at IS NOT NULL AND fs.next_eligible_at > ? THEN 1 ELSE 0 END) AS blocked,",
-            "SUM(CASE WHEN fs.last_status = 'error' THEN 1 ELSE 0 END) AS error_rows",
+            "SUM(CASE WHEN fs.provider_listing_id IS NOT NULL THEN 1 ELSE 0 END) AS error_rows",
             "FROM provider_listing_catalog catalog",
+            "LEFT JOIN fundamentals_raw fr "
+            "ON fr.provider_listing_id = catalog.provider_listing_id",
             "LEFT JOIN fundamentals_fetch_state fs "
             "ON fs.provider_listing_id = catalog.provider_listing_id",
             "WHERE catalog.provider = ?",
@@ -2615,11 +2639,11 @@ class SupportedTickerRepository(SQLiteStore):
         params: List[object] = [provider_norm]
         query = [
             "SELECT catalog.provider_symbol AS symbol, catalog.provider_exchange_code AS exchange_code,",
-            "fs.last_status, fs.last_error, fs.next_eligible_at, fs.attempts",
+            "fs.error AS last_error, fs.next_eligible_at, fs.attempts",
             "FROM provider_listing_catalog catalog",
             "JOIN fundamentals_fetch_state fs "
             "ON fs.provider_listing_id = catalog.provider_listing_id",
-            "WHERE catalog.provider = ? AND fs.last_status = 'error'",
+            "WHERE catalog.provider = ?",
         ]
         normalized_codes = _normalized_codes(exchange_codes)
         if normalized_codes:
@@ -2638,7 +2662,7 @@ class SupportedTickerRepository(SQLiteStore):
             IngestProgressFailure(
                 symbol=row["symbol"],
                 exchange_code=row["exchange_code"],
-                last_status=row["last_status"],
+                last_status="error",
                 last_error=row["last_error"],
                 next_eligible_at=row["next_eligible_at"],
                 attempts=_coerce_int(row["attempts"]),
@@ -2870,20 +2894,21 @@ class FundamentalsRepository(SQLiteStore):
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS fundamentals_raw (
-                    payload_id INTEGER PRIMARY KEY,
-                    provider_listing_id INTEGER NOT NULL UNIQUE,
+                    provider_listing_id INTEGER PRIMARY KEY,
                     data TEXT NOT NULL,
-                    fetched_at TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+                    last_fetched_at TEXT NOT NULL,
                     FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
                 )
                 """
             )
             conn.execute("DROP INDEX IF EXISTS idx_fundamentals_raw_security")
             conn.execute("DROP INDEX IF EXISTS idx_fundamentals_raw_provider_symbol")
+            conn.execute("DROP INDEX IF EXISTS idx_fundamentals_raw_provider_fetched")
             conn.execute(
                 """
-                CREATE INDEX IF NOT EXISTS idx_fundamentals_raw_provider_fetched
-                ON fundamentals_raw(fetched_at)
+                CREATE INDEX IF NOT EXISTS idx_fundamentals_raw_last_fetched
+                ON fundamentals_raw(last_fetched_at)
                 """
             )
             _ensure_provider_listing_catalog_views(conn)
@@ -2901,7 +2926,8 @@ class FundamentalsRepository(SQLiteStore):
             provider, symbol, exchange
         )
         provider_norm = provider.strip().upper()
-        fetched_at = _utc_now_iso()
+        data = canonical_json_dumps(payload)
+        last_fetched_at = _utc_now_iso()
         self.upsert_many(
             provider_norm,
             [
@@ -2912,15 +2938,11 @@ class FundamentalsRepository(SQLiteStore):
                     listing_currency=_normalize_optional_text(
                         listing_currency.upper() if listing_currency else None
                     ),
-                    data=json.dumps(payload),
-                    fetched_at=fetched_at,
+                    data=data,
+                    payload_hash=fundamentals_payload_hash(data),
+                    last_fetched_at=last_fetched_at,
                 )
             ],
-        )
-        FundamentalsFetchStateRepository(self.db_path).mark_success(
-            provider_norm,
-            str(provider_symbol or ""),
-            fetched_at=fetched_at,
         )
 
     def upsert_many(
@@ -2960,7 +2982,8 @@ class FundamentalsRepository(SQLiteStore):
                     (
                         int(provider_listing_row["provider_listing_id"]),
                         update.data,
-                        update.fetched_at,
+                        update.payload_hash,
+                        update.last_fetched_at,
                     )
                 )
             if not rows:
@@ -2970,13 +2993,24 @@ class FundamentalsRepository(SQLiteStore):
                 INSERT INTO fundamentals_raw (
                     provider_listing_id,
                     data,
-                    fetched_at
-                ) VALUES (?, ?, ?)
+                    payload_hash,
+                    last_fetched_at
+                ) VALUES (?, ?, ?, ?)
                 ON CONFLICT(provider_listing_id) DO UPDATE SET
                     data = excluded.data,
-                    fetched_at = excluded.fetched_at
+                    payload_hash = excluded.payload_hash,
+                    last_fetched_at = excluded.last_fetched_at
                 """,
                 rows,
+            )
+            provider_listing_ids = [row[0] for row in rows]
+            placeholders = ", ".join("?" for _ in provider_listing_ids)
+            conn.execute(
+                f"""
+                DELETE FROM fundamentals_fetch_state
+                WHERE provider_listing_id IN ({placeholders})
+                """,
+                provider_listing_ids,
             )
             listing_updates = listing_repo.upsert_many_from_fundamentals_updates(
                 provider_norm,
@@ -3151,7 +3185,7 @@ class FundamentalsRepository(SQLiteStore):
             return None
         return row[0], row[1], json.loads(row[2])
 
-    def fetch_payload_with_fetched_at(
+    def fetch_payload_with_hash(
         self, provider: str, symbol: str
     ) -> Optional[Tuple[Dict[str, Any], str]]:
         self.initialize_schema()
@@ -3163,7 +3197,7 @@ class FundamentalsRepository(SQLiteStore):
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT fr.data, fr.fetched_at
+                SELECT fr.data, fr.payload_hash
                 FROM fundamentals_raw fr
                 JOIN provider_listing_catalog catalog
                   ON catalog.provider_listing_id = fr.provider_listing_id
@@ -3173,7 +3207,7 @@ class FundamentalsRepository(SQLiteStore):
             ).fetchone()
         if row is None:
             return None
-        return json.loads(row["data"]), str(row["fetched_at"])
+        return json.loads(row["data"]), str(row["payload_hash"])
 
     def symbols(self, provider: str) -> List[str]:
         self.initialize_schema()
@@ -3251,9 +3285,9 @@ class FundamentalsRepository(SQLiteStore):
             SELECT
                 catalog.provider_symbol,
                 catalog.security_id,
-                fr.fetched_at,
-                ns.raw_fetched_at AS normalized_raw_fetched_at,
-                ns.last_normalized_at
+                fr.payload_hash,
+                ns.normalized_payload_hash,
+                ns.normalized_at
             FROM fundamentals_raw fr
             JOIN provider_listing_catalog catalog
               ON catalog.provider_listing_id = fr.provider_listing_id
@@ -3276,13 +3310,13 @@ class FundamentalsRepository(SQLiteStore):
         for row in rows:
             symbol_key = str(row["provider_symbol"])
             rows_by_symbol[symbol_key] = row
-            normalized_raw_fetched_at = _normalize_optional_text(
-                row["normalized_raw_fetched_at"]
+            normalized_payload_hash = _normalize_optional_text(
+                row["normalized_payload_hash"]
             )
-            raw_fetched_at = str(row["fetched_at"])
+            raw_payload_hash = str(row["payload_hash"])
             if (
-                normalized_raw_fetched_at is not None
-                and raw_fetched_at <= normalized_raw_fetched_at
+                normalized_payload_hash is not None
+                and raw_payload_hash == normalized_payload_hash
             ):
                 security_ids_needing_provider.append(int(row["security_id"]))
 
@@ -3317,11 +3351,11 @@ class FundamentalsRepository(SQLiteStore):
             symbol_key: FundamentalsNormalizationCandidate(
                 provider_symbol=symbol_key,
                 security_id=int(row["security_id"]),
-                raw_fetched_at=str(row["fetched_at"]),
-                normalized_raw_fetched_at=_normalize_optional_text(
-                    row["normalized_raw_fetched_at"]
+                raw_payload_hash=str(row["payload_hash"]),
+                normalized_payload_hash=_normalize_optional_text(
+                    row["normalized_payload_hash"]
                 ),
-                last_normalized_at=_normalize_optional_text(row["last_normalized_at"]),
+                normalized_at=_normalize_optional_text(row["normalized_at"]),
                 current_source_provider=source_provider_by_security.get(
                     int(row["security_id"])
                 ),
@@ -3341,9 +3375,9 @@ class FundamentalsRepository(SQLiteStore):
                 SELECT
                     catalog.provider_symbol,
                     catalog.security_id,
-                    fr.fetched_at,
-                    ns.raw_fetched_at AS normalized_raw_fetched_at,
-                    ns.last_normalized_at
+                    fr.payload_hash,
+                    ns.normalized_payload_hash,
+                    ns.normalized_at
                 FROM fundamentals_raw fr
                 JOIN provider_listing_catalog catalog
                   ON catalog.provider_listing_id = fr.provider_listing_id
@@ -3503,7 +3537,7 @@ class SecurityListingStatusRepository(SQLiteStore):
                 self._build_status_record(
                     security_id=update.security_id,
                     provider_symbol=update.provider_symbol,
-                    raw_fetched_at=update.fetched_at,
+                    raw_fetched_at=update.last_fetched_at,
                     payload=payload if isinstance(payload, Mapping) else {},
                 )
             )
@@ -3600,7 +3634,7 @@ class SecurityListingStatusRepository(SQLiteStore):
         ) -> List[sqlite3.Row]:
             params: List[Any] = [provider_norm]
             query = [
-                "SELECT catalog.security_id, catalog.provider_symbol, fr.fetched_at, fr.data",
+                "SELECT catalog.security_id, catalog.provider_symbol, fr.last_fetched_at, fr.data",
                 "FROM fundamentals_raw fr",
                 "JOIN provider_listing_catalog catalog",
                 "  ON catalog.provider_listing_id = fr.provider_listing_id",
@@ -3644,7 +3678,7 @@ class SecurityListingStatusRepository(SQLiteStore):
                 self._build_status_record(
                     security_id=int(row["security_id"]),
                     provider_symbol=str(row["provider_symbol"]),
-                    raw_fetched_at=str(row["fetched_at"]),
+                    raw_fetched_at=str(row["last_fetched_at"]),
                     payload=payload if isinstance(payload, Mapping) else {},
                 )
             )
@@ -3700,7 +3734,12 @@ class SecurityListingStatusRepository(SQLiteStore):
                     conn.execute(
                         f"""
                         DELETE FROM fundamentals_normalization_state
-                        WHERE provider = ? AND provider_symbol IN ({placeholders})
+                        WHERE provider_listing_id IN (
+                            SELECT catalog.provider_listing_id
+                            FROM provider_listing_catalog catalog
+                            WHERE catalog.provider = ?
+                              AND catalog.provider_symbol IN ({placeholders})
+                        )
                         """,
                         [provider_norm, *symbol_chunk],
                     )
@@ -4062,11 +4101,271 @@ class _FetchStateRepository(SQLiteStore):
         return int(cursor.rowcount or 0)
 
 
-class FundamentalsFetchStateRepository(_FetchStateRepository):
-    """Track fundamentals fetch status for resumable ingestion."""
+class FundamentalsFetchStateRepository(SQLiteStore):
+    """Track active fundamentals fetch failures for resumable ingestion."""
 
-    table_name = "fundamentals_fetch_state"
-    index_name = "idx_fundamentals_fetch_next"
+    def initialize_schema(self) -> None:
+        apply_migrations(self.db_path)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS fundamentals_fetch_state (
+                    provider_listing_id INTEGER PRIMARY KEY,
+                    failed_at TEXT NOT NULL,
+                    error TEXT NOT NULL,
+                    next_eligible_at TEXT NOT NULL,
+                    attempts INTEGER NOT NULL CHECK (attempts > 0),
+                    FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
+                )
+                """
+            )
+            conn.execute(
+                "DROP INDEX IF EXISTS idx_fundamentals_fetch_state_provider_symbol"
+            )
+            conn.execute(
+                "DROP INDEX IF EXISTS idx_fundamentals_fetch_state_provider_fetched_symbol"
+            )
+            conn.execute(
+                "DROP INDEX IF EXISTS idx_fundamentals_fetch_state_provider_status_next_symbol"
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_fundamentals_fetch_next
+                ON fundamentals_fetch_state(next_eligible_at)
+                """
+            )
+
+    def _resolve_provider_listing_id(
+        self,
+        conn: sqlite3.Connection,
+        provider: str,
+        symbol: str,
+    ) -> Optional[int]:
+        row = conn.execute(
+            """
+            SELECT provider_listing_id
+            FROM provider_listing_catalog
+            WHERE provider = ? AND provider_symbol = ?
+            """,
+            (provider.strip().upper(), symbol.strip().upper()),
+        ).fetchone()
+        return int(row["provider_listing_id"]) if row else None
+
+    def fetch(
+        self, provider: str, symbol: str
+    ) -> Optional[Dict[str, Optional[str] | int]]:
+        self.initialize_schema()
+        with self._connect() as conn:
+            provider_listing_id = self._resolve_provider_listing_id(
+                conn, provider, symbol
+            )
+            if provider_listing_id is None:
+                return None
+            row = conn.execute(
+                """
+                SELECT failed_at, error, next_eligible_at, attempts
+                FROM fundamentals_fetch_state
+                WHERE provider_listing_id = ?
+                """,
+                (provider_listing_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "failed_at": row["failed_at"],
+            "error": row["error"],
+            "last_status": "error",
+            "last_error": row["error"],
+            "next_eligible_at": row["next_eligible_at"],
+            "attempts": row["attempts"],
+        }
+
+    def mark_success(
+        self,
+        provider: str,
+        symbol: str,
+        fetched_at: Optional[str] = None,
+    ) -> None:
+        del fetched_at
+        self.mark_success_many(provider, [symbol])
+
+    def mark_success_many(
+        self,
+        provider: str,
+        symbols: Sequence[str],
+        fetched_at: Optional[str] = None,
+    ) -> None:
+        del fetched_at
+        self.initialize_schema()
+        normalized = _normalized_codes(symbols)
+        if not normalized:
+            return
+        provider_norm = provider.strip().upper()
+        with self._connect() as conn:
+            provider_listing_ids = []
+            for symbol in normalized:
+                provider_listing_id = self._resolve_provider_listing_id(
+                    conn, provider_norm, symbol
+                )
+                if provider_listing_id is not None:
+                    provider_listing_ids.append(provider_listing_id)
+            if not provider_listing_ids:
+                return
+            placeholders = ", ".join("?" for _ in provider_listing_ids)
+            conn.execute(
+                f"""
+                DELETE FROM fundamentals_fetch_state
+                WHERE provider_listing_id IN ({placeholders})
+                """,
+                provider_listing_ids,
+            )
+
+    def mark_failure(
+        self,
+        provider: str,
+        symbol: str,
+        error: str,
+        base_backoff_seconds: int = 3600,
+        max_backoff_seconds: int = 86400,
+    ) -> None:
+        self.initialize_schema()
+        with self._connect() as conn:
+            provider_listing_id = self._resolve_provider_listing_id(
+                conn, provider, symbol
+            )
+            if provider_listing_id is None:
+                return
+            row = conn.execute(
+                """
+                SELECT attempts
+                FROM fundamentals_fetch_state
+                WHERE provider_listing_id = ?
+                """,
+                (provider_listing_id,),
+            ).fetchone()
+            attempts = int(row["attempts"]) if row else 0
+            attempts += 1
+            backoff = min(
+                base_backoff_seconds * (2 ** (attempts - 1)),
+                max_backoff_seconds,
+            )
+            failed_at = datetime.now(timezone.utc)
+            next_eligible_at = (failed_at + timedelta(seconds=backoff)).isoformat()
+            conn.execute(
+                """
+                INSERT INTO fundamentals_fetch_state (
+                    provider_listing_id,
+                    failed_at,
+                    error,
+                    next_eligible_at,
+                    attempts
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(provider_listing_id) DO UPDATE SET
+                    failed_at = excluded.failed_at,
+                    error = excluded.error,
+                    next_eligible_at = excluded.next_eligible_at,
+                    attempts = excluded.attempts
+                """,
+                (
+                    provider_listing_id,
+                    failed_at.isoformat(),
+                    error,
+                    next_eligible_at,
+                    attempts,
+                ),
+            )
+
+    def mark_failure_many(
+        self,
+        provider: str,
+        errors: Sequence[Tuple[str, str]],
+        base_backoff_seconds: int = 3600,
+        max_backoff_seconds: int = 86400,
+    ) -> None:
+        self.initialize_schema()
+        normalized_errors = [
+            (symbol.strip().upper(), str(error))
+            for symbol, error in errors
+            if symbol and str(error)
+        ]
+        if not normalized_errors:
+            return
+        provider_norm = provider.strip().upper()
+        now = datetime.now(timezone.utc)
+        with self._connect() as conn:
+            rows = []
+            for symbol, error in normalized_errors:
+                provider_listing_id = self._resolve_provider_listing_id(
+                    conn, provider_norm, symbol
+                )
+                if provider_listing_id is None:
+                    continue
+                state = conn.execute(
+                    """
+                    SELECT attempts
+                    FROM fundamentals_fetch_state
+                    WHERE provider_listing_id = ?
+                    """,
+                    (provider_listing_id,),
+                ).fetchone()
+                attempts = int(state["attempts"]) if state else 0
+                attempts += 1
+                backoff = min(
+                    base_backoff_seconds * (2 ** (attempts - 1)),
+                    max_backoff_seconds,
+                )
+                rows.append(
+                    (
+                        provider_listing_id,
+                        now.isoformat(),
+                        error,
+                        (now + timedelta(seconds=backoff)).isoformat(),
+                        attempts,
+                    )
+                )
+            conn.executemany(
+                """
+                INSERT INTO fundamentals_fetch_state (
+                    provider_listing_id,
+                    failed_at,
+                    error,
+                    next_eligible_at,
+                    attempts
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(provider_listing_id) DO UPDATE SET
+                    failed_at = excluded.failed_at,
+                    error = excluded.error,
+                    next_eligible_at = excluded.next_eligible_at,
+                    attempts = excluded.attempts
+                """,
+                rows,
+            )
+
+    def delete_symbols(self, provider: str, symbols: Sequence[str]) -> int:
+        self.initialize_schema()
+        normalized = _normalized_codes(symbols)
+        if not normalized:
+            return 0
+        provider_norm = provider.strip().upper()
+        with self._connect() as conn:
+            provider_listing_ids = []
+            for symbol in normalized:
+                provider_listing_id = self._resolve_provider_listing_id(
+                    conn, provider_norm, symbol
+                )
+                if provider_listing_id is not None:
+                    provider_listing_ids.append(provider_listing_id)
+            if not provider_listing_ids:
+                return 0
+            placeholders = ", ".join("?" for _ in provider_listing_ids)
+            cursor = conn.execute(
+                f"""
+                DELETE FROM fundamentals_fetch_state
+                WHERE provider_listing_id IN ({placeholders})
+                """,
+                provider_listing_ids,
+            )
+        return int(cursor.rowcount or 0)
 
 
 class MarketDataFetchStateRepository(_FetchStateRepository):
@@ -4085,94 +4384,16 @@ class FundamentalsNormalizationStateRepository(SQLiteStore):
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS fundamentals_normalization_state (
-                    provider_listing_id INTEGER NOT NULL PRIMARY KEY,
-                    provider TEXT NOT NULL,
-                    provider_symbol TEXT NOT NULL,
-                    security_id INTEGER NOT NULL,
-                    listing_id INTEGER NOT NULL,
-                    raw_fetched_at TEXT NOT NULL,
-                    last_normalized_at TEXT NOT NULL,
-                    UNIQUE (provider, provider_symbol)
+                    provider_listing_id INTEGER PRIMARY KEY,
+                    normalized_payload_hash TEXT NOT NULL CHECK (length(normalized_payload_hash) = 64),
+                    normalized_at TEXT NOT NULL,
+                    FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
                 )
                 """
             )
-            columns = _table_columns(conn, "fundamentals_normalization_state")
-            alter_statements = [
-                (
-                    "provider_listing_id",
-                    """
-                    ALTER TABLE fundamentals_normalization_state
-                    ADD COLUMN provider_listing_id INTEGER
-                    """,
-                ),
-                (
-                    "provider",
-                    """
-                    ALTER TABLE fundamentals_normalization_state
-                    ADD COLUMN provider TEXT
-                    """,
-                ),
-                (
-                    "provider_symbol",
-                    """
-                    ALTER TABLE fundamentals_normalization_state
-                    ADD COLUMN provider_symbol TEXT
-                    """,
-                ),
-                (
-                    "security_id",
-                    """
-                    ALTER TABLE fundamentals_normalization_state
-                    ADD COLUMN security_id INTEGER
-                    """,
-                ),
-                (
-                    "listing_id",
-                    """
-                    ALTER TABLE fundamentals_normalization_state
-                    ADD COLUMN listing_id INTEGER
-                    """,
-                ),
-            ]
-            for column_name, statement in alter_statements:
-                if column_name not in columns:
-                    conn.execute(statement)
+            conn.execute("DROP INDEX IF EXISTS idx_fundamentals_norm_state_security")
             conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_fundamentals_norm_state_security
-                ON fundamentals_normalization_state(security_id)
-                """
-            )
-            conn.execute(
-                """
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_fundamentals_norm_state_provider_symbol
-                ON fundamentals_normalization_state(provider, provider_symbol)
-                """
-            )
-            _ensure_provider_listing_catalog_views(conn)
-            conn.execute(
-                """
-                UPDATE fundamentals_normalization_state
-                SET provider = (
-                        SELECT catalog.provider
-                        FROM provider_listing_catalog catalog
-                        WHERE catalog.provider_listing_id = fundamentals_normalization_state.provider_listing_id
-                    ),
-                    provider_symbol = (
-                        SELECT catalog.provider_symbol
-                        FROM provider_listing_catalog catalog
-                        WHERE catalog.provider_listing_id = fundamentals_normalization_state.provider_listing_id
-                    ),
-                    listing_id = COALESCE(listing_id, security_id),
-                    security_id = COALESCE(security_id, listing_id)
-                WHERE provider_listing_id IS NOT NULL
-                  AND (
-                      provider IS NULL
-                      OR provider_symbol IS NULL
-                      OR security_id IS NULL
-                      OR listing_id IS NULL
-                  )
-                """
+                "DROP INDEX IF EXISTS idx_fundamentals_norm_state_provider_symbol"
             )
 
     def fetch(
@@ -4182,9 +4403,14 @@ class FundamentalsNormalizationStateRepository(SQLiteStore):
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT security_id, raw_fetched_at, last_normalized_at
-                FROM fundamentals_normalization_state
-                WHERE provider = ? AND provider_symbol = ?
+                SELECT
+                    catalog.security_id,
+                    ns.normalized_payload_hash,
+                    ns.normalized_at
+                FROM fundamentals_normalization_state ns
+                JOIN provider_listing_catalog catalog
+                  ON catalog.provider_listing_id = ns.provider_listing_id
+                WHERE catalog.provider = ? AND catalog.provider_symbol = ?
                 """,
                 (provider.strip().upper(), symbol.strip().upper()),
             ).fetchone()
@@ -4192,8 +4418,8 @@ class FundamentalsNormalizationStateRepository(SQLiteStore):
             return None
         return {
             "security_id": int(row["security_id"]),
-            "raw_fetched_at": row["raw_fetched_at"],
-            "last_normalized_at": row["last_normalized_at"],
+            "normalized_payload_hash": row["normalized_payload_hash"],
+            "normalized_at": row["normalized_at"],
         }
 
     def mark_success(
@@ -4201,9 +4427,10 @@ class FundamentalsNormalizationStateRepository(SQLiteStore):
         provider: str,
         symbol: str,
         security_id: int,
-        raw_fetched_at: str,
+        normalized_payload_hash: str,
         normalized_at: Optional[str] = None,
     ) -> None:
+        del security_id
         self.initialize_schema()
         with self._connect() as conn:
             provider_listing_row = conn.execute(
@@ -4220,27 +4447,16 @@ class FundamentalsNormalizationStateRepository(SQLiteStore):
                 """
                 INSERT INTO fundamentals_normalization_state (
                     provider_listing_id,
-                    provider,
-                    provider_symbol,
-                    security_id,
-                    listing_id,
-                    raw_fetched_at,
-                    last_normalized_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(provider, provider_symbol) DO UPDATE SET
-                    provider_listing_id = excluded.provider_listing_id,
-                    security_id = excluded.security_id,
-                    listing_id = excluded.listing_id,
-                    raw_fetched_at = excluded.raw_fetched_at,
-                    last_normalized_at = excluded.last_normalized_at
+                    normalized_payload_hash,
+                    normalized_at
+                ) VALUES (?, ?, ?)
+                ON CONFLICT(provider_listing_id) DO UPDATE SET
+                    normalized_payload_hash = excluded.normalized_payload_hash,
+                    normalized_at = excluded.normalized_at
                 """,
                 (
                     int(provider_listing_row["provider_listing_id"]),
-                    provider.strip().upper(),
-                    symbol.strip().upper(),
-                    int(security_id),
-                    int(security_id),
-                    raw_fetched_at,
+                    normalized_payload_hash,
                     normalized_at or _utc_now_iso(),
                 ),
             )
@@ -4250,14 +4466,29 @@ class FundamentalsNormalizationStateRepository(SQLiteStore):
         normalized = _normalized_codes(symbols)
         if not normalized:
             return 0
-        placeholders = ", ".join("?" for _ in normalized)
+        provider_norm = provider.strip().upper()
         with self._connect() as conn:
+            provider_listing_ids = []
+            for symbol in normalized:
+                row = conn.execute(
+                    """
+                    SELECT provider_listing_id
+                    FROM provider_listing_catalog
+                    WHERE provider = ? AND provider_symbol = ?
+                    """,
+                    (provider_norm, symbol),
+                ).fetchone()
+                if row is not None:
+                    provider_listing_ids.append(int(row["provider_listing_id"]))
+            if not provider_listing_ids:
+                return 0
+            placeholders = ", ".join("?" for _ in provider_listing_ids)
             cursor = conn.execute(
                 f"""
                 DELETE FROM fundamentals_normalization_state
-                WHERE provider = ? AND provider_symbol IN ({placeholders})
+                WHERE provider_listing_id IN ({placeholders})
                 """,
-                [provider.strip().upper(), *normalized],
+                provider_listing_ids,
             )
         return int(cursor.rowcount or 0)
 
@@ -6359,4 +6590,6 @@ __all__ = [
     "MetricRecord",
     "MetricsRepository",
     "EntityMetadataRepository",
+    "canonical_json_dumps",
+    "fundamentals_payload_hash",
 ]
