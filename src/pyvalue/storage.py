@@ -54,6 +54,9 @@ _CONNECTION_PERFORMANCE_PRAGMAS: Tuple[str, ...] = (
 )
 
 _PRIMARY_LISTING_SOURCE_PROVIDER = "EODHD"
+_LISTING_STATUS_UNKNOWN = "unknown"
+_LISTING_STATUS_PRIMARY = "primary"
+_LISTING_STATUS_SECONDARY = "secondary"
 _LISTING_CLASS_MATCHED_PRIMARY = "matched_primary_ticker"
 _LISTING_CLASS_DIFFERENT_PRIMARY = "different_primary_ticker"
 _LISTING_CLASS_MISSING_PRIMARY = "missing_primary_ticker"
@@ -167,6 +170,7 @@ def _ensure_provider_listing_catalog_views(conn: sqlite3.Connection) -> None:
             NULL AS security_type,
             i.country AS country,
             COALESCE(pl.currency, l.currency) AS currency,
+            l.primary_listing_status,
             NULL AS isin,
             NULL AS updated_at
         FROM provider_listing pl
@@ -192,6 +196,7 @@ def _ensure_provider_listing_catalog_views(conn: sqlite3.Connection) -> None:
             security_type,
             country,
             currency,
+            primary_listing_status,
             isin,
             updated_at
         FROM provider_listing_catalog
@@ -211,20 +216,8 @@ def _batched(values: Sequence[Any], size: int) -> Iterable[Sequence[Any]]:
         yield values[start : start + size]
 
 
-def _primary_listing_left_join(
-    *,
-    security_alias: str,
-    status_alias: str = "sls",
-) -> str:
-    return (
-        "LEFT JOIN security_listing_status "
-        f"{status_alias} ON {status_alias}.listing_id = {security_alias}.security_id "
-        f"AND {status_alias}.source_provider = '{_PRIMARY_LISTING_SOURCE_PROVIDER}'"
-    )
-
-
-def _primary_listing_predicate(status_alias: str = "sls") -> str:
-    return f"COALESCE({status_alias}.is_primary_listing, 1) = 1"
+def _primary_listing_predicate(alias: str = "catalog") -> str:
+    return f"{alias}.primary_listing_status <> '{_LISTING_STATUS_SECONDARY}'"
 
 
 @dataclass(frozen=True)
@@ -527,7 +520,7 @@ class FundamentalsUpdate:
 
 @dataclass(frozen=True)
 class SecurityListingStatusRecord:
-    """Cached primary-vs-secondary listing classification for one security."""
+    """Primary-vs-secondary listing classification for one canonical listing."""
 
     security_id: int
     source_provider: str
@@ -931,12 +924,23 @@ class SecurityRepository(SQLiteStore):
                     exchange_id INTEGER NOT NULL,
                     symbol TEXT NOT NULL,
                     currency TEXT,
+                    primary_listing_status TEXT NOT NULL DEFAULT 'unknown'
+                        CHECK (primary_listing_status IN ('unknown', 'primary', 'secondary')),
                     UNIQUE (exchange_id, symbol),
                     FOREIGN KEY (issuer_id) REFERENCES issuer(issuer_id),
                     FOREIGN KEY (exchange_id) REFERENCES "exchange"(exchange_id)
                 )
                 """
             )
+            columns = _table_columns(conn, "listing")
+            if "primary_listing_status" not in columns:
+                conn.execute(
+                    """
+                    ALTER TABLE listing
+                    ADD COLUMN primary_listing_status TEXT NOT NULL DEFAULT 'unknown'
+                    CHECK (primary_listing_status IN ('unknown', 'primary', 'secondary'))
+                    """
+                )
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_listing_exchange
@@ -1412,21 +1416,15 @@ class SecurityRepository(SQLiteStore):
             "JOIN listing l ON l.listing_id = pl.listing_id",
             'JOIN "exchange" e ON e.exchange_id = l.exchange_id',
         ]
-        if primary_only:
-            query.append(
-                "LEFT JOIN security_listing_status sls "
-                "ON sls.listing_id = l.listing_id "
-                f"AND sls.source_provider = '{_PRIMARY_LISTING_SOURCE_PROVIDER}'"
-            )
         normalized = _normalized_codes(exchange_codes)
         if normalized:
             placeholders = ", ".join("?" for _ in normalized)
             query.append(f"WHERE UPPER(e.exchange_code) IN ({placeholders})")
             params.extend(normalized)
             if primary_only:
-                query.append(f"AND {_primary_listing_predicate()}")
+                query.append(f"AND {_primary_listing_predicate('l')}")
         elif primary_only:
-            query.append(f"WHERE {_primary_listing_predicate()}")
+            query.append(f"WHERE {_primary_listing_predicate('l')}")
         query.append("ORDER BY canonical_symbol")
         with self._connect() as conn:
             rows = conn.execute(" ".join(query), params).fetchall()
@@ -1448,21 +1446,15 @@ class SecurityRepository(SQLiteStore):
             "JOIN issuer i ON i.issuer_id = l.issuer_id",
             'JOIN "exchange" e ON e.exchange_id = l.exchange_id',
         ]
-        if primary_only:
-            query.append(
-                "LEFT JOIN security_listing_status sls "
-                "ON sls.listing_id = l.listing_id "
-                f"AND sls.source_provider = '{_PRIMARY_LISTING_SOURCE_PROVIDER}'"
-            )
         normalized = _normalized_codes(exchange_codes)
         if normalized:
             placeholders = ", ".join("?" for _ in normalized)
             query.append(f"WHERE UPPER(e.exchange_code) IN ({placeholders})")
             params.extend(normalized)
             if primary_only:
-                query.append(f"AND {_primary_listing_predicate()}")
+                query.append(f"AND {_primary_listing_predicate('l')}")
         elif primary_only:
-            query.append(f"WHERE {_primary_listing_predicate()}")
+            query.append(f"WHERE {_primary_listing_predicate('l')}")
         query.append("GROUP BY l.listing_id, canonical_symbol, i.name")
         query.append("ORDER BY canonical_symbol")
         with self._connect() as conn:
@@ -2088,14 +2080,6 @@ class SupportedTickerRepository(SQLiteStore):
             )
             conn.execute(
                 f"""
-                DELETE FROM security_listing_status
-                WHERE provider_listing_id IN ({placeholders})
-                   OR primary_provider_listing_id IN ({placeholders})
-                """,
-                [*chunk, *chunk],
-            )
-            conn.execute(
-                f"""
                 DELETE FROM provider_listing
                 WHERE provider_listing_id IN ({placeholders})
                 """,
@@ -2242,12 +2226,6 @@ class SupportedTickerRepository(SQLiteStore):
             f"SELECT {self._catalog_select_columns('catalog')}",
             "FROM provider_listing_catalog catalog",
         ]
-        if primary_only:
-            query.append(
-                "LEFT JOIN security_listing_status sls "
-                "ON sls.listing_id = catalog.security_id "
-                f"AND sls.source_provider = '{_PRIMARY_LISTING_SOURCE_PROVIDER}'"
-            )
         query.append("WHERE UPPER(catalog.provider) = ?")
         normalized_codes = _normalized_codes(exchange_codes)
         if normalized_codes:
@@ -2681,13 +2659,6 @@ class SupportedTickerRepository(SQLiteStore):
             "ON ms.provider_listing_id = catalog.provider_listing_id",
             "WHERE catalog.provider = ?",
         ]
-        if primary_only:
-            query.insert(
-                2,
-                "LEFT JOIN security_listing_status sls "
-                "ON sls.listing_id = catalog.security_id "
-                f"AND sls.source_provider = '{_PRIMARY_LISTING_SOURCE_PROVIDER}'",
-            )
         normalized_codes = _normalized_codes(exchange_codes)
         if normalized_codes:
             placeholders = ", ".join("?" for _ in normalized_codes)
@@ -2751,13 +2722,6 @@ class SupportedTickerRepository(SQLiteStore):
             "ON ms.provider_listing_id = catalog.provider_listing_id",
             "WHERE catalog.provider = ?",
         ]
-        if primary_only:
-            query.insert(
-                8,
-                "LEFT JOIN security_listing_status sls "
-                "ON sls.listing_id = catalog.security_id "
-                f"AND sls.source_provider = '{_PRIMARY_LISTING_SOURCE_PROVIDER}'",
-            )
         normalized_codes = _normalized_codes(exchange_codes)
         if normalized_codes:
             placeholders = ", ".join("?" for _ in normalized_codes)
@@ -2810,13 +2774,6 @@ class SupportedTickerRepository(SQLiteStore):
             "ON ms.provider_listing_id = catalog.provider_listing_id",
             "WHERE catalog.provider = ?",
         ]
-        if primary_only:
-            query.insert(
-                9,
-                "LEFT JOIN security_listing_status sls "
-                "ON sls.listing_id = catalog.security_id "
-                f"AND sls.source_provider = '{_PRIMARY_LISTING_SOURCE_PROVIDER}'",
-            )
         normalized_codes = _normalized_codes(exchange_codes)
         if normalized_codes:
             placeholders = ", ".join("?" for _ in normalized_codes)
@@ -2860,13 +2817,6 @@ class SupportedTickerRepository(SQLiteStore):
             "ON ms.provider_listing_id = catalog.provider_listing_id",
             "WHERE catalog.provider = ? AND ms.last_status = 'error'",
         ]
-        if primary_only:
-            query.insert(
-                4,
-                "LEFT JOIN security_listing_status sls "
-                "ON sls.listing_id = catalog.security_id "
-                f"AND sls.source_provider = '{_PRIMARY_LISTING_SOURCE_PROVIDER}'",
-            )
         normalized_codes = _normalized_codes(exchange_codes)
         if normalized_codes:
             placeholders = ", ".join("?" for _ in normalized_codes)
@@ -3430,107 +3380,11 @@ class FundamentalsRepository(SQLiteStore):
 
 
 class SecurityListingStatusRepository(SQLiteStore):
-    """Persist and reconcile cached primary-listing classification."""
+    """Persist and reconcile canonical primary-listing classification."""
 
     def initialize_schema(self) -> None:
         apply_migrations(self.db_path)
         self._security_repo().initialize_schema()
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS security_listing_status (
-                    listing_id INTEGER NOT NULL PRIMARY KEY,
-                    security_id INTEGER NOT NULL UNIQUE,
-                    source_provider TEXT NOT NULL,
-                    provider_listing_id INTEGER NOT NULL,
-                    provider_symbol TEXT NOT NULL,
-                    raw_fetched_at TEXT NOT NULL,
-                    is_primary_listing INTEGER NOT NULL CHECK (is_primary_listing IN (0, 1)),
-                    primary_provider_listing_id INTEGER,
-                    primary_provider_symbol TEXT,
-                    classification_basis TEXT NOT NULL CHECK (
-                        classification_basis IN (
-                            'matched_primary_ticker',
-                            'different_primary_ticker',
-                            'missing_primary_ticker'
-                        )
-                    ),
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
-            columns = _table_columns(conn, "security_listing_status")
-            alter_statements = [
-                (
-                    "listing_id",
-                    "ALTER TABLE security_listing_status ADD COLUMN listing_id INTEGER",
-                ),
-                (
-                    "security_id",
-                    "ALTER TABLE security_listing_status ADD COLUMN security_id INTEGER",
-                ),
-                (
-                    "provider_symbol",
-                    "ALTER TABLE security_listing_status ADD COLUMN provider_symbol TEXT",
-                ),
-                (
-                    "provider_listing_id",
-                    """
-                    ALTER TABLE security_listing_status
-                    ADD COLUMN provider_listing_id INTEGER
-                    """,
-                ),
-                (
-                    "primary_provider_listing_id",
-                    """
-                    ALTER TABLE security_listing_status
-                    ADD COLUMN primary_provider_listing_id INTEGER
-                    """,
-                ),
-                (
-                    "primary_provider_symbol",
-                    """
-                    ALTER TABLE security_listing_status
-                    ADD COLUMN primary_provider_symbol TEXT
-                    """,
-                ),
-            ]
-            for column_name, statement in alter_statements:
-                if column_name not in columns:
-                    conn.execute(statement)
-            _ensure_provider_listing_catalog_views(conn)
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_security_listing_status_primary
-                ON security_listing_status(is_primary_listing, security_id)
-                """
-            )
-            conn.execute(
-                """
-                UPDATE security_listing_status
-                SET listing_id = COALESCE(listing_id, security_id),
-                    security_id = COALESCE(security_id, listing_id),
-                    provider_symbol = COALESCE(
-                        provider_symbol,
-                        (
-                            SELECT catalog.provider_symbol
-                            FROM provider_listing_catalog catalog
-                            WHERE catalog.provider_listing_id = security_listing_status.provider_listing_id
-                        )
-                    ),
-                    primary_provider_symbol = COALESCE(
-                        primary_provider_symbol,
-                        (
-                            SELECT catalog.provider_symbol
-                            FROM provider_listing_catalog catalog
-                            WHERE catalog.provider_listing_id = security_listing_status.primary_provider_listing_id
-                        )
-                    )
-                WHERE listing_id IS NULL
-                   OR security_id IS NULL
-                   OR provider_symbol IS NULL
-                """
-            )
 
     @staticmethod
     def _build_status_record(
@@ -3586,90 +3440,30 @@ class SecurityListingStatusRepository(SQLiteStore):
             self.initialize_schema()
         if not rows:
             return 0
-        payload = [row for row in rows if row.provider_symbol]
+        payload = [
+            (
+                _LISTING_STATUS_PRIMARY
+                if row.is_primary_listing
+                else _LISTING_STATUS_SECONDARY,
+                int(row.security_id),
+            )
+            for row in rows
+            if row.provider_symbol and row.security_id
+        ]
         if not payload:
             return 0
 
-        def _build_payload(conn: sqlite3.Connection) -> List[Tuple[object, ...]]:
-            built_rows: List[Tuple[object, ...]] = []
-            for row in payload:
-                provider_symbol = row.provider_symbol.strip().upper()
-                provider_listing_row = conn.execute(
-                    """
-                    SELECT provider_listing_id
-                    FROM provider_listing_catalog
-                    WHERE provider = ? AND provider_symbol = ?
-                    """,
-                    (row.source_provider.strip().upper(), provider_symbol),
-                ).fetchone()
-                if provider_listing_row is None:
-                    continue
-                primary_provider_symbol = _normalize_qualified_symbol(
-                    row.primary_provider_symbol
-                )
-                primary_provider_listing_id: Optional[int] = None
-                if primary_provider_symbol is not None:
-                    primary_row = conn.execute(
-                        """
-                        SELECT provider_listing_id
-                        FROM provider_listing_catalog
-                        WHERE provider = ? AND provider_symbol = ?
-                        """,
-                        (row.source_provider.strip().upper(), primary_provider_symbol),
-                    ).fetchone()
-                    primary_provider_listing_id = (
-                        int(primary_row["provider_listing_id"]) if primary_row else None
-                    )
-                built_rows.append(
-                    (
-                        int(row.security_id),
-                        int(row.security_id),
-                        row.source_provider.strip().upper(),
-                        int(provider_listing_row["provider_listing_id"]),
-                        provider_symbol,
-                        row.raw_fetched_at,
-                        1 if row.is_primary_listing else 0,
-                        primary_provider_listing_id,
-                        primary_provider_symbol,
-                        row.classification_basis,
-                        row.updated_at or _utc_now_iso(),
-                    )
-                )
-            return built_rows
-
         sql = """
-            INSERT INTO security_listing_status (
-                listing_id,
-                security_id,
-                source_provider,
-                provider_listing_id,
-                provider_symbol,
-                raw_fetched_at,
-                is_primary_listing,
-                primary_provider_listing_id,
-                primary_provider_symbol,
-                classification_basis,
-                updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(listing_id) DO UPDATE SET
-                security_id = excluded.security_id,
-                source_provider = excluded.source_provider,
-                provider_listing_id = excluded.provider_listing_id,
-                provider_symbol = excluded.provider_symbol,
-                raw_fetched_at = excluded.raw_fetched_at,
-                is_primary_listing = excluded.is_primary_listing,
-                primary_provider_listing_id = excluded.primary_provider_listing_id,
-                primary_provider_symbol = excluded.primary_provider_symbol,
-                classification_basis = excluded.classification_basis,
-                updated_at = excluded.updated_at
+            UPDATE listing
+            SET primary_listing_status = ?
+            WHERE listing_id = ?
         """
         if connection is not None:
-            connection.executemany(sql, _build_payload(connection))
+            connection.executemany(sql, payload)
             return len(payload)
         with self._connect() as conn:
-            built_payload = _build_payload(conn)
-            conn.executemany(sql, built_payload)
-        return len(built_payload)
+            conn.executemany(sql, payload)
+        return len(payload)
 
     def upsert_many_from_fundamentals_updates(
         self,
@@ -3709,7 +3503,7 @@ class SecurityListingStatusRepository(SQLiteStore):
         security_ids: Optional[Sequence[int]] = None,
         chunk_size: int = 500,
     ) -> List[str]:
-        """Return supported EODHD symbols missing cached listing status."""
+        """Return supported EODHD symbols with unknown listing status."""
 
         self.initialize_schema()
         provider_norm = _PRIMARY_LISTING_SOURCE_PROVIDER
@@ -3729,9 +3523,8 @@ class SecurityListingStatusRepository(SQLiteStore):
             query = [
                 "SELECT st.provider_symbol",
                 "FROM supported_tickers st",
-                _primary_listing_left_join(security_alias="st"),
                 "WHERE st.provider = ?",
-                "AND sls.security_id IS NULL",
+                f"AND st.primary_listing_status = '{_LISTING_STATUS_UNKNOWN}'",
             ]
             if normalized_exchanges:
                 placeholders = ", ".join("?" for _ in normalized_exchanges)
@@ -3796,9 +3589,7 @@ class SecurityListingStatusRepository(SQLiteStore):
                 "FROM fundamentals_raw fr",
                 "JOIN provider_listing_catalog catalog",
                 "  ON catalog.provider_listing_id = fr.provider_listing_id",
-                _primary_listing_left_join(security_alias="catalog"),
                 "WHERE catalog.provider = ?",
-                "AND (sls.raw_fetched_at IS NULL OR sls.raw_fetched_at < fr.fetched_at)",
             ]
             if normalized_exchanges:
                 placeholders = ", ".join("?" for _ in normalized_exchanges)
@@ -5413,9 +5204,8 @@ class FXRatesRepository(SQLiteStore):
                 f"""
                 SELECT DISTINCT st.currency
                 FROM supported_tickers st
-                {_primary_listing_left_join(security_alias="st")}
                 WHERE st.currency IS NOT NULL
-                  AND {_primary_listing_predicate()}
+                  AND {_primary_listing_predicate("st")}
                 ORDER BY st.currency
                 """
             ).fetchall()

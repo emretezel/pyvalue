@@ -26,12 +26,12 @@ Provider rules:
   are provider-agnostic and operate on canonical symbols
 
 For EODHD-backed symbols, downstream stage commands and canonical-scope
-commands also apply cached primary-listing classification from raw
+commands also apply canonical primary-listing classification from raw
 fundamentals. Listings classified as secondary through `General.PrimaryTicker`
 are excluded from normalization, market-data refresh, metric, screening,
 metadata-refresh, and canonical reporting scopes. Missing or unusable
 `PrimaryTicker` values are treated as primary. Read-only canonical/report
-commands backfill missing cached listing-status rows in scope; use
+commands backfill unknown listing statuses in scope; use
 `reconcile-listing-status` when you want a full backfill sweep from stored raw
 fundamentals.
 
@@ -116,7 +116,7 @@ Notes:
 
 ### `reconcile-listing-status`
 
-Backfill cached EODHD primary-vs-secondary listing classification from stored
+Backfill canonical EODHD primary-vs-secondary listing classification from stored
 raw fundamentals only.
 
 Key options:
@@ -130,10 +130,10 @@ Notes:
 
 - this command does not download fundamentals or market data
 - it reads existing `fundamentals_raw` payloads and writes
-  `security_listing_status`
+  `listing.primary_listing_status`
 - use this command after upgrading an existing database if you want to refresh
-  the full cached listing-status table immediately instead of waiting for
-  read-only commands to backfill missing rows on demand
+  all stored listing statuses immediately instead of waiting for read-only
+  commands to backfill unknown statuses on demand
 - listings classified as secondary via `General.PrimaryTicker` trigger
   downstream cleanup of normalized facts, market data, metrics, and related
   refresh-state rows for that listing

@@ -659,7 +659,7 @@ def _ensure_eodhd_listing_scope_cached(
     exchange_codes: Optional[Sequence[str]] = None,
     security_ids: Optional[Sequence[int]] = None,
 ) -> List[SecurityListingStatusRecord]:
-    """Backfill only missing cached listing-status rows for an EODHD scope."""
+    """Backfill only unknown listing-status values for an EODHD scope."""
 
     repo = SecurityListingStatusRepository(database)
     missing_provider_symbols = repo.list_missing_eodhd_provider_symbols(
@@ -743,7 +743,7 @@ def cmd_reconcile_listing_status(
     print(f"Database: {db_path}")
     print(f"Scope: {scope_label}")
     print(f"Supported tickers in scope: {len(scope_rows)}")
-    print(f"Listing-status rows upserted: {len(updates)}")
+    print(f"Listings classified: {len(updates)}")
     print(f"Primary listings classified: {primary_updates}")
     print(f"Secondary listings classified: {secondary_updates}")
     if not updates:

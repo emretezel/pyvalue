@@ -11,7 +11,7 @@ One row per `(provider_id, provider_exchange_code)`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-23`
+- Snapshot source: `data/pyvalue.db` on `2026-04-25`
 - Row count: `74`
 - Table size: `12,288 bytes` (`12.0 KiB`)
 - Approximate bytes per row: `166.1`
@@ -68,7 +68,7 @@ One row per `(provider_id, provider_exchange_code)`.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-23`
+- Snapshot source: `data/pyvalue.db` on `2026-04-25`
 - Sample window: first `5` rows returned by SQLite ordered by `provider_exchange_id ASC`
 
 ```json

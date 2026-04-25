@@ -11,7 +11,7 @@ Append-only version rows, though operationally the table is expected to behave l
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-23`
+- Snapshot source: `data/pyvalue.db` on `2026-04-25`
 - Row count: `1`
 - Table size: `4,096 bytes` (`4.0 KiB`)
 - Approximate bytes per row: `4,096.0`
@@ -54,13 +54,13 @@ Append-only version rows, though operationally the table is expected to behave l
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-23`
+- Snapshot source: `data/pyvalue.db` on `2026-04-25`
 - Sample window: first `1` rows returned by SQLite ordered by `version ASC`
 
 ```json
 [
   {
-    "version": 35
+    "version": 38
   }
 ]
 ```

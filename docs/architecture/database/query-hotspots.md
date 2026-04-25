@@ -30,12 +30,11 @@ This page maps the end-to-end pipeline to the tables and indexes that matter mos
 - Reads `provider_listing`
 - Reads and writes `fundamentals_fetch_state`
 - Upserts `fundamentals_raw`
-- Reconciles `security_listing_status`
+- Updates `listing.primary_listing_status`
 - Critical structures:
   - `provider_listing` unique `(provider_exchange_id, provider_symbol)`
   - `fundamentals_raw` unique `provider_listing_id`
   - `idx_fundamentals_fetch_next`
-  - `idx_security_listing_status_primary`
 - Review focus:
   - `fundamentals_raw.data` is the widest operational row in the schema
   - provider-scoped state tables are now keyed by `provider_listing_id`, so planning queries often join through `provider_listing`
@@ -67,12 +66,11 @@ This page maps the end-to-end pipeline to the tables and indexes that matter mos
 ## 6. Update Market Data
 
 - Reads `provider_listing`
-- Applies primary-listing filter through `security_listing_status`
+- Applies primary-listing filter through `listing.primary_listing_status`
 - Reads and writes `market_data_fetch_state`
 - Upserts `market_data`
 - Critical structures:
   - `idx_provider_listing_listing`
-  - `idx_security_listing_status_primary`
   - `idx_market_data_fetch_next`
   - `idx_market_data_latest`
 - Review focus:
@@ -114,7 +112,6 @@ This page maps the end-to-end pipeline to the tables and indexes that matter mos
 - Reads `metric_compute_status` for diagnostics
 - Critical structures:
   - `provider_listing` joins back to `listing`
-  - `idx_security_listing_status_primary`
   - `metrics` PK
   - `idx_metrics_metric_id`
   - `idx_metric_compute_status_metric_status`

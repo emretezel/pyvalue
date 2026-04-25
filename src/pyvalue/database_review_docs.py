@@ -100,8 +100,8 @@ TABLE_GROUPS: tuple[tuple[str, tuple[TableInventoryEntry, ...]], ...] = (
             ),
             TableInventoryEntry(
                 table_name="listing",
-                logical_refs="canonical root for facts, prices, metrics, and statuses",
-                review_focus="maintain fast lookup by `(exchange_id, symbol)` and keep canonical rows narrow",
+                logical_refs="canonical root for facts, prices, metrics, and primary-listing status",
+                review_focus="maintain fast lookup by `(exchange_id, symbol)` and keep canonical status semantics clear",
             ),
             TableInventoryEntry(
                 table_name="provider_listing",
@@ -122,11 +122,6 @@ TABLE_GROUPS: tuple[tuple[str, tuple[TableInventoryEntry, ...]], ...] = (
                 table_name="fundamentals_fetch_state",
                 logical_refs="`provider_listing_id` in `provider_listing`",
                 review_focus="retry/backoff query shape vs index set",
-            ),
-            TableInventoryEntry(
-                table_name="security_listing_status",
-                logical_refs="`listing_id` in `listing`, `provider_listing_id` in `provider_listing`",
-                review_focus="primary-listing filter cost and purge trigger responsibilities",
             ),
             TableInventoryEntry(
                 table_name="fundamentals_normalization_state",

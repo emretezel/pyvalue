@@ -11,10 +11,10 @@ One row per `(exchange_id, symbol)`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-23`
+- Snapshot source: `data/pyvalue.db` on `2026-04-25`
 - Row count: `77,484`
-- Table size: `1,753,088 bytes` (`1.7 MiB`)
-- Approximate bytes per row: `22.6`
+- Table size: `2,637,824 bytes` (`2.5 MiB`)
+- Approximate bytes per row: `34.0`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -26,6 +26,7 @@ One row per `(exchange_id, symbol)`.
 | `exchange_id` | `INTEGER` | no | FK, idx | canonical exchange link; part of composite unique key |
 | `symbol` | `TEXT` | no |  | bare canonical listing symbol such as `AAPL`; part of composite unique key |
 | `currency` | `TEXT` | yes |  | fallback listing currency when provider listing currency is missing |
+| `primary_listing_status` | `TEXT` | no |  | canonical primary-listing classification: `unknown`, `primary`, or `secondary` |
 
 ## Keys And Relationships
 
@@ -37,10 +38,9 @@ One row per `(exchange_id, symbol)`.
 - Physical references from other tables:
   - `fundamentals_normalization_state`.`listing_id` -> `listing_id`
   - `provider_listing`.`listing_id` -> `listing_id`
-  - `security_listing_status`.`listing_id` -> `listing_id`
 - Unique constraints beyond the primary key:
   - (`exchange_id`, `symbol`)
-- Main logical refs: canonical root for facts, prices, metrics, and statuses
+- Main logical refs: canonical root for facts, prices, metrics, and primary-listing status
 <!-- END generated_keys_and_relationships -->
 
 ## Secondary Indexes
@@ -52,7 +52,7 @@ One row per `(exchange_id, symbol)`.
 ## Main Read Paths
 
 - canonical symbol resolution through `listing.symbol || '.' || exchange.exchange_code`
-- downstream joins from facts, market data, metrics, and listing status
+- downstream joins from facts, market data, metrics, and primary-listing status
 
 ## Main Write Paths
 
@@ -63,7 +63,7 @@ One row per `(exchange_id, symbol)`.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-23`
+- Snapshot source: `data/pyvalue.db` on `2026-04-25`
 - Sample window: first `5` rows returned by SQLite ordered by `listing_id ASC`
 
 ```json
@@ -73,35 +73,40 @@ One row per `(exchange_id, symbol)`.
     "issuer_id": 1,
     "exchange_id": 1,
     "symbol": "AALB",
-    "currency": "EUR"
+    "currency": "EUR",
+    "primary_listing_status": "primary"
   },
   {
     "listing_id": 2,
     "issuer_id": 2,
     "exchange_id": 1,
     "symbol": "ABN",
-    "currency": "EUR"
+    "currency": "EUR",
+    "primary_listing_status": "primary"
   },
   {
     "listing_id": 3,
     "issuer_id": 3,
     "exchange_id": 1,
     "symbol": "ACOMO",
-    "currency": "EUR"
+    "currency": "EUR",
+    "primary_listing_status": "primary"
   },
   {
     "listing_id": 4,
     "issuer_id": 4,
     "exchange_id": 1,
     "symbol": "AD",
-    "currency": "EUR"
+    "currency": "EUR",
+    "primary_listing_status": "primary"
   },
   {
     "listing_id": 5,
     "issuer_id": 5,
     "exchange_id": 1,
     "symbol": "ADYEN",
-    "currency": "EUR"
+    "currency": "EUR",
+    "primary_listing_status": "primary"
   }
 ]
 ```
@@ -114,3 +119,5 @@ One row per `(exchange_id, symbol)`.
   table's `currency`.
 - `market_data.currency` stores quote-row currency only and is not used as
   listing-currency metadata.
+- Unknown primary-listing status is treated as eligible; downstream
+  primary-only scopes exclude only `secondary`.

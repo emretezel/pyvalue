@@ -2838,7 +2838,7 @@ def test_cmd_reconcile_listing_status_backfills_from_raw_only(tmp_path, capsys):
     )
 
     with sqlite3.connect(db_path) as conn:
-        conn.execute("DELETE FROM security_listing_status")
+        conn.execute("UPDATE listing SET primary_listing_status = 'unknown'")
 
     rc = cli.cmd_reconcile_listing_status(
         provider="EODHD",
@@ -2852,9 +2852,10 @@ def test_cmd_reconcile_listing_status_backfills_from_raw_only(tmp_path, capsys):
     with sqlite3.connect(db_path) as conn:
         statuses = conn.execute(
             """
-            SELECT provider_symbol, is_primary_listing, classification_basis
-            FROM security_listing_status
-            ORDER BY provider_symbol
+            SELECT l.symbol || '.' || e.exchange_code, l.primary_listing_status
+            FROM listing l
+            JOIN "exchange" e ON e.exchange_id = l.exchange_id
+            ORDER BY l.symbol || '.' || e.exchange_code
             """
         ).fetchall()
         fact_rows = conn.execute(
@@ -2883,9 +2884,9 @@ def test_cmd_reconcile_listing_status_backfills_from_raw_only(tmp_path, capsys):
         ).fetchone()[0]
 
     assert statuses == [
-        ("AAA.LSE", 0, "different_primary_ticker"),
-        ("AAA.US", 1, "matched_primary_ticker"),
-        ("BBB.LSE", 1, "missing_primary_ticker"),
+        ("AAA.LSE", "secondary"),
+        ("AAA.US", "primary"),
+        ("BBB.LSE", "primary"),
     ]
     assert fact_rows == 0
     assert market_rows == 0
@@ -2897,7 +2898,7 @@ def test_cmd_reconcile_listing_status_backfills_from_raw_only(tmp_path, capsys):
         f"Database: {db_path}",
         "Scope: all supported tickers",
         "Supported tickers in scope: 3",
-        "Listing-status rows upserted: 3",
+        "Listings classified: 3",
         "Primary listings classified: 2",
         "Secondary listings classified: 1",
     ]
@@ -7893,7 +7894,7 @@ def test_cmd_run_screen_bulk_backfills_missing_listing_status_without_full_recon
         exchange="LSE",
     )
     with sqlite3.connect(db_path) as conn:
-        conn.execute("DELETE FROM security_listing_status")
+        conn.execute("UPDATE listing SET primary_listing_status = 'unknown'")
 
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
@@ -7930,15 +7931,16 @@ criteria:
     with sqlite3.connect(db_path) as conn:
         statuses = conn.execute(
             """
-            SELECT provider_symbol, is_primary_listing, classification_basis
-            FROM security_listing_status
-            ORDER BY provider_symbol
+            SELECT l.symbol || '.' || e.exchange_code, l.primary_listing_status
+            FROM listing l
+            JOIN "exchange" e ON e.exchange_id = l.exchange_id
+            ORDER BY l.symbol || '.' || e.exchange_code
             """
         ).fetchall()
 
     assert statuses == [
-        ("AAA.LSE", 0, "different_primary_ticker"),
-        ("BBB.LSE", 1, "missing_primary_ticker"),
+        ("AAA.LSE", "secondary"),
+        ("BBB.LSE", "primary"),
     ]
     output = capsys.readouterr().out
     assert "BBB.LSE" in output
@@ -8431,7 +8433,7 @@ def test_cmd_run_screen_stage_backfills_missing_listing_status_without_full_reco
         exchange="LSE",
     )
     with sqlite3.connect(db_path) as conn:
-        conn.execute("DELETE FROM security_listing_status")
+        conn.execute("UPDATE listing SET primary_listing_status = 'unknown'")
 
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
@@ -8469,15 +8471,16 @@ criteria:
     with sqlite3.connect(db_path) as conn:
         statuses = conn.execute(
             """
-            SELECT provider_symbol, is_primary_listing, classification_basis
-            FROM security_listing_status
-            ORDER BY provider_symbol
+            SELECT l.symbol || '.' || e.exchange_code, l.primary_listing_status
+            FROM listing l
+            JOIN "exchange" e ON e.exchange_id = l.exchange_id
+            ORDER BY l.symbol || '.' || e.exchange_code
             """
         ).fetchall()
 
     assert statuses == [
-        ("AAA.LSE", 0, "different_primary_ticker"),
-        ("BBB.LSE", 1, "missing_primary_ticker"),
+        ("AAA.LSE", "secondary"),
+        ("BBB.LSE", "primary"),
     ]
     output = capsys.readouterr().out
     assert "Entity: BBB PLC" in output

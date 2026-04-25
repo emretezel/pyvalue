@@ -682,8 +682,8 @@ def test_migration_creates_provider_listing_table(tmp_path):
     assert supported_tickers_table is None
 
 
-def test_migration_creates_security_listing_status_table(tmp_path):
-    db_path = tmp_path / "security-listing-status.sqlite"
+def test_migration_moves_primary_listing_status_to_listing(tmp_path):
+    db_path = tmp_path / "primary-listing-status.sqlite"
 
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
@@ -692,24 +692,73 @@ def test_migration_creates_security_listing_status_table(tmp_path):
     assert second == 0
 
     with sqlite3.connect(db_path) as conn:
-        info = conn.execute("PRAGMA table_info(security_listing_status)").fetchall()
+        info = conn.execute("PRAGMA table_info(listing)").fetchall()
         columns = {row[1] for row in info}
-        pk_cols = [row[1] for row in info if row[5]]
-        indexes = conn.execute("PRAGMA index_list(security_listing_status)").fetchall()
-        index_names = {row[1] for row in indexes}
+        status_column = next(row for row in info if row[1] == "primary_listing_status")
+        status_table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='security_listing_status'"
+        ).fetchone()
 
-    assert columns == {
-        "listing_id",
-        "source_provider",
-        "provider_listing_id",
-        "raw_fetched_at",
-        "is_primary_listing",
-        "primary_provider_listing_id",
-        "classification_basis",
-        "updated_at",
-    }
-    assert pk_cols == ["listing_id"]
-    assert "idx_security_listing_status_primary" in index_names
+    assert "primary_listing_status" in columns
+    assert status_column[3] == 1
+    assert status_column[4] == "'unknown'"
+    assert status_table is None
+
+
+def test_migration_backfills_listing_primary_status_and_drops_legacy_table(tmp_path):
+    db_path = tmp_path / "primary-listing-status-backfill.sqlite"
+    prior_version = len(MIGRATIONS) - 1
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE schema_migrations (version INTEGER NOT NULL)")
+        conn.execute(
+            "INSERT INTO schema_migrations (version) VALUES (?)",
+            (prior_version,),
+        )
+        conn.execute(
+            """
+            CREATE TABLE listing (
+                listing_id INTEGER PRIMARY KEY,
+                symbol TEXT NOT NULL
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO listing (listing_id, symbol) VALUES (?, ?)",
+            [(1, "AAA"), (2, "BBB"), (3, "CCC")],
+        )
+        conn.execute(
+            """
+            CREATE TABLE security_listing_status (
+                listing_id INTEGER NOT NULL PRIMARY KEY,
+                is_primary_listing INTEGER NOT NULL
+            )
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO security_listing_status (listing_id, is_primary_listing)
+            VALUES (?, ?)
+            """,
+            [(1, 1), (2, 0)],
+        )
+
+    applied = apply_migrations(db_path)
+
+    assert applied == 1
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT listing_id, primary_listing_status
+            FROM listing
+            ORDER BY listing_id
+            """
+        ).fetchall()
+        status_table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='security_listing_status'"
+        ).fetchone()
+
+    assert rows == [(1, "primary"), (2, "secondary"), (3, "unknown")]
+    assert status_table is None
 
 
 def test_migration_adds_sector_and_industry_to_securities(tmp_path):
@@ -989,7 +1038,7 @@ def test_migration_drops_fundamentals_raw_listing_identity_columns(tmp_path):
 
 def test_migration_drops_fundamentals_raw_currency_from_current_schema(tmp_path):
     db_path = tmp_path / "fundamentals-raw-drop-currency.sqlite"
-    previous_version = len(MIGRATIONS) - 1
+    previous_version = len(MIGRATIONS) - 2
     with sqlite3.connect(db_path) as conn:
         conn.execute(
             """
@@ -1033,7 +1082,7 @@ def test_migration_drops_fundamentals_raw_currency_from_current_schema(tmp_path)
 
     applied = apply_migrations(db_path)
 
-    assert applied == 1
+    assert applied == 2
     with sqlite3.connect(db_path) as conn:
         columns = {
             row[1]

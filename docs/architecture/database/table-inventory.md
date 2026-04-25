@@ -3,7 +3,7 @@
 This page is the quickest way to inspect the current schema before going table by table.
 
 <!-- BEGIN generated_table_inventory -->
-All row counts and table sizes below come from the live `data/pyvalue.db` snapshot on `2026-04-23`. Sizes refer to the table object's own pages, not the size of its secondary indexes.
+All row counts and table sizes below come from the live `data/pyvalue.db` snapshot on `2026-04-25`. Sizes refer to the table object's own pages, not the size of its secondary indexes.
 
 ## Identity And Catalog
 
@@ -13,7 +13,7 @@ All row counts and table sizes below come from the live `data/pyvalue.db` snapsh
 | [exchange](tables/exchange.md) | `73` | `12.0 KiB` | `exchange_id` | referenced physically by `provider_exchange.exchange_id` and `listing.exchange_id` | keep the canonical exchange table narrow and indexed for provider-catalog resolution |
 | [provider_exchange](tables/provider_exchange.md) | `74` | `12.0 KiB` | `provider_exchange_id` | maps provider exchange codes to canonical exchange identity | check whether provider-owned exchange metadata belongs here and whether exchange-slice rewrites stay cheap |
 | [issuer](tables/issuer.md) | `77,484` | `65.6 MiB` | `issuer_id` | referenced physically by `listing.issuer_id` | separate issuer metadata from listing identity and keep updates cheap |
-| [listing](tables/listing.md) | `77,484` | `1.7 MiB` | `listing_id` | canonical root for facts, prices, metrics, and statuses | maintain fast lookup by `(exchange_id, symbol)` and keep canonical rows narrow |
+| [listing](tables/listing.md) | `77,484` | `2.5 MiB` | `listing_id` | canonical root for facts, prices, metrics, and primary-listing status | maintain fast lookup by `(exchange_id, symbol)` and keep canonical status semantics clear |
 | [provider_listing](tables/provider_listing.md) | `75,848` | `1.7 MiB` | `provider_listing_id` | links provider catalog rows to canonical `listing_id` | highest-priority provider catalog table; review provider slice rewrites and lookup indexes |
 
 ## Raw Ingestion And State
@@ -22,7 +22,6 @@ All row counts and table sizes below come from the live `data/pyvalue.db` snapsh
 | --- | --- | --- | --- | --- | --- |
 | [fundamentals_raw](tables/fundamentals_raw.md) | `75,848` | `16.63 GiB` | `payload_id` | `provider_listing_id` in `provider_listing` | wide-row storage, JSON payload size, and latest-row-only semantics |
 | [fundamentals_fetch_state](tables/fundamentals_fetch_state.md) | `75,848` | `3.8 MiB` | `provider_listing_id` | `provider_listing_id` in `provider_listing` | retry/backoff query shape vs index set |
-| [security_listing_status](tables/security_listing_status.md) | `75,848` | `8.1 MiB` | `listing_id` | `listing_id` in `listing`, `provider_listing_id` in `provider_listing` | primary-listing filter cost and purge trigger responsibilities |
 | [fundamentals_normalization_state](tables/fundamentals_normalization_state.md) | `61,092` | `4.9 MiB` | `provider_listing_id` | `provider_listing_id` in `provider_listing`, `listing_id` in `listing` | whether this watermark table is minimal and sufficient |
 | [market_data_fetch_state](tables/market_data_fetch_state.md) | `61,092` | `3.0 MiB` | `provider_listing_id` | `provider_listing_id` in `provider_listing` | same pattern as fundamentals state; check duplication vs simplicity |
 

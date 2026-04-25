@@ -29,9 +29,6 @@ This page lists the current secondary indexes from the post-refactor schema. Pri
 - `fundamentals_normalization_state`
   - `idx_fundamentals_norm_state_security (listing_id)`
     - supports canonical joins from normalization state
-- `security_listing_status`
-  - `idx_security_listing_status_primary (is_primary_listing, listing_id)`
-    - supports the primary-listing filter used across downstream scopes
 - `market_data_fetch_state`
   - `idx_market_data_fetch_next (next_eligible_at)`
     - supports market-data scheduling and backoff

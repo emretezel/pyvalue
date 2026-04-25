@@ -33,7 +33,6 @@ Table groups:
 - Raw ingestion and state
   - [fundamentals_raw](tables/fundamentals_raw.md)
   - [fundamentals_fetch_state](tables/fundamentals_fetch_state.md)
-  - [security_listing_status](tables/security_listing_status.md)
   - [fundamentals_normalization_state](tables/fundamentals_normalization_state.md)
   - [market_data_fetch_state](tables/market_data_fetch_state.md)
 - Canonical analytics

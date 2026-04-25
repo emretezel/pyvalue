@@ -55,6 +55,9 @@ changing canonical listing keys.
 Canonical listing identity lives here. A listing is defined by
 `(exchange_id, symbol)`, and user-facing canonical symbols such as `AAPL.US`
 are derived from `listing.symbol + exchange.exchange_code`.
+EODHD primary-vs-secondary classification is stored as
+`primary_listing_status`; unknown listings remain eligible in primary-only
+scopes, while secondary listings are excluded.
 
 ### `provider_listing`
 
@@ -88,12 +91,6 @@ Purpose:
 
 Operational fundamentals fetch progress and retry backoff live here, keyed by
 `provider_listing_id`.
-
-### `security_listing_status`
-
-Cached EODHD primary-vs-secondary listing classification lives here, keyed by
-canonical `listing_id`. It lets downstream stages exclude secondary listings
-without re-parsing `fundamentals_raw.data`.
 
 ### `fundamentals_normalization_state`
 
@@ -150,7 +147,7 @@ A normal run looks like:
 2. Provider exchange catalogs are refreshed into `exchange` and `provider_exchange`.
 3. Provider listing catalogs are refreshed into `issuer`, `listing`, and `provider_listing`.
 4. Raw fundamentals are fetched into `fundamentals_raw`.
-5. EODHD raw writes refresh `security_listing_status` from `General.PrimaryTicker`.
+5. EODHD raw writes refresh `listing.primary_listing_status` from `General.PrimaryTicker`.
 6. Provider-specific normalization writes canonical `financial_facts`.
 7. Market refresh writes canonical `market_data`.
 8. Retry/backoff state updates `fundamentals_fetch_state` and `market_data_fetch_state`.

@@ -247,14 +247,19 @@ def test_fundamentals_repository_classifies_and_purges_secondary_listings(tmp_pa
 
     status_repo = SecurityListingStatusRepository(db_path)
     reconciled = status_repo.reconcile_eodhd_fundamentals()
-    assert reconciled == []
+    assert [row.provider_symbol for row in reconciled] == [
+        "AAA.LSE",
+        "AAA.US",
+        "BBB.LSE",
+    ]
 
     with sqlite3.connect(db_path) as conn:
         statuses = conn.execute(
             """
-            SELECT provider_symbol, is_primary_listing, primary_provider_symbol, classification_basis
-            FROM security_listing_status
-            ORDER BY provider_symbol
+            SELECT l.symbol || '.' || e.exchange_code, l.primary_listing_status
+            FROM listing l
+            JOIN "exchange" e ON e.exchange_id = l.exchange_id
+            ORDER BY l.symbol || '.' || e.exchange_code
             """
         ).fetchall()
         fact_rows = conn.execute(
@@ -293,9 +298,9 @@ def test_fundamentals_repository_classifies_and_purges_secondary_listings(tmp_pa
         ).fetchone()[0]
 
     assert statuses == [
-        ("AAA.LSE", 0, "AAA.US", "different_primary_ticker"),
-        ("AAA.US", 1, "AAA.US", "matched_primary_ticker"),
-        ("BBB.LSE", 1, None, "missing_primary_ticker"),
+        ("AAA.LSE", "secondary"),
+        ("AAA.US", "primary"),
+        ("BBB.LSE", "primary"),
     ]
     assert fact_rows == 0
     assert refresh_rows == 0
@@ -1005,7 +1010,7 @@ def test_supported_ticker_repository_primary_only_filters_secondary_listings(
     ]
 
 
-def test_security_listing_status_repository_lists_missing_provider_symbols(tmp_path):
+def test_listing_status_repository_lists_unknown_provider_symbols(tmp_path):
     db_path = tmp_path / "missing-listing-status.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()

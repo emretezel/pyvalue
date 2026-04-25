@@ -102,7 +102,8 @@ CREATE TABLE listing (
             issuer_id INTEGER NOT NULL,
             exchange_id INTEGER NOT NULL,
             symbol TEXT NOT NULL,
-            currency TEXT,
+            currency TEXT, primary_listing_status TEXT NOT NULL DEFAULT 'unknown'
+            CHECK (primary_listing_status IN ('unknown', 'primary', 'secondary')),
             UNIQUE (exchange_id, symbol),
             FOREIGN KEY (issuer_id) REFERENCES issuer(issuer_id),
             FOREIGN KEY (exchange_id) REFERENCES "exchange"(exchange_id)
@@ -195,25 +196,6 @@ CREATE TABLE provider_listing (
 CREATE TABLE schema_migrations (
             version INTEGER NOT NULL
         );
-CREATE TABLE "security_listing_status" (
-            listing_id INTEGER NOT NULL PRIMARY KEY,
-            source_provider TEXT NOT NULL,
-            provider_listing_id INTEGER NOT NULL,
-            raw_fetched_at TEXT NOT NULL,
-            is_primary_listing INTEGER NOT NULL CHECK (is_primary_listing IN (0, 1)),
-            primary_provider_listing_id INTEGER,
-            classification_basis TEXT NOT NULL CHECK (
-                classification_basis IN (
-                    'matched_primary_ticker',
-                    'different_primary_ticker',
-                    'missing_primary_ticker'
-                )
-            ),
-            updated_at TEXT NOT NULL,
-            FOREIGN KEY (listing_id) REFERENCES listing(listing_id),
-            FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id),
-            FOREIGN KEY (primary_provider_listing_id) REFERENCES provider_listing(provider_listing_id)
-        );
 CREATE INDEX idx_fin_facts_concept
             ON financial_facts(concept);
 CREATE INDEX idx_fin_facts_currency_nonnull
@@ -255,5 +237,3 @@ CREATE INDEX idx_provider_listing_listing
         ON provider_listing(listing_id);
 CREATE INDEX idx_provider_listing_provider
         ON provider_listing(provider_id);
-CREATE INDEX idx_security_listing_status_primary
-            ON security_listing_status(is_primary_listing, listing_id);

@@ -11,7 +11,7 @@ One row per fact version keyed by listing, concept, period/date, unit, and acces
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-23`
+- Snapshot source: `data/pyvalue.db` on `2026-04-25`
 - Row count: `103,188,287`
 - Table size: `9,183,584,256 bytes` (`8.55 GiB`)
 - Approximate bytes per row: `89.0`
@@ -69,7 +69,7 @@ One row per fact version keyed by listing, concept, period/date, unit, and acces
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-23`
+- Snapshot source: `data/pyvalue.db` on `2026-04-25`
 - Sample window: first `5` rows returned by SQLite ordered by `listing_id ASC, concept ASC, fiscal_period ASC, end_date ASC, unit ASC, accn ASC`
 
 ```json

@@ -3610,6 +3610,50 @@ def _migration_037_drop_fundamentals_raw_currency(conn: sqlite3.Connection) -> N
     )
 
 
+def _migration_038_move_primary_listing_status_to_listing(
+    conn: sqlite3.Connection,
+) -> None:
+    """Store primary listing classification directly on canonical listings."""
+
+    if not _table_exists(conn, "listing"):
+        return
+
+    listing_columns = _table_columns(conn, "listing")
+    if "primary_listing_status" not in listing_columns:
+        conn.execute(
+            """
+            ALTER TABLE listing
+            ADD COLUMN primary_listing_status TEXT NOT NULL DEFAULT 'unknown'
+            CHECK (primary_listing_status IN ('unknown', 'primary', 'secondary'))
+            """
+        )
+
+    if _table_exists(conn, "security_listing_status"):
+        status_columns = _table_columns(conn, "security_listing_status")
+        key_column = "listing_id" if "listing_id" in status_columns else "security_id"
+        if key_column in status_columns and "is_primary_listing" in status_columns:
+            conn.execute(
+                f"""
+                UPDATE listing
+                SET primary_listing_status = (
+                    SELECT CASE
+                        WHEN sls.is_primary_listing = 1 THEN 'primary'
+                        ELSE 'secondary'
+                    END
+                    FROM security_listing_status sls
+                    WHERE sls.{key_column} = listing.listing_id
+                )
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM security_listing_status sls
+                    WHERE sls.{key_column} = listing.listing_id
+                )
+                """
+            )
+        conn.execute("DROP INDEX IF EXISTS idx_security_listing_status_primary")
+        conn.execute("DROP TABLE security_listing_status")
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -3648,6 +3692,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_035_drop_provider_status,
     _migration_036_drop_fundamentals_raw_listing_columns,
     _migration_037_drop_fundamentals_raw_currency,
+    _migration_038_move_primary_listing_status_to_listing,
 ]
 
 

@@ -94,7 +94,7 @@ pyvalue refresh-supported-tickers --all-supported
 pyvalue ingest-fundamentals --all-supported
 ```
 
-If you upgrade an existing database and need to backfill the cached
+If you upgrade an existing database and need to backfill the canonical
 primary-vs-secondary listing classification without downloading anything
 again, run:
 
@@ -102,8 +102,8 @@ again, run:
 pyvalue reconcile-listing-status --all-supported
 ```
 
-Read-only canonical/report commands backfill only missing cached listing-status
-rows in scope. Run `reconcile-listing-status` when you want an immediate full
+Read-only canonical/report commands backfill only unknown listing statuses in
+scope. Run `reconcile-listing-status` when you want an immediate full
 backfill sweep from stored raw fundamentals.
 
 `ingest-fundamentals` checks the EODHD user/quota endpoint
@@ -136,7 +136,8 @@ available through the newly stored payload and normalized downstream tables are
 refreshed only when you run normalization again.
 
 `pyvalue` also inspects `General.PrimaryTicker` on each stored EODHD payload
-and caches whether that listing is primary or secondary. Missing, blank, or
+and stores whether that canonical listing is primary or secondary on
+`listing.primary_listing_status`. Missing, blank, or
 otherwise unusable `PrimaryTicker` values are treated as primary. Once a
 listing is classified as secondary, downstream normalization, market-data,
 metric, screening, metadata-refresh, and FX-discovery scopes exclude it. The
