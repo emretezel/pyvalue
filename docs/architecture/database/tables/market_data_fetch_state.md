@@ -23,10 +23,10 @@ One row per `provider_listing_id`.
 | --- | --- | --- | --- | --- |
 | `provider_listing_id` | `INTEGER` | no | PK, FK | provider listing identity |
 | `last_fetched_at` | `TEXT` | yes |  | last successful or attempted fetch time |
-| `last_status` | `TEXT` | yes |  | latest status |
+| `last_status` | `TEXT` | yes |  | latest status; CHECK enforces `IN ('ok','error')` when not NULL |
 | `last_error` | `TEXT` | yes |  | latest provider error |
 | `next_eligible_at` | `TEXT` | yes | idx | retry/backoff watermark |
-| `attempts` | `INTEGER` | no |  | retry counter |
+| `attempts` | `INTEGER` | no |  | retry counter; CHECK enforces `>= 0` |
 
 ## Keys And Relationships
 

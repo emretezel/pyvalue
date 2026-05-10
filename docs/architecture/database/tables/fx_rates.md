@@ -23,11 +23,11 @@ One row per `(provider, rate_date, base_currency, quote_currency)`.
 | --- | --- | --- | --- | --- |
 | `provider` | `TEXT` | no | PK, idx | provider namespace |
 | `rate_date` | `TEXT` | no | PK, idx | effective date |
-| `base_currency` | `TEXT` | no | PK, idx | base currency |
-| `quote_currency` | `TEXT` | no | PK, idx | quote currency |
-| `rate_text` | `TEXT` | no |  | stored decimal text to preserve precision |
+| `base_currency` | `TEXT` | no | PK, idx | base currency. CHECK enforces 3-char uppercase ASCII letters |
+| `quote_currency` | `TEXT` | no | PK, idx | quote currency. CHECK enforces 3-char uppercase ASCII letters |
+| `rate` | `REAL` | no |  | rate as native float (per project REAL-everywhere policy) |
 | `fetched_at` | `TEXT` | no |  | provider fetch timestamp |
-| `source_kind` | `TEXT` | no |  | direct provider source kind |
+| `source_kind` | `TEXT` | no |  | direct provider source kind. CHECK enforces `IN ('provider')` — widen via a future migration when synthesized/derived sources are introduced |
 | `meta_json` | `TEXT` | yes |  | optional metadata |
 | `created_at` | `TEXT` | no |  | insert timestamp |
 | `updated_at` | `TEXT` | no |  | update timestamp |

@@ -35,14 +35,17 @@ One row per issuer record created during catalog backfill or listing creation.
 - Physical foreign keys: none
 - Physical references from other tables:
   - `listing`.`issuer_id` -> `issuer_id`
-- Unique constraints beyond the primary key: none
+- Unique constraints beyond the primary key:
+  - `idx_issuer_name_country` (`name`, `country`) — UNIQUE INDEX. SQLite
+    treats NULLs as distinct, so name-less or country-less rows do not
+    collide with one another or with fully-populated rows.
 - Main logical refs: referenced physically by `listing.issuer_id`
 <!-- END generated_keys_and_relationships -->
 
 ## Secondary Indexes
 
 <!-- BEGIN generated_secondary_indexes -->
-- None beyond the primary key and unique constraints.
+- `idx_issuer_name_country` (`name`, `country`) — UNIQUE
 <!-- END generated_secondary_indexes -->
 
 ## Main Read Paths
@@ -109,3 +112,11 @@ One row per issuer record created during catalog backfill or listing creation.
 ## Review Notes
 
 - `issuer` intentionally has no provider key. Provider-specific descriptive metadata should remain in provider-owned tables or raw payloads unless promoted deliberately.
+- `name` is intentionally **not** tightened to NOT NULL today. The
+  live DB has 260 legacy issuer rows whose source payload predates the
+  `issuer.name` column; tightening the constraint would require a
+  per-row decision (delete vs backfill from listing-level metadata)
+  that should ship in a dedicated migration once that policy is set.
+  The UNIQUE INDEX on (name, country) does not block this future
+  work — it only constrains future inserts where both columns are
+  populated.

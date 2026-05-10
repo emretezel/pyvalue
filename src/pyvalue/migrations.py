@@ -5545,6 +5545,875 @@ def _migration_054_drop_provider_listing_provider_id(
         )
 
 
+def _view_exists(conn: sqlite3.Connection, name: str) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='view' AND name=?",
+            (name,),
+        ).fetchone()
+        is not None
+    )
+
+
+def _create_securities_view(conn: sqlite3.Connection) -> None:
+    """(Re)create the ``securities`` compat view defined in migration 044."""
+
+    conn.execute(
+        """
+        CREATE VIEW securities AS
+        SELECT
+            l.listing_id AS security_id,
+            l.symbol AS canonical_ticker,
+            e.exchange_code AS canonical_exchange_code,
+            l.symbol || '.' || e.exchange_code AS canonical_symbol,
+            i.name AS entity_name,
+            i.description,
+            i.sector,
+            i.industry,
+            NULL AS created_at,
+            NULL AS updated_at
+        FROM listing l
+        JOIN issuer i ON i.issuer_id = l.issuer_id
+        JOIN "exchange" e ON e.exchange_id = l.exchange_id
+        """
+    )
+
+
+def _create_exchange_provider_view(conn: sqlite3.Connection) -> None:
+    """(Re)create the ``exchange_provider`` compat view from migration 044."""
+
+    conn.execute(
+        """
+        CREATE VIEW exchange_provider AS
+        SELECT
+            p.provider_code AS provider,
+            ep.provider_exchange_code,
+            ep.exchange_id,
+            ep.name,
+            ep.country,
+            ep.currency,
+            ep.operating_mic,
+            ep.country_iso2,
+            ep.country_iso3,
+            ep.updated_at
+        FROM provider_exchange ep
+        JOIN provider p ON p.provider_id = ep.provider_id
+        """
+    )
+
+
+def _create_provider_listing_catalog_view(conn: sqlite3.Connection) -> None:
+    """(Re)create ``provider_listing_catalog`` in its post-054 shape.
+
+    Joins through ``provider_exchange`` to recover ``provider_id`` /
+    ``provider_code`` since migration 054 dropped the denormalised
+    ``provider_listing.provider_id`` column.
+    """
+
+    conn.execute(
+        """
+        CREATE VIEW provider_listing_catalog AS
+        SELECT
+            pl.provider_listing_id,
+            p.provider_id,
+            p.provider_code AS provider,
+            px.provider_exchange_id,
+            px.provider_exchange_code,
+            CASE
+                WHEN p.provider_code = 'SEC' THEN pl.provider_symbol || '.US'
+                ELSE pl.provider_symbol || '.' || px.provider_exchange_code
+            END AS provider_symbol,
+            pl.provider_symbol AS provider_ticker,
+            l.listing_id AS security_id,
+            e.exchange_code AS listing_exchange,
+            i.name AS security_name,
+            NULL AS security_type,
+            i.country AS country,
+            l.currency AS currency,
+            l.primary_listing_status,
+            NULL AS isin,
+            NULL AS updated_at
+        FROM provider_listing pl
+        JOIN provider_exchange px
+          ON px.provider_exchange_id = pl.provider_exchange_id
+        JOIN provider p ON p.provider_id = px.provider_id
+        JOIN listing l ON l.listing_id = pl.listing_id
+        JOIN issuer i ON i.issuer_id = l.issuer_id
+        JOIN "exchange" e ON e.exchange_id = l.exchange_id
+        """
+    )
+
+
+def _create_supported_tickers_view(conn: sqlite3.Connection) -> None:
+    """(Re)create ``supported_tickers`` (projection over the catalog view)."""
+
+    conn.execute(
+        """
+        CREATE VIEW supported_tickers AS
+        SELECT
+            provider,
+            provider_symbol,
+            provider_ticker,
+            provider_exchange_code,
+            security_id,
+            listing_exchange,
+            security_name,
+            security_type,
+            country,
+            currency,
+            primary_listing_status,
+            isin,
+            updated_at
+        FROM provider_listing_catalog
+        """
+    )
+
+
+def _migration_055_status_enum_checks(conn: sqlite3.Connection) -> None:
+    """Add CHECK constraints for status / source_kind enum columns.
+
+    Audit finding 3.3: the following columns hold a small fixed set of
+    values in practice but had no schema-level enforcement.
+
+    * ``metric_compute_status.status``: only ``'success'`` / ``'failure'``
+      ever written.
+    * ``market_data_fetch_state.last_status``: ``'ok'`` / ``'error'`` (or
+      ``NULL`` before the first fetch).
+    * ``fx_refresh_state.last_status``: same pattern as above.
+
+    Each CHECK is encoded as part of a temp-table rebuild because SQLite
+    does not support ``ALTER TABLE ADD CHECK``. ``defer_foreign_keys``
+    keeps child FKs intact across the rebuild.
+
+    ``fx_rates.source_kind`` is deferred to migration 058, which also
+    rebuilds ``fx_rates`` to add currency-format CHECKs in the same
+    pass.
+    """
+
+    if _table_exists(conn, "metric_compute_status"):
+        ddl_row = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'metric_compute_status'"
+        ).fetchone()
+        if ddl_row and "CHECK (status IN ('success', 'failure'))" not in ddl_row[0]:
+            conn.execute("PRAGMA defer_foreign_keys = ON")
+            conn.execute("DROP INDEX IF EXISTS idx_metric_compute_status_metric_status")
+            conn.execute(
+                """
+                CREATE TABLE metric_compute_status__new (
+                    listing_id INTEGER NOT NULL,
+                    metric_id TEXT NOT NULL,
+                    status TEXT NOT NULL
+                        CHECK (status IN ('success', 'failure')),
+                    reason_code TEXT,
+                    reason_detail TEXT,
+                    attempted_at TEXT NOT NULL,
+                    value_as_of TEXT,
+                    facts_refreshed_at TEXT,
+                    market_data_as_of TEXT,
+                    market_data_updated_at TEXT,
+                    PRIMARY KEY (listing_id, metric_id),
+                    FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO metric_compute_status__new (
+                    listing_id, metric_id, status, reason_code, reason_detail,
+                    attempted_at, value_as_of, facts_refreshed_at,
+                    market_data_as_of, market_data_updated_at
+                )
+                SELECT
+                    listing_id, metric_id, status, reason_code, reason_detail,
+                    attempted_at, value_as_of, facts_refreshed_at,
+                    market_data_as_of, market_data_updated_at
+                FROM metric_compute_status
+                """
+            )
+            conn.execute("DROP TABLE metric_compute_status")
+            conn.execute(
+                "ALTER TABLE metric_compute_status__new RENAME TO metric_compute_status"
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_metric_compute_status_metric_status
+                ON metric_compute_status(metric_id, status)
+                """
+            )
+
+    if _table_exists(conn, "market_data_fetch_state"):
+        ddl_row = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'market_data_fetch_state'"
+        ).fetchone()
+        if ddl_row and "CHECK (last_status IN ('ok', 'error'))" not in ddl_row[0]:
+            conn.execute("PRAGMA defer_foreign_keys = ON")
+            conn.execute("DROP INDEX IF EXISTS idx_market_data_fetch_next")
+            conn.execute(
+                """
+                CREATE TABLE market_data_fetch_state__new (
+                    provider_listing_id INTEGER NOT NULL PRIMARY KEY,
+                    last_fetched_at TEXT,
+                    last_status TEXT
+                        CHECK (last_status IS NULL
+                               OR last_status IN ('ok', 'error')),
+                    last_error TEXT,
+                    next_eligible_at TEXT,
+                    attempts INTEGER NOT NULL DEFAULT 0
+                        CHECK (attempts >= 0),
+                    FOREIGN KEY (provider_listing_id)
+                        REFERENCES provider_listing(provider_listing_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO market_data_fetch_state__new (
+                    provider_listing_id, last_fetched_at, last_status,
+                    last_error, next_eligible_at, attempts
+                )
+                SELECT
+                    provider_listing_id, last_fetched_at, last_status,
+                    last_error, next_eligible_at, attempts
+                FROM market_data_fetch_state
+                """
+            )
+            conn.execute("DROP TABLE market_data_fetch_state")
+            conn.execute(
+                "ALTER TABLE market_data_fetch_state__new "
+                "RENAME TO market_data_fetch_state"
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_market_data_fetch_next
+                ON market_data_fetch_state(next_eligible_at)
+                """
+            )
+
+    if _table_exists(conn, "fx_refresh_state"):
+        ddl_row = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'fx_refresh_state'"
+        ).fetchone()
+        if ddl_row and "CHECK (last_status IN ('ok', 'error'))" not in ddl_row[0]:
+            fk_already_present = bool(
+                conn.execute("PRAGMA foreign_key_list(fx_refresh_state)").fetchall()
+            )
+            conn.execute("PRAGMA defer_foreign_keys = ON")
+            fk_clause = (
+                ",\n            FOREIGN KEY (provider) REFERENCES provider(provider_code)"
+                if fk_already_present
+                else ""
+            )
+            conn.execute(
+                f"""
+                CREATE TABLE fx_refresh_state__new (
+                    provider TEXT NOT NULL,
+                    canonical_symbol TEXT NOT NULL,
+                    min_rate_date TEXT,
+                    max_rate_date TEXT,
+                    full_history_backfilled INTEGER NOT NULL DEFAULT 0
+                        CHECK (full_history_backfilled IN (0, 1)),
+                    last_fetched_at TEXT,
+                    last_status TEXT
+                        CHECK (last_status IS NULL
+                               OR last_status IN ('ok', 'error')),
+                    last_error TEXT,
+                    attempts INTEGER NOT NULL DEFAULT 0
+                        CHECK (attempts >= 0),
+                    PRIMARY KEY (provider, canonical_symbol){fk_clause}
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO fx_refresh_state__new (
+                    provider, canonical_symbol, min_rate_date, max_rate_date,
+                    full_history_backfilled, last_fetched_at, last_status,
+                    last_error, attempts
+                )
+                SELECT
+                    provider, canonical_symbol, min_rate_date, max_rate_date,
+                    full_history_backfilled, last_fetched_at, last_status,
+                    last_error, attempts
+                FROM fx_refresh_state
+                """
+            )
+            conn.execute("DROP TABLE fx_refresh_state")
+            conn.execute("ALTER TABLE fx_refresh_state__new RENAME TO fx_refresh_state")
+
+    fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if fk_violations:
+        raise RuntimeError(
+            f"migration 055 left foreign key violations: {fk_violations!r}"
+        )
+
+
+# Currency-code format predicate used by migrations 056-059.
+# All currency columns store either a 3-char ISO-4217 code (USD, EUR,
+# ...) or one of the project's accepted subunit codes (GBX = pence,
+# ZAC = South African cent, ILA = Israeli agora). All three are exactly
+# 3 uppercase ASCII letters, so a single GLOB suffices.
+_CURRENCY_FORMAT_CHECK = (
+    "length({col}) = 3 AND {col} = upper({col}) AND {col} GLOB '[A-Z][A-Z][A-Z]'"
+)
+
+
+def _migration_056_listing_format_checks(conn: sqlite3.Connection) -> None:
+    """Add format CHECKs to ``listing.symbol`` and ``listing.currency``.
+
+    Audit finding 3.3:
+
+    * ``listing.symbol`` was declared NOT NULL but otherwise unconstrained.
+      Live values are uppercase tickers, sometimes containing ``&``
+      (B-corp tickers like ``F&D``) or ``^`` (index tickers like
+      ``^SET``), but always non-empty and never containing whitespace.
+    * ``listing.currency`` had no length / uppercase / ISO-shape check.
+      Live values are 3-char ISO-4217 codes plus the accepted subunits
+      ``GBX``, ``ZAC``, ``ILA``.
+
+    The CHECKs encode those invariants. ``listing`` is referenced by
+    several child tables (``financial_facts``, ``metric_compute_status``,
+    ``metrics``, ``provider_listing``); the rebuild defers FK
+    enforcement to commit time so the children aren't disturbed.
+    """
+
+    if not _table_exists(conn, "listing"):
+        return
+
+    columns = _table_columns(conn, "listing")
+    # Some test fixtures pin the schema at versions before the canonical
+    # listing shape (issuer_id / exchange_id) is in place. Skip cleanly
+    # in that case — the rebuild only makes sense once those columns
+    # exist; earlier migrations are responsible for getting them there.
+    if not {"issuer_id", "exchange_id", "symbol"} <= columns:
+        return
+
+    ddl_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='listing'"
+    ).fetchone()
+    if ddl_row is None:
+        return
+    existing_ddl = ddl_row[0]
+    if "CHECK (length(symbol)" in existing_ddl:
+        return
+
+    conn.execute("DROP INDEX IF EXISTS idx_listing_exchange")
+    conn.execute("DROP INDEX IF EXISTS idx_listing_currency_nonnull")
+
+    # SQLite re-validates every view on schema change. The views from
+    # migrations 042/044 reference ``listing l`` directly; rebuilding
+    # the table without dropping them first fails at the RENAME with
+    # "no such table: main.listing". Drop them up front and recreate
+    # with the same DDL post-rebuild so future-readers see no shape
+    # change.
+    catalog_view_existed = _view_exists(conn, "provider_listing_catalog")
+    supported_view_existed = _view_exists(conn, "supported_tickers")
+    securities_view_existed = _view_exists(conn, "securities")
+    if supported_view_existed:
+        conn.execute("DROP VIEW supported_tickers")
+    if catalog_view_existed:
+        conn.execute("DROP VIEW provider_listing_catalog")
+    if securities_view_existed:
+        conn.execute("DROP VIEW securities")
+
+    has_primary_listing_status = "primary_listing_status" in columns
+    primary_status_column = (
+        ",\n            primary_listing_status TEXT NOT NULL DEFAULT 'unknown'"
+        if has_primary_listing_status
+        else ""
+    )
+    primary_status_select = (
+        ", primary_listing_status" if has_primary_listing_status else ""
+    )
+
+    currency_check = _CURRENCY_FORMAT_CHECK.format(col="currency")
+    conn.execute(
+        f"""
+        CREATE TABLE listing__new (
+            listing_id INTEGER PRIMARY KEY,
+            issuer_id INTEGER NOT NULL,
+            exchange_id INTEGER NOT NULL,
+            symbol TEXT NOT NULL
+                CHECK (length(symbol) > 0
+                       AND symbol = upper(trim(symbol))
+                       AND instr(symbol, ' ') = 0
+                       AND symbol GLOB '[A-Z0-9.&^*-]*'),
+            currency TEXT
+                CHECK (currency IS NULL OR ({currency_check})){primary_status_column},
+            UNIQUE (exchange_id, symbol),
+            FOREIGN KEY (issuer_id) REFERENCES issuer(issuer_id),
+            FOREIGN KEY (exchange_id) REFERENCES "exchange"(exchange_id)
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        INSERT INTO listing__new (
+            listing_id, issuer_id, exchange_id, symbol, currency{primary_status_select}
+        )
+        SELECT
+            listing_id, issuer_id, exchange_id, symbol, currency{primary_status_select}
+        FROM listing
+        """
+    )
+    conn.execute("DROP TABLE listing")
+    conn.execute("ALTER TABLE listing__new RENAME TO listing")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_listing_exchange
+        ON listing(exchange_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_listing_currency_nonnull
+        ON listing(currency)
+        WHERE currency IS NOT NULL
+        """
+    )
+
+    if securities_view_existed:
+        _create_securities_view(conn)
+    if catalog_view_existed:
+        _create_provider_listing_catalog_view(conn)
+    if supported_view_existed:
+        _create_supported_tickers_view(conn)
+
+    fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if fk_violations:
+        raise RuntimeError(
+            f"migration 056 left foreign key violations: {fk_violations!r}"
+        )
+
+
+def _migration_057_provider_exchange_currency_check(
+    conn: sqlite3.Connection,
+) -> None:
+    """Clean ``'UNKNOWN'`` placeholder currencies and add a format CHECK.
+
+    Audit finding 3.3: ``provider_exchange.currency`` had no shape
+    constraint. Live data was clean except for three rows whose
+    currency was the literal ``'UNKNOWN'`` (FOREX / GBOND / MONEY
+    virtual exchanges). Those exchanges don't have a real quote
+    currency; the column is already nullable, so coercing to ``NULL``
+    matches what callers already handle.
+
+    Migration steps:
+    1. Coerce ``UNKNOWN`` → ``NULL`` (data cleanup).
+    2. Rebuild the table with the format CHECK.
+    """
+
+    if not _table_exists(conn, "provider_exchange"):
+        return
+
+    ddl_row = conn.execute(
+        "SELECT sql FROM sqlite_master "
+        "WHERE type = 'table' AND name = 'provider_exchange'"
+    ).fetchone()
+    if ddl_row is None:
+        return
+    existing_ddl = ddl_row[0]
+    if "CHECK (currency IS NULL OR (length(currency)" in existing_ddl:
+        return
+
+    conn.execute(
+        "UPDATE provider_exchange SET currency = NULL WHERE currency = 'UNKNOWN'"
+    )
+
+    conn.execute("PRAGMA defer_foreign_keys = ON")
+    conn.execute("DROP INDEX IF EXISTS idx_provider_exchange_exchange")
+
+    # provider_listing_catalog (042), supported_tickers (042), and
+    # exchange_provider (044) all reference provider_exchange directly.
+    # SQLite re-validates them on schema change; drop and recreate
+    # around the rebuild.
+    catalog_view_existed = _view_exists(conn, "provider_listing_catalog")
+    supported_view_existed = _view_exists(conn, "supported_tickers")
+    exchange_provider_view_existed = _view_exists(conn, "exchange_provider")
+    if supported_view_existed:
+        conn.execute("DROP VIEW supported_tickers")
+    if catalog_view_existed:
+        conn.execute("DROP VIEW provider_listing_catalog")
+    if exchange_provider_view_existed:
+        conn.execute("DROP VIEW exchange_provider")
+
+    currency_check = _CURRENCY_FORMAT_CHECK.format(col="currency")
+    conn.execute(
+        f"""
+        CREATE TABLE provider_exchange__new (
+            provider_exchange_id INTEGER PRIMARY KEY,
+            provider_id INTEGER NOT NULL,
+            provider_exchange_code TEXT NOT NULL,
+            exchange_id INTEGER NOT NULL,
+            name TEXT,
+            country TEXT,
+            currency TEXT
+                CHECK (currency IS NULL OR ({currency_check})),
+            operating_mic TEXT,
+            country_iso2 TEXT,
+            country_iso3 TEXT,
+            updated_at TEXT NOT NULL,
+            UNIQUE (provider_id, provider_exchange_code),
+            UNIQUE (provider_exchange_id, provider_id),
+            FOREIGN KEY (provider_id) REFERENCES provider(provider_id),
+            FOREIGN KEY (exchange_id) REFERENCES "exchange"(exchange_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO provider_exchange__new (
+            provider_exchange_id, provider_id, provider_exchange_code,
+            exchange_id, name, country, currency, operating_mic,
+            country_iso2, country_iso3, updated_at
+        )
+        SELECT
+            provider_exchange_id, provider_id, provider_exchange_code,
+            exchange_id, name, country, currency, operating_mic,
+            country_iso2, country_iso3, updated_at
+        FROM provider_exchange
+        """
+    )
+    conn.execute("DROP TABLE provider_exchange")
+    conn.execute("ALTER TABLE provider_exchange__new RENAME TO provider_exchange")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_provider_exchange_exchange
+        ON provider_exchange(exchange_id)
+        """
+    )
+
+    if exchange_provider_view_existed:
+        _create_exchange_provider_view(conn)
+    if catalog_view_existed:
+        _create_provider_listing_catalog_view(conn)
+    if supported_view_existed:
+        _create_supported_tickers_view(conn)
+
+    fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if fk_violations:
+        raise RuntimeError(
+            f"migration 057 left foreign key violations: {fk_violations!r}"
+        )
+
+
+def _migration_058_fx_rates_format_checks(conn: sqlite3.Connection) -> None:
+    """Add ``source_kind``, ``base_currency`` and ``quote_currency`` CHECKs to ``fx_rates``.
+
+    Audit finding 3.3:
+    * ``fx_rates.source_kind``: only ``'provider'`` is ever written today;
+      future direct/synthetic sources will land via a new migration that
+      widens the CHECK explicitly.
+    * ``fx_rates.base_currency`` / ``quote_currency``: 3-char ISO codes
+      in practice; the existing schema didn't enforce that.
+
+    Same temp-table rebuild pattern as migrations 048 and 045.
+    """
+
+    if not _table_exists(conn, "fx_rates"):
+        return
+
+    ddl_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='fx_rates'"
+    ).fetchone()
+    if ddl_row is None:
+        return
+    existing_ddl = ddl_row[0]
+    if "CHECK (source_kind IN ('provider'))" in existing_ddl:
+        return
+
+    fk_already_present = bool(
+        conn.execute("PRAGMA foreign_key_list(fx_rates)").fetchall()
+    )
+    fk_clause = (
+        ",\n            FOREIGN KEY (provider) REFERENCES provider(provider_code)"
+        if fk_already_present
+        else ""
+    )
+
+    columns = _table_columns(conn, "fx_rates")
+    rate_column = "rate" if "rate" in columns else "rate_text"
+    rate_decl = (
+        "rate REAL NOT NULL" if rate_column == "rate" else "rate_text TEXT NOT NULL"
+    )
+
+    conn.execute("DROP INDEX IF EXISTS idx_fx_rates_pair_date")
+
+    base_check = _CURRENCY_FORMAT_CHECK.format(col="base_currency")
+    quote_check = _CURRENCY_FORMAT_CHECK.format(col="quote_currency")
+    meta_column_decl = ",\n            meta_json TEXT" if "meta_json" in columns else ""
+    meta_select = ", meta_json" if "meta_json" in columns else ""
+
+    conn.execute(
+        f"""
+        CREATE TABLE fx_rates__new (
+            provider TEXT NOT NULL,
+            rate_date TEXT NOT NULL,
+            base_currency TEXT NOT NULL CHECK ({base_check}),
+            quote_currency TEXT NOT NULL CHECK ({quote_check}),
+            {rate_decl},
+            fetched_at TEXT NOT NULL,
+            source_kind TEXT NOT NULL
+                CHECK (source_kind IN ('provider')){meta_column_decl},
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (
+                provider, rate_date, base_currency, quote_currency
+            ){fk_clause}
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        INSERT INTO fx_rates__new (
+            provider, rate_date, base_currency, quote_currency,
+            {rate_column}, fetched_at, source_kind{meta_select},
+            created_at, updated_at
+        )
+        SELECT
+            provider, rate_date, base_currency, quote_currency,
+            {rate_column}, fetched_at, source_kind{meta_select},
+            created_at, updated_at
+        FROM fx_rates
+        """
+    )
+    conn.execute("DROP TABLE fx_rates")
+    conn.execute("ALTER TABLE fx_rates__new RENAME TO fx_rates")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fx_rates_pair_date
+        ON fx_rates(provider, base_currency, quote_currency, rate_date DESC)
+        """
+    )
+
+    fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if fk_violations:
+        raise RuntimeError(
+            f"migration 058 left foreign key violations: {fk_violations!r}"
+        )
+
+
+def _migration_059_financial_facts_format_checks(
+    conn: sqlite3.Connection,
+) -> None:
+    """Add ``currency`` and ``unit`` format CHECKs to ``financial_facts``.
+
+    Audit finding 3.3: ``financial_facts.currency`` was unconstrained
+    (live values are 3-char ISO codes including subunits GBX/ILA);
+    ``financial_facts.unit`` was NOT NULL but empty / whitespace
+    values were possible (one such row exists on the live DB).
+
+    The CHECKs:
+    * ``currency`` — NULL or 3-char uppercase ISO form (same predicate
+      as listing/provider_exchange/fx_rates).
+    * ``unit`` — non-empty after trim and free of internal whitespace.
+      ``unit`` is a free-form metadata field that varies with the source
+      payload (ISO codes, ``shares``, ``EPS``, composites such as
+      ``USD/shares``); a strict enum would lock out future sources, so
+      the CHECK targets the *shape* invariants instead.
+
+    **Cost note:** ``financial_facts`` is the largest table in the
+    project (live DB: 103M rows, ~8.5 GiB). The temp-table rebuild this
+    migration performs is the same shape as migration 043 (which ran
+    in ~72 minutes on production). Apply on a quiet window.
+
+    The migration aborts cleanly if any orphan rows exist or if any
+    row would violate either CHECK; the latter is a pre-flight rather
+    than a silent INSERT...SELECT filter so dirty data is surfaced
+    rather than dropped.
+    """
+
+    if not _table_exists(conn, "financial_facts"):
+        return
+
+    ddl_row = conn.execute(
+        "SELECT sql FROM sqlite_master "
+        "WHERE type = 'table' AND name = 'financial_facts'"
+    ).fetchone()
+    if ddl_row is None:
+        return
+    existing_ddl = ddl_row[0]
+    if "CHECK (currency IS NULL OR" in existing_ddl:
+        return
+
+    orphan_count = conn.execute(
+        """
+        SELECT COUNT(*) FROM financial_facts
+        WHERE listing_id NOT IN (SELECT listing_id FROM listing)
+        """
+    ).fetchone()[0]
+    if orphan_count:
+        raise RuntimeError(
+            f"migration 059 aborted: {orphan_count} orphan financial_facts "
+            "rows reference missing listings. Clean these before retrying."
+        )
+
+    bad_currency = conn.execute(
+        f"""
+        SELECT COUNT(*) FROM financial_facts
+        WHERE currency IS NOT NULL
+          AND NOT ({_CURRENCY_FORMAT_CHECK.format(col="currency")})
+        """
+    ).fetchone()[0]
+    if bad_currency:
+        raise RuntimeError(
+            f"migration 059 aborted: {bad_currency} financial_facts rows "
+            "have a currency that fails the 3-char uppercase shape check."
+        )
+
+    bad_unit = conn.execute(
+        """
+        SELECT COUNT(*) FROM financial_facts
+        WHERE unit IS NULL
+           OR length(trim(unit)) = 0
+           OR instr(unit, ' ') > 0
+           OR instr(unit, char(9)) > 0
+           OR instr(unit, char(10)) > 0
+        """
+    ).fetchone()[0]
+    if bad_unit:
+        raise RuntimeError(
+            f"migration 059 aborted: {bad_unit} financial_facts rows have "
+            "an empty or whitespace-bearing unit. Clean these before "
+            "retrying."
+        )
+
+    conn.execute("PRAGMA defer_foreign_keys = ON")
+    conn.execute("DROP INDEX IF EXISTS idx_fin_facts_concept")
+    conn.execute("DROP INDEX IF EXISTS idx_fin_facts_security_concept")
+    conn.execute("DROP INDEX IF EXISTS idx_fin_facts_security_concept_latest")
+    conn.execute("DROP INDEX IF EXISTS idx_fin_facts_currency_nonnull")
+
+    currency_check = _CURRENCY_FORMAT_CHECK.format(col="currency")
+    conn.execute(
+        f"""
+        CREATE TABLE financial_facts__new (
+            listing_id INTEGER NOT NULL,
+            cik TEXT,
+            concept TEXT NOT NULL,
+            fiscal_period TEXT,
+            end_date TEXT NOT NULL,
+            unit TEXT NOT NULL
+                CHECK (length(trim(unit)) > 0
+                       AND instr(unit, ' ') = 0
+                       AND instr(unit, char(9)) = 0
+                       AND instr(unit, char(10)) = 0),
+            value REAL NOT NULL,
+            accn TEXT,
+            filed TEXT,
+            frame TEXT,
+            start_date TEXT,
+            accounting_standard TEXT,
+            currency TEXT
+                CHECK (currency IS NULL OR ({currency_check})),
+            source_provider TEXT,
+            PRIMARY KEY (listing_id, concept, fiscal_period, end_date, unit),
+            FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO financial_facts__new (
+            listing_id, cik, concept, fiscal_period, end_date, unit,
+            value, accn, filed, frame, start_date, accounting_standard,
+            currency, source_provider
+        )
+        SELECT
+            listing_id, cik, concept, fiscal_period, end_date, unit,
+            value, accn, filed, frame, start_date, accounting_standard,
+            currency, source_provider
+        FROM financial_facts
+        """
+    )
+    conn.execute("DROP TABLE financial_facts")
+    conn.execute("ALTER TABLE financial_facts__new RENAME TO financial_facts")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fin_facts_concept
+        ON financial_facts(concept)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fin_facts_security_concept_latest
+        ON financial_facts(listing_id, concept, end_date DESC, filed DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fin_facts_currency_nonnull
+        ON financial_facts(currency)
+        WHERE currency IS NOT NULL
+        """
+    )
+
+    fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if fk_violations:
+        raise RuntimeError(
+            f"migration 059 left foreign key violations: {fk_violations!r}"
+        )
+
+
+def _migration_060_issuer_unique_name_country(conn: sqlite3.Connection) -> None:
+    """Add ``UNIQUE (name, country)`` to ``issuer``.
+
+    Audit finding 3.7: ``issuer`` had no UNIQUE on the natural identity
+    columns. Two issuers with the same canonical name and country are
+    almost certainly the same entity, and tightening the constraint
+    keeps duplicates from creeping in via parallel ingest paths.
+
+    The constraint is applied as a UNIQUE INDEX rather than a column
+    constraint so a NULL ``name`` or NULL ``country`` doesn't get
+    swallowed by SQLite's NULL-distinct semantics — UNIQUE indexes
+    treat NULLs as distinct, which matches the audit's intent (a
+    name-less or country-less issuer should not block a properly
+    populated future issuer).
+
+    ``name`` is intentionally **not** tightened to NOT NULL in this
+    migration. The live DB has 260 rows with NULL name (legacy issuer
+    rows whose source payload predates the issuer.name column); fixing
+    them requires a per-row decision (delete vs backfill from
+    listing-level metadata) that should land in a dedicated migration
+    rather than being smuggled in here.
+
+    Pre-flight: surface any *exact* duplicate (name, country) pairs
+    that would block the unique index. Both columns must be non-NULL
+    for a duplicate to count under SQLite's UNIQUE INDEX semantics.
+    """
+
+    if not _table_exists(conn, "issuer"):
+        return
+
+    duplicates = conn.execute(
+        """
+        SELECT name, country, COUNT(*) AS n
+        FROM issuer
+        WHERE name IS NOT NULL AND country IS NOT NULL
+        GROUP BY name, country
+        HAVING n > 1
+        """
+    ).fetchall()
+    if duplicates:
+        sample = ", ".join(
+            f"({row[0]!r}, {row[1]!r})x{row[2]}" for row in duplicates[:3]
+        )
+        raise RuntimeError(
+            f"migration 060 aborted: {len(duplicates)} (name, country) "
+            f"duplicate groups in issuer (sample: {sample}). Resolve them "
+            "before retrying."
+        )
+
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_issuer_name_country
+        ON issuer(name, country)
+        """
+    )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -5600,6 +6469,12 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_052_drop_redundant_fin_facts_index,
     _migration_053_drop_market_data_fetch_state_runtime_columns,
     _migration_054_drop_provider_listing_provider_id,
+    _migration_055_status_enum_checks,
+    _migration_056_listing_format_checks,
+    _migration_057_provider_exchange_currency_check,
+    _migration_058_fx_rates_format_checks,
+    _migration_059_financial_facts_format_checks,
+    _migration_060_issuer_unique_name_country,
 ]
 
 

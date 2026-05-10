@@ -3,7 +3,7 @@ import sqlite3
 
 import pytest
 
-from pyvalue.migrations import MIGRATIONS, apply_migrations
+from pyvalue.migrations import MIGRATIONS, _ensure_migrations_table, apply_migrations
 
 
 def _create_legacy_listings_table(conn: sqlite3.Connection) -> None:
@@ -2638,6 +2638,476 @@ def test_migration_054_blocks_on_drift_between_provider_listing_and_exchange(
 
 def test_migration_054_idempotent(tmp_path):
     db_path = tmp_path / "provider-listing-054-idempotent.sqlite"
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0
+
+
+# ---------------------------------------------------------------------------
+# Migration 055: status enum CHECK constraints on metric_compute_status,
+# market_data_fetch_state, fx_refresh_state.
+# ---------------------------------------------------------------------------
+
+
+def test_migration_055_metric_compute_status_rejects_unknown_status(tmp_path):
+    db_path = tmp_path / "metric-status-055.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        listing_id = _seed_listing(conn)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO metric_compute_status (
+                    listing_id, metric_id, status, attempted_at
+                ) VALUES (?, 'm1', 'wat', '2026-01-01T00:00:00+00:00')
+                """,
+                (listing_id,),
+            )
+
+
+def test_migration_055_market_data_fetch_state_rejects_unknown_status(tmp_path):
+    db_path = tmp_path / "fetch-status-055.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        _seed_listing(conn)
+        conn.execute(
+            """
+            INSERT INTO provider_listing (
+                provider_listing_id, provider_exchange_id, provider_symbol,
+                listing_id
+            ) VALUES (1, 1, 'TEST', 1)
+            """
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO market_data_fetch_state (
+                    provider_listing_id, last_status
+                ) VALUES (1, 'pending')
+                """
+            )
+
+
+def test_migration_055_fx_refresh_state_rejects_unknown_status(tmp_path):
+    db_path = tmp_path / "fx-refresh-status-055.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO fx_refresh_state (
+                    provider, canonical_symbol, last_status
+                ) VALUES ('EODHD', 'EUR/USD', 'pending')
+                """
+            )
+
+
+def test_migration_055_idempotent(tmp_path):
+    db_path = tmp_path / "status-checks-055-idempotent.sqlite"
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0
+
+
+# ---------------------------------------------------------------------------
+# Migration 056: listing.symbol + listing.currency format CHECKs.
+# ---------------------------------------------------------------------------
+
+
+def test_migration_056_listing_rejects_lowercase_symbol(tmp_path):
+    db_path = tmp_path / "listing-symbol-056.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO "exchange" (
+                exchange_id, exchange_code, created_at, updated_at
+            ) VALUES (1, 'US', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')
+            """
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO issuer (issuer_id, name) VALUES (1, 'Test')"
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO listing (
+                    listing_id, issuer_id, exchange_id, symbol
+                ) VALUES (99, 1, 1, 'aapl')
+                """
+            )
+
+
+def test_migration_056_listing_rejects_bad_currency_form(tmp_path):
+    db_path = tmp_path / "listing-currency-056.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO "exchange" (
+                exchange_id, exchange_code, created_at, updated_at
+            ) VALUES (1, 'US', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')
+            """
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO issuer (issuer_id, name) VALUES (1, 'Test')"
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO listing (
+                    listing_id, issuer_id, exchange_id, symbol, currency
+                ) VALUES (99, 1, 1, 'AAA', 'usd')
+                """
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO listing (
+                    listing_id, issuer_id, exchange_id, symbol, currency
+                ) VALUES (98, 1, 1, 'BBB', 'GBP0.01')
+                """
+            )
+
+
+def test_migration_056_listing_accepts_subunit_currencies(tmp_path):
+    """Subunit codes (GBX, ZAC, ILA) are 3-char uppercase and must pass."""
+
+    db_path = tmp_path / "listing-subunit-056.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO "exchange" (
+                exchange_id, exchange_code, created_at, updated_at
+            ) VALUES (1, 'LSE', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')
+            """
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO issuer (issuer_id, name) VALUES (1, 'Test')"
+        )
+        conn.execute(
+            """
+            INSERT INTO listing (
+                listing_id, issuer_id, exchange_id, symbol, currency
+            ) VALUES (1, 1, 1, 'AAPL', 'GBX')
+            """
+        )
+
+        row = conn.execute(
+            "SELECT currency FROM listing WHERE listing_id = 1"
+        ).fetchone()
+        assert row[0] == "GBX"
+
+
+def test_migration_056_idempotent(tmp_path):
+    db_path = tmp_path / "listing-checks-056-idempotent.sqlite"
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0
+
+
+# ---------------------------------------------------------------------------
+# Migration 057: provider_exchange.currency cleanup + format CHECK.
+# ---------------------------------------------------------------------------
+
+
+def test_migration_057_provider_exchange_normalizes_unknown_currency(tmp_path):
+    """A pre-057 row with currency='UNKNOWN' is rewritten to NULL."""
+
+    db_path = tmp_path / "provider-exchange-unknown-057.sqlite"
+
+    # Apply migrations through 056 (one before 057) so the
+    # provider_exchange table is in its pre-057 shape (no currency
+    # CHECK), then seed the dirty row directly. apply_migrations()
+    # always runs to len(MIGRATIONS) so we drive each migration by
+    # hand here.
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = OFF")
+    _ensure_migrations_table(conn)
+    conn.commit()
+    for i, migration in enumerate(MIGRATIONS[:56], start=1):
+        conn.execute("BEGIN")
+        migration(conn)
+        conn.execute("DELETE FROM schema_migrations")
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (?)", (i,))
+        conn.commit()
+    conn.execute(
+        """
+        UPDATE provider_exchange SET currency = 'UNKNOWN'
+        WHERE provider_exchange_id = 1
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    apply_migrations(db_path)
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT currency FROM provider_exchange WHERE provider_exchange_id = 1"
+        ).fetchone()
+    assert row[0] is None
+
+
+def test_migration_057_provider_exchange_rejects_bad_currency(tmp_path):
+    db_path = tmp_path / "provider-exchange-currency-057.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO provider_exchange (
+                    provider_id, provider_exchange_code, exchange_id,
+                    currency, updated_at
+                ) VALUES (1, 'XYZ', 1, 'usd',
+                          '2026-01-01T00:00:00+00:00')
+                """
+            )
+
+
+def test_migration_057_idempotent(tmp_path):
+    db_path = tmp_path / "provider-exchange-057-idempotent.sqlite"
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0
+
+
+# ---------------------------------------------------------------------------
+# Migration 058: fx_rates source_kind + base/quote currency CHECKs.
+# ---------------------------------------------------------------------------
+
+
+def test_migration_058_fx_rates_rejects_lowercase_currency(tmp_path):
+    db_path = tmp_path / "fx-rates-currency-058.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO fx_rates (
+                    provider, rate_date, base_currency, quote_currency,
+                    rate, fetched_at, source_kind, created_at, updated_at
+                ) VALUES (
+                    'EODHD', '2026-01-01', 'usd', 'EUR', 1.1,
+                    '2026-01-02', 'provider',
+                    '2026-01-02', '2026-01-02'
+                )
+                """
+            )
+
+
+def test_migration_058_fx_rates_rejects_unknown_source_kind(tmp_path):
+    db_path = tmp_path / "fx-rates-source-058.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO fx_rates (
+                    provider, rate_date, base_currency, quote_currency,
+                    rate, fetched_at, source_kind, created_at, updated_at
+                ) VALUES (
+                    'EODHD', '2026-01-01', 'USD', 'EUR', 1.1,
+                    '2026-01-02', 'synthesized',
+                    '2026-01-02', '2026-01-02'
+                )
+                """
+            )
+
+
+def test_migration_058_idempotent(tmp_path):
+    db_path = tmp_path / "fx-rates-058-idempotent.sqlite"
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0
+
+
+# ---------------------------------------------------------------------------
+# Migration 059: financial_facts.currency + unit format CHECKs (heavy
+# rebuild on the largest table in the project; tests run on an empty
+# fixture so the rebuild is fast).
+# ---------------------------------------------------------------------------
+
+
+def test_migration_059_financial_facts_rejects_lowercase_currency(tmp_path):
+    db_path = tmp_path / "fin-facts-currency-059.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        listing_id = _seed_listing(conn)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO financial_facts (
+                    listing_id, concept, fiscal_period, end_date, unit,
+                    value, currency
+                ) VALUES (?, 'Revenues', 'FY', '2025-12-31', 'USD',
+                          1.0, 'usd')
+                """,
+                (listing_id,),
+            )
+
+
+def test_migration_059_financial_facts_rejects_empty_unit(tmp_path):
+    db_path = tmp_path / "fin-facts-unit-059.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        listing_id = _seed_listing(conn)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO financial_facts (
+                    listing_id, concept, fiscal_period, end_date, unit, value
+                ) VALUES (?, 'Revenues', 'FY', '2025-12-31', '', 1.0)
+                """,
+                (listing_id,),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO financial_facts (
+                    listing_id, concept, fiscal_period, end_date, unit, value
+                ) VALUES (?, 'Revenues', 'FY', '2025-12-31', 'USD shares', 1.0)
+                """,
+                (listing_id,),
+            )
+
+
+def test_migration_059_financial_facts_accepts_composite_unit(tmp_path):
+    """``USD/shares`` is a valid SEC fact unit and must pass the CHECK."""
+
+    db_path = tmp_path / "fin-facts-composite-unit-059.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        listing_id = _seed_listing(conn)
+        conn.execute(
+            """
+            INSERT INTO financial_facts (
+                listing_id, concept, fiscal_period, end_date, unit, value
+            ) VALUES (?, 'EarningsPerShareBasic', 'FY', '2025-12-31',
+                      'USD/shares', 1.5)
+            """,
+            (listing_id,),
+        )
+        row = conn.execute(
+            "SELECT unit, value FROM financial_facts WHERE listing_id = ?",
+            (listing_id,),
+        ).fetchone()
+    assert row == ("USD/shares", 1.5)
+
+
+def test_migration_059_idempotent(tmp_path):
+    db_path = tmp_path / "fin-facts-059-idempotent.sqlite"
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0
+
+
+# ---------------------------------------------------------------------------
+# Migration 060: UNIQUE (name, country) on issuer.
+# ---------------------------------------------------------------------------
+
+
+def test_migration_060_issuer_rejects_duplicate_name_country(tmp_path):
+    db_path = tmp_path / "issuer-uniq-060.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO issuer (issuer_id, name, country)
+            VALUES (1, 'Acme Corp', 'US')
+            """
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO issuer (issuer_id, name, country)
+                VALUES (2, 'Acme Corp', 'US')
+                """
+            )
+
+
+def test_migration_060_issuer_allows_duplicate_with_null_country(tmp_path):
+    """SQLite UNIQUE INDEX treats NULLs as distinct, so a name with a
+    NULL country can coexist with the same name + non-NULL country."""
+
+    db_path = tmp_path / "issuer-uniq-null-060.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO issuer (issuer_id, name, country)
+            VALUES (1, 'Acme Corp', 'US')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO issuer (issuer_id, name, country)
+            VALUES (2, 'Acme Corp', NULL)
+            """
+        )
+        # And another NULL-country row with the same name still works
+        # because UNIQUE indexes treat NULL as distinct.
+        conn.execute(
+            """
+            INSERT INTO issuer (issuer_id, name, country)
+            VALUES (3, 'Acme Corp', NULL)
+            """
+        )
+        rows = conn.execute(
+            "SELECT COUNT(*) FROM issuer WHERE name = 'Acme Corp'"
+        ).fetchone()[0]
+    assert rows == 3
+
+
+def test_migration_060_aborts_on_existing_duplicates(tmp_path):
+    """If pre-existing rows duplicate (name, country), the migration
+    should abort cleanly so the operator can investigate."""
+
+    db_path = tmp_path / "issuer-dup-pre-060.sqlite"
+
+    apply_migrations(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DROP INDEX IF EXISTS idx_issuer_name_country")
+        conn.execute("DELETE FROM schema_migrations")
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (?)", (59,))
+        conn.executemany(
+            "INSERT INTO issuer (issuer_id, name, country) VALUES (?, ?, ?)",
+            [(1, "Acme", "US"), (2, "Acme", "US")],
+        )
+
+    with pytest.raises(RuntimeError, match="migration 060 aborted"):
+        apply_migrations(db_path)
+
+
+def test_migration_060_idempotent(tmp_path):
+    db_path = tmp_path / "issuer-uniq-060-idempotent.sqlite"
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
 

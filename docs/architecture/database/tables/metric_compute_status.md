@@ -23,7 +23,7 @@ One row per `(listing_id, metric_id)`.
 | --- | --- | --- | --- | --- |
 | `listing_id` | `INTEGER` | no | PK | canonical listing identity |
 | `metric_id` | `TEXT` | no | PK, idx | metric identifier |
-| `status` | `TEXT` | no | idx | success or failure |
+| `status` | `TEXT` | no | idx | `'success'` or `'failure'`, enforced by CHECK |
 | `reason_code` | `TEXT` | yes |  | failure bucket |
 | `reason_detail` | `TEXT` | yes |  | diagnostic detail |
 | `attempted_at` | `TEXT` | no |  | attempt timestamp |

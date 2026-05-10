@@ -30,14 +30,14 @@ meaningful filing accession value.
 | `concept` | `TEXT` | no | PK, idx | normalized concept |
 | `fiscal_period` | `TEXT` | yes | PK | FY, Q1, TTM, and so on |
 | `end_date` | `TEXT` | no | PK, idx | fact period end |
-| `unit` | `TEXT` | no | PK | unit or semantic label |
+| `unit` | `TEXT` | no | PK | unit or semantic label. CHECK enforces non-empty trimmed text with no internal whitespace |
 | `value` | `REAL` | no |  | numeric fact value |
 | `accn` | `TEXT` | yes |  | filing/accession discriminator (post-043: nullable, non-key) |
 | `filed` | `TEXT` | yes | idx | filing date for latest-row ordering |
 | `frame` | `TEXT` | yes |  | provider frame string |
 | `start_date` | `TEXT` | yes |  | period start for duration facts |
 | `accounting_standard` | `TEXT` | yes |  | provider accounting basis |
-| `currency` | `TEXT` | yes | partial idx | ISO currency for monetary facts |
+| `currency` | `TEXT` | yes | partial idx | ISO currency for monetary facts. CHECK enforces 3-char uppercase ASCII letters when present |
 | `source_provider` | `TEXT` | yes |  | provenance |
 
 ## Keys And Relationships

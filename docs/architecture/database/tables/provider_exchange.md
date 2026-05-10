@@ -27,7 +27,7 @@ One row per `(provider_id, provider_exchange_code)`.
 | `exchange_id` | `INTEGER` | no | FK, idx | canonical exchange identity |
 | `name` | `TEXT` | yes |  | provider display name |
 | `country` | `TEXT` | yes |  | provider country label |
-| `currency` | `TEXT` | yes |  | provider exchange-currency hint |
+| `currency` | `TEXT` | yes |  | provider exchange-currency hint. CHECK enforces 3-char uppercase ASCII letters when present (legacy `'UNKNOWN'` placeholders were normalized to NULL by migration 057) |
 | `operating_mic` | `TEXT` | yes |  | MIC when supplied by the provider |
 | `country_iso2` | `TEXT` | yes |  | normalized country code |
 | `country_iso3` | `TEXT` | yes |  | normalized country code |

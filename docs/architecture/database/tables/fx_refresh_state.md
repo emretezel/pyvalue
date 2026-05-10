@@ -25,11 +25,11 @@ One row per `(provider, canonical_symbol)`.
 | `canonical_symbol` | `TEXT` | no | PK | canonical six-letter FX pair |
 | `min_rate_date` | `TEXT` | yes |  | earliest stored date |
 | `max_rate_date` | `TEXT` | yes |  | latest stored date |
-| `full_history_backfilled` | `INTEGER` | no |  | whether the full backfill completed |
+| `full_history_backfilled` | `INTEGER` | no |  | whether the full backfill completed; CHECK enforces `IN (0, 1)` |
 | `last_fetched_at` | `TEXT` | yes |  | last refresh timestamp |
-| `last_status` | `TEXT` | yes |  | success or error |
+| `last_status` | `TEXT` | yes |  | latest status; CHECK enforces `IN ('ok','error')` when not NULL |
 | `last_error` | `TEXT` | yes |  | provider error |
-| `attempts` | `INTEGER` | no |  | retry counter |
+| `attempts` | `INTEGER` | no |  | retry counter; CHECK enforces `>= 0` |
 
 ## Keys And Relationships
 
