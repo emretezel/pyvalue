@@ -722,36 +722,9 @@ class ProviderRepository(SQLiteStore):
     """Persist and resolve provider registry rows."""
 
     def initialize_schema(self) -> None:
+        # The `provider` table (created by migration 034) and the legacy
+        # `providers` view (owned by migration 044) are migration-managed.
         apply_migrations(self.db_path)
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS provider (
-                    provider_id INTEGER PRIMARY KEY,
-                    provider_code TEXT NOT NULL UNIQUE CHECK (
-                        provider_code = UPPER(TRIM(provider_code))
-                        AND LENGTH(TRIM(provider_code)) > 0
-                    ),
-                    display_name TEXT NOT NULL,
-                    description TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute("DROP VIEW IF EXISTS providers")
-            conn.execute(
-                """
-                CREATE VIEW providers AS
-                SELECT
-                    provider_code,
-                    display_name,
-                    description,
-                    created_at,
-                    updated_at
-                FROM provider
-                """
-            )
 
     def ensure(
         self,
@@ -863,79 +836,14 @@ class SecurityRepository(SQLiteStore):
         self._by_id: Dict[int, Security] = {}
 
     def initialize_schema(self) -> None:
+        # `issuer`, `listing`, their indexes, and the `securities` compat
+        # view are owned by migrations (034 for the tables, 044 for the
+        # view). The runtime ALTER for `primary_listing_status` is also
+        # gone because migration 038 introduced the column with the same
+        # CHECK constraint and migration 042's ownership pattern means
+        # initialize_schema doesn't need to patch the schema anymore.
         apply_migrations(self.db_path)
         self._exchange_repo().initialize_schema()
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS issuer (
-                    issuer_id INTEGER PRIMARY KEY,
-                    name TEXT,
-                    description TEXT,
-                    sector TEXT,
-                    industry TEXT,
-                    country TEXT
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS listing (
-                    listing_id INTEGER PRIMARY KEY,
-                    issuer_id INTEGER NOT NULL,
-                    exchange_id INTEGER NOT NULL,
-                    symbol TEXT NOT NULL,
-                    currency TEXT,
-                    primary_listing_status TEXT NOT NULL DEFAULT 'unknown'
-                        CHECK (primary_listing_status IN ('unknown', 'primary', 'secondary')),
-                    UNIQUE (exchange_id, symbol),
-                    FOREIGN KEY (issuer_id) REFERENCES issuer(issuer_id),
-                    FOREIGN KEY (exchange_id) REFERENCES "exchange"(exchange_id)
-                )
-                """
-            )
-            columns = _table_columns(conn, "listing")
-            if "primary_listing_status" not in columns:
-                conn.execute(
-                    """
-                    ALTER TABLE listing
-                    ADD COLUMN primary_listing_status TEXT NOT NULL DEFAULT 'unknown'
-                    CHECK (primary_listing_status IN ('unknown', 'primary', 'secondary'))
-                    """
-                )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_listing_exchange
-                ON listing(exchange_id)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_listing_currency_nonnull
-                ON listing(currency)
-                WHERE currency IS NOT NULL
-                """
-            )
-            conn.execute("DROP VIEW IF EXISTS securities")
-            conn.execute(
-                """
-                CREATE VIEW securities AS
-                SELECT
-                    l.listing_id AS security_id,
-                    l.symbol AS canonical_ticker,
-                    e.exchange_code AS canonical_exchange_code,
-                    l.symbol || '.' || e.exchange_code AS canonical_symbol,
-                    i.name AS entity_name,
-                    i.description,
-                    i.sector,
-                    i.industry,
-                    NULL AS created_at,
-                    NULL AS updated_at
-                FROM listing l
-                JOIN issuer i ON i.issuer_id = l.issuer_id
-                JOIN "exchange" e ON e.exchange_id = l.exchange_id
-                """
-            )
 
     def _select_identity_sql(self, where_sql: str) -> str:
         return f"""
@@ -1439,21 +1347,8 @@ class ExchangeRepository(SQLiteStore):
     """Persist canonical exchange identities."""
 
     def initialize_schema(self) -> None:
+        # The `exchange` table is owned by migration 034.
         apply_migrations(self.db_path)
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS "exchange" (
-                    exchange_id INTEGER PRIMARY KEY,
-                    exchange_code TEXT NOT NULL UNIQUE CHECK (
-                        exchange_code = UPPER(TRIM(exchange_code))
-                        AND LENGTH(TRIM(exchange_code)) > 0
-                    ),
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
 
     def ensure(
         self,
@@ -1527,56 +1422,12 @@ class ExchangeProviderRepository(SQLiteStore):
     """Store exchange catalogs published by data providers."""
 
     def initialize_schema(self) -> None:
+        # `provider_exchange` (table + idx_provider_exchange_exchange) is
+        # owned by migration 034. The `exchange_provider` compat view is
+        # owned by migration 044.
         apply_migrations(self.db_path)
         self._provider_repo().initialize_schema()
         self._exchange_repo().initialize_schema()
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS provider_exchange (
-                    provider_exchange_id INTEGER PRIMARY KEY,
-                    provider_id INTEGER NOT NULL,
-                    provider_exchange_code TEXT NOT NULL,
-                    exchange_id INTEGER NOT NULL,
-                    name TEXT,
-                    country TEXT,
-                    currency TEXT,
-                    operating_mic TEXT,
-                    country_iso2 TEXT,
-                    country_iso3 TEXT,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE (provider_id, provider_exchange_code),
-                    UNIQUE (provider_exchange_id, provider_id),
-                    FOREIGN KEY (provider_id) REFERENCES provider(provider_id),
-                    FOREIGN KEY (exchange_id) REFERENCES "exchange"(exchange_id)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_provider_exchange_exchange
-                ON provider_exchange(exchange_id)
-                """
-            )
-            conn.execute("DROP VIEW IF EXISTS exchange_provider")
-            conn.execute(
-                """
-                CREATE VIEW exchange_provider AS
-                SELECT
-                    p.provider_code AS provider,
-                    ep.provider_exchange_code,
-                    ep.exchange_id,
-                    ep.name,
-                    ep.country,
-                    ep.currency,
-                    ep.operating_mic,
-                    ep.country_iso2,
-                    ep.country_iso3,
-                    ep.updated_at
-                FROM provider_exchange ep
-                JOIN provider p ON p.provider_id = ep.provider_id
-                """
-            )
 
     def replace_for_provider(
         self,
@@ -1810,40 +1661,12 @@ class SupportedTickerRepository(SQLiteStore):
     """Store provider-supported ticker catalogs by exchange."""
 
     def initialize_schema(self) -> None:
+        # `provider_listing` (table + idx_provider_listing_provider +
+        # idx_provider_listing_listing) is owned by migration 034.
         apply_migrations(self.db_path)
         self._provider_repo().initialize_schema()
         self._exchange_provider_repo().initialize_schema()
         self._security_repo().initialize_schema()
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS provider_listing (
-                    provider_listing_id INTEGER PRIMARY KEY,
-                    provider_id INTEGER NOT NULL,
-                    provider_exchange_id INTEGER NOT NULL,
-                    provider_symbol TEXT NOT NULL,
-                    listing_id INTEGER NOT NULL,
-                    UNIQUE (provider_exchange_id, provider_symbol),
-                    FOREIGN KEY (provider_id) REFERENCES provider(provider_id),
-                    FOREIGN KEY (provider_exchange_id) REFERENCES provider_exchange(provider_exchange_id),
-                    FOREIGN KEY (listing_id) REFERENCES listing(listing_id),
-                    FOREIGN KEY (provider_exchange_id, provider_id)
-                        REFERENCES provider_exchange(provider_exchange_id, provider_id)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_provider_listing_provider
-                ON provider_listing(provider_id)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_provider_listing_listing
-                ON provider_listing(listing_id)
-                """
-            )
         FundamentalsRepository(self.db_path).initialize_schema()
         FundamentalsFetchStateRepository(self.db_path).initialize_schema()
         MarketDataRepository(self.db_path).initialize_schema()
@@ -2821,29 +2644,13 @@ class FundamentalsRepository(SQLiteStore):
     """Persist raw fundamentals payloads by provider."""
 
     def initialize_schema(self) -> None:
+        # `fundamentals_raw` (table + idx_fundamentals_raw_last_fetched)
+        # is owned by migration 040, which also dropped the legacy
+        # `idx_fundamentals_raw_security`, `..._provider_symbol`, and
+        # `..._provider_fetched` indexes — so the runtime DROP INDEX
+        # statements are no longer needed either.
         apply_migrations(self.db_path)
         self._security_repo().initialize_schema()
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS fundamentals_raw (
-                    provider_listing_id INTEGER PRIMARY KEY,
-                    data TEXT NOT NULL,
-                    payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
-                    last_fetched_at TEXT NOT NULL,
-                    FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
-                )
-                """
-            )
-            conn.execute("DROP INDEX IF EXISTS idx_fundamentals_raw_security")
-            conn.execute("DROP INDEX IF EXISTS idx_fundamentals_raw_provider_symbol")
-            conn.execute("DROP INDEX IF EXISTS idx_fundamentals_raw_provider_fetched")
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_fundamentals_raw_last_fetched
-                ON fundamentals_raw(last_fetched_at)
-                """
-            )
 
     def upsert(
         self,
@@ -4036,35 +3843,10 @@ class FundamentalsFetchStateRepository(SQLiteStore):
     """Track active fundamentals fetch failures for resumable ingestion."""
 
     def initialize_schema(self) -> None:
+        # `fundamentals_fetch_state` (table + idx_fundamentals_fetch_next)
+        # is owned by migration 040, which also dropped the legacy
+        # provider-keyed indexes that the runtime path used to reset.
         apply_migrations(self.db_path)
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS fundamentals_fetch_state (
-                    provider_listing_id INTEGER PRIMARY KEY,
-                    failed_at TEXT NOT NULL,
-                    error TEXT NOT NULL,
-                    next_eligible_at TEXT NOT NULL,
-                    attempts INTEGER NOT NULL CHECK (attempts > 0),
-                    FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
-                )
-                """
-            )
-            conn.execute(
-                "DROP INDEX IF EXISTS idx_fundamentals_fetch_state_provider_symbol"
-            )
-            conn.execute(
-                "DROP INDEX IF EXISTS idx_fundamentals_fetch_state_provider_fetched_symbol"
-            )
-            conn.execute(
-                "DROP INDEX IF EXISTS idx_fundamentals_fetch_state_provider_status_next_symbol"
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_fundamentals_fetch_next
-                ON fundamentals_fetch_state(next_eligible_at)
-                """
-            )
 
     def _resolve_provider_listing_id(
         self,
@@ -4310,22 +4092,10 @@ class FundamentalsNormalizationStateRepository(SQLiteStore):
     """Track successful normalization watermarks for stored raw fundamentals."""
 
     def initialize_schema(self) -> None:
+        # `fundamentals_normalization_state` is owned by migration 040.
+        # The legacy security/provider-symbol indexes were dropped there
+        # too, so the runtime cleanup is no longer necessary.
         apply_migrations(self.db_path)
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS fundamentals_normalization_state (
-                    provider_listing_id INTEGER PRIMARY KEY,
-                    normalized_payload_hash TEXT NOT NULL CHECK (length(normalized_payload_hash) = 64),
-                    normalized_at TEXT NOT NULL,
-                    FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
-                )
-                """
-            )
-            conn.execute("DROP INDEX IF EXISTS idx_fundamentals_norm_state_security")
-            conn.execute(
-                "DROP INDEX IF EXISTS idx_fundamentals_norm_state_provider_symbol"
-            )
 
     def fetch(
         self, provider: str, symbol: str
@@ -4428,17 +4198,9 @@ class FinancialFactsRefreshStateRepository(SQLiteStore):
     """Track the latest normalized financial-facts refresh per security."""
 
     def initialize_schema(self) -> None:
+        # `financial_facts_refresh_state` is owned by migration 034.
         apply_migrations(self.db_path)
         self._security_repo().initialize_schema()
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS financial_facts_refresh_state (
-                    listing_id INTEGER NOT NULL PRIMARY KEY,
-                    refreshed_at TEXT NOT NULL
-                )
-                """
-            )
 
     def mark_security_refreshed(
         self,
@@ -4545,69 +4307,14 @@ class FinancialFactsRepository(SQLiteStore):
     """Persist normalized financial facts for downstream metrics."""
 
     def initialize_schema(self) -> None:
+        # `financial_facts` (table + all four idx_fin_facts_* indexes) is
+        # owned by migration 034 (initial), 029 (latest-concept index), and
+        # 043 (PK rebuild + listing FK). The defensive
+        # CREATE-INDEX-with-locked-retry block is no longer needed because
+        # the migration runs once inside its own transaction.
         apply_migrations(self.db_path)
         self._security_repo().initialize_schema()
         FinancialFactsRefreshStateRepository(self.db_path).initialize_schema()
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS financial_facts (
-                    listing_id INTEGER NOT NULL,
-                    cik TEXT,
-                    concept TEXT NOT NULL,
-                    fiscal_period TEXT,
-                    end_date TEXT NOT NULL,
-                    unit TEXT NOT NULL,
-                    value REAL NOT NULL,
-                    accn TEXT,
-                    filed TEXT,
-                    frame TEXT,
-                    start_date TEXT,
-                    accounting_standard TEXT,
-                    currency TEXT,
-                    source_provider TEXT,
-                    PRIMARY KEY (listing_id, concept, fiscal_period, end_date, unit, accn)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_fin_facts_security_concept
-                ON financial_facts(listing_id, concept)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_fin_facts_concept
-                ON financial_facts(concept)
-                """
-            )
-            # ``idx_fin_facts_security_concept_latest`` is the canonical index
-            # for the compute-metrics fact preload (storage.facts_for_symbols_many
-            # pins it via INDEXED BY). Migration 029 creates it on existing
-            # databases that already hold ``financial_facts``; this CREATE acts
-            # as a backstop for fresh databases where migrations ran before
-            # this table existed. Both call sites use IF NOT EXISTS so the
-            # index is created exactly once. We swallow "database is locked"
-            # because parallel metric workers can race here on a fresh DB; a
-            # later initialize_schema() call will succeed once the lock clears.
-            try:
-                conn.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS idx_fin_facts_security_concept_latest
-                    ON financial_facts(listing_id, concept, end_date DESC, filed DESC)
-                    """
-                )
-            except sqlite3.OperationalError as exc:
-                if "database is locked" not in str(exc).lower():
-                    raise
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_fin_facts_currency_nonnull
-                ON financial_facts(currency)
-                WHERE currency IS NOT NULL
-                """
-            )
 
     def replace_facts(
         self,
@@ -5100,31 +4807,8 @@ class FXRatesRepository(SQLiteStore):
     """Persist and query direct FX rate observations."""
 
     def initialize_schema(self) -> None:
+        # `fx_rates` (table + idx_fx_rates_pair_date) is owned by migration 026.
         apply_migrations(self.db_path)
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS fx_rates (
-                    provider TEXT NOT NULL,
-                    rate_date TEXT NOT NULL,
-                    base_currency TEXT NOT NULL,
-                    quote_currency TEXT NOT NULL,
-                    rate_text TEXT NOT NULL,
-                    fetched_at TEXT NOT NULL,
-                    source_kind TEXT NOT NULL,
-                    meta_json TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY (provider, rate_date, base_currency, quote_currency)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_fx_rates_pair_date
-                ON fx_rates(provider, base_currency, quote_currency, rate_date DESC)
-                """
-            )
 
     def upsert(self, record: FXRateRecord) -> None:
         self.upsert_many([record])
@@ -5408,30 +5092,9 @@ class FXSupportedPairsRepository(SQLiteStore):
     """Persist FX provider catalog entries."""
 
     def initialize_schema(self) -> None:
+        # `fx_supported_pairs` (table + idx_fx_supported_pairs_refreshable)
+        # is owned by migration 028.
         apply_migrations(self.db_path)
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS fx_supported_pairs (
-                    provider TEXT NOT NULL,
-                    symbol TEXT NOT NULL,
-                    canonical_symbol TEXT NOT NULL,
-                    base_currency TEXT,
-                    quote_currency TEXT,
-                    name TEXT,
-                    is_alias INTEGER NOT NULL DEFAULT 0,
-                    is_refreshable INTEGER NOT NULL DEFAULT 0,
-                    last_seen_at TEXT NOT NULL,
-                    PRIMARY KEY (provider, symbol)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_fx_supported_pairs_refreshable
-                ON fx_supported_pairs(provider, is_refreshable, canonical_symbol)
-                """
-            )
 
     def replace_provider_catalog(
         self,
@@ -5522,24 +5185,8 @@ class FXRefreshStateRepository(SQLiteStore):
     """Persist FX refresh coverage and retry state per canonical symbol."""
 
     def initialize_schema(self) -> None:
+        # `fx_refresh_state` is owned by migration 028.
         apply_migrations(self.db_path)
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS fx_refresh_state (
-                    provider TEXT NOT NULL,
-                    canonical_symbol TEXT NOT NULL,
-                    min_rate_date TEXT,
-                    max_rate_date TEXT,
-                    full_history_backfilled INTEGER NOT NULL DEFAULT 0,
-                    last_fetched_at TEXT,
-                    last_status TEXT,
-                    last_error TEXT,
-                    attempts INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY (provider, canonical_symbol)
-                )
-                """
-            )
 
     def fetch(
         self,
@@ -6116,29 +5763,10 @@ class MarketDataRepository(SQLiteStore):
     """Persist canonical market data snapshots."""
 
     def initialize_schema(self) -> None:
+        # `market_data` (table + idx_market_data_latest) is owned by
+        # migration 034.
         apply_migrations(self.db_path)
         self._security_repo().initialize_schema()
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS market_data (
-                    listing_id INTEGER NOT NULL,
-                    as_of DATE NOT NULL,
-                    price REAL NOT NULL,
-                    volume INTEGER,
-                    market_cap REAL,
-                    source_provider TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY (listing_id, as_of)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_market_data_latest
-                ON market_data(listing_id, as_of DESC)
-                """
-            )
 
     def upsert_price(
         self,
