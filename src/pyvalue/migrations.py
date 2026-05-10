@@ -133,9 +133,21 @@ def _infer_canonical_exchange(symbol: str) -> Optional[str]:
 def apply_migrations(db_path: Union[str, Path]) -> int:
     """Apply all pending migrations in order.
 
-    Returns the number of migrations applied. Safe to call repeatedly; no-op when
-    already up-to-date. Each migration runs inside its own transaction and will
-    rollback on error.
+    Returns the number of migrations applied. Safe to call repeatedly;
+    no-op when already up-to-date. Each migration runs inside its own
+    transaction and rolls back on error.
+
+    Foreign-key enforcement is disabled for the duration of the
+    migration session and re-enabled afterwards. The SQLite manual
+    (https://www.sqlite.org/lang_altertable.html, "Making Other Kinds
+    Of Table Schema Changes") recommends this pattern for any rebuild
+    that drops a parent table while child tables retain rows: with
+    enforcement on, ``DROP TABLE parent`` poisons the deferred-FK queue
+    even when the rename immediately restores the parent's name and
+    every row remains reachable, and ``COMMIT`` then fails with
+    "FOREIGN KEY constraint failed" despite ``PRAGMA foreign_key_check``
+    returning empty. After every migration we run ``foreign_key_check``
+    explicitly so violations are still surfaced loudly.
     """
 
     db_path = Path(db_path)
@@ -146,7 +158,8 @@ def apply_migrations(db_path: Union[str, Path]) -> int:
     conn = sqlite3.connect(db_path)
     try:
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys=ON")
+        # Off for the duration of migrations; re-enabled before close.
+        conn.execute("PRAGMA foreign_keys = OFF")
         current = _current_version(conn)
         target = len(MIGRATIONS)
         conn.commit()
@@ -157,11 +170,27 @@ def apply_migrations(db_path: Union[str, Path]) -> int:
                 conn.execute("BEGIN")
                 migration(conn)
                 _set_version(conn, version)
+                # Surface any FK violation introduced by this migration
+                # before we lose the ability to bisect — rollback the
+                # individual transaction rather than committing a dirty
+                # state.
+                violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+                if violations:
+                    conn.rollback()
+                    raise RuntimeError(
+                        f"migration {version} ({migration.__name__}) left "
+                        f"foreign key violations: {violations!r}"
+                    )
                 conn.commit()
                 applied += 1
             except Exception:
                 conn.rollback()
                 raise
+
+        # Re-enable enforcement for the connection's brief tail life and
+        # for any post-migration callers that reuse this connection
+        # (none today, but the invariant is cheap and robust).
+        conn.execute("PRAGMA foreign_keys = ON")
     finally:
         conn.close()
 
