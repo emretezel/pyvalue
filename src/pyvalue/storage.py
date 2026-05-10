@@ -157,72 +157,6 @@ def _normalize_provider_identity(
     )
 
 
-def _ensure_provider_listing_catalog_views(conn: sqlite3.Connection) -> None:
-    """Create compatibility catalog views over the physical provider_listing table."""
-
-    def create_view(sql: str) -> None:
-        try:
-            conn.execute(sql)
-        except sqlite3.OperationalError as exc:
-            if "already exists" not in str(exc).lower():
-                raise
-
-    conn.execute("DROP VIEW IF EXISTS supported_tickers")
-    conn.execute("DROP VIEW IF EXISTS provider_listing_catalog")
-    create_view(
-        """
-        CREATE VIEW provider_listing_catalog AS
-        SELECT
-            pl.provider_listing_id,
-            p.provider_id,
-            p.provider_code AS provider,
-            px.provider_exchange_id,
-            px.provider_exchange_code,
-            CASE
-                WHEN p.provider_code = 'SEC' THEN pl.provider_symbol || '.US'
-                ELSE pl.provider_symbol || '.' || px.provider_exchange_code
-            END AS provider_symbol,
-            pl.provider_symbol AS provider_ticker,
-            l.listing_id AS security_id,
-            e.exchange_code AS listing_exchange,
-            i.name AS security_name,
-            NULL AS security_type,
-            i.country AS country,
-            l.currency AS currency,
-            l.primary_listing_status,
-            NULL AS isin,
-            NULL AS updated_at
-        FROM provider_listing pl
-        JOIN provider p ON p.provider_id = pl.provider_id
-        JOIN provider_exchange px
-          ON px.provider_exchange_id = pl.provider_exchange_id
-        JOIN listing l ON l.listing_id = pl.listing_id
-        JOIN issuer i ON i.issuer_id = l.issuer_id
-        JOIN "exchange" e ON e.exchange_id = l.exchange_id
-        """
-    )
-    create_view(
-        """
-        CREATE VIEW supported_tickers AS
-        SELECT
-            provider,
-            provider_symbol,
-            provider_ticker,
-            provider_exchange_code,
-            security_id,
-            listing_exchange,
-            security_name,
-            security_type,
-            country,
-            currency,
-            primary_listing_status,
-            isin,
-            updated_at
-        FROM provider_listing_catalog
-        """
-    )
-
-
 def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
     return {
         str(row["name"])
@@ -1910,7 +1844,6 @@ class SupportedTickerRepository(SQLiteStore):
                 ON provider_listing(listing_id)
                 """
             )
-            _ensure_provider_listing_catalog_views(conn)
         FundamentalsRepository(self.db_path).initialize_schema()
         FundamentalsFetchStateRepository(self.db_path).initialize_schema()
         MarketDataRepository(self.db_path).initialize_schema()
@@ -2911,7 +2844,6 @@ class FundamentalsRepository(SQLiteStore):
                 ON fundamentals_raw(last_fetched_at)
                 """
             )
-            _ensure_provider_listing_catalog_views(conn)
 
     def upsert(
         self,
@@ -3801,7 +3733,6 @@ class _FetchStateRepository(SQLiteStore):
                 ON {self.table_name}(provider, provider_symbol)
                 """
             )
-            _ensure_provider_listing_catalog_views(conn)
             conn.execute(
                 f"""
                 UPDATE {self.table_name}
@@ -5194,7 +5125,6 @@ class FXRatesRepository(SQLiteStore):
                 ON fx_rates(provider, base_currency, quote_currency, rate_date DESC)
                 """
             )
-            _ensure_provider_listing_catalog_views(conn)
 
     def upsert(self, record: FXRateRecord) -> None:
         self.upsert_many([record])
@@ -5741,29 +5671,14 @@ class MetricsRepository(SQLiteStore):
     """Persist computed metric values."""
 
     def initialize_schema(self) -> None:
+        # The `metrics` table and its indexes are owned by migrations
+        # (created in #034, rebuilt in #041 to add FK + CHECK constraints).
+        # apply_migrations() is the single source of truth — re-issuing
+        # CREATE TABLE here would either no-op or, after a hypothetical
+        # DROP, recreate the table with the legacy unconstrained DDL and
+        # silently strip migration 041's constraints.
         apply_migrations(self.db_path)
         self._security_repo().initialize_schema()
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS metrics (
-                    listing_id INTEGER NOT NULL,
-                    metric_id TEXT NOT NULL,
-                    value REAL NOT NULL,
-                    as_of TEXT NOT NULL,
-                    unit_kind TEXT NOT NULL DEFAULT 'other',
-                    currency TEXT,
-                    unit_label TEXT,
-                    PRIMARY KEY (listing_id, metric_id)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_metrics_metric_id
-                ON metrics(metric_id)
-                """
-            )
 
     def upsert(
         self,
@@ -5994,32 +5909,11 @@ class MetricComputeStatusRepository(SQLiteStore):
     """Persist the latest metric-computation attempt per symbol/metric."""
 
     def initialize_schema(self) -> None:
+        # `metric_compute_status` is owned by migrations (created in #034,
+        # rebuilt in #041 to add FK to listing). See MetricsRepository for
+        # the full rationale on why the runtime CREATE TABLE was removed.
         apply_migrations(self.db_path)
         self._security_repo().initialize_schema()
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS metric_compute_status (
-                    listing_id INTEGER NOT NULL,
-                    metric_id TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    reason_code TEXT,
-                    reason_detail TEXT,
-                    attempted_at TEXT NOT NULL,
-                    value_as_of TEXT,
-                    facts_refreshed_at TEXT,
-                    market_data_as_of TEXT,
-                    market_data_updated_at TEXT,
-                    PRIMARY KEY (listing_id, metric_id)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_metric_compute_status_metric_status
-                ON metric_compute_status(metric_id, status)
-                """
-            )
 
     def upsert_many(
         self,
