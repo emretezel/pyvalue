@@ -386,18 +386,11 @@ def test_migration_preserves_existing_provider_rows_when_adding_registry(tmp_pat
             )
             """
         )
-        conn.execute(
-            """
-            CREATE TABLE market_data (
-                security_id INTEGER NOT NULL,
-                as_of TEXT NOT NULL,
-                price REAL NOT NULL,
-                source_provider TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (security_id, as_of)
-            )
-            """
-        )
+        # market_data is omitted from this fixture: migration 047 added a
+        # listing-FK that an orphan security_id row would violate, and
+        # this test's purpose is the provider-registry migration, not
+        # market_data preservation. test_migration_canonicalizes_listing_quote_currency_and_market_data
+        # covers the market_data path with proper securities seeding.
         conn.execute(
             """
             CREATE TABLE fx_rates (
@@ -428,13 +421,6 @@ def test_migration_preserves_existing_provider_rows_when_adding_registry(tmp_pat
                 ("EODHD", "AAA.US", "{}", "2026-01-01T00:00:00+00:00"),
                 ("SEC", "BBB.US", "{}", "2026-01-01T00:00:00+00:00"),
             ],
-        )
-        conn.execute(
-            """
-            INSERT INTO market_data (
-                security_id, as_of, price, source_provider, updated_at
-            ) VALUES (1, '2026-01-02', 10.0, 'EODHD', '2026-01-02T00:00:00+00:00')
-            """
         )
         conn.executemany(
             """
@@ -488,9 +474,6 @@ def test_migration_preserves_existing_provider_rows_when_adding_registry(tmp_pat
         fundamentals_raw_count = conn.execute(
             "SELECT COUNT(*) FROM fundamentals_raw"
         ).fetchone()[0]
-        market_data_count = conn.execute("SELECT COUNT(*) FROM market_data").fetchone()[
-            0
-        ]
         fx_rates_count = conn.execute("SELECT COUNT(*) FROM fx_rates").fetchone()[0]
         supported_ticker_join_count = conn.execute(
             """
@@ -507,13 +490,6 @@ def test_migration_preserves_existing_provider_rows_when_adding_registry(tmp_pat
             JOIN provider p ON p.provider_id = pl.provider_id
             """
         ).fetchone()[0]
-        market_data_join_count = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM market_data md
-            JOIN provider p ON p.provider_code = md.source_provider
-            """
-        ).fetchone()[0]
         fx_rates_join_count = conn.execute(
             """
             SELECT COUNT(*)
@@ -524,11 +500,9 @@ def test_migration_preserves_existing_provider_rows_when_adding_registry(tmp_pat
 
     assert provider_listing_count == 0
     assert fundamentals_raw_count == 0
-    assert market_data_count == 1
     assert fx_rates_count == 2
     assert supported_ticker_join_count == 0
     assert fundamentals_raw_join_count == 0
-    assert market_data_join_count == 1
     assert fx_rates_join_count == 2
 
 
@@ -2121,3 +2095,191 @@ def test_migration_045_idempotent_on_already_renamed_schema(tmp_path):
 
     assert first == len(MIGRATIONS)
     assert second == 0
+
+
+# ----------------------------------------------------------------------
+# Migration 046 — financial_facts_refresh_state listing_id FK
+# ----------------------------------------------------------------------
+
+
+def test_migration_046_fk_rejects_unknown_listing_id(tmp_path):
+    db_path = tmp_path / "ffrs-fk-orphan.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO financial_facts_refresh_state (listing_id, refreshed_at)
+                VALUES (999999, '2026-01-01T00:00:00+00:00')
+                """
+            )
+
+
+def test_migration_046_pre_flight_orphan_aborts(tmp_path):
+    """Existing orphan rows must abort migration 046, not be silently dropped."""
+
+    db_path = tmp_path / "ffrs-046-orphan.sqlite"
+    apply_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("DROP TABLE financial_facts_refresh_state")
+        conn.execute(
+            """
+            CREATE TABLE financial_facts_refresh_state (
+                listing_id INTEGER NOT NULL PRIMARY KEY,
+                refreshed_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO financial_facts_refresh_state (listing_id, refreshed_at)
+            VALUES (999999, '2026-01-01T00:00:00+00:00')
+            """
+        )
+        conn.execute("UPDATE schema_migrations SET version = 45")
+        conn.commit()
+
+    with pytest.raises(RuntimeError, match="orphan"):
+        apply_migrations(db_path)
+
+
+def test_migration_046_preserves_valid_rows(tmp_path):
+    db_path = tmp_path / "ffrs-046-preserve.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        listing_id = _seed_listing(conn)
+        conn.execute(
+            """
+            INSERT INTO financial_facts_refresh_state (listing_id, refreshed_at)
+            VALUES (?, '2026-01-01T00:00:00+00:00')
+            """,
+            (listing_id,),
+        )
+        conn.commit()
+
+    second = apply_migrations(db_path)
+    assert second == 0
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT listing_id, refreshed_at FROM financial_facts_refresh_state"
+        ).fetchall()
+
+    assert rows == [(listing_id, "2026-01-01T00:00:00+00:00")]
+
+
+# ----------------------------------------------------------------------
+# Migration 047 — market_data listing_id FK
+# ----------------------------------------------------------------------
+
+
+def test_migration_047_fk_rejects_unknown_listing_id(tmp_path):
+    db_path = tmp_path / "md-047-orphan.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO market_data (
+                    listing_id, as_of, price, source_provider, updated_at
+                ) VALUES (
+                    999999, '2026-01-01', 10.0, 'EODHD',
+                    '2026-01-01T00:00:00+00:00'
+                )
+                """
+            )
+
+
+def test_migration_047_preserves_valid_rows(tmp_path):
+    db_path = tmp_path / "md-047-preserve.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        listing_id = _seed_listing(conn)
+        conn.execute(
+            """
+            INSERT INTO market_data (
+                listing_id, as_of, price, volume, market_cap,
+                source_provider, updated_at
+            ) VALUES (?, '2026-01-01', 10.0, 1000, 1.5e9, 'EODHD',
+                      '2026-01-01T00:00:00+00:00')
+            """,
+            (listing_id,),
+        )
+        conn.commit()
+
+    second = apply_migrations(db_path)
+    assert second == 0
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT listing_id, as_of, price, volume, market_cap, source_provider
+            FROM market_data
+            """
+        ).fetchall()
+
+    assert rows == [(listing_id, "2026-01-01", 10.0, 1000, 1.5e9, "EODHD")]
+
+
+# ----------------------------------------------------------------------
+# Migrations 048-050 — provider FKs on fx_rates / fx_supported_pairs / fx_refresh_state
+# ----------------------------------------------------------------------
+
+
+def test_migration_048_fx_rates_fk_rejects_unknown_provider(tmp_path):
+    db_path = tmp_path / "fx-rates-048.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO fx_rates (
+                    provider, rate_date, base_currency, quote_currency, rate,
+                    fetched_at, source_kind, created_at, updated_at
+                ) VALUES (
+                    'NOT_A_PROVIDER', '2026-01-01', 'USD', 'EUR', 0.91,
+                    '2026-01-01T00:00:00+00:00', 'provider',
+                    '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'
+                )
+                """
+            )
+
+
+def test_migration_049_fx_supported_pairs_fk_rejects_unknown_provider(tmp_path):
+    db_path = tmp_path / "fx-supported-049.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO fx_supported_pairs (
+                    provider, symbol, canonical_symbol, last_seen_at
+                ) VALUES (
+                    'NOT_A_PROVIDER', 'EURUSD.FOREX', 'EUR/USD',
+                    '2026-01-01T00:00:00+00:00'
+                )
+                """
+            )
+
+
+def test_migration_050_fx_refresh_state_fk_rejects_unknown_provider(tmp_path):
+    db_path = tmp_path / "fx-refresh-050.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO fx_refresh_state (
+                    provider, canonical_symbol
+                ) VALUES ('NOT_A_PROVIDER', 'EUR/USD')
+                """
+            )

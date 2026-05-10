@@ -4403,6 +4403,375 @@ def _migration_043_financial_facts_dedupe_and_fk(conn: sqlite3.Connection) -> No
         )
 
 
+def _migration_047_add_fk_market_data(conn: sqlite3.Connection) -> None:
+    """Add ``FOREIGN KEY (listing_id) REFERENCES listing`` to ``market_data``.
+
+    Audit finding 3.2: ``market_data.listing_id`` referenced ``listing``
+    only logically. The rebuild attaches the missing physical FK.
+    """
+
+    if not _table_exists(conn, "market_data"):
+        return
+
+    fk_rows = conn.execute("PRAGMA foreign_key_list(market_data)").fetchall()
+    if any(row[2] == "listing" for row in fk_rows):
+        return
+
+    orphan_count = conn.execute(
+        """
+        SELECT COUNT(*) FROM market_data
+        WHERE listing_id NOT IN (SELECT listing_id FROM listing)
+        """
+    ).fetchone()[0]
+    if orphan_count:
+        raise RuntimeError(
+            f"migration 047 aborted: {orphan_count} orphan market_data rows "
+            "reference missing listings. Clean these before retrying."
+        )
+
+    conn.execute("PRAGMA defer_foreign_keys = ON")
+
+    conn.execute("DROP INDEX IF EXISTS idx_market_data_latest")
+    conn.execute("DROP INDEX IF EXISTS idx_market_data_currency_nonnull")
+
+    columns = _table_columns(conn, "market_data")
+    # Older schemas could carry a `currency` column even though migration
+    # 039 removed it from the canonical shape; preserve it in the rebuild
+    # if present so the migration is robust against historical fixtures.
+    has_currency = "currency" in columns
+    new_currency_decl = "currency TEXT,\n            " if has_currency else ""
+    select_currency_expr = "currency, " if has_currency else ""
+
+    conn.execute(
+        f"""
+        CREATE TABLE market_data__new (
+            listing_id INTEGER NOT NULL,
+            as_of DATE NOT NULL,
+            price REAL NOT NULL,
+            volume INTEGER,
+            market_cap REAL,
+            {new_currency_decl}source_provider TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (listing_id, as_of),
+            FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        INSERT INTO market_data__new (
+            listing_id, as_of, price, volume, market_cap,
+            {"currency, " if has_currency else ""}source_provider, updated_at
+        )
+        SELECT
+            listing_id, as_of, price, volume, market_cap,
+            {select_currency_expr}source_provider, updated_at
+        FROM market_data
+        """
+    )
+    conn.execute("DROP TABLE market_data")
+    conn.execute("ALTER TABLE market_data__new RENAME TO market_data")
+
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_data_latest
+        ON market_data(listing_id, as_of DESC)
+        """
+    )
+    if has_currency:
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_market_data_currency_nonnull
+            ON market_data(currency)
+            WHERE currency IS NOT NULL
+            """
+        )
+
+    fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if fk_violations:
+        raise RuntimeError(
+            f"migration 047 left foreign key violations: {fk_violations!r}"
+        )
+
+
+def _migration_048_add_fk_fx_rates_provider(conn: sqlite3.Connection) -> None:
+    """Add ``FOREIGN KEY (provider) REFERENCES provider(provider_code)`` to ``fx_rates``."""
+
+    if not _table_exists(conn, "fx_rates"):
+        return
+
+    fk_rows = conn.execute("PRAGMA foreign_key_list(fx_rates)").fetchall()
+    if any(row[2] == "provider" for row in fk_rows):
+        return
+
+    orphan_count = conn.execute(
+        """
+        SELECT COUNT(*) FROM fx_rates
+        WHERE provider NOT IN (SELECT provider_code FROM provider)
+        """
+    ).fetchone()[0]
+    if orphan_count:
+        raise RuntimeError(
+            f"migration 048 aborted: {orphan_count} orphan fx_rates rows "
+            "reference missing providers. Clean these before retrying."
+        )
+
+    conn.execute("PRAGMA defer_foreign_keys = ON")
+    conn.execute("DROP INDEX IF EXISTS idx_fx_rates_pair_date")
+
+    conn.execute(
+        """
+        CREATE TABLE fx_rates__new (
+            provider TEXT NOT NULL,
+            rate_date TEXT NOT NULL,
+            base_currency TEXT NOT NULL,
+            quote_currency TEXT NOT NULL,
+            rate REAL NOT NULL,
+            fetched_at TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            meta_json TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (provider, rate_date, base_currency, quote_currency),
+            FOREIGN KEY (provider) REFERENCES provider(provider_code)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO fx_rates__new (
+            provider, rate_date, base_currency, quote_currency, rate,
+            fetched_at, source_kind, meta_json, created_at, updated_at
+        )
+        SELECT
+            provider, rate_date, base_currency, quote_currency, rate,
+            fetched_at, source_kind, meta_json, created_at, updated_at
+        FROM fx_rates
+        """
+    )
+    conn.execute("DROP TABLE fx_rates")
+    conn.execute("ALTER TABLE fx_rates__new RENAME TO fx_rates")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fx_rates_pair_date
+        ON fx_rates(provider, base_currency, quote_currency, rate_date DESC)
+        """
+    )
+
+    fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if fk_violations:
+        raise RuntimeError(
+            f"migration 048 left foreign key violations: {fk_violations!r}"
+        )
+
+
+def _migration_049_add_fk_fx_supported_pairs_provider(
+    conn: sqlite3.Connection,
+) -> None:
+    """Add provider FK to ``fx_supported_pairs``."""
+
+    if not _table_exists(conn, "fx_supported_pairs"):
+        return
+
+    fk_rows = conn.execute("PRAGMA foreign_key_list(fx_supported_pairs)").fetchall()
+    if any(row[2] == "provider" for row in fk_rows):
+        return
+
+    orphan_count = conn.execute(
+        """
+        SELECT COUNT(*) FROM fx_supported_pairs
+        WHERE provider NOT IN (SELECT provider_code FROM provider)
+        """
+    ).fetchone()[0]
+    if orphan_count:
+        raise RuntimeError(
+            f"migration 049 aborted: {orphan_count} orphan fx_supported_pairs "
+            "rows reference missing providers. Clean these before retrying."
+        )
+
+    conn.execute("PRAGMA defer_foreign_keys = ON")
+    conn.execute("DROP INDEX IF EXISTS idx_fx_supported_pairs_refreshable")
+
+    conn.execute(
+        """
+        CREATE TABLE fx_supported_pairs__new (
+            provider TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            canonical_symbol TEXT NOT NULL,
+            base_currency TEXT,
+            quote_currency TEXT,
+            name TEXT,
+            is_alias INTEGER NOT NULL DEFAULT 0,
+            is_refreshable INTEGER NOT NULL DEFAULT 0,
+            last_seen_at TEXT NOT NULL,
+            PRIMARY KEY (provider, symbol),
+            FOREIGN KEY (provider) REFERENCES provider(provider_code)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO fx_supported_pairs__new (
+            provider, symbol, canonical_symbol, base_currency, quote_currency,
+            name, is_alias, is_refreshable, last_seen_at
+        )
+        SELECT
+            provider, symbol, canonical_symbol, base_currency, quote_currency,
+            name, is_alias, is_refreshable, last_seen_at
+        FROM fx_supported_pairs
+        """
+    )
+    conn.execute("DROP TABLE fx_supported_pairs")
+    conn.execute("ALTER TABLE fx_supported_pairs__new RENAME TO fx_supported_pairs")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fx_supported_pairs_refreshable
+        ON fx_supported_pairs(provider, is_refreshable, canonical_symbol)
+        """
+    )
+
+    fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if fk_violations:
+        raise RuntimeError(
+            f"migration 049 left foreign key violations: {fk_violations!r}"
+        )
+
+
+def _migration_050_add_fk_fx_refresh_state_provider(
+    conn: sqlite3.Connection,
+) -> None:
+    """Add provider FK to ``fx_refresh_state``."""
+
+    if not _table_exists(conn, "fx_refresh_state"):
+        return
+
+    fk_rows = conn.execute("PRAGMA foreign_key_list(fx_refresh_state)").fetchall()
+    if any(row[2] == "provider" for row in fk_rows):
+        return
+
+    orphan_count = conn.execute(
+        """
+        SELECT COUNT(*) FROM fx_refresh_state
+        WHERE provider NOT IN (SELECT provider_code FROM provider)
+        """
+    ).fetchone()[0]
+    if orphan_count:
+        raise RuntimeError(
+            f"migration 050 aborted: {orphan_count} orphan fx_refresh_state "
+            "rows reference missing providers. Clean these before retrying."
+        )
+
+    conn.execute("PRAGMA defer_foreign_keys = ON")
+
+    conn.execute(
+        """
+        CREATE TABLE fx_refresh_state__new (
+            provider TEXT NOT NULL,
+            canonical_symbol TEXT NOT NULL,
+            min_rate_date TEXT,
+            max_rate_date TEXT,
+            full_history_backfilled INTEGER NOT NULL DEFAULT 0,
+            last_fetched_at TEXT,
+            last_status TEXT,
+            last_error TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (provider, canonical_symbol),
+            FOREIGN KEY (provider) REFERENCES provider(provider_code)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO fx_refresh_state__new (
+            provider, canonical_symbol, min_rate_date, max_rate_date,
+            full_history_backfilled, last_fetched_at, last_status, last_error,
+            attempts
+        )
+        SELECT
+            provider, canonical_symbol, min_rate_date, max_rate_date,
+            full_history_backfilled, last_fetched_at, last_status, last_error,
+            attempts
+        FROM fx_refresh_state
+        """
+    )
+    conn.execute("DROP TABLE fx_refresh_state")
+    conn.execute("ALTER TABLE fx_refresh_state__new RENAME TO fx_refresh_state")
+
+    fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if fk_violations:
+        raise RuntimeError(
+            f"migration 050 left foreign key violations: {fk_violations!r}"
+        )
+
+
+def _migration_046_add_fk_financial_facts_refresh_state(
+    conn: sqlite3.Connection,
+) -> None:
+    """Add ``FOREIGN KEY (listing_id) REFERENCES listing`` to
+    ``financial_facts_refresh_state``.
+
+    Per audit finding 3.2, this watermark table referenced ``listing_id``
+    only logically. The rebuild attaches the same physical FK pattern
+    that migrations 041 (metrics/metric_compute_status) and 043
+    (financial_facts) already use.
+
+    The migration aborts cleanly if any orphan rows exist.
+    """
+
+    if not _table_exists(conn, "financial_facts_refresh_state"):
+        return
+
+    # Already migrated? Inspect the existing FK list and skip if present.
+    fk_rows = conn.execute(
+        "PRAGMA foreign_key_list(financial_facts_refresh_state)"
+    ).fetchall()
+    if any(row[2] == "listing" for row in fk_rows):
+        return
+
+    orphan_count = conn.execute(
+        """
+        SELECT COUNT(*) FROM financial_facts_refresh_state
+        WHERE listing_id NOT IN (SELECT listing_id FROM listing)
+        """
+    ).fetchone()[0]
+    if orphan_count:
+        raise RuntimeError(
+            f"migration 046 aborted: {orphan_count} orphan "
+            "financial_facts_refresh_state rows reference missing listings. "
+            "Clean these before retrying."
+        )
+
+    conn.execute("PRAGMA defer_foreign_keys = ON")
+
+    conn.execute(
+        """
+        CREATE TABLE financial_facts_refresh_state__new (
+            listing_id INTEGER NOT NULL PRIMARY KEY,
+            refreshed_at TEXT NOT NULL,
+            FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO financial_facts_refresh_state__new (listing_id, refreshed_at)
+        SELECT listing_id, refreshed_at
+        FROM financial_facts_refresh_state
+        """
+    )
+    conn.execute("DROP TABLE financial_facts_refresh_state")
+    conn.execute(
+        "ALTER TABLE financial_facts_refresh_state__new "
+        "RENAME TO financial_facts_refresh_state"
+    )
+
+    fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if fk_violations:
+        raise RuntimeError(
+            f"migration 046 left foreign key violations: {fk_violations!r}"
+        )
+
+
 def _migration_045_fx_rates_rate_to_real(conn: sqlite3.Connection) -> None:
     """Rebuild fx_rates with a REAL ``rate`` column (was TEXT ``rate_text``).
 
@@ -4502,61 +4871,119 @@ def _migration_044_persist_compat_views(conn: sqlite3.Connection) -> None:
     reason; this migration extends that pattern to the remaining three.
     Future shape changes ship as a new migration, not a runtime
     ``DROP VIEW`` / ``CREATE VIEW`` pair in ``storage.py``.
+
+    Each view is created only when its underlying tables exist, and only
+    when no table with the same name is in the way (an early migration
+    may have used the view name for a TABLE before the rename chain).
+    Creating a view against a missing table would later poison every
+    DDL statement because SQLite re-validates views on schema change.
     """
 
-    conn.execute("DROP VIEW IF EXISTS providers")
-    conn.execute("DROP VIEW IF EXISTS securities")
-    conn.execute("DROP VIEW IF EXISTS exchange_provider")
+    provider_columns_needed = {
+        "provider_code",
+        "display_name",
+        "description",
+        "created_at",
+        "updated_at",
+    }
+    if (
+        _table_exists(conn, "provider")
+        and provider_columns_needed <= _table_columns(conn, "provider")
+        and not _table_exists(conn, "providers")
+    ):
+        conn.execute("DROP VIEW IF EXISTS providers")
+        conn.execute(
+            """
+            CREATE VIEW providers AS
+            SELECT
+                provider_code,
+                display_name,
+                description,
+                created_at,
+                updated_at
+            FROM provider
+            """
+        )
 
-    conn.execute(
-        """
-        CREATE VIEW providers AS
-        SELECT
-            provider_code,
-            display_name,
-            description,
-            created_at,
-            updated_at
-        FROM provider
-        """
-    )
-    conn.execute(
-        """
-        CREATE VIEW securities AS
-        SELECT
-            l.listing_id AS security_id,
-            l.symbol AS canonical_ticker,
-            e.exchange_code AS canonical_exchange_code,
-            l.symbol || '.' || e.exchange_code AS canonical_symbol,
-            i.name AS entity_name,
-            i.description,
-            i.sector,
-            i.industry,
-            NULL AS created_at,
-            NULL AS updated_at
-        FROM listing l
-        JOIN issuer i ON i.issuer_id = l.issuer_id
-        JOIN "exchange" e ON e.exchange_id = l.exchange_id
-        """
-    )
-    conn.execute(
-        """
-        CREATE VIEW exchange_provider AS
-        SELECT
-            p.provider_code AS provider,
-            ep.provider_exchange_code,
-            ep.exchange_id,
-            ep.name,
-            ep.country,
-            ep.currency,
-            ep.operating_mic,
-            ep.country_iso2,
-            ep.country_iso3,
-            ep.updated_at
-        FROM provider_exchange ep
-        JOIN provider p ON p.provider_id = ep.provider_id
-        """
-    )
+    listing_columns_needed = {"listing_id", "symbol", "issuer_id", "exchange_id"}
+    issuer_columns_needed = {
+        "issuer_id",
+        "name",
+        "description",
+        "sector",
+        "industry",
+    }
+    exchange_columns_needed = {"exchange_id", "exchange_code"}
+    if (
+        _table_exists(conn, "listing")
+        and listing_columns_needed <= _table_columns(conn, "listing")
+        and _table_exists(conn, "issuer")
+        and issuer_columns_needed <= _table_columns(conn, "issuer")
+        and _table_exists(conn, "exchange")
+        and exchange_columns_needed <= _table_columns(conn, "exchange")
+        and not _table_exists(conn, "securities")
+    ):
+        conn.execute("DROP VIEW IF EXISTS securities")
+        conn.execute(
+            """
+            CREATE VIEW securities AS
+            SELECT
+                l.listing_id AS security_id,
+                l.symbol AS canonical_ticker,
+                e.exchange_code AS canonical_exchange_code,
+                l.symbol || '.' || e.exchange_code AS canonical_symbol,
+                i.name AS entity_name,
+                i.description,
+                i.sector,
+                i.industry,
+                NULL AS created_at,
+                NULL AS updated_at
+            FROM listing l
+            JOIN issuer i ON i.issuer_id = l.issuer_id
+            JOIN "exchange" e ON e.exchange_id = l.exchange_id
+            """
+        )
+
+    provider_exchange_columns_needed = {
+        "provider_exchange_id",
+        "provider_id",
+        "provider_exchange_code",
+        "exchange_id",
+        "name",
+        "country",
+        "currency",
+        "operating_mic",
+        "country_iso2",
+        "country_iso3",
+        "updated_at",
+    }
+    if (
+        _table_exists(conn, "provider_exchange")
+        and provider_exchange_columns_needed
+        <= _table_columns(conn, "provider_exchange")
+        and _table_exists(conn, "provider")
+        and {"provider_id", "provider_code"} <= _table_columns(conn, "provider")
+        and not _table_exists(conn, "exchange_provider")
+    ):
+        conn.execute("DROP VIEW IF EXISTS exchange_provider")
+        conn.execute(
+            """
+            CREATE VIEW exchange_provider AS
+            SELECT
+                p.provider_code AS provider,
+                ep.provider_exchange_code,
+                ep.exchange_id,
+                ep.name,
+                ep.country,
+                ep.currency,
+                ep.operating_mic,
+                ep.country_iso2,
+                ep.country_iso3,
+                ep.updated_at
+            FROM provider_exchange ep
+            JOIN provider p ON p.provider_id = ep.provider_id
+            """
+        )
 
 
 def _migration_042_persist_provider_listing_views(conn: sqlite3.Connection) -> None:
@@ -4577,7 +5004,45 @@ def _migration_042_persist_provider_listing_views(conn: sqlite3.Connection) -> N
     and ``supported_tickers`` are owned by migrations. Future shape
     changes ship as a new migration, not as a runtime ``DROP VIEW`` /
     ``CREATE VIEW`` pair in ``storage.py``.
+
+    The view is only created when its underlying tables are present.
+    Migration tests sometimes start from very old fixtures that don't
+    finish the catalog rename chain (migration 034 conditionally creates
+    these tables based on what's in the DB). Creating a view against a
+    missing table would later poison every DDL statement, because
+    SQLite re-validates views on schema change and the validation would
+    fail with "no such table" on every subsequent ALTER / DROP.
     """
+
+    required = {
+        "provider_listing": {
+            "provider_listing_id",
+            "provider_id",
+            "provider_exchange_id",
+            "provider_symbol",
+            "listing_id",
+        },
+        "provider": {"provider_id", "provider_code"},
+        "provider_exchange": {
+            "provider_exchange_id",
+            "provider_exchange_code",
+        },
+        "listing": {
+            "listing_id",
+            "issuer_id",
+            "exchange_id",
+            "symbol",
+            "currency",
+            "primary_listing_status",
+        },
+        "issuer": {"issuer_id", "name", "country"},
+        "exchange": {"exchange_id", "exchange_code"},
+    }
+    for table_name, needed_cols in required.items():
+        if not _table_exists(conn, table_name):
+            return
+        if not needed_cols <= _table_columns(conn, table_name):
+            return
 
     # Drop any transient views the legacy runtime code may have created
     # earlier in this DB's lifetime so the CREATE VIEW below is the
@@ -4685,6 +5150,11 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_043_financial_facts_dedupe_and_fk,
     _migration_044_persist_compat_views,
     _migration_045_fx_rates_rate_to_real,
+    _migration_046_add_fk_financial_facts_refresh_state,
+    _migration_047_add_fk_market_data,
+    _migration_048_add_fk_fx_rates_provider,
+    _migration_049_add_fk_fx_supported_pairs_provider,
+    _migration_050_add_fk_fx_refresh_state_provider,
 ]
 
 
