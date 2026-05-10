@@ -6,7 +6,9 @@ Tracks the schema migration version applied to the database.
 
 ## Grain
 
-Append-only version rows, though operationally the table is expected to behave like a single latest-version record.
+Exactly one row, pinned to ``id = 1`` after migration 063. Every
+``_set_version`` call replaces the row in place; the PK + CHECK make
+duplicate or stray-id rows impossible.
 
 ## Live Stats
 
@@ -21,12 +23,13 @@ Append-only version rows, though operationally the table is expected to behave l
 
 | Column | Type | Null | Key | Notes |
 | --- | --- | --- | --- | --- |
+| `id` | `INTEGER` | no | PK | always 1; ``CHECK (id = 1)`` enforces the single-row invariant |
 | `version` | `INTEGER` | no |  | applied schema version |
 
 ## Keys And Relationships
 
 <!-- BEGIN generated_keys_and_relationships -->
-- Primary key: none
+- Primary key: `id`
 - Physical foreign keys: none
 - Physical references from other tables: none
 - Unique constraints beyond the primary key: none
@@ -60,7 +63,8 @@ Append-only version rows, though operationally the table is expected to behave l
 ```json
 [
   {
-    "version": 38
+    "id": 1,
+    "version": 63
   }
 ]
 ```
@@ -68,5 +72,8 @@ Append-only version rows, though operationally the table is expected to behave l
 
 ## Review Notes
 
-- Low priority for performance
-- Check whether the table should enforce single-row semantics more explicitly
+- Single-row semantics are now enforced by the schema (``id INTEGER
+  PRIMARY KEY CHECK (id = 1)``). ``_set_version`` uses
+  ``DELETE FROM schema_migrations; INSERT INTO schema_migrations
+  (version) VALUES (?)`` — SQLite auto-picks ``id = 1`` for the
+  insert because the table is empty, so the CHECK passes.

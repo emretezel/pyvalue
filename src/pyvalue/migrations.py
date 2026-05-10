@@ -47,9 +47,25 @@ _PROVIDER_REGISTRY_ROWS: Tuple[Tuple[str, str, Optional[str]], ...] = (
 
 
 def _ensure_migrations_table(conn: sqlite3.Connection) -> None:
+    """Create the ``schema_migrations`` table on a fresh DB.
+
+    Fresh DBs land directly at the audit P3 #12 shape — a single row
+    pinned to ``id = 1`` so duplicate version markers can't accumulate.
+    Existing DBs running the older ``CREATE TABLE schema_migrations
+    (version INTEGER NOT NULL)`` shape are left untouched here (the
+    ``IF NOT EXISTS`` clause no-ops) and migrated by
+    ``_migration_063_schema_migrations_pk_and_guard``.
+
+    ``_set_version`` works against either shape — its
+    ``INSERT INTO schema_migrations (version) VALUES (?)`` form lets
+    SQLite auto-assign the ``id`` rowid (which is ``1`` for an empty
+    table, satisfying the CHECK).
+    """
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS schema_migrations (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
             version INTEGER NOT NULL
         )
         """
@@ -66,6 +82,11 @@ def _current_version(conn: sqlite3.Connection) -> int:
 
 
 def _set_version(conn: sqlite3.Connection, version: int) -> None:
+    # The DELETE + INSERT pattern works for both the legacy
+    # (version INTEGER NOT NULL) shape and the post-063 single-row
+    # shape: the new shape's ``id`` is an INTEGER PRIMARY KEY rowid
+    # alias, so an INSERT that omits it auto-picks ``id = 1`` on an
+    # empty table, which the CHECK accepts.
     conn.execute("DELETE FROM schema_migrations")
     conn.execute("INSERT INTO schema_migrations (version) VALUES (?)", (version,))
 
@@ -3764,6 +3785,12 @@ def _migration_039_canonical_listing_quote_currency(
 ) -> None:
     """Keep listing quote currency as the only persisted currency truth."""
 
+    # primary_provider_listing_catalog (migration 062) is a downstream
+    # projection of provider_listing_catalog and must be dropped first so
+    # SQLite's view re-validation on the next ALTER does not trip on a
+    # stale reference. Migration 062 will recreate it at the tail of the
+    # chain.
+    conn.execute("DROP VIEW IF EXISTS primary_provider_listing_catalog")
     conn.execute("DROP VIEW IF EXISTS supported_tickers")
     conn.execute("DROP VIEW IF EXISTS provider_listing_catalog")
 
@@ -5231,7 +5258,10 @@ def _migration_042_persist_provider_listing_views(conn: sqlite3.Connection) -> N
 
     # Drop any transient views the legacy runtime code may have created
     # earlier in this DB's lifetime so the CREATE VIEW below is the
-    # single canonical definition.
+    # single canonical definition. primary_provider_listing_catalog
+    # (migration 062) is a projection of provider_listing_catalog so it
+    # must come down first.
+    conn.execute("DROP VIEW IF EXISTS primary_provider_listing_catalog")
     conn.execute("DROP VIEW IF EXISTS supported_tickers")
     conn.execute("DROP VIEW IF EXISTS provider_listing_catalog")
 
@@ -5437,6 +5467,17 @@ def _migration_054_drop_provider_listing_provider_id(
         ).fetchone()
         is not None
     )
+    primary_view_existed = (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='view' AND name='primary_provider_listing_catalog'"
+        ).fetchone()
+        is not None
+    )
+    # Drop dependents first; primary_provider_listing_catalog (062) is a
+    # projection of provider_listing_catalog. After the rebuild we
+    # recreate them in the same order they depend on each other.
+    if primary_view_existed:
+        conn.execute("DROP VIEW primary_provider_listing_catalog")
     if supported_view_existed:
         conn.execute("DROP VIEW supported_tickers")
     if catalog_view_existed:
@@ -5535,6 +5576,15 @@ def _migration_054_drop_provider_listing_provider_id(
                 isin,
                 updated_at
             FROM provider_listing_catalog
+            """
+        )
+    if primary_view_existed:
+        conn.execute(
+            """
+            CREATE VIEW primary_provider_listing_catalog AS
+            SELECT *
+            FROM provider_listing_catalog
+            WHERE primary_listing_status != 'secondary'
             """
         )
 
@@ -5665,6 +5715,24 @@ def _create_supported_tickers_view(conn: sqlite3.Connection) -> None:
             isin,
             updated_at
         FROM provider_listing_catalog
+        """
+    )
+
+
+def _create_primary_provider_listing_catalog_view(conn: sqlite3.Connection) -> None:
+    """(Re)create ``primary_provider_listing_catalog`` from migration 062.
+
+    A pre-filtered projection of ``provider_listing_catalog`` that
+    excludes secondary listings, so callers can query the view directly
+    instead of inlining the predicate.
+    """
+
+    conn.execute(
+        """
+        CREATE VIEW primary_provider_listing_catalog AS
+        SELECT *
+        FROM provider_listing_catalog
+        WHERE primary_listing_status != 'secondary'
         """
     )
 
@@ -5911,6 +5979,12 @@ def _migration_056_listing_format_checks(conn: sqlite3.Connection) -> None:
     catalog_view_existed = _view_exists(conn, "provider_listing_catalog")
     supported_view_existed = _view_exists(conn, "supported_tickers")
     securities_view_existed = _view_exists(conn, "securities")
+    primary_view_existed = _view_exists(conn, "primary_provider_listing_catalog")
+    # Drop dependents before parents (migration 062's
+    # primary_provider_listing_catalog projects from
+    # provider_listing_catalog).
+    if primary_view_existed:
+        conn.execute("DROP VIEW primary_provider_listing_catalog")
     if supported_view_existed:
         conn.execute("DROP VIEW supported_tickers")
     if catalog_view_existed:
@@ -5980,6 +6054,8 @@ def _migration_056_listing_format_checks(conn: sqlite3.Connection) -> None:
         _create_provider_listing_catalog_view(conn)
     if supported_view_existed:
         _create_supported_tickers_view(conn)
+    if primary_view_existed:
+        _create_primary_provider_listing_catalog_view(conn)
 
     fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
     if fk_violations:
@@ -6028,10 +6104,14 @@ def _migration_057_provider_exchange_currency_check(
     # provider_listing_catalog (042), supported_tickers (042), and
     # exchange_provider (044) all reference provider_exchange directly.
     # SQLite re-validates them on schema change; drop and recreate
-    # around the rebuild.
+    # around the rebuild. primary_provider_listing_catalog (062)
+    # depends on the catalog so it must come down first.
     catalog_view_existed = _view_exists(conn, "provider_listing_catalog")
     supported_view_existed = _view_exists(conn, "supported_tickers")
     exchange_provider_view_existed = _view_exists(conn, "exchange_provider")
+    primary_view_existed = _view_exists(conn, "primary_provider_listing_catalog")
+    if primary_view_existed:
+        conn.execute("DROP VIEW primary_provider_listing_catalog")
     if supported_view_existed:
         conn.execute("DROP VIEW supported_tickers")
     if catalog_view_existed:
@@ -6091,6 +6171,8 @@ def _migration_057_provider_exchange_currency_check(
         _create_provider_listing_catalog_view(conn)
     if supported_view_existed:
         _create_supported_tickers_view(conn)
+    if primary_view_existed:
+        _create_primary_provider_listing_catalog_view(conn)
 
     fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
     if fk_violations:
@@ -6414,6 +6496,170 @@ def _migration_060_issuer_unique_name_country(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_061_market_data_fetch_state_error_invariant(
+    conn: sqlite3.Connection,
+) -> None:
+    """Tighten ``market_data_fetch_state`` so error rows must carry an error.
+
+    Audit P3 #13: ``fundamentals_fetch_state`` (migration 040) keeps a
+    tight invariant that a failure row must have ``failed_at`` and
+    ``error`` populated. ``market_data_fetch_state`` is wider (one row
+    per provider listing, not just on failure) but the same idea
+    applies to its error rows: ``last_status = 'error'`` is meaningless
+    without ``last_error``.
+
+    Live data confirms zero error rows currently violate this; 230
+    error rows have NULL ``last_fetched_at`` (a fetch that never
+    succeeded), so this column is **not** tightened.
+    """
+
+    if not _table_exists(conn, "market_data_fetch_state"):
+        return
+
+    ddl_row = conn.execute(
+        "SELECT sql FROM sqlite_master "
+        "WHERE type = 'table' AND name = 'market_data_fetch_state'"
+    ).fetchone()
+    if ddl_row is None:
+        return
+    if "last_status != 'error' OR last_error IS NOT NULL" in ddl_row[0]:
+        return
+
+    bad = conn.execute(
+        """
+        SELECT COUNT(*) FROM market_data_fetch_state
+        WHERE last_status = 'error' AND last_error IS NULL
+        """
+    ).fetchone()[0]
+    if bad:
+        raise RuntimeError(
+            f"migration 061 aborted: {bad} market_data_fetch_state rows "
+            "have last_status='error' with NULL last_error. Backfill or "
+            "clear them before retrying."
+        )
+
+    conn.execute("DROP INDEX IF EXISTS idx_market_data_fetch_next")
+    conn.execute(
+        """
+        CREATE TABLE market_data_fetch_state__new (
+            provider_listing_id INTEGER NOT NULL PRIMARY KEY,
+            last_fetched_at TEXT,
+            last_status TEXT
+                CHECK (last_status IS NULL
+                       OR last_status IN ('ok', 'error')),
+            last_error TEXT,
+            next_eligible_at TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0
+                CHECK (attempts >= 0),
+            CHECK (last_status != 'error' OR last_error IS NOT NULL),
+            FOREIGN KEY (provider_listing_id)
+                REFERENCES provider_listing(provider_listing_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO market_data_fetch_state__new (
+            provider_listing_id, last_fetched_at, last_status,
+            last_error, next_eligible_at, attempts
+        )
+        SELECT
+            provider_listing_id, last_fetched_at, last_status,
+            last_error, next_eligible_at, attempts
+        FROM market_data_fetch_state
+        """
+    )
+    conn.execute("DROP TABLE market_data_fetch_state")
+    conn.execute(
+        "ALTER TABLE market_data_fetch_state__new RENAME TO market_data_fetch_state"
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_data_fetch_next
+        ON market_data_fetch_state(next_eligible_at)
+        """
+    )
+
+
+def _migration_063_schema_migrations_pk_and_guard(
+    conn: sqlite3.Connection,
+) -> None:
+    """Tighten ``schema_migrations`` to a single-row, PK-guarded shape.
+
+    Audit P3 #12: the original table was
+    ``CREATE TABLE schema_migrations (version INTEGER NOT NULL)`` with
+    no PK and no row-count guard, relying on application discipline to
+    keep exactly one row. The new shape adds ``id INTEGER PRIMARY KEY
+    CHECK (id = 1)`` so duplicate version markers can't accumulate
+    (a second insert collides on the PK; a hand-edit to ``id <> 1``
+    fails the CHECK).
+
+    The migration is meta — we're rewriting the table that tracks
+    migrations themselves. The framework re-records the version after
+    the migration body via ``_set_version``, which works against both
+    shapes (its INSERT omits ``id`` and SQLite auto-picks the rowid).
+    """
+
+    if not _table_exists(conn, "schema_migrations"):
+        return
+
+    columns = _table_columns(conn, "schema_migrations")
+    if "id" in columns:
+        # Already migrated.
+        return
+
+    # Preserve the current version marker through the rebuild.
+    row = conn.execute("SELECT version FROM schema_migrations LIMIT 1").fetchone()
+    current_version = int(row[0]) if row else 0
+
+    conn.execute(
+        """
+        CREATE TABLE schema_migrations__new (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            version INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO schema_migrations__new (id, version) VALUES (1, ?)",
+        (current_version,),
+    )
+    conn.execute("DROP TABLE schema_migrations")
+    conn.execute("ALTER TABLE schema_migrations__new RENAME TO schema_migrations")
+
+
+def _migration_062_primary_provider_listing_catalog_view(
+    conn: sqlite3.Connection,
+) -> None:
+    """Add ``primary_provider_listing_catalog`` view for the primary-only filter.
+
+    Audit P3 #10: 8+ call sites in ``storage.py`` inline
+    ``catalog.primary_listing_status <> 'secondary'`` via the
+    ``_primary_listing_predicate()`` helper. CLAUDE.md: *Do not repeat
+    logic that belongs in the schema.* A view consolidates the filter
+    so callers can ``FROM primary_provider_listing_catalog catalog``
+    instead of remembering the predicate.
+
+    The view depends on ``provider_listing_catalog`` from migration 042
+    (rebuilt by migration 054). Created only when the parent view
+    exists; otherwise this is a no-op so older fixtures stay healthy.
+    """
+
+    if not _view_exists(conn, "provider_listing_catalog"):
+        return
+    if _view_exists(conn, "primary_provider_listing_catalog"):
+        return
+
+    conn.execute(
+        """
+        CREATE VIEW primary_provider_listing_catalog AS
+        SELECT *
+        FROM provider_listing_catalog
+        WHERE primary_listing_status != 'secondary'
+        """
+    )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -6475,6 +6721,9 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_058_fx_rates_format_checks,
     _migration_059_financial_facts_format_checks,
     _migration_060_issuer_unique_name_country,
+    _migration_061_market_data_fetch_state_error_invariant,
+    _migration_062_primary_provider_listing_catalog_view,
+    _migration_063_schema_migrations_pk_and_guard,
 ]
 
 

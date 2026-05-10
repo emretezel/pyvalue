@@ -24,7 +24,7 @@ One row per `provider_listing_id`.
 | `provider_listing_id` | `INTEGER` | no | PK, FK | provider listing identity |
 | `last_fetched_at` | `TEXT` | yes |  | last successful or attempted fetch time |
 | `last_status` | `TEXT` | yes |  | latest status; CHECK enforces `IN ('ok','error')` when not NULL |
-| `last_error` | `TEXT` | yes |  | latest provider error |
+| `last_error` | `TEXT` | yes |  | latest provider error. Row-level CHECK requires this to be NOT NULL when `last_status = 'error'` |
 | `next_eligible_at` | `TEXT` | yes | idx | retry/backoff watermark |
 | `attempts` | `INTEGER` | no |  | retry counter; CHECK enforces `>= 0` |
 

@@ -3113,3 +3113,222 @@ def test_migration_060_idempotent(tmp_path):
 
     assert first == len(MIGRATIONS)
     assert second == 0
+
+
+# ---------------------------------------------------------------------------
+# Migration 061: row-level error invariant on market_data_fetch_state.
+# ---------------------------------------------------------------------------
+
+
+def test_migration_061_rejects_error_status_with_null_last_error(tmp_path):
+    db_path = tmp_path / "fetch-state-error-061.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        _seed_listing(conn)
+        conn.execute(
+            """
+            INSERT INTO provider_listing (
+                provider_listing_id, provider_exchange_id, provider_symbol,
+                listing_id
+            ) VALUES (1, 1, 'AAA', 1)
+            """
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO market_data_fetch_state (
+                    provider_listing_id, last_status, last_error
+                ) VALUES (1, 'error', NULL)
+                """
+            )
+
+
+def test_migration_061_accepts_error_status_with_error_text(tmp_path):
+    db_path = tmp_path / "fetch-state-error-ok-061.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        _seed_listing(conn)
+        conn.execute(
+            """
+            INSERT INTO provider_listing (
+                provider_listing_id, provider_exchange_id, provider_symbol,
+                listing_id
+            ) VALUES (1, 1, 'AAA', 1)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO market_data_fetch_state (
+                provider_listing_id, last_status, last_error
+            ) VALUES (1, 'error', 'rate limit')
+            """
+        )
+        row = conn.execute(
+            "SELECT last_status, last_error FROM market_data_fetch_state"
+        ).fetchone()
+    assert row == ("error", "rate limit")
+
+
+def test_migration_061_idempotent(tmp_path):
+    db_path = tmp_path / "fetch-state-061-idempotent.sqlite"
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0
+
+
+# ---------------------------------------------------------------------------
+# Migration 062: primary_provider_listing_catalog view.
+# ---------------------------------------------------------------------------
+
+
+def test_migration_062_creates_primary_view(tmp_path):
+    db_path = tmp_path / "primary-view-062.sqlite"
+    apply_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        view_def = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'view' AND name = 'primary_provider_listing_catalog'"
+        ).fetchone()
+    assert view_def is not None
+    assert "primary_listing_status != 'secondary'" in view_def[0]
+
+
+def test_migration_062_view_excludes_secondary_listings(tmp_path):
+    db_path = tmp_path / "primary-view-content-062.sqlite"
+    apply_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("INSERT INTO issuer (issuer_id, name) VALUES (1, 'A')")
+        conn.execute(
+            """
+            INSERT INTO listing (
+                listing_id, issuer_id, exchange_id, symbol, primary_listing_status
+            ) VALUES
+                (1, 1, 1, 'AAA', 'primary'),
+                (2, 1, 1, 'BBB', 'secondary'),
+                (3, 1, 1, 'CCC', 'unknown')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO provider_listing (
+                provider_listing_id, provider_exchange_id, provider_symbol,
+                listing_id
+            ) VALUES
+                (10, 1, 'AAA', 1),
+                (20, 1, 'BBB', 2),
+                (30, 1, 'CCC', 3)
+            """
+        )
+        primary_only = sorted(
+            row[0]
+            for row in conn.execute(
+                "SELECT provider_listing_id FROM primary_provider_listing_catalog"
+            ).fetchall()
+        )
+        full = sorted(
+            row[0]
+            for row in conn.execute(
+                "SELECT provider_listing_id FROM provider_listing_catalog"
+            ).fetchall()
+        )
+
+    # 'unknown' is treated as primary (only 'secondary' is excluded).
+    assert primary_only == [10, 30]
+    assert full == [10, 20, 30]
+
+
+def test_migration_062_idempotent(tmp_path):
+    db_path = tmp_path / "primary-view-062-idempotent.sqlite"
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0
+
+
+# ---------------------------------------------------------------------------
+# Migration 063: schema_migrations PK + single-row guard.
+# ---------------------------------------------------------------------------
+
+
+def test_migration_063_schema_migrations_has_pk_and_check(tmp_path):
+    db_path = tmp_path / "schema-mig-pk-063.sqlite"
+    apply_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        info = conn.execute("PRAGMA table_info(schema_migrations)").fetchall()
+        columns = {row[1]: row for row in info}
+        sql = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'schema_migrations'"
+        ).fetchone()[0]
+    assert "id" in columns
+    assert columns["id"][5] == 1  # part of primary key
+    assert "CHECK (id = 1)" in sql
+
+
+def test_migration_063_rejects_second_row(tmp_path):
+    db_path = tmp_path / "schema-mig-second-row-063.sqlite"
+    apply_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO schema_migrations (id, version) VALUES (2, 999)")
+
+
+def test_migration_063_rejects_id_other_than_one(tmp_path):
+    db_path = tmp_path / "schema-mig-bad-id-063.sqlite"
+    apply_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("UPDATE schema_migrations SET id = 99")
+
+
+def test_migration_063_preserves_version_through_rebuild(tmp_path):
+    """An existing pre-063 DB at version N should land at version N
+    (well, len(MIGRATIONS)) without losing the marker mid-migration."""
+
+    db_path = tmp_path / "schema-mig-preserve-063.sqlite"
+
+    # Hand-build a legacy schema_migrations table at version 62 to
+    # simulate an existing DB caught mid-chain.
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = OFF")
+    _ensure_migrations_table(conn)
+    conn.commit()
+    for i, migration in enumerate(MIGRATIONS[:62], start=1):
+        conn.execute("BEGIN")
+        migration(conn)
+        conn.execute("DELETE FROM schema_migrations")
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (?)", (i,))
+        conn.commit()
+    # Force the legacy schema (no id column) on the schema_migrations
+    # table so 063 has work to do.
+    conn.execute("BEGIN")
+    conn.execute("DROP TABLE schema_migrations")
+    conn.execute("CREATE TABLE schema_migrations (version INTEGER NOT NULL)")
+    conn.execute("INSERT INTO schema_migrations (version) VALUES (62)")
+    conn.commit()
+    conn.close()
+
+    apply_migrations(db_path)
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute("SELECT id, version FROM schema_migrations").fetchall()
+    assert rows == [(1, len(MIGRATIONS))]
+
+
+def test_migration_063_idempotent(tmp_path):
+    db_path = tmp_path / "schema-mig-063-idempotent.sqlite"
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0

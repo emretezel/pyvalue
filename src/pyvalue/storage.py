@@ -166,6 +166,23 @@ def _primary_listing_predicate(alias: str = "catalog") -> str:
     return f"{alias}.primary_listing_status <> '{_LISTING_STATUS_SECONDARY}'"
 
 
+def _provider_listing_catalog_view(*, primary_only: bool) -> str:
+    """Return the catalog view name to query.
+
+    When ``primary_only`` is set the caller wants to exclude secondary
+    listings; ``primary_provider_listing_catalog`` (migration 062) is a
+    pre-filtered projection of ``provider_listing_catalog`` so callers
+    can swap the FROM clause and drop the inline
+    ``primary_listing_status`` predicate.
+    """
+
+    return (
+        "primary_provider_listing_catalog"
+        if primary_only
+        else "provider_listing_catalog"
+    )
+
+
 @dataclass(frozen=True)
 class Security:
     """Canonical security identity."""
@@ -2047,9 +2064,10 @@ class SupportedTickerRepository(SQLiteStore):
         self.initialize_schema()
         provider_norm = provider.strip().upper()
         params: List[object] = [provider_norm]
+        catalog_view = _provider_listing_catalog_view(primary_only=primary_only)
         query = [
             f"SELECT {self._catalog_select_columns('catalog')}",
-            "FROM provider_listing_catalog catalog",
+            f"FROM {catalog_view} catalog",
         ]
         query.append("WHERE catalog.provider = ?")
         normalized_codes = _normalized_codes(exchange_codes)
@@ -2062,8 +2080,6 @@ class SupportedTickerRepository(SQLiteStore):
             placeholders = ", ".join("?" for _ in normalized_symbols)
             query.append(f"AND catalog.provider_symbol IN ({placeholders})")
             params.extend(normalized_symbols)
-        if primary_only:
-            query.append(f"AND {_primary_listing_predicate()}")
         query.append("ORDER BY catalog.provider_exchange_code, catalog.provider_symbol")
         with self._connect() as conn:
             rows = conn.execute(" ".join(query), params).fetchall()
@@ -2474,19 +2490,39 @@ class SupportedTickerRepository(SQLiteStore):
         *,
         primary_only: bool = False,
     ) -> List[SupportedTicker]:
+        """Return supported tickers eligible for a market-data refresh.
+
+        Audit P3 #14: the previous form materialised
+        ``SELECT listing_id, MAX(as_of) FROM market_data GROUP BY listing_id``
+        as a derived subquery and joined the result against the catalog,
+        which forced a full scan of ``market_data`` (~6.8M rows on the
+        live DB) regardless of how narrow the provider/exchange/symbol
+        scope was.
+
+        The query now scopes the catalog *first* and uses a correlated
+        ``(SELECT MAX(as_of) FROM market_data WHERE listing_id = ?)``
+        probe per scoped row. With
+        ``idx_market_data_latest (listing_id, as_of DESC)`` covering the
+        lookup, each probe is a single index seek; total work scales
+        with the scoped catalog size rather than the full
+        ``market_data`` row count. The probe is computed once via an
+        inline subquery and then both filtered on and ordered by in the
+        outer ``WHERE`` / ``ORDER BY``, so the planner doesn't run it
+        multiple times per row.
+        """
+
         self.initialize_schema()
         provider_norm = provider.strip().upper()
         now = datetime.now(timezone.utc)
         cutoff = (now.date() - timedelta(days=max_age_days)).isoformat()
         params: List[object] = [provider_norm]
-        query = [
-            f"SELECT {self._catalog_select_columns('catalog')}",
-            "FROM provider_listing_catalog catalog",
-            "LEFT JOIN (",
-            "    SELECT listing_id, MAX(as_of) AS latest_as_of",
-            "    FROM market_data",
-            "    GROUP BY listing_id",
-            ") md ON md.listing_id = catalog.security_id",
+        catalog_view = _provider_listing_catalog_view(primary_only=primary_only)
+        inner = [
+            f"SELECT {self._catalog_select_columns('catalog')},",
+            "(SELECT MAX(as_of) FROM market_data "
+            "WHERE listing_id = catalog.security_id) AS latest_as_of,",
+            "ms.next_eligible_at AS next_eligible_at",
+            f"FROM {catalog_view} catalog",
             "LEFT JOIN market_data_fetch_state ms "
             "ON ms.provider_listing_id = catalog.provider_listing_id",
             "WHERE catalog.provider = ?",
@@ -2494,31 +2530,38 @@ class SupportedTickerRepository(SQLiteStore):
         normalized_codes = _normalized_codes(exchange_codes)
         if normalized_codes:
             placeholders = ", ".join("?" for _ in normalized_codes)
-            query.append(f"AND catalog.provider_exchange_code IN ({placeholders})")
+            inner.append(f"AND catalog.provider_exchange_code IN ({placeholders})")
             params.extend(normalized_codes)
         normalized_symbols = _normalized_codes(provider_symbols)
         if normalized_symbols:
             placeholders = ", ".join("?" for _ in normalized_symbols)
-            query.append(f"AND catalog.provider_symbol IN ({placeholders})")
+            inner.append(f"AND catalog.provider_symbol IN ({placeholders})")
             params.extend(normalized_symbols)
-        if primary_only:
-            query.append(f"AND {_primary_listing_predicate()}")
-        query.append("AND (md.latest_as_of IS NULL OR md.latest_as_of <= ?)")
+        select_columns = ", ".join(
+            f"sub.{col.split('.', 1)[1]}"
+            for col in self._catalog_select_columns("catalog").split(", ")
+        )
+        outer = [
+            f"SELECT {select_columns}",
+            "FROM (" + " ".join(inner) + ") AS sub",
+            "WHERE (sub.latest_as_of IS NULL OR sub.latest_as_of <= ?)",
+        ]
         params.append(cutoff)
         if respect_backoff:
-            query.append(
-                "AND (ms.next_eligible_at IS NULL OR ms.next_eligible_at <= ?)"
+            outer.append(
+                "AND (sub.next_eligible_at IS NULL OR sub.next_eligible_at <= ?)"
             )
             params.append(now.isoformat())
-        query.append(
-            "ORDER BY CASE WHEN md.latest_as_of IS NULL THEN 0 ELSE 1 END, "
-            "md.latest_as_of ASC, catalog.provider_exchange_code ASC, catalog.provider_symbol ASC"
+        outer.append(
+            "ORDER BY CASE WHEN sub.latest_as_of IS NULL THEN 0 ELSE 1 END, "
+            "sub.latest_as_of ASC, "
+            "sub.provider_exchange_code ASC, sub.provider_symbol ASC"
         )
         if max_symbols is not None:
-            query.append("LIMIT ?")
+            outer.append("LIMIT ?")
             params.append(max_symbols)
         with self._connect() as conn:
-            rows = conn.execute(" ".join(query), params).fetchall()
+            rows = conn.execute(" ".join(outer), params).fetchall()
         return [SupportedTicker(*row) for row in rows]
 
     def market_data_progress_summary(
@@ -2536,6 +2579,7 @@ class SupportedTickerRepository(SQLiteStore):
             datetime.now(timezone.utc).date() - timedelta(days=max_age_days)
         ).isoformat()
         params: List[object] = [cutoff, now, provider_norm]
+        catalog_view = _provider_listing_catalog_view(primary_only=primary_only)
         query = [
             "SELECT",
             "COUNT(*) AS total_supported,",
@@ -2544,7 +2588,7 @@ class SupportedTickerRepository(SQLiteStore):
             "SUM(CASE WHEN md.latest_as_of IS NOT NULL AND md.latest_as_of <= ? THEN 1 ELSE 0 END) AS stale,",
             "SUM(CASE WHEN ms.next_eligible_at IS NOT NULL AND ms.next_eligible_at > ? THEN 1 ELSE 0 END) AS blocked,",
             "SUM(CASE WHEN ms.last_status = 'error' THEN 1 ELSE 0 END) AS error_rows",
-            "FROM provider_listing_catalog catalog",
+            f"FROM {catalog_view} catalog",
             "LEFT JOIN (",
             "    SELECT listing_id, MAX(as_of) AS latest_as_of",
             "    FROM market_data",
@@ -2559,8 +2603,6 @@ class SupportedTickerRepository(SQLiteStore):
             placeholders = ", ".join("?" for _ in normalized_codes)
             query.append(f"AND catalog.provider_exchange_code IN ({placeholders})")
             params.extend(normalized_codes)
-        if primary_only:
-            query.append(f"AND {_primary_listing_predicate()}")
         with self._connect() as conn:
             row = conn.execute(" ".join(query), params).fetchone()
         return IngestProgressSummary(
@@ -2587,6 +2629,7 @@ class SupportedTickerRepository(SQLiteStore):
             datetime.now(timezone.utc).date() - timedelta(days=max_age_days)
         ).isoformat()
         params: List[object] = [cutoff, now, provider_norm]
+        catalog_view = _provider_listing_catalog_view(primary_only=primary_only)
         query = [
             "SELECT",
             "catalog.provider_exchange_code AS exchange_code,",
@@ -2596,7 +2639,7 @@ class SupportedTickerRepository(SQLiteStore):
             "SUM(CASE WHEN md.latest_as_of IS NOT NULL AND md.latest_as_of <= ? THEN 1 ELSE 0 END) AS stale,",
             "SUM(CASE WHEN ms.next_eligible_at IS NOT NULL AND ms.next_eligible_at > ? THEN 1 ELSE 0 END) AS blocked,",
             "SUM(CASE WHEN ms.last_status = 'error' THEN 1 ELSE 0 END) AS error_rows",
-            "FROM provider_listing_catalog catalog",
+            f"FROM {catalog_view} catalog",
             "LEFT JOIN (",
             "    SELECT listing_id, MAX(as_of) AS latest_as_of",
             "    FROM market_data",
@@ -2611,8 +2654,6 @@ class SupportedTickerRepository(SQLiteStore):
             placeholders = ", ".join("?" for _ in normalized_codes)
             query.append(f"AND catalog.provider_exchange_code IN ({placeholders})")
             params.extend(normalized_codes)
-        if primary_only:
-            query.append(f"AND {_primary_listing_predicate()}")
         query.append("GROUP BY catalog.provider_exchange_code")
         query.append("ORDER BY catalog.provider_exchange_code")
         with self._connect() as conn:
@@ -2641,10 +2682,11 @@ class SupportedTickerRepository(SQLiteStore):
         self.initialize_schema()
         provider_norm = provider.strip().upper()
         params: List[object] = [provider_norm]
+        catalog_view = _provider_listing_catalog_view(primary_only=primary_only)
         query = [
             "SELECT catalog.provider_symbol AS symbol, catalog.provider_exchange_code AS exchange_code,",
             "ms.last_status, ms.last_error, ms.next_eligible_at, ms.attempts",
-            "FROM provider_listing_catalog catalog",
+            f"FROM {catalog_view} catalog",
             "JOIN market_data_fetch_state ms "
             "ON ms.provider_listing_id = catalog.provider_listing_id",
             "WHERE catalog.provider = ? AND ms.last_status = 'error'",
@@ -2654,8 +2696,6 @@ class SupportedTickerRepository(SQLiteStore):
             placeholders = ", ".join("?" for _ in normalized_codes)
             query.append(f"AND catalog.provider_exchange_code IN ({placeholders})")
             params.extend(normalized_codes)
-        if primary_only:
-            query.append(f"AND {_primary_listing_predicate()}")
         query.append(
             "ORDER BY CASE WHEN ms.next_eligible_at IS NULL THEN 1 ELSE 0 END, "
             "ms.next_eligible_at ASC, catalog.provider_symbol ASC"
