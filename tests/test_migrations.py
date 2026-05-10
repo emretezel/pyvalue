@@ -1867,12 +1867,15 @@ def test_migration_043_dedupe_keeps_filed_winner(tmp_path):
             """,
             (listing_id, listing_id, listing_id),
         )
-        # Rewind so 043 will be re-run.
-        conn.execute("UPDATE schema_migrations SET version = 42")
+        # Rewind so 043 will be re-run. Anything beyond 042 (043, 044, ...)
+        # will replay; assert exactly that delta so this test stays accurate
+        # as later migrations are appended.
+        target_version = 42
+        conn.execute("UPDATE schema_migrations SET version = ?", (target_version,))
         conn.commit()
 
     second = apply_migrations(db_path)
-    assert second == 1
+    assert second == len(MIGRATIONS) - target_version
 
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute(
@@ -1976,3 +1979,57 @@ def test_migration_043_preserves_unique_rows(tmp_path):
         (listing_a, "Revenue", "Q1", "2025-03-31", "USD", 25.0),
         (listing_b, "NetIncome", "FY", "2024-12-31", "USD", 10.0),
     ]
+
+
+# ----------------------------------------------------------------------
+# Migration 044 — compat views (providers, securities, exchange_provider)
+# ----------------------------------------------------------------------
+
+
+def test_migration_044_persists_compat_views(tmp_path):
+    """Three legacy compat views must be in sqlite_master after apply_migrations."""
+
+    db_path = tmp_path / "compat-views.sqlite"
+    apply_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        view_names = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'view'"
+            ).fetchall()
+        }
+
+    assert {"providers", "securities", "exchange_provider"} <= view_names
+
+
+def test_migration_044_securities_view_returns_canonical_join(tmp_path):
+    """The securities view should expose listing+issuer+exchange in the legacy shape."""
+
+    db_path = tmp_path / "compat-securities.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        listing_id = _seed_listing(conn)
+        row = conn.execute(
+            """
+            SELECT security_id, canonical_ticker, canonical_exchange_code,
+                   canonical_symbol, entity_name
+            FROM securities
+            WHERE security_id = ?
+            """,
+            (listing_id,),
+        ).fetchone()
+
+    assert row == (listing_id, "TEST", "US", "TEST.US", "Test Issuer")
+
+
+def test_migration_044_idempotent(tmp_path):
+    """Running apply_migrations twice on a fresh DB is a no-op the second time."""
+
+    db_path = tmp_path / "compat-views-idempotent.sqlite"
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0

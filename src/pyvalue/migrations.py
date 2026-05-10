@@ -2130,6 +2130,16 @@ def _migration_032_create_providers_registry(conn: sqlite3.Connection) -> None:
     """Create and seed the provider registry."""
 
     now = datetime.now(timezone.utc).isoformat()
+    # Migration 044 (later in the chain) creates a `providers` VIEW over the
+    # renamed `provider` table. If migrations are replayed (a test rewinds
+    # schema_version below 32 after a head-of-tree run, for instance), the
+    # view from 044 is still in the database when this migration retries.
+    # CREATE TABLE IF NOT EXISTS would silently no-op against the view and
+    # the subsequent INSERT would fail with "cannot modify providers because
+    # it is a view". Drop any conflicting view first so the table-shaped
+    # provider registry can be (re-)created cleanly. On a fresh forward run
+    # the DROP is a no-op.
+    conn.execute("DROP VIEW IF EXISTS providers")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS providers (
@@ -2169,6 +2179,11 @@ def _migration_033_split_exchange_catalog(conn: sqlite3.Connection) -> None:
     """Split supported_exchanges into canonical exchange and exchange_provider."""
 
     now = datetime.now(timezone.utc).isoformat()
+    # See migration 032 for the rationale. Migration 044 creates an
+    # ``exchange_provider`` VIEW that conflicts with the table-shape this
+    # migration installs; dropping the view first lets a replay re-create
+    # the table cleanly. On a fresh forward run the DROP is a no-op.
+    conn.execute("DROP VIEW IF EXISTS exchange_provider")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS "exchange" (
@@ -4388,6 +4403,81 @@ def _migration_043_financial_facts_dedupe_and_fk(conn: sqlite3.Connection) -> No
         )
 
 
+def _migration_044_persist_compat_views(conn: sqlite3.Connection) -> None:
+    """Take migration ownership of the legacy compatibility views.
+
+    Three views still lived only in ``storage.py`` runtime DDL:
+
+    * ``providers`` — old plural name for the renamed ``provider`` table.
+    * ``securities`` — pre-canonical-rename name for the
+      ``listing JOIN issuer JOIN exchange`` shape.
+    * ``exchange_provider`` — old name for the renamed
+      ``provider_exchange`` table.
+
+    Each is heavily consumed by both production code (e.g. financial
+    fact joins, market data joins) and tests, so they cannot simply be
+    deleted — they must be persisted. Migration 042 took ownership of
+    ``provider_listing_catalog`` and ``supported_tickers`` for the same
+    reason; this migration extends that pattern to the remaining three.
+    Future shape changes ship as a new migration, not a runtime
+    ``DROP VIEW`` / ``CREATE VIEW`` pair in ``storage.py``.
+    """
+
+    conn.execute("DROP VIEW IF EXISTS providers")
+    conn.execute("DROP VIEW IF EXISTS securities")
+    conn.execute("DROP VIEW IF EXISTS exchange_provider")
+
+    conn.execute(
+        """
+        CREATE VIEW providers AS
+        SELECT
+            provider_code,
+            display_name,
+            description,
+            created_at,
+            updated_at
+        FROM provider
+        """
+    )
+    conn.execute(
+        """
+        CREATE VIEW securities AS
+        SELECT
+            l.listing_id AS security_id,
+            l.symbol AS canonical_ticker,
+            e.exchange_code AS canonical_exchange_code,
+            l.symbol || '.' || e.exchange_code AS canonical_symbol,
+            i.name AS entity_name,
+            i.description,
+            i.sector,
+            i.industry,
+            NULL AS created_at,
+            NULL AS updated_at
+        FROM listing l
+        JOIN issuer i ON i.issuer_id = l.issuer_id
+        JOIN "exchange" e ON e.exchange_id = l.exchange_id
+        """
+    )
+    conn.execute(
+        """
+        CREATE VIEW exchange_provider AS
+        SELECT
+            p.provider_code AS provider,
+            ep.provider_exchange_code,
+            ep.exchange_id,
+            ep.name,
+            ep.country,
+            ep.currency,
+            ep.operating_mic,
+            ep.country_iso2,
+            ep.country_iso3,
+            ep.updated_at
+        FROM provider_exchange ep
+        JOIN provider p ON p.provider_id = ep.provider_id
+        """
+    )
+
+
 def _migration_042_persist_provider_listing_views(conn: sqlite3.Connection) -> None:
     """Move provider-listing view DDL from runtime code into the schema.
 
@@ -4512,6 +4602,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_041_add_metrics_constraints,
     _migration_042_persist_provider_listing_views,
     _migration_043_financial_facts_dedupe_and_fk,
+    _migration_044_persist_compat_views,
 ]
 
 
