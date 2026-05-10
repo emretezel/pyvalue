@@ -4704,6 +4704,28 @@ def _migration_050_add_fk_fx_refresh_state_provider(
         )
 
 
+def _migration_052_drop_redundant_fin_facts_index(conn: sqlite3.Connection) -> None:
+    """Drop ``idx_fin_facts_security_concept`` — fully covered by ``_latest``.
+
+    Audit P3 #11: ``idx_fin_facts_security_concept (listing_id, concept)``
+    is a strict prefix of
+    ``idx_fin_facts_security_concept_latest
+    (listing_id, concept, end_date DESC, filed DESC)``. SQLite's query
+    planner can serve any query that filters on ``(listing_id, concept)``
+    from the longer index. Keeping both means every fact insert pays
+    the write cost of two near-identical b-trees on the largest table
+    in the DB (~103M rows, ~8.5 GiB).
+
+    Forward fresh-DB runs of earlier migrations created both indexes —
+    dropping the redundant one here keeps the schema in sync regardless
+    of how the DB was migrated.
+    """
+
+    if not _table_exists(conn, "financial_facts"):
+        return
+    conn.execute("DROP INDEX IF EXISTS idx_fin_facts_security_concept")
+
+
 def _migration_051_add_bool_checks(conn: sqlite3.Connection) -> None:
     """Add ``CHECK (col IN (0, 1))`` to boolean-flagged INTEGER columns.
 
@@ -5283,6 +5305,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_049_add_fk_fx_supported_pairs_provider,
     _migration_050_add_fk_fx_refresh_state_provider,
     _migration_051_add_bool_checks,
+    _migration_052_drop_redundant_fin_facts_index,
 ]
 
 
