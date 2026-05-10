@@ -324,7 +324,10 @@ class FactRecord:
     symbol: str
     cik: Optional[str] = None
     concept: str = ""
-    fiscal_period: Optional[str] = None
+    # fiscal_period defaults to ``"INSTANT"`` (matches the SEC company
+    # facts convention for point-in-time values) rather than ``None`` so
+    # the column can be NOT NULL at the schema level (migration 065).
+    fiscal_period: str = "INSTANT"
     end_date: str = ""
     unit: str = ""
     value: float = 0.0
@@ -923,6 +926,10 @@ class SecurityRepository(SQLiteStore):
                 conn, exchange.exchange_id, ticker
             )
             if security is None:
+                # migration 064 enforces issuer.name NOT NULL. Use the
+                # canonical_symbol as a placeholder name when the
+                # caller doesn't supply one; downstream metadata
+                # refreshes can promote it to the real entity name.
                 cursor = conn.execute(
                     """
                     INSERT INTO issuer (
@@ -933,7 +940,12 @@ class SecurityRepository(SQLiteStore):
                         country
                     ) VALUES (?, ?, ?, ?, NULL)
                     """,
-                    (entity_name, description, sector, industry),
+                    (
+                        entity_name or canonical_symbol,
+                        description,
+                        sector,
+                        industry,
+                    ),
                 )
                 if cursor.lastrowid is None:
                     raise RuntimeError(
@@ -1512,10 +1524,12 @@ class ExchangeProviderRepository(SQLiteStore):
                         provider_row.provider_id,
                         code_norm,
                         exchange.exchange_id,
-                        _normalize_optional_text(row.get("Name") or row.get("name")),
+                        _normalize_optional_text(row.get("Name") or row.get("name"))
+                        or code_norm,
                         _normalize_optional_text(
                             row.get("Country") or row.get("country")
-                        ),
+                        )
+                        or "Unknown",
                         _normalize_optional_text(
                             row.get("Currency") or row.get("currency")
                         ),
@@ -1620,6 +1634,7 @@ class ExchangeProviderRepository(SQLiteStore):
                 canonical_exchange_code.strip().upper(),
                 connection=conn,
             )
+            code_norm = provider_exchange_code.strip().upper()
             conn.execute(
                 """
                 INSERT INTO provider_exchange (
@@ -1643,10 +1658,10 @@ class ExchangeProviderRepository(SQLiteStore):
                 """,
                 (
                     provider_row.provider_id,
-                    provider_exchange_code.strip().upper(),
+                    code_norm,
                     exchange.exchange_id,
-                    _normalize_optional_text(name),
-                    _normalize_optional_text(country),
+                    _normalize_optional_text(name) or code_norm,
+                    _normalize_optional_text(country) or "Unknown",
                     _normalize_optional_text(currency),
                     _utc_now_iso(),
                 ),
@@ -1752,6 +1767,14 @@ class SupportedTickerRepository(SQLiteStore):
         ).upper()
         exchange = self._exchange_repo().ensure(exchange_code, connection=conn)
         now = _utc_now_iso()
+        # migration 066 enforces NOT NULL on name and country. Use the
+        # provider exchange code as a name fallback and 'Unknown' as a
+        # country fallback when the caller doesn't supply them. The
+        # ON CONFLICT branch only updates these when a non-NULL/non-empty
+        # value comes in, so a richer subsequent refresh can promote the
+        # placeholder.
+        name_value = _normalize_optional_text(name) or provider_exchange_code
+        country_value = _normalize_optional_text(country) or "Unknown"
         conn.execute(
             """
             INSERT INTO provider_exchange (
@@ -1768,8 +1791,18 @@ class SupportedTickerRepository(SQLiteStore):
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(provider_id, provider_exchange_code) DO UPDATE SET
                 exchange_id = excluded.exchange_id,
-                name = COALESCE(excluded.name, provider_exchange.name),
-                country = COALESCE(excluded.country, provider_exchange.country),
+                name = CASE
+                    WHEN excluded.name IS NOT NULL AND excluded.name != ''
+                         AND excluded.name != provider_exchange.provider_exchange_code
+                    THEN excluded.name
+                    ELSE provider_exchange.name
+                END,
+                country = CASE
+                    WHEN excluded.country IS NOT NULL AND excluded.country != ''
+                         AND excluded.country != 'Unknown'
+                    THEN excluded.country
+                    ELSE provider_exchange.country
+                END,
                 currency = COALESCE(excluded.currency, provider_exchange.currency),
                 operating_mic = COALESCE(excluded.operating_mic, provider_exchange.operating_mic),
                 country_iso2 = COALESCE(excluded.country_iso2, provider_exchange.country_iso2),
@@ -1780,8 +1813,8 @@ class SupportedTickerRepository(SQLiteStore):
                 provider_row.provider_id,
                 provider_exchange_code,
                 exchange.exchange_id,
-                _normalize_optional_text(name),
-                _normalize_optional_text(country),
+                name_value,
+                country_value,
                 _normalize_optional_text(currency),
                 _normalize_optional_text(operating_mic),
                 _normalize_optional_text(country_iso2),

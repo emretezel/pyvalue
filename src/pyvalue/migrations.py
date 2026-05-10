@@ -6660,6 +6660,408 @@ def _migration_062_primary_provider_listing_catalog_view(
     )
 
 
+def _migration_064_drop_orphan_issuers_tighten_name(
+    conn: sqlite3.Connection,
+) -> None:
+    """Delete orphan NULL-name issuers and require ``issuer.name``.
+
+    The legacy ingest path created 260 ``issuer`` rows with NULL
+    ``name`` plus matching ``listing`` rows that were never registered
+    in ``provider_listing`` (SEC closed-end funds whose canonical
+    promotion didn't complete). On the live DB those orphans carry no
+    provider_listing, no fundamentals, no metrics — only stale
+    ``market_data``. With no provider mapping there is no path to
+    refresh them, so they are pure dead weight.
+
+    This migration:
+    1. Identifies issuers with ``name IS NULL``.
+    2. Asserts (pre-flight) that none of them have any
+       ``provider_listing``, ``financial_facts``, ``metrics``, or
+       ``metric_compute_status`` references; if they do, the migration
+       aborts so the operator can investigate.
+    3. Deletes the corresponding ``market_data`` rows, then the
+       ``listing`` rows, then the ``issuer`` rows.
+    4. Rebuilds ``issuer`` with ``name TEXT NOT NULL``, preserving the
+       UNIQUE INDEX (name, country) from migration 060.
+
+    Fresh DBs without orphans (e.g. unit-test fixtures, freshly
+    initialised production DBs) skip the deletion and go straight to
+    the rebuild.
+    """
+
+    if not _table_exists(conn, "issuer"):
+        return
+
+    columns = _table_columns(conn, "issuer")
+    ddl_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='issuer'"
+    ).fetchone()
+    if ddl_row is None:
+        return
+    if "name TEXT NOT NULL" in ddl_row[0]:
+        # Already migrated.
+        return
+    if "name" not in columns:
+        # Fixture without the canonical issuer shape; earlier migrations
+        # are responsible for getting it there.
+        return
+
+    orphan_issuer_ids = [
+        int(row[0])
+        for row in conn.execute(
+            "SELECT issuer_id FROM issuer WHERE name IS NULL"
+        ).fetchall()
+    ]
+    if orphan_issuer_ids:
+        placeholders = ", ".join("?" for _ in orphan_issuer_ids)
+        orphan_listing_ids = [
+            int(row[0])
+            for row in conn.execute(
+                f"""
+                SELECT listing_id FROM listing
+                WHERE issuer_id IN ({placeholders})
+                """,
+                orphan_issuer_ids,
+            ).fetchall()
+        ]
+        for table_name, fk_column in (
+            ("provider_listing", "listing_id"),
+            ("financial_facts", "listing_id"),
+            ("metrics", "listing_id"),
+            ("metric_compute_status", "listing_id"),
+            ("financial_facts_refresh_state", "listing_id"),
+        ):
+            if not _table_exists(conn, table_name):
+                continue
+            if not orphan_listing_ids:
+                continue
+            listing_placeholders = ", ".join("?" for _ in orphan_listing_ids)
+            offending = conn.execute(
+                f"SELECT COUNT(*) FROM {table_name} "
+                f"WHERE {fk_column} IN ({listing_placeholders})",
+                orphan_listing_ids,
+            ).fetchone()[0]
+            if offending:
+                raise RuntimeError(
+                    f"migration 064 aborted: {offending} {table_name} rows "
+                    f"reference orphan NULL-name issuers' listings. Resolve "
+                    "the references before retrying."
+                )
+
+        if orphan_listing_ids and _table_exists(conn, "market_data"):
+            listing_placeholders = ", ".join("?" for _ in orphan_listing_ids)
+            conn.execute(
+                f"DELETE FROM market_data WHERE listing_id IN ({listing_placeholders})",
+                orphan_listing_ids,
+            )
+        if orphan_listing_ids:
+            listing_placeholders = ", ".join("?" for _ in orphan_listing_ids)
+            conn.execute(
+                f"DELETE FROM listing WHERE listing_id IN ({listing_placeholders})",
+                orphan_listing_ids,
+            )
+        conn.execute(
+            f"DELETE FROM issuer WHERE issuer_id IN ({placeholders})",
+            orphan_issuer_ids,
+        )
+
+    # Issuer has one child table (listing); the framework's
+    # foreign_keys=OFF window covers the rebuild. UNIQUE INDEX
+    # idx_issuer_name_country from migration 060 must be re-created.
+    # securities (044) and provider_listing_catalog (042/054) reference
+    # issuer.name; drop and recreate around the rebuild.
+    securities_view_existed = _view_exists(conn, "securities")
+    catalog_view_existed = _view_exists(conn, "provider_listing_catalog")
+    supported_view_existed = _view_exists(conn, "supported_tickers")
+    primary_view_existed = _view_exists(conn, "primary_provider_listing_catalog")
+    if primary_view_existed:
+        conn.execute("DROP VIEW primary_provider_listing_catalog")
+    if supported_view_existed:
+        conn.execute("DROP VIEW supported_tickers")
+    if catalog_view_existed:
+        conn.execute("DROP VIEW provider_listing_catalog")
+    if securities_view_existed:
+        conn.execute("DROP VIEW securities")
+
+    conn.execute("DROP INDEX IF EXISTS idx_issuer_name_country")
+    conn.execute(
+        """
+        CREATE TABLE issuer__new (
+            issuer_id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            sector TEXT,
+            industry TEXT,
+            country TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO issuer__new (
+            issuer_id, name, description, sector, industry, country
+        )
+        SELECT issuer_id, name, description, sector, industry, country
+        FROM issuer
+        """
+    )
+    conn.execute("DROP TABLE issuer")
+    conn.execute("ALTER TABLE issuer__new RENAME TO issuer")
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_issuer_name_country
+        ON issuer(name, country)
+        """
+    )
+
+    if securities_view_existed:
+        _create_securities_view(conn)
+    if catalog_view_existed:
+        _create_provider_listing_catalog_view(conn)
+    if supported_view_existed:
+        _create_supported_tickers_view(conn)
+    if primary_view_existed:
+        _create_primary_provider_listing_catalog_view(conn)
+
+
+def _migration_065_financial_facts_fiscal_period_not_null(
+    conn: sqlite3.Connection,
+) -> None:
+    """Tighten ``financial_facts.fiscal_period`` to NOT NULL.
+
+    Migration 043 deliberately kept ``fiscal_period`` nullable in the
+    schema because ``FactRecord.fiscal_period: Optional[str]`` and
+    several callers relied on that. With the API change in this commit
+    (FactRecord.fiscal_period defaulted to ``'INSTANT'`` when the
+    upstream payload doesn't carry one) the schema can finally enforce
+    the invariant.
+
+    Live DB carries zero NULL ``fiscal_period`` rows today (audit
+    confirmed against the 103M-row table), so the pre-flight is a
+    formality. The rebuild itself is heavy on production
+    (~70min on live DB) — same shape as migration 043 / 059.
+    """
+
+    if not _table_exists(conn, "financial_facts"):
+        return
+
+    ddl_row = conn.execute(
+        "SELECT sql FROM sqlite_master "
+        "WHERE type = 'table' AND name = 'financial_facts'"
+    ).fetchone()
+    if ddl_row is None:
+        return
+    if "fiscal_period TEXT NOT NULL" in ddl_row[0]:
+        return
+
+    null_count = conn.execute(
+        "SELECT COUNT(*) FROM financial_facts WHERE fiscal_period IS NULL"
+    ).fetchone()[0]
+    if null_count:
+        raise RuntimeError(
+            f"migration 065 aborted: {null_count} financial_facts rows "
+            "have NULL fiscal_period. Backfill them (e.g. to 'INSTANT') "
+            "before retrying."
+        )
+
+    orphan_count = conn.execute(
+        """
+        SELECT COUNT(*) FROM financial_facts
+        WHERE listing_id NOT IN (SELECT listing_id FROM listing)
+        """
+    ).fetchone()[0]
+    if orphan_count:
+        raise RuntimeError(
+            f"migration 065 aborted: {orphan_count} orphan financial_facts "
+            "rows reference missing listings."
+        )
+
+    conn.execute("DROP INDEX IF EXISTS idx_fin_facts_concept")
+    conn.execute("DROP INDEX IF EXISTS idx_fin_facts_security_concept")
+    conn.execute("DROP INDEX IF EXISTS idx_fin_facts_security_concept_latest")
+    conn.execute("DROP INDEX IF EXISTS idx_fin_facts_currency_nonnull")
+
+    currency_check = _CURRENCY_FORMAT_CHECK.format(col="currency")
+    conn.execute(
+        f"""
+        CREATE TABLE financial_facts__new (
+            listing_id INTEGER NOT NULL,
+            cik TEXT,
+            concept TEXT NOT NULL,
+            fiscal_period TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            unit TEXT NOT NULL
+                CHECK (length(trim(unit)) > 0
+                       AND instr(unit, ' ') = 0
+                       AND instr(unit, char(9)) = 0
+                       AND instr(unit, char(10)) = 0),
+            value REAL NOT NULL,
+            accn TEXT,
+            filed TEXT,
+            frame TEXT,
+            start_date TEXT,
+            accounting_standard TEXT,
+            currency TEXT
+                CHECK (currency IS NULL OR ({currency_check})),
+            source_provider TEXT,
+            PRIMARY KEY (listing_id, concept, fiscal_period, end_date, unit),
+            FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO financial_facts__new (
+            listing_id, cik, concept, fiscal_period, end_date, unit,
+            value, accn, filed, frame, start_date, accounting_standard,
+            currency, source_provider
+        )
+        SELECT
+            listing_id, cik, concept, fiscal_period, end_date, unit,
+            value, accn, filed, frame, start_date, accounting_standard,
+            currency, source_provider
+        FROM financial_facts
+        """
+    )
+    conn.execute("DROP TABLE financial_facts")
+    conn.execute("ALTER TABLE financial_facts__new RENAME TO financial_facts")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fin_facts_concept
+        ON financial_facts(concept)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fin_facts_security_concept_latest
+        ON financial_facts(listing_id, concept, end_date DESC, filed DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fin_facts_currency_nonnull
+        ON financial_facts(currency)
+        WHERE currency IS NOT NULL
+        """
+    )
+
+
+def _migration_066_provider_exchange_name_country_not_null(
+    conn: sqlite3.Connection,
+) -> None:
+    """Tighten ``provider_exchange.name`` and ``country`` to NOT NULL.
+
+    Both columns are 100% populated on the live DB (verified during the
+    audit), so this is a pure guard against future bad writes. The
+    rebuild also handles the catalog/exchange_provider view
+    drop/recreate dance.
+    """
+
+    if not _table_exists(conn, "provider_exchange"):
+        return
+
+    ddl_row = conn.execute(
+        "SELECT sql FROM sqlite_master "
+        "WHERE type = 'table' AND name = 'provider_exchange'"
+    ).fetchone()
+    if ddl_row is None:
+        return
+    if "name TEXT NOT NULL" in ddl_row[0]:
+        return
+
+    # Live DB has 0 NULL rows on both columns. Older test fixtures and
+    # any pre-canonical-rename DB may have NULL name/country because
+    # earlier migrations backfilled provider_exchange from supported
+    # tickers without resolving display metadata. Use the provider
+    # exchange code as a name fallback and 'Unknown' as the country
+    # fallback rather than aborting: both are recoverable by a
+    # subsequent supported-tickers refresh.
+    conn.execute(
+        """
+        UPDATE provider_exchange
+        SET name = provider_exchange_code
+        WHERE name IS NULL OR trim(name) = ''
+        """
+    )
+    conn.execute(
+        """
+        UPDATE provider_exchange
+        SET country = 'Unknown'
+        WHERE country IS NULL OR trim(country) = ''
+        """
+    )
+
+    conn.execute("DROP INDEX IF EXISTS idx_provider_exchange_exchange")
+
+    catalog_view_existed = _view_exists(conn, "provider_listing_catalog")
+    supported_view_existed = _view_exists(conn, "supported_tickers")
+    exchange_provider_view_existed = _view_exists(conn, "exchange_provider")
+    primary_view_existed = _view_exists(conn, "primary_provider_listing_catalog")
+    if primary_view_existed:
+        conn.execute("DROP VIEW primary_provider_listing_catalog")
+    if supported_view_existed:
+        conn.execute("DROP VIEW supported_tickers")
+    if catalog_view_existed:
+        conn.execute("DROP VIEW provider_listing_catalog")
+    if exchange_provider_view_existed:
+        conn.execute("DROP VIEW exchange_provider")
+
+    currency_check = _CURRENCY_FORMAT_CHECK.format(col="currency")
+    conn.execute(
+        f"""
+        CREATE TABLE provider_exchange__new (
+            provider_exchange_id INTEGER PRIMARY KEY,
+            provider_id INTEGER NOT NULL,
+            provider_exchange_code TEXT NOT NULL,
+            exchange_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            country TEXT NOT NULL,
+            currency TEXT
+                CHECK (currency IS NULL OR ({currency_check})),
+            operating_mic TEXT,
+            country_iso2 TEXT,
+            country_iso3 TEXT,
+            updated_at TEXT NOT NULL,
+            UNIQUE (provider_id, provider_exchange_code),
+            UNIQUE (provider_exchange_id, provider_id),
+            FOREIGN KEY (provider_id) REFERENCES provider(provider_id),
+            FOREIGN KEY (exchange_id) REFERENCES "exchange"(exchange_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO provider_exchange__new (
+            provider_exchange_id, provider_id, provider_exchange_code,
+            exchange_id, name, country, currency, operating_mic,
+            country_iso2, country_iso3, updated_at
+        )
+        SELECT
+            provider_exchange_id, provider_id, provider_exchange_code,
+            exchange_id, name, country, currency, operating_mic,
+            country_iso2, country_iso3, updated_at
+        FROM provider_exchange
+        """
+    )
+    conn.execute("DROP TABLE provider_exchange")
+    conn.execute("ALTER TABLE provider_exchange__new RENAME TO provider_exchange")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_provider_exchange_exchange
+        ON provider_exchange(exchange_id)
+        """
+    )
+
+    if exchange_provider_view_existed:
+        _create_exchange_provider_view(conn)
+    if catalog_view_existed:
+        _create_provider_listing_catalog_view(conn)
+    if supported_view_existed:
+        _create_supported_tickers_view(conn)
+    if primary_view_existed:
+        _create_primary_provider_listing_catalog_view(conn)
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -6724,6 +7126,9 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_061_market_data_fetch_state_error_invariant,
     _migration_062_primary_provider_listing_catalog_view,
     _migration_063_schema_migrations_pk_and_guard,
+    _migration_064_drop_orphan_issuers_tighten_name,
+    _migration_065_financial_facts_fiscal_period_not_null,
+    _migration_066_provider_exchange_name_country_not_null,
 ]
 
 

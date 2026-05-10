@@ -22,7 +22,7 @@ One row per issuer record created during catalog backfill or listing creation.
 | Column | Type | Null | Key | Notes |
 | --- | --- | --- | --- | --- |
 | `issuer_id` | `INTEGER` | no | PK | issuer surrogate key |
-| `name` | `TEXT` | yes |  | display name |
+| `name` | `TEXT` | no |  | display name; migration 064 dropped 260 legacy orphan NULL-name rows and tightened the column to NOT NULL. The runtime ingest path falls back to the canonical_symbol when the upstream catalog doesn't supply a name. |
 | `description` | `TEXT` | yes |  | long provider-derived description |
 | `sector` | `TEXT` | yes |  | cached business sector |
 | `industry` | `TEXT` | yes |  | cached business industry |
@@ -112,11 +112,9 @@ One row per issuer record created during catalog backfill or listing creation.
 ## Review Notes
 
 - `issuer` intentionally has no provider key. Provider-specific descriptive metadata should remain in provider-owned tables or raw payloads unless promoted deliberately.
-- `name` is intentionally **not** tightened to NOT NULL today. The
-  live DB has 260 legacy issuer rows whose source payload predates the
-  `issuer.name` column; tightening the constraint would require a
-  per-row decision (delete vs backfill from listing-level metadata)
-  that should ship in a dedicated migration once that policy is set.
-  The UNIQUE INDEX on (name, country) does not block this future
-  work — it only constrains future inserts where both columns are
-  populated.
+- Migration 064 deleted 260 legacy orphan rows (NULL name, no
+  provider_listing, no fundamentals, no metrics — only stale
+  market_data) and tightened `name` to NOT NULL. The runtime ingest
+  path supplies `canonical_symbol` as a fallback when the upstream
+  catalog doesn't carry an issuer name; downstream metadata refreshes
+  can later promote the placeholder to the real entity name.

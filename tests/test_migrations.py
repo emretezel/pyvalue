@@ -3332,3 +3332,289 @@ def test_migration_063_idempotent(tmp_path):
 
     assert first == len(MIGRATIONS)
     assert second == 0
+
+
+# ---------------------------------------------------------------------------
+# Migration 064: drop orphan NULL-name issuers and tighten issuer.name.
+# ---------------------------------------------------------------------------
+
+
+def test_migration_064_tightens_issuer_name_not_null(tmp_path):
+    db_path = tmp_path / "issuer-name-064.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO issuer (issuer_id, name) VALUES (99, NULL)")
+
+
+def test_migration_064_drops_orphan_null_name_issuers(tmp_path):
+    """Pre-064 fixtures with NULL-name issuers + matching listings +
+    stale market_data are scrubbed by the migration."""
+
+    db_path = tmp_path / "issuer-orphan-064.sqlite"
+
+    # Bring the DB up to migration 063 (one before 064), then seed an
+    # orphan issuer/listing/market_data triple in the pre-064 shape.
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = OFF")
+    _ensure_migrations_table(conn)
+    conn.commit()
+    for i, migration in enumerate(MIGRATIONS[:63], start=1):
+        conn.execute("BEGIN")
+        migration(conn)
+        conn.execute("DELETE FROM schema_migrations")
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (?)", (i,))
+        conn.commit()
+    # Seed: an orphan issuer (NULL name) with one listing and one
+    # market_data row, plus a populated issuer to confirm it survives.
+    conn.execute(
+        "INSERT INTO issuer (issuer_id, name, country) VALUES (1, 'Acme', 'US')"
+    )
+    conn.execute("INSERT INTO issuer (issuer_id, name) VALUES (99, NULL)")
+    conn.execute(
+        """
+        INSERT INTO listing (listing_id, issuer_id, exchange_id, symbol)
+        VALUES (1, 1, 1, 'ACME'), (99, 99, 1, 'ORPHAN')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO market_data (
+            listing_id, as_of, price, source_provider, updated_at
+        ) VALUES
+            (1, '2026-01-01', 100.0, 'EODHD', '2026-01-02T00:00:00+00:00'),
+            (99, '2026-01-01', 50.0, 'EODHD', '2026-01-02T00:00:00+00:00')
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    apply_migrations(db_path)
+    with sqlite3.connect(db_path) as conn:
+        issuer_rows = sorted(
+            (row[0], row[1])
+            for row in conn.execute("SELECT issuer_id, name FROM issuer").fetchall()
+        )
+        listing_rows = sorted(
+            row[0] for row in conn.execute("SELECT listing_id FROM listing").fetchall()
+        )
+        market_rows = sorted(
+            row[0]
+            for row in conn.execute("SELECT listing_id FROM market_data").fetchall()
+        )
+    assert (99, None) not in issuer_rows
+    assert 99 not in listing_rows
+    assert 99 not in market_rows
+    # The populated issuer/listing/market_data survives.
+    assert (1, "Acme") in issuer_rows
+    assert 1 in listing_rows
+    assert 1 in market_rows
+
+
+def test_migration_064_aborts_when_orphan_has_facts(tmp_path):
+    """If an orphan listing surprisingly carries financial_facts, the
+    migration should abort so the operator can investigate."""
+
+    db_path = tmp_path / "issuer-orphan-with-facts-064.sqlite"
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = OFF")
+    _ensure_migrations_table(conn)
+    conn.commit()
+    for i, migration in enumerate(MIGRATIONS[:63], start=1):
+        conn.execute("BEGIN")
+        migration(conn)
+        conn.execute("DELETE FROM schema_migrations")
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (?)", (i,))
+        conn.commit()
+    conn.execute("INSERT INTO issuer (issuer_id, name) VALUES (99, NULL)")
+    conn.execute(
+        """
+        INSERT INTO listing (listing_id, issuer_id, exchange_id, symbol)
+        VALUES (99, 99, 1, 'ORPHAN')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO financial_facts (
+            listing_id, concept, fiscal_period, end_date, unit, value
+        ) VALUES (99, 'Revenue', 'FY', '2025-12-31', 'USD', 1.0)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(RuntimeError, match="migration 064 aborted"):
+        apply_migrations(db_path)
+
+
+def test_migration_064_idempotent(tmp_path):
+    db_path = tmp_path / "issuer-064-idempotent.sqlite"
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0
+
+
+# ---------------------------------------------------------------------------
+# Migration 065: financial_facts.fiscal_period NOT NULL.
+# ---------------------------------------------------------------------------
+
+
+def test_migration_065_rejects_null_fiscal_period(tmp_path):
+    db_path = tmp_path / "fin-facts-fiscal-065.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        listing_id = _seed_listing(conn)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO financial_facts (
+                    listing_id, concept, fiscal_period, end_date, unit, value
+                ) VALUES (?, 'Revenue', NULL, '2025-12-31', 'USD', 1.0)
+                """,
+                (listing_id,),
+            )
+
+
+def test_migration_065_aborts_on_pre_existing_null_fiscal_period(tmp_path):
+    db_path = tmp_path / "fin-facts-null-fp-065.sqlite"
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = OFF")
+    _ensure_migrations_table(conn)
+    conn.commit()
+    for i, migration in enumerate(MIGRATIONS[:64], start=1):
+        conn.execute("BEGIN")
+        migration(conn)
+        conn.execute("DELETE FROM schema_migrations")
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (?)", (i,))
+        conn.commit()
+    conn.execute("INSERT INTO issuer (issuer_id, name) VALUES (1, 'X')")
+    conn.execute(
+        """
+        INSERT INTO listing (listing_id, issuer_id, exchange_id, symbol)
+        VALUES (1, 1, 1, 'X')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO financial_facts (
+            listing_id, concept, fiscal_period, end_date, unit, value
+        ) VALUES (1, 'Revenue', NULL, '2025-12-31', 'USD', 1.0)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(RuntimeError, match="migration 065 aborted"):
+        apply_migrations(db_path)
+
+
+def test_migration_065_idempotent(tmp_path):
+    db_path = tmp_path / "fin-facts-065-idempotent.sqlite"
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0
+
+
+# ---------------------------------------------------------------------------
+# Migration 066: provider_exchange name + country NOT NULL.
+# ---------------------------------------------------------------------------
+
+
+def test_migration_066_rejects_null_name(tmp_path):
+    db_path = tmp_path / "provider-exchange-null-name-066.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO provider_exchange (
+                    provider_id, provider_exchange_code, exchange_id,
+                    name, country, updated_at
+                ) VALUES (1, 'XYZ', 1, NULL, 'US',
+                          '2026-01-01T00:00:00+00:00')
+                """
+            )
+
+
+def test_migration_066_rejects_null_country(tmp_path):
+    db_path = tmp_path / "provider-exchange-null-country-066.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO provider_exchange (
+                    provider_id, provider_exchange_code, exchange_id,
+                    name, country, updated_at
+                ) VALUES (1, 'XYZ', 1, 'Bourse', NULL,
+                          '2026-01-01T00:00:00+00:00')
+                """
+            )
+
+
+def test_migration_066_backfills_legacy_nulls(tmp_path):
+    """A pre-066 DB with NULL name/country rows must come out clean
+    after the migration backfills sensible placeholders."""
+
+    db_path = tmp_path / "provider-exchange-backfill-066.sqlite"
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = OFF")
+    _ensure_migrations_table(conn)
+    conn.commit()
+    for i, migration in enumerate(MIGRATIONS[:65], start=1):
+        conn.execute("BEGIN")
+        migration(conn)
+        conn.execute("DELETE FROM schema_migrations")
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (?)", (i,))
+        conn.commit()
+    # Seed two rows with NULL name and NULL country.
+    conn.execute(
+        """
+        INSERT INTO provider_exchange (
+            provider_id, provider_exchange_code, exchange_id,
+            name, country, updated_at
+        ) VALUES
+            (1, 'LEGACY1', 1, NULL, NULL, '2026-01-01T00:00:00+00:00'),
+            (1, 'LEGACY2', 1, '', '', '2026-01-01T00:00:00+00:00')
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    apply_migrations(db_path)
+    with sqlite3.connect(db_path) as conn:
+        rows = sorted(
+            (row[0], row[1])
+            for row in conn.execute(
+                "SELECT name, country FROM provider_exchange "
+                "WHERE provider_exchange_code IN ('LEGACY1', 'LEGACY2')"
+            ).fetchall()
+        )
+    assert rows == [
+        ("LEGACY1", "Unknown"),
+        ("LEGACY2", "Unknown"),
+    ]
+
+
+def test_migration_066_idempotent(tmp_path):
+    db_path = tmp_path / "provider-exchange-066-idempotent.sqlite"
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0

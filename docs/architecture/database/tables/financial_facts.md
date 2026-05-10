@@ -28,7 +28,7 @@ meaningful filing accession value.
 | `listing_id` | `INTEGER` | no | PK, idx | canonical listing link |
 | `cik` | `TEXT` | yes |  | SEC identifier when available |
 | `concept` | `TEXT` | no | PK, idx | normalized concept |
-| `fiscal_period` | `TEXT` | yes | PK | FY, Q1, TTM, and so on |
+| `fiscal_period` | `TEXT` | no | PK | FY, Q1, TTM, and so on. Migration 065 tightened to NOT NULL after audit confirmed zero NULL rows on the live DB; the runtime FactRecord default is `'INSTANT'`. |
 | `end_date` | `TEXT` | no | PK, idx | fact period end |
 | `unit` | `TEXT` | no | PK | unit or semantic label. CHECK enforces non-empty trimmed text with no internal whitespace |
 | `value` | `REAL` | no |  | numeric fact value |
