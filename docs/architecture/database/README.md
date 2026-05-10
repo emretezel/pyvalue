@@ -11,17 +11,18 @@ Use it in this order:
 
 Snapshot caveat:
 
-- The documented schema target is version `40`; the migrated `data/pyvalue.db`
+- The documented schema target is version `43`; the migrated `data/pyvalue.db`
   still carries a verified `fundamentals_raw` preservation discrepancy:
   `75,848` current rows versus `77,045` in the pre-migration backup.
 - Treat the `fundamentals_raw` counts and first-five samples in this section as documentation of the current live file, not as proof that the migration preserved every raw payload.
 
 Important structural notes:
 
-- The catalog layer now uses enforced foreign keys across `provider`, `exchange`, `provider_exchange`, `issuer`, `listing`, and `provider_listing`.
+- The catalog layer now uses enforced foreign keys across `provider`, `exchange`, `provider_exchange`, `issuer`, `listing`, and `provider_listing`. As of migration 041, `metrics` and `metric_compute_status` also declare `FOREIGN KEY (listing_id) REFERENCES listing(listing_id)` and `metrics` carries `CHECK` constraints on `unit_kind` and the monetary-only-currency rule. Migration 043 adds the same FK to `financial_facts` and tightens its primary key to `(listing_id, concept, fiscal_period, end_date, unit)` (the previous PK trailed `accn`, which is NULL on 99.94% of rows and never disambiguates duplicates).
 - `listing` is the canonical identity root for downstream facts, market data, metrics, and listing status.
 - `provider_listing` is the operational root for provider-scoped ingestion and market-data workflows.
 - `fundamentals_raw`, `metrics`, and `metric_compute_status` each store the latest row per logical key, not a full history.
+- Migrations are the **single source of truth** for schema (tables, indexes, and views). The `provider_listing_catalog` and `supported_tickers` views are owned by migration 042; runtime code in `storage.py` no longer issues `CREATE VIEW`.
 
 Table groups:
 
@@ -49,6 +50,11 @@ Table groups:
   - [fx_rates](tables/fx_rates.md)
 - Housekeeping
   - [schema_migrations](tables/schema_migrations.md)
+
+Views:
+
+- `provider_listing_catalog` — joins `provider_listing` to `provider`, `provider_exchange`, `listing`, `issuer`, and `exchange` to expose the canonical provider-scoped catalog used by ingestion, screening, and FX paths. Owned by migration 042.
+- `supported_tickers` — projection of `provider_listing_catalog` retained for compatibility with code paths that read the historical name. Owned by migration 042.
 
 Supporting review pages:
 

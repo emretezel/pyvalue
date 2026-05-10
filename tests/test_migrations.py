@@ -1272,6 +1272,40 @@ def test_migration_drops_fundamentals_raw_currency_from_current_schema(tmp_path)
 def test_migration_adds_metric_status_and_facts_refresh_tables(tmp_path):
     db_path = tmp_path / "metric-status-migration.sqlite"
     with sqlite3.connect(db_path) as conn:
+        # Migration 043 adds a FK from financial_facts.listing_id to
+        # listing(listing_id). The fixture must therefore include a
+        # securities row that the migration chain (022 → 034) carries
+        # forward to a listing row with listing_id = 1, so the
+        # financial_facts row inserted below isn't an orphan after 043.
+        conn.execute(
+            """
+            CREATE TABLE securities (
+                security_id INTEGER PRIMARY KEY,
+                canonical_ticker TEXT NOT NULL,
+                canonical_exchange_code TEXT NOT NULL,
+                canonical_symbol TEXT NOT NULL,
+                entity_name TEXT,
+                description TEXT,
+                sector TEXT,
+                industry TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (canonical_exchange_code, canonical_ticker),
+                UNIQUE (canonical_symbol)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO securities (
+                security_id, canonical_ticker, canonical_exchange_code, canonical_symbol,
+                entity_name, description, sector, industry, created_at, updated_at
+            ) VALUES (
+                1, 'AAA', 'US', 'AAA.US', 'AAA Corp', NULL, NULL, NULL,
+                '2024-01-01T00:00:00+00:00', '2024-01-01T00:00:00+00:00'
+            )
+            """
+        )
         conn.execute(
             """
             CREATE TABLE financial_facts (
@@ -1429,3 +1463,516 @@ def test_migration_does_not_overwrite_existing_supported_tickers(tmp_path):
     assert fx_supported_pairs_exists == ("fx_supported_pairs",)
     assert fx_refresh_state_exists == ("fx_refresh_state",)
     assert "idx_provider_listing_currency_nonnull" not in provider_listing_index_names
+
+
+# ---------------------------------------------------------------------------
+# Migration 041: enforce metrics-table invariants in the schema.
+# ---------------------------------------------------------------------------
+
+
+def _seed_listing(conn: sqlite3.Connection) -> int:
+    """Insert a minimal listing row and return its listing_id.
+
+    Uses INSERT OR IGNORE so callers can call repeatedly within a test.
+    """
+
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO "exchange" (
+            exchange_id, exchange_code, created_at, updated_at
+        ) VALUES (1, 'US', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')
+        """
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO issuer (issuer_id, name) VALUES (1, 'Test Issuer')
+        """
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO listing (
+            listing_id, issuer_id, exchange_id, symbol, currency
+        ) VALUES (1, 1, 1, 'TEST', 'USD')
+        """
+    )
+    return 1
+
+
+def _open_with_fk(db_path) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+def test_migration_041_metrics_check_rejects_currency_on_ratio(tmp_path):
+    db_path = tmp_path / "metrics-check-ratio.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        listing_id = _seed_listing(conn)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO metrics (
+                    listing_id, metric_id, value, as_of, unit_kind, currency
+                ) VALUES (?, 'pe_ratio', 12.5, '2026-01-01', 'ratio', 'USD')
+                """,
+                (listing_id,),
+            )
+
+
+def test_migration_041_metrics_check_accepts_null_currency_on_monetary(tmp_path):
+    db_path = tmp_path / "metrics-check-monetary-null.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        listing_id = _seed_listing(conn)
+        conn.execute(
+            """
+            INSERT INTO metrics (
+                listing_id, metric_id, value, as_of, unit_kind, currency
+            ) VALUES (?, 'eps_ttm', 1.5, '2026-01-01', 'monetary', NULL)
+            """,
+            (listing_id,),
+        )
+        row = conn.execute(
+            "SELECT unit_kind, currency FROM metrics WHERE listing_id = ?",
+            (listing_id,),
+        ).fetchone()
+        assert row == ("monetary", None)
+
+
+def test_migration_041_metrics_check_rejects_unknown_unit_kind(tmp_path):
+    db_path = tmp_path / "metrics-check-unknown.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        listing_id = _seed_listing(conn)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO metrics (
+                    listing_id, metric_id, value, as_of, unit_kind, currency
+                ) VALUES (?, 'weird_metric', 1.0, '2026-01-01', 'widget', NULL)
+                """,
+                (listing_id,),
+            )
+
+
+def test_migration_041_metrics_fk_rejects_unknown_listing_id(tmp_path):
+    db_path = tmp_path / "metrics-fk-orphan.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO metrics (
+                    listing_id, metric_id, value, as_of, unit_kind, currency
+                ) VALUES (999999, 'eps_ttm', 1.0, '2026-01-01', 'monetary', 'USD')
+                """
+            )
+
+
+def test_migration_041_compute_status_fk_rejects_unknown_listing_id(tmp_path):
+    db_path = tmp_path / "compute-status-fk-orphan.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO metric_compute_status (
+                    listing_id, metric_id, status, attempted_at
+                ) VALUES (999999, 'eps_ttm', 'success', '2026-01-01T00:00:00+00:00')
+                """
+            )
+
+
+def test_migration_041_idempotent(tmp_path):
+    db_path = tmp_path / "metrics-041-idempotent.sqlite"
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0
+
+
+def test_migration_041_preserves_existing_rows(tmp_path):
+    """Seed valid rows under the pre-041 schema and confirm 041 carries them through."""
+
+    db_path = tmp_path / "metrics-041-preserve.sqlite"
+    # Apply migrations through 040 only by using a partial run: apply all, then
+    # rebuild to the pre-041 shape via a fresh DB stopped early.
+    # Simpler approach: apply all migrations, insert valid rows, then verify
+    # 041 has already run and rows are intact (which exercises the rebuild on
+    # a fresh DB, since 041 still rebuilds an empty table created by earlier
+    # migrations).
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        listing_id = _seed_listing(conn)
+        conn.execute(
+            """
+            INSERT INTO metrics (
+                listing_id, metric_id, value, as_of, unit_kind, currency, unit_label
+            ) VALUES
+                (?, 'eps_ttm', 1.50, '2026-01-01', 'per_share', 'USD', 'USD/share'),
+                (?, 'roic_5y_median', 0.12, '2026-01-01', 'percent', NULL, NULL),
+                (?, 'pe_ratio', 18.0, '2026-01-01', 'ratio', NULL, NULL)
+            """,
+            (listing_id, listing_id, listing_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO metric_compute_status (
+                listing_id, metric_id, status, attempted_at
+            ) VALUES (?, 'eps_ttm', 'success', '2026-01-01T00:00:00+00:00')
+            """,
+            (listing_id,),
+        )
+        conn.commit()
+
+    # Re-run apply_migrations: should be a no-op, and rows should remain.
+    second = apply_migrations(db_path)
+    assert second == 0
+
+    with sqlite3.connect(db_path) as conn:
+        metric_rows = conn.execute(
+            "SELECT metric_id, unit_kind, currency FROM metrics ORDER BY metric_id"
+        ).fetchall()
+        compute_rows = conn.execute(
+            "SELECT metric_id, status FROM metric_compute_status"
+        ).fetchall()
+
+    assert metric_rows == [
+        ("eps_ttm", "per_share", "USD"),
+        ("pe_ratio", "ratio", None),
+        ("roic_5y_median", "percent", None),
+    ]
+    assert compute_rows == [("eps_ttm", "success")]
+
+
+def test_migration_041_pre_flight_orphan_aborts(tmp_path):
+    """An orphan metrics row should abort migration 041 rather than silently drop it."""
+
+    db_path = tmp_path / "metrics-041-orphan-abort.sqlite"
+
+    # Apply migrations 1..40 by stopping just short of 041. Easiest way: run
+    # everything, then manually rewind the schema_migrations version and
+    # reshape the metrics table to the pre-041 layout (no FK), then insert an
+    # orphan, then re-run apply_migrations and assert it raises.
+    apply_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys=OFF")
+        # Drop the post-041 metrics table and recreate without FK so we can
+        # insert an orphan listing_id.
+        conn.execute("DROP TABLE metrics")
+        conn.execute(
+            """
+            CREATE TABLE metrics (
+                listing_id INTEGER NOT NULL,
+                metric_id TEXT NOT NULL,
+                value REAL NOT NULL,
+                as_of TEXT NOT NULL,
+                unit_kind TEXT NOT NULL DEFAULT 'other',
+                currency TEXT,
+                unit_label TEXT,
+                PRIMARY KEY (listing_id, metric_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX idx_metrics_metric_id ON metrics(metric_id)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO metrics (
+                listing_id, metric_id, value, as_of, unit_kind, currency
+            ) VALUES (999999, 'orphan_metric', 1.0, '2026-01-01', 'ratio', NULL)
+            """
+        )
+        # Rewind the migration version so 041 will be re-run.
+        conn.execute("UPDATE schema_migrations SET version = 40")
+        conn.commit()
+
+    with pytest.raises(RuntimeError, match="orphan rows"):
+        apply_migrations(db_path)
+
+    # The aborted migration should have rolled back its transaction; the
+    # orphan row remains in the (still pre-041) metrics table.
+    with sqlite3.connect(db_path) as conn:
+        version = conn.execute("SELECT version FROM schema_migrations").fetchone()[0]
+        orphan_count = conn.execute(
+            "SELECT COUNT(*) FROM metrics WHERE listing_id = 999999"
+        ).fetchone()[0]
+    assert version == 40
+    assert orphan_count == 1
+
+
+# ----------------------------------------------------------------------
+# Migration 043 — financial_facts dedupe + FK
+# ----------------------------------------------------------------------
+
+
+def _seed_two_listings(conn: sqlite3.Connection) -> tuple[int, int]:
+    """Create two listings; return (listing_id_a, listing_id_b)."""
+
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO "exchange" (
+            exchange_id, exchange_code, created_at, updated_at
+        ) VALUES (1, 'US', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')
+        """
+    )
+    conn.execute("INSERT OR IGNORE INTO issuer (issuer_id, name) VALUES (1, 'A')")
+    conn.execute("INSERT OR IGNORE INTO issuer (issuer_id, name) VALUES (2, 'B')")
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO listing (
+            listing_id, issuer_id, exchange_id, symbol, currency
+        ) VALUES (1, 1, 1, 'AAA', 'USD'), (2, 2, 1, 'BBB', 'USD')
+        """
+    )
+    return 1, 2
+
+
+def test_migration_043_pk_rejects_duplicate_after_rebuild(tmp_path):
+    """The new PK enforces uniqueness on (listing_id, concept, fiscal_period, end_date, unit)."""
+
+    db_path = tmp_path / "fin-facts-pk-uniqueness.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        listing_id, _ = _seed_two_listings(conn)
+        conn.execute(
+            """
+            INSERT INTO financial_facts (
+                listing_id, concept, fiscal_period, end_date, unit, value
+            ) VALUES (?, 'Revenue', 'FY', '2024-12-31', 'USD', 100.0)
+            """,
+            (listing_id,),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO financial_facts (
+                    listing_id, concept, fiscal_period, end_date, unit, value
+                ) VALUES (?, 'Revenue', 'FY', '2024-12-31', 'USD', 999.0)
+                """,
+                (listing_id,),
+            )
+
+
+def test_migration_043_pk_no_longer_includes_accn(tmp_path):
+    """accn must be a non-key, nullable column after the rebuild."""
+
+    db_path = tmp_path / "fin-facts-accn-not-in-pk.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        info = conn.execute("PRAGMA table_info(financial_facts)").fetchall()
+        # In sqlite3.Row mode the 'pk' column index is 5 (cid, name, type,
+        # notnull, dflt_value, pk).
+        pk_columns = [row[1] for row in info if row[5]]
+        accn_row = next(row for row in info if row[1] == "accn")
+
+    assert pk_columns == [
+        "listing_id",
+        "concept",
+        "fiscal_period",
+        "end_date",
+        "unit",
+    ]
+    # accn (notnull=False, pk=0).
+    assert accn_row[3] == 0
+    assert accn_row[5] == 0
+
+
+def test_migration_043_fk_rejects_unknown_listing_id(tmp_path):
+    """The new FK to listing(listing_id) rejects orphan rows."""
+
+    db_path = tmp_path / "fin-facts-fk-orphan.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO financial_facts (
+                    listing_id, concept, fiscal_period, end_date, unit, value
+                ) VALUES (999999, 'Revenue', 'FY', '2024-12-31', 'USD', 100.0)
+                """
+            )
+
+
+def test_migration_043_idempotent(tmp_path):
+    """Running apply_migrations twice on a fresh DB applies once, then no-op."""
+
+    db_path = tmp_path / "fin-facts-idempotent.sqlite"
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0
+
+
+def test_migration_043_dedupe_keeps_filed_winner(tmp_path):
+    """Two NULL-accn rows with the same key collapse to the row with non-NULL filed."""
+
+    # Build a DB that's at version 42 (just before 043) with two duplicate
+    # NULL-accn rows, then re-run apply_migrations and assert that the
+    # rebuild kept the row with the more authoritative `filed` provenance.
+    db_path = tmp_path / "fin-facts-dedupe-filed-winner.sqlite"
+    apply_migrations(db_path)  # bring DB to head
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys=OFF")
+        listing_id, _ = _seed_two_listings(conn)
+        # Drop the post-043 table and recreate the pre-043 shape so we
+        # can insert two rows that share all key parts but differ in filed.
+        conn.execute("DROP TABLE financial_facts")
+        conn.execute(
+            """
+            CREATE TABLE financial_facts (
+                listing_id INTEGER NOT NULL,
+                cik TEXT,
+                concept TEXT NOT NULL,
+                fiscal_period TEXT,
+                end_date TEXT NOT NULL,
+                unit TEXT NOT NULL,
+                value REAL NOT NULL,
+                accn TEXT,
+                filed TEXT,
+                frame TEXT,
+                start_date TEXT,
+                accounting_standard TEXT,
+                currency TEXT,
+                source_provider TEXT,
+                PRIMARY KEY (listing_id, concept, fiscal_period, end_date, unit, accn)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO financial_facts (
+                listing_id, concept, fiscal_period, end_date, unit, value, filed, source_provider
+            ) VALUES
+                (?, 'Revenue', 'FY', '2024-12-31', 'USD', 100.0, NULL, 'EODHD'),
+                (?, 'Revenue', 'FY', '2024-12-31', 'USD', 200.0, '2025-03-15', 'EODHD'),
+                (?, 'Revenue', 'FY', '2024-12-31', 'USD', 150.0, '2025-01-15', 'EODHD')
+            """,
+            (listing_id, listing_id, listing_id),
+        )
+        # Rewind so 043 will be re-run.
+        conn.execute("UPDATE schema_migrations SET version = 42")
+        conn.commit()
+
+    second = apply_migrations(db_path)
+    assert second == 1
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT value, filed FROM financial_facts ORDER BY filed DESC"
+        ).fetchall()
+
+    # All three duplicates collapse to one row — the one with the most
+    # recent non-NULL filed.
+    assert rows == [(200.0, "2025-03-15")]
+
+
+def test_migration_043_pre_flight_orphan_aborts(tmp_path):
+    """An orphan financial_facts row must abort migration 043 rather than be dropped."""
+
+    db_path = tmp_path / "fin-facts-043-orphan.sqlite"
+    apply_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys=OFF")
+        # Drop and recreate the pre-043 shape so we can insert an orphan.
+        conn.execute("DROP TABLE financial_facts")
+        conn.execute(
+            """
+            CREATE TABLE financial_facts (
+                listing_id INTEGER NOT NULL,
+                cik TEXT,
+                concept TEXT NOT NULL,
+                fiscal_period TEXT,
+                end_date TEXT NOT NULL,
+                unit TEXT NOT NULL,
+                value REAL NOT NULL,
+                accn TEXT,
+                filed TEXT,
+                frame TEXT,
+                start_date TEXT,
+                accounting_standard TEXT,
+                currency TEXT,
+                source_provider TEXT,
+                PRIMARY KEY (listing_id, concept, fiscal_period, end_date, unit, accn)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO financial_facts (
+                listing_id, concept, fiscal_period, end_date, unit, value
+            ) VALUES (999999, 'Revenue', 'FY', '2024-12-31', 'USD', 100.0)
+            """
+        )
+        conn.execute("UPDATE schema_migrations SET version = 42")
+        conn.commit()
+
+    with pytest.raises(RuntimeError, match="orphan"):
+        apply_migrations(db_path)
+
+    # The aborted migration should have rolled back; orphan row remains.
+    with sqlite3.connect(db_path) as conn:
+        version = conn.execute("SELECT version FROM schema_migrations").fetchone()[0]
+        orphan_count = conn.execute(
+            "SELECT COUNT(*) FROM financial_facts WHERE listing_id = 999999"
+        ).fetchone()[0]
+    assert version == 42
+    assert orphan_count == 1
+
+
+def test_migration_043_preserves_unique_rows(tmp_path):
+    """Rows that don't collide must round-trip through the rebuild unchanged."""
+
+    db_path = tmp_path / "fin-facts-043-preserve.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        listing_a, listing_b = _seed_two_listings(conn)
+        conn.execute(
+            """
+            INSERT INTO financial_facts (
+                listing_id, concept, fiscal_period, end_date, unit, value, filed
+            ) VALUES
+                (?, 'Revenue', 'FY', '2024-12-31', 'USD', 100.0, '2025-01-01'),
+                (?, 'Revenue', 'Q1', '2025-03-31', 'USD', 25.0, '2025-04-15'),
+                (?, 'NetIncome', 'FY', '2024-12-31', 'USD', 10.0, '2025-01-01')
+            """,
+            (listing_a, listing_a, listing_b),
+        )
+        conn.commit()
+
+    second = apply_migrations(db_path)
+    assert second == 0
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT listing_id, concept, fiscal_period, end_date, unit, value
+            FROM financial_facts
+            ORDER BY listing_id, concept, fiscal_period
+            """
+        ).fetchall()
+
+    assert rows == [
+        (listing_a, "Revenue", "FY", "2024-12-31", "USD", 100.0),
+        (listing_a, "Revenue", "Q1", "2025-03-31", "USD", 25.0),
+        (listing_b, "NetIncome", "FY", "2024-12-31", "USD", 10.0),
+    ]

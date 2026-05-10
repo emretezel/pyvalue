@@ -4070,6 +4070,404 @@ def _migration_040_pure_fundamentals_state(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migration_041_add_metrics_constraints(conn: sqlite3.Connection) -> None:
+    """Enforce metrics-table invariants in the schema.
+
+    Adds:
+      * ``FOREIGN KEY (listing_id) REFERENCES listing(listing_id)`` to ``metrics``
+        and ``metric_compute_status`` (every other listing-rooted table already
+        declares it).
+      * Two CHECK constraints on ``metrics``:
+          - ``unit_kind`` must be one of the documented metric unit kinds.
+          - ``currency`` is non-NULL only when ``unit_kind`` is monetary
+            (``'monetary'`` or ``'per_share'``). The rule is one-directional:
+            monetary kinds may still have NULL currency for unresolved cases,
+            matching ``metric_currency_or_none()`` in ``pyvalue.currency``.
+
+    The migration aborts cleanly if either table contains rows whose
+    ``listing_id`` does not exist in ``listing``; orphans must be cleaned
+    before the rebuild can proceed (see ``purge_secondary_security_data``).
+    """
+
+    # If neither table exists yet (fresh database before earlier migrations
+    # created them), nothing to do here. Earlier migrations are responsible
+    # for creating the initial tables.
+    if not _table_exists(conn, "metrics") and not _table_exists(
+        conn, "metric_compute_status"
+    ):
+        return
+
+    # Pre-flight: refuse to migrate if any orphan rows exist. Failing loud is
+    # better than silently dropping rows during the rebuild.
+    orphan_counts = []
+    for table_name in ("metrics", "metric_compute_status"):
+        if not _table_exists(conn, table_name):
+            continue
+        count = conn.execute(
+            f"""
+            SELECT COUNT(*) FROM {table_name}
+            WHERE listing_id NOT IN (SELECT listing_id FROM listing)
+            """
+        ).fetchone()[0]
+        if count:
+            orphan_counts.append((table_name, count))
+    if orphan_counts:
+        details = ", ".join(f"{name}={count}" for name, count in orphan_counts)
+        raise RuntimeError(
+            "migration 041 aborted: orphan rows reference missing listings "
+            f"({details}). Clean them via purge_secondary_security_data() "
+            "or a targeted DELETE before retrying."
+        )
+
+    # Defer FK checks within the rebuild so intermediate states (the temp
+    # table, the post-INSERT moment) don't trip enforcement. The transaction
+    # commit at the end of apply_migrations() will run the deferred checks.
+    conn.execute("PRAGMA defer_foreign_keys = ON")
+
+    if _table_exists(conn, "metrics"):
+        conn.execute("DROP INDEX IF EXISTS idx_metrics_metric_id")
+        conn.execute(
+            """
+            CREATE TABLE metrics__new (
+                listing_id INTEGER NOT NULL,
+                metric_id TEXT NOT NULL,
+                value REAL NOT NULL,
+                as_of TEXT NOT NULL,
+                unit_kind TEXT NOT NULL DEFAULT 'other',
+                currency TEXT,
+                unit_label TEXT,
+                PRIMARY KEY (listing_id, metric_id),
+                FOREIGN KEY (listing_id) REFERENCES listing(listing_id),
+                CHECK (
+                    unit_kind IN (
+                        'monetary', 'per_share', 'ratio', 'percent',
+                        'multiple', 'count', 'other'
+                    )
+                ),
+                CHECK (
+                    currency IS NULL
+                    OR unit_kind IN ('monetary', 'per_share')
+                )
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO metrics__new (
+                listing_id, metric_id, value, as_of, unit_kind, currency, unit_label
+            )
+            SELECT
+                listing_id, metric_id, value, as_of, unit_kind, currency, unit_label
+            FROM metrics
+            """
+        )
+        conn.execute("DROP TABLE metrics")
+        conn.execute("ALTER TABLE metrics__new RENAME TO metrics")
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_metrics_metric_id
+            ON metrics(metric_id)
+            """
+        )
+
+    if _table_exists(conn, "metric_compute_status"):
+        conn.execute("DROP INDEX IF EXISTS idx_metric_compute_status_metric_status")
+        conn.execute(
+            """
+            CREATE TABLE metric_compute_status__new (
+                listing_id INTEGER NOT NULL,
+                metric_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                reason_code TEXT,
+                reason_detail TEXT,
+                attempted_at TEXT NOT NULL,
+                value_as_of TEXT,
+                facts_refreshed_at TEXT,
+                market_data_as_of TEXT,
+                market_data_updated_at TEXT,
+                PRIMARY KEY (listing_id, metric_id),
+                FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO metric_compute_status__new (
+                listing_id, metric_id, status, reason_code, reason_detail,
+                attempted_at, value_as_of, facts_refreshed_at,
+                market_data_as_of, market_data_updated_at
+            )
+            SELECT
+                listing_id, metric_id, status, reason_code, reason_detail,
+                attempted_at, value_as_of, facts_refreshed_at,
+                market_data_as_of, market_data_updated_at
+            FROM metric_compute_status
+            """
+        )
+        conn.execute("DROP TABLE metric_compute_status")
+        conn.execute(
+            "ALTER TABLE metric_compute_status__new RENAME TO metric_compute_status"
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_metric_compute_status_metric_status
+            ON metric_compute_status(metric_id, status)
+            """
+        )
+
+    # Verify the rebuild left the database self-consistent. foreign_key_check
+    # returns one row per offending FK violation; integrity_check returns 'ok'
+    # on a healthy database.
+    fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if fk_violations:
+        raise RuntimeError(
+            f"migration 041 left foreign key violations: {fk_violations!r}"
+        )
+    integrity = conn.execute("PRAGMA integrity_check").fetchone()
+    if integrity is None or integrity[0] != "ok":
+        raise RuntimeError(f"migration 041 integrity_check failed: {integrity!r}")
+
+
+def _migration_043_financial_facts_dedupe_and_fk(conn: sqlite3.Connection) -> None:
+    """Drop ``accn`` from the ``financial_facts`` PK, dedupe collisions, add FK.
+
+    The previous PK was ``(listing_id, concept, fiscal_period, end_date,
+    unit, accn)``. Audit findings on the live DB:
+
+    * 103,126,997 of 103,188,287 rows (99.94%) have ``accn IS NULL``;
+      the bulk EODHD source never populates the column.
+    * Across the entire table, **zero** ``(listing_id, concept,
+      fiscal_period, end_date, unit)`` groups are disambiguated by
+      multiple distinct non-NULL ``accn`` values — ``accn`` therefore
+      plays no role in de-facto uniqueness.
+    * Because SQLite treats ``NULL <> NULL`` for PK uniqueness,
+      24,837 duplicate-key groups currently coexist with the same
+      non-``accn`` key parts. Every duplicate is from EODHD.
+
+    This migration:
+
+    1. Builds a new table whose PK is
+       ``(listing_id, concept, fiscal_period, end_date, unit)`` and
+       declares ``FOREIGN KEY (listing_id) REFERENCES listing(listing_id)``,
+       closing the missing-FK gap that audit finding 3.2 flagged.
+    2. ``accn`` remains a nullable, non-key column for the ~89K rows that
+       carry meaningful filing accession values.
+    3. ``fiscal_period`` remains nullable in the schema. The live DB has
+       zero NULL-fiscal_period rows today, but ``FactRecord`` allows
+       ``fiscal_period = None`` and several callers rely on that, so
+       enforcing ``NOT NULL`` here would be an API break for marginal
+       benefit. Two rows that share every other PK column and both have
+       ``fiscal_period IS NULL`` could in principle coexist (NULL ≠ NULL
+       in PK semantics), but no such rows exist on the live DB.
+    4. Deduplicates the 24,837 colliding groups via ``ROW_NUMBER()``,
+       keeping the row with the most authoritative provenance:
+       non-NULL ``filed`` first, then ``filed DESC``, then
+       ``rowid ASC`` for a deterministic tie-break.
+
+    The migration aborts cleanly if any orphan rows (``listing_id`` not
+    present in ``listing``) exist; orphans must be cleaned before the FK
+    can be added.
+    """
+
+    if not _table_exists(conn, "financial_facts"):
+        return
+
+    orphan_count = conn.execute(
+        """
+        SELECT COUNT(*) FROM financial_facts
+        WHERE listing_id NOT IN (SELECT listing_id FROM listing)
+        """
+    ).fetchone()[0]
+    if orphan_count:
+        raise RuntimeError(
+            f"migration 043 aborted: {orphan_count} orphan financial_facts "
+            "rows reference missing listings. Clean these before retrying."
+        )
+
+    # Defer FK checks within the rebuild so intermediate states don't
+    # trip enforcement; the transaction commit at the end of
+    # apply_migrations() runs the deferred checks.
+    conn.execute("PRAGMA defer_foreign_keys = ON")
+
+    conn.execute("DROP INDEX IF EXISTS idx_fin_facts_concept")
+    conn.execute("DROP INDEX IF EXISTS idx_fin_facts_security_concept")
+    conn.execute("DROP INDEX IF EXISTS idx_fin_facts_security_concept_latest")
+    conn.execute("DROP INDEX IF EXISTS idx_fin_facts_currency_nonnull")
+
+    conn.execute(
+        """
+        CREATE TABLE financial_facts__new (
+            listing_id INTEGER NOT NULL,
+            cik TEXT,
+            concept TEXT NOT NULL,
+            fiscal_period TEXT,
+            end_date TEXT NOT NULL,
+            unit TEXT NOT NULL,
+            value REAL NOT NULL,
+            accn TEXT,
+            filed TEXT,
+            frame TEXT,
+            start_date TEXT,
+            accounting_standard TEXT,
+            currency TEXT,
+            source_provider TEXT,
+            PRIMARY KEY (listing_id, concept, fiscal_period, end_date, unit),
+            FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
+        )
+        """
+    )
+
+    # Dedupe within each (listing_id, concept, fiscal_period, end_date,
+    # unit) group, keeping a single winning row per group:
+    #   1. Prefer rows with a non-NULL `filed` over rows without one.
+    #   2. Among those, prefer the most recently filed.
+    #   3. Tie-break by rowid ASC for determinism.
+    # ``rowid`` is exposed by ``financial_facts.rowid`` even though the
+    # table has an explicit composite PK — SQLite always tracks an
+    # implicit rowid unless ``WITHOUT ROWID`` is used.
+    conn.execute(
+        """
+        INSERT INTO financial_facts__new (
+            listing_id, cik, concept, fiscal_period, end_date, unit,
+            value, accn, filed, frame, start_date, accounting_standard,
+            currency, source_provider
+        )
+        SELECT
+            listing_id, cik, concept, fiscal_period, end_date, unit,
+            value, accn, filed, frame, start_date, accounting_standard,
+            currency, source_provider
+        FROM (
+            SELECT
+                financial_facts.*,
+                ROW_NUMBER() OVER (
+                    PARTITION BY listing_id, concept, fiscal_period, end_date, unit
+                    ORDER BY
+                        (filed IS NOT NULL) DESC,
+                        filed DESC,
+                        financial_facts.rowid ASC
+                ) AS rn
+            FROM financial_facts
+        )
+        WHERE rn = 1
+        """
+    )
+
+    conn.execute("DROP TABLE financial_facts")
+    conn.execute("ALTER TABLE financial_facts__new RENAME TO financial_facts")
+
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fin_facts_concept
+        ON financial_facts(concept)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fin_facts_security_concept
+        ON financial_facts(listing_id, concept)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fin_facts_security_concept_latest
+        ON financial_facts(listing_id, concept, end_date DESC, filed DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fin_facts_currency_nonnull
+        ON financial_facts(currency)
+        WHERE currency IS NOT NULL
+        """
+    )
+
+    fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if fk_violations:
+        raise RuntimeError(
+            f"migration 043 left foreign key violations: {fk_violations!r}"
+        )
+
+
+def _migration_042_persist_provider_listing_views(conn: sqlite3.Connection) -> None:
+    """Move provider-listing view DDL from runtime code into the schema.
+
+    Historically ``_ensure_provider_listing_catalog_views()`` in
+    ``storage.py`` created ``provider_listing_catalog`` and
+    ``supported_tickers`` at runtime, gated behind various
+    ``initialize_schema()`` paths. That left the views off the migration
+    record and out of the persisted schema for any DB whose application
+    boot path did not touch one of those repositories (per audit, the
+    live DB held zero views). Splitting schema ownership between
+    migrations and runtime code is the root cause of the constraint-drift
+    issues that motivated migration 041; migration 042 closes the same
+    door for views.
+
+    From this point onward, view definitions for ``provider_listing_catalog``
+    and ``supported_tickers`` are owned by migrations. Future shape
+    changes ship as a new migration, not as a runtime ``DROP VIEW`` /
+    ``CREATE VIEW`` pair in ``storage.py``.
+    """
+
+    # Drop any transient views the legacy runtime code may have created
+    # earlier in this DB's lifetime so the CREATE VIEW below is the
+    # single canonical definition.
+    conn.execute("DROP VIEW IF EXISTS supported_tickers")
+    conn.execute("DROP VIEW IF EXISTS provider_listing_catalog")
+
+    conn.execute(
+        """
+        CREATE VIEW provider_listing_catalog AS
+        SELECT
+            pl.provider_listing_id,
+            p.provider_id,
+            p.provider_code AS provider,
+            px.provider_exchange_id,
+            px.provider_exchange_code,
+            CASE
+                WHEN p.provider_code = 'SEC' THEN pl.provider_symbol || '.US'
+                ELSE pl.provider_symbol || '.' || px.provider_exchange_code
+            END AS provider_symbol,
+            pl.provider_symbol AS provider_ticker,
+            l.listing_id AS security_id,
+            e.exchange_code AS listing_exchange,
+            i.name AS security_name,
+            NULL AS security_type,
+            i.country AS country,
+            l.currency AS currency,
+            l.primary_listing_status,
+            NULL AS isin,
+            NULL AS updated_at
+        FROM provider_listing pl
+        JOIN provider p ON p.provider_id = pl.provider_id
+        JOIN provider_exchange px
+          ON px.provider_exchange_id = pl.provider_exchange_id
+        JOIN listing l ON l.listing_id = pl.listing_id
+        JOIN issuer i ON i.issuer_id = l.issuer_id
+        JOIN "exchange" e ON e.exchange_id = l.exchange_id
+        """
+    )
+    conn.execute(
+        """
+        CREATE VIEW supported_tickers AS
+        SELECT
+            provider,
+            provider_symbol,
+            provider_ticker,
+            provider_exchange_code,
+            security_id,
+            listing_exchange,
+            security_name,
+            security_type,
+            country,
+            currency,
+            primary_listing_status,
+            isin,
+            updated_at
+        FROM provider_listing_catalog
+        """
+    )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -4111,6 +4509,9 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_038_move_primary_listing_status_to_listing,
     _migration_039_canonical_listing_quote_currency,
     _migration_040_pure_fundamentals_state,
+    _migration_041_add_metrics_constraints,
+    _migration_042_persist_provider_listing_views,
+    _migration_043_financial_facts_dedupe_and_fk,
 ]
 
 
