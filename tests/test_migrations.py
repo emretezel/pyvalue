@@ -2283,3 +2283,85 @@ def test_migration_050_fx_refresh_state_fk_rejects_unknown_provider(tmp_path):
                 ) VALUES ('NOT_A_PROVIDER', 'EUR/USD')
                 """
             )
+
+
+# ----------------------------------------------------------------------
+# Migration 051 — bool CHECK constraints on fx_* state tables
+# ----------------------------------------------------------------------
+
+
+def test_migration_051_fx_supported_pairs_rejects_non_bool_is_alias(tmp_path):
+    db_path = tmp_path / "fx-pairs-bool-051.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO fx_supported_pairs (
+                    provider, symbol, canonical_symbol, is_alias, is_refreshable,
+                    last_seen_at
+                ) VALUES (
+                    'EODHD', 'EURUSD.FOREX', 'EUR/USD', 2, 1,
+                    '2026-01-01T00:00:00+00:00'
+                )
+                """
+            )
+
+
+def test_migration_051_fx_supported_pairs_rejects_non_bool_is_refreshable(tmp_path):
+    db_path = tmp_path / "fx-pairs-bool2-051.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO fx_supported_pairs (
+                    provider, symbol, canonical_symbol, is_alias, is_refreshable,
+                    last_seen_at
+                ) VALUES (
+                    'EODHD', 'EURUSD.FOREX', 'EUR/USD', 0, -1,
+                    '2026-01-01T00:00:00+00:00'
+                )
+                """
+            )
+
+
+def test_migration_051_fx_refresh_state_rejects_non_bool_full_history(tmp_path):
+    db_path = tmp_path / "fx-refresh-bool-051.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO fx_refresh_state (
+                    provider, canonical_symbol, full_history_backfilled
+                ) VALUES ('EODHD', 'EUR/USD', 7)
+                """
+            )
+
+
+def test_migration_051_fx_refresh_state_rejects_negative_attempts(tmp_path):
+    db_path = tmp_path / "fx-refresh-attempts-051.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO fx_refresh_state (
+                    provider, canonical_symbol, attempts
+                ) VALUES ('EODHD', 'EUR/USD', -1)
+                """
+            )
+
+
+def test_migration_051_idempotent(tmp_path):
+    db_path = tmp_path / "fx-bool-checks-051.sqlite"
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0

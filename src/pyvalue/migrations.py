@@ -4704,6 +4704,133 @@ def _migration_050_add_fk_fx_refresh_state_provider(
         )
 
 
+def _migration_051_add_bool_checks(conn: sqlite3.Connection) -> None:
+    """Add ``CHECK (col IN (0, 1))`` to boolean-flagged INTEGER columns.
+
+    Audit finding 3.3: ``fx_supported_pairs.is_alias``,
+    ``fx_supported_pairs.is_refreshable``, and
+    ``fx_refresh_state.full_history_backfilled`` were declared as plain
+    INTEGER without enum constraints. The Python code only ever writes
+    0 or 1, but the schema previously didn't enforce that. Adding a
+    CHECK closes the invariant at the database level. ``attempts``
+    columns also gain ``CHECK (attempts >= 0)``.
+    """
+
+    if _table_exists(conn, "fx_supported_pairs"):
+        ddl_row = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'fx_supported_pairs'"
+        ).fetchone()
+        if ddl_row and "CHECK (is_alias IN (0, 1))" not in ddl_row[0]:
+            fk_already_present = bool(
+                conn.execute("PRAGMA foreign_key_list(fx_supported_pairs)").fetchall()
+            )
+            conn.execute("PRAGMA defer_foreign_keys = ON")
+            conn.execute("DROP INDEX IF EXISTS idx_fx_supported_pairs_refreshable")
+
+            fk_clause = (
+                ",\n            FOREIGN KEY (provider) REFERENCES provider(provider_code)"
+                if fk_already_present
+                else ""
+            )
+            conn.execute(
+                f"""
+                CREATE TABLE fx_supported_pairs__new (
+                    provider TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    canonical_symbol TEXT NOT NULL,
+                    base_currency TEXT,
+                    quote_currency TEXT,
+                    name TEXT,
+                    is_alias INTEGER NOT NULL DEFAULT 0
+                        CHECK (is_alias IN (0, 1)),
+                    is_refreshable INTEGER NOT NULL DEFAULT 0
+                        CHECK (is_refreshable IN (0, 1)),
+                    last_seen_at TEXT NOT NULL,
+                    PRIMARY KEY (provider, symbol){fk_clause}
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO fx_supported_pairs__new (
+                    provider, symbol, canonical_symbol, base_currency,
+                    quote_currency, name, is_alias, is_refreshable, last_seen_at
+                )
+                SELECT
+                    provider, symbol, canonical_symbol, base_currency,
+                    quote_currency, name, is_alias, is_refreshable, last_seen_at
+                FROM fx_supported_pairs
+                """
+            )
+            conn.execute("DROP TABLE fx_supported_pairs")
+            conn.execute(
+                "ALTER TABLE fx_supported_pairs__new RENAME TO fx_supported_pairs"
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_fx_supported_pairs_refreshable
+                ON fx_supported_pairs(provider, is_refreshable, canonical_symbol)
+                """
+            )
+
+    if _table_exists(conn, "fx_refresh_state"):
+        ddl_row = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'fx_refresh_state'"
+        ).fetchone()
+        if ddl_row and "CHECK (full_history_backfilled IN (0, 1))" not in ddl_row[0]:
+            fk_already_present = bool(
+                conn.execute("PRAGMA foreign_key_list(fx_refresh_state)").fetchall()
+            )
+            conn.execute("PRAGMA defer_foreign_keys = ON")
+            fk_clause = (
+                ",\n            FOREIGN KEY (provider) REFERENCES provider(provider_code)"
+                if fk_already_present
+                else ""
+            )
+            conn.execute(
+                f"""
+                CREATE TABLE fx_refresh_state__new (
+                    provider TEXT NOT NULL,
+                    canonical_symbol TEXT NOT NULL,
+                    min_rate_date TEXT,
+                    max_rate_date TEXT,
+                    full_history_backfilled INTEGER NOT NULL DEFAULT 0
+                        CHECK (full_history_backfilled IN (0, 1)),
+                    last_fetched_at TEXT,
+                    last_status TEXT,
+                    last_error TEXT,
+                    attempts INTEGER NOT NULL DEFAULT 0
+                        CHECK (attempts >= 0),
+                    PRIMARY KEY (provider, canonical_symbol){fk_clause}
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO fx_refresh_state__new (
+                    provider, canonical_symbol, min_rate_date, max_rate_date,
+                    full_history_backfilled, last_fetched_at, last_status,
+                    last_error, attempts
+                )
+                SELECT
+                    provider, canonical_symbol, min_rate_date, max_rate_date,
+                    full_history_backfilled, last_fetched_at, last_status,
+                    last_error, attempts
+                FROM fx_refresh_state
+                """
+            )
+            conn.execute("DROP TABLE fx_refresh_state")
+            conn.execute("ALTER TABLE fx_refresh_state__new RENAME TO fx_refresh_state")
+
+    fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if fk_violations:
+        raise RuntimeError(
+            f"migration 051 left foreign key violations: {fk_violations!r}"
+        )
+
+
 def _migration_046_add_fk_financial_facts_refresh_state(
     conn: sqlite3.Connection,
 ) -> None:
@@ -5155,6 +5282,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_048_add_fk_fx_rates_provider,
     _migration_049_add_fk_fx_supported_pairs_provider,
     _migration_050_add_fk_fx_refresh_state_provider,
+    _migration_051_add_bool_checks,
 ]
 
 
