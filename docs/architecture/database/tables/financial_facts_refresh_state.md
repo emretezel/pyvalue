@@ -84,4 +84,21 @@ One row per `listing_id`.
 
 ## Review Notes
 
-- This table is intentionally narrow; consider whether it remains useful alongside `fundamentals_normalization_state`.
+- This table is intentionally narrow.
+- Watermark partition (audit §3.6 — kept separate by deliberate decision).
+  Three tables track the fundamentals pipeline; each owns a distinct stage,
+  so consolidation would erase observable signal:
+  - `fundamentals_fetch_state` — *raw fetch* attempts. One row per active
+    failure; absence means the provider listing is not currently backed off.
+  - `fundamentals_normalization_state` — *normalization* watermark. Records
+    the raw payload hash that was successfully normalized for a provider
+    listing, so re-normalization is skipped when the upstream payload has
+    not changed.
+  - `financial_facts_refresh_state` (this table) — *canonical fact write*
+    watermark. Records when normalized facts were last written for the
+    canonical `listing_id` (which can aggregate across multiple
+    `provider_listing` rows).
+- The grain difference is meaningful: normalization is keyed by
+  `provider_listing_id`, this table is keyed by `listing_id`. Merging the
+  two would force an arbitrary choice of grain and lose the per-provider
+  vs canonical distinction.

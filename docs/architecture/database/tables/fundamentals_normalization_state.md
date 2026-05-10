@@ -64,3 +64,11 @@ Rows should be regenerated from a migrated database snapshot.
 - `listing_id` is derived through `provider_listing` when needed and is not
   duplicated here.
 - Fetch timestamps are not used as normalization watermarks; payload hashes are.
+- Watermark partition (audit §3.6 — kept separate by deliberate decision).
+  This table sits between `fundamentals_fetch_state` (raw fetch attempts,
+  keyed by `provider_listing_id`) and `financial_facts_refresh_state`
+  (canonical fact write, keyed by `listing_id`). Each table owns a distinct
+  pipeline stage. Consolidating them would either force a single grain
+  (losing per-provider vs canonical distinction) or merge orthogonal
+  signals (failure backoff vs payload-hash idempotency vs canonical
+  refresh time).
