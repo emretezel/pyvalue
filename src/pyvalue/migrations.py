@@ -167,8 +167,18 @@ def apply_migrations(db_path: Union[str, Path]) -> int:
     even when the rename immediately restores the parent's name and
     every row remains reachable, and ``COMMIT`` then fails with
     "FOREIGN KEY constraint failed" despite ``PRAGMA foreign_key_check``
-    returning empty. After every migration we run ``foreign_key_check``
-    explicitly so violations are still surfaced loudly.
+    returning empty.
+
+    A single ``PRAGMA foreign_key_check`` runs at the end of the
+    session — running it after every migration is correct but cripples
+    large-DB applies: each invocation scans every FK in every child
+    table, which on the live production DB (~67 GiB, 103M financial
+    facts) is dominated by I/O and adds ~3 minutes per migration.
+    Running the check once at the end keeps the safety net (a violation
+    still aborts before re-enabling FK enforcement) without paying the
+    per-migration tax. If a specific migration must be bisected, run
+    ``apply_migrations`` against a copy and add a debug check after the
+    failing version.
     """
 
     db_path = Path(db_path)
@@ -191,26 +201,20 @@ def apply_migrations(db_path: Union[str, Path]) -> int:
                 conn.execute("BEGIN")
                 migration(conn)
                 _set_version(conn, version)
-                # Surface any FK violation introduced by this migration
-                # before we lose the ability to bisect — rollback the
-                # individual transaction rather than committing a dirty
-                # state.
-                violations = conn.execute("PRAGMA foreign_key_check").fetchall()
-                if violations:
-                    conn.rollback()
-                    raise RuntimeError(
-                        f"migration {version} ({migration.__name__}) left "
-                        f"foreign key violations: {violations!r}"
-                    )
                 conn.commit()
                 applied += 1
             except Exception:
                 conn.rollback()
                 raise
 
-        # Re-enable enforcement for the connection's brief tail life and
-        # for any post-migration callers that reuse this connection
-        # (none today, but the invariant is cheap and robust).
+        # Single end-of-session integrity gate.
+        if applied:
+            violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+            if violations:
+                raise RuntimeError(
+                    "post-migration foreign_key_check reported "
+                    f"violations: {violations!r}"
+                )
         conn.execute("PRAGMA foreign_keys = ON")
     finally:
         conn.close()
