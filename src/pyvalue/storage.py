@@ -683,18 +683,20 @@ class SQLiteStore:
         """
 
         apply_migrations(self.db_path)
-        symbol_norm = symbol.strip().upper()
+        ticker, exchange = _normalize_symbol_base(symbol)
+        if exchange is None:
+            return None
         with self._connect() as conn:
             row = conn.execute(
                 """
                 SELECT l.currency
                 FROM listing l
                 JOIN "exchange" e ON e.exchange_id = l.exchange_id
-                WHERE UPPER(l.symbol || '.' || e.exchange_code) = ?
+                WHERE l.symbol = ? AND e.exchange_code = ?
                   AND l.currency IS NOT NULL
                 LIMIT 1
                 """,
-                (symbol_norm,),
+                (ticker, exchange),
             ).fetchone()
         return normalize_currency_code(row[0]) if row else None
 
@@ -702,18 +704,20 @@ class SQLiteStore:
         """Return the stored listing quote currency for ``symbol``."""
 
         apply_migrations(self.db_path)
-        symbol_norm = symbol.strip().upper()
+        ticker, exchange = _normalize_symbol_base(symbol)
+        if exchange is None:
+            return None
         with self._connect() as conn:
             row = conn.execute(
                 """
                 SELECT l.currency
                 FROM listing l
                 JOIN "exchange" e ON e.exchange_id = l.exchange_id
-                WHERE UPPER(l.symbol || '.' || e.exchange_code) = ?
+                WHERE l.symbol = ? AND e.exchange_code = ?
                   AND l.currency IS NOT NULL
                 LIMIT 1
                 """,
-                (symbol_norm,),
+                (ticker, exchange),
             ).fetchone()
         return raw_currency_code(row[0]) if row else None
 
@@ -1003,12 +1007,13 @@ class SecurityRepository(SQLiteStore):
         cached = self._by_symbol.get(normalized)
         if cached is not None:
             return cached
+        ticker, exchange = _normalize_symbol_base(symbol)
+        if exchange is None:
+            return None
         with self._connect() as conn:
             row = conn.execute(
-                self._select_identity_sql(
-                    "UPPER(l.symbol || '.' || e.exchange_code) = ?"
-                ),
-                (normalized,),
+                self._select_identity_sql("l.symbol = ? AND e.exchange_code = ?"),
+                (ticker, exchange),
             ).fetchone()
         if row is None:
             return None
@@ -1060,9 +1065,28 @@ class SecurityRepository(SQLiteStore):
         if not uncached:
             return resolved
 
+        # Split each canonical symbol once in Python so the SQL probes
+        # (l.symbol, e.exchange_code) directly. Concatenating the columns
+        # in the WHERE clause defeats the underlying UNIQUE index on
+        # listing(exchange_id, symbol).
+        pairs: List[Tuple[str, str]] = []
+        for canonical in uncached:
+            ticker, exchange = _normalize_symbol_base(canonical)
+            if exchange is None:
+                continue
+            pairs.append((ticker, exchange))
+        if not pairs:
+            return resolved
+
         def _query(conn: sqlite3.Connection) -> None:
-            for chunk in _batched(uncached, chunk_size):
-                placeholders = ", ".join("?" for _ in chunk)
+            # SQLite supports tuple IN with row constructors; the parameter
+            # list is flat (ticker_1, exchange_1, ticker_2, exchange_2, ...).
+            for chunk in _batched(pairs, chunk_size):
+                placeholders = ", ".join("(?, ?)" for _ in chunk)
+                params: List[str] = []
+                for ticker, exchange in chunk:
+                    params.append(ticker)
+                    params.append(exchange)
                 rows = conn.execute(
                     f"""
                     SELECT
@@ -1070,9 +1094,9 @@ class SecurityRepository(SQLiteStore):
                         l.symbol || '.' || e.exchange_code AS canonical_symbol
                     FROM listing l
                     JOIN "exchange" e ON e.exchange_id = l.exchange_id
-                    WHERE UPPER(l.symbol || '.' || e.exchange_code) IN ({placeholders})
+                    WHERE (l.symbol, e.exchange_code) IN (VALUES {placeholders})
                     """,
-                    list(chunk),
+                    params,
                 ).fetchall()
                 for row in rows:
                     resolved[row["canonical_symbol"]] = row["security_id"]
@@ -1105,9 +1129,24 @@ class SecurityRepository(SQLiteStore):
         if not uncached:
             return resolved
 
+        # Probe (l.symbol, e.exchange_code) directly via row-constructor
+        # IN to use the underlying UNIQUE index on listing.
+        pairs: List[Tuple[str, str]] = []
+        for canonical in uncached:
+            ticker, exchange = _normalize_symbol_base(canonical)
+            if exchange is None:
+                continue
+            pairs.append((ticker, exchange))
+        if not pairs:
+            return resolved
+
         with self._connect() as conn:
-            for chunk in _batched(uncached, chunk_size):
-                placeholders = ", ".join("?" for _ in chunk)
+            for chunk in _batched(pairs, chunk_size):
+                placeholders = ", ".join("(?, ?)" for _ in chunk)
+                params: List[str] = []
+                for ticker, exchange in chunk:
+                    params.append(ticker)
+                    params.append(exchange)
                 rows = conn.execute(
                     f"""
                     SELECT
@@ -1124,9 +1163,9 @@ class SecurityRepository(SQLiteStore):
                     FROM listing l
                     JOIN issuer i ON i.issuer_id = l.issuer_id
                     JOIN "exchange" e ON e.exchange_id = l.exchange_id
-                    WHERE UPPER(l.symbol || '.' || e.exchange_code) IN ({placeholders})
+                    WHERE (l.symbol, e.exchange_code) IN (VALUES {placeholders})
                     """,
-                    list(chunk),
+                    params,
                 ).fetchall()
                 for row in rows:
                     security = Security(*row)
@@ -1296,7 +1335,7 @@ class SecurityRepository(SQLiteStore):
         normalized = _normalized_codes(exchange_codes)
         if normalized:
             placeholders = ", ".join("?" for _ in normalized)
-            query.append(f"WHERE UPPER(e.exchange_code) IN ({placeholders})")
+            query.append(f"WHERE e.exchange_code IN ({placeholders})")
             params.extend(normalized)
             if primary_only:
                 query.append(f"AND {_primary_listing_predicate('l')}")
@@ -1326,7 +1365,7 @@ class SecurityRepository(SQLiteStore):
         normalized = _normalized_codes(exchange_codes)
         if normalized:
             placeholders = ", ".join("?" for _ in normalized)
-            query.append(f"WHERE UPPER(e.exchange_code) IN ({placeholders})")
+            query.append(f"WHERE e.exchange_code IN ({placeholders})")
             params.extend(normalized)
             if primary_only:
                 query.append(f"AND {_primary_listing_predicate('l')}")
@@ -1625,7 +1664,7 @@ class ExchangeProviderRepository(SQLiteStore):
                 FROM provider_exchange ep
                 JOIN provider p ON p.provider_id = ep.provider_id
                 JOIN "exchange" e ON e.exchange_id = ep.exchange_id
-                WHERE UPPER(p.provider_code) = ? AND UPPER(ep.provider_exchange_code) = ?
+                WHERE p.provider_code = ? AND ep.provider_exchange_code = ?
                 """,
                 (provider_norm, code_norm),
             ).fetchone()
@@ -1643,7 +1682,7 @@ class ExchangeProviderRepository(SQLiteStore):
             'JOIN "exchange" e ON e.exchange_id = ep.exchange_id',
         ]
         if provider:
-            query.append("WHERE UPPER(p.provider_code) = ?")
+            query.append("WHERE p.provider_code = ?")
             params.append(provider.strip().upper())
         query.append("ORDER BY p.provider_code, ep.provider_exchange_code")
         with self._connect() as conn:
@@ -1814,9 +1853,13 @@ class SupportedTickerRepository(SQLiteStore):
                 security.security_id,
             ),
         )
+        # The only column callers consume from the returned Row is
+        # provider_listing_id. Querying the full row via SELECT * was a
+        # CLAUDE.md violation (audit P2 #6). Materialise the post-insert
+        # provider_listing_id with an explicit projection.
         row = conn.execute(
             """
-            SELECT *
+            SELECT provider_listing_id
             FROM provider_listing_catalog
             WHERE provider = ?
               AND provider_exchange_code = ?
@@ -1993,7 +2036,7 @@ class SupportedTickerRepository(SQLiteStore):
                 f"""
                 SELECT {self._catalog_select_columns()}
                 FROM provider_listing_catalog catalog
-                WHERE UPPER(catalog.provider) = ? AND UPPER(catalog.provider_symbol) = ?
+                WHERE catalog.provider = ? AND catalog.provider_symbol = ?
                 """,
                 (provider_norm, symbol_norm),
             ).fetchone()
@@ -2016,18 +2059,16 @@ class SupportedTickerRepository(SQLiteStore):
             f"SELECT {self._catalog_select_columns('catalog')}",
             "FROM provider_listing_catalog catalog",
         ]
-        query.append("WHERE UPPER(catalog.provider) = ?")
+        query.append("WHERE catalog.provider = ?")
         normalized_codes = _normalized_codes(exchange_codes)
         if normalized_codes:
             placeholders = ", ".join("?" for _ in normalized_codes)
-            query.append(
-                f"AND UPPER(catalog.provider_exchange_code) IN ({placeholders})"
-            )
+            query.append(f"AND catalog.provider_exchange_code IN ({placeholders})")
             params.extend(normalized_codes)
         normalized_symbols = _normalized_codes(provider_symbols)
         if normalized_symbols:
             placeholders = ", ".join("?" for _ in normalized_symbols)
-            query.append(f"AND UPPER(catalog.provider_symbol) IN ({placeholders})")
+            query.append(f"AND catalog.provider_symbol IN ({placeholders})")
             params.extend(normalized_symbols)
         if primary_only:
             query.append(f"AND {_primary_listing_predicate()}")
@@ -2091,7 +2132,7 @@ class SupportedTickerRepository(SQLiteStore):
         params: List[object] = []
         query = ["SELECT DISTINCT provider_exchange_code FROM provider_listing_catalog"]
         if provider:
-            query.append("WHERE UPPER(provider) = ?")
+            query.append("WHERE provider = ?")
             params.append(provider.strip().upper())
         query.append("ORDER BY provider_exchange_code")
         with self._connect() as conn:
@@ -2110,10 +2151,10 @@ class SupportedTickerRepository(SQLiteStore):
                 "SELECT provider_listing_id FROM provider_listing_catalog WHERE 1 = 1"
             ]
             if provider:
-                query.append("AND UPPER(provider) = ?")
+                query.append("AND provider = ?")
                 params.append(provider.strip().upper())
             if exchange_code:
-                query.append("AND UPPER(provider_exchange_code) = ?")
+                query.append("AND provider_exchange_code = ?")
                 params.append(exchange_code.strip().upper())
             rows = conn.execute(" ".join(query), params).fetchall()
             provider_listing_ids = [int(row["provider_listing_id"]) for row in rows]
@@ -2131,7 +2172,7 @@ class SupportedTickerRepository(SQLiteStore):
                 f"""
                 SELECT provider_listing_id
                 FROM provider_listing_catalog
-                WHERE UPPER(provider) = ? AND UPPER(provider_symbol) IN ({placeholders})
+                WHERE provider = ? AND provider_symbol IN ({placeholders})
                 """,
                 [provider.strip().upper(), *normalized],
             ).fetchall()
@@ -2171,10 +2212,14 @@ class SupportedTickerRepository(SQLiteStore):
         ]
         if provider:
             params.append(provider.strip().upper())
-            query.append("AND UPPER(catalog.provider) = ?")
+            query.append("AND catalog.provider = ?")
         params.extend([symbol_norm, symbol_norm])
+        # The composite expression on l.symbol || '.' || e.exchange_code
+        # cannot use an index regardless of UPPER(); the underlying columns
+        # are already normalised via CHECK / Python-side .upper(), so the
+        # UPPER() wrapper is dead weight.
         query.append(
-            "AND (UPPER(catalog.provider_symbol) = ? OR UPPER(l.symbol || '.' || e.exchange_code) = ?)"
+            "AND (catalog.provider_symbol = ? OR l.symbol || '.' || e.exchange_code = ?)"
         )
         query.append(
             "ORDER BY CASE WHEN catalog.provider = 'EODHD' THEN 0 WHEN catalog.provider = 'SEC' THEN 1 ELSE 2 END"
