@@ -181,7 +181,7 @@ TABLE_GROUPS: tuple[tuple[str, tuple[TableInventoryEntry, ...]], ...] = (
             TableInventoryEntry(
                 table_name="fx_rates",
                 logical_refs="no enforced FK",
-                review_focus="largest FX table; pair/date access path and `rate_text` storage choice",
+                review_focus="largest FX table; pair/date access path and REAL `rate` storage",
             ),
         ),
     ),

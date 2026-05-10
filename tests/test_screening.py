@@ -98,7 +98,7 @@ def test_evaluate_criterion_converts_monetary_constant_currency(tmp_path):
             rate_date="2023-12-31",
             base_currency="USD",
             quote_currency="GBP",
-            rate_text="0.8",
+            rate=0.8,
             fetched_at="2023-12-31T00:00:00+00:00",
             source_kind="provider",
         )
@@ -144,7 +144,7 @@ def test_evaluate_criterion_converts_mixed_currency_metrics(tmp_path):
             rate_date="2023-12-31",
             base_currency="USD",
             quote_currency="EUR",
-            rate_text="0.9",
+            rate=0.9,
             fetched_at="2023-12-31T00:00:00+00:00",
             source_kind="provider",
         )
@@ -190,7 +190,7 @@ def test_evaluate_criterion_normalizes_configured_subunit_metric_currencies(tmp_
             rate_date="2023-12-31",
             base_currency="ZAR",
             quote_currency="ILS",
-            rate_text="0.2",
+            rate=0.2,
             fetched_at="2023-12-31T00:00:00+00:00",
             source_kind="provider",
         )

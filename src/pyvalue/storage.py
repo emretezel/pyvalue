@@ -421,7 +421,7 @@ class FXRateRecord:
     rate_date: str
     base_currency: str
     quote_currency: str
-    rate_text: str
+    rate: float
     fetched_at: str
     source_kind: str
     meta_json: Optional[str] = None
@@ -4824,7 +4824,7 @@ class FXRatesRepository(SQLiteStore):
                 record.rate_date,
                 normalize_currency_code(record.base_currency),
                 normalize_currency_code(record.quote_currency),
-                str(record.rate_text),
+                float(record.rate),
                 record.fetched_at,
                 record.source_kind.strip().lower(),
                 record.meta_json,
@@ -4845,7 +4845,7 @@ class FXRatesRepository(SQLiteStore):
                     rate_date,
                     base_currency,
                     quote_currency,
-                    rate_text,
+                    rate,
                     fetched_at,
                     source_kind,
                     meta_json,
@@ -4854,7 +4854,7 @@ class FXRatesRepository(SQLiteStore):
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(provider, rate_date, base_currency, quote_currency)
                 DO UPDATE SET
-                    rate_text = excluded.rate_text,
+                    rate = excluded.rate,
                     fetched_at = excluded.fetched_at,
                     source_kind = excluded.source_kind,
                     meta_json = excluded.meta_json,
@@ -4880,7 +4880,7 @@ class FXRatesRepository(SQLiteStore):
                     rate_date,
                     base_currency,
                     quote_currency,
-                    rate_text,
+                    rate,
                     fetched_at,
                     source_kind,
                     meta_json,
@@ -4910,14 +4910,14 @@ class FXRatesRepository(SQLiteStore):
         provider: str,
         base_currency: str,
         quote_currency: str,
-    ) -> list[tuple[str, str]]:
+    ) -> list[tuple[str, float]]:
         """Return one direct pair history ordered by ascending rate date."""
 
         self.initialize_schema()
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT rate_date, rate_text
+                SELECT rate_date, rate
                 FROM fx_rates
                 WHERE provider = ?
                   AND base_currency = ?
@@ -4930,19 +4930,19 @@ class FXRatesRepository(SQLiteStore):
                     normalize_currency_code(quote_currency),
                 ),
             ).fetchall()
-        return [(str(row["rate_date"]), str(row["rate_text"])) for row in rows]
+        return [(str(row["rate_date"]), float(row["rate"])) for row in rows]
 
     def fetch_all_for_provider(
         self,
         provider: str,
-    ) -> list[tuple[str, str, str, str]]:
+    ) -> list[tuple[str, str, str, float]]:
         """Return the full direct-rate history for one provider."""
 
         self.initialize_schema()
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT base_currency, quote_currency, rate_date, rate_text
+                SELECT base_currency, quote_currency, rate_date, rate
                 FROM fx_rates
                 WHERE provider = ?
                 ORDER BY base_currency ASC, quote_currency ASC, rate_date ASC
@@ -4954,7 +4954,7 @@ class FXRatesRepository(SQLiteStore):
                 str(row["base_currency"]),
                 str(row["quote_currency"]),
                 str(row["rate_date"]),
-                str(row["rate_text"]),
+                float(row["rate"]),
             )
             for row in rows
         ]

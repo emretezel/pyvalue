@@ -135,15 +135,15 @@ class FXSeries:
         return cls(array("I"), array("d"))
 
     @classmethod
-    def from_rows(cls, rows: Sequence[tuple[str, str]]) -> FXSeries:
+    def from_rows(cls, rows: Sequence[tuple[str, float]]) -> FXSeries:
         ordinals = array("I")
         rates = array("d")
-        for rate_date, rate_text in rows:
+        for rate_date, rate in rows:
             parsed = _to_date(rate_date)
             if parsed is None:
                 continue
             ordinals.append(parsed.toordinal())
-            rates.append(float(rate_text))
+            rates.append(float(rate))
         return cls(ordinals=ordinals, rates=rates)
 
 
@@ -261,7 +261,7 @@ class FrankfurterProvider:
                     rate_date=entry_date,
                     base_currency=base,
                     quote_currency=quote,
-                    rate_text=str(rate),
+                    rate=float(rate),
                     fetched_at=timestamp,
                     source_kind="provider",
                     meta_json=json.dumps({"provider": self.provider_name}),
@@ -393,7 +393,7 @@ class EODHDFXProvider:
                     rate_date=rate_date,
                     base_currency=base,
                     quote_currency=quote,
-                    rate_text=str(close),
+                    rate=float(close),
                     fetched_at=fetched_at,
                     source_kind="provider",
                     meta_json=json.dumps(
@@ -497,14 +497,14 @@ class FXService:
         self._history_cache.clear()
         self._quote_cache.clear()
         current_pair: Optional[tuple[str, str, str]] = None
-        current_rows: list[tuple[str, str]] = []
-        for base_currency, quote_currency, rate_date, rate_text in rows:
+        current_rows: list[tuple[str, float]] = []
+        for base_currency, quote_currency, rate_date, rate in rows:
             pair_key = (provider_norm, base_currency, quote_currency)
             if current_pair != pair_key and current_pair is not None:
                 self._history_cache[current_pair] = FXSeries.from_rows(current_rows)
                 current_rows = []
             current_pair = pair_key
-            current_rows.append((rate_date, rate_text))
+            current_rows.append((rate_date, rate))
         if current_pair is not None:
             self._history_cache[current_pair] = FXSeries.from_rows(current_rows)
         self._provider_fully_preloaded = True

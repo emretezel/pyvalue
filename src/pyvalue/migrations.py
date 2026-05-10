@@ -4403,6 +4403,87 @@ def _migration_043_financial_facts_dedupe_and_fk(conn: sqlite3.Connection) -> No
         )
 
 
+def _migration_045_fx_rates_rate_to_real(conn: sqlite3.Connection) -> None:
+    """Rebuild fx_rates with a REAL ``rate`` column (was TEXT ``rate_text``).
+
+    Per the project's REAL-everywhere policy, FX rates should be stored
+    as REAL rather than serialised through a TEXT column. The historical
+    ``rate_text TEXT`` column was a workaround for the previous
+    "no REAL for monetary values" guideline; that guideline does not
+    apply to pyvalue.
+
+    The migration:
+      * Builds a new fx_rates table with ``rate REAL NOT NULL`` in place
+        of ``rate_text TEXT NOT NULL``. Column shape, PK, and the
+        idx_fx_rates_pair_date index are otherwise preserved.
+      * Casts the existing string values to REAL during INSERT...SELECT.
+        SQLite's CAST(text AS REAL) reads the leading numeric prefix and
+        returns the float.
+      * Renames the temp table back to ``fx_rates`` and re-creates the
+        index.
+
+    The Python boundary changes (``FXRateRecord.rate_text: str`` →
+    ``FXRateRecord.rate: float`` and the ``str(...)`` / ``float(...)``
+    coercion at the storage layer) ship in the same commit. After this
+    migration, callers consume ``rate`` as ``float`` and the
+    ``rate_text`` field name no longer appears in the codebase.
+    """
+
+    if not _table_exists(conn, "fx_rates"):
+        return
+
+    columns = _table_columns(conn, "fx_rates")
+    if "rate" in columns and "rate_text" not in columns:
+        # Already migrated.
+        return
+
+    conn.execute("DROP INDEX IF EXISTS idx_fx_rates_pair_date")
+
+    conn.execute(
+        """
+        CREATE TABLE fx_rates__new (
+            provider TEXT NOT NULL,
+            rate_date TEXT NOT NULL,
+            base_currency TEXT NOT NULL,
+            quote_currency TEXT NOT NULL,
+            rate REAL NOT NULL,
+            fetched_at TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            meta_json TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (provider, rate_date, base_currency, quote_currency)
+        )
+        """
+    )
+    # `meta_json` was added by a later migration than the original
+    # fx_rates create, so historical fixtures may not carry the column.
+    # Substitute NULL when it is missing so the rebuild stays compatible
+    # with the older schemas the migration test fixtures emulate.
+    meta_json_expr = "meta_json" if "meta_json" in columns else "NULL"
+    conn.execute(
+        f"""
+        INSERT INTO fx_rates__new (
+            provider, rate_date, base_currency, quote_currency, rate,
+            fetched_at, source_kind, meta_json, created_at, updated_at
+        )
+        SELECT
+            provider, rate_date, base_currency, quote_currency,
+            CAST(rate_text AS REAL),
+            fetched_at, source_kind, {meta_json_expr}, created_at, updated_at
+        FROM fx_rates
+        """
+    )
+    conn.execute("DROP TABLE fx_rates")
+    conn.execute("ALTER TABLE fx_rates__new RENAME TO fx_rates")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fx_rates_pair_date
+        ON fx_rates(provider, base_currency, quote_currency, rate_date DESC)
+        """
+    )
+
+
 def _migration_044_persist_compat_views(conn: sqlite3.Connection) -> None:
     """Take migration ownership of the legacy compatibility views.
 
@@ -4603,6 +4684,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_042_persist_provider_listing_views,
     _migration_043_financial_facts_dedupe_and_fk,
     _migration_044_persist_compat_views,
+    _migration_045_fx_rates_rate_to_real,
 ]
 
 

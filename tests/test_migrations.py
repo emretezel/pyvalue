@@ -1006,7 +1006,7 @@ def test_migration_adds_sector_and_industry_to_securities(tmp_path):
         "rate_date",
         "base_currency",
         "quote_currency",
-        "rate_text",
+        "rate",
         "fetched_at",
         "source_kind",
         "meta_json",
@@ -2028,6 +2028,94 @@ def test_migration_044_idempotent(tmp_path):
     """Running apply_migrations twice on a fresh DB is a no-op the second time."""
 
     db_path = tmp_path / "compat-views-idempotent.sqlite"
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0
+
+
+# ----------------------------------------------------------------------
+# Migration 045 — fx_rates.rate_text TEXT → rate REAL
+# ----------------------------------------------------------------------
+
+
+def test_migration_045_renames_rate_text_to_rate_real(tmp_path):
+    """After apply_migrations the fx_rates table has REAL rate, no rate_text."""
+
+    db_path = tmp_path / "fx-rate-real.sqlite"
+    apply_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        info = conn.execute("PRAGMA table_info(fx_rates)").fetchall()
+        column_types = {row[1]: row[2] for row in info}
+
+    assert "rate" in column_types
+    assert column_types["rate"] == "REAL"
+    assert "rate_text" not in column_types
+
+
+def test_migration_045_casts_existing_text_to_real(tmp_path):
+    """Pre-045 fx_rates rows with TEXT rate values are cast to REAL during the rebuild."""
+
+    db_path = tmp_path / "fx-rate-cast.sqlite"
+    apply_migrations(db_path)
+
+    # Recreate the pre-045 schema so we can insert TEXT rate_text rows and
+    # then re-run migration 045 on top.
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DROP TABLE fx_rates")
+        conn.execute(
+            """
+            CREATE TABLE fx_rates (
+                provider TEXT NOT NULL,
+                rate_date TEXT NOT NULL,
+                base_currency TEXT NOT NULL,
+                quote_currency TEXT NOT NULL,
+                rate_text TEXT NOT NULL,
+                fetched_at TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                meta_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (provider, rate_date, base_currency, quote_currency)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO fx_rates (
+                provider, rate_date, base_currency, quote_currency, rate_text,
+                fetched_at, source_kind, meta_json, created_at, updated_at
+            ) VALUES
+                ('EODHD', '2025-01-01', 'EUR', 'USD', '1.0951',
+                 '2025-01-01T12:00:00Z', 'provider', NULL,
+                 '2025-01-01T12:00:00Z', '2025-01-01T12:00:00Z'),
+                ('EODHD', '2025-01-02', 'EUR', 'USD', '1.0832',
+                 '2025-01-02T12:00:00Z', 'provider', NULL,
+                 '2025-01-02T12:00:00Z', '2025-01-02T12:00:00Z')
+            """
+        )
+        conn.execute("UPDATE schema_migrations SET version = 44")
+        conn.commit()
+
+    apply_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT rate_date, rate FROM fx_rates ORDER BY rate_date"
+        ).fetchall()
+        info = conn.execute("PRAGMA table_info(fx_rates)").fetchall()
+        column_types = {row[1]: row[2] for row in info}
+
+    assert column_types["rate"] == "REAL"
+    assert rows == [("2025-01-01", 1.0951), ("2025-01-02", 1.0832)]
+
+
+def test_migration_045_idempotent_on_already_renamed_schema(tmp_path):
+    """Running 045 twice (fresh-DB path) is a no-op the second time."""
+
+    db_path = tmp_path / "fx-rate-idempotent.sqlite"
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
 

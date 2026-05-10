@@ -108,7 +108,7 @@ def test_rank_screen_passers_normalizes_mixed_currency_metric_with_ranking_curre
             rate_date="2023-12-31",
             base_currency="USD",
             quote_currency="EUR",
-            rate_text="0.5",
+            rate=0.5,
             fetched_at="2023-12-31T00:00:00+00:00",
             source_kind="provider",
         )
@@ -201,7 +201,7 @@ def test_cmd_refresh_fx_rates_eodhd_syncs_catalog_and_skips_aliases(
                     rate_date="2024-01-01",
                     base_currency="EUR",
                     quote_currency="USD",
-                    rate_text="1.09",
+                    rate=1.09,
                     fetched_at="2024-01-01T00:00:00+00:00",
                     source_kind="provider",
                 )
@@ -221,7 +221,7 @@ def test_cmd_refresh_fx_rates_eodhd_syncs_catalog_and_skips_aliases(
     assert FakeProvider.last_instance.calls == [("EURUSD", "2024-01-01", "2024-01-01")]
 
     fx_repo = FXRatesRepository(db_path)
-    assert fx_repo.fetch_pair_history("EODHD", "EUR", "USD") == [("2024-01-01", "1.09")]
+    assert fx_repo.fetch_pair_history("EODHD", "EUR", "USD") == [("2024-01-01", 1.09)]
 
     state = FXRefreshStateRepository(db_path).fetch("EODHD", "EURUSD")
     assert state is not None
@@ -259,7 +259,7 @@ def test_cmd_refresh_fx_rates_eodhd_fetches_only_incremental_newer_history(
                 rate_date="2024-01-01",
                 base_currency="EUR",
                 quote_currency="USD",
-                rate_text="1.09",
+                rate=1.09,
                 fetched_at="2024-01-01T00:00:00+00:00",
                 source_kind="provider",
             ),
@@ -268,7 +268,7 @@ def test_cmd_refresh_fx_rates_eodhd_fetches_only_incremental_newer_history(
                 rate_date="2024-01-02",
                 base_currency="EUR",
                 quote_currency="USD",
-                rate_text="1.10",
+                rate=1.10,
                 fetched_at="2024-01-02T00:00:00+00:00",
                 source_kind="provider",
             ),
@@ -299,7 +299,7 @@ def test_cmd_refresh_fx_rates_eodhd_fetches_only_incremental_newer_history(
                     rate_date="2024-01-03",
                     base_currency="EUR",
                     quote_currency="USD",
-                    rate_text="1.11",
+                    rate=1.11,
                     fetched_at="2024-01-03T00:00:00+00:00",
                     source_kind="provider",
                 )
@@ -339,7 +339,7 @@ def test_cmd_refresh_fx_rates_eodhd_completes_old_history_after_bounded_backfill
                 rate_date="2024-01-02",
                 base_currency="EUR",
                 quote_currency="USD",
-                rate_text="1.10",
+                rate=1.10,
                 fetched_at="2024-01-02T00:00:00+00:00",
                 source_kind="provider",
             ),
@@ -348,7 +348,7 @@ def test_cmd_refresh_fx_rates_eodhd_completes_old_history_after_bounded_backfill
                 rate_date="2024-01-03",
                 base_currency="EUR",
                 quote_currency="USD",
-                rate_text="1.11",
+                rate=1.11,
                 fetched_at="2024-01-03T00:00:00+00:00",
                 source_kind="provider",
             ),
@@ -380,7 +380,7 @@ def test_cmd_refresh_fx_rates_eodhd_completes_old_history_after_bounded_backfill
                         rate_date="2024-01-01",
                         base_currency="EUR",
                         quote_currency="USD",
-                        rate_text="1.09",
+                        rate=1.09,
                         fetched_at="2024-01-01T00:00:00+00:00",
                         source_kind="provider",
                     )
@@ -391,7 +391,7 @@ def test_cmd_refresh_fx_rates_eodhd_completes_old_history_after_bounded_backfill
                     rate_date="2024-01-04",
                     base_currency="EUR",
                     quote_currency="USD",
-                    rate_text="1.12",
+                    rate=1.12,
                     fetched_at="2024-01-04T00:00:00+00:00",
                     source_kind="provider",
                 ),
@@ -400,7 +400,7 @@ def test_cmd_refresh_fx_rates_eodhd_completes_old_history_after_bounded_backfill
                     rate_date="2024-01-05",
                     base_currency="EUR",
                     quote_currency="USD",
-                    rate_text="1.13",
+                    rate=1.13,
                     fetched_at="2024-01-05T00:00:00+00:00",
                     source_kind="provider",
                 ),
