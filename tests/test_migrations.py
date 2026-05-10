@@ -3086,9 +3086,9 @@ def test_migration_060_issuer_allows_duplicate_with_null_country(tmp_path):
     assert rows == 3
 
 
-def test_migration_060_aborts_on_existing_duplicates(tmp_path):
-    """If pre-existing rows duplicate (name, country), the migration
-    should abort cleanly so the operator can investigate."""
+def test_migration_060_dedups_existing_duplicates(tmp_path):
+    """Pre-existing (name, country) duplicates collapse to one canonical
+    issuer (lowest issuer_id) with the UNIQUE index in place."""
 
     db_path = tmp_path / "issuer-dup-pre-060.sqlite"
 
@@ -3099,11 +3099,113 @@ def test_migration_060_aborts_on_existing_duplicates(tmp_path):
         conn.execute("INSERT INTO schema_migrations (version) VALUES (?)", (59,))
         conn.executemany(
             "INSERT INTO issuer (issuer_id, name, country) VALUES (?, ?, ?)",
-            [(1, "Acme", "US"), (2, "Acme", "US")],
+            [(1, "Acme", "US"), (2, "Acme", "US"), (3, "Acme", "US")],
         )
 
-    with pytest.raises(RuntimeError, match="migration 060 aborted"):
-        apply_migrations(db_path)
+    apply_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT issuer_id, name, country FROM issuer WHERE name = 'Acme'"
+        ).fetchall()
+    assert rows == [(1, "Acme", "US")]
+
+
+def test_migration_060_dedup_remaps_listings(tmp_path):
+    """Dedup must reassign listing.issuer_id from non-canonical rows to
+    the canonical row before deleting the losers."""
+
+    db_path = tmp_path / "issuer-dedup-remap-060.sqlite"
+
+    apply_migrations(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DROP INDEX IF EXISTS idx_issuer_name_country")
+        conn.execute("DELETE FROM schema_migrations")
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (?)", (59,))
+        conn.execute("DELETE FROM listing")
+        conn.execute("DELETE FROM issuer")
+        conn.executemany(
+            """
+            INSERT INTO "exchange" (
+                exchange_id, exchange_code, created_at, updated_at
+            ) VALUES (?, ?, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')
+            """,
+            [(501, "F"), (502, "XETRA")],
+        )
+        conn.executemany(
+            "INSERT INTO issuer (issuer_id, name, country) VALUES (?, ?, ?)",
+            [(10, "Petrobras", "Germany"), (11, "Petrobras", "Germany")],
+        )
+        conn.execute(
+            "INSERT INTO listing (listing_id, issuer_id, exchange_id, "
+            "symbol, currency) VALUES (?, ?, ?, ?, ?)",
+            (100, 10, 501, "PBR", "EUR"),
+        )
+        conn.execute(
+            "INSERT INTO listing (listing_id, issuer_id, exchange_id, "
+            "symbol, currency) VALUES (?, ?, ?, ?, ?)",
+            (101, 11, 502, "PBR", "EUR"),
+        )
+
+    apply_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        issuer_rows = conn.execute(
+            "SELECT issuer_id FROM issuer WHERE name = 'Petrobras' "
+            "AND country = 'Germany'"
+        ).fetchall()
+        listing_rows = conn.execute(
+            "SELECT listing_id, issuer_id FROM listing ORDER BY listing_id"
+        ).fetchall()
+
+    assert issuer_rows == [(10,)]
+    assert listing_rows == [(100, 10), (101, 10)]
+
+
+def test_migration_060_dedup_backfills_metadata(tmp_path):
+    """Canonical row's nullable columns (description/sector/industry) get
+    filled from the first non-NULL value found in non-canonical rows.
+    Existing non-NULL values on the canonical row are never overwritten.
+    """
+
+    db_path = tmp_path / "issuer-dedup-meta-060.sqlite"
+
+    apply_migrations(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DROP INDEX IF EXISTS idx_issuer_name_country")
+        conn.execute("DELETE FROM schema_migrations")
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (?)", (59,))
+        conn.execute("DELETE FROM listing")
+        conn.execute("DELETE FROM issuer")
+        # Canonical row (lowest id) has sector but no industry/description.
+        # Non-canonical row 21 provides industry; non-canonical row 22
+        # provides description. Row 22 also has a *different* sector,
+        # which must NOT clobber the canonical's existing sector.
+        conn.executemany(
+            "INSERT INTO issuer (issuer_id, name, description, sector, "
+            "industry, country) VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (20, "Acme", None, "Tech", None, "US"),
+                (21, "Acme", None, None, "Software", "US"),
+                (22, "Acme", "Maker of Acme products", "Other", None, "US"),
+            ],
+        )
+
+    apply_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT issuer_id, name, description, sector, industry, country "
+            "FROM issuer WHERE name = 'Acme'"
+        ).fetchone()
+    assert row == (
+        20,
+        "Acme",
+        "Maker of Acme products",
+        "Tech",
+        "Software",
+        "US",
+    )
 
 
 def test_migration_060_idempotent(tmp_path):

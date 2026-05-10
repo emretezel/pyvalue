@@ -118,3 +118,17 @@ One row per issuer record created during catalog backfill or listing creation.
   path supplies `canonical_symbol` as a fallback when the upstream
   catalog doesn't carry an issuer name; downstream metadata refreshes
   can later promote the placeholder to the real entity name.
+- Migration 060 deduplicated `(name, country)` groups before adding
+  the UNIQUE INDEX. The pre-canonical-name ingest path
+  (`SecurityRepository.ensure`) keyed its existence check on
+  `(exchange_id, symbol)` rather than `(name, country)`, so the same
+  real-world issuer (Petrobras across 22 German venues, dual-listed
+  Korean tickers, etc.) accumulated one `issuer` row per listing
+  instead of one row per entity. The migration kept the row with the
+  lowest `issuer_id` per group as canonical, COALESCE-promoted any
+  non-NULL `description` / `sector` / `industry` from the rest of the
+  group onto it, remapped `listing.issuer_id` references, and deleted
+  the losers. Rows with a NULL `name` or NULL `country` were left
+  alone — SQLite's UNIQUE INDEX treats NULLs as distinct, and merging
+  on a NULL key would conflate unrelated companies (e.g. 260 US
+  closed-end-fund issuers whose listings are unrelated).

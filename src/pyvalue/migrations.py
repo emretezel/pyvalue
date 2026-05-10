@@ -6444,36 +6444,59 @@ def _migration_059_financial_facts_format_checks(
 
 
 def _migration_060_issuer_unique_name_country(conn: sqlite3.Connection) -> None:
-    """Add ``UNIQUE (name, country)`` to ``issuer``.
+    """Deduplicate ``issuer`` by ``(name, country)`` and add a UNIQUE index.
 
     Audit finding 3.7: ``issuer`` had no UNIQUE on the natural identity
     columns. Two issuers with the same canonical name and country are
     almost certainly the same entity, and tightening the constraint
     keeps duplicates from creeping in via parallel ingest paths.
 
-    The constraint is applied as a UNIQUE INDEX rather than a column
-    constraint so a NULL ``name`` or NULL ``country`` doesn't get
-    swallowed by SQLite's NULL-distinct semantics — UNIQUE indexes
-    treat NULLs as distinct, which matches the audit's intent (a
-    name-less or country-less issuer should not block a properly
-    populated future issuer).
+    The ingest path in ``SecurityRepository.ensure`` keys its existence
+    check on ``(exchange_id, symbol)`` rather than ``(name, country)``,
+    so the same real-world issuer (e.g. Petrobras on 22 German venues,
+    or one Korean ticker on KOSPI + KOSDAQ) accumulates one ``issuer``
+    row per listing instead of one row per entity. The live DB had
+    ~4,696 such groups (~13,121 duplicate rows, ~8,425 listings to
+    remap) at the time this migration was authored.
 
-    ``name`` is intentionally **not** tightened to NOT NULL in this
-    migration. The live DB has 260 rows with NULL name (legacy issuer
-    rows whose source payload predates the issuer.name column); fixing
-    them requires a per-row decision (delete vs backfill from
-    listing-level metadata) that should land in a dedicated migration
-    rather than being smuggled in here.
+    Dedup rule:
+      * Canonical row per group = the row with the lowest ``issuer_id``.
+        That preserves the oldest surrogate-key reference and matches
+        the order in which ingest first observed the entity.
+      * For nullable columns (``description``, ``sector``, ``industry``)
+        the canonical's own value wins when non-NULL; otherwise the
+        first non-NULL across the rest of the group (by ascending
+        ``issuer_id``) is promoted. ``COALESCE``-style backfill — no
+        column value is ever overwritten, only filled.
+      * Listings pointing at non-canonical issuers are remapped to the
+        canonical id (``listing.issuer_id`` is the only physical FK to
+        ``issuer``).
+      * Non-canonical issuer rows are then deleted.
 
-    Pre-flight: surface any *exact* duplicate (name, country) pairs
-    that would block the unique index. Both columns must be non-NULL
-    for a duplicate to count under SQLite's UNIQUE INDEX semantics.
+    NULL semantics: a row with NULL ``name`` or NULL ``country`` is
+    skipped by the dedup. SQLite's UNIQUE INDEX treats NULLs as
+    distinct, so those rows do not block the index, and merging them
+    on a NULL key would conflate unrelated companies (the live DB has
+    a 260-row "group" of NULL/NULL closed-end-fund issuers whose
+    listings are unrelated and must stay separate). They remain as
+    legitimate-under-the-constraint duplicates until a future
+    migration backfills their metadata.
+
+    The UNIQUE INDEX is applied after the dedup. SQLite re-validates
+    views referencing ``issuer`` on the next query, not on DML, so
+    no view drop/recreate is needed here.
     """
 
     if not _table_exists(conn, "issuer"):
         return
+    if not _table_exists(conn, "listing"):
+        return
 
-    duplicates = conn.execute(
+    # Identify duplicate groups where both name and country are non-NULL.
+    # SQLite's UNIQUE INDEX semantics treat NULLs as distinct, so rows
+    # with a NULL component cannot violate the constraint regardless of
+    # how many siblings they have.
+    groups = conn.execute(
         """
         SELECT name, country, COUNT(*) AS n
         FROM issuer
@@ -6482,15 +6505,88 @@ def _migration_060_issuer_unique_name_country(conn: sqlite3.Connection) -> None:
         HAVING n > 1
         """
     ).fetchall()
-    if duplicates:
-        sample = ", ".join(
-            f"({row[0]!r}, {row[1]!r})x{row[2]}" for row in duplicates[:3]
+
+    if groups:
+        # Build a (old_id -> canonical_id) mapping for every non-canonical
+        # row in every duplicate group. We use a TEMP table so the UPDATE
+        # against ``listing`` can join it directly without dragging the
+        # whole mapping into Python memory.
+        conn.execute("DROP TABLE IF EXISTS issuer_dedup_map_060")
+        conn.execute(
+            """
+            CREATE TEMP TABLE issuer_dedup_map_060 (
+                old_id INTEGER PRIMARY KEY,
+                canonical_id INTEGER NOT NULL
+            )
+            """
         )
-        raise RuntimeError(
-            f"migration 060 aborted: {len(duplicates)} (name, country) "
-            f"duplicate groups in issuer (sample: {sample}). Resolve them "
-            "before retrying."
+        conn.execute(
+            """
+            INSERT INTO issuer_dedup_map_060 (old_id, canonical_id)
+            SELECT i.issuer_id, c.canonical_id
+            FROM issuer i
+            JOIN (
+                SELECT name, country, MIN(issuer_id) AS canonical_id
+                FROM issuer
+                WHERE name IS NOT NULL AND country IS NOT NULL
+                GROUP BY name, country
+                HAVING COUNT(*) > 1
+            ) c ON c.name = i.name AND c.country = i.country
+            WHERE i.name IS NOT NULL AND i.country IS NOT NULL
+              AND i.issuer_id != c.canonical_id
+            """
         )
+
+        # Promote the first non-NULL ``description`` / ``sector`` /
+        # ``industry`` from any non-canonical row onto the canonical row,
+        # using COALESCE so an existing non-NULL value is never overwritten.
+        # Each column is backfilled independently — a non-canonical row may
+        # contribute its industry while a different one contributes the
+        # description.
+        for column in ("description", "sector", "industry"):
+            conn.execute(
+                f"""
+                UPDATE issuer
+                SET {column} = COALESCE(
+                    {column},
+                    (
+                        SELECT src.{column}
+                        FROM issuer src
+                        JOIN issuer_dedup_map_060 m ON m.old_id = src.issuer_id
+                        WHERE m.canonical_id = issuer.issuer_id
+                          AND src.{column} IS NOT NULL
+                        ORDER BY src.issuer_id
+                        LIMIT 1
+                    )
+                )
+                WHERE issuer_id IN (
+                    SELECT DISTINCT canonical_id FROM issuer_dedup_map_060
+                )
+                """
+            )
+
+        # Remap listings off the soon-to-be-deleted issuer rows.
+        conn.execute(
+            """
+            UPDATE listing
+            SET issuer_id = (
+                SELECT canonical_id
+                FROM issuer_dedup_map_060
+                WHERE old_id = listing.issuer_id
+            )
+            WHERE issuer_id IN (SELECT old_id FROM issuer_dedup_map_060)
+            """
+        )
+
+        # Drop the non-canonical issuer rows.
+        conn.execute(
+            """
+            DELETE FROM issuer
+            WHERE issuer_id IN (SELECT old_id FROM issuer_dedup_map_060)
+            """
+        )
+
+        conn.execute("DROP TABLE issuer_dedup_map_060")
 
     conn.execute(
         """
