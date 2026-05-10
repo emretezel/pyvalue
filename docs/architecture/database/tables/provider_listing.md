@@ -22,8 +22,7 @@ One row per `(provider_exchange_id, provider_symbol)`.
 | Column | Type | Null | Key | Notes |
 | --- | --- | --- | --- | --- |
 | `provider_listing_id` | `INTEGER` | no | PK | durable provider-listing identity for raw/state rows |
-| `provider_id` | `INTEGER` | no | FK, idx | provider namespace |
-| `provider_exchange_id` | `INTEGER` | no | FK | provider exchange mapping; part of composite unique key |
+| `provider_exchange_id` | `INTEGER` | no | FK | provider exchange mapping; part of composite unique key. The owning provider is reachable via `provider_exchange.provider_id`. |
 | `provider_symbol` | `TEXT` | no |  | bare provider symbol from catalog payloads such as `AAPL`; part of composite unique key |
 | `listing_id` | `INTEGER` | no | FK, idx | canonical listing link |
 
@@ -32,10 +31,8 @@ One row per `(provider_exchange_id, provider_symbol)`.
 <!-- BEGIN generated_keys_and_relationships -->
 - Primary key: `provider_listing_id`
 - Physical foreign keys:
-  - (`provider_exchange_id`, `provider_id`) -> `provider_exchange`.(`provider_exchange_id`, `provider_id`)
   - `listing_id` -> `listing`.`listing_id`
   - `provider_exchange_id` -> `provider_exchange`.`provider_exchange_id`
-  - `provider_id` -> `provider`.`provider_id`
 - Physical references from other tables:
   - `fundamentals_fetch_state`.`provider_listing_id` -> `provider_listing_id`
   - `fundamentals_normalization_state`.`provider_listing_id` -> `provider_listing_id`
@@ -50,7 +47,6 @@ One row per `(provider_exchange_id, provider_symbol)`.
 
 <!-- BEGIN generated_secondary_indexes -->
 - `idx_provider_listing_listing (listing_id)`
-- `idx_provider_listing_provider (provider_id)`
 <!-- END generated_secondary_indexes -->
 
 ## Main Read Paths
@@ -75,35 +71,30 @@ One row per `(provider_exchange_id, provider_symbol)`.
 [
   {
     "provider_listing_id": 1,
-    "provider_id": 1,
     "provider_exchange_id": 1,
     "provider_symbol": "AALB",
     "listing_id": 1
   },
   {
     "provider_listing_id": 2,
-    "provider_id": 1,
     "provider_exchange_id": 1,
     "provider_symbol": "ABN",
     "listing_id": 2
   },
   {
     "provider_listing_id": 3,
-    "provider_id": 1,
     "provider_exchange_id": 1,
     "provider_symbol": "ACOMO",
     "listing_id": 3
   },
   {
     "provider_listing_id": 4,
-    "provider_id": 1,
     "provider_exchange_id": 1,
     "provider_symbol": "AD",
     "listing_id": 4
   },
   {
     "provider_listing_id": 5,
-    "provider_id": 1,
     "provider_exchange_id": 1,
     "provider_symbol": "ADYEN",
     "listing_id": 5
@@ -119,3 +110,9 @@ One row per `(provider_exchange_id, provider_symbol)`.
 - Provider-listing currency is not persisted here. Use `listing.currency` for
   the canonical quote unit; compatibility catalog APIs expose it as `currency`
   when needed.
+- The owning `provider_id` is intentionally **not** stored here. It is
+  always reachable via `provider_exchange.provider_id` (joined through
+  `provider_exchange_id`). Migration 054 dropped the column to honour the
+  *single source of truth* rule (audit P2 #9): replicating `provider_id`
+  on every row was a denormalisation that the composite FK had to defend
+  against drift, with no offsetting performance benefit on hot paths.

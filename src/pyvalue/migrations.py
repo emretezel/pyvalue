@@ -2411,12 +2411,19 @@ def _migration_034_rename_catalog_identity_tables(conn: sqlite3.Connection) -> N
         )
         """
     )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_provider_listing_provider
-        ON provider_listing(provider_id)
-        """
-    )
+    # ``idx_provider_listing_provider`` is only created when the
+    # ``provider_id`` column is still on the table. Migration 054 drops
+    # the column; a test harness that rewinds ``schema_migrations.version``
+    # below 034 and re-applies migrations would otherwise hit
+    # "no such column: provider_id" here even though the table already
+    # has its post-054 shape.
+    if "provider_id" in _table_columns(conn, "provider_listing"):
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_provider_listing_provider
+            ON provider_listing(provider_id)
+            """
+        )
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_provider_listing_listing
@@ -5253,6 +5260,262 @@ def _migration_042_persist_provider_listing_views(conn: sqlite3.Connection) -> N
     )
 
 
+def _migration_053_drop_market_data_fetch_state_runtime_columns(
+    conn: sqlite3.Connection,
+) -> None:
+    """Drop runtime-added ``provider`` / ``provider_symbol`` columns from
+    ``market_data_fetch_state``.
+
+    Audit P1 #1.c: ``_FetchStateRepository.initialize_schema()`` historically
+    ALTER-ed ``market_data_fetch_state`` to add ``provider`` and
+    ``provider_symbol`` columns plus a ``UNIQUE (provider, provider_symbol)``
+    index. Migration 040 rebuilt the table without these columns, but the
+    runtime path would re-add them on the next ``initialize_schema()``
+    call, undoing the migration.
+
+    The columns duplicate values that already live in
+    ``provider_listing`` / ``provider_exchange`` / ``provider`` and were
+    only there to let the repository upsert by ``(provider,
+    provider_symbol)`` without joining. The repository is being rewritten
+    in this same change to resolve ``provider_listing_id`` via
+    ``provider_listing_catalog`` and use the table's ``provider_listing_id``
+    PK directly, so the columns are no longer needed.
+
+    This migration is idempotent — it only acts when the columns are
+    actually present (e.g. on a DB whose runtime path re-added them
+    after migration 040). Live DBs that have not run the runtime path
+    since migration 040 already have the clean schema and this migration
+    is a no-op.
+    """
+
+    if not _table_exists(conn, "market_data_fetch_state"):
+        return
+
+    columns = _table_columns(conn, "market_data_fetch_state")
+    has_provider_cols = "provider" in columns or "provider_symbol" in columns
+
+    # Drop the legacy unique index unconditionally — a DB that ran the
+    # runtime path may have it even after we drop the columns.
+    conn.execute("DROP INDEX IF EXISTS idx_market_data_fetch_state_provider_symbol")
+
+    if not has_provider_cols:
+        return
+
+    # SQLite cannot drop a column that participates in a UNIQUE index, so
+    # the index drop above must run first. ``ALTER TABLE DROP COLUMN`` is
+    # available since SQLite 3.35 (March 2021); the project's minimum
+    # SQLite is well above that.
+    if "provider" in columns:
+        conn.execute("ALTER TABLE market_data_fetch_state DROP COLUMN provider")
+    if "provider_symbol" in columns:
+        conn.execute("ALTER TABLE market_data_fetch_state DROP COLUMN provider_symbol")
+
+    fk_violations = conn.execute(
+        "PRAGMA foreign_key_check(market_data_fetch_state)"
+    ).fetchall()
+    if fk_violations:
+        raise RuntimeError(
+            f"migration 053 left foreign key violations: {fk_violations!r}"
+        )
+
+
+def _migration_054_drop_provider_listing_provider_id(
+    conn: sqlite3.Connection,
+) -> None:
+    """Drop ``provider_listing.provider_id`` denormalisation.
+
+    Audit P2 #9: ``provider_listing.provider_id`` is fully derivable from
+    ``provider_listing.provider_exchange_id`` via
+    ``provider_exchange.provider_id``. Holding it on the row violates the
+    *single source of truth* rule even though the composite FK
+    ``(provider_exchange_id, provider_id) -> provider_exchange
+    (provider_exchange_id, provider_id)`` keeps the values consistent.
+
+    This migration drops:
+    - the supporting index ``idx_provider_listing_provider``;
+    - the column ``provider_id`` (and the associated FK clauses, since
+      they're recreated as part of the table rebuild);
+
+    Queries that previously filtered ``provider_listing.provider_id``
+    directly are rewritten to join through ``provider_exchange`` in the
+    same change.
+
+    SQLite cannot ``DROP COLUMN`` for a column that participates in a
+    foreign-key constraint or composite UNIQUE; we therefore rebuild
+    the table.
+    """
+
+    if not _table_exists(conn, "provider_listing"):
+        return
+
+    columns = _table_columns(conn, "provider_listing")
+    if "provider_id" not in columns:
+        return
+    # The whole point of this migration is that ``provider_id`` is
+    # derivable from ``provider_exchange.provider_id`` via the
+    # ``provider_exchange_id`` link. If the canonical shape is not in
+    # place yet (no ``provider_exchange_id`` column, or
+    # ``provider_exchange`` table missing entirely), ``provider_id`` is
+    # not a derivable denormalisation here and must not be dropped.
+    # Test fixtures that pin the schema at version 38 hit this branch
+    # because earlier migrations left ``provider_listing`` in a partial
+    # shape that the canonical-rename chain (migration 034) would
+    # normally complete; bail out cleanly rather than blowing up the
+    # migration chain.
+    if "provider_exchange_id" not in columns or not _table_exists(
+        conn, "provider_exchange"
+    ):
+        return
+
+    # Confirm that every (provider_exchange_id, provider_id) on
+    # provider_listing matches the provider_id that provider_exchange
+    # carries; if it doesn't, the denormalisation has already drifted
+    # from its source of truth and we'd lose information by dropping.
+    drift = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM provider_listing pl
+        LEFT JOIN provider_exchange px
+          ON px.provider_exchange_id = pl.provider_exchange_id
+        WHERE px.provider_id IS NULL OR px.provider_id != pl.provider_id
+        """
+    ).fetchone()[0]
+    if drift:
+        raise RuntimeError(
+            f"migration 054 aborted: {drift} provider_listing rows have "
+            "provider_id that disagrees with provider_exchange. Resolve "
+            "the drift before dropping the column."
+        )
+
+    conn.execute("PRAGMA defer_foreign_keys = ON")
+    conn.execute("DROP INDEX IF EXISTS idx_provider_listing_provider")
+
+    # SQLite re-validates every view on schema change. The
+    # provider_listing_catalog view (and supported_tickers, which derives
+    # from it) currently SELECT pl.provider_id; rebuilding the table
+    # without that column would fail validation at COMMIT. Drop the
+    # views, rebuild the table, then recreate the views with a join
+    # through provider_exchange to recover provider_id.
+    catalog_view_existed = (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='view' AND name='provider_listing_catalog'"
+        ).fetchone()
+        is not None
+    )
+    supported_view_existed = (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='view' AND name='supported_tickers'"
+        ).fetchone()
+        is not None
+    )
+    if supported_view_existed:
+        conn.execute("DROP VIEW supported_tickers")
+    if catalog_view_existed:
+        conn.execute("DROP VIEW provider_listing_catalog")
+
+    conn.execute(
+        """
+        CREATE TABLE provider_listing__new (
+            provider_listing_id INTEGER PRIMARY KEY,
+            provider_exchange_id INTEGER NOT NULL,
+            provider_symbol TEXT NOT NULL,
+            listing_id INTEGER NOT NULL,
+            UNIQUE (provider_exchange_id, provider_symbol),
+            FOREIGN KEY (provider_exchange_id)
+                REFERENCES provider_exchange(provider_exchange_id),
+            FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO provider_listing__new (
+            provider_listing_id, provider_exchange_id, provider_symbol, listing_id
+        )
+        SELECT
+            provider_listing_id, provider_exchange_id, provider_symbol, listing_id
+        FROM provider_listing
+        """
+    )
+
+    # Dropping and recreating the parent under the same name lets every
+    # child table's FK keep pointing at the right name without an
+    # explicit rewrite. defer_foreign_keys defers the integrity check
+    # to COMMIT, so the gap between DROP and RENAME doesn't trigger a
+    # spurious violation against the children that already reference
+    # provider_listing(provider_listing_id).
+    conn.execute("DROP TABLE provider_listing")
+    conn.execute("ALTER TABLE provider_listing__new RENAME TO provider_listing")
+
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_provider_listing_listing
+        ON provider_listing(listing_id)
+        """
+    )
+
+    if catalog_view_existed:
+        conn.execute(
+            """
+            CREATE VIEW provider_listing_catalog AS
+            SELECT
+                pl.provider_listing_id,
+                p.provider_id,
+                p.provider_code AS provider,
+                px.provider_exchange_id,
+                px.provider_exchange_code,
+                CASE
+                    WHEN p.provider_code = 'SEC' THEN pl.provider_symbol || '.US'
+                    ELSE pl.provider_symbol || '.' || px.provider_exchange_code
+                END AS provider_symbol,
+                pl.provider_symbol AS provider_ticker,
+                l.listing_id AS security_id,
+                e.exchange_code AS listing_exchange,
+                i.name AS security_name,
+                NULL AS security_type,
+                i.country AS country,
+                l.currency AS currency,
+                l.primary_listing_status,
+                NULL AS isin,
+                NULL AS updated_at
+            FROM provider_listing pl
+            JOIN provider_exchange px
+              ON px.provider_exchange_id = pl.provider_exchange_id
+            JOIN provider p ON p.provider_id = px.provider_id
+            JOIN listing l ON l.listing_id = pl.listing_id
+            JOIN issuer i ON i.issuer_id = l.issuer_id
+            JOIN "exchange" e ON e.exchange_id = l.exchange_id
+            """
+        )
+    if supported_view_existed:
+        conn.execute(
+            """
+            CREATE VIEW supported_tickers AS
+            SELECT
+                provider,
+                provider_symbol,
+                provider_ticker,
+                provider_exchange_code,
+                security_id,
+                listing_exchange,
+                security_name,
+                security_type,
+                country,
+                currency,
+                primary_listing_status,
+                isin,
+                updated_at
+            FROM provider_listing_catalog
+            """
+        )
+
+    fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if fk_violations:
+        raise RuntimeError(
+            f"migration 054 left foreign key violations: {fk_violations!r}"
+        )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -5306,6 +5569,8 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_050_add_fk_fx_refresh_state_provider,
     _migration_051_add_bool_checks,
     _migration_052_drop_redundant_fin_facts_index,
+    _migration_053_drop_market_data_fetch_state_runtime_columns,
+    _migration_054_drop_provider_listing_provider_id,
 ]
 
 

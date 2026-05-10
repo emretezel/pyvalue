@@ -157,13 +157,6 @@ def _normalize_provider_identity(
     )
 
 
-def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
-    return {
-        str(row["name"])
-        for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-    }
-
-
 def _batched(values: Sequence[Any], size: int) -> Iterable[Sequence[Any]]:
     for start in range(0, len(values), size):
         yield values[start : start + size]
@@ -1700,8 +1693,9 @@ class SupportedTickerRepository(SQLiteStore):
     """Store provider-supported ticker catalogs by exchange."""
 
     def initialize_schema(self) -> None:
-        # `provider_listing` (table + idx_provider_listing_provider +
-        # idx_provider_listing_listing) is owned by migration 034.
+        # `provider_listing` (table + idx_provider_listing_listing) is
+        # owned by migration 034 and refined by migration 054, which
+        # dropped the derivable `provider_id` denormalisation column.
         apply_migrations(self.db_path)
         self._provider_repo().initialize_schema()
         self._exchange_provider_repo().initialize_schema()
@@ -1838,16 +1832,14 @@ class SupportedTickerRepository(SQLiteStore):
         conn.execute(
             """
             INSERT INTO provider_listing (
-                provider_id,
                 provider_exchange_id,
                 provider_symbol,
                 listing_id
-            ) VALUES (?, ?, ?, ?)
+            ) VALUES (?, ?, ?)
             ON CONFLICT(provider_exchange_id, provider_symbol) DO UPDATE SET
                 listing_id = excluded.listing_id
             """,
             (
-                int(provider_exchange_row["provider_id"]),
                 int(provider_exchange_row["provider_exchange_id"]),
                 bare_symbol,
                 security.security_id,
@@ -3530,7 +3522,12 @@ class SecurityListingStatusRepository(SQLiteStore):
                     conn.execute(
                         f"""
                         DELETE FROM market_data_fetch_state
-                        WHERE provider = ? AND provider_symbol IN ({placeholders})
+                        WHERE provider_listing_id IN (
+                            SELECT catalog.provider_listing_id
+                            FROM provider_listing_catalog catalog
+                            WHERE catalog.provider = ?
+                              AND catalog.provider_symbol IN ({placeholders})
+                        )
                         """,
                         [provider_norm, *symbol_chunk],
                     )
@@ -3541,67 +3538,13 @@ class _FetchStateRepository(SQLiteStore):
     index_name: str
 
     def initialize_schema(self) -> None:
+        # The table, its FK to provider_listing, and the
+        # ``next_eligible_at`` index are all owned by migrations 040+
+        # (see migration 053 for the runtime-column cleanup). All
+        # provider/symbol resolution is now done through
+        # ``provider_listing_catalog`` joins; this repository writes
+        # directly against the ``provider_listing_id`` PK.
         apply_migrations(self.db_path)
-        with self._connect() as conn:
-            conn.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS {self.table_name} (
-                    provider_listing_id INTEGER NOT NULL PRIMARY KEY,
-                    provider TEXT NOT NULL,
-                    provider_symbol TEXT NOT NULL,
-                    last_fetched_at TEXT,
-                    last_status TEXT,
-                    last_error TEXT,
-                    next_eligible_at TEXT,
-                    attempts INTEGER NOT NULL DEFAULT 0,
-                    UNIQUE (provider, provider_symbol)
-                )
-                """
-            )
-            columns = _table_columns(conn, self.table_name)
-            alter_statements = [
-                (
-                    "provider_listing_id",
-                    f"ALTER TABLE {self.table_name} ADD COLUMN provider_listing_id INTEGER",
-                ),
-                ("provider", f"ALTER TABLE {self.table_name} ADD COLUMN provider TEXT"),
-                (
-                    "provider_symbol",
-                    f"ALTER TABLE {self.table_name} ADD COLUMN provider_symbol TEXT",
-                ),
-            ]
-            for column_name, statement in alter_statements:
-                if column_name not in columns:
-                    conn.execute(statement)
-            conn.execute(
-                f"""
-                CREATE INDEX IF NOT EXISTS {self.index_name}
-                ON {self.table_name}(provider, next_eligible_at)
-                """
-            )
-            conn.execute(
-                f"""
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_{self.table_name}_provider_symbol
-                ON {self.table_name}(provider, provider_symbol)
-                """
-            )
-            conn.execute(
-                f"""
-                UPDATE {self.table_name}
-                SET provider = (
-                        SELECT catalog.provider
-                        FROM provider_listing_catalog catalog
-                        WHERE catalog.provider_listing_id = {self.table_name}.provider_listing_id
-                    ),
-                    provider_symbol = (
-                        SELECT catalog.provider_symbol
-                        FROM provider_listing_catalog catalog
-                        WHERE catalog.provider_listing_id = {self.table_name}.provider_listing_id
-                    )
-                WHERE provider_listing_id IS NOT NULL
-                  AND (provider IS NULL OR provider_symbol IS NULL)
-                """
-            )
 
     def _resolve_provider_listing_id(
         self,
@@ -3624,13 +3567,18 @@ class _FetchStateRepository(SQLiteStore):
     ) -> Optional[Dict[str, Optional[str] | int]]:
         self.initialize_schema()
         with self._connect() as conn:
+            provider_listing_id = self._resolve_provider_listing_id(
+                conn, provider, symbol
+            )
+            if provider_listing_id is None:
+                return None
             row = conn.execute(
                 f"""
                 SELECT last_fetched_at, last_status, last_error, next_eligible_at, attempts
                 FROM {self.table_name}
-                WHERE provider = ? AND provider_symbol = ?
+                WHERE provider_listing_id = ?
                 """,
-                (provider.strip().upper(), symbol.strip().upper()),
+                (provider_listing_id,),
             ).fetchone()
         if row is None:
             return None
@@ -3660,28 +3608,20 @@ class _FetchStateRepository(SQLiteStore):
                 f"""
                 INSERT INTO {self.table_name} (
                     provider_listing_id,
-                    provider,
-                    provider_symbol,
                     last_fetched_at,
                     last_status,
                     last_error,
                     next_eligible_at,
                     attempts
-                ) VALUES (?, ?, ?, ?, 'ok', NULL, NULL, 0)
-                ON CONFLICT(provider, provider_symbol) DO UPDATE SET
-                    provider_listing_id = excluded.provider_listing_id,
+                ) VALUES (?, ?, 'ok', NULL, NULL, 0)
+                ON CONFLICT(provider_listing_id) DO UPDATE SET
                     last_fetched_at = excluded.last_fetched_at,
                     last_status = 'ok',
                     last_error = NULL,
                     next_eligible_at = NULL,
                     attempts = 0
                 """,
-                (
-                    provider_listing_id,
-                    provider.strip().upper(),
-                    symbol.strip().upper(),
-                    timestamp,
-                ),
+                (provider_listing_id, timestamp),
             )
 
     def mark_success_many(
@@ -3704,21 +3644,18 @@ class _FetchStateRepository(SQLiteStore):
                 )
                 if provider_listing_id is None:
                     continue
-                rows.append((provider_listing_id, provider_norm, symbol, timestamp))
+                rows.append((provider_listing_id, timestamp))
             conn.executemany(
                 f"""
                 INSERT INTO {self.table_name} (
                     provider_listing_id,
-                    provider,
-                    provider_symbol,
                     last_fetched_at,
                     last_status,
                     last_error,
                     next_eligible_at,
                     attempts
-                ) VALUES (?, ?, ?, ?, 'ok', NULL, NULL, 0)
-                ON CONFLICT(provider, provider_symbol) DO UPDATE SET
-                    provider_listing_id = excluded.provider_listing_id,
+                ) VALUES (?, ?, 'ok', NULL, NULL, 0)
+                ON CONFLICT(provider_listing_id) DO UPDATE SET
                     last_fetched_at = excluded.last_fetched_at,
                     last_status = 'ok',
                     last_error = NULL,
@@ -3754,16 +3691,13 @@ class _FetchStateRepository(SQLiteStore):
                 f"""
                 INSERT INTO {self.table_name} (
                     provider_listing_id,
-                    provider,
-                    provider_symbol,
                     last_fetched_at,
                     last_status,
                     last_error,
                     next_eligible_at,
                     attempts
-                ) VALUES (?, ?, ?, ?, 'error', ?, ?, ?)
-                ON CONFLICT(provider, provider_symbol) DO UPDATE SET
-                    provider_listing_id = excluded.provider_listing_id,
+                ) VALUES (?, ?, 'error', ?, ?, ?)
+                ON CONFLICT(provider_listing_id) DO UPDATE SET
                     last_fetched_at = COALESCE(excluded.last_fetched_at, {self.table_name}.last_fetched_at),
                     last_status = 'error',
                     last_error = excluded.last_error,
@@ -3772,8 +3706,6 @@ class _FetchStateRepository(SQLiteStore):
                 """,
                 (
                     provider_listing_id,
-                    provider.strip().upper(),
-                    symbol.strip().upper(),
                     last_fetched_at,
                     error,
                     next_eligible_at,
@@ -3797,21 +3729,35 @@ class _FetchStateRepository(SQLiteStore):
         if not normalized_errors:
             return
         provider_norm = provider.strip().upper()
-        symbols = [symbol for symbol, _ in normalized_errors]
-        state_by_symbol: Dict[str, Dict[str, Optional[str] | int]] = {}
+        # Resolve provider_listing_id for every error symbol up front so
+        # we can fetch the existing attempt counter / last_fetched_at by
+        # PK in a single query, then build the upsert rows from the same
+        # mapping. Symbols that don't resolve are skipped — there is
+        # nothing to write state for.
+        listing_id_by_symbol: Dict[str, int] = {}
         with self._connect() as conn:
-            for chunk in _batched(symbols, 500):
+            for symbol, _error in normalized_errors:
+                provider_listing_id = self._resolve_provider_listing_id(
+                    conn, provider_norm, symbol
+                )
+                if provider_listing_id is not None:
+                    listing_id_by_symbol[symbol] = provider_listing_id
+            if not listing_id_by_symbol:
+                return
+
+            state_by_id: Dict[int, Dict[str, Optional[str] | int]] = {}
+            for chunk in _batched(list(listing_id_by_symbol.values()), 500):
                 placeholders = ", ".join("?" for _ in chunk)
-                rows = conn.execute(
+                rows_state = conn.execute(
                     f"""
-                    SELECT provider_symbol, last_fetched_at, attempts
+                    SELECT provider_listing_id, last_fetched_at, attempts
                     FROM {self.table_name}
-                    WHERE provider = ? AND provider_symbol IN ({placeholders})
+                    WHERE provider_listing_id IN ({placeholders})
                     """,
-                    [provider_norm, *chunk],
+                    list(chunk),
                 ).fetchall()
-                for row in rows:
-                    state_by_symbol[row["provider_symbol"]] = {
+                for row in rows_state:
+                    state_by_id[int(row["provider_listing_id"])] = {
                         "last_fetched_at": row["last_fetched_at"],
                         "attempts": row["attempts"],
                     }
@@ -3819,12 +3765,10 @@ class _FetchStateRepository(SQLiteStore):
             now = datetime.now(timezone.utc)
             rows = []
             for symbol, error in normalized_errors:
-                provider_listing_id = self._resolve_provider_listing_id(
-                    conn, provider_norm, symbol
-                )
+                provider_listing_id = listing_id_by_symbol.get(symbol)
                 if provider_listing_id is None:
                     continue
-                state = state_by_symbol.get(symbol)
+                state = state_by_id.get(provider_listing_id)
                 attempts = int(state.get("attempts") or 0) if state else 0
                 attempts += 1
                 backoff = min(
@@ -3836,8 +3780,6 @@ class _FetchStateRepository(SQLiteStore):
                 rows.append(
                     (
                         provider_listing_id,
-                        provider_norm,
-                        symbol,
                         last_fetched_at,
                         error,
                         next_eligible_at,
@@ -3848,16 +3790,13 @@ class _FetchStateRepository(SQLiteStore):
                 f"""
                 INSERT INTO {self.table_name} (
                     provider_listing_id,
-                    provider,
-                    provider_symbol,
                     last_fetched_at,
                     last_status,
                     last_error,
                     next_eligible_at,
                     attempts
-                ) VALUES (?, ?, ?, ?, 'error', ?, ?, ?)
-                ON CONFLICT(provider, provider_symbol) DO UPDATE SET
-                    provider_listing_id = excluded.provider_listing_id,
+                ) VALUES (?, ?, 'error', ?, ?, ?)
+                ON CONFLICT(provider_listing_id) DO UPDATE SET
                     last_fetched_at = COALESCE(excluded.last_fetched_at, {self.table_name}.last_fetched_at),
                     last_status = 'error',
                     last_error = excluded.last_error,
@@ -3872,14 +3811,24 @@ class _FetchStateRepository(SQLiteStore):
         normalized = _normalized_codes(symbols)
         if not normalized:
             return 0
-        placeholders = ", ".join("?" for _ in normalized)
+        provider_norm = provider.strip().upper()
         with self._connect() as conn:
+            provider_listing_ids: List[int] = []
+            for symbol in normalized:
+                provider_listing_id = self._resolve_provider_listing_id(
+                    conn, provider_norm, symbol
+                )
+                if provider_listing_id is not None:
+                    provider_listing_ids.append(provider_listing_id)
+            if not provider_listing_ids:
+                return 0
+            placeholders = ", ".join("?" for _ in provider_listing_ids)
             cursor = conn.execute(
                 f"""
                 DELETE FROM {self.table_name}
-                WHERE provider = ? AND provider_symbol IN ({placeholders})
+                WHERE provider_listing_id IN ({placeholders})
                 """,
-                [provider.strip().upper(), *normalized],
+                provider_listing_ids,
             )
         return int(cursor.rowcount or 0)
 

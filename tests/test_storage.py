@@ -70,9 +70,9 @@ def test_supported_ticker_repository_replace_from_listings_persists_rows(tmp_pat
             SELECT p.provider_code, px.provider_exchange_code, pl.provider_symbol,
                    e.exchange_code, l.currency
             FROM provider_listing pl
-            JOIN provider p ON p.provider_id = pl.provider_id
             JOIN provider_exchange px
               ON px.provider_exchange_id = pl.provider_exchange_id
+            JOIN provider p ON p.provider_id = px.provider_id
             JOIN listing l ON l.listing_id = pl.listing_id
             JOIN "exchange" e ON e.exchange_id = l.exchange_id
             ORDER BY pl.provider_symbol
@@ -298,7 +298,11 @@ def test_fundamentals_repository_classifies_and_purges_secondary_listings(tmp_pa
             """
             SELECT COUNT(*)
             FROM market_data_fetch_state
-            WHERE provider = 'EODHD' AND provider_symbol = 'AAA.LSE'
+            WHERE provider_listing_id = (
+                SELECT provider_listing_id
+                FROM provider_listing_catalog
+                WHERE provider = 'EODHD' AND provider_symbol = 'AAA.LSE'
+            )
             """
         ).fetchone()[0]
 

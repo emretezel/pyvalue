@@ -49,8 +49,8 @@ def test_migration_updates_listings_primary_key(tmp_path):
             SELECT p.provider_code, px.provider_exchange_code, pl.provider_symbol,
                    e.exchange_code, i.name
             FROM provider_listing pl
-            JOIN provider p ON p.provider_id = pl.provider_id
             JOIN provider_exchange px ON px.provider_exchange_id = pl.provider_exchange_id
+            JOIN provider p ON p.provider_id = px.provider_id
             JOIN listing l ON l.listing_id = pl.listing_id
             JOIN issuer i ON i.issuer_id = l.issuer_id
             JOIN "exchange" e ON e.exchange_id = l.exchange_id
@@ -479,7 +479,9 @@ def test_migration_preserves_existing_provider_rows_when_adding_registry(tmp_pat
             """
             SELECT COUNT(*)
             FROM provider_listing pl
-            JOIN provider p ON p.provider_id = pl.provider_id
+            JOIN provider_exchange px
+              ON px.provider_exchange_id = pl.provider_exchange_id
+            JOIN provider p ON p.provider_id = px.provider_id
             """
         ).fetchone()[0]
         fundamentals_raw_join_count = conn.execute(
@@ -487,7 +489,9 @@ def test_migration_preserves_existing_provider_rows_when_adding_registry(tmp_pat
             SELECT COUNT(*)
             FROM fundamentals_raw fr
             JOIN provider_listing pl ON pl.provider_listing_id = fr.provider_listing_id
-            JOIN provider p ON p.provider_id = pl.provider_id
+            JOIN provider_exchange px
+              ON px.provider_exchange_id = pl.provider_exchange_id
+            JOIN provider p ON p.provider_id = px.provider_id
             """
         ).fetchone()[0]
         fx_rates_join_count = conn.execute(
@@ -644,15 +648,14 @@ def test_migration_creates_provider_listing_table(tmp_path):
 
     assert columns == {
         "provider_listing_id",
-        "provider_id",
         "provider_exchange_id",
         "provider_symbol",
         "listing_id",
     }
     assert pk_cols == ["provider_listing_id"]
-    assert "idx_provider_listing_provider" in index_names
+    assert "idx_provider_listing_provider" not in index_names
     assert "idx_provider_listing_listing" in index_names
-    assert fk_targets == {"provider", "provider_exchange", "listing"}
+    assert fk_targets == {"provider_exchange", "listing"}
     assert supported_tickers_table is None
 
 
@@ -1405,8 +1408,8 @@ def test_migration_does_not_overwrite_existing_supported_tickers(tmp_path):
             """
             SELECT i.name, pl.provider_symbol, px.provider_exchange_code
             FROM provider_listing pl
-            JOIN provider p ON p.provider_id = pl.provider_id
             JOIN provider_exchange px ON px.provider_exchange_id = pl.provider_exchange_id
+            JOIN provider p ON p.provider_id = px.provider_id
             JOIN listing l ON l.listing_id = pl.listing_id
             JOIN issuer i ON i.issuer_id = l.issuer_id
             WHERE p.provider_code = 'SEC'
@@ -2360,6 +2363,281 @@ def test_migration_051_fx_refresh_state_rejects_negative_attempts(tmp_path):
 
 def test_migration_051_idempotent(tmp_path):
     db_path = tmp_path / "fx-bool-checks-051.sqlite"
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0
+
+
+# ---------------------------------------------------------------------------
+# Migration 053: drop runtime ``provider`` / ``provider_symbol`` columns from
+# ``market_data_fetch_state`` and the legacy unique index that paired them.
+# ---------------------------------------------------------------------------
+
+
+def test_migration_053_market_data_fetch_state_columns_are_canonical(tmp_path):
+    """Fresh DBs end with the canonical fetch-state shape — no provider cols."""
+
+    db_path = tmp_path / "fetch-state-053.sqlite"
+    apply_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        info = conn.execute("PRAGMA table_info(market_data_fetch_state)").fetchall()
+        columns = {row[1] for row in info}
+        index_names = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA index_list(market_data_fetch_state)"
+            ).fetchall()
+        }
+
+    assert columns == {
+        "provider_listing_id",
+        "last_fetched_at",
+        "last_status",
+        "last_error",
+        "next_eligible_at",
+        "attempts",
+    }
+    assert "provider" not in columns
+    assert "provider_symbol" not in columns
+    assert "idx_market_data_fetch_state_provider_symbol" not in index_names
+
+
+def test_migration_053_drops_runtime_added_columns(tmp_path):
+    """Simulate a DB whose runtime path re-added provider/provider_symbol;
+    migration 053 must drop them back out without losing other rows."""
+
+    db_path = tmp_path / "fetch-state-053-runtime.sqlite"
+
+    # Bring the DB up to migration 052 (the last migration before 053).
+    target_version = 52
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE schema_migrations (version INTEGER NOT NULL)")
+    apply_migrations(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM schema_migrations")
+        conn.execute(
+            "INSERT INTO schema_migrations (version) VALUES (?)",
+            (target_version,),
+        )
+        # apply_migrations already pre-seeds provider, provider_exchange,
+        # and exchange. Reuse those IDs to avoid UNIQUE collisions.
+        conn.execute("INSERT INTO issuer (issuer_id, name) VALUES (1, 'Issuer A')")
+        conn.execute(
+            """
+            INSERT INTO listing (listing_id, issuer_id, exchange_id, symbol)
+            VALUES (1, 1, 1, 'AAA')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO provider_listing (
+                provider_listing_id, provider_exchange_id, provider_symbol, listing_id
+            ) VALUES (1, 1, 'AAA', 1)
+            """
+        )
+        # Recreate the runtime drift: add the legacy columns + index
+        # after migration 040 had cleaned them up, then write a row
+        # using the legacy shape.
+        conn.execute("ALTER TABLE market_data_fetch_state ADD COLUMN provider TEXT")
+        conn.execute(
+            "ALTER TABLE market_data_fetch_state ADD COLUMN provider_symbol TEXT"
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX idx_market_data_fetch_state_provider_symbol
+            ON market_data_fetch_state(provider, provider_symbol)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO market_data_fetch_state (
+                provider_listing_id, provider, provider_symbol,
+                last_fetched_at, last_status, attempts
+            ) VALUES (1, 'EODHD', 'AAA.US', '2026-04-01T00:00:00+00:00', 'ok', 0)
+            """
+        )
+
+    applied = apply_migrations(db_path)
+    assert applied == len(MIGRATIONS) - target_version
+
+    with sqlite3.connect(db_path) as conn:
+        info = conn.execute("PRAGMA table_info(market_data_fetch_state)").fetchall()
+        columns = {row[1] for row in info}
+        index_names = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA index_list(market_data_fetch_state)"
+            ).fetchall()
+        }
+        row = conn.execute(
+            """
+            SELECT provider_listing_id, last_fetched_at, last_status, attempts
+            FROM market_data_fetch_state
+            """
+        ).fetchone()
+
+    assert "provider" not in columns
+    assert "provider_symbol" not in columns
+    assert "idx_market_data_fetch_state_provider_symbol" not in index_names
+    assert row == (1, "2026-04-01T00:00:00+00:00", "ok", 0)
+
+
+def test_migration_053_idempotent(tmp_path):
+    db_path = tmp_path / "fetch-state-053-idempotent.sqlite"
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0
+
+
+# ---------------------------------------------------------------------------
+# Migration 054: drop derivable ``provider_listing.provider_id`` column,
+# rebuild ``provider_listing_catalog`` view to join through provider_exchange.
+# ---------------------------------------------------------------------------
+
+
+def test_migration_054_provider_listing_drops_provider_id(tmp_path):
+    """Fresh DB ends without provider_id on provider_listing."""
+
+    db_path = tmp_path / "provider-listing-054.sqlite"
+    apply_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        info = conn.execute("PRAGMA table_info(provider_listing)").fetchall()
+        columns = {row[1] for row in info}
+        index_names = {
+            row[1]
+            for row in conn.execute("PRAGMA index_list(provider_listing)").fetchall()
+        }
+        fk_targets = {
+            row[2]
+            for row in conn.execute(
+                "PRAGMA foreign_key_list(provider_listing)"
+            ).fetchall()
+        }
+
+    assert columns == {
+        "provider_listing_id",
+        "provider_exchange_id",
+        "provider_symbol",
+        "listing_id",
+    }
+    assert "idx_provider_listing_provider" not in index_names
+    assert "idx_provider_listing_listing" in index_names
+    # provider_id FK + composite (provider_exchange_id, provider_id) FK
+    # should both be gone; only provider_exchange_id and listing_id
+    # references remain.
+    assert fk_targets == {"provider_exchange", "listing"}
+
+
+def test_migration_054_view_resolves_provider_through_exchange(tmp_path):
+    """The rebuilt provider_listing_catalog view must still surface
+    ``provider`` correctly even though provider_id was dropped from the
+    base table — it should join through provider_exchange instead."""
+
+    db_path = tmp_path / "provider-listing-catalog-054.sqlite"
+    apply_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        # apply_migrations seeds provider/provider_exchange/exchange.
+        # Reuse the SEC/US row at exchange_id=1, provider_exchange_id=1,
+        # provider_id=3 (provider_code='SEC').
+        conn.execute("INSERT INTO issuer (issuer_id, name) VALUES (1, 'A')")
+        conn.execute(
+            """
+            INSERT INTO listing (listing_id, issuer_id, exchange_id, symbol)
+            VALUES (1, 1, 1, 'AAA')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO provider_listing (
+                provider_listing_id, provider_exchange_id, provider_symbol,
+                listing_id
+            ) VALUES (1000, 1, 'AAA', 1)
+            """
+        )
+
+        row = conn.execute(
+            """
+            SELECT provider, provider_id, provider_listing_id, provider_symbol
+            FROM provider_listing_catalog
+            WHERE provider_listing_id = 1000
+            """
+        ).fetchone()
+
+    # SEC provider has provider_id=3 in the seeded registry; provider_symbol
+    # for SEC is built without the exchange suffix per the catalog view's
+    # CASE expression, so the canonical form is 'AAA.US'.
+    assert row == ("SEC", 3, 1000, "AAA.US")
+
+
+def test_migration_054_blocks_on_drift_between_provider_listing_and_exchange(
+    tmp_path,
+):
+    """If provider_listing.provider_id disagrees with
+    provider_exchange.provider_id, the migration must abort to avoid
+    silently losing information."""
+
+    db_path = tmp_path / "provider-listing-drift-054.sqlite"
+
+    # Bring the DB up through migration 053 (one before 054).
+    apply_migrations(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM schema_migrations")
+        conn.execute(
+            "INSERT INTO schema_migrations (version) VALUES (?)",
+            (53,),
+        )
+        # The fresh DB already has providers (EODHD=1, FRANKFURTER=2,
+        # SEC=3), an exchange (id=1, code='US'), and a single
+        # provider_exchange (id=1, provider_id=3, code='US'). Drop and
+        # rebuild provider_listing in the pre-054 shape so we can
+        # introduce drift, then insert a row whose provider_id (1, EODHD)
+        # disagrees with provider_exchange.provider_id (3, SEC).
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("DROP VIEW IF EXISTS supported_tickers")
+        conn.execute("DROP VIEW IF EXISTS provider_listing_catalog")
+        conn.execute("DROP TABLE provider_listing")
+        conn.execute(
+            """
+            CREATE TABLE provider_listing (
+                provider_listing_id INTEGER PRIMARY KEY,
+                provider_id INTEGER NOT NULL,
+                provider_exchange_id INTEGER NOT NULL,
+                provider_symbol TEXT NOT NULL,
+                listing_id INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute("INSERT INTO issuer (issuer_id, name) VALUES (1, 'A')")
+        conn.execute(
+            """
+            INSERT INTO listing (listing_id, issuer_id, exchange_id, symbol)
+            VALUES (1, 1, 1, 'AAA')
+            """
+        )
+        # Drift: provider_listing.provider_id = 1 (EODHD) but the
+        # matching provider_exchange row carries provider_id = 3 (SEC).
+        conn.execute(
+            """
+            INSERT INTO provider_listing (
+                provider_listing_id, provider_id, provider_exchange_id,
+                provider_symbol, listing_id
+            ) VALUES (1, 1, 1, 'AAA', 1)
+            """
+        )
+
+    with pytest.raises(RuntimeError, match="migration 054 aborted"):
+        apply_migrations(db_path)
+
+
+def test_migration_054_idempotent(tmp_path):
+    db_path = tmp_path / "provider-listing-054-idempotent.sqlite"
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
 
