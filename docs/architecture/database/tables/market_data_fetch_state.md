@@ -42,7 +42,7 @@ One row per `provider_listing_id`.
 ## Secondary Indexes
 
 <!-- BEGIN generated_secondary_indexes -->
-- `idx_market_data_fetch_next (next_eligible_at)`
+- None beyond the primary key and unique constraints.
 <!-- END generated_secondary_indexes -->
 
 ## Main Read Paths

@@ -43,7 +43,7 @@ One row per `(listing_id, metric_id)`.
 ## Secondary Indexes
 
 <!-- BEGIN generated_secondary_indexes -->
-- `idx_metrics_metric_id (metric_id)`
+- None beyond the primary key and unique constraints.
 <!-- END generated_secondary_indexes -->
 
 ## Main Read Paths

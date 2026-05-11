@@ -7162,6 +7162,55 @@ def _migration_066_provider_exchange_name_country_not_null(
         _create_primary_provider_listing_catalog_view(conn)
 
 
+def _migration_067_drop_unused_indexes(conn: sqlite3.Connection) -> None:
+    """Drop eight secondary indexes that the audit found unused or redundant.
+
+    Each of these indexes either had no current query that exercised it,
+    or was strictly covered by a PRIMARY KEY / UNIQUE auto-index:
+
+    * ``idx_fin_facts_concept`` — concept is always paired with
+      ``listing_id`` in the codebase, in which case
+      ``idx_fin_facts_security_concept_latest`` already covers the
+      query. The standalone-concept index alone occupied ~3.18 GB.
+    * ``idx_metric_compute_status_metric_status`` — no query filters on
+      ``(metric_id)`` or ``(metric_id, status)``; all reads match the
+      PK ``(listing_id, metric_id)``.
+    * ``idx_metrics_metric_id`` — same story as above for ``metrics``.
+    * ``idx_market_data_latest`` — strictly redundant with the PK
+      ``(listing_id, as_of)``. SQLite traverses the PK in either
+      direction at no cost, so the descending-ordered duplicate index
+      added write amplification without any optimizer benefit.
+    * ``idx_fundamentals_raw_last_fetched`` — the only candidate filter
+      (``_fetch_stale``) joins through ``provider_listing_catalog`` and
+      reaches ``fundamentals_raw`` via PK; the optimizer never picks the
+      ``last_fetched_at`` index.
+    * ``idx_market_data_fetch_next`` /
+      ``idx_fundamentals_fetch_next`` — both fetch-state tables are
+      always reached via PK in JOINs. No code path scans them by
+      ``next_eligible_at``.
+    * ``idx_listing_exchange`` — overlaps with
+      ``sqlite_autoindex_listing_1 (exchange_id, symbol)`` whose
+      leading column is already ``exchange_id``.
+
+    ``DROP INDEX IF EXISTS`` keeps the migration safely re-runnable
+    against databases that never created one or more of these indexes
+    (e.g. fresh test DBs that took different paths through earlier
+    migrations).
+    """
+
+    for index_name in (
+        "idx_fin_facts_concept",
+        "idx_metric_compute_status_metric_status",
+        "idx_metrics_metric_id",
+        "idx_market_data_latest",
+        "idx_fundamentals_raw_last_fetched",
+        "idx_market_data_fetch_next",
+        "idx_listing_exchange",
+        "idx_fundamentals_fetch_next",
+    ):
+        conn.execute(f"DROP INDEX IF EXISTS {index_name}")
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -7229,6 +7278,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_064_drop_orphan_issuers_tighten_name,
     _migration_065_financial_facts_fiscal_period_not_null,
     _migration_066_provider_exchange_name_country_not_null,
+    _migration_067_drop_unused_indexes,
 ]
 
 

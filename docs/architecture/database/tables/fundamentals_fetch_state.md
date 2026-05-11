@@ -43,7 +43,7 @@ not currently blocked by a fundamentals fetch failure.
 ## Secondary Indexes
 
 <!-- BEGIN generated_secondary_indexes -->
-- `idx_fundamentals_fetch_next (next_eligible_at)`
+- None beyond the primary key and unique constraints.
 <!-- END generated_secondary_indexes -->
 
 ## Main Read Paths

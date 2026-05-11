@@ -34,8 +34,7 @@ This page maps the end-to-end pipeline to the tables and indexes that matter mos
 - Critical structures:
   - `provider_listing` unique `(provider_exchange_id, provider_symbol)`
   - `fundamentals_raw` primary key `provider_listing_id`
-  - `idx_fundamentals_raw_last_fetched`
-  - `idx_fundamentals_fetch_next`
+  - `fundamentals_fetch_state` primary key `provider_listing_id` (the join driver — migration 067 dropped the `next_eligible_at` and `last_fetched_at` indexes since they were never picked)
 - Review focus:
   - `fundamentals_raw.data` is the widest operational row in the schema
   - `fundamentals_fetch_state` stores only active failures; successful fetch progress is derived from raw payload presence and age
@@ -73,10 +72,10 @@ This page maps the end-to-end pipeline to the tables and indexes that matter mos
 - Upserts `market_data`
 - Critical structures:
   - `idx_provider_listing_listing`
-  - `idx_market_data_fetch_next`
-  - `idx_market_data_latest`
+  - `market_data` primary key `(listing_id, as_of)` (latest-snapshot probes traverse the PK backwards; migration 067 dropped the redundant `idx_market_data_latest`)
+  - `market_data_fetch_state` primary key `provider_listing_id`
 - Review focus:
-  - latest-snapshot queries should hit `idx_market_data_latest`
+  - latest-snapshot queries should resolve against the `market_data` PK in a single seek per scoped row
   - stale planning aggregates by `listing_id`, making `market_data` a hotspot on large universes
 
 ## 7. Refresh FX Rates
@@ -100,9 +99,9 @@ This page maps the end-to-end pipeline to the tables and indexes that matter mos
 - Critical structures:
   - `listing` unique `(exchange_id, symbol)`
   - `idx_fin_facts_security_concept_latest`
-  - `idx_market_data_latest`
+  - `market_data` primary key `(listing_id, as_of)`
   - `metrics` PK `(listing_id, metric_id)`
-  - `idx_metric_compute_status_metric_status`
+  - `metric_compute_status` PK `(listing_id, metric_id)` (migration 067 dropped the `(metric_id, status)` secondary because every read matches the PK)
 - Review focus:
   - this is the hottest read path in the system
   - `financial_facts` row width and index fit dominate runtime more than almost any other table
@@ -114,9 +113,8 @@ This page maps the end-to-end pipeline to the tables and indexes that matter mos
 - Reads `metric_compute_status` for diagnostics
 - Critical structures:
   - `provider_listing` joins back to `listing`
-  - `metrics` PK
-  - `idx_metrics_metric_id`
-  - `idx_metric_compute_status_metric_status`
+  - `metrics` PK `(listing_id, metric_id)` (migration 067 dropped the bare `metric_id` index since it was never picked)
+  - `metric_compute_status` PK `(listing_id, metric_id)`
 - Review focus:
   - screening depends on `metrics` being a compact cache; if the table grows wider or more history is added, read costs change materially
 

@@ -1028,7 +1028,9 @@ def test_migration_creates_market_data_fetch_state_table(tmp_path):
         "attempts",
     }
     assert pk_cols == ["provider_listing_id"]
-    assert "idx_market_data_fetch_next" in index_names
+    # ``idx_market_data_fetch_next`` was dropped by migration 067 as
+    # unused; see ``test_migration_067_drops_unused_indexes``.
+    assert "idx_market_data_fetch_next" not in index_names
 
 
 def test_migration_creates_fundamentals_hot_path_indexes(tmp_path):
@@ -1050,14 +1052,17 @@ def test_migration_creates_fundamentals_hot_path_indexes(tmp_path):
         raw_fks = conn.execute("PRAGMA foreign_key_list(fundamentals_raw)").fetchall()
         raw_fk_targets = {row[2] for row in raw_fks}
 
-    assert "idx_fundamentals_fetch_next" in state_index_names
+    # ``idx_fundamentals_fetch_next`` and
+    # ``idx_fundamentals_raw_last_fetched`` were dropped by migration
+    # 067 as unused; see ``test_migration_067_drops_unused_indexes``.
+    assert "idx_fundamentals_fetch_next" not in state_index_names
     assert raw_columns == {
         "provider_listing_id",
         "data",
         "payload_hash",
         "last_fetched_at",
     }
-    assert "idx_fundamentals_raw_last_fetched" in raw_index_names
+    assert "idx_fundamentals_raw_last_fetched" not in raw_index_names
     assert "idx_fundamentals_raw_provider_fetched" not in raw_index_names
     assert "idx_fundamentals_raw_security" not in raw_index_names
     assert raw_fk_targets == {"provider_listing"}
@@ -1159,7 +1164,9 @@ def test_migration_drops_fundamentals_raw_listing_identity_columns(tmp_path):
         "payload_hash",
         "last_fetched_at",
     }
-    assert "idx_fundamentals_raw_last_fetched" in index_names
+    # ``idx_fundamentals_raw_last_fetched`` was dropped by migration
+    # 067; see ``test_migration_067_drops_unused_indexes``.
+    assert "idx_fundamentals_raw_last_fetched" not in index_names
     assert "idx_fundamentals_raw_security" not in index_names
     assert "idx_fundamentals_raw_provider_symbol" not in index_names
     assert row == (
@@ -1237,7 +1244,9 @@ def test_migration_drops_fundamentals_raw_currency_from_current_schema(tmp_path)
         "payload_hash",
         "last_fetched_at",
     }
-    assert "idx_fundamentals_raw_last_fetched" in index_names
+    # ``idx_fundamentals_raw_last_fetched`` was dropped by migration
+    # 067; see ``test_migration_067_drops_unused_indexes``.
+    assert "idx_fundamentals_raw_last_fetched" not in index_names
     assert row == (
         1,
         "{}",
@@ -1361,7 +1370,9 @@ def test_migration_adds_metric_status_and_facts_refresh_tables(tmp_path):
         "market_data_as_of",
         "market_data_updated_at",
     }
-    assert "idx_metric_compute_status_metric_status" in status_index_names
+    # ``idx_metric_compute_status_metric_status`` was dropped by
+    # migration 067; see ``test_migration_067_drops_unused_indexes``.
+    assert "idx_metric_compute_status_metric_status" not in status_index_names
 
 
 def test_migration_does_not_overwrite_existing_supported_tickers(tmp_path):
@@ -1660,11 +1671,10 @@ def test_migration_041_pre_flight_orphan_aborts(tmp_path):
             )
             """
         )
-        conn.execute(
-            """
-            CREATE INDEX idx_metrics_metric_id ON metrics(metric_id)
-            """
-        )
+        # Pre-041 also created ``idx_metrics_metric_id`` on this
+        # table, but migration 067 has since dropped it as unused; the
+        # fixture no longer recreates it because the rest of the test
+        # only exercises orphan detection in migration 041.
         conn.execute(
             """
             INSERT INTO metrics (
@@ -3715,6 +3725,75 @@ def test_migration_066_backfills_legacy_nulls(tmp_path):
 
 def test_migration_066_idempotent(tmp_path):
     db_path = tmp_path / "provider-exchange-066-idempotent.sqlite"
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0
+
+
+# Indexes that migration 067 must drop. Audit found they were either
+# never picked by the optimizer or strictly covered by a PK / UNIQUE
+# auto-index. See the migration docstring for per-index rationale.
+_MIGRATION_067_DROPPED_INDEXES = frozenset(
+    {
+        "idx_fin_facts_concept",
+        "idx_metric_compute_status_metric_status",
+        "idx_metrics_metric_id",
+        "idx_market_data_latest",
+        "idx_fundamentals_raw_last_fetched",
+        "idx_market_data_fetch_next",
+        "idx_listing_exchange",
+        "idx_fundamentals_fetch_next",
+    }
+)
+
+# Indexes that must survive migration 067 — every other secondary
+# index the schema declares. Asserting on this set catches the
+# copy-paste mistake of accidentally dropping the wrong index.
+_MIGRATION_067_RETAINED_INDEXES = frozenset(
+    {
+        "idx_fin_facts_security_concept_latest",
+        "idx_fin_facts_currency_nonnull",
+        "idx_fx_rates_pair_date",
+        "idx_fx_supported_pairs_refreshable",
+        "idx_issuer_name_country",
+        "idx_listing_currency_nonnull",
+        "idx_provider_exchange_exchange",
+        "idx_provider_listing_listing",
+    }
+)
+
+
+def test_migration_067_drops_unused_indexes(tmp_path):
+    db_path = tmp_path / "drop-unused-indexes-067.sqlite"
+    applied = apply_migrations(db_path)
+
+    assert applied == len(MIGRATIONS)
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%'"
+        ).fetchall()
+    index_names = {row[0] for row in rows}
+
+    # The eight doomed indexes must be gone after a fresh apply.
+    assert _MIGRATION_067_DROPPED_INDEXES.isdisjoint(index_names), (
+        "migration 067 left a doomed index in place: "
+        f"{sorted(_MIGRATION_067_DROPPED_INDEXES & index_names)}"
+    )
+
+    # And the eight indexes that the audit kept must still exist —
+    # protects against a future change that drops the wrong one.
+    missing_retained = _MIGRATION_067_RETAINED_INDEXES - index_names
+    assert not missing_retained, (
+        f"migration 067 (or a later change) dropped indexes that the "
+        f"audit retained: {sorted(missing_retained)}"
+    )
+
+
+def test_migration_067_idempotent(tmp_path):
+    db_path = tmp_path / "drop-unused-indexes-067-idempotent.sqlite"
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
 

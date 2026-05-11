@@ -2534,14 +2534,14 @@ class SupportedTickerRepository(SQLiteStore):
 
         The query now scopes the catalog *first* and uses a correlated
         ``(SELECT MAX(as_of) FROM market_data WHERE listing_id = ?)``
-        probe per scoped row. With
-        ``idx_market_data_latest (listing_id, as_of DESC)`` covering the
-        lookup, each probe is a single index seek; total work scales
-        with the scoped catalog size rather than the full
-        ``market_data`` row count. The probe is computed once via an
-        inline subquery and then both filtered on and ordered by in the
-        outer ``WHERE`` / ``ORDER BY``, so the planner doesn't run it
-        multiple times per row.
+        probe per scoped row. The probe is served by the
+        ``market_data`` PK ``(listing_id, as_of)`` — SQLite traverses
+        the index backwards for the ``MAX``, so each probe is a single
+        index seek and total work scales with the scoped catalog size
+        rather than the full ``market_data`` row count. The probe is
+        computed once via an inline subquery and then both filtered on
+        and ordered by in the outer ``WHERE`` / ``ORDER BY``, so the
+        planner doesn't run it multiple times per row.
         """
 
         self.initialize_schema()
@@ -2754,11 +2754,10 @@ class FundamentalsRepository(SQLiteStore):
     """Persist raw fundamentals payloads by provider."""
 
     def initialize_schema(self) -> None:
-        # `fundamentals_raw` (table + idx_fundamentals_raw_last_fetched)
-        # is owned by migration 040, which also dropped the legacy
-        # `idx_fundamentals_raw_security`, `..._provider_symbol`, and
-        # `..._provider_fetched` indexes — so the runtime DROP INDEX
-        # statements are no longer needed either.
+        # `fundamentals_raw` is owned by migration 040, which also
+        # dropped the legacy `idx_fundamentals_raw_security`,
+        # `..._provider_symbol`, and `..._provider_fetched` indexes — so
+        # the runtime DROP INDEX statements are no longer needed either.
         apply_migrations(self.db_path)
         self._security_repo().initialize_schema()
 
@@ -3608,13 +3607,12 @@ class SecurityListingStatusRepository(SQLiteStore):
 
 class _FetchStateRepository(SQLiteStore):
     table_name: str
-    index_name: str
 
     def initialize_schema(self) -> None:
-        # The table, its FK to provider_listing, and the
-        # ``next_eligible_at`` index are all owned by migrations 040+
-        # (see migration 053 for the runtime-column cleanup). All
-        # provider/symbol resolution is now done through
+        # The table and its FK to provider_listing are owned by
+        # migrations 040+ (see migration 053 for the runtime-column
+        # cleanup, migration 067 for the next_eligible_at index drop).
+        # All provider/symbol resolution is now done through
         # ``provider_listing_catalog`` joins; this repository writes
         # directly against the ``provider_listing_id`` PK.
         apply_migrations(self.db_path)
@@ -3910,9 +3908,9 @@ class FundamentalsFetchStateRepository(SQLiteStore):
     """Track active fundamentals fetch failures for resumable ingestion."""
 
     def initialize_schema(self) -> None:
-        # `fundamentals_fetch_state` (table + idx_fundamentals_fetch_next)
-        # is owned by migration 040, which also dropped the legacy
-        # provider-keyed indexes that the runtime path used to reset.
+        # `fundamentals_fetch_state` is owned by migration 040, which
+        # also dropped the legacy provider-keyed indexes that the
+        # runtime path used to reset.
         apply_migrations(self.db_path)
 
     def _resolve_provider_listing_id(
@@ -4152,7 +4150,6 @@ class MarketDataFetchStateRepository(_FetchStateRepository):
     """Track market-data fetch status for resumable ingestion."""
 
     table_name = "market_data_fetch_state"
-    index_name = "idx_market_data_fetch_next"
 
 
 class FundamentalsNormalizationStateRepository(SQLiteStore):
@@ -5830,8 +5827,7 @@ class MarketDataRepository(SQLiteStore):
     """Persist canonical market data snapshots."""
 
     def initialize_schema(self) -> None:
-        # `market_data` (table + idx_market_data_latest) is owned by
-        # migration 034.
+        # `market_data` is owned by migration 034.
         apply_migrations(self.db_path)
         self._security_repo().initialize_schema()
 
@@ -5994,7 +5990,7 @@ class MarketDataRepository(SQLiteStore):
                         SELECT
                             listing_id,
                             MAX(as_of) AS as_of
-                        FROM market_data INDEXED BY idx_market_data_latest
+                        FROM market_data
                         WHERE listing_id IN ({placeholders})
                         GROUP BY listing_id
                     )

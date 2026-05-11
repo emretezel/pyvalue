@@ -233,17 +233,11 @@ CREATE TABLE "schema_migrations" (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             version INTEGER NOT NULL
         );
-CREATE INDEX idx_fin_facts_concept
-        ON financial_facts(concept);
 CREATE INDEX idx_fin_facts_currency_nonnull
         ON financial_facts(currency)
         WHERE currency IS NOT NULL;
 CREATE INDEX idx_fin_facts_security_concept_latest
         ON financial_facts(listing_id, concept, end_date DESC, filed DESC);
-CREATE INDEX idx_fundamentals_fetch_next
-        ON fundamentals_fetch_state(next_eligible_at);
-CREATE INDEX idx_fundamentals_raw_last_fetched
-        ON fundamentals_raw(last_fetched_at);
 CREATE INDEX idx_fx_rates_pair_date
         ON fx_rates(provider, base_currency, quote_currency, rate_date DESC);
 CREATE INDEX idx_fx_supported_pairs_refreshable
@@ -253,16 +247,6 @@ CREATE UNIQUE INDEX idx_issuer_name_country
 CREATE INDEX idx_listing_currency_nonnull
         ON listing(currency)
         WHERE currency IS NOT NULL;
-CREATE INDEX idx_listing_exchange
-        ON listing(exchange_id);
-CREATE INDEX idx_market_data_fetch_next
-        ON market_data_fetch_state(next_eligible_at);
-CREATE INDEX idx_market_data_latest
-        ON market_data(listing_id, as_of DESC);
-CREATE INDEX idx_metric_compute_status_metric_status
-                ON metric_compute_status(metric_id, status);
-CREATE INDEX idx_metrics_metric_id
-            ON metrics(metric_id);
 CREATE INDEX idx_provider_exchange_exchange
         ON provider_exchange(exchange_id);
 CREATE INDEX idx_provider_listing_listing

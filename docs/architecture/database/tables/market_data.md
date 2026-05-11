@@ -43,7 +43,7 @@ One row per `(listing_id, as_of)` snapshot date.
 ## Secondary Indexes
 
 <!-- BEGIN generated_secondary_indexes -->
-- `idx_market_data_latest (listing_id, as_of DESC)`
+- None beyond the primary key and unique constraints.
 <!-- END generated_secondary_indexes -->
 
 ## Main Read Paths

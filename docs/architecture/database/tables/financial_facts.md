@@ -56,7 +56,6 @@ meaningful filing accession value.
 <!-- BEGIN generated_secondary_indexes -->
 - `idx_fin_facts_currency_nonnull (currency)` WHERE currency IS NOT NULL
 - `idx_fin_facts_security_concept_latest (listing_id, concept, end_date DESC, filed DESC)`
-- `idx_fin_facts_concept (concept)`
 <!-- END generated_secondary_indexes -->
 
 ## Main Read Paths

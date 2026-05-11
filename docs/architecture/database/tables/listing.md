@@ -52,7 +52,6 @@ One row per `(exchange_id, symbol)`.
 
 <!-- BEGIN generated_secondary_indexes -->
 - `idx_listing_currency_nonnull (currency)` WHERE currency IS NOT NULL
-- `idx_listing_exchange (exchange_id)`
 <!-- END generated_secondary_indexes -->
 
 ## Main Read Paths

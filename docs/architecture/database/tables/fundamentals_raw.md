@@ -40,7 +40,7 @@ One row per `provider_listing_id`; historical payload versions are not retained.
 ## Secondary Indexes
 
 <!-- BEGIN generated_secondary_indexes -->
-- `idx_fundamentals_raw_last_fetched (last_fetched_at)`
+- None beyond the primary key and unique constraints.
 <!-- END generated_secondary_indexes -->
 
 ## Main Read Paths
