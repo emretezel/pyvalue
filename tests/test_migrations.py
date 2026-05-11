@@ -3799,3 +3799,272 @@ def test_migration_067_idempotent(tmp_path):
 
     assert first == len(MIGRATIONS)
     assert second == 0
+
+
+# ---------------------------------------------------------------------------
+# Migration 068 — fiscal_period CHECK + empty-string backfill
+# ---------------------------------------------------------------------------
+
+# The CHECK introduced by migration 068 is the schema-level guarantee that no
+# fact ever leaks into the table with an empty ``fiscal_period``. The two
+# regression tests below pin that guarantee plus the backfill behaviour. They
+# focus on migration 068 specifically rather than the full migration chain.
+
+_VALID_FISCAL_PERIODS = ("FY", "Q1", "Q2", "Q3", "Q4", "TTM", "INSTANT")
+
+
+def _drop_fiscal_period_check(conn: sqlite3.Connection) -> None:
+    """Recreate ``financial_facts`` without the CHECK so we can seed
+    legacy empty-period rows for the backfill test.
+
+    SQLite can't ALTER a CHECK away in place, so we mirror the live DDL
+    minus the new constraint. Indexes are recreated to match the current
+    schema (post migration 067 + 068).
+    """
+
+    conn.execute("DROP INDEX IF EXISTS idx_fin_facts_security_concept_latest")
+    conn.execute("DROP INDEX IF EXISTS idx_fin_facts_currency_nonnull")
+    conn.execute("DROP TABLE financial_facts")
+    conn.execute(
+        """
+        CREATE TABLE financial_facts (
+            listing_id INTEGER NOT NULL,
+            cik TEXT,
+            concept TEXT NOT NULL,
+            fiscal_period TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            unit TEXT NOT NULL
+                CHECK (length(trim(unit)) > 0
+                       AND instr(unit, ' ') = 0
+                       AND instr(unit, char(9)) = 0
+                       AND instr(unit, char(10)) = 0),
+            value REAL NOT NULL,
+            accn TEXT,
+            filed TEXT,
+            frame TEXT,
+            start_date TEXT,
+            accounting_standard TEXT,
+            currency TEXT,
+            source_provider TEXT,
+            PRIMARY KEY (listing_id, concept, fiscal_period, end_date, unit),
+            FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fin_facts_security_concept_latest
+        ON financial_facts(listing_id, concept, end_date DESC, filed DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fin_facts_currency_nonnull
+        ON financial_facts(currency)
+        WHERE currency IS NOT NULL
+        """
+    )
+
+
+def test_migration_068_check_rejects_empty_fiscal_period(tmp_path):
+    """Post-migration the CHECK must reject any fiscal_period='' insert."""
+
+    db_path = tmp_path / "fiscal-period-check.sqlite"
+    applied = apply_migrations(db_path)
+    assert applied == len(MIGRATIONS)
+
+    with sqlite3.connect(db_path) as conn:
+        # FK is off by default in tests, so we can target the CHECK without
+        # also tripping over listing_id=1 not existing in `listing`.
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO financial_facts (
+                    listing_id, concept, fiscal_period, end_date, unit, value
+                ) VALUES (1, 'EnterpriseValue', '', '2025-12-31', 'USD', 1.0)
+                """
+            )
+        # And it must accept every value in the allow-list.
+        for period in _VALID_FISCAL_PERIODS:
+            conn.execute(
+                """
+                INSERT INTO financial_facts (
+                    listing_id, concept, fiscal_period, end_date, unit, value
+                ) VALUES (1, 'Revenues', ?, '2025-12-31', 'USD', 1.0)
+                """,
+                (period,),
+            )
+
+
+def _seed_catalog_row(
+    conn: sqlite3.Connection,
+    *,
+    listing_id: int,
+    name: str,
+    provider_symbol: str,
+) -> int:
+    """Insert a minimal issuer/listing/provider_listing chain and return its
+    ``provider_listing_id``. ``apply_migrations`` pre-seeds the US exchange
+    and one provider_exchange row (SEC-US); we just point at that row since
+    the backfill SQL doesn't care which provider supplied the cached payload.
+    """
+
+    exchange_id = conn.execute(
+        "SELECT exchange_id FROM exchange WHERE exchange_code = 'US'"
+    ).fetchone()[0]
+    provider_exchange_id = conn.execute(
+        "SELECT provider_exchange_id FROM provider_exchange LIMIT 1"
+    ).fetchone()[0]
+    conn.execute(
+        "INSERT INTO issuer (issuer_id, name) VALUES (?, ?)",
+        (listing_id, name),
+    )
+    conn.execute(
+        """
+        INSERT INTO listing (listing_id, issuer_id, exchange_id, symbol)
+        VALUES (?, ?, ?, ?)
+        """,
+        (listing_id, listing_id, exchange_id, provider_symbol),
+    )
+    conn.execute(
+        """
+        INSERT INTO provider_listing (
+            provider_exchange_id, provider_symbol, listing_id
+        ) VALUES (?, ?, ?)
+        """,
+        (provider_exchange_id, provider_symbol, listing_id),
+    )
+    return int(
+        conn.execute(
+            "SELECT provider_listing_id FROM provider_listing WHERE listing_id = ?",
+            (listing_id,),
+        ).fetchone()[0]
+    )
+
+
+def test_migration_068_backfills_from_updated_at(tmp_path):
+    """Migration 068 maps empty-period rows to INSTANT/TTM and re-dates them
+    from ``General.UpdatedAt`` in the cached fundamentals payload."""
+
+    from pyvalue.migrations import _migration_068_fiscal_period_check
+
+    db_path = tmp_path / "fiscal-period-backfill.sqlite"
+    applied = apply_migrations(db_path)
+    assert applied == len(MIGRATIONS)
+
+    with sqlite3.connect(db_path) as conn:
+        # Recreate the table without the CHECK so we can seed legacy rows
+        # that the production code is no longer able to insert.
+        _drop_fiscal_period_check(conn)
+
+        provider_listing_id = _seed_catalog_row(
+            conn, listing_id=42, name="Acme", provider_symbol="ACME"
+        )
+        conn.execute(
+            """
+            INSERT INTO fundamentals_raw (
+                provider_listing_id, data, payload_hash, last_fetched_at
+            ) VALUES (
+                ?, '{"General":{"UpdatedAt":"2026-03-27"}}', ?,
+                '2026-03-28T08:42:36+00:00'
+            )
+            """,
+            (provider_listing_id, "0" * 64),
+        )
+
+        # Two legacy empty-period snapshots — one EV, one DPS — plus a
+        # well-formed FY row that must survive the migration unchanged.
+        conn.execute(
+            """
+            INSERT INTO financial_facts (
+                listing_id, concept, fiscal_period, end_date, unit, value,
+                source_provider, currency
+            ) VALUES
+                (42, 'EnterpriseValue', '', '2025-12-31', 'USD', 3700.0,
+                 'EODHD', 'USD'),
+                (42, 'CommonStockDividendsPerShareCashPaid', '',
+                 '2025-12-31', 'USD', 1.03, 'EODHD', 'USD'),
+                (42, 'Revenues', 'FY', '2024-12-31', 'USD', 100.0,
+                 'EODHD', 'USD')
+            """
+        )
+
+        _migration_068_fiscal_period_check(conn)
+
+        rows = conn.execute(
+            """
+            SELECT concept, fiscal_period, end_date, value
+            FROM financial_facts
+            ORDER BY concept
+            """
+        ).fetchall()
+        assert rows == [
+            (
+                "CommonStockDividendsPerShareCashPaid",
+                "TTM",
+                "2026-03-27",
+                1.03,
+            ),
+            ("EnterpriseValue", "INSTANT", "2026-03-27", 3700.0),
+            ("Revenues", "FY", "2024-12-31", 100.0),
+        ]
+
+        # The CHECK is now in place and must reject another empty insert.
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO financial_facts (
+                    listing_id, concept, fiscal_period, end_date, unit, value
+                ) VALUES (42, 'EnterpriseValue', '', '2026-04-01', 'USD', 1.0)
+                """
+            )
+
+
+def test_migration_068_falls_back_to_last_fetched_at_when_updated_at_missing(
+    tmp_path,
+):
+    """If General.UpdatedAt is absent we fall back to DATE(last_fetched_at)."""
+
+    from pyvalue.migrations import _migration_068_fiscal_period_check
+
+    db_path = tmp_path / "fiscal-period-backfill-fallback.sqlite"
+    apply_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        _drop_fiscal_period_check(conn)
+
+        provider_listing_id = _seed_catalog_row(
+            conn, listing_id=7, name="Beta", provider_symbol="BETA"
+        )
+        # Payload deliberately lacks General.UpdatedAt — should trigger the
+        # DATE(last_fetched_at) fallback.
+        conn.execute(
+            """
+            INSERT INTO fundamentals_raw (
+                provider_listing_id, data, payload_hash, last_fetched_at
+            ) VALUES (
+                ?, '{"General":{}}', ?, '2026-02-14T11:22:33+00:00'
+            )
+            """,
+            (provider_listing_id, "1" * 64),
+        )
+        conn.execute(
+            """
+            INSERT INTO financial_facts (
+                listing_id, concept, fiscal_period, end_date, unit, value,
+                source_provider, currency
+            ) VALUES (7, 'EnterpriseValue', '', '2025-09-30', 'USD', 50.0,
+                      'EODHD', 'USD')
+            """
+        )
+
+        _migration_068_fiscal_period_check(conn)
+
+        end_date, fiscal_period = conn.execute(
+            """
+            SELECT end_date, fiscal_period FROM financial_facts
+            WHERE listing_id = 7 AND concept = 'EnterpriseValue'
+            """
+        ).fetchone()
+        assert fiscal_period == "INSTANT"
+        assert end_date == "2026-02-14"

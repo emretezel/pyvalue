@@ -11,7 +11,8 @@ CREATE TABLE "financial_facts" (
             listing_id INTEGER NOT NULL,
             cik TEXT,
             concept TEXT NOT NULL,
-            fiscal_period TEXT NOT NULL,
+            fiscal_period TEXT NOT NULL
+                CHECK (fiscal_period IN ('FY','Q1','Q2','Q3','Q4','TTM','INSTANT')),
             end_date TEXT NOT NULL,
             unit TEXT NOT NULL
                 CHECK (length(trim(unit)) > 0

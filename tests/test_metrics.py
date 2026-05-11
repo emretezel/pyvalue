@@ -6446,7 +6446,7 @@ def _build_ev_ratio_records(
                 symbol=symbol,
                 concept="EnterpriseValue",
                 end_date=q4,
-                fiscal_period="",
+                fiscal_period="INSTANT",
                 value=enterprise_value,
                 currency=enterprise_currency,
             )
@@ -9282,7 +9282,7 @@ def test_oey_ev_metric_uses_normalized_enterprise_value_denominator():
             end_date=q4,
             value=5840.0,
             currency="USD",
-            fiscal_period="",
+            fiscal_period="INSTANT",
         )
     ]
 
@@ -9368,7 +9368,7 @@ def test_oey_ev_metric_falls_back_to_derived_ev_when_primary_non_positive():
             end_date=q4,
             value=0.0,
             currency="USD",
-            fiscal_period="",
+            fiscal_period="INSTANT",
         )
     ]
     records_by_concept["LongTermDebt"] = [
@@ -9457,7 +9457,7 @@ def test_oey_ev_metric_returns_none_for_enterprise_value_currency_mismatch():
             end_date=q4,
             value=100.0,
             currency="EUR",
-            fiscal_period="",
+            fiscal_period="INSTANT",
         )
     ]
 
@@ -9499,7 +9499,7 @@ def test_oey_ev_metric_returns_none_when_enterprise_value_missing():
             end_date=q4,
             value=100.0,
             currency="EUR",
-            fiscal_period="",
+            fiscal_period="INSTANT",
         )
     ]
 
@@ -9548,7 +9548,7 @@ def test_oey_ev_metric_allows_negative_values():
             end_date=q4,
             value=1080.0,
             currency="USD",
-            fiscal_period="",
+            fiscal_period="INSTANT",
         )
     ]
 
@@ -11807,7 +11807,7 @@ def test_oey_ev_norm_metric_uses_oe_fy_median_and_normalized_ev():
             symbol=symbol,
             concept="EnterpriseValue",
             end_date=f"{latest_year}-09-30",
-            fiscal_period="",
+            fiscal_period="INSTANT",
             value=3200.0,
             currency="USD",
         )
@@ -11881,7 +11881,7 @@ def test_oey_ev_norm_metric_returns_none_for_enterprise_value_currency_mismatch(
             symbol=symbol,
             concept="EnterpriseValue",
             end_date=f"{latest_year}-09-30",
-            fiscal_period="",
+            fiscal_period="INSTANT",
             value=100.0,
             currency="EUR",
         )
@@ -12176,7 +12176,7 @@ def test_dividend_yield_ttm_metric_falls_back_to_dps_and_price():
                 fact(
                     symbol=symbol,
                     concept="CommonStockDividendsPerShareCashPaid",
-                    fiscal_period="",
+                    fiscal_period="TTM",
                     end_date=q4,
                     value=2.5,
                     currency="USD",

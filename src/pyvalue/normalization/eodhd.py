@@ -388,6 +388,11 @@ class EODHDFactsNormalizer:
                 )
                 currency = currency_resolution.currency_code
                 period_code = fiscal_period or self._infer_quarter(entry)
+                if period_code is None:
+                    # In practice _infer_quarter only fails when end_date is also
+                    # unparseable, and we've already skipped those entries above.
+                    # Keep the guard explicit so the schema CHECK never sees ''.
+                    continue
                 frame = self._build_frame(end_date, period_code)
                 total_liab = self._extract_value(
                     entry, ["totalLiabilities", "totalLiab"], lowered
@@ -618,7 +623,7 @@ class EODHDFactsNormalizer:
                         FactRecord(
                             symbol=symbol.upper(),
                             concept=concept,
-                            fiscal_period=period_code or "",
+                            fiscal_period=period_code,
                             end_date=end_date,
                             unit=unit,
                             value=normalized_value,
@@ -648,11 +653,17 @@ class EODHDFactsNormalizer:
         if raw_value is None:
             return []
 
-        highlights = payload.get("Highlights") or {}
-        end_date = self._extract_date({"date": highlights.get("MostRecentQuarter")})
+        # EODHD's Valuation.EnterpriseValue is a point-in-time scalar timestamped by
+        # General.UpdatedAt — not by the balance-sheet quarter. Earlier code used
+        # Highlights.MostRecentQuarter, which can be off by up to ~90 days and made
+        # the (listing, concept, end_date, ...) PK collide across re-ingests, silently
+        # overwriting history. UpdatedAt restores correct INSTANT semantics.
+        end_date = self._payload_updated_at(payload)
         if not end_date:
-            end_date = self._latest_financials_end_date(payload.get("Financials") or {})
-        if not end_date:
+            LOGGER.warning(
+                "EnterpriseValue: missing General.UpdatedAt for %s; skipping snapshot",
+                symbol,
+            )
             return []
 
         currency_resolution = resolve_eodhd_currency(
@@ -673,7 +684,7 @@ class EODHDFactsNormalizer:
             FactRecord(
                 symbol=symbol.upper(),
                 concept="EnterpriseValue",
-                fiscal_period="",
+                fiscal_period="INSTANT",
                 end_date=end_date,
                 unit=normalized_currency or "",
                 value=normalized_value,
@@ -700,21 +711,16 @@ class EODHDFactsNormalizer:
                 return code
         return None
 
-    def _latest_financials_end_date(self, financials: Dict) -> Optional[str]:
-        latest: Optional[str] = None
-        for statement_payload in financials.values():
-            if not isinstance(statement_payload, dict):
-                continue
-            for frequency in ("yearly", "quarterly"):
-                for key, entry in self._iter_entries_with_keys(
-                    statement_payload.get(frequency)
-                ):
-                    end_date = self._extract_entry_date_keyed(key, entry)
-                    if not end_date:
-                        continue
-                    if latest is None or end_date > latest:
-                        latest = end_date
-        return latest
+    def _payload_updated_at(self, payload: Dict) -> Optional[str]:
+        """Return the ISO date in `General.UpdatedAt`, or None if absent/invalid.
+
+        This is EODHD's own refresh timestamp for the fundamentals row and is the
+        correct as-of date for snapshot facts (EV, TTM DPS, SharesStats share counts)
+        whose values move independently of the most-recently-filed quarter.
+        """
+
+        general = payload.get("General") or {}
+        return self._extract_date({"date": general.get("UpdatedAt")})
 
     def _normalize_share_counts(
         self,
@@ -723,32 +729,42 @@ class EODHDFactsNormalizer:
         accounting_standard: Optional[str],
         default_currency: Optional[str],
     ) -> List[FactRecord]:
-        """Map share stats to outstanding share count facts."""
+        """Map SharesStats.SharesOutstanding to an INSTANT share-count snapshot.
+
+        SharesStats is a point-in-time block, timestamped by General.UpdatedAt
+        (the EODHD-side refresh date), not by any fiscal quarter. The historical
+        period-keyed series is handled separately by `_normalize_outstanding_shares`.
+        """
 
         stats = payload.get("SharesStats") or {}
         value = stats.get("SharesOutstanding") or stats.get("SharesFloat")
         shares = _to_float(value)
         if shares is None:
             return []
-        general = payload.get("General") or {}
-        end_date = general.get("LatestQuarter") or general.get("LatestReportDate")
+        end_date = self._payload_updated_at(payload)
         if not end_date:
+            LOGGER.warning(
+                "CommonStockSharesOutstanding (snapshot): missing General.UpdatedAt"
+                " for %s; skipping",
+                symbol,
+            )
             return []
-        record = FactRecord(
-            symbol=symbol.upper(),
-            concept="CommonStockSharesOutstanding",
-            fiscal_period="",
-            end_date=end_date,
-            unit=SHARES_UNIT,
-            value=shares,
-            accn=None,
-            filed=None,
-            frame=None,
-            start_date=None,
-            accounting_standard=accounting_standard,
-            currency=None,
-        )
-        return [record] if record else []
+        return [
+            FactRecord(
+                symbol=symbol.upper(),
+                concept="CommonStockSharesOutstanding",
+                fiscal_period="INSTANT",
+                end_date=end_date,
+                unit=SHARES_UNIT,
+                value=shares,
+                accn=None,
+                filed=None,
+                frame=None,
+                start_date=None,
+                accounting_standard=accounting_standard,
+                currency=None,
+            )
+        ]
 
     def _normalize_outstanding_shares(
         self,
@@ -785,8 +801,13 @@ class EODHDFactsNormalizer:
                         shares = shares_mln * 1_000_000
                 if shares is None:
                     continue
-                period = fiscal_period or self._infer_quarter({"date": end_date}) or ""
-                frame = self._build_frame(end_date, period or "FY")
+                period = fiscal_period or self._infer_quarter({"date": end_date})
+                if period is None:
+                    # Can only happen with an end_date that parses but has a malformed
+                    # month component. Skip rather than smuggle in '' (the CHECK on
+                    # financial_facts.fiscal_period would reject it anyway).
+                    continue
+                frame = self._build_frame(end_date, period)
                 records.append(
                     FactRecord(
                         symbol=symbol.upper(),
@@ -821,10 +842,17 @@ class EODHDFactsNormalizer:
         if raw_value is None:
             return []
 
-        end_date = self._extract_date({"date": highlights.get("MostRecentQuarter")})
+        # Highlights.DividendShare is per EODHD's glossary a TTM figure, refreshed
+        # alongside the rest of the Highlights/Valuation block and timestamped by
+        # General.UpdatedAt. Tagging it as TTM with end_date=UpdatedAt avoids the
+        # silent overwrite that MostRecentQuarter produced.
+        end_date = self._payload_updated_at(payload)
         if not end_date:
-            end_date = self._latest_financials_end_date(payload.get("Financials") or {})
-        if not end_date:
+            LOGGER.warning(
+                "CommonStockDividendsPerShareCashPaid: missing General.UpdatedAt"
+                " for %s; skipping snapshot",
+                symbol,
+            )
             return []
 
         currency_resolution = resolve_eodhd_currency(
@@ -842,7 +870,7 @@ class EODHDFactsNormalizer:
             FactRecord(
                 symbol=symbol.upper(),
                 concept="CommonStockDividendsPerShareCashPaid",
-                fiscal_period="",
+                fiscal_period="TTM",
                 end_date=end_date,
                 unit=normalized_currency or "",
                 value=normalized_value,
@@ -1127,7 +1155,9 @@ class EODHDFactsNormalizer:
                 raw_general_currency or general_currency,
                 implied_quarterly,
             ):
-                period = self._infer_quarter({"date": date_str}) or ""
+                period = self._infer_quarter({"date": date_str})
+                if period is None:
+                    continue
                 add_record(date_str, value, period, currency)
             for date_str, value, currency in self._normalize_eps_series(
                 annual,
@@ -1140,7 +1170,9 @@ class EODHDFactsNormalizer:
                 val = _to_float(entry.get("epsActual"))
                 if val is None:
                     continue
-                period = self._infer_quarter({"date": date_str}) or ""
+                period = self._infer_quarter({"date": date_str})
+                if period is None:
+                    continue
                 add_record(date_str[:10], val, period, entry.get("currency"))
 
             for date_str, entry in annual.items():

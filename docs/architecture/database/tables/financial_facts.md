@@ -28,7 +28,7 @@ meaningful filing accession value.
 | `listing_id` | `INTEGER` | no | PK, idx | canonical listing link |
 | `cik` | `TEXT` | yes |  | SEC identifier when available |
 | `concept` | `TEXT` | no | PK, idx | normalized concept |
-| `fiscal_period` | `TEXT` | no | PK | FY, Q1, TTM, and so on. Migration 065 tightened to NOT NULL after audit confirmed zero NULL rows on the live DB; the runtime FactRecord default is `'INSTANT'`. |
+| `fiscal_period` | `TEXT` | no | PK | One of `FY`, `Q1`, `Q2`, `Q3`, `Q4`, `TTM`, `INSTANT`. Migration 065 tightened to NOT NULL; migration 068 added a CHECK pinning the enum after backfilling the 77,209 empty-string rows that earlier EODHD code persisted for snapshot facts. Runtime `FactRecord` default is `'INSTANT'`. |
 | `end_date` | `TEXT` | no | PK, idx | fact period end |
 | `unit` | `TEXT` | no | PK | unit or semantic label. CHECK enforces non-empty trimmed text with no internal whitespace |
 | `value` | `REAL` | no |  | numeric fact value |
@@ -168,3 +168,4 @@ meaningful filing accession value.
 - Migration 052 dropped the redundant `idx_fin_facts_security_concept (listing_id, concept)` because `idx_fin_facts_security_concept_latest` already covers the `(listing_id, concept, ...)` prefix.
 - Migration 059 added row-level CHECK constraints on `unit` (non-empty, no internal whitespace) and `currency` (3-char uppercase ASCII when present). One legacy malformed EODHD `EnterpriseValue` row (empty unit, ~193 trillion value) was deleted as part of the pre-flight cleanup.
 - Migration 065 tightened `fiscal_period` to NOT NULL after an audit confirmed zero NULL rows on the live DB; the runtime `FactRecord` default is `'INSTANT'`.
+- Migration 068 added `CHECK (fiscal_period IN ('FY','Q1','Q2','Q3','Q4','TTM','INSTANT'))` and backfilled the ~77K legacy rows where earlier EODHD code persisted `fiscal_period=''` for snapshot facts (EnterpriseValue, CommonStockDividendsPerShareCashPaid, and a dormant SharesStats writer). Backfill mapping: `CommonStockDividendsPerShareCashPaid` → `'TTM'`, every other empty-period concept → `'INSTANT'`. For the backfilled rows the migration re-dates `end_date` to `General.UpdatedAt` from the cached fundamentals payload (falling back to `DATE(fundamentals_raw.last_fetched_at)`), because the legacy `end_date = Highlights.MostRecentQuarter` was the balance-sheet quarter rather than the price/Valuation snapshot date. The corresponding normalizer changes in `eodhd.py` make every fresh ingest emit the correct enum/date so the empty-period bug cannot recur.

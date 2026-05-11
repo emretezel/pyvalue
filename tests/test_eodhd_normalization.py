@@ -385,7 +385,7 @@ def test_eodhd_normalizes_dividend_share_from_highlights():
             "DividendShare": 3.2,
             "MostRecentQuarter": "2024-09-30",
         },
-        "General": {"CurrencyCode": "USD"},
+        "General": {"CurrencyCode": "USD", "UpdatedAt": "2024-11-05"},
     }
 
     records = normalizer.normalize(payload, symbol="TEST.US")
@@ -396,7 +396,29 @@ def test_eodhd_normalizes_dividend_share_from_highlights():
         "CommonStockDividendsPerShareCashPaid should map from Highlights.DividendShare"
     )
     assert derived[0].value == 3.2
-    assert derived[0].end_date == "2024-09-30"
+    # DividendShare is a TTM scalar timestamped by General.UpdatedAt, NOT by the
+    # balance-sheet quarter — see EODHD's Fundamentals Glossary.
+    assert derived[0].fiscal_period == "TTM"
+    assert derived[0].end_date == "2024-11-05"
+
+
+def test_eodhd_dividend_share_skipped_when_updated_at_missing():
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Highlights": {
+            "DividendShare": 3.2,
+            "MostRecentQuarter": "2024-09-30",
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+    derived = [
+        r for r in records if r.concept == "CommonStockDividendsPerShareCashPaid"
+    ]
+    assert not derived, (
+        "DividendShare snapshot must be skipped when General.UpdatedAt is absent"
+    )
 
 
 def test_eodhd_normalizes_short_term_debt_and_cash_investments():
@@ -772,7 +794,7 @@ def test_eodhd_normalizes_enterprise_value_from_valuation():
     payload = {
         "Valuation": {"EnterpriseValue": 1234.0},
         "Highlights": {"MostRecentQuarter": "2025-09-30"},
-        "General": {"CurrencyCode": "USD"},
+        "General": {"CurrencyCode": "USD", "UpdatedAt": "2025-11-15"},
     }
 
     records = normalizer.normalize(payload, symbol="TEST.US")
@@ -780,11 +802,15 @@ def test_eodhd_normalizes_enterprise_value_from_valuation():
     assert derived, "EnterpriseValue should map from Valuation.EnterpriseValue"
     assert derived[0].value == 1234.0
     assert derived[0].currency == "USD"
-    assert derived[0].end_date == "2025-09-30"
-    assert derived[0].fiscal_period == ""
+    # EV is a market-driven snapshot — its as-of date is General.UpdatedAt,
+    # not the balance-sheet MostRecentQuarter.
+    assert derived[0].fiscal_period == "INSTANT"
+    assert derived[0].end_date == "2025-11-15"
 
 
-def test_eodhd_enterprise_value_uses_most_recent_quarter_date_when_present():
+def test_eodhd_enterprise_value_uses_updated_at_for_end_date():
+    """EV is dated by General.UpdatedAt regardless of MostRecentQuarter / filings."""
+
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Valuation": {"EnterpriseValue": 555.0},
@@ -807,16 +833,19 @@ def test_eodhd_enterprise_value_uses_most_recent_quarter_date_when_present():
                 ],
             }
         },
-        "General": {"CurrencyCode": "USD"},
+        "General": {"CurrencyCode": "USD", "UpdatedAt": "2025-10-14"},
     }
 
     records = normalizer.normalize(payload, symbol="TEST.US")
     derived = [r for r in records if r.concept == "EnterpriseValue"]
     assert derived, "EnterpriseValue should be normalized when valuation value exists"
-    assert derived[0].end_date == "2025-06-30"
+    assert derived[0].fiscal_period == "INSTANT"
+    assert derived[0].end_date == "2025-10-14"
 
 
-def test_eodhd_enterprise_value_falls_back_to_latest_statement_date():
+def test_eodhd_enterprise_value_skipped_when_updated_at_missing():
+    """Without General.UpdatedAt we have no defensible as-of date, so skip."""
+
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Valuation": {"EnterpriseValue": 777.0},
@@ -843,8 +872,7 @@ def test_eodhd_enterprise_value_falls_back_to_latest_statement_date():
 
     records = normalizer.normalize(payload, symbol="TEST.US")
     derived = [r for r in records if r.concept == "EnterpriseValue"]
-    assert derived, "EnterpriseValue should fall back to latest statement date"
-    assert derived[0].end_date == "2025-09-30"
+    assert not derived, "EV must be skipped when General.UpdatedAt is missing"
 
 
 def test_eodhd_enterprise_value_uses_statement_currency_when_general_missing():
@@ -862,7 +890,7 @@ def test_eodhd_enterprise_value_uses_statement_currency_when_general_missing():
                 ],
             }
         },
-        "General": {"CurrencyCode": None},
+        "General": {"CurrencyCode": None, "UpdatedAt": "2025-10-14"},
     }
 
     records = normalizer.normalize(payload, symbol="TEST.BA")
@@ -1178,15 +1206,20 @@ def test_eodhd_normalize_shares_not_converted_to_target_currency(tmp_path):
     normalizer = EODHDFactsNormalizer(fx_service=fx)
     payload = {
         "SharesStats": {"SharesOutstanding": 5000000},
-        "General": {"CurrencyCode": "EUR", "LatestQuarter": "2024-12-31"},
+        "General": {"CurrencyCode": "EUR", "UpdatedAt": "2024-12-31"},
         "Financials": {},
     }
 
     records = normalizer.normalize(payload, symbol="TEST.EU", target_currency="USD")
-    shares = [r for r in records if r.concept == "CommonStockSharesOutstanding"]
+    shares = [
+        r
+        for r in records
+        if r.concept == "CommonStockSharesOutstanding" and r.fiscal_period == "INSTANT"
+    ]
     assert shares
     assert shares[0].currency is None
     assert shares[0].value == 5000000
+    assert shares[0].end_date == "2024-12-31"
 
 
 def test_eodhd_normalize_no_target_currency_preserves_source():

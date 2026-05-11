@@ -1885,9 +1885,13 @@ class SECFactsNormalizer:
         except (TypeError, ValueError):
             return None
 
-        fiscal_period = entry.get("fp") or ""
+        fiscal_period = entry.get("fp")
         end_date = entry.get("end")
-        if end_date is None:
+        if end_date is None or not fiscal_period:
+            # Drop records that don't carry a proper fiscal period. The
+            # financial_facts CHECK enforces fiscal_period IN
+            # ('FY','Q1','Q2','Q3','Q4','TTM','INSTANT'), so an empty string
+            # would fail at insert time anyway.
             return None
 
         currency = self._currency_from_unit(unit)

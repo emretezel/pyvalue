@@ -7211,6 +7211,178 @@ def _migration_067_drop_unused_indexes(conn: sqlite3.Connection) -> None:
         conn.execute(f"DROP INDEX IF EXISTS {index_name}")
 
 
+def _migration_068_fiscal_period_check(conn: sqlite3.Connection) -> None:
+    """Constrain ``financial_facts.fiscal_period`` to a known enum.
+
+    Adds ``CHECK (fiscal_period IN ('FY','Q1','Q2','Q3','Q4','TTM','INSTANT'))``
+    and backfills the rows that earlier EODHD code persisted with
+    ``fiscal_period=''`` — EODHD's snapshot facts ``EnterpriseValue``,
+    ``CommonStockDividendsPerShareCashPaid`` and the dormant
+    ``CommonStockSharesOutstanding`` SharesStats writer all emitted an
+    empty string because the source payload exposes them as scalars
+    (not period-keyed time series).
+
+    Backfill mapping:
+      * ``CommonStockDividendsPerShareCashPaid`` → ``'TTM'`` (per EODHD's
+        glossary: ``Highlights.DividendShare`` is a trailing-12-month figure).
+      * Anything else with empty period → ``'INSTANT'`` (covers EV and the
+        SharesOutstanding snapshot; both are point-in-time scalars).
+
+    For the backfilled rows, ``end_date`` is re-derived from the cached
+    fundamentals payload's ``General.UpdatedAt`` (the real EODHD-side
+    refresh timestamp for the snapshot), falling back to
+    ``DATE(fundamentals_raw.last_fetched_at)`` when ``UpdatedAt`` is
+    absent, and finally to the row's existing ``end_date`` so we never
+    insert a NULL ``end_date``. The legacy ``end_date`` was the
+    balance-sheet ``MostRecentQuarter`` — wrong by up to ~90 days for
+    these market-driven snapshots.
+
+    PK uniqueness is preserved with a ``ROW_NUMBER()`` filter: if a
+    listing has several historical empty-period rows for the same
+    concept (different legacy ``end_date`` values), they all map onto
+    the same new key after the backfill, and only the row with the
+    latest legacy ``end_date`` survives.
+
+    The migration is idempotent — re-running against a DB that already
+    has the CHECK is a no-op.
+    """
+
+    if not _table_exists(conn, "financial_facts"):
+        return
+
+    ddl_row = conn.execute(
+        "SELECT sql FROM sqlite_master "
+        "WHERE type = 'table' AND name = 'financial_facts'"
+    ).fetchone()
+    if ddl_row is None:
+        return
+    if "fiscal_period IN ('FY'" in ddl_row[0]:
+        return
+
+    conn.execute("DROP INDEX IF EXISTS idx_fin_facts_security_concept_latest")
+    conn.execute("DROP INDEX IF EXISTS idx_fin_facts_currency_nonnull")
+
+    currency_check = _CURRENCY_FORMAT_CHECK.format(col="currency")
+    conn.execute(
+        f"""
+        CREATE TABLE financial_facts__new (
+            listing_id INTEGER NOT NULL,
+            cik TEXT,
+            concept TEXT NOT NULL,
+            fiscal_period TEXT NOT NULL
+                CHECK (fiscal_period IN ('FY','Q1','Q2','Q3','Q4','TTM','INSTANT')),
+            end_date TEXT NOT NULL,
+            unit TEXT NOT NULL
+                CHECK (length(trim(unit)) > 0
+                       AND instr(unit, ' ') = 0
+                       AND instr(unit, char(9)) = 0
+                       AND instr(unit, char(10)) = 0),
+            value REAL NOT NULL,
+            accn TEXT,
+            filed TEXT,
+            frame TEXT,
+            start_date TEXT,
+            accounting_standard TEXT,
+            currency TEXT
+                CHECK (currency IS NULL OR ({currency_check})),
+            source_provider TEXT,
+            PRIMARY KEY (listing_id, concept, fiscal_period, end_date, unit),
+            FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
+        )
+        """
+    )
+
+    # Backfill via a single INSERT ... SELECT. The CTE chain:
+    #   listing_as_of — resolves each listing's snapshot date from the cached
+    #     fundamentals_raw payload (General.UpdatedAt preferred, last_fetched_at
+    #     as a fallback).
+    #   backfilled    — rewrites fiscal_period and end_date for empty-period
+    #     rows, passes everything else through unchanged. legacy_end_date is
+    #     kept so the dedup step can prefer the most recent historical snapshot.
+    # ROW_NUMBER() picks one row per new (listing_id, concept, fiscal_period,
+    # end_date, unit) tuple — only meaningful for collapsed empty-period rows;
+    # non-empty rows have unique tuples already.
+    conn.execute(
+        """
+        INSERT INTO financial_facts__new (
+            listing_id, cik, concept, fiscal_period, end_date, unit,
+            value, accn, filed, frame, start_date, accounting_standard,
+            currency, source_provider
+        )
+        WITH listing_as_of AS (
+            SELECT
+                pl.listing_id,
+                COALESCE(
+                    json_extract(fr.data, '$.General.UpdatedAt'),
+                    SUBSTR(fr.last_fetched_at, 1, 10)
+                ) AS as_of
+            FROM provider_listing pl
+            JOIN fundamentals_raw fr
+              ON fr.provider_listing_id = pl.provider_listing_id
+        ),
+        backfilled AS (
+            SELECT
+                ff.listing_id,
+                ff.cik,
+                ff.concept,
+                CASE
+                    WHEN ff.fiscal_period <> '' THEN ff.fiscal_period
+                    WHEN ff.concept = 'CommonStockDividendsPerShareCashPaid'
+                        THEN 'TTM'
+                    ELSE 'INSTANT'
+                END AS fiscal_period,
+                CASE
+                    WHEN ff.fiscal_period <> '' THEN ff.end_date
+                    ELSE COALESCE(la.as_of, ff.end_date)
+                END AS end_date,
+                ff.end_date AS legacy_end_date,
+                ff.unit,
+                ff.value,
+                ff.accn,
+                ff.filed,
+                ff.frame,
+                ff.start_date,
+                ff.accounting_standard,
+                ff.currency,
+                ff.source_provider
+            FROM financial_facts ff
+            LEFT JOIN listing_as_of la ON la.listing_id = ff.listing_id
+        )
+        SELECT
+            listing_id, cik, concept, fiscal_period, end_date, unit,
+            value, accn, filed, frame, start_date, accounting_standard,
+            currency, source_provider
+        FROM (
+            SELECT
+                b.*,
+                ROW_NUMBER() OVER (
+                    PARTITION BY b.listing_id, b.concept, b.fiscal_period,
+                                 b.end_date, b.unit
+                    ORDER BY b.legacy_end_date DESC, b.value DESC
+                ) AS rn
+            FROM backfilled b
+        )
+        WHERE rn = 1
+        """
+    )
+
+    conn.execute("DROP TABLE financial_facts")
+    conn.execute("ALTER TABLE financial_facts__new RENAME TO financial_facts")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fin_facts_security_concept_latest
+        ON financial_facts(listing_id, concept, end_date DESC, filed DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fin_facts_currency_nonnull
+        ON financial_facts(currency)
+        WHERE currency IS NOT NULL
+        """
+    )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -7279,6 +7451,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_065_financial_facts_fiscal_period_not_null,
     _migration_066_provider_exchange_name_country_not_null,
     _migration_067_drop_unused_indexes,
+    _migration_068_fiscal_period_check,
 ]
 
 
