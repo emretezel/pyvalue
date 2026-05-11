@@ -19,11 +19,11 @@ This page maps the end-to-end pipeline to the tables and indexes that matter mos
 - Critical structures:
   - `provider_listing` unique `(provider_exchange_id, provider_symbol)`
   - `listing` unique `(exchange_id, symbol)`
-  - `idx_provider_listing_provider`
   - `idx_provider_listing_listing`
 - Review focus:
   - `provider_listing` is the root table for provider-scoped work
   - bare provider symbols are only unique within one provider exchange
+  - migration 054 dropped `provider_listing.provider_id` and its supporting index; the owning provider is reached via `provider_exchange.provider_id` through `provider_exchange_id`
 
 ## 3. Ingest Fundamentals
 

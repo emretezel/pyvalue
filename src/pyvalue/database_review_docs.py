@@ -191,7 +191,7 @@ TABLE_GROUPS: tuple[tuple[str, tuple[TableInventoryEntry, ...]], ...] = (
             TableInventoryEntry(
                 table_name="schema_migrations",
                 logical_refs="none",
-                review_focus="low priority; check whether single-row semantics are guaranteed",
+                review_focus="single-row by construction (migration 063: `id INTEGER PRIMARY KEY CHECK (id = 1)`); low review priority",
             ),
         ),
     ),

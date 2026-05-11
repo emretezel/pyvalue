@@ -12,10 +12,10 @@ One row per `(exchange_id, symbol)`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-25`
-- Row count: `77,484`
-- Table size: `2,637,824 bytes` (`2.5 MiB`)
-- Approximate bytes per row: `34.0`
+- Snapshot source: `data/pyvalue.db` on `2026-05-11`
+- Row count: `77,224`
+- Table size: `2,416,640 bytes` (`2.3 MiB`)
+- Approximate bytes per row: `31.3`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -37,6 +37,11 @@ One row per `(exchange_id, symbol)`.
   - `exchange_id` -> `exchange`.`exchange_id`
   - `issuer_id` -> `issuer`.`issuer_id`
 - Physical references from other tables:
+  - `financial_facts`.`listing_id` -> `listing_id`
+  - `financial_facts_refresh_state`.`listing_id` -> `listing_id`
+  - `market_data`.`listing_id` -> `listing_id`
+  - `metric_compute_status`.`listing_id` -> `listing_id`
+  - `metrics`.`listing_id` -> `listing_id`
   - `provider_listing`.`listing_id` -> `listing_id`
 - Unique constraints beyond the primary key:
   - (`exchange_id`, `symbol`)
@@ -65,7 +70,7 @@ One row per `(exchange_id, symbol)`.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-25`
+- Snapshot source: `data/pyvalue.db` on `2026-05-11`
 - Sample window: first `5` rows returned by SQLite ordered by `listing_id ASC`
 
 ```json

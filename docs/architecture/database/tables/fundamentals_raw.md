@@ -11,8 +11,10 @@ One row per `provider_listing_id`; historical payload versions are not retained.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-Live stats should be regenerated after applying schema migration 040 to the
-database snapshot.
+- Snapshot source: `data/pyvalue.db` on `2026-05-11`
+- Row count: `75,848`
+- Table size: `17,857,482,752 bytes` (`16.63 GiB`)
+- Approximate bytes per row: `235,437.8`
 <!-- END generated_live_stats -->
 
 ## Columns

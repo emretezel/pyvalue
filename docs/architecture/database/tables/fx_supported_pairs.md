@@ -11,7 +11,7 @@ One row per provider FX symbol.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-25`
+- Snapshot source: `data/pyvalue.db` on `2026-05-11`
 - Row count: `990`
 - Table size: `102,400 bytes` (`100.0 KiB`)
 - Approximate bytes per row: `103.4`
@@ -27,15 +27,16 @@ One row per provider FX symbol.
 | `base_currency` | `TEXT` | yes |  | base currency |
 | `quote_currency` | `TEXT` | yes |  | quote currency |
 | `name` | `TEXT` | yes |  | provider display name |
-| `is_alias` | `INTEGER` | no |  | alias flag |
-| `is_refreshable` | `INTEGER` | no | idx | canonical fetchable flag |
+| `is_alias` | `INTEGER` | no |  | alias flag. CHECK enforces `IN (0, 1)` |
+| `is_refreshable` | `INTEGER` | no | idx | canonical fetchable flag. CHECK enforces `IN (0, 1)` |
 | `last_seen_at` | `TEXT` | no |  | catalog refresh timestamp |
 
 ## Keys And Relationships
 
 <!-- BEGIN generated_keys_and_relationships -->
 - Primary key: (`provider`, `symbol`)
-- Physical foreign keys: none
+- Physical foreign keys:
+  - `provider` -> `provider`.`provider_code`
 - Physical references from other tables: none
 - Unique constraints beyond the primary key: none
 - Main logical refs: canonical pair used by `fx_refresh_state`
@@ -71,7 +72,7 @@ One row per provider FX symbol.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-25`
+- Snapshot source: `data/pyvalue.db` on `2026-05-11`
 - Sample window: first `5` rows returned by SQLite ordered by `provider ASC, symbol ASC`
 
 ```json
@@ -137,5 +138,7 @@ One row per provider FX symbol.
 
 ## Review Notes
 
-- Alias support is useful, but it also makes the model less obvious than a single canonical-pair table
-- Review whether non-refreshable alias rows are worth retaining once canonical pairs are resolved
+- Alias support is useful, but it also makes the model less obvious than a single canonical-pair table.
+- Review whether non-refreshable alias rows are worth retaining once canonical pairs are resolved.
+- Migration 049 added the physical FK `provider -> provider(provider_code)`.
+- Migration 051 added boolean CHECK constraints (`is_alias IN (0, 1)`, `is_refreshable IN (0, 1)`) so the INTEGER columns cannot drift into non-boolean values.

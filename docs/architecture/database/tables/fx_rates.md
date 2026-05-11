@@ -11,10 +11,10 @@ One row per `(provider, rate_date, base_currency, quote_currency)`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-25`
+- Snapshot source: `data/pyvalue.db` on `2026-05-11`
 - Row count: `6,819,876`
-- Table size: `1,328,381,952 bytes` (`1.24 GiB`)
-- Approximate bytes per row: `194.8`
+- Table size: `1,328,111,616 bytes` (`1.24 GiB`)
+- Approximate bytes per row: `194.7`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -36,7 +36,8 @@ One row per `(provider, rate_date, base_currency, quote_currency)`.
 
 <!-- BEGIN generated_keys_and_relationships -->
 - Primary key: (`provider`, `rate_date`, `base_currency`, `quote_currency`)
-- Physical foreign keys: none
+- Physical foreign keys:
+  - `provider` -> `provider`.`provider_code`
 - Physical references from other tables: none
 - Unique constraints beyond the primary key: none
 - Main logical refs: no enforced FK
@@ -64,7 +65,7 @@ One row per `(provider, rate_date, base_currency, quote_currency)`.
 - `rate_date`: date predicate and ordering column for direct-rate lookup.
 - `base_currency`: first pair component in all direct FX searches.
 - `quote_currency`: second pair component in all direct FX searches.
-- `rate_text`: stored decimal value consumed by FX conversion logic.
+- `rate`: REAL rate value consumed by FX conversion logic; migration 045 converted this column from TEXT (`rate_text`) to REAL under the project's REAL-everywhere policy.
 - `fetched_at`: provider fetch timestamp for auditability.
 - `source_kind`: indicates how the direct rate was sourced.
 - `meta_json`: optional provider metadata, not part of hot lookup predicates.
@@ -74,7 +75,7 @@ One row per `(provider, rate_date, base_currency, quote_currency)`.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-25`
+- Snapshot source: `data/pyvalue.db` on `2026-05-11`
 - Sample window: first `5` rows returned by SQLite ordered by `provider ASC, rate_date ASC, base_currency ASC, quote_currency ASC`
 
 ```json
@@ -84,7 +85,7 @@ One row per `(provider, rate_date, base_currency, quote_currency)`.
     "rate_date": "1950-01-01",
     "base_currency": "EUR",
     "quote_currency": "EUR",
-    "rate_text": "1",
+    "rate": 1.0,
     "fetched_at": "Wed, 08 Apr 2026 21:32:03 GMT",
     "source_kind": "provider",
     "meta_json": "{\"provider\": \"EODHD\", \"symbol\": \"EUREUR\"}",
@@ -96,7 +97,7 @@ One row per `(provider, rate_date, base_currency, quote_currency)`.
     "rate_date": "1950-01-02",
     "base_currency": "EUR",
     "quote_currency": "EUR",
-    "rate_text": "1",
+    "rate": 1.0,
     "fetched_at": "Wed, 08 Apr 2026 21:32:03 GMT",
     "source_kind": "provider",
     "meta_json": "{\"provider\": \"EODHD\", \"symbol\": \"EUREUR\"}",
@@ -108,7 +109,7 @@ One row per `(provider, rate_date, base_currency, quote_currency)`.
     "rate_date": "1950-01-03",
     "base_currency": "EUR",
     "quote_currency": "EUR",
-    "rate_text": "1",
+    "rate": 1.0,
     "fetched_at": "Wed, 08 Apr 2026 21:32:03 GMT",
     "source_kind": "provider",
     "meta_json": "{\"provider\": \"EODHD\", \"symbol\": \"EUREUR\"}",
@@ -120,7 +121,7 @@ One row per `(provider, rate_date, base_currency, quote_currency)`.
     "rate_date": "1950-01-04",
     "base_currency": "EUR",
     "quote_currency": "EUR",
-    "rate_text": "1",
+    "rate": 1.0,
     "fetched_at": "Wed, 08 Apr 2026 21:32:03 GMT",
     "source_kind": "provider",
     "meta_json": "{\"provider\": \"EODHD\", \"symbol\": \"EUREUR\"}",
@@ -132,7 +133,7 @@ One row per `(provider, rate_date, base_currency, quote_currency)`.
     "rate_date": "1950-01-05",
     "base_currency": "EUR",
     "quote_currency": "EUR",
-    "rate_text": "1",
+    "rate": 1.0,
     "fetched_at": "Wed, 08 Apr 2026 21:32:03 GMT",
     "source_kind": "provider",
     "meta_json": "{\"provider\": \"EODHD\", \"symbol\": \"EUREUR\"}",
@@ -145,5 +146,8 @@ One row per `(provider, rate_date, base_currency, quote_currency)`.
 
 ## Review Notes
 
-- This can become large, so pair/date access path matters more than almost any descriptive concern
-- Review the `rate_text` choice against any future need for numeric filtering inside SQLite
+- This can become large, so pair/date access path matters more than almost any descriptive concern.
+- Migration 045 converted `rate_text` (TEXT) to `rate` (REAL) under the project REAL-everywhere policy. Numeric filtering inside SQLite is now first-class.
+- Migration 048 added the physical FK `provider -> provider(provider_code)`.
+- Migration 058 added 3-char uppercase ASCII format CHECKs to `base_currency` and `quote_currency`.
+- Migration 055 added the `source_kind IN ('provider')` CHECK; widen it via a future migration when synthesized or derived sources are introduced.

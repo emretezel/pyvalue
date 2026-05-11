@@ -11,10 +11,10 @@ One row per `(listing_id, as_of)` snapshot date.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-25`
-- Row count: `223,034`
-- Table size: `18,681,856 bytes` (`17.8 MiB`)
-- Approximate bytes per row: `83.8`
+- Snapshot source: `data/pyvalue.db` on `2026-05-11`
+- Row count: `222,774`
+- Table size: `17,764,352 bytes` (`16.9 MiB`)
+- Approximate bytes per row: `79.7`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -33,7 +33,8 @@ One row per `(listing_id, as_of)` snapshot date.
 
 <!-- BEGIN generated_keys_and_relationships -->
 - Primary key: (`listing_id`, `as_of`)
-- Physical foreign keys: none
+- Physical foreign keys:
+  - `listing_id` -> `listing`.`listing_id`
 - Physical references from other tables: none
 - Unique constraints beyond the primary key: none
 - Main logical refs: `listing_id` in `listing`
@@ -58,7 +59,7 @@ One row per `(listing_id, as_of)` snapshot date.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-25`
+- Snapshot source: `data/pyvalue.db` on `2026-05-11`
 - Sample window: first `5` rows returned by SQLite ordered by `listing_id ASC, as_of ASC`
 
 ```json

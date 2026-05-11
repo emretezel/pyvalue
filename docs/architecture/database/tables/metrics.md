@@ -11,7 +11,7 @@ One row per `(listing_id, metric_id)`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-25`
+- Snapshot source: `data/pyvalue.db` on `2026-05-11`
 - Row count: `2,422,916`
 - Table size: `136,704,000 bytes` (`130.4 MiB`)
 - Approximate bytes per row: `56.4`
@@ -25,15 +25,16 @@ One row per `(listing_id, metric_id)`.
 | `metric_id` | `TEXT` | no | PK, idx | metric identifier |
 | `value` | `REAL` | no |  | computed metric value |
 | `as_of` | `TEXT` | no |  | metric value date |
-| `unit_kind` | `TEXT` | no |  | metric unit category |
-| `currency` | `TEXT` | yes |  | metric currency when monetary |
+| `unit_kind` | `TEXT` | no |  | metric unit category. Row-level CHECK enforces consistency with `currency`: `unit_kind = 'monetary'` requires a non-NULL `currency`; any other `unit_kind` (e.g. `'ratio'`, `'count'`) requires NULL `currency`. |
+| `currency` | `TEXT` | yes |  | metric currency when monetary; NULL for non-monetary metrics (enforced by the `unit_kind` row-level CHECK above) |
 | `unit_label` | `TEXT` | yes |  | display unit label |
 
 ## Keys And Relationships
 
 <!-- BEGIN generated_keys_and_relationships -->
 - Primary key: (`listing_id`, `metric_id`)
-- Physical foreign keys: none
+- Physical foreign keys:
+  - `listing_id` -> `listing`.`listing_id`
 - Physical references from other tables: none
 - Unique constraints beyond the primary key: none
 - Main logical refs: `listing_id` in `listing`
@@ -58,7 +59,7 @@ One row per `(listing_id, metric_id)`.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-25`
+- Snapshot source: `data/pyvalue.db` on `2026-05-11`
 - Sample window: first `5` rows returned by SQLite ordered by `listing_id ASC, metric_id ASC`
 
 ```json
@@ -115,3 +116,4 @@ One row per `(listing_id, metric_id)`.
 ## Review Notes
 
 - This table stores latest values only. Historical metric versions would require a separate table or an expanded key.
+- Migration 041 added the `listing_id` FK, made `value` NOT NULL, and added a row-level CHECK pairing `unit_kind` with `currency` (monetary metrics must carry a currency; ratio/count metrics must not).

@@ -11,8 +11,10 @@ One row per `provider_listing_id`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-Live stats should be regenerated after applying schema migration 040 to the
-database snapshot.
+- Snapshot source: `data/pyvalue.db` on `2026-05-11`
+- Row count: `61,092`
+- Table size: `6,606,848 bytes` (`6.3 MiB`)
+- Approximate bytes per row: `108.1`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -37,7 +39,7 @@ database snapshot.
 ## Secondary Indexes
 
 <!-- BEGIN generated_secondary_indexes -->
-- none
+- None beyond the primary key and unique constraints.
 <!-- END generated_secondary_indexes -->
 
 ## Main Read Paths
@@ -53,10 +55,38 @@ database snapshot.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-25`
+- Snapshot source: `data/pyvalue.db` on `2026-05-11`
 - Sample window: first `5` rows returned by SQLite ordered by `provider_listing_id ASC`
 
-Rows should be regenerated from a migrated database snapshot.
+```json
+[
+  {
+    "provider_listing_id": 1,
+    "normalized_payload_hash": "dccd9d08007aa97929e92800dfd0ad5e5364d638e9b0a58f1bc9df3b5437c6c7",
+    "normalized_at": "2026-04-13T13:51:55.370224+00:00"
+  },
+  {
+    "provider_listing_id": 2,
+    "normalized_payload_hash": "381be9035eb7de4f43b546ba6f99bda96ebf7c3cc6072aeeb5632a8cb2a7945a",
+    "normalized_at": "2026-04-13T13:51:54.070234+00:00"
+  },
+  {
+    "provider_listing_id": 3,
+    "normalized_payload_hash": "c12f24b84cffcc6b767192d5aee1e7762e738d7212deca7ae427779074c4e8f3",
+    "normalized_at": "2026-04-13T13:51:54.419968+00:00"
+  },
+  {
+    "provider_listing_id": 4,
+    "normalized_payload_hash": "8f65bd3b378e791e97b01fa0cfb0efc7345cdc5d69d946d326368c344002f224",
+    "normalized_at": "2026-04-13T13:51:54.716059+00:00"
+  },
+  {
+    "provider_listing_id": 5,
+    "normalized_payload_hash": "aea318e6295f0aaa847c235b73c1aad5bab84b65dab11b0c1fa5f77903f6e460",
+    "normalized_at": "2026-04-13T13:51:54.204930+00:00"
+  }
+]
+```
 <!-- END generated_sample_rows -->
 
 ## Review Notes

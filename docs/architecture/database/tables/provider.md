@@ -11,7 +11,7 @@ One row per provider.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-25`
+- Snapshot source: `data/pyvalue.db` on `2026-05-11`
 - Row count: `3`
 - Table size: `4,096 bytes` (`4.0 KiB`)
 - Approximate bytes per row: `1,365.3`
@@ -34,8 +34,10 @@ One row per provider.
 - Primary key: `provider_id`
 - Physical foreign keys: none
 - Physical references from other tables:
+  - `fx_rates`.`provider` -> `provider_code`
+  - `fx_refresh_state`.`provider` -> `provider_code`
+  - `fx_supported_pairs`.`provider` -> `provider_code`
   - `provider_exchange`.`provider_id` -> `provider_id`
-  - `provider_listing`.`provider_id` -> `provider_id`
 - Unique constraints beyond the primary key:
   - `provider_code`
 - Main logical refs: referenced physically by `provider_exchange` and `provider_listing`
@@ -59,7 +61,7 @@ One row per provider.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-25`
+- Snapshot source: `data/pyvalue.db` on `2026-05-11`
 - Sample window: first `3` rows returned by SQLite ordered by `provider_id ASC`
 
 ```json

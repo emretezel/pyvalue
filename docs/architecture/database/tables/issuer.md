@@ -11,10 +11,10 @@ One row per issuer record created during catalog backfill or listing creation.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-25`
-- Row count: `77,484`
-- Table size: `68,800,512 bytes` (`65.6 MiB`)
-- Approximate bytes per row: `887.9`
+- Snapshot source: `data/pyvalue.db` on `2026-05-11`
+- Row count: `68,728`
+- Table size: `64,503,808 bytes` (`61.5 MiB`)
+- Approximate bytes per row: `938.5`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -36,16 +36,14 @@ One row per issuer record created during catalog backfill or listing creation.
 - Physical references from other tables:
   - `listing`.`issuer_id` -> `issuer_id`
 - Unique constraints beyond the primary key:
-  - `idx_issuer_name_country` (`name`, `country`) — UNIQUE INDEX. SQLite
-    treats NULLs as distinct, so name-less or country-less rows do not
-    collide with one another or with fully-populated rows.
+  - (`name`, `country`)
 - Main logical refs: referenced physically by `listing.issuer_id`
 <!-- END generated_keys_and_relationships -->
 
 ## Secondary Indexes
 
 <!-- BEGIN generated_secondary_indexes -->
-- `idx_issuer_name_country` (`name`, `country`) — UNIQUE
+- None beyond the primary key and unique constraints.
 <!-- END generated_secondary_indexes -->
 
 ## Main Read Paths
@@ -60,7 +58,7 @@ One row per issuer record created during catalog backfill or listing creation.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-25`
+- Snapshot source: `data/pyvalue.db` on `2026-05-11`
 - Sample window: first `5` rows returned by SQLite ordered by `issuer_id ASC`
 
 ```json

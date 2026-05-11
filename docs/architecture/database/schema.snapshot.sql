@@ -11,96 +11,120 @@ CREATE TABLE "financial_facts" (
             listing_id INTEGER NOT NULL,
             cik TEXT,
             concept TEXT NOT NULL,
-            fiscal_period TEXT,
+            fiscal_period TEXT NOT NULL,
             end_date TEXT NOT NULL,
-            unit TEXT NOT NULL,
+            unit TEXT NOT NULL
+                CHECK (length(trim(unit)) > 0
+                       AND instr(unit, ' ') = 0
+                       AND instr(unit, char(9)) = 0
+                       AND instr(unit, char(10)) = 0),
             value REAL NOT NULL,
             accn TEXT,
             filed TEXT,
             frame TEXT,
             start_date TEXT,
             accounting_standard TEXT,
-            currency TEXT,
+            currency TEXT
+                CHECK (currency IS NULL OR (length(currency) = 3 AND currency = upper(currency) AND currency GLOB '[A-Z][A-Z][A-Z]')),
             source_provider TEXT,
-            PRIMARY KEY (listing_id, concept, fiscal_period, end_date, unit, accn)
+            PRIMARY KEY (listing_id, concept, fiscal_period, end_date, unit),
+            FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
         );
 CREATE TABLE "financial_facts_refresh_state" (
             listing_id INTEGER NOT NULL PRIMARY KEY,
-            refreshed_at TEXT NOT NULL
+            refreshed_at TEXT NOT NULL,
+            FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
         );
-CREATE TABLE "fundamentals_fetch_state" (
-            provider_listing_id INTEGER PRIMARY KEY,
-            failed_at TEXT NOT NULL,
-            error TEXT NOT NULL,
-            next_eligible_at TEXT NOT NULL,
-            attempts INTEGER NOT NULL CHECK (attempts > 0),
-            FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
-        );
-CREATE TABLE "fundamentals_normalization_state" (
-            provider_listing_id INTEGER PRIMARY KEY,
-            normalized_payload_hash TEXT NOT NULL CHECK (length(normalized_payload_hash) = 64),
-            normalized_at TEXT NOT NULL,
-            FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
-        );
+CREATE TABLE fundamentals_fetch_state (
+                provider_listing_id INTEGER PRIMARY KEY,
+                failed_at TEXT NOT NULL,
+                error TEXT NOT NULL,
+                next_eligible_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL CHECK (attempts > 0),
+                FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
+            );
+CREATE TABLE fundamentals_normalization_state (
+                provider_listing_id INTEGER PRIMARY KEY,
+                normalized_payload_hash TEXT NOT NULL CHECK (length(normalized_payload_hash) = 64),
+                normalized_at TEXT NOT NULL,
+                FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
+            );
 CREATE TABLE fundamentals_raw (
-            provider_listing_id INTEGER PRIMARY KEY,
-            data TEXT NOT NULL,
-            payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
-            last_fetched_at TEXT NOT NULL,
-            FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
-        );
-CREATE TABLE fx_rates (
+                provider_listing_id INTEGER PRIMARY KEY,
+                data TEXT NOT NULL,
+                payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+                last_fetched_at TEXT NOT NULL,
+                FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
+            );
+CREATE TABLE "fx_rates" (
             provider TEXT NOT NULL,
             rate_date TEXT NOT NULL,
-            base_currency TEXT NOT NULL,
-            quote_currency TEXT NOT NULL,
-            rate_text TEXT NOT NULL,
+            base_currency TEXT NOT NULL CHECK (length(base_currency) = 3 AND base_currency = upper(base_currency) AND base_currency GLOB '[A-Z][A-Z][A-Z]'),
+            quote_currency TEXT NOT NULL CHECK (length(quote_currency) = 3 AND quote_currency = upper(quote_currency) AND quote_currency GLOB '[A-Z][A-Z][A-Z]'),
+            rate REAL NOT NULL,
             fetched_at TEXT NOT NULL,
-            source_kind TEXT NOT NULL,
+            source_kind TEXT NOT NULL
+                CHECK (source_kind IN ('provider')),
             meta_json TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            PRIMARY KEY (provider, rate_date, base_currency, quote_currency)
+            PRIMARY KEY (
+                provider, rate_date, base_currency, quote_currency
+            ),
+            FOREIGN KEY (provider) REFERENCES provider(provider_code)
         );
-CREATE TABLE fx_refresh_state (
-            provider TEXT NOT NULL,
-            canonical_symbol TEXT NOT NULL,
-            min_rate_date TEXT,
-            max_rate_date TEXT,
-            full_history_backfilled INTEGER NOT NULL DEFAULT 0,
-            last_fetched_at TEXT,
-            last_status TEXT,
-            last_error TEXT,
-            attempts INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (provider, canonical_symbol)
-        );
-CREATE TABLE fx_supported_pairs (
-            provider TEXT NOT NULL,
-            symbol TEXT NOT NULL,
-            canonical_symbol TEXT NOT NULL,
-            base_currency TEXT,
-            quote_currency TEXT,
-            name TEXT,
-            is_alias INTEGER NOT NULL DEFAULT 0,
-            is_refreshable INTEGER NOT NULL DEFAULT 0,
-            last_seen_at TEXT NOT NULL,
-            PRIMARY KEY (provider, symbol)
-        );
-CREATE TABLE issuer (
+CREATE TABLE "fx_refresh_state" (
+                    provider TEXT NOT NULL,
+                    canonical_symbol TEXT NOT NULL,
+                    min_rate_date TEXT,
+                    max_rate_date TEXT,
+                    full_history_backfilled INTEGER NOT NULL DEFAULT 0
+                        CHECK (full_history_backfilled IN (0, 1)),
+                    last_fetched_at TEXT,
+                    last_status TEXT
+                        CHECK (last_status IS NULL
+                               OR last_status IN ('ok', 'error')),
+                    last_error TEXT,
+                    attempts INTEGER NOT NULL DEFAULT 0
+                        CHECK (attempts >= 0),
+                    PRIMARY KEY (provider, canonical_symbol),
+            FOREIGN KEY (provider) REFERENCES provider(provider_code)
+                );
+CREATE TABLE "fx_supported_pairs" (
+                    provider TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    canonical_symbol TEXT NOT NULL,
+                    base_currency TEXT,
+                    quote_currency TEXT,
+                    name TEXT,
+                    is_alias INTEGER NOT NULL DEFAULT 0
+                        CHECK (is_alias IN (0, 1)),
+                    is_refreshable INTEGER NOT NULL DEFAULT 0
+                        CHECK (is_refreshable IN (0, 1)),
+                    last_seen_at TEXT NOT NULL,
+                    PRIMARY KEY (provider, symbol),
+            FOREIGN KEY (provider) REFERENCES provider(provider_code)
+                );
+CREATE TABLE "issuer" (
             issuer_id INTEGER PRIMARY KEY,
-            name TEXT,
+            name TEXT NOT NULL,
             description TEXT,
             sector TEXT,
             industry TEXT,
             country TEXT
         );
-CREATE TABLE listing (
+CREATE TABLE "listing" (
             listing_id INTEGER PRIMARY KEY,
             issuer_id INTEGER NOT NULL,
             exchange_id INTEGER NOT NULL,
-            symbol TEXT NOT NULL,
-            currency TEXT, primary_listing_status TEXT NOT NULL DEFAULT 'unknown'
-            CHECK (primary_listing_status IN ('unknown', 'primary', 'secondary')),
+            symbol TEXT NOT NULL
+                CHECK (length(symbol) > 0
+                       AND symbol = upper(trim(symbol))
+                       AND instr(symbol, ' ') = 0
+                       AND symbol GLOB '[A-Z0-9.&^*-]*'),
+            currency TEXT
+                CHECK (currency IS NULL OR (length(currency) = 3 AND currency = upper(currency) AND currency GLOB '[A-Z][A-Z][A-Z]')),
+            primary_listing_status TEXT NOT NULL DEFAULT 'unknown',
             UNIQUE (exchange_id, symbol),
             FOREIGN KEY (issuer_id) REFERENCES issuer(issuer_id),
             FOREIGN KEY (exchange_id) REFERENCES "exchange"(exchange_id)
@@ -113,40 +137,59 @@ CREATE TABLE "market_data" (
             market_cap REAL,
             source_provider TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            PRIMARY KEY (listing_id, as_of)
+            PRIMARY KEY (listing_id, as_of),
+            FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
         );
 CREATE TABLE "market_data_fetch_state" (
             provider_listing_id INTEGER NOT NULL PRIMARY KEY,
             last_fetched_at TEXT,
-            last_status TEXT,
+            last_status TEXT
+                CHECK (last_status IS NULL
+                       OR last_status IN ('ok', 'error')),
             last_error TEXT,
             next_eligible_at TEXT,
-            attempts INTEGER NOT NULL DEFAULT 0,
-            FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
+            attempts INTEGER NOT NULL DEFAULT 0
+                CHECK (attempts >= 0),
+            CHECK (last_status != 'error' OR last_error IS NOT NULL),
+            FOREIGN KEY (provider_listing_id)
+                REFERENCES provider_listing(provider_listing_id)
         );
 CREATE TABLE "metric_compute_status" (
-            listing_id INTEGER NOT NULL,
-            metric_id TEXT NOT NULL,
-            status TEXT NOT NULL,
-            reason_code TEXT,
-            reason_detail TEXT,
-            attempted_at TEXT NOT NULL,
-            value_as_of TEXT,
-            facts_refreshed_at TEXT,
-            market_data_as_of TEXT,
-            market_data_updated_at TEXT,
-            PRIMARY KEY (listing_id, metric_id)
-        );
+                    listing_id INTEGER NOT NULL,
+                    metric_id TEXT NOT NULL,
+                    status TEXT NOT NULL
+                        CHECK (status IN ('success', 'failure')),
+                    reason_code TEXT,
+                    reason_detail TEXT,
+                    attempted_at TEXT NOT NULL,
+                    value_as_of TEXT,
+                    facts_refreshed_at TEXT,
+                    market_data_as_of TEXT,
+                    market_data_updated_at TEXT,
+                    PRIMARY KEY (listing_id, metric_id),
+                    FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
+                );
 CREATE TABLE "metrics" (
-            listing_id INTEGER NOT NULL,
-            metric_id TEXT NOT NULL,
-            value REAL NOT NULL,
-            as_of TEXT NOT NULL,
-            unit_kind TEXT NOT NULL DEFAULT 'other',
-            currency TEXT,
-            unit_label TEXT,
-            PRIMARY KEY (listing_id, metric_id)
-        );
+                listing_id INTEGER NOT NULL,
+                metric_id TEXT NOT NULL,
+                value REAL NOT NULL,
+                as_of TEXT NOT NULL,
+                unit_kind TEXT NOT NULL DEFAULT 'other',
+                currency TEXT,
+                unit_label TEXT,
+                PRIMARY KEY (listing_id, metric_id),
+                FOREIGN KEY (listing_id) REFERENCES listing(listing_id),
+                CHECK (
+                    unit_kind IN (
+                        'monetary', 'per_share', 'ratio', 'percent',
+                        'multiple', 'count', 'other'
+                    )
+                ),
+                CHECK (
+                    currency IS NULL
+                    OR unit_kind IN ('monetary', 'per_share')
+                )
+            );
 CREATE TABLE provider (
             provider_id INTEGER PRIMARY KEY,
             provider_code TEXT NOT NULL UNIQUE CHECK (
@@ -158,14 +201,15 @@ CREATE TABLE provider (
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
-CREATE TABLE provider_exchange (
+CREATE TABLE "provider_exchange" (
             provider_exchange_id INTEGER PRIMARY KEY,
             provider_id INTEGER NOT NULL,
             provider_exchange_code TEXT NOT NULL,
             exchange_id INTEGER NOT NULL,
-            name TEXT,
-            country TEXT,
-            currency TEXT,
+            name TEXT NOT NULL,
+            country TEXT NOT NULL,
+            currency TEXT
+                CHECK (currency IS NULL OR (length(currency) = 3 AND currency = upper(currency) AND currency GLOB '[A-Z][A-Z][A-Z]')),
             operating_mic TEXT,
             country_iso2 TEXT,
             country_iso3 TEXT,
@@ -175,55 +219,51 @@ CREATE TABLE provider_exchange (
             FOREIGN KEY (provider_id) REFERENCES provider(provider_id),
             FOREIGN KEY (exchange_id) REFERENCES "exchange"(exchange_id)
         );
-CREATE TABLE provider_listing (
+CREATE TABLE "provider_listing" (
             provider_listing_id INTEGER PRIMARY KEY,
-            provider_id INTEGER NOT NULL,
             provider_exchange_id INTEGER NOT NULL,
             provider_symbol TEXT NOT NULL,
             listing_id INTEGER NOT NULL,
             UNIQUE (provider_exchange_id, provider_symbol),
-            FOREIGN KEY (provider_id) REFERENCES provider(provider_id),
-            FOREIGN KEY (provider_exchange_id) REFERENCES provider_exchange(provider_exchange_id),
-            FOREIGN KEY (listing_id) REFERENCES listing(listing_id),
-            FOREIGN KEY (provider_exchange_id, provider_id)
-                REFERENCES provider_exchange(provider_exchange_id, provider_id)
+            FOREIGN KEY (provider_exchange_id)
+                REFERENCES provider_exchange(provider_exchange_id),
+            FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
         );
-CREATE TABLE schema_migrations (
+CREATE TABLE "schema_migrations" (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
             version INTEGER NOT NULL
         );
 CREATE INDEX idx_fin_facts_concept
-            ON financial_facts(concept);
+        ON financial_facts(concept);
 CREATE INDEX idx_fin_facts_currency_nonnull
-            ON financial_facts(currency)
-            WHERE currency IS NOT NULL;
-CREATE INDEX idx_fin_facts_security_concept
-            ON financial_facts(listing_id, concept);
+        ON financial_facts(currency)
+        WHERE currency IS NOT NULL;
 CREATE INDEX idx_fin_facts_security_concept_latest
-            ON financial_facts(listing_id, concept, end_date DESC, filed DESC);
+        ON financial_facts(listing_id, concept, end_date DESC, filed DESC);
 CREATE INDEX idx_fundamentals_fetch_next
-            ON fundamentals_fetch_state(next_eligible_at);
+        ON fundamentals_fetch_state(next_eligible_at);
 CREATE INDEX idx_fundamentals_raw_last_fetched
         ON fundamentals_raw(last_fetched_at);
 CREATE INDEX idx_fx_rates_pair_date
         ON fx_rates(provider, base_currency, quote_currency, rate_date DESC);
 CREATE INDEX idx_fx_supported_pairs_refreshable
-        ON fx_supported_pairs(provider, is_refreshable, canonical_symbol);
+                ON fx_supported_pairs(provider, is_refreshable, canonical_symbol);
+CREATE UNIQUE INDEX idx_issuer_name_country
+        ON issuer(name, country);
+CREATE INDEX idx_listing_currency_nonnull
+        ON listing(currency)
+        WHERE currency IS NOT NULL;
 CREATE INDEX idx_listing_exchange
         ON listing(exchange_id);
-CREATE INDEX idx_listing_currency_nonnull
-            ON listing(currency)
-            WHERE currency IS NOT NULL;
 CREATE INDEX idx_market_data_fetch_next
-            ON market_data_fetch_state(next_eligible_at);
+        ON market_data_fetch_state(next_eligible_at);
 CREATE INDEX idx_market_data_latest
-            ON market_data(listing_id, as_of DESC);
+        ON market_data(listing_id, as_of DESC);
 CREATE INDEX idx_metric_compute_status_metric_status
-            ON metric_compute_status(metric_id, status);
+                ON metric_compute_status(metric_id, status);
 CREATE INDEX idx_metrics_metric_id
             ON metrics(metric_id);
 CREATE INDEX idx_provider_exchange_exchange
         ON provider_exchange(exchange_id);
 CREATE INDEX idx_provider_listing_listing
         ON provider_listing(listing_id);
-CREATE INDEX idx_provider_listing_provider
-        ON provider_listing(provider_id);

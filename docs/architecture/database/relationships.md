@@ -1,6 +1,6 @@
 # Relationships
 
-The identity/catalog layer now uses physical foreign keys. Large downstream tables still mostly rely on application-maintained logical references because those tables are rebuilt and migrated carefully around the live SQLite database.
+The identity/catalog layer and the large downstream analytical tables all use physical foreign keys. Migrations 041, 043, and 046–050 added the previously-missing physical FKs on `metrics`, `metric_compute_status`, `financial_facts`, `financial_facts_refresh_state`, `market_data`, `fx_rates`, `fx_supported_pairs`, and `fx_refresh_state`, so referential integrity is enforced by SQLite (`PRAGMA foreign_keys = ON`) rather than application code.
 
 ## Canonical Identity Flow
 

@@ -11,18 +11,22 @@ Use it in this order:
 
 Snapshot caveat:
 
-- The documented schema target is version `43`; the migrated `data/pyvalue.db`
-  still carries a verified `fundamentals_raw` preservation discrepancy:
-  `75,848` current rows versus `77,045` in the pre-migration backup.
+- The documented schema target is version `66`. The live `data/pyvalue.db`
+  carries a known `fundamentals_raw` preservation discrepancy from a pre-`043`
+  migration (`75,848` current rows vs. `77,045` in the pre-migration backup).
 - Treat the `fundamentals_raw` counts and first-five samples in this section as documentation of the current live file, not as proof that the migration preserved every raw payload.
 
 Important structural notes:
 
-- The catalog layer now uses enforced foreign keys across `provider`, `exchange`, `provider_exchange`, `issuer`, `listing`, and `provider_listing`. As of migration 041, `metrics` and `metric_compute_status` also declare `FOREIGN KEY (listing_id) REFERENCES listing(listing_id)` and `metrics` carries `CHECK` constraints on `unit_kind` and the monetary-only-currency rule. Migration 043 adds the same FK to `financial_facts` and tightens its primary key to `(listing_id, concept, fiscal_period, end_date, unit)` (the previous PK trailed `accn`, which is NULL on 99.94% of rows and never disambiguates duplicates).
-- `listing` is the canonical identity root for downstream facts, market data, metrics, and listing status.
-- `provider_listing` is the operational root for provider-scoped ingestion and market-data workflows.
+- **Referential integrity is enforced at the database level**, not in application code. Migrations 041, 043, and 046–050 added the previously-missing physical FKs on `metrics`, `metric_compute_status`, `financial_facts`, `financial_facts_refresh_state`, `market_data`, and the FX state tables, on top of the FKs the catalog layer (`provider`, `exchange`, `provider_exchange`, `issuer`, `listing`, `provider_listing`) already carried.
+- **Domain invariants are enforced by CHECK constraints**. Migration 041 added `metrics.unit_kind` + currency pairing, migrations 055–059 added enum/format/non-empty CHECKs across `metric_compute_status.status`, `*_fetch_state.last_status`, `fx_rates.source_kind`, currency-code formats, listing symbol formats, `financial_facts.unit` non-empty, and the boolean INTEGER columns (`is_alias`, `is_refreshable`, `full_history_backfilled`), and migration 061 added the row-level `market_data_fetch_state` error-row invariant.
+- **`issuer (name, country)` is now UNIQUE** (migration 060) after a one-time dedup that collapsed ~4,696 duplicate groups (~13,121 rows) and remapped ~8,425 listings to canonical issuers. Rows with NULL name or NULL country remain non-colliding because SQLite UNIQUE indexes treat NULLs as distinct.
+- **`listing` is the canonical identity root** for downstream facts, market data, metrics, and listing status.
+- **`provider_listing` is the operational root** for provider-scoped ingestion and market-data workflows. Migration 054 dropped the denormalised `provider_listing.provider_id`; the owning provider is reachable via `provider_exchange.provider_id` through `provider_exchange_id`.
+- **`fx_rates.rate` is `REAL`** under the project REAL-everywhere policy (migration 045 converted the legacy TEXT `rate_text` column).
 - `fundamentals_raw`, `metrics`, and `metric_compute_status` each store the latest row per logical key, not a full history.
-- Migrations are the **single source of truth** for schema (tables, indexes, and views). The `provider_listing_catalog` and `supported_tickers` views are owned by migration 042; runtime code in `storage.py` no longer issues `CREATE VIEW`.
+- **Migrations are the single source of truth for schema** (tables, indexes, and views). Migration 042 added `provider_listing_catalog` and `supported_tickers`, migration 044 added the `securities`, `providers`, and `exchange_provider` compat views, migration 062 added `primary_provider_listing_catalog`. Runtime code in `storage.py` does not issue `CREATE TABLE` / `CREATE VIEW` outside the migration framework.
+- **`schema_migrations` is single-row by construction** (migration 063): the column shape is `(id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL)` so stray or duplicate version rows are impossible.
 
 Table groups:
 
@@ -51,10 +55,12 @@ Table groups:
 - Housekeeping
   - [schema_migrations](tables/schema_migrations.md)
 
-Views:
+Views (all persisted in the schema and owned by migrations, never by runtime code):
 
 - `provider_listing_catalog` — joins `provider_listing` to `provider`, `provider_exchange`, `listing`, `issuer`, and `exchange` to expose the canonical provider-scoped catalog used by ingestion, screening, and FX paths. Owned by migration 042.
 - `supported_tickers` — projection of `provider_listing_catalog` retained for compatibility with code paths that read the historical name. Owned by migration 042.
+- `primary_provider_listing_catalog` — `provider_listing_catalog` filtered to `listing.primary_listing_status <> 'secondary'`. Replaces the inline `_primary_listing_predicate()` filter that previously appeared at 11+ query sites in `storage.py`. Owned by migration 062.
+- `securities`, `providers`, `exchange_provider` — backwards-compatibility views over the canonical identity tables. Owned by migration 044.
 
 Supporting review pages:
 

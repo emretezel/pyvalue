@@ -13,10 +13,9 @@ This page lists the current secondary indexes from the post-refactor schema. Pri
   - `idx_listing_currency_nonnull (currency) WHERE currency IS NOT NULL`
     - narrows FX currency discovery and currency-scoped validation scans
 - `provider_listing`
-  - `idx_provider_listing_provider (provider_id)`
-    - supports provider-scoped catalog scans
   - `idx_provider_listing_listing (listing_id)`
     - supports canonical-listing joins back into provider rows
+  - Migration 054 dropped both `provider_id` and `idx_provider_listing_provider`: the owning provider is reachable via `provider_exchange.provider_id` through `provider_exchange_id`.
 
 ## Raw Ingestion And State
 
@@ -33,14 +32,13 @@ This page lists the current secondary indexes from the post-refactor schema. Pri
 ## Canonical Analytics
 
 - `financial_facts`
-  - `idx_fin_facts_security_concept (listing_id, concept)`
-    - supports concept-scoped fact access
   - `idx_fin_facts_concept (concept)`
     - supports concept-wide scans and diagnostics
   - `idx_fin_facts_security_concept_latest (listing_id, concept, end_date DESC, filed DESC)`
     - critical latest-fact index for `compute-metrics`
   - `idx_fin_facts_currency_nonnull (currency) WHERE currency IS NOT NULL`
     - narrows FX discovery scans
+  - Migration 052 dropped `idx_fin_facts_security_concept (listing_id, concept)` because `idx_fin_facts_security_concept_latest` already covers the same `(listing_id, concept, ...)` prefix.
 - `market_data`
   - `idx_market_data_latest (listing_id, as_of DESC)`
     - critical latest-snapshot index for market-data reads and metrics
@@ -59,6 +57,11 @@ This page lists the current secondary indexes from the post-refactor schema. Pri
 - `fx_rates`
   - `idx_fx_rates_pair_date (provider, base_currency, quote_currency, rate_date DESC)`
     - critical pair/date lookup index for direct FX retrieval
+
+## UNIQUE Indexes
+
+- `issuer`
+  - `idx_issuer_name_country (name, country)` — UNIQUE, added by migration 060 after deduplicating ~4,696 `(name, country)` groups (~13,121 rows collapsed; ~8,425 listings remapped). SQLite treats NULLs as distinct, so name-less or country-less rows do not collide with one another or with fully-populated rows.
 
 ## Initial Index Review Questions
 

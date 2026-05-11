@@ -11,7 +11,7 @@ One row per `listing_id`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-25`
+- Snapshot source: `data/pyvalue.db` on `2026-05-11`
 - Row count: `61,987`
 - Table size: `2,564,096 bytes` (`2.4 MiB`)
 - Approximate bytes per row: `41.4`
@@ -28,7 +28,8 @@ One row per `listing_id`.
 
 <!-- BEGIN generated_keys_and_relationships -->
 - Primary key: `listing_id`
-- Physical foreign keys: none
+- Physical foreign keys:
+  - `listing_id` -> `listing`.`listing_id`
 - Physical references from other tables: none
 - Unique constraints beyond the primary key: none
 - Main logical refs: `listing_id` in `listing`
@@ -53,7 +54,7 @@ One row per `listing_id`.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-04-25`
+- Snapshot source: `data/pyvalue.db` on `2026-05-11`
 - Sample window: first `5` rows returned by SQLite ordered by `listing_id ASC`
 
 ```json
