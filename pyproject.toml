@@ -21,6 +21,7 @@ dev = [
     "pytest>=7.4",
     "ruff>=0.15",
     "mypy>=1.19",
+    "hypothesis>=6.0",
 ]
 
 [project.scripts]

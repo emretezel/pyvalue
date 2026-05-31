@@ -5,6 +5,7 @@ Author: Emre Tezel
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import logging
 from pathlib import Path
 import tempfile
@@ -22,6 +23,218 @@ from pyvalue.storage import FactRecord
 
 
 _EPHEMERAL_FX_DATABASE = Path(tempfile.gettempdir()) / "pyvalue_ephemeral_fx.db"
+
+
+class CurrencyMismatchError(ValueError):
+    """Raised when an arithmetic or comparison op mixes two different currencies.
+
+    ``Money`` deliberately refuses to combine amounts in different currencies so
+    that a metric can never *silently* add, subtract or compare values that have
+    not first been converted to a common currency. The motivation is the whole
+    point of the type: bare-float math let a USD fundamental and a EUR price
+    combine without anyone noticing. Callers must convert (see
+    :meth:`Money.convert`) before operating across currencies.
+    """
+
+    def __init__(self, left: str, right: str, operation: str) -> None:
+        self.left = left
+        self.right = right
+        self.operation = operation
+        super().__init__(f"Currency mismatch in {operation}: {left} vs {right}")
+
+
+@dataclass(frozen=True)
+class Money:
+    """An amount of money tied to a single, normalized *major* currency.
+
+    Why this type exists: monetary facts and market prices can be denominated in
+    different currencies, and some quote currencies are subunits (GBX/ZAC/ILA =
+    base/100). Operating on bare floats lets mismatched currencies combine
+    silently. ``Money`` keeps the currency travelling with the amount and turns
+    any cross-currency arithmetic into a hard :class:`CurrencyMismatchError`, so
+    each metric is forced to convert every input to one target currency first.
+
+    Invariants (enforced in :meth:`__post_init__`):
+
+    * ``currency`` is always a normalized *major* ISO code. Subunit inputs are
+      collapsed to their base currency and the amount divided by the subunit
+      divisor (reusing :func:`pyvalue.currency.normalize_monetary_amount`), so a
+      ``Money`` can never hold pence/agorot/cents -- the same guarantee the data
+      boundary enforces for ``market_data.price`` and ``financial_facts.value``.
+    * ``amount`` is a ``float`` (project policy permits REAL/float everywhere).
+
+    A ``Money`` is never currency-less: constructing one with a missing or
+    unparseable currency raises ``ValueError`` (use :meth:`from_value` for the
+    soft, ``Optional``-returning path).
+
+    Equality and hashing come from the frozen dataclass and compare
+    ``(amount, currency)`` *after* normalization, so ``Money(2500, "GBX")``
+    equals ``Money(25, "GBP")`` and never raises on a currency difference.
+    Ordering (``<``, ``<=`` ...) is currency-safe and raises on a mismatch.
+    """
+
+    amount: float
+    currency: str
+
+    def __post_init__(self) -> None:
+        # Normalize subunit -> major exactly once, at construction, so every
+        # downstream operation can assume a major currency and equal-currency
+        # comparisons are meaningful. Re-running this on a derived result (e.g.
+        # the output of ``__add__``) is idempotent for major currencies.
+        normalized_amount, normalized_currency = normalize_monetary_amount(
+            self.amount, self.currency
+        )
+        if normalized_currency is None:
+            raise ValueError(f"Money requires a currency code; got {self.currency!r}")
+        if normalized_amount is None:
+            raise ValueError(f"Money requires a numeric amount; got {self.amount!r}")
+        object.__setattr__(self, "amount", float(normalized_amount))
+        object.__setattr__(self, "currency", normalized_currency)
+
+    # -- factories --------------------------------------------------------
+
+    @classmethod
+    def of(cls, amount: float, currency: str) -> "Money":
+        """Build a ``Money`` from an amount and a (possibly subunit) currency."""
+
+        return cls(amount, currency)
+
+    @classmethod
+    def from_value(cls, amount: float | None, currency: str | None) -> "Money | None":
+        """Build a ``Money`` or return ``None`` when it cannot be formed.
+
+        Bridges the many tuple-returning helpers (e.g.
+        :func:`normalize_money_value`) whose amount/currency may be ``None``.
+        Returns ``None`` when ``amount`` is ``None`` or ``currency`` is
+        missing/unparseable; otherwise behaves like the constructor.
+        """
+
+        if amount is None:
+            return None
+        # Reject a missing/unparseable currency, but pass the *original* code to
+        # the constructor so a raw subunit (e.g. "GBX") still gets its amount
+        # divided -- pre-normalizing here would collapse the code without
+        # dividing the amount, silently inflating subunit values 100x.
+        if currency is None or normalize_currency_code(currency) is None:
+            return None
+        return cls(amount, currency)
+
+    # -- currency-safe arithmetic -----------------------------------------
+
+    def _require_same_currency(self, other: "Money", operation: str) -> None:
+        if self.currency != other.currency:
+            raise CurrencyMismatchError(self.currency, other.currency, operation)
+
+    def __add__(self, other: "Money") -> "Money":
+        if not isinstance(other, Money):
+            return NotImplemented
+        self._require_same_currency(other, "add")
+        return Money(self.amount + other.amount, self.currency)
+
+    def __radd__(self, other: object) -> "Money":
+        # Support ``sum(iterable_of_money)``, which starts from the int ``0``.
+        if other == 0:
+            return self
+        return NotImplemented
+
+    def __sub__(self, other: "Money") -> "Money":
+        if not isinstance(other, Money):
+            return NotImplemented
+        self._require_same_currency(other, "subtract")
+        return Money(self.amount - other.amount, self.currency)
+
+    def __mul__(self, factor: float) -> "Money":
+        # Money * scalar -> Money. Money * Money is intentionally undefined (the
+        # product of two currency amounts is not itself a currency amount).
+        if not isinstance(factor, (int, float)) or isinstance(factor, bool):
+            return NotImplemented
+        return Money(self.amount * factor, self.currency)
+
+    __rmul__ = __mul__
+
+    def __truediv__(self, divisor: "float | Money") -> "Money | float":
+        # Money / Money -> dimensionless ratio (float), same currency only.
+        # Money / scalar -> Money. Cross-currency division raises.
+        if isinstance(divisor, Money):
+            self._require_same_currency(divisor, "divide")
+            if divisor.amount == 0:
+                raise ZeroDivisionError("division by a zero-amount Money")
+            return self.amount / divisor.amount
+        if not isinstance(divisor, (int, float)) or isinstance(divisor, bool):
+            return NotImplemented
+        return Money(self.amount / divisor, self.currency)
+
+    def __neg__(self) -> "Money":
+        return Money(-self.amount, self.currency)
+
+    def __abs__(self) -> "Money":
+        return Money(abs(self.amount), self.currency)
+
+    # -- currency-safe ordering (eq/hash provided by the frozen dataclass) --
+
+    def __lt__(self, other: "Money") -> bool:
+        if not isinstance(other, Money):
+            return NotImplemented
+        self._require_same_currency(other, "compare")
+        return self.amount < other.amount
+
+    def __le__(self, other: "Money") -> bool:
+        if not isinstance(other, Money):
+            return NotImplemented
+        self._require_same_currency(other, "compare")
+        return self.amount <= other.amount
+
+    def __gt__(self, other: "Money") -> bool:
+        if not isinstance(other, Money):
+            return NotImplemented
+        self._require_same_currency(other, "compare")
+        return self.amount > other.amount
+
+    def __ge__(self, other: "Money") -> bool:
+        if not isinstance(other, Money):
+            return NotImplemented
+        self._require_same_currency(other, "compare")
+        return self.amount >= other.amount
+
+    # -- conversion -------------------------------------------------------
+
+    def convert(
+        self, target: str, *, fx_service: FXService, as_of: str
+    ) -> "Money | None":
+        """Convert into ``target`` currency, or ``None`` if no rate exists.
+
+        Delegates to :meth:`FXService.convert_amount`. A same-currency convert
+        is a no-op returning ``self``. Returns ``None`` (soft fail) when the
+        rate is unavailable; callers that must hard-fail use
+        :meth:`convert_or_raise`.
+        """
+
+        normalized_target = normalize_currency_code(target)
+        if normalized_target is None:
+            raise ValueError(f"convert requires a target currency; got {target!r}")
+        if normalized_target == self.currency:
+            return self
+        converted = fx_service.convert_amount(
+            self.amount, self.currency, normalized_target, as_of
+        )
+        if converted is None:
+            return None
+        return Money(float(converted), normalized_target)
+
+    def convert_or_raise(
+        self, target: str, *, fx_service: FXService, as_of: str
+    ) -> "Money":
+        """Like :meth:`convert` but raise ``MissingFXRateError`` on no rate."""
+
+        result = self.convert(target, fx_service=fx_service, as_of=as_of)
+        if result is None:
+            raise MissingFXRateError(
+                provider=fx_service.provider_name,
+                base_currency=self.currency,
+                quote_currency=normalize_currency_code(target) or str(target),
+                as_of=str(as_of),
+            )
+        return result
 
 
 class _NoFetchFXConfig(Config):
@@ -258,6 +471,8 @@ def align_money_values(
 
 
 __all__ = [
+    "CurrencyMismatchError",
+    "Money",
     "align_money_values",
     "choose_target_currency",
     "convert_money_value",
