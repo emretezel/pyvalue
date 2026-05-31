@@ -29,6 +29,7 @@ from typing import (
 from pyvalue.currency import (
     MetricUnitKind,
     SHARES_UNIT,
+    canonical_trading_currency,
     fact_currency_or_none,
     metric_currency_or_none,
     normalize_currency_code,
@@ -5944,7 +5945,11 @@ class MarketDataRepository(SQLiteStore):
             price=row["price"],
             volume=row["volume"],
             market_cap=row["market_cap"],
-            currency=row["currency"],
+            # market_data.price is stored in the major currency, so report the
+            # listing currency collapsed to its base (GBX -> GBP) -- never a
+            # subunit. This keeps the (price, currency) pair self-consistent so
+            # downstream Money/normalization does not divide by 100 a second time.
+            currency=canonical_trading_currency(row["currency"]),
             updated_at=row["updated_at"],
         )
 
@@ -6020,7 +6025,9 @@ class MarketDataRepository(SQLiteStore):
                         price=row["price"],
                         volume=row["volume"],
                         market_cap=row["market_cap"],
-                        currency=row["currency"],
+                        # Stored price is major; collapse listing currency to
+                        # its base so the (price, currency) pair is consistent.
+                        currency=canonical_trading_currency(row["currency"]),
                         updated_at=row["updated_at"],
                     )
 

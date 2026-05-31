@@ -136,22 +136,36 @@ def test_market_data_service_derives_market_cap_from_shares(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("symbol", "exchange", "quote_currency", "price", "shares", "market_cap"),
+    (
+        "symbol",
+        "exchange",
+        "quote_currency",
+        "base_currency",
+        "price",
+        "major_price",
+        "shares",
+        "market_cap",
+    ),
     [
-        ("SHEL.LSE", "LSE", "GBX", 2783.5, 50, 1391.75),
-        ("NPN.JSE", "JSE", "ZAC", 23750.0, 20, 4750.0),
-        ("BCOM.TA", "TA", "ILA", 1234.0, 10, 123.4),
+        ("SHEL.LSE", "LSE", "GBX", "GBP", 2783.5, 27.835, 50, 1391.75),
+        ("NPN.JSE", "JSE", "ZAC", "ZAR", 23750.0, 237.5, 20, 4750.0),
+        ("BCOM.TA", "TA", "ILA", "ILS", 1234.0, 12.34, 10, 123.4),
     ],
 )
-def test_market_data_service_stores_subunit_price_and_base_market_cap(
+def test_market_data_service_stores_major_price_and_market_cap(
     tmp_path,
     symbol,
     exchange,
     quote_currency,
+    base_currency,
     price,
+    major_price,
     shares,
     market_cap,
 ):
+    # A subunit-quoted listing (GBX/ZAC/ILA) must be stored in its MAJOR
+    # currency: the raw quote price is divided by 100 and the snapshot reports
+    # the base currency, so subunits never cross the data boundary.
     class DummyProvider:
         def latest_price(self, requested_symbol):
             return PriceData(
@@ -211,9 +225,9 @@ def test_market_data_service_stores_subunit_price_and_base_market_cap(
 
     snapshot = MarketDataRepository(db_path).latest_snapshot(symbol)
     assert snapshot is not None
-    assert snapshot.price == price
+    assert snapshot.price == pytest.approx(major_price)
     assert snapshot.market_cap == pytest.approx(market_cap)
-    assert snapshot.currency == quote_currency
+    assert snapshot.currency == base_currency
 
 
 def test_market_data_service_prefers_share_unit_count_when_duplicates_exist(tmp_path):
@@ -545,9 +559,10 @@ def test_market_data_service_prepare_price_data_uses_currency_hint(tmp_path):
         currency_hint="GBX",
     )
 
-    assert prepared.price == 2783.5
-    assert prepared.market_cap == 1391.75
-    assert prepared.currency == "GBX"
+    # The hint says GBX (pence); the stored price is the major amount (GBP).
+    assert prepared.price == pytest.approx(27.835)
+    assert prepared.market_cap == pytest.approx(1391.75)
+    assert prepared.currency == "GBP"
 
 
 def test_market_data_service_prepare_price_data_uses_ila_currency_hint(tmp_path):
@@ -585,5 +600,6 @@ def test_market_data_service_prepare_price_data_uses_ila_currency_hint(tmp_path)
         currency_hint="ILA",
     )
 
-    assert prepared.price == 1234.0
-    assert prepared.currency == "ILA"
+    # ILA agorot collapse to ILS major: 1234 -> 12.34.
+    assert prepared.price == pytest.approx(12.34)
+    assert prepared.currency == "ILS"

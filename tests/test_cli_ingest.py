@@ -7211,14 +7211,25 @@ def test_cmd_recalc_market_cap(tmp_path):
     assert snapshot_b.market_cap is None
 
 
-def test_cmd_recalc_market_cap_uses_base_currency_for_subunit_quote_prices(tmp_path):
+def test_cmd_recalc_market_cap_uses_major_currency_for_subunit_quote_prices(tmp_path):
     db_path = tmp_path / "marketcap-subunits.db"
+    # market_data.price is stored in the MAJOR currency now, so recalc is simply
+    # major_price * shares, and snapshots report the base currency for subunit
+    # listings (GBX -> GBP, ZAC -> ZAR, ILA -> ILS).
     cases = [
-        ("AAA.LSE", "LSE", "GBX", 250.0, 100, 250.0),
-        ("BBB.JSE", "JSE", "ZAC", 1234.0, 20, 246.8),
-        ("CCC.TA", "TA", "ILA", 987.0, 10, 98.7),
+        ("AAA.LSE", "LSE", "GBX", "GBP", 2.5, 100, 250.0),
+        ("BBB.JSE", "JSE", "ZAC", "ZAR", 12.34, 20, 246.8),
+        ("CCC.TA", "TA", "ILA", "ILS", 9.87, 10, 98.7),
     ]
-    for symbol, exchange_code, currency, _price, _shares, _expected in cases:
+    for (
+        symbol,
+        exchange_code,
+        quote_currency,
+        _base,
+        _price,
+        _shares,
+        _expected,
+    ) in cases:
         store_catalog_listings(
             db_path,
             exchange_code,
@@ -7227,7 +7238,7 @@ def test_cmd_recalc_market_cap_uses_base_currency_for_subunit_quote_prices(tmp_p
                     symbol=symbol,
                     security_name=f"{symbol} Ltd",
                     exchange=exchange_code,
-                    currency=currency,
+                    currency=quote_currency,
                 )
             ],
             provider="EODHD",
@@ -7237,7 +7248,7 @@ def test_cmd_recalc_market_cap_uses_base_currency_for_subunit_quote_prices(tmp_p
     fact_repo.initialize_schema()
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    for symbol, _exchange_code, _currency, price, shares, _expected in cases:
+    for symbol, _exchange_code, _quote, _base, price, shares, _expected in cases:
         fact_repo.replace_facts(
             symbol,
             [
@@ -7259,11 +7270,19 @@ def test_cmd_recalc_market_cap_uses_base_currency_for_subunit_quote_prices(tmp_p
     )
 
     assert rc == 0
-    for symbol, _exchange_code, currency, price, _shares, expected in cases:
+    for (
+        symbol,
+        _exchange_code,
+        _quote,
+        base_currency,
+        price,
+        _shares,
+        expected,
+    ) in cases:
         snapshot = market_repo.latest_snapshot(symbol)
         assert snapshot is not None
         assert snapshot.price == price
-        assert snapshot.currency == currency
+        assert snapshot.currency == base_currency
         assert snapshot.market_cap == pytest.approx(expected)
 
 

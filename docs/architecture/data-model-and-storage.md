@@ -120,9 +120,12 @@ Currency and unit semantics:
 ### `market_data`
 
 Stores latest quote and market-cap snapshot information by `listing_id`.
-`market_data.price` is stored in the listing quote unit from `listing.currency`.
-`market_data.market_cap` is stored in base(`listing.currency`). The table does
-not persist a duplicate currency column.
+`market_data.price` is stored in the **major** currency
+(`canonical_trading_currency(listing.currency)`): subunit quotes (`GBX`/`GBP0.01`
+-> `GBP`, `ZAC` -> `ZAR`, `ILA` -> `ILS`) are divided by their subunit divisor
+before persistence, so subunits never cross the data boundary, and the snapshot
+read path reports that same base currency. `market_data.market_cap` is stored in
+base(`listing.currency`). The table does not persist a duplicate currency column.
 
 ### `market_data_fetch_state`
 

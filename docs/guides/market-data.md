@@ -16,7 +16,11 @@ This covers:
 Storage invariants:
 - `listing.currency` is the authoritative listing quote unit and may be a
   subunit such as `GBX`, `ZAC`, or `ILA`
-- `market_data.price` is stored in that quote unit
+- `market_data.price` is stored in the **major** currency
+  (`canonical_trading_currency(listing.currency)`, e.g. GBP for a GBX listing).
+  Subunits never cross the data boundary: an incoming pence/cent/agorot quote is
+  divided by its subunit divisor before it is written, and the snapshot read
+  path reports the same base currency so the price and currency stay consistent.
 - `market_data.market_cap` is stored in base(`listing.currency`)
 - market-data rows do not persist a duplicate currency column
 
@@ -101,9 +105,9 @@ If prices were ingested before useful share-count facts were available, recomput
 pyvalue recalc-market-cap --exchange-codes US
 ```
 
-This uses the latest price, converts quote-unit subunit prices to
-base(`listing.currency`), multiplies by the latest normalized share count, and
-updates only the latest stored `market_data.as_of` row for each selected symbol.
+This uses the latest stored price (already in the major currency), multiplies by
+the latest normalized share count, and updates only the latest stored
+`market_data.as_of` row for each selected symbol.
 
 ## Operational Notes
 

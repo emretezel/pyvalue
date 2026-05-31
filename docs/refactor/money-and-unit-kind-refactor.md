@@ -34,8 +34,8 @@ A single pre-refactor backup covers the whole effort:
 | Phase | Scope | Status |
 |------|-------|--------|
 | 0 | Tracking doc | Landed |
-| 1 | `Money` value type (additive) | In review |
-| 2 | `market_data.price` → major currency + migration 069 | Not started |
+| 1 | `Money` value type (additive) | Landed (`9f6b98c`) |
+| 2 | `market_data.price` → major currency + migration 069 | In review |
 | 3 | `unit` → `unit_kind` rebuild + migration 070 | Not started |
 | 4 | Remove `market_data.market_cap` + migration 071 | Not started |
 | 5 | Full `Money` adoption across metrics + docs/rule update | Not started |
@@ -48,6 +48,25 @@ A single pre-refactor backup covers the whole effort:
 - **Hypothesis** was installed in the env but undeclared; added to
   `pyproject.toml` `[project.optional-dependencies].dev` in Phase 1.
 - **Python** is `>=3.12` per `pyproject.toml` (CLAUDE.md's ">=3.9" is stale).
+
+### Phase 2 — `market_data.price` in major currency
+- Ingest (`marketdata/service.py`): `prepare_price_data` now collapses the
+  quoted price to its major currency via `normalize_monetary_amount` and stores
+  that; removed the inverse helper `_quote_unit_price`.
+- Read path (`storage.py`): `latest_snapshot_record` / `latest_snapshots_many`
+  report `canonical_trading_currency(listing.currency)` so the (price, currency)
+  pair is self-consistent and downstream normalization never divides twice.
+- Migration **069** divides existing `market_data.price` by 100 for listings
+  whose `listing.currency` is a subunit (GBX/GBP0.01/ZAC/ILA). Data-only;
+  version-gated to run once; must deploy with the code.
+- Metric values are unchanged end-to-end (previously: pence price ÷100 on read;
+  now: major price, no division). Updated tests: market-data service/hint tests,
+  the migration-039 chain test (069 now also runs), the recalc-market-cap CLI
+  test; added a migration-069 regression test. Docs: market-data guide +
+  data-model architecture doc.
+- **Deploy note:** between deploying Phase-2 code and running migration 069,
+  refreshing a subunit listing could trip the >50x suspicious-jump guard
+  (new major vs old pence). Run 069 immediately after deploy.
 
 ### Phase 1 — `Money` value type
 - Added `Money` (frozen dataclass) + `CurrencyMismatchError` to `src/pyvalue/money.py`,

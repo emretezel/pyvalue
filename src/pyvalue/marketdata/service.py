@@ -12,10 +12,8 @@ from typing import Optional, Union
 
 from pyvalue.config import Config
 from pyvalue.currency import (
-    currency_subunit,
     is_subunit_currency,
     normalize_monetary_amount,
-    normalize_currency_code,
     raw_currency_code,
 )
 from pyvalue.marketdata import (
@@ -127,26 +125,6 @@ class MarketDataService:
             return amount
         return float(normalized_amount)
 
-    @staticmethod
-    def _quote_unit_price(
-        price: float,
-        *,
-        source_currency: Optional[str],
-        quote_currency: Optional[str],
-    ) -> float:
-        source = raw_currency_code(source_currency or quote_currency)
-        quote = raw_currency_code(quote_currency or source)
-        if source is None or quote is None or source == quote:
-            return price
-        base_price, source_base = normalize_monetary_amount(price, source)
-        quote_base = normalize_currency_code(quote)
-        if base_price is None or source_base is None or source_base != quote_base:
-            return price
-        quote_subunit = currency_subunit(quote)
-        if quote_subunit is None:
-            return float(base_price)
-        return float(base_price * quote_subunit.divisor)
-
     def _validate_price_change(
         self,
         symbol: str,
@@ -241,35 +219,44 @@ class MarketDataService:
             market_cap=data.market_cap,
             currency=data.currency,
         )
-        quote_currency = raw_currency_code(
-            currency_hint
+        # The provider quotes the price in a currency that may be a subunit
+        # (e.g. GBX pence on the LSE). Prefer the provider's own code -- it
+        # disambiguates pence from pounds -- then an explicit hint, then the
+        # listing's quote currency. We then collapse that to the MAJOR currency
+        # so subunits never cross the data boundary: market_data.price is always
+        # stored in the major currency and the snapshot read path reports the
+        # same (base) currency.
+        quoted_currency = raw_currency_code(
+            prepared.currency
+            or currency_hint
             or self.supported_ticker_repo.fetch_currency(normalized_symbol)
-            or prepared.currency
         )
-        price = self._quote_unit_price(
-            prepared.price,
-            source_currency=prepared.currency,
-            quote_currency=quote_currency,
+        major_amount, major_currency = normalize_monetary_amount(
+            prepared.price, quoted_currency
         )
+        price = float(major_amount) if major_amount is not None else prepared.price
+
         market_cap = prepared.market_cap
         if market_cap is None and price is not None:
             shares = self._latest_share_count(normalized_symbol)
             if shares is not None:
-                base_price = self._base_unit_amount(price, quote_currency)
-                if base_price is not None:
-                    market_cap = shares * base_price
-        elif is_subunit_currency(prepared.currency):
+                # price is already major, so the derived market cap is too.
+                market_cap = shares * price
+        elif market_cap is not None and is_subunit_currency(prepared.currency):
+            # A provider-supplied market cap quoted in the subunit is collapsed
+            # to the major currency for consistency with the stored price.
             market_cap = self._base_unit_amount(market_cap, prepared.currency)
+
         self._validate_price_change(
             normalized_symbol,
             as_of=prepared.as_of,
             price=price,
-            currency=quote_currency,
+            currency=major_currency,
             market_cap=market_cap,
         )
         prepared.price = price
         prepared.market_cap = market_cap
-        prepared.currency = quote_currency
+        prepared.currency = major_currency
         return prepared
 
     def persist_updates(self, updates: list[MarketDataUpdate]) -> None:

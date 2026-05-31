@@ -880,10 +880,12 @@ def test_migration_canonicalizes_listing_quote_currency_and_market_data(tmp_path
     assert "idx_provider_listing_currency_nonnull" not in provider_listing_index_names
     assert "idx_market_data_currency_nonnull" not in market_data_index_names
     assert "idx_listing_currency_nonnull" in listing_index_names
+    # Migration 069 then converts the subunit-listing prices to the major
+    # currency (divide by 100); market_cap is left unchanged.
     assert market_rows == [
-        (1, 2783.5, 1000.0),
-        (3, 1234.0, 1234.0),
-        (4, 1234.0, 500.0),
+        (1, 27.835, 1000.0),
+        (3, 12.34, 1234.0),
+        (4, 12.34, 500.0),
     ]
 
 
@@ -4068,3 +4070,57 @@ def test_migration_068_falls_back_to_last_fetched_at_when_updated_at_missing(
         ).fetchone()
         assert fiscal_period == "INSTANT"
         assert end_date == "2026-02-14"
+
+
+def test_migration_069_divides_subunit_prices_to_major(tmp_path):
+    """Migration 069 converts ``market_data.price`` to the major currency.
+
+    Prices for listings quoted in a subunit (GBX/GBP0.01/ZAC/ILA) are divided
+    by 100; prices for major-currency listings are left untouched. Uses a
+    minimal two-table fixture because the migration only reads
+    ``listing.currency`` and rewrites ``market_data.price``.
+    """
+
+    from pyvalue.migrations import _migration_069_market_data_price_major_currency
+
+    db_path = tmp_path / "subunit-price.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE listing (listing_id INTEGER PRIMARY KEY, currency TEXT)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE market_data (
+                listing_id INTEGER NOT NULL,
+                as_of TEXT NOT NULL,
+                price REAL NOT NULL,
+                PRIMARY KEY (listing_id, as_of)
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO listing (listing_id, currency) VALUES (?, ?)",
+            [(1, "GBX"), (2, "ZAC"), (3, "ILA"), (4, "USD"), (5, "GBP")],
+        )
+        conn.executemany(
+            "INSERT INTO market_data (listing_id, as_of, price) VALUES (?, ?, ?)",
+            [
+                (1, "2024-01-02", 2783.5),  # GBX pence -> 27.835 GBP
+                (2, "2024-01-02", 23750.0),  # ZAC cents -> 237.5 ZAR
+                (3, "2024-01-02", 1234.0),  # ILA agorot -> 12.34 ILS
+                (4, "2024-01-02", 150.0),  # USD major, unchanged
+                (5, "2024-01-02", 22.04),  # GBP major, unchanged
+            ],
+        )
+
+        _migration_069_market_data_price_major_currency(conn)
+
+        prices = dict(
+            conn.execute("SELECT listing_id, price FROM market_data").fetchall()
+        )
+
+    assert prices[1] == pytest.approx(27.835)
+    assert prices[2] == pytest.approx(237.5)
+    assert prices[3] == pytest.approx(12.34)
+    assert prices[4] == 150.0
+    assert prices[5] == 22.04

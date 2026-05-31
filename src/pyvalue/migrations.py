@@ -7383,6 +7383,47 @@ def _migration_068_fiscal_period_check(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_069_market_data_price_major_currency(
+    conn: sqlite3.Connection,
+) -> None:
+    """Store ``market_data.price`` in the major currency for subunit listings.
+
+    Historically, prices for listings quoted in a subunit (GBX/GBP0.01 pence,
+    ZAC cents, ILA agorot) were stored in that subunit -- migration 039 even
+    multiplied the formerly GBP/ZAR/ILS rows by 100 to match the pence-quoted
+    feed. The data boundary now keeps every stored price in the *major*
+    currency (the Money type and the snapshot read path both assume this), so
+    divide those rows by 100 exactly once.
+
+    ``listing.currency`` is the source of truth for whether a row is a subunit
+    quote and itself stays as the raw quote code (e.g. 'GBX'); only the stored
+    price changes. After this runs, the snapshot read path reports
+    ``canonical_trading_currency(listing.currency)`` (the base code), so the
+    stored price and the reported currency are consistent.
+
+    This is a data-only migration with no schema marker; the schema-version
+    gate guarantees it runs exactly once (re-running would wrongly divide
+    again). It must be deployed together with the Phase-2 code change.
+    """
+
+    if not _table_exists(conn, "market_data") or not _table_exists(conn, "listing"):
+        return
+
+    # Subunit codes whose major value is the stored amount / 100. Mirrors
+    # SUBUNIT_CURRENCY_REGISTRY in currency.py; inlined so the migration stays a
+    # frozen snapshot independent of later registry edits.
+    conn.execute(
+        """
+        UPDATE market_data
+        SET price = price / 100.0
+        WHERE listing_id IN (
+            SELECT listing_id FROM listing
+            WHERE UPPER(TRIM(currency)) IN ('GBX', 'GBP0.01', 'ZAC', 'ILA')
+        )
+        """
+    )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -7452,6 +7493,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_066_provider_exchange_name_country_not_null,
     _migration_067_drop_unused_indexes,
     _migration_068_fiscal_period_check,
+    _migration_069_market_data_price_major_currency,
 ]
 
 
