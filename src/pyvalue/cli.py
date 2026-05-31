@@ -1420,13 +1420,41 @@ def _fetch_symbol_market_data(
     return provider.latest_price(symbol)
 
 
+_SKIPPED_NO_CURRENCY_PREVIEW = 20
+
+
+def _report_skipped_no_currency(exchange_code: str, skipped: Sequence[str]) -> None:
+    """Warn on provider tickers skipped because the payload carried no currency.
+
+    ``listing.currency`` is NOT NULL with no fallback, so a catalog entry whose
+    payload omits the currency is not inserted. Printing the affected tickers to
+    the console lets the operator chase the data issue with the provider. The
+    list is previewed (first ``_SKIPPED_NO_CURRENCY_PREVIEW``) so a large gap
+    does not flood the output.
+    """
+
+    if not skipped:
+        return
+    preview = ", ".join(skipped[:_SKIPPED_NO_CURRENCY_PREVIEW])
+    extra = len(skipped) - _SKIPPED_NO_CURRENCY_PREVIEW
+    suffix = f" (+{extra} more)" if extra > 0 else ""
+    print(
+        f"    WARNING: {len(skipped)} ticker(s) on {exchange_code} skipped -- no "
+        f"currency in the provider payload; chase with the provider: "
+        f"{preview}{suffix}"
+    )
+
+
 def _refresh_supported_tickers_for_exchange(
     database: str,
     provider: str,
     client: EODHDFundamentalsClient,
     exchange_code: str,
-) -> Tuple[int, int]:
-    """Refresh one exchange's supported tickers and prune stale fetch state."""
+) -> Tuple[int, int, Tuple[str, ...]]:
+    """Refresh one exchange's supported tickers and prune stale fetch state.
+
+    Returns ``(inserted, removed, skipped_no_currency)``.
+    """
 
     provider_norm = provider.strip().upper()
     exchange_norm = exchange_code.strip().upper()
@@ -1446,7 +1474,7 @@ def _refresh_supported_tickers_for_exchange(
     ticker_repo = SupportedTickerRepository(database)
     existing = ticker_repo.list_for_exchange(provider_norm, exchange_norm)
     existing_symbols = {row.symbol for row in existing}
-    stored = ticker_repo.replace_for_exchange(
+    result = ticker_repo.replace_for_exchange(
         provider_norm, exchange_norm, filtered_rows
     )
     current = ticker_repo.list_for_exchange(provider_norm, exchange_norm)
@@ -1457,7 +1485,7 @@ def _refresh_supported_tickers_for_exchange(
     state_repo.delete_symbols(provider_norm, removed_symbols)
     market_state_repo = MarketDataFetchStateRepository(database)
     market_state_repo.delete_symbols(provider_norm, removed_symbols)
-    return stored, len(removed_symbols)
+    return result.inserted, len(removed_symbols), result.skipped_no_currency
 
 
 def _list_eodhd_exchange_codes(
@@ -2111,9 +2139,10 @@ def cmd_load_us_universe(database: str, include_etfs: bool) -> int:
 
     repo = SupportedTickerRepository(database)
     repo.initialize_schema()
-    inserted = repo.replace_from_listings("SEC", "US", filtered)
+    result = repo.replace_from_listings("SEC", "US", filtered)
 
-    print(f"Stored {inserted} SEC supported tickers for US in {database}")
+    print(f"Stored {result.inserted} SEC supported tickers for US in {database}")
+    _report_skipped_no_currency("US", result.skipped_no_currency)
     return 0
 
 
@@ -2212,7 +2241,8 @@ def cmd_refresh_supported_tickers(
         ticker_repo.initialize_schema()
         existing = ticker_repo.list_for_exchange("SEC", "US")
         existing_symbols = {row.symbol for row in existing}
-        stored = ticker_repo.replace_from_listings("SEC", "US", filtered)
+        sec_result = ticker_repo.replace_from_listings("SEC", "US", filtered)
+        stored = sec_result.inserted
         current = ticker_repo.list_for_exchange("SEC", "US")
         current_symbols = {row.symbol for row in current}
         removed_symbols = sorted(existing_symbols - current_symbols)
@@ -2224,6 +2254,7 @@ def cmd_refresh_supported_tickers(
             f"[1/1] Stored {stored} supported tickers for US in {database} "
             f"(removed {len(removed_symbols)} unsupported tickers)"
         )
+        _report_skipped_no_currency("US", sec_result.skipped_no_currency)
         return 0
 
     if provider_norm != "EODHD":
@@ -2250,7 +2281,7 @@ def cmd_refresh_supported_tickers(
 
     total = len(exchange_list)
     for idx, code in enumerate(exchange_list, 1):
-        stored, removed = _refresh_supported_tickers_for_exchange(
+        stored, removed, skipped = _refresh_supported_tickers_for_exchange(
             database=database,
             provider=provider_norm,
             client=eodhd_client,
@@ -2260,6 +2291,7 @@ def cmd_refresh_supported_tickers(
             f"[{idx}/{total}] Stored {stored} supported tickers for {code} "
             f"in {database} (removed {removed} unsupported tickers)"
         )
+        _report_skipped_no_currency(code, skipped)
     return 0
 
 

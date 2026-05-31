@@ -1735,6 +1735,21 @@ class ExchangeProviderRepository(SQLiteStore):
         return provider_exchange_code.strip().upper()
 
 
+@dataclass(frozen=True)
+class SupportedTickerRefreshResult:
+    """Outcome of refreshing one provider/exchange supported-ticker slice.
+
+    ``inserted`` counts the listings actually catalogued. ``skipped_no_currency``
+    lists the provider tickers dropped because the payload carried no currency:
+    ``listing.currency`` is NOT NULL with no fallback, so a currency-less entry
+    cannot be modelled. It is surfaced to the operator so the underlying data
+    issue can be chased with the provider.
+    """
+
+    inserted: int
+    skipped_no_currency: Tuple[str, ...]
+
+
 class SupportedTickerRepository(SQLiteStore):
     """Store provider-supported ticker catalogs by exchange."""
 
@@ -1988,11 +2003,12 @@ class SupportedTickerRepository(SQLiteStore):
         provider: str,
         exchange_code: str,
         listings: Sequence[Listing],
-    ) -> int:
+    ) -> SupportedTickerRefreshResult:
         self.initialize_schema()
         provider_norm = provider.strip().upper()
         provider_exchange_code = exchange_code.strip().upper()
         retained_tickers: List[str] = []
+        skipped_no_currency: List[str] = []
         with self._connect() as conn:
             provider_exchange_row = self._ensure_provider_exchange_row(
                 conn,
@@ -2004,8 +2020,7 @@ class SupportedTickerRepository(SQLiteStore):
                 bare_symbol, _ = _normalize_symbol_base(symbol)
                 if not bare_symbol:
                     continue
-                retained_tickers.append(bare_symbol)
-                self._ensure_provider_listing(
+                created = self._ensure_provider_listing(
                     conn,
                     provider_norm,
                     symbol,
@@ -2013,6 +2028,10 @@ class SupportedTickerRepository(SQLiteStore):
                     currency=listing.currency,
                     entity_name=listing.security_name,
                 )
+                if created is None:
+                    skipped_no_currency.append(bare_symbol)
+                    continue
+                retained_tickers.append(bare_symbol)
             existing_rows = conn.execute(
                 """
                 SELECT provider_listing_id, provider_symbol
@@ -2027,18 +2046,22 @@ class SupportedTickerRepository(SQLiteStore):
                 if str(row["provider_symbol"]) not in set(retained_tickers)
             ]
             self._delete_provider_listing_ids(conn, to_delete)
-        return len(retained_tickers)
+        return SupportedTickerRefreshResult(
+            inserted=len(retained_tickers),
+            skipped_no_currency=tuple(skipped_no_currency),
+        )
 
     def replace_for_exchange(
         self,
         provider: str,
         exchange_code: str,
         rows: Sequence[Dict[str, Any]],
-    ) -> int:
+    ) -> SupportedTickerRefreshResult:
         self.initialize_schema()
         provider_norm = provider.strip().upper()
         provider_exchange_code = exchange_code.strip().upper()
         retained_tickers: List[str] = []
+        skipped_no_currency: List[str] = []
         with self._connect() as conn:
             provider_exchange_row = self._ensure_provider_exchange_row(
                 conn,
@@ -2050,7 +2073,6 @@ class SupportedTickerRepository(SQLiteStore):
                 if not code:
                     continue
                 bare_symbol = code.upper()
-                retained_tickers.append(bare_symbol)
                 self._ensure_provider_exchange_row(
                     conn,
                     provider_norm,
@@ -2066,7 +2088,7 @@ class SupportedTickerRepository(SQLiteStore):
                     country_iso2=row.get("CountryISO2") or row.get("country_iso2"),
                     country_iso3=row.get("CountryISO3") or row.get("country_iso3"),
                 )
-                self._ensure_provider_listing(
+                created = self._ensure_provider_listing(
                     conn,
                     provider_norm,
                     bare_symbol,
@@ -2074,6 +2096,10 @@ class SupportedTickerRepository(SQLiteStore):
                     currency=row.get("Currency") or row.get("currency"),
                     entity_name=row.get("Name") or row.get("name"),
                 )
+                if created is None:
+                    skipped_no_currency.append(bare_symbol)
+                    continue
+                retained_tickers.append(bare_symbol)
             existing_rows = conn.execute(
                 """
                 SELECT provider_listing_id, provider_symbol
@@ -2089,7 +2115,10 @@ class SupportedTickerRepository(SQLiteStore):
                 if str(row["provider_symbol"]) not in retained
             ]
             self._delete_provider_listing_ids(conn, to_delete)
-        return len(retained_tickers)
+        return SupportedTickerRefreshResult(
+            inserted=len(retained_tickers),
+            skipped_no_currency=tuple(skipped_no_currency),
+        )
 
     def fetch_for_symbol(self, provider: str, symbol: str) -> Optional[SupportedTicker]:
         self.initialize_schema()
@@ -6190,6 +6219,7 @@ __all__ = [
     "IngestProgressExchange",
     "IngestProgressFailure",
     "SupportedTicker",
+    "SupportedTickerRefreshResult",
     "SupportedTickerRepository",
     "ProviderExchangeRepository",
     "ProviderListing",

@@ -94,13 +94,14 @@ def test_supported_ticker_repository_replace_from_listings_persists_rows(tmp_pat
     repo = SupportedTickerRepository(tmp_path / "universe.db")
     repo.initialize_schema()
 
-    inserted = repo.replace_from_listings(
+    result = repo.replace_from_listings(
         "SEC",
         "US",
         [_listing("AAA"), _listing("BBB", is_etf=True)],
     )
 
-    assert inserted == 2
+    assert result.inserted == 2
+    assert result.skipped_no_currency == ()
 
     with sqlite3.connect(tmp_path / "universe.db") as conn:
         rows = conn.execute(
@@ -463,7 +464,7 @@ def test_supported_ticker_repository_replaces_rows_per_exchange(tmp_path):
         [{"Code": "CCC", "Name": "CCC Inc", "Type": "Common Stock", "Currency": "USD"}],
     )
 
-    inserted = repo.replace_for_exchange(
+    result = repo.replace_for_exchange(
         "eodhd",
         "lse",
         [
@@ -476,7 +477,8 @@ def test_supported_ticker_repository_replaces_rows_per_exchange(tmp_path):
         ],
     )
 
-    assert inserted == 1
+    assert result.inserted == 1
+    assert result.skipped_no_currency == ()
     lse = repo.list_for_exchange("EODHD", "LSE")
     us = repo.list_for_exchange("EODHD", "US")
     assert [(row.symbol, row.security_name) for row in lse] == [
@@ -499,6 +501,43 @@ def test_supported_ticker_repository_replaces_rows_per_exchange(tmp_path):
 
     us = repo.list_for_exchange("EODHD", "US")
     assert [(row.symbol, row.code) for row in us] == [("BRK.B.US", "BRK.B")]
+
+
+def test_supported_ticker_repository_reports_skipped_no_currency(tmp_path):
+    """Catalog entries with no currency are skipped (not stored) and reported.
+
+    listing.currency is NOT NULL with no fallback, so a payload row whose
+    currency is missing or blank cannot be modelled; replace_for_exchange must
+    drop it, surface it via skipped_no_currency, and catalog only the rest.
+    """
+
+    repo = SupportedTickerRepository(tmp_path / "skip-no-ccy.db")
+    repo.initialize_schema()
+
+    result = repo.replace_for_exchange(
+        "EODHD",
+        "LSE",
+        [
+            {
+                "Code": "AAA",
+                "Name": "AAA plc",
+                "Type": "Common Stock",
+                "Currency": "GBX",
+            },
+            {"Code": "BBB", "Name": "BBB plc", "Type": "Common Stock"},  # no currency
+            {
+                "Code": "CCC",
+                "Name": "CCC plc",
+                "Type": "Common Stock",
+                "Currency": "",
+            },  # blank
+        ],
+    )
+
+    assert result.inserted == 1
+    assert result.skipped_no_currency == ("BBB", "CCC")
+    # Only the currency-bearing ticker is catalogued.
+    assert [row.symbol for row in repo.list_for_exchange("EODHD", "LSE")] == ["AAA.LSE"]
 
 
 def test_supported_ticker_repository_lists_eligible_symbols(tmp_path):

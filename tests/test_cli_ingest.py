@@ -10506,3 +10506,24 @@ def test_resolve_ticker_target_currency_returns_none_when_unresolvable(tmp_path)
 
     result = cli._resolve_ticker_target_currency(str(db_path), "UNKNOWN.XX")
     assert result is None
+
+
+def test_report_skipped_no_currency_prints_count_and_preview(capsys):
+    """refresh-supported-tickers surfaces skipped (no-currency) tickers on screen."""
+
+    # Nothing is printed when no tickers were skipped.
+    cli._report_skipped_no_currency("LSE", [])
+    assert capsys.readouterr().out == ""
+
+    # A small skip list is enumerated in full so the operator can chase them.
+    cli._report_skipped_no_currency("LSE", ["AAA", "BBB"])
+    out = capsys.readouterr().out
+    assert "2 ticker(s) on LSE skipped" in out
+    assert "AAA, BBB" in out
+    assert "chase with the provider" in out
+
+    # A large skip list is previewed (first 20) with the remainder summarized.
+    cli._report_skipped_no_currency("US", [f"T{i}" for i in range(25)])
+    out = capsys.readouterr().out
+    assert "25 ticker(s) on US skipped" in out
+    assert "(+5 more)" in out
