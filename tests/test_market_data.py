@@ -41,6 +41,26 @@ class DummyEODSession:
         return DummyResponse(self.payload)
 
 
+def _seed_listing(db_path, symbol: str, currency: str = "USD"):
+    """Seed a cataloged EODHD listing carrying ``currency`` for ``symbol``.
+
+    ``listing.currency`` is NOT NULL with no fallback, so every listing must be
+    created from a provider payload that carries a currency. Tests that drive
+    ``refresh_symbol``/``upsert_price``/``replace_facts`` for an uncatalogued
+    symbol seed the listing here first so the strict creation path is satisfied.
+    """
+
+    ticker, suffix = symbol.split(".")
+    repo = SupportedTickerRepository(db_path)
+    repo.initialize_schema()
+    repo.replace_for_exchange(
+        "EODHD",
+        suffix,
+        [{"Code": ticker, "Type": "Common Stock", "Currency": currency}],
+    )
+    return repo
+
+
 def test_eodhd_provider_parses_response():
     payload = [
         {"date": "2024-03-01", "Close": "200.50", "Volume": "12345"},
@@ -70,6 +90,7 @@ def test_market_data_service_persists_prices(tmp_path):
                 currency=None,
             )
 
+    _seed_listing(tmp_path / "data.db", "AAPL.US", currency="USD")
     service = MarketDataService(db_path=tmp_path / "data.db", provider=DummyProvider())
 
     result = service.refresh_symbol("AAPL.US")
@@ -103,6 +124,7 @@ def test_market_data_service_derives_market_cap_from_shares(tmp_path):
         eodhd_api_key = None
 
     db_path = tmp_path / "shares.db"
+    _seed_listing(db_path, "AAPL.US", currency="USD")
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
     fact_repo.replace_facts(
@@ -245,6 +267,7 @@ def test_market_data_service_prefers_share_unit_count_when_duplicates_exist(tmp_
         eodhd_api_key = None
 
     db_path = tmp_path / "duplicate-shares.db"
+    _seed_listing(db_path, "AAPL.US", currency="USD")
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
     fact_repo.replace_facts(
@@ -344,6 +367,9 @@ def test_market_data_service_uses_fundamentals_shares(tmp_path):
         eodhd_api_key = None
 
     db_path = tmp_path / "sharesfund.db"
+    # LSE listings quote in GBX (pence); seed the listing in that currency so
+    # the fundamentals payload can be stored against it.
+    _seed_listing(db_path, "SHEL.LSE", currency="GBX")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     fund_repo.upsert(
@@ -361,7 +387,9 @@ def test_market_data_service_uses_fundamentals_shares(tmp_path):
     repo = MarketDataRepository(db_path)
     snapshot = repo.latest_snapshot("SHEL.LSE")
     assert snapshot is not None
-    assert snapshot.market_cap == 1000.0
+    # 20.0 GBX collapses to 0.20 GBP (major), so 50 shares -> 10.0 market cap.
+    assert snapshot.market_cap == pytest.approx(10.0)
+    assert snapshot.currency == "GBP"
 
 
 def test_market_data_service_rejects_unexplained_price_jump(tmp_path):
@@ -379,6 +407,7 @@ def test_market_data_service_rejects_unexplained_price_jump(tmp_path):
         eodhd_api_key = None
 
     db_path = tmp_path / "suspicious-price.db"
+    _seed_listing(db_path, "ATXS.US", currency="USD")
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
     fact_repo.replace_facts(
@@ -443,6 +472,7 @@ def test_market_data_service_allows_split_like_price_change_when_value_is_stable
         eodhd_api_key = None
 
     db_path = tmp_path / "split-like-price.db"
+    _seed_listing(db_path, "SPLT.US", currency="USD")
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
     fact_repo.replace_facts(
@@ -522,6 +552,7 @@ def test_market_data_service_prepare_price_data_uses_currency_hint(tmp_path):
         eodhd_api_key = None
 
     db_path = tmp_path / "hint.db"
+    _seed_listing(db_path, "SHEL.LSE", currency="GBX")
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
     fact_repo.replace_facts(

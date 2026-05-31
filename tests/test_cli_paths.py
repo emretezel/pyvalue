@@ -59,7 +59,7 @@ def test_resolve_canonical_scope_symbols_defaults_to_all_supported(tmp_path):
                 round_lot_size=100,
                 source="test",
                 isin=None,
-                currency=None,
+                currency="USD",
             ),
             Listing(
                 symbol="BBB.US",
@@ -72,7 +72,7 @@ def test_resolve_canonical_scope_symbols_defaults_to_all_supported(tmp_path):
                 round_lot_size=100,
                 source="test",
                 isin=None,
-                currency=None,
+                currency="USD",
             ),
         ],
     )
@@ -107,7 +107,7 @@ def test_resolve_provider_scope_rows_defaults_to_all_supported(tmp_path):
                 round_lot_size=100,
                 source="test",
                 isin=None,
-                currency=None,
+                currency="USD",
             )
         ],
     )

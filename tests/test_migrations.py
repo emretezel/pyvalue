@@ -36,6 +36,48 @@ def test_migration_updates_listings_primary_key(tmp_path):
     db_path = tmp_path / "db.sqlite"
     with sqlite3.connect(db_path) as conn:
         _create_legacy_listings_table(conn)
+        # The legacy ``listings`` table cannot carry a quote currency through
+        # the chain (migration 002 rebuilds it without the column), so the
+        # canonicalised listing would land with currency NULL and migration
+        # 069 would then purge it. Seed the matching catalog row in the
+        # ``supported_tickers`` shape migration 022 reads, carrying USD, so the
+        # listing survives. Migration 021 uses INSERT OR IGNORE, so this
+        # pre-seeded row (keyed by provider + the symbol 021 derives,
+        # 'ABC.NYSE') wins and keeps the expected issuer name 'ABC Corp'.
+        # Pinning the start at version 20 makes this modern supported_tickers
+        # shape valid (mirrors test_migration_does_not_overwrite_existing_supported_tickers).
+        conn.execute(
+            """
+            CREATE TABLE supported_tickers (
+                provider TEXT NOT NULL,
+                exchange_code TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                code TEXT NOT NULL,
+                listing_exchange TEXT,
+                security_name TEXT,
+                security_type TEXT,
+                country TEXT,
+                currency TEXT,
+                isin TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (provider, symbol)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO supported_tickers (
+                provider, exchange_code, symbol, code, listing_exchange,
+                security_name, security_type, country, currency, isin, updated_at
+            ) VALUES (
+                'SEC', 'US', 'ABC.NYSE', 'ABC', 'NYSE',
+                'ABC Corp', 'Common Stock', NULL, 'USD', NULL,
+                '2020-01-01T00:00:00Z'
+            )
+            """
+        )
+        conn.execute("CREATE TABLE schema_migrations (version INTEGER NOT NULL)")
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (20)")
 
     applied = apply_migrations(db_path)
     assert applied >= 1
@@ -919,6 +961,42 @@ def test_migration_adds_sector_and_industry_to_securities(tmp_path):
             )
             """
         )
+        # The bare ``securities`` fixture canonicalises to a listing with no
+        # provider_listing and therefore a NULL currency, which migration 069
+        # now purges. Seed the matching ``supported_tickers`` catalog row
+        # (canonical symbol 'AAA.US') carrying USD so migration 022 builds a
+        # provider_listing whose currency migration 039 backfills onto the
+        # listing -- keeping the listing alive for the assertions below.
+        conn.execute(
+            """
+            CREATE TABLE supported_tickers (
+                provider TEXT NOT NULL,
+                exchange_code TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                code TEXT NOT NULL,
+                listing_exchange TEXT,
+                security_name TEXT,
+                security_type TEXT,
+                country TEXT,
+                currency TEXT,
+                isin TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (provider, symbol)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO supported_tickers (
+                provider, exchange_code, symbol, code, listing_exchange,
+                security_name, security_type, country, currency, isin, updated_at
+            ) VALUES (
+                'EODHD', 'US', 'AAA.US', 'AAA', 'US',
+                'AAA Corp', 'Common Stock', NULL, 'USD', NULL,
+                '2024-01-01T00:00:00+00:00'
+            )
+            """
+        )
         conn.execute("CREATE TABLE schema_migrations (version INTEGER NOT NULL)")
         conn.execute("INSERT INTO schema_migrations (version) VALUES (24)")
 
@@ -1326,6 +1404,43 @@ def test_migration_adds_metric_status_and_facts_refresh_tables(tmp_path):
             )
             """
         )
+        # Migration 069 purges listings with a NULL currency (and their
+        # financial_facts / refresh-state rows). The bare securities fixture
+        # yields a currency-less listing, so seed the matching
+        # ``supported_tickers`` catalog row (canonical symbol 'AAA.US')
+        # carrying USD; migration 022 then builds a provider_listing whose
+        # currency migration 039 backfills onto listing 1, keeping it and its
+        # financial_facts row alive for the refresh-state assertions below.
+        conn.execute(
+            """
+            CREATE TABLE supported_tickers (
+                provider TEXT NOT NULL,
+                exchange_code TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                code TEXT NOT NULL,
+                listing_exchange TEXT,
+                security_name TEXT,
+                security_type TEXT,
+                country TEXT,
+                currency TEXT,
+                isin TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (provider, symbol)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO supported_tickers (
+                provider, exchange_code, symbol, code, listing_exchange,
+                security_name, security_type, country, currency, isin, updated_at
+            ) VALUES (
+                'SEC', 'US', 'AAA.US', 'AAA', 'US',
+                'AAA Corp', 'Common Stock', NULL, 'USD', NULL,
+                '2024-01-01T00:00:00+00:00'
+            )
+            """
+        )
         conn.execute("CREATE TABLE schema_migrations (version INTEGER NOT NULL)")
         conn.execute("INSERT INTO schema_migrations (version) VALUES (29)")
 
@@ -1406,7 +1521,8 @@ def test_migration_does_not_overwrite_existing_supported_tickers(tmp_path):
                 security_name, security_type, country, currency, isin, updated_at
             ) VALUES (
                 'SEC', 'US', 'ABC.NYSE', 'ABC', 'NYSE',
-                'Preserved Name', 'ETF', NULL, NULL, NULL, '2024-01-01T00:00:00+00:00'
+                'Preserved Name', 'ETF', NULL, 'USD', NULL,
+                '2024-01-01T00:00:00+00:00'
             )
             """
         )
@@ -2437,10 +2553,14 @@ def test_migration_053_drops_runtime_added_columns(tmp_path):
         # apply_migrations already pre-seeds provider, provider_exchange,
         # and exchange. Reuse those IDs to avoid UNIQUE collisions.
         conn.execute("INSERT INTO issuer (issuer_id, name) VALUES (1, 'Issuer A')")
+        # Migration 069 makes ``listing.currency`` NOT NULL and purges any
+        # currency-less listing (and its provider_listing/fetch-state
+        # children), so the fixture must give this listing a currency to
+        # survive to the assertions below.
         conn.execute(
             """
-            INSERT INTO listing (listing_id, issuer_id, exchange_id, symbol)
-            VALUES (1, 1, 1, 'AAA')
+            INSERT INTO listing (listing_id, issuer_id, exchange_id, symbol, currency)
+            VALUES (1, 1, 1, 'AAA', 'USD')
             """
         )
         conn.execute(
@@ -2559,10 +2679,13 @@ def test_migration_054_view_resolves_provider_through_exchange(tmp_path):
         # Reuse the SEC/US row at exchange_id=1, provider_exchange_id=1,
         # provider_id=3 (provider_code='SEC').
         conn.execute("INSERT INTO issuer (issuer_id, name) VALUES (1, 'A')")
+        # Migration 069 made ``listing.currency`` NOT NULL; supply a currency
+        # so this listing survives the (already-applied) purge and the
+        # catalog-view lookup below still finds it.
         conn.execute(
             """
-            INSERT INTO listing (listing_id, issuer_id, exchange_id, symbol)
-            VALUES (1, 1, 1, 'AAA')
+            INSERT INTO listing (listing_id, issuer_id, exchange_id, symbol, currency)
+            VALUES (1, 1, 1, 'AAA', 'USD')
             """
         )
         conn.execute(
@@ -2627,10 +2750,13 @@ def test_migration_054_blocks_on_drift_between_provider_listing_and_exchange(
             """
         )
         conn.execute("INSERT INTO issuer (issuer_id, name) VALUES (1, 'A')")
+        # ``apply_migrations`` already brought the DB to head, so the
+        # ``listing`` table carries the migration-069 ``currency NOT NULL``
+        # constraint; the insert must supply a currency.
         conn.execute(
             """
-            INSERT INTO listing (listing_id, issuer_id, exchange_id, symbol)
-            VALUES (1, 1, 1, 'AAA')
+            INSERT INTO listing (listing_id, issuer_id, exchange_id, symbol, currency)
+            VALUES (1, 1, 1, 'AAA', 'USD')
             """
         )
         # Drift: provider_listing.provider_id = 1 (EODHD) but the
@@ -3318,14 +3444,17 @@ def test_migration_062_view_excludes_secondary_listings(tmp_path):
 
     with sqlite3.connect(db_path) as conn:
         conn.execute("INSERT INTO issuer (issuer_id, name) VALUES (1, 'A')")
+        # Migration 069 made ``listing.currency`` NOT NULL, so every fixture
+        # listing must carry a currency.
         conn.execute(
             """
             INSERT INTO listing (
-                listing_id, issuer_id, exchange_id, symbol, primary_listing_status
+                listing_id, issuer_id, exchange_id, symbol, currency,
+                primary_listing_status
             ) VALUES
-                (1, 1, 1, 'AAA', 'primary'),
-                (2, 1, 1, 'BBB', 'secondary'),
-                (3, 1, 1, 'CCC', 'unknown')
+                (1, 1, 1, 'AAA', 'USD', 'primary'),
+                (2, 1, 1, 'BBB', 'USD', 'secondary'),
+                (3, 1, 1, 'CCC', 'USD', 'unknown')
             """
         )
         conn.execute(
@@ -3483,14 +3612,17 @@ def test_migration_064_drops_orphan_null_name_issuers(tmp_path):
         conn.commit()
     # Seed: an orphan issuer (NULL name) with one listing and one
     # market_data row, plus a populated issuer to confirm it survives.
+    # Both listings carry a currency so the only reason the orphan (99) is
+    # removed is migration 064's NULL-name rule -- not migration 069's
+    # currency-less purge, which would otherwise also delete listing 1.
     conn.execute(
         "INSERT INTO issuer (issuer_id, name, country) VALUES (1, 'Acme', 'US')"
     )
     conn.execute("INSERT INTO issuer (issuer_id, name) VALUES (99, NULL)")
     conn.execute(
         """
-        INSERT INTO listing (listing_id, issuer_id, exchange_id, symbol)
-        VALUES (1, 1, 1, 'ACME'), (99, 99, 1, 'ORPHAN')
+        INSERT INTO listing (listing_id, issuer_id, exchange_id, symbol, currency)
+        VALUES (1, 1, 1, 'ACME', 'USD'), (99, 99, 1, 'ORPHAN', 'USD')
         """
     )
     conn.execute(
@@ -3750,9 +3882,9 @@ _MIGRATION_067_DROPPED_INDEXES = frozenset(
     }
 )
 
-# Indexes that must survive migration 067 — every other secondary
-# index the schema declares. Asserting on this set catches the
-# copy-paste mistake of accidentally dropping the wrong index.
+# Indexes that must survive the full migration chain — every other
+# secondary index the schema declares at head. Asserting on this set
+# catches the copy-paste mistake of accidentally dropping the wrong index.
 _MIGRATION_067_RETAINED_INDEXES = frozenset(
     {
         "idx_fin_facts_security_concept_latest",
@@ -3921,10 +4053,13 @@ def _seed_catalog_row(
         "INSERT INTO issuer (issuer_id, name) VALUES (?, ?)",
         (listing_id, name),
     )
+    # Migration 069 makes ``listing.currency`` NOT NULL; this helper runs
+    # after ``apply_migrations`` has reached head, so the listing must carry
+    # a currency (the catalog row points at a US listing -> USD).
     conn.execute(
         """
-        INSERT INTO listing (listing_id, issuer_id, exchange_id, symbol)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO listing (listing_id, issuer_id, exchange_id, symbol, currency)
+        VALUES (?, ?, ?, ?, 'USD')
         """,
         (listing_id, listing_id, exchange_id, provider_symbol),
     )
@@ -4072,8 +4207,8 @@ def test_migration_068_falls_back_to_last_fetched_at_when_updated_at_missing(
         assert end_date == "2026-02-14"
 
 
-def test_migration_069_divides_subunit_prices_to_major(tmp_path):
-    """Migration 069 converts ``market_data.price`` to the major currency.
+def test_migration_070_divides_subunit_prices_to_major(tmp_path):
+    """Migration 070 converts ``market_data.price`` to the major currency.
 
     Prices for listings quoted in a subunit (GBX/GBP0.01/ZAC/ILA) are divided
     by 100; prices for major-currency listings are left untouched. Uses a
@@ -4081,7 +4216,7 @@ def test_migration_069_divides_subunit_prices_to_major(tmp_path):
     ``listing.currency`` and rewrites ``market_data.price``.
     """
 
-    from pyvalue.migrations import _migration_069_market_data_price_major_currency
+    from pyvalue.migrations import _migration_070_market_data_price_major_currency
 
     db_path = tmp_path / "subunit-price.sqlite"
     with sqlite3.connect(db_path) as conn:
@@ -4113,7 +4248,7 @@ def test_migration_069_divides_subunit_prices_to_major(tmp_path):
             ],
         )
 
-        _migration_069_market_data_price_major_currency(conn)
+        _migration_070_market_data_price_major_currency(conn)
 
         prices = dict(
             conn.execute("SELECT listing_id, price FROM market_data").fetchall()
@@ -4124,3 +4259,107 @@ def test_migration_069_divides_subunit_prices_to_major(tmp_path):
     assert prices[3] == pytest.approx(12.34)
     assert prices[4] == 150.0
     assert prices[5] == 22.04
+
+
+def test_migration_069_purges_currencyless_listings_and_dependents(tmp_path):
+    """Migration 069 deletes NULL-currency listings + every dependent row, then
+    makes ``listing.currency`` NOT NULL.
+
+    A currency-less listing and the rows hanging off it -- ``provider_listing``
+    and its ``fundamentals_raw`` child (keyed by provider_listing_id), plus
+    ``financial_facts`` / ``market_data`` (keyed by listing_id) -- are removed;
+    a currency-bearing listing and its rows survive. The rebuilt table enforces
+    ``currency TEXT NOT NULL``.
+    """
+
+    from pyvalue.migrations import _migration_069_purge_currencyless_listings
+
+    db_path = tmp_path / "purge-currencyless.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE issuer (issuer_id INTEGER PRIMARY KEY, name TEXT)")
+        conn.execute(
+            "CREATE TABLE exchange (exchange_id INTEGER PRIMARY KEY, exchange_code TEXT)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE listing (
+                listing_id INTEGER PRIMARY KEY,
+                issuer_id INTEGER NOT NULL,
+                exchange_id INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                currency TEXT,
+                primary_listing_status TEXT NOT NULL DEFAULT 'unknown'
+            )
+            """
+        )
+        conn.execute(
+            "CREATE TABLE provider_listing "
+            "(provider_listing_id INTEGER PRIMARY KEY, listing_id INTEGER NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE fundamentals_raw "
+            "(provider_listing_id INTEGER NOT NULL, data TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE financial_facts (listing_id INTEGER NOT NULL, concept TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE market_data "
+            "(listing_id INTEGER NOT NULL, as_of TEXT, price REAL)"
+        )
+        conn.execute("INSERT INTO issuer (issuer_id, name) VALUES (1, 'I1'), (2, 'I2')")
+        conn.execute(
+            "INSERT INTO exchange (exchange_id, exchange_code) VALUES (1, 'US')"
+        )
+        conn.execute(
+            """
+            INSERT INTO listing (listing_id, issuer_id, exchange_id, symbol, currency)
+            VALUES (1, 1, 1, 'AAA', NULL), (2, 2, 1, 'BBB', 'USD')
+            """
+        )
+        conn.execute(
+            "INSERT INTO provider_listing (provider_listing_id, listing_id) "
+            "VALUES (10, 1), (20, 2)"
+        )
+        conn.execute(
+            "INSERT INTO fundamentals_raw (provider_listing_id, data) "
+            "VALUES (10, '{}'), (20, '{}')"
+        )
+        conn.execute(
+            "INSERT INTO financial_facts (listing_id, concept) "
+            "VALUES (1, 'Revenues'), (2, 'Revenues')"
+        )
+        conn.execute(
+            "INSERT INTO market_data (listing_id, as_of, price) "
+            "VALUES (1, '2024-01-02', 5.0), (2, '2024-01-02', 6.0)"
+        )
+
+        _migration_069_purge_currencyless_listings(conn)
+
+        listings = conn.execute(
+            "SELECT listing_id, currency FROM listing ORDER BY listing_id"
+        ).fetchall()
+        provider_listings = [
+            r[0]
+            for r in conn.execute("SELECT provider_listing_id FROM provider_listing")
+        ]
+        raw = [
+            r[0]
+            for r in conn.execute("SELECT provider_listing_id FROM fundamentals_raw")
+        ]
+        fact_listings = [
+            r[0] for r in conn.execute("SELECT listing_id FROM financial_facts")
+        ]
+        md_listings = [r[0] for r in conn.execute("SELECT listing_id FROM market_data")]
+        ddl = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='listing'"
+        ).fetchone()[0]
+
+    # Only the currency-bearing listing (and its dependents) survive.
+    assert listings == [(2, "USD")]
+    assert provider_listings == [20]
+    assert raw == [20]
+    assert fact_listings == [2]
+    assert md_listings == [2]
+    # The rebuilt table enforces a non-null currency.
+    assert "currency TEXT NOT NULL" in ddl

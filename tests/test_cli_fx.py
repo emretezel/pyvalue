@@ -18,6 +18,7 @@ from pyvalue.storage import (
     FXRefreshStateRepository,
     FXSupportedPairsRepository,
     MetricsRepository,
+    SupportedTickerRepository,
 )
 
 
@@ -35,12 +36,30 @@ def _ranking_definition(metric: RankingMetric) -> ScreenDefinition:
     )
 
 
+def _seed_listing(db_path, symbol: str, *, currency: str = "USD") -> None:
+    """Catalog a listing carrying a currency so metric/entity upserts (which
+    materialize the listing) satisfy the NOT NULL listing.currency invariant.
+    The metric's own currency is independent of the listing's quote currency.
+    """
+
+    ticker, _, suffix = symbol.partition(".")
+    repo = SupportedTickerRepository(db_path)
+    repo.initialize_schema()
+    repo.replace_for_exchange(
+        "EODHD",
+        suffix or "US",
+        [{"Code": ticker, "Type": "Common Stock", "Currency": currency}],
+    )
+
+
 def test_rank_screen_passers_skips_mixed_currency_metric_without_ranking_currency(
     tmp_path, caplog
 ):
     db_path = tmp_path / "ranking_skip.db"
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
+    _seed_listing(db_path, "AAA.US")
+    _seed_listing(db_path, "BBB.US")
     metrics_repo.upsert(
         "AAA.US",
         "market_cap",
@@ -84,6 +103,8 @@ def test_rank_screen_passers_normalizes_mixed_currency_metric_with_ranking_curre
     db_path = tmp_path / "ranking_convert.db"
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
+    _seed_listing(db_path, "AAA.US")
+    _seed_listing(db_path, "BBB.US")
     metrics_repo.upsert(
         "AAA.US",
         "market_cap",

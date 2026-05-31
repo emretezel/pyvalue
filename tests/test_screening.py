@@ -19,7 +19,28 @@ from pyvalue.storage import (
     FXRatesRepository,
     FinancialFactsRepository,
     MetricsRepository,
+    SupportedTickerRepository,
 )
+
+
+def _seed_listing(db_path, symbol, *, currency="USD"):
+    """Catalog ``symbol`` carrying a quote ``currency`` before metrics land.
+
+    ``listing.currency`` is NOT NULL with no fallback, so writing a metric for
+    an uncataloged symbol would otherwise raise ``ValueError`` when the metrics
+    repo tries to create the listing. Seeding a cataloged listing here gives the
+    listing its currency up front; the per-metric ``currency`` kwargs used in
+    the cross-currency tests are independent of the listing currency.
+    """
+
+    ticker, _, suffix = symbol.partition(".")
+    repo = SupportedTickerRepository(db_path)
+    repo.initialize_schema()
+    repo.replace_for_exchange(
+        "EODHD",
+        suffix or "US",
+        [{"Code": ticker, "Type": "Common Stock", "Currency": currency}],
+    )
 
 
 def test_evaluate_criterion_uses_metrics_repo(tmp_path):
@@ -28,6 +49,7 @@ def test_evaluate_criterion_uses_metrics_repo(tmp_path):
     fact_repo.initialize_schema()
     metrics_repo = MetricsRepository(db)
     metrics_repo.initialize_schema()
+    _seed_listing(db, "AAPL.US")
     metrics_repo.upsert("AAPL.US", "working_capital", 100.0, "2023-09-30")
     metrics_repo.upsert("AAPL.US", "long_term_debt", 150.0, "2023-09-30")
 
@@ -64,6 +86,7 @@ def test_evaluate_criterion_supports_constant_terms(tmp_path):
     fact_repo.initialize_schema()
     metrics_repo = MetricsRepository(db)
     metrics_repo.initialize_schema()
+    _seed_listing(db, "AAPL.US")
     metrics_repo.upsert("AAPL.US", "earnings_yield", 0.05, "2023-09-30")
 
     criterion = Criterion(
@@ -82,6 +105,7 @@ def test_evaluate_criterion_converts_monetary_constant_currency(tmp_path):
     fact_repo.initialize_schema()
     metrics_repo = MetricsRepository(db)
     metrics_repo.initialize_schema()
+    _seed_listing(db, "AAPL.US")
     metrics_repo.upsert(
         "AAPL.US",
         "working_capital",
@@ -120,6 +144,7 @@ def test_evaluate_criterion_converts_mixed_currency_metrics(tmp_path):
     fact_repo.initialize_schema()
     metrics_repo = MetricsRepository(db)
     metrics_repo.initialize_schema()
+    _seed_listing(db, "AAPL.US")
     metrics_repo.upsert(
         "AAPL.US",
         "long_term_debt",
@@ -166,6 +191,7 @@ def test_evaluate_criterion_normalizes_configured_subunit_metric_currencies(tmp_
     fact_repo.initialize_schema()
     metrics_repo = MetricsRepository(db)
     metrics_repo.initialize_schema()
+    _seed_listing(db, "AAPL.US")
     metrics_repo.upsert(
         "AAPL.US",
         "long_term_debt",

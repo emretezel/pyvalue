@@ -12,8 +12,20 @@ def _seed_universe(db_path):
         "SEC",
         "US",
         [
-            Listing(symbol="FILER.US", security_name="Filer", exchange="NASDAQ"),
-            Listing(symbol="NONFILER.US", security_name="NonFiler", exchange="NYSE"),
+            # Listings must carry a currency (listing.currency is NOT NULL with
+            # no fallback). US exchanges quote in USD.
+            Listing(
+                symbol="FILER.US",
+                security_name="Filer",
+                exchange="NASDAQ",
+                currency="USD",
+            ),
+            Listing(
+                symbol="NONFILER.US",
+                security_name="NonFiler",
+                exchange="NYSE",
+                currency="USD",
+            ),
         ],
     )
 

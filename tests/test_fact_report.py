@@ -20,12 +20,26 @@ from pyvalue.universe import Listing
 def _seed_universe(db_path):
     universe = SupportedTickerRepository(db_path)
     universe.initialize_schema()
+    # Listings are non-nullable on currency and have no fallback; a Listing
+    # without a currency is skipped entirely by the catalog, so the implicit
+    # listing creation inside replace_facts would later raise. Seed both
+    # ".US" listings with USD (US exchange convention) up front.
     universe.replace_from_listings(
         "SEC",
         "US",
         [
-            Listing(symbol="AAA.US", security_name="AAA", exchange="NYSE"),
-            Listing(symbol="BBB.US", security_name="BBB", exchange="NYSE"),
+            Listing(
+                symbol="AAA.US",
+                security_name="AAA",
+                exchange="NYSE",
+                currency="USD",
+            ),
+            Listing(
+                symbol="BBB.US",
+                security_name="BBB",
+                exchange="NYSE",
+                currency="USD",
+            ),
         ],
     )
 

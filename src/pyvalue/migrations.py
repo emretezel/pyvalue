@@ -7383,7 +7383,175 @@ def _migration_068_fiscal_period_check(conn: sqlite3.Connection) -> None:
     )
 
 
-def _migration_069_market_data_price_major_currency(
+def _migration_069_purge_currencyless_listings(conn: sqlite3.Connection) -> None:
+    """Delete listings with no quote currency, then make ``currency`` NOT NULL.
+
+    Listings created by the price-ingest path (``SecurityRepository.ensure``)
+    for symbols that were never catalogued carry a NULL ``currency``: migration
+    039 backfilled ``listing.currency`` from ``provider_listing``, so a listing
+    with no ``provider_listing`` row stayed NULL. These listings are
+    currency-blind (every metric skips them) and, lacking a ``fundamentals_raw``
+    payload, cannot be rebuilt by ``normalise`` -- so they are deleted outright
+    rather than backfilled.
+
+    The purge cascades to every dependent row: the ``provider_listing`` children
+    keyed by ``provider_listing_id`` (``fundamentals_raw``,
+    ``fundamentals_normalization_state``, ``fundamentals_fetch_state``,
+    ``market_data_fetch_state``) first, then the direct children keyed by
+    ``listing_id`` (``financial_facts``, ``financial_facts_refresh_state``,
+    ``market_data``, ``metric_compute_status``, ``metrics``,
+    ``provider_listing``), then the ``listing`` rows themselves.
+
+    With no NULL currencies left, ``listing`` is rebuilt with ``currency TEXT
+    NOT NULL`` so the gap cannot recur (``SecurityRepository.ensure`` now
+    resolves the currency from the exchange instead of inserting NULL). The
+    table is referenced by several child tables and the catalog views, so FK
+    enforcement is deferred to commit time and the views are dropped/recreated
+    around the rebuild (matching migration 056).
+
+    Idempotent: a listing table that already declares ``currency TEXT NOT NULL``
+    is left untouched.
+    """
+
+    if not _table_exists(conn, "listing"):
+        return
+    columns = _table_columns(conn, "listing")
+    if not {"issuer_id", "exchange_id", "symbol", "currency"} <= columns:
+        return
+    ddl_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='listing'"
+    ).fetchone()
+    if ddl_row is None:
+        return
+    if "currency TEXT NOT NULL" in ddl_row[0]:
+        return
+
+    conn.execute("PRAGMA defer_foreign_keys = ON")
+
+    # --- 1. Purge currency-less listings and every dependent row. ---
+    # Grandchildren keyed by provider_listing_id (delete before provider_listing).
+    for table in (
+        "fundamentals_raw",
+        "fundamentals_normalization_state",
+        "fundamentals_fetch_state",
+        "market_data_fetch_state",
+    ):
+        if _table_exists(conn, table):
+            conn.execute(
+                f"""
+                DELETE FROM {table}
+                WHERE provider_listing_id IN (
+                    SELECT provider_listing_id FROM provider_listing
+                    WHERE listing_id IN (
+                        SELECT listing_id FROM listing WHERE currency IS NULL
+                    )
+                )
+                """
+            )
+    # Direct children keyed by listing_id.
+    for table in (
+        "financial_facts",
+        "financial_facts_refresh_state",
+        "market_data",
+        "metric_compute_status",
+        "metrics",
+        "provider_listing",
+    ):
+        if _table_exists(conn, table):
+            conn.execute(
+                f"""
+                DELETE FROM {table}
+                WHERE listing_id IN (
+                    SELECT listing_id FROM listing WHERE currency IS NULL
+                )
+                """
+            )
+    conn.execute("DELETE FROM listing WHERE currency IS NULL")
+
+    # --- 2. Rebuild listing with currency NOT NULL. ---
+    # Only idx_listing_currency_nonnull is recreated below. idx_listing_exchange
+    # was dropped as unused by migration 067 and is deliberately NOT resurrected.
+    conn.execute("DROP INDEX IF EXISTS idx_listing_currency_nonnull")
+
+    catalog_view_existed = _view_exists(conn, "provider_listing_catalog")
+    supported_view_existed = _view_exists(conn, "supported_tickers")
+    securities_view_existed = _view_exists(conn, "securities")
+    primary_view_existed = _view_exists(conn, "primary_provider_listing_catalog")
+    if primary_view_existed:
+        conn.execute("DROP VIEW primary_provider_listing_catalog")
+    if supported_view_existed:
+        conn.execute("DROP VIEW supported_tickers")
+    if catalog_view_existed:
+        conn.execute("DROP VIEW provider_listing_catalog")
+    if securities_view_existed:
+        conn.execute("DROP VIEW securities")
+
+    has_primary_listing_status = "primary_listing_status" in columns
+    primary_status_column = (
+        ",\n            primary_listing_status TEXT NOT NULL DEFAULT 'unknown'"
+        if has_primary_listing_status
+        else ""
+    )
+    primary_status_select = (
+        ", primary_listing_status" if has_primary_listing_status else ""
+    )
+    currency_check = _CURRENCY_FORMAT_CHECK.format(col="currency")
+    conn.execute(
+        f"""
+        CREATE TABLE listing__new (
+            listing_id INTEGER PRIMARY KEY,
+            issuer_id INTEGER NOT NULL,
+            exchange_id INTEGER NOT NULL,
+            symbol TEXT NOT NULL
+                CHECK (length(symbol) > 0
+                       AND symbol = upper(trim(symbol))
+                       AND instr(symbol, ' ') = 0
+                       AND symbol GLOB '[A-Z0-9.&^*-]*'),
+            currency TEXT NOT NULL
+                CHECK ({currency_check}){primary_status_column},
+            UNIQUE (exchange_id, symbol),
+            FOREIGN KEY (issuer_id) REFERENCES issuer(issuer_id),
+            FOREIGN KEY (exchange_id) REFERENCES "exchange"(exchange_id)
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        INSERT INTO listing__new (
+            listing_id, issuer_id, exchange_id, symbol, currency{primary_status_select}
+        )
+        SELECT
+            listing_id, issuer_id, exchange_id, symbol, currency{primary_status_select}
+        FROM listing
+        """
+    )
+    conn.execute("DROP TABLE listing")
+    conn.execute("ALTER TABLE listing__new RENAME TO listing")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_listing_currency_nonnull
+        ON listing(currency)
+        WHERE currency IS NOT NULL
+        """
+    )
+
+    if securities_view_existed:
+        _create_securities_view(conn)
+    if catalog_view_existed:
+        _create_provider_listing_catalog_view(conn)
+    if supported_view_existed:
+        _create_supported_tickers_view(conn)
+    if primary_view_existed:
+        _create_primary_provider_listing_catalog_view(conn)
+
+    fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if fk_violations:
+        raise RuntimeError(
+            f"migration 069 left foreign key violations: {fk_violations!r}"
+        )
+
+
+def _migration_070_market_data_price_major_currency(
     conn: sqlite3.Connection,
 ) -> None:
     """Store ``market_data.price`` in the major currency for subunit listings.
@@ -7395,11 +7563,13 @@ def _migration_069_market_data_price_major_currency(
     currency (the Money type and the snapshot read path both assume this), so
     divide those rows by 100 exactly once.
 
-    ``listing.currency`` is the source of truth for whether a row is a subunit
-    quote and itself stays as the raw quote code (e.g. 'GBX'); only the stored
-    price changes. After this runs, the snapshot read path reports
-    ``canonical_trading_currency(listing.currency)`` (the base code), so the
-    stored price and the reported currency are consistent.
+    Runs after migration 069 has purged currency-less listings, so every
+    remaining listing has a non-null quote currency. ``listing.currency`` is the
+    source of truth for whether a row is a subunit quote and itself stays as the
+    raw quote code (e.g. 'GBX'); only the stored price changes. After this runs,
+    the snapshot read path reports ``canonical_trading_currency(listing.currency)``
+    (the base code), so the stored price and the reported currency are
+    consistent.
 
     This is a data-only migration with no schema marker; the schema-version
     gate guarantees it runs exactly once (re-running would wrongly divide
@@ -7493,7 +7663,8 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_066_provider_exchange_name_country_not_null,
     _migration_067_drop_unused_indexes,
     _migration_068_fiscal_period_check,
-    _migration_069_market_data_price_major_currency,
+    _migration_069_purge_currencyless_listings,
+    _migration_070_market_data_price_major_currency,
 ]
 
 

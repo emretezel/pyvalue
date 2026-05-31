@@ -9,6 +9,7 @@ import sqlite3
 import threading
 import time
 import concurrent.futures.thread as thread_futures
+from collections.abc import Sequence
 from concurrent.futures import Future, ProcessPoolExecutor
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
@@ -166,6 +167,41 @@ def store_catalog_listings(
         for listing in listings
     ]
     repo.replace_from_listings(provider, exchange_code, listings_with_currency)
+    return repo
+
+
+def _seed_listing(
+    db_path,
+    symbol: str | Sequence[str],
+    currency: str = "USD",
+    provider: str = "EODHD",
+):
+    """Seed cataloged listing(s) carrying ``currency`` for ``symbol``.
+
+    ``listing.currency`` is NOT NULL with no fallback, so every listing must be
+    created from a provider payload that carries a currency. Tests that drive
+    ``replace_facts``/``FundamentalsRepository.upsert``/``upsert_price`` for an
+    uncatalogued symbol seed the listing here first (under the same provider the
+    test exercises) so the strict creation path is satisfied.
+
+    ``symbol`` may be a single symbol or a sequence. Symbols are grouped by their
+    exchange suffix and seeded with a single ``replace_for_exchange`` call per
+    exchange, so seeding several same-exchange symbols does not wipe its
+    siblings (``replace_for_exchange`` removes provider listings absent from the
+    payload it is given).
+    """
+
+    symbols = [symbol] if isinstance(symbol, str) else list(symbol)
+    rows_by_exchange: dict[str, list[dict[str, str]]] = {}
+    for entry in symbols:
+        ticker, suffix = entry.split(".")
+        rows_by_exchange.setdefault(suffix, []).append(
+            {"Code": ticker, "Type": "Common Stock", "Currency": currency}
+        )
+    repo = SupportedTickerRepository(db_path)
+    repo.initialize_schema()
+    for suffix, rows in rows_by_exchange.items():
+        repo.replace_for_exchange(provider, suffix, rows)
     return repo
 
 
@@ -839,6 +875,9 @@ def test_cmd_ingest_fundamentals_sec(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "SECCompanyFactsClient", FakeClient)
 
     db_path = tmp_path / "facts.db"
+    # SEC fundamentals attach to a SEC provider_listing; the listing must
+    # already carry a currency (NOT NULL, no fallback) for the payload to store.
+    _seed_listing(db_path, "AAPL.US", currency="USD", provider="SEC")
     rc = cli.cmd_ingest_fundamentals(
         provider="SEC",
         symbol="AAPL",
@@ -879,6 +918,10 @@ def test_cmd_ingest_fundamentals_eodhd(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
     monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
 
+    # The EODHD ingest path resolves the listing currency from the catalog and
+    # threads it onto the stored fundamentals. Seed the LSE listing in GBX so a
+    # listing exists (NOT NULL, no fallback) for the payload to attach to.
+    _seed_listing(db_path, "SHEL.LSE", currency="GBX", provider="EODHD")
     rc = cli.cmd_ingest_fundamentals(
         provider="EODHD",
         symbol="SHEL.LSE",
@@ -904,7 +947,8 @@ def test_cmd_ingest_fundamentals_eodhd(monkeypatch, tmp_path):
             WHERE catalog.provider='EODHD' AND catalog.provider_symbol='SHEL.LSE'
             """
         ).fetchone()
-    assert row[0] is None
+    # The seeded LSE listing carries GBX; the ingest path stores that currency.
+    assert row[0] == "GBX"
     assert row[1] == "LSE"
 
 
@@ -1094,13 +1138,21 @@ def test_cmd_load_universe_eodhd(monkeypatch, tmp_path):
 def test_cmd_load_universe_sec_stores_supported_tickers(monkeypatch, tmp_path):
     class FakeLoader:
         def load(self):
+            # US listings quote in USD; the loader carries the currency so the
+            # listing can be created (listing.currency is NOT NULL, no fallback).
             return [
-                Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NASDAQ"),
+                Listing(
+                    symbol="AAA.US",
+                    security_name="AAA Inc",
+                    exchange="NASDAQ",
+                    currency="USD",
+                ),
                 Listing(
                     symbol="ETF1.US",
                     security_name="ETF One",
                     exchange="NYSE Arca",
                     is_etf=True,
+                    currency="USD",
                 ),
             ]
 
@@ -3931,7 +3983,10 @@ def test_cmd_compute_metrics_bulk_with_exchange(monkeypatch, tmp_path):
 
 def test_cmd_compute_metrics_bulk_uses_minimal_provider_listing(monkeypatch, tmp_path):
     db_path = tmp_path / "fundmetrics.db"
-    # No listings stored; only fundamentals exist.
+    # A minimal cataloged listing carrying a currency (listing.currency is NOT
+    # NULL, no fallback) is the only catalog state; fundamentals/facts attach to
+    # it. LSE listings quote in GBX.
+    _seed_listing(db_path, "AAA.LSE", currency="GBX", provider="EODHD")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     fund_repo.upsert("EODHD", "AAA.LSE", {"dummy": True})
@@ -3983,6 +4038,7 @@ def test_cmd_compute_metrics_bulk_uses_minimal_provider_listing(monkeypatch, tmp
 
 def test_compute_metrics_for_symbol_reuses_fact_and_market_cache(monkeypatch, tmp_path):
     db_path = tmp_path / "metric-cache.db"
+    _seed_listing(db_path, "AAA.US", currency="USD")
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
     fact_repo.replace_facts(
@@ -5106,6 +5162,10 @@ def test_cmd_compute_metrics_stage_parallel_partial_failure(
 
 def test_run_metric_computation_interrupts_cleanly(monkeypatch, tmp_path, capsys):
     db_path = tmp_path / "metric-stage-interrupt.db"
+    # Persisting a metric row resolves the listing; seed both symbols so the
+    # listing exists (listing.currency is NOT NULL, no fallback).
+    _seed_listing(db_path, "AAA.US", currency="USD")
+    _seed_listing(db_path, "BBB.US", currency="USD")
 
     class DummyMetric:
         id = "dummy_metric"
@@ -5663,6 +5723,7 @@ def test_cmd_compute_metrics_stage_process_pool_smoke(monkeypatch, tmp_path):
 
 def test_cmd_clear_fundamentals_raw(tmp_path):
     db_path = tmp_path / "clearfunds.db"
+    _seed_listing(db_path, "AAA.US", currency="USD", provider="SEC")
     repo = FundamentalsRepository(db_path)
     repo.initialize_schema()
     repo.upsert("SEC", "AAA.US", {"facts": {}})
@@ -5701,6 +5762,7 @@ def test_cmd_clear_fundamentals_raw(tmp_path):
 
 def test_cmd_clear_financial_facts_clears_normalization_state(tmp_path):
     db_path = tmp_path / "clearfacts.db"
+    _seed_listing(db_path, "AAA.US", currency="USD", provider="SEC")
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
     fact_repo.replace_facts(
@@ -5769,6 +5831,7 @@ def test_cmd_clear_financial_facts_clears_normalization_state(tmp_path):
 
 def test_cmd_clear_metrics_clears_metric_compute_status(tmp_path):
     db_path = tmp_path / "clearmetrics.db"
+    _seed_listing(db_path, "AAA.US", currency="USD")
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
     metrics_repo.upsert("AAA.US", "working_capital", 10.0, "2024-12-31")
@@ -5799,6 +5862,7 @@ def test_cmd_clear_metrics_clears_metric_compute_status(tmp_path):
 
 def test_cmd_normalize_fundamentals_sec(monkeypatch, tmp_path):
     db_path = tmp_path / "facts.db"
+    _seed_listing(db_path, "AAPL.US", currency="USD", provider="SEC")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     fund_repo.upsert("SEC", "AAPL.US", {"entityName": "Apple Inc", "facts": {}})
@@ -5877,6 +5941,7 @@ def test_cmd_normalize_fundamentals_sec_skips_when_up_to_date(
     monkeypatch, tmp_path, capsys
 ):
     db_path = tmp_path / "facts-skip.db"
+    _seed_listing(db_path, "AAPL.US", currency="USD", provider="SEC")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     fund_repo.upsert("SEC", "AAPL.US", {"entityName": "Apple Inc", "facts": {}})
@@ -5926,6 +5991,7 @@ def test_cmd_normalize_fundamentals_sec_force_reprocesses_up_to_date_symbol(
     monkeypatch, tmp_path
 ):
     db_path = tmp_path / "facts-force.db"
+    _seed_listing(db_path, "AAPL.US", currency="USD", provider="SEC")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     fund_repo.upsert("SEC", "AAPL.US", {"entityName": "Apple Inc", "facts": {}})
@@ -6210,6 +6276,10 @@ def test_cmd_normalize_fundamentals_bulk_with_exchange(monkeypatch, tmp_path):
 
 def test_cmd_normalize_fundamentals_eodhd(monkeypatch, tmp_path):
     db_path = tmp_path / "funds.db"
+    # FundamentalsRepository.upsert resolves (and would create) the listing
+    # before applying listing_currency, so the listing must already exist with a
+    # currency (NOT NULL, no fallback). Seed it in the declared GBP.
+    _seed_listing(db_path, "SHEL.LSE", currency="GBP", provider="EODHD")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     fund_repo.upsert(
@@ -6293,6 +6363,9 @@ def test_cmd_normalize_fundamentals_eodhd(monkeypatch, tmp_path):
 
 def test_cmd_normalize_fundamentals_eodhd_drops_old_missing_fx_periods(tmp_path):
     db_path = tmp_path / "funds-partial.db"
+    # AALB.AS (Amsterdam) quotes in EUR; seed the listing so upsert can resolve
+    # it (listing.currency is NOT NULL, no fallback).
+    _seed_listing(db_path, "AALB.AS", currency="EUR", provider="EODHD")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     fund_repo.upsert(
@@ -6364,6 +6437,7 @@ def test_cmd_normalize_fundamentals_eodhd_zero_row_normalization_records_state(
     monkeypatch, tmp_path, capsys
 ):
     db_path = tmp_path / "funds-zero.db"
+    _seed_listing(db_path, "SHEL.LSE", currency="GBP", provider="EODHD")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     fund_repo.upsert(
@@ -6415,8 +6489,15 @@ def test_cmd_normalize_fundamentals_eodhd_zero_row_normalization_records_state(
     assert "already up to date" in capsys.readouterr().out
 
 
-def test_cmd_normalize_fundamentals_eodhd_requires_listing_currency(tmp_path):
+def test_cmd_normalize_fundamentals_eodhd_requires_listing_currency(
+    monkeypatch, tmp_path
+):
     db_path = tmp_path / "funds-missing-listing-currency.db"
+    # A listing must exist (with a currency) for the payload to store at all, so
+    # seed one and then simulate the currency resolver coming back empty -- that
+    # is the precondition that must still abort normalization with a clear error
+    # rather than silently picking a fallback currency.
+    _seed_listing(db_path, "LANDM.US", currency="USD", provider="EODHD")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     fund_repo.upsert(
@@ -6432,7 +6513,13 @@ def test_cmd_normalize_fundamentals_eodhd_requires_listing_currency(tmp_path):
         "LANDM.US",
         "2026-01-31",
         price=25.0,
-        currency=None,
+        currency="USD",
+    )
+
+    # Force the catalog currency lookup to report "unresolvable" so the
+    # normalize command exercises its missing-currency guard.
+    monkeypatch.setattr(
+        SupportedTickerRepository, "ticker_currency", lambda self, symbol: None
     )
 
     with pytest.raises(SystemExit, match="missing listing/provider-listing currency"):
@@ -6448,6 +6535,11 @@ def test_cmd_normalize_fundamentals_cross_provider_reruns_when_facts_owned_by_ot
     monkeypatch, tmp_path
 ):
     db_path = tmp_path / "funds-cross-provider.db"
+    # The payload is ingested under two providers; each provider_listing must
+    # resolve to a listing that already carries a currency (NOT NULL, no
+    # fallback). Seed the US (USD) listing under both providers.
+    _seed_listing(db_path, "AAA.US", currency="USD", provider="EODHD")
+    _seed_listing(db_path, "AAA.US", currency="USD", provider="SEC")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     fund_repo.upsert(
@@ -6601,6 +6693,9 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_reports_freshness_scan(
     monkeypatch, tmp_path, capsys
 ):
     db_path = tmp_path / "normalize-eodhd-status.db"
+    # Seed both US (USD) listings up front so the payload upserts can resolve
+    # them (listing.currency is NOT NULL, no fallback).
+    _seed_listing(db_path, ("AAA.US", "BBB.US"), currency="USD", provider="EODHD")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     for symbol in ("AAA.US", "BBB.US"):
@@ -6635,6 +6730,7 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_force_skips_freshness_scan(
     monkeypatch, tmp_path, capsys
 ):
     db_path = tmp_path / "normalize-eodhd-force.db"
+    _seed_listing(db_path, ("AAA.US", "BBB.US"), currency="USD", provider="EODHD")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     for symbol in ("AAA.US", "BBB.US"):
@@ -6689,6 +6785,9 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_suppresses_missing_fx_warnings_on
 ):
     db_path = tmp_path / "normalize-eodhd-missing-fx.db"
     log_dir = tmp_path / "logs"
+    # AALB.AS (Amsterdam) quotes in EUR; seed the listing so the payload upsert
+    # can resolve it (listing.currency is NOT NULL, no fallback).
+    _seed_listing(db_path, "AALB.AS", currency="EUR", provider="EODHD")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     fund_repo.upsert(
@@ -6755,6 +6854,9 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_continues_after_symbol_failure_wi
     monkeypatch, tmp_path, capsys
 ):
     db_path = tmp_path / "normalize-eodhd-failure.db"
+    _seed_listing(
+        db_path, ("AAA.US", "BBB.US", "CCC.US"), currency="USD", provider="EODHD"
+    )
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     for symbol in ("AAA.US", "BBB.US", "CCC.US"):
@@ -6833,6 +6935,7 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_interrupts_cleanly(
     monkeypatch, tmp_path, capsys
 ):
     db_path = tmp_path / "normalize-eodhd-interrupt.db"
+    _seed_listing(db_path, ("AAA.US", "BBB.US"), currency="USD", provider="EODHD")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     for symbol in ("AAA.US", "BBB.US"):
@@ -6921,6 +7024,9 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_interrupts_cleanly(
 
 def test_cmd_normalize_sec_facts_bulk_with_inline_executor(monkeypatch, tmp_path):
     db_path = tmp_path / "normalize-sec-inline.db"
+    # SEC fundamentals attach to a SEC provider_listing whose listing must
+    # already carry a currency (NOT NULL, no fallback).
+    _seed_listing(db_path, ("AAA.US", "BBB.US"), currency="USD", provider="SEC")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     for symbol in ("AAA.US", "BBB.US"):
@@ -6991,6 +7097,7 @@ def test_cmd_normalize_us_facts_bulk_force_skips_freshness_scan(
     monkeypatch, tmp_path, capsys
 ):
     db_path = tmp_path / "normalize-sec-force.db"
+    _seed_listing(db_path, ("AAA.US", "BBB.US"), currency="USD", provider="SEC")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     for symbol in ("AAA.US", "BBB.US"):
@@ -7037,6 +7144,7 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_process_pool_smoke(
     monkeypatch, tmp_path
 ):
     db_path = tmp_path / "normalize-eodhd-process.db"
+    _seed_listing(db_path, ("AAA.US", "BBB.US"), currency="USD", provider="EODHD")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     for symbol in ("AAA.US", "BBB.US"):
@@ -7121,6 +7229,7 @@ def test_cmd_normalize_sec_facts_bulk_process_pool_smoke(monkeypatch, tmp_path):
             }
         },
     }
+    _seed_listing(db_path, ("AAA.US", "BBB.US"), currency="USD", provider="SEC")
     for symbol in ("AAA.US", "BBB.US"):
         fund_repo.upsert("SEC", symbol, payload)
 
@@ -7520,6 +7629,10 @@ def test_cmd_refresh_security_metadata_backfills_eodhd_fields_and_sec_name_fallb
         ],
         provider="SEC",
     )
+    # AAA.US carries EODHD fundamentals, so it also needs an EODHD provider
+    # listing whose listing has a currency (NOT NULL, no fallback) for the
+    # payload to store.
+    _seed_listing(db_path, "AAA.US", currency="USD", provider="EODHD")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     fund_repo.upsert(
@@ -7617,6 +7730,9 @@ def test_cmd_refresh_security_metadata_respects_symbol_scope(tmp_path, capsys):
         ],
         provider="SEC",
     )
+    # Both symbols carry EODHD fundamentals, so seed their EODHD provider
+    # listings (USD) so the payloads can store.
+    _seed_listing(db_path, ("AAA.US", "BBB.US"), currency="USD", provider="EODHD")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     fund_repo.upsert(
@@ -7664,6 +7780,7 @@ def test_cmd_refresh_security_metadata_does_not_use_full_payload_fetch(
         [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
         provider="SEC",
     )
+    _seed_listing(db_path, "AAA.US", currency="USD", provider="EODHD")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     fund_repo.upsert(
@@ -7703,6 +7820,7 @@ def test_cmd_refresh_security_metadata_reports_progress(tmp_path, capsys, monkey
         ],
         provider="SEC",
     )
+    _seed_listing(db_path, ("AAA.US", "BBB.US"), currency="USD", provider="EODHD")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     fund_repo.upsert(
@@ -7752,6 +7870,7 @@ def test_cmd_refresh_security_metadata_cancels_cleanly(tmp_path, capsys, monkeyp
         ],
         provider="SEC",
     )
+    _seed_listing(db_path, ("AAA.US", "BBB.US"), currency="USD", provider="EODHD")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     fund_repo.upsert(
@@ -9657,6 +9776,9 @@ def test_cmd_compute_metrics_prints_currency_invariant_summary(
     monkeypatch, tmp_path, capsys
 ):
     db_path = tmp_path / "compute-metrics-summary.db"
+    # Persisting the successful metric resolves the listing; seed it so the
+    # listing exists (listing.currency is NOT NULL, no fallback).
+    _seed_listing(db_path, "AAPL.US", currency="USD")
     MetricsRepository(db_path).initialize_schema()
 
     class GoodMetric:
@@ -9716,6 +9838,7 @@ def test_cmd_compute_metrics_persists_metric_compute_status_success_and_failure(
     monkeypatch, tmp_path
 ):
     db_path = tmp_path / "compute-metrics-status.db"
+    _seed_listing(db_path, "AAPL.US", currency="USD")
     MetricsRepository(db_path).initialize_schema()
 
     class GoodMetric:

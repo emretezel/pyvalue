@@ -35,10 +35,16 @@ A single pre-refactor backup covers the whole effort:
 |------|-------|--------|
 | 0 | Tracking doc | Landed |
 | 1 | `Money` value type (additive) | Landed (`9f6b98c`) |
-| 2 | `market_data.price` → major currency + migration 069 | In review |
-| 3 | `unit` → `unit_kind` rebuild + migration 070 | Not started |
-| 4 | Remove `market_data.market_cap` + migration 071 | Not started |
+| 2 | `market_data.price` → major currency + migration 070 | Landed (`5cdfeeb`)\* |
+| 2.6 | Purge currency-less listings + `listing.currency` NOT NULL + migration 069 | In review |
+| 3 | `unit` → `unit_kind` rebuild + migration 071 | Not started |
+| 4 | Remove `market_data.market_cap` + migration 072 | Not started |
 | 5 | Full `Money` adoption across metrics + docs/rule update | Not started |
+
+\* Phase 2 landed with the price migration numbered **069**; Phase 2.6 renumbers
+it to **070** so the currency-less-listing purge (**069**) runs *first* — price
+scaling must run after the purge. Migrations have not been applied to the
+production DB, so renumbering an as-yet-unapplied migration is safe.
 
 ## Notes & deviations
 - **Test layout:** the repo uses a *flat* `tests/` tree (no `tests/unit|regression|integration/`),
@@ -49,6 +55,29 @@ A single pre-refactor backup covers the whole effort:
   `pyproject.toml` `[project.optional-dependencies].dev` in Phase 1.
 - **Python** is `>=3.12` per `pyproject.toml` (CLAUDE.md's ">=3.9" is stale).
 
+### Phase 2.6 — purge currency-less listings + `listing.currency` NOT NULL
+Author decision: a listing's currency comes **only** from the
+`refresh-supported-tickers` payload — no fallback/derivation. Currency-less
+listings are deleted (not backfilled), and the column is made NOT NULL.
+- Migration **069** (`_migration_069_purge_currencyless_listings`): deletes every
+  listing with `currency IS NULL` plus all dependent rows (provider_listing and
+  its fundamentals_raw/normalization_state/fetch_state + market_data_fetch_state
+  children; financial_facts, financial_facts_refresh_state, market_data,
+  metric_compute_status, metrics), then rebuilds `listing` with
+  `currency TEXT NOT NULL`. Does NOT resurrect `idx_listing_exchange` (migration
+  067 dropped it). Live impact: ~1,377 listings + ~989k facts + ~1.5k
+  market_data + ~4k metrics rows (all currency-blind, non-rebuildable).
+- Catalog gate (`SupportedTickerRepository._ensure_provider_listing`): returns
+  None / creates nothing when the payload has no currency.
+- `SecurityRepository.ensure(...)` / `ensure_from_symbol(...)` take a keyword
+  `currency=` and **raise** if asked to create a listing without one (no
+  fallback). Catalog paths thread the payload currency through; the
+  fundamentals-raw store path skips a payload it cannot model.
+- Test fallout: ~115 tests across 8 files minted listings without a currency;
+  all updated to seed a currency-bearing listing (via the catalog) before
+  creating facts/prices/metrics. Added a focused migration-069 purge regression
+  test. No production code was weakened and no currency fallback was added.
+
 ### Phase 2 — `market_data.price` in major currency
 - Ingest (`marketdata/service.py`): `prepare_price_data` now collapses the
   quoted price to its major currency via `normalize_monetary_amount` and stores
@@ -56,7 +85,7 @@ A single pre-refactor backup covers the whole effort:
 - Read path (`storage.py`): `latest_snapshot_record` / `latest_snapshots_many`
   report `canonical_trading_currency(listing.currency)` so the (price, currency)
   pair is self-consistent and downstream normalization never divides twice.
-- Migration **069** divides existing `market_data.price` by 100 for listings
+- Migration **070** divides existing `market_data.price` by 100 for listings
   whose `listing.currency` is a subunit (GBX/GBP0.01/ZAC/ILA). Data-only;
   version-gated to run once; must deploy with the code.
 - Metric values are unchanged end-to-end (previously: pence price ÷100 on read;

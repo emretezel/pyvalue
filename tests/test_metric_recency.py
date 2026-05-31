@@ -43,6 +43,10 @@ def test_metric_skips_when_latest_fact_is_stale(tmp_path):
     repo = FinancialFactsRepository(tmp_path / "facts.db")
     repo.initialize_schema()
     stale_date = (date.today() - timedelta(days=MAX_FACT_AGE_DAYS + 1)).isoformat()
+    # Listings are non-nullable on currency and have no fallback; seed the
+    # currency-bearing listing via the catalog before replace_facts (which
+    # otherwise would implicitly create the listing without a currency).
+    _store_market_currency(tmp_path / "facts.db", "AAPL.US", stale_date)
     repo.replace_facts(
         "AAPL.US",
         [
@@ -56,7 +60,6 @@ def test_metric_skips_when_latest_fact_is_stale(tmp_path):
             )
         ],
     )
-    _store_market_currency(tmp_path / "facts.db", "AAPL.US", stale_date)
 
     metric = LongTermDebtMetric()
 
@@ -79,12 +82,14 @@ def test_ttm_metric_requires_recent_quarters(tmp_path):
                 value=float(idx),
             )
         )
-    repo.replace_facts("AAPL.US", records)
+    # Seed the currency-bearing listing before replace_facts; listings are
+    # non-nullable on currency with no fallback.
     _store_market_currency(
         tmp_path / "quarters.db",
         "AAPL.US",
         (today - timedelta(days=30)).isoformat(),
     )
+    repo.replace_facts("AAPL.US", records)
 
     metric = EarningsPerShareTTM()
     result = metric.compute("AAPL.US", repo)
@@ -117,12 +122,14 @@ def test_ttm_metric_skips_when_latest_quarter_is_stale(tmp_path):
                 value=float(idx),
             )
         )
-    repo.replace_facts("AAPL.US", records)
+    # Seed the currency-bearing listing before replace_facts; listings are
+    # non-nullable on currency with no fallback.
     _store_market_currency(
         tmp_path / "stale_quarters.db",
         "AAPL.US",
         (today - timedelta(days=MAX_FACT_AGE_DAYS + 10)).isoformat(),
     )
+    repo.replace_facts("AAPL.US", records)
 
     metric = EarningsPerShareTTM()
 
@@ -157,12 +164,14 @@ def test_fy_metric_accepts_when_recent_quarter_exists(tmp_path):
             value=1.0,
         )
     )
-    repo.replace_facts("AAPL.US", fy_records)
+    # Seed the currency-bearing listing before replace_facts; listings are
+    # non-nullable on currency with no fallback.
     _store_market_currency(
         tmp_path / "epsavg.db",
         "AAPL.US",
         (date.today() - timedelta(days=60)).isoformat(),
     )
+    repo.replace_facts("AAPL.US", fy_records)
 
     metric = EPSAverageSixYearMetric()
     result = metric.compute("AAPL.US", repo)
@@ -175,6 +184,13 @@ def test_roc_metric_uses_recent_concept_even_if_fy_old(tmp_path):
     repo.initialize_schema()
     # FY data older than a year.
     fy_old = (date.today() - timedelta(days=500)).isoformat()
+    # Seed the currency-bearing listing before replace_facts; listings are
+    # non-nullable on currency with no fallback.
+    _store_market_currency(
+        tmp_path / "roc.db",
+        "TEST.US",
+        (date.today() - timedelta(days=45)).isoformat(),
+    )
     # Recent quarterly facts to satisfy freshness.
     repo.replace_facts(
         "TEST.US",
@@ -244,11 +260,6 @@ def test_roc_metric_uses_recent_concept_even_if_fy_old(tmp_path):
                 value=20.0,
             ),
         ],
-    )
-    _store_market_currency(
-        tmp_path / "roc.db",
-        "TEST.US",
-        (date.today() - timedelta(days=45)).isoformat(),
     )
 
     metric = ROCGreenblattMetric()

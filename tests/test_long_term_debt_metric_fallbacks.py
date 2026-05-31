@@ -80,8 +80,10 @@ def test_long_term_debt_metric_uses_other_long_term_debt_fallback(tmp_path):
 
     repo = FinancialFactsRepository(tmp_path / "facts.db")
     repo.initialize_schema()
-    repo.replace_facts("TEST.US", records)
+    # Seed the currency-bearing listing before replace_facts; listings are
+    # non-nullable on currency with no fallback.
     _store_market_currency(tmp_path / "facts.db", "TEST.US", recent)
+    repo.replace_facts("TEST.US", records)
 
     metric = LongTermDebtMetric()
     result = metric.compute("TEST.US", repo)
@@ -119,8 +121,10 @@ def test_long_term_debt_metric_uses_lease_including_current_fallback(tmp_path):
 
     repo = FinancialFactsRepository(tmp_path / "facts.db")
     repo.initialize_schema()
-    repo.replace_facts("TEST.US", records)
+    # Seed the currency-bearing listing before replace_facts; listings are
+    # non-nullable on currency with no fallback.
     _store_market_currency(tmp_path / "facts.db", "TEST.US", recent)
+    repo.replace_facts("TEST.US", records)
 
     metric = LongTermDebtMetric()
     result = metric.compute("TEST.US", repo)
@@ -171,8 +175,10 @@ def test_long_term_debt_metric_uses_operating_lease_noncurrent_fallback(tmp_path
 
     repo = FinancialFactsRepository(tmp_path / "facts.db")
     repo.initialize_schema()
-    repo.replace_facts("TEST.US", records)
+    # Seed the currency-bearing listing before replace_facts; listings are
+    # non-nullable on currency with no fallback.
     _store_market_currency(tmp_path / "facts.db", "TEST.US", recent)
+    repo.replace_facts("TEST.US", records)
 
     metric = LongTermDebtMetric()
     result = metric.compute("TEST.US", repo)

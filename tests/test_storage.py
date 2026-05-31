@@ -31,8 +31,13 @@ from pyvalue.marketdata.service import latest_share_count
 from pyvalue.universe import Listing
 
 
-def _listing(symbol: str, is_etf: bool = False) -> Listing:
+def _listing(symbol: str, is_etf: bool = False, currency: str = "USD") -> Listing:
     """Helper to instantiate listings in a compact way.
+
+    ``listing.currency`` is now NOT NULL with no fallback, so every listing must
+    carry a currency. The helper defaults to ``"USD"`` (the NYSE convention used
+    throughout these tests) and lets callers override it where a specific code
+    matters.
 
     Author: Emre Tezel
     """
@@ -48,8 +53,41 @@ def _listing(symbol: str, is_etf: bool = False) -> Listing:
         round_lot_size=100,
         source="test",
         isin=None,
-        currency=None,
+        currency=currency,
     )
+
+
+def _seed_listing(
+    db_path,
+    symbol: str,
+    *,
+    currency: str = "USD",
+    provider: str = "EODHD",
+) -> None:
+    """Create a cataloged listing carrying a currency so repos (which no
+    longer auto-create currency-less listings) can attach data to it.
+
+    The provider defaults to EODHD; pass ``provider="SEC"`` for tests that
+    upsert SEC fundamentals so the matching SEC provider listing exists.
+
+    ``replace_for_exchange`` overwrites the whole (provider, exchange) slice, so
+    to make this helper safe to call repeatedly for symbols on the same exchange
+    we fold the new ticker into the existing roster before re-writing it.
+    """
+    ticker, _, suffix = symbol.partition(".")
+    exchange = suffix or "US"
+    repo = SupportedTickerRepository(db_path)
+    repo.initialize_schema()
+    rows = {
+        existing.code: {
+            "Code": existing.code,
+            "Type": "Common Stock",
+            "Currency": existing.currency,
+        }
+        for existing in repo.list_for_exchange(provider, exchange)
+    }
+    rows[ticker] = {"Code": ticker, "Type": "Common Stock", "Currency": currency}
+    repo.replace_for_exchange(provider, exchange, list(rows.values()))
 
 
 def test_supported_ticker_repository_replace_from_listings_persists_rows(tmp_path):
@@ -83,8 +121,8 @@ def test_supported_ticker_repository_replace_from_listings_persists_rows(tmp_pat
         }
 
     assert rows == [
-        ("SEC", "US", "AAA", "US", None),
-        ("SEC", "US", "BBB", "US", None),
+        ("SEC", "US", "AAA", "US", "USD"),
+        ("SEC", "US", "BBB", "US", "USD"),
     ]
     assert "security_type" not in provider_listing_columns
     assert "currency" not in provider_listing_columns
@@ -136,8 +174,10 @@ def test_supported_ticker_repository_normalizes_exchange_and_fetches_currency(tm
 
 
 def test_fundamentals_repository_normalizes_provider(tmp_path):
-    repo = FundamentalsRepository(tmp_path / "funds.db")
+    db_path = tmp_path / "funds.db"
+    repo = FundamentalsRepository(db_path)
     repo.initialize_schema()
+    _seed_listing(db_path, "FOO.LSE", currency="GBX")
     repo.upsert("eodhd", "FOO.LSE", payload={"bar": 1})
 
     assert repo.symbols("EODHD") == ["FOO.LSE"]
@@ -151,14 +191,24 @@ def test_fundamentals_repository_classifies_and_purges_secondary_listings(tmp_pa
     ticker_repo.replace_for_exchange(
         "EODHD",
         "US",
-        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock"}],
+        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock", "Currency": "USD"}],
     )
     ticker_repo.replace_for_exchange(
         "EODHD",
         "LSE",
         [
-            {"Code": "AAA", "Name": "AAA plc", "Type": "Common Stock"},
-            {"Code": "BBB", "Name": "BBB plc", "Type": "Common Stock"},
+            {
+                "Code": "AAA",
+                "Name": "AAA plc",
+                "Type": "Common Stock",
+                "Currency": "GBX",
+            },
+            {
+                "Code": "BBB",
+                "Name": "BBB plc",
+                "Type": "Common Stock",
+                "Currency": "GBX",
+            },
         ],
     )
     by_symbol = {row.symbol: row for row in ticker_repo.list_for_provider("EODHD")}
@@ -393,20 +443,37 @@ def test_supported_ticker_repository_replaces_rows_per_exchange(tmp_path):
         "EODHD",
         "LSE",
         [
-            {"Code": "AAA", "Name": "AAA plc", "Type": "Common Stock"},
-            {"Code": "BRK.B", "Name": "Share Class", "Type": "Preferred Stock"},
+            {
+                "Code": "AAA",
+                "Name": "AAA plc",
+                "Type": "Common Stock",
+                "Currency": "GBX",
+            },
+            {
+                "Code": "BRK.B",
+                "Name": "Share Class",
+                "Type": "Preferred Stock",
+                "Currency": "GBX",
+            },
         ],
     )
     repo.replace_for_exchange(
         "EODHD",
         "US",
-        [{"Code": "CCC", "Name": "CCC Inc", "Type": "Common Stock"}],
+        [{"Code": "CCC", "Name": "CCC Inc", "Type": "Common Stock", "Currency": "USD"}],
     )
 
     inserted = repo.replace_for_exchange(
         "eodhd",
         "lse",
-        [{"Code": "AAA", "Name": "AAA plc refreshed", "Type": "Common Stock"}],
+        [
+            {
+                "Code": "AAA",
+                "Name": "AAA plc refreshed",
+                "Type": "Common Stock",
+                "Currency": "GBX",
+            }
+        ],
     )
 
     assert inserted == 1
@@ -420,7 +487,14 @@ def test_supported_ticker_repository_replaces_rows_per_exchange(tmp_path):
     repo.replace_for_exchange(
         "EODHD",
         "US",
-        [{"Code": "BRK.B", "Name": "Berkshire B", "Type": "Common Stock"}],
+        [
+            {
+                "Code": "BRK.B",
+                "Name": "Berkshire B",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            }
+        ],
     )
 
     us = repo.list_for_exchange("EODHD", "US")
@@ -435,8 +509,18 @@ def test_supported_ticker_repository_lists_eligible_symbols(tmp_path):
         "EODHD",
         "LSE",
         [
-            {"Code": "AAA", "Name": "AAA plc", "Type": "Common Stock"},
-            {"Code": "BBB", "Name": "BBB plc", "Type": "Preferred Stock"},
+            {
+                "Code": "AAA",
+                "Name": "AAA plc",
+                "Type": "Common Stock",
+                "Currency": "GBX",
+            },
+            {
+                "Code": "BBB",
+                "Name": "BBB plc",
+                "Type": "Preferred Stock",
+                "Currency": "GBX",
+            },
         ],
     )
 
@@ -458,6 +542,7 @@ def test_financial_facts_repository_replace_fact_rows_matches_replace_facts(tmp_
     db_path = tmp_path / "financial-facts.db"
     repo = FinancialFactsRepository(db_path)
     repo.initialize_schema()
+    _seed_listing(db_path, "AAA.US")
 
     inserted = repo.replace_facts(
         "AAA.US",
@@ -515,6 +600,7 @@ def test_financial_facts_repository_replace_facts_updates_refresh_state(tmp_path
     db_path = tmp_path / "facts-refresh-state.db"
     repo = FinancialFactsRepository(db_path)
     repo.initialize_schema()
+    _seed_listing(db_path, "AAA.US")
 
     repo.replace_facts(
         "AAA.US",
@@ -543,6 +629,7 @@ def test_financial_facts_repository_replace_fact_rows_persists_source_provider(
     db_path = tmp_path / "financial-facts-source-provider.db"
     repo = FinancialFactsRepository(db_path)
     repo.initialize_schema()
+    _seed_listing(db_path, "AAA.US")
 
     inserted = repo.replace_fact_rows(
         "AAA.US",
@@ -591,6 +678,9 @@ def test_fundamentals_repository_normalization_candidates_match_state_and_facts(
     state_repo = FundamentalsNormalizationStateRepository(db_path)
     state_repo.initialize_schema()
 
+    _seed_listing(db_path, "AAA.US", provider="SEC")
+    _seed_listing(db_path, "BBB.US", provider="SEC")
+    _seed_listing(db_path, "CCC.US", provider="SEC")
     fund_repo.upsert("SEC", "AAA.US", {"entityName": "AAA", "facts": {}})
     fund_repo.upsert("SEC", "BBB.US", {"entityName": "BBB", "facts": {}})
     fund_repo.upsert("SEC", "CCC.US", {"entityName": "CCC", "facts": {}})
@@ -693,6 +783,8 @@ def test_fundamentals_repository_normalization_candidates_skip_facts_scan_withou
     seen_sql = []
     fund_repo = LoggingFundamentalsRepository(db_path, seen_sql)
     fund_repo.initialize_schema()
+    _seed_listing(db_path, "AAA.US")
+    _seed_listing(db_path, "BBB.US")
     fund_repo.upsert("EODHD", "AAA.US", {"General": {"Name": "AAA"}}, exchange="US")
     fund_repo.upsert("EODHD", "BBB.US", {"General": {"Name": "BBB"}}, exchange="US")
 
@@ -709,6 +801,7 @@ def test_financial_facts_repository_replace_fact_rows_replaces_symbol_slice(tmp_
     db_path = tmp_path / "financial-facts-replace.db"
     repo = FinancialFactsRepository(db_path)
     repo.initialize_schema()
+    _seed_listing(db_path, "AAA.US")
 
     repo.replace_fact_rows(
         "AAA.US",
@@ -809,7 +902,7 @@ def test_fundamentals_repository_upsert_clears_active_fetch_failure(tmp_path):
     ticker_repo.replace_for_exchange(
         "EODHD",
         "US",
-        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock"}],
+        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock", "Currency": "USD"}],
     )
     repo = FundamentalsRepository(db_path)
     repo.initialize_schema()
@@ -832,8 +925,18 @@ def test_fundamentals_repository_upsert_many_uses_resolved_metadata_and_overwrit
         "EODHD",
         "US",
         [
-            {"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock"},
-            {"Code": "BBB", "Name": "BBB Inc", "Type": "Common Stock"},
+            {
+                "Code": "AAA",
+                "Name": "AAA Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
+            {
+                "Code": "BBB",
+                "Name": "BBB Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
         ],
     )
     tickers = {row.symbol: row for row in ticker_repo.list_for_exchange("EODHD", "US")}
@@ -943,10 +1046,30 @@ def test_supported_ticker_repository_lists_market_data_symbols_missing_then_olde
         "EODHD",
         "US",
         [
-            {"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock"},
-            {"Code": "BBB", "Name": "BBB Inc", "Type": "Common Stock"},
-            {"Code": "CCC", "Name": "CCC Inc", "Type": "Common Stock"},
-            {"Code": "DDD", "Name": "DDD Inc", "Type": "Common Stock"},
+            {
+                "Code": "AAA",
+                "Name": "AAA Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
+            {
+                "Code": "BBB",
+                "Name": "BBB Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
+            {
+                "Code": "CCC",
+                "Name": "CCC Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
+            {
+                "Code": "DDD",
+                "Name": "DDD Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
         ],
     )
 
@@ -980,14 +1103,24 @@ def test_supported_ticker_repository_primary_only_filters_secondary_listings(
     ticker_repo.replace_for_exchange(
         "EODHD",
         "US",
-        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock"}],
+        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock", "Currency": "USD"}],
     )
     ticker_repo.replace_for_exchange(
         "EODHD",
         "LSE",
         [
-            {"Code": "AAA", "Name": "AAA plc", "Type": "Common Stock"},
-            {"Code": "BBB", "Name": "BBB plc", "Type": "Common Stock"},
+            {
+                "Code": "AAA",
+                "Name": "AAA plc",
+                "Type": "Common Stock",
+                "Currency": "GBX",
+            },
+            {
+                "Code": "BBB",
+                "Name": "BBB plc",
+                "Type": "Common Stock",
+                "Currency": "GBX",
+            },
         ],
     )
 
@@ -1034,14 +1167,24 @@ def test_listing_status_repository_lists_unknown_provider_symbols(tmp_path):
     ticker_repo.replace_for_exchange(
         "EODHD",
         "US",
-        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock"}],
+        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock", "Currency": "USD"}],
     )
     ticker_repo.replace_for_exchange(
         "EODHD",
         "LSE",
         [
-            {"Code": "AAA", "Name": "AAA plc", "Type": "Common Stock"},
-            {"Code": "BBB", "Name": "BBB plc", "Type": "Common Stock"},
+            {
+                "Code": "AAA",
+                "Name": "AAA plc",
+                "Type": "Common Stock",
+                "Currency": "GBX",
+            },
+            {
+                "Code": "BBB",
+                "Name": "BBB plc",
+                "Type": "Common Stock",
+                "Currency": "GBX",
+            },
         ],
     )
     by_symbol = {row.symbol: row for row in ticker_repo.list_for_provider("EODHD")}
@@ -1093,7 +1236,7 @@ def test_market_data_fetch_state_repository_tracks_success_and_failure(tmp_path)
     ticker_repo.replace_for_exchange(
         "EODHD",
         "US",
-        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock"}],
+        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock", "Currency": "USD"}],
     )
     repo = MarketDataFetchStateRepository(db_path)
     repo.initialize_schema()
@@ -1125,8 +1268,18 @@ def test_market_data_repository_upsert_prices_batches_rows(tmp_path):
         "EODHD",
         "US",
         [
-            {"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock"},
-            {"Code": "BBB", "Name": "BBB Inc", "Type": "Common Stock"},
+            {
+                "Code": "AAA",
+                "Name": "AAA Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
+            {
+                "Code": "BBB",
+                "Name": "BBB Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
         ],
     )
     rows = ticker_repo.list_for_exchange("EODHD", "US")
@@ -1167,8 +1320,18 @@ def test_market_data_fetch_state_repository_batch_methods(tmp_path):
         "EODHD",
         "US",
         [
-            {"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock"},
-            {"Code": "BBB", "Name": "BBB Inc", "Type": "Common Stock"},
+            {
+                "Code": "AAA",
+                "Name": "AAA Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
+            {
+                "Code": "BBB",
+                "Name": "BBB Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
         ],
     )
     repo = MarketDataFetchStateRepository(db_path)
@@ -1195,8 +1358,18 @@ def test_market_data_repository_latest_snapshots_many_matches_single_lookup(tmp_
         "EODHD",
         "US",
         [
-            {"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock"},
-            {"Code": "BBB", "Name": "BBB Inc", "Type": "Common Stock"},
+            {
+                "Code": "AAA",
+                "Name": "AAA Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
+            {
+                "Code": "BBB",
+                "Name": "BBB Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
         ],
     )
     rows = ticker_repo.list_for_exchange("EODHD", "US")
@@ -1253,6 +1426,8 @@ def test_financial_facts_repository_latest_share_counts_many_matches_single_look
     db_path = tmp_path / "share-counts-many.db"
     repo = FinancialFactsRepository(db_path)
     repo.initialize_schema()
+    _seed_listing(db_path, "AAA.US")
+    _seed_listing(db_path, "BBB.US")
     repo.replace_facts(
         "AAA.US",
         [
@@ -1319,6 +1494,8 @@ def test_financial_facts_repository_facts_for_symbols_many_matches_single_lookup
     db_path = tmp_path / "facts-many.db"
     repo = FinancialFactsRepository(db_path)
     repo.initialize_schema()
+    _seed_listing(db_path, "AAA.US")
+    _seed_listing(db_path, "BBB.US")
     repo.replace_facts(
         "AAA.US",
         [
@@ -1383,6 +1560,7 @@ def test_financial_facts_repository_facts_for_symbols_many_concept_filter(tmp_pa
     db_path = tmp_path / "facts-many-concepts.db"
     repo = FinancialFactsRepository(db_path)
     repo.initialize_schema()
+    _seed_listing(db_path, "AAA.US")
     repo.replace_facts(
         "AAA.US",
         [
@@ -1439,6 +1617,10 @@ def test_metrics_repository_upsert_many_with_external_connection(monkeypatch, tm
     repo.initialize_schema()
     # Pre-create the canonical securities so resolve_ids_many doesn't fall
     # through to ensure_from_symbol (which always opens its own connection).
+    # Listings now require a currency at creation time, so seed cataloged
+    # listings (which carry one) before attaching the entity name.
+    _seed_listing(db_path, "AAA.US")
+    _seed_listing(db_path, "BBB.US")
     sec_repo = repo._security_repo()
     sec_repo.ensure_from_symbol("AAA.US", entity_name="AAA Corp")
     sec_repo.ensure_from_symbol("BBB.US", entity_name="BBB Corp")
@@ -1560,8 +1742,18 @@ def test_market_data_repository_update_market_caps_many_matches_single_update(tm
         "EODHD",
         "US",
         [
-            {"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock"},
-            {"Code": "BBB", "Name": "BBB Inc", "Type": "Common Stock"},
+            {
+                "Code": "AAA",
+                "Name": "AAA Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
+            {
+                "Code": "BBB",
+                "Name": "BBB Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
         ],
     )
     rows = ticker_repo.list_for_exchange("EODHD", "US")
@@ -1703,6 +1895,8 @@ def test_metrics_repository_upsert_many_matches_single_upsert(tmp_path):
     db_path = tmp_path / "metrics-upsert-many.db"
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
+    _seed_listing(db_path, "AAA.US")
+    _seed_listing(db_path, "BBB.US")
 
     repo.upsert("AAA.US", "metric_one", 1.0, "2024-01-01")
     updated = repo.upsert_many(
@@ -1725,6 +1919,10 @@ def test_metrics_repository_upsert_many_retries_transient_locked_error(
     db_path = tmp_path / "metrics-upsert-retry.db"
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
+    # Seed the listing before monkeypatching _connect so resolve_ids_many
+    # finds it (rather than falling through to ensure_from_symbol, which would
+    # open the locked/patched connection on the retry path).
+    _seed_listing(db_path, "AAA.US")
     monkeypatch.setattr(repo, "initialize_schema", lambda: None)
 
     original_connect = repo._connect
@@ -1756,6 +1954,9 @@ def test_metrics_repository_fetch_many_for_symbols_returns_requested_metrics(
     db_path = tmp_path / "metrics-fetch-many.db"
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
+    _seed_listing(db_path, "AAA.US")
+    _seed_listing(db_path, "BBB.US")
+    _seed_listing(db_path, "CCC.US")
     repo.upsert_many(
         [
             ("AAA.US", "metric_one", 1.0, "2024-01-01"),
@@ -1786,6 +1987,8 @@ def test_metric_compute_status_repository_upsert_and_fetch_many(tmp_path):
     db_path = tmp_path / "metric-status.db"
     repo = MetricComputeStatusRepository(db_path)
     repo.initialize_schema()
+    _seed_listing(db_path, "AAA.US")
+    _seed_listing(db_path, "BBB.US")
 
     updated = repo.upsert_many(
         [
@@ -1829,6 +2032,7 @@ def test_metrics_repository_persists_unit_metadata(tmp_path):
     db_path = tmp_path / "metrics-metadata.db"
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
+    _seed_listing(db_path, "AAA.US")
 
     repo.upsert(
         "AAA.US",
@@ -1866,6 +2070,8 @@ def test_metrics_repository_normalizes_configured_subunit_currencies(tmp_path):
     db_path = tmp_path / "metrics-subunits.db"
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
+    _seed_listing(db_path, "AAA.JSE", currency="ZAC")
+    _seed_listing(db_path, "BBB.TA", currency="ILA")
 
     repo.upsert(
         "AAA.JSE",
@@ -1897,6 +2103,9 @@ def test_fx_rates_repository_latest_on_or_before_and_discover_currencies(tmp_pat
     db_path = tmp_path / "fx-repo.db"
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
+    _seed_listing(db_path, "AAA.LSE", currency="GBX")
+    _seed_listing(db_path, "BBB.JSE", currency="ZAC")
+    _seed_listing(db_path, "CCC.TA", currency="ILA")
     fact_repo.replace_facts(
         "AAA.LSE",
         [
@@ -1987,7 +2196,7 @@ def test_fx_rates_repository_discover_currencies_excludes_secondary_supported_ti
     ticker_repo.replace_for_exchange(
         "EODHD",
         "US",
-        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock"}],
+        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock", "Currency": "USD"}],
     )
     ticker_repo.replace_for_exchange(
         "EODHD",
@@ -2024,12 +2233,17 @@ def test_fx_rates_repository_discover_currencies_excludes_secondary_supported_ti
     repo = FXRatesRepository(db_path)
     repo.initialize_schema()
 
-    assert repo.discover_currencies() == ["ZAR"]
+    # The primary US (USD) and JSE (ZAC -> ZAR) listings are discovered, but the
+    # secondary AAA.LSE listing is excluded -- GBP never appears. (Listings now
+    # carry a NOT NULL currency, so the primary USD listing contributes USD too.)
+    assert repo.discover_currencies() == ["USD", "ZAR"]
 
 
 def test_security_repository_upserts_sector_and_industry_metadata(tmp_path):
-    repo = SecurityRepository(tmp_path / "security-metadata.db")
+    db_path = tmp_path / "security-metadata.db"
+    repo = SecurityRepository(db_path)
     repo.initialize_schema()
+    _seed_listing(db_path, "AAA.US")
 
     repo.upsert_metadata(
         "AAA.US",
@@ -2049,8 +2263,11 @@ def test_security_repository_upserts_sector_and_industry_metadata(tmp_path):
 
 
 def test_entity_metadata_repository_fetch_many_returns_security_records(tmp_path):
-    repo = EntityMetadataRepository(tmp_path / "entity-metadata.db")
+    db_path = tmp_path / "entity-metadata.db"
+    repo = EntityMetadataRepository(db_path)
     repo.initialize_schema()
+    _seed_listing(db_path, "AAA.US")
+    _seed_listing(db_path, "BBB.US")
     repo.upsert("AAA.US", sector="Technology", industry="Software")
     repo.upsert("BBB.US", sector="Industrials", industry="Machinery")
 
@@ -2063,8 +2280,11 @@ def test_entity_metadata_repository_fetch_many_returns_security_records(tmp_path
 
 
 def test_security_repository_upsert_metadata_many_updates_existing_rows(tmp_path):
-    repo = SecurityRepository(tmp_path / "security-metadata-batch.db")
+    db_path = tmp_path / "security-metadata-batch.db"
+    repo = SecurityRepository(db_path)
     repo.initialize_schema()
+    _seed_listing(db_path, "AAA.US")
+    _seed_listing(db_path, "BBB.US")
     aaa = repo.ensure_from_symbol("AAA.US", entity_name="AAA Corp")
     bbb = repo.ensure_from_symbol(
         "BBB.US",
@@ -2104,6 +2324,12 @@ def test_fundamentals_repository_fetch_metadata_candidates_extracts_fields(tmp_p
     db_path = tmp_path / "fundamentals-metadata-candidates.db"
     repo = FundamentalsRepository(db_path)
     repo.initialize_schema()
+    # AAA carries both an EODHD and a SEC payload; BBB is SEC-only; CCC has only
+    # a bare listing. Seed a provider listing for each provider the test upserts.
+    _seed_listing(db_path, "AAA.US")
+    _seed_listing(db_path, "AAA.US", provider="SEC")
+    _seed_listing(db_path, "BBB.US", provider="SEC")
+    _seed_listing(db_path, "CCC.US")
     repo.upsert(
         "EODHD",
         "AAA.US",
@@ -2138,6 +2364,8 @@ def test_fundamentals_repository_fetch_many_returns_payloads_by_symbol(tmp_path)
     db_path = tmp_path / "fundamentals-fetch-many.db"
     repo = FundamentalsRepository(db_path)
     repo.initialize_schema()
+    _seed_listing(db_path, "AAA.US")
+    _seed_listing(db_path, "BBB.US")
     repo.upsert(
         "EODHD",
         "AAA.US",

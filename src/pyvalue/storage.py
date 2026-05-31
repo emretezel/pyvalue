@@ -907,6 +907,7 @@ class SecurityRepository(SQLiteStore):
         sector: Optional[str] = None,
         industry: Optional[str] = None,
         *,
+        currency: Optional[str] = None,
         connection: Optional[sqlite3.Connection] = None,
     ) -> Security:
         if connection is None:
@@ -920,6 +921,9 @@ class SecurityRepository(SQLiteStore):
         description = _normalize_optional_text(description)
         sector = _normalize_optional_text(sector)
         industry = _normalize_optional_text(industry)
+        # Listings carry a currency from the provider payload only -- there is
+        # no fallback or derivation. Creating a listing without one is refused.
+        listing_currency = raw_currency_code(currency)
 
         def _ensure(conn: sqlite3.Connection) -> Optional[Security]:
             exchange = self._exchange_repo().ensure(exchange_code, connection=conn)
@@ -927,6 +931,13 @@ class SecurityRepository(SQLiteStore):
                 conn, exchange.exchange_id, ticker
             )
             if security is None:
+                if listing_currency is None:
+                    raise ValueError(
+                        f"Cannot create listing {canonical_symbol} without a "
+                        "quote currency. Listings are created from the "
+                        "refresh-supported-tickers payload currency; there is "
+                        "no currency fallback."
+                    )
                 # migration 064 enforces issuer.name NOT NULL. Use the
                 # canonical_symbol as a placeholder name when the
                 # caller doesn't supply one; downstream metadata
@@ -960,9 +971,9 @@ class SecurityRepository(SQLiteStore):
                         exchange_id,
                         symbol,
                         currency
-                    ) VALUES (?, ?, ?, NULL)
+                    ) VALUES (?, ?, ?, ?)
                     """,
-                    (issuer_id, exchange.exchange_id, ticker),
+                    (issuer_id, exchange.exchange_id, ticker, listing_currency),
                 )
             else:
                 conn.execute(
@@ -1006,6 +1017,7 @@ class SecurityRepository(SQLiteStore):
         sector: Optional[str] = None,
         industry: Optional[str] = None,
         *,
+        currency: Optional[str] = None,
         connection: Optional[sqlite3.Connection] = None,
     ) -> Security:
         ticker, suffix = _normalize_symbol_base(symbol)
@@ -1021,6 +1033,7 @@ class SecurityRepository(SQLiteStore):
             description=description,
             sector=sector,
             industry=industry,
+            currency=currency,
             connection=connection,
         )
 
@@ -1851,7 +1864,14 @@ class SupportedTickerRepository(SQLiteStore):
         exchange_code: Optional[str] = None,
         currency: Optional[str] = None,
         entity_name: Optional[str] = None,
-    ) -> sqlite3.Row:
+    ) -> Optional[sqlite3.Row]:
+        # Listings must carry a currency (listing.currency is NOT NULL and there
+        # is no fallback). A catalog entry whose payload omits the currency is
+        # skipped entirely -- neither the listing nor the provider_listing row
+        # is created.
+        quote_currency = raw_currency_code(currency)
+        if quote_currency is None:
+            return None
         provider_norm, bare_symbol, provider_exchange_code, _ = (
             _normalize_provider_identity(
                 provider,
@@ -1868,18 +1888,19 @@ class SupportedTickerRepository(SQLiteStore):
             bare_symbol,
             str(provider_exchange_row["exchange_code"]),
             entity_name=entity_name,
+            currency=quote_currency,
             connection=conn,
         )
-        quote_currency = raw_currency_code(currency)
-        if quote_currency is not None:
-            conn.execute(
-                """
-                UPDATE listing
-                SET currency = ?
-                WHERE listing_id = ?
-                """,
-                (quote_currency, security.security_id),
-            )
+        # Keep listing.currency in sync when the listing pre-existed with a
+        # different currency.
+        conn.execute(
+            """
+            UPDATE listing
+            SET currency = ?
+            WHERE listing_id = ?
+            """,
+            (quote_currency, security.security_id),
+        )
         conn.execute(
             """
             INSERT INTO provider_listing (
@@ -2827,6 +2848,10 @@ class FundamentalsRepository(SQLiteStore):
                         exchange_code=update.provider_exchange_code,
                         currency=update.listing_currency,
                     )
+                if provider_listing_row is None:
+                    # No currency available to model the listing (listing.currency
+                    # is NOT NULL with no fallback), so skip storing this payload.
+                    continue
                 rows.append(
                     (
                         int(provider_listing_row["provider_listing_id"]),
