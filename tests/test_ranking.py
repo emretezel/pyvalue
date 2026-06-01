@@ -3,7 +3,7 @@
 Author: Emre Tezel
 """
 
-from pyvalue.ranking import compute_screen_ranking
+from pyvalue.screening import compute_screen_ranking
 from pyvalue.screening import RankingDefinition, RankingMetric, RankingTieBreaker
 
 

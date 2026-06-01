@@ -83,7 +83,7 @@ class _ConsoleMetricWarningFilter(logging.Filter):
         if record.name.startswith("pyvalue.metrics"):
             return False
         if (
-            record.name == "pyvalue.screening"
+            record.name == "pyvalue.screening.screen"
             and record.msg == "Metric %s missing for %s; run compute-metrics first"
         ):
             return False

@@ -67,11 +67,11 @@ from pyvalue.metrics.base import (
 )
 from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS, metric_fx_service_context
 from pyvalue.normalization import EODHDFactsNormalizer, SECFactsNormalizer
-from pyvalue.ranking import compute_screen_ranking
 from pyvalue.reporting import MetricCoverage, compute_fact_coverage
 from pyvalue.screening import (
     Criterion,
     CriterionEvaluation,
+    compute_screen_ranking,
     evaluate_criterion_detail,
     evaluate_criterion_verbose,
     load_screen,

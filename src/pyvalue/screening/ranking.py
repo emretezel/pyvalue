@@ -9,7 +9,7 @@ from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from typing import Dict, Mapping, Optional, Sequence
 
-from pyvalue.screening import RankingDefinition
+from .screen import RankingDefinition
 
 
 _ALL_PEERS = "__all__"
