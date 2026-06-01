@@ -38,14 +38,27 @@ A single pre-refactor backup covers the whole effort:
 | 2 | `market_data.price` → major currency + migration 070 | Landed (`5cdfeeb`)\* |
 | 2.6 | Purge currency-less listings + `listing.currency` NOT NULL + migration 069 | Landed (`df117d4`) |
 | 3 | `unit` → `unit_kind` rebuild + migration 071 | Landed (`a1bf04d`) |
-| 4 | Remove `market_data.market_cap` + migration 072 | In review |
+| 4 | Remove `market_data.market_cap` + migration 072 | Landed (`eec19bc`) |
 | 5a | Typed fact read boundary (`MonetaryFact`/`ScalarFact` + `FactReader`) + metric sweep | Landed (`db4cacb`) |
-| 5b | FX-convert inputs to listing currency + docs/rule update | In review |
+| 5b | FX-convert inputs to listing currency + docs/rule update | Landed (`359af4f`) |
 
 \* Phase 2 landed with the price migration numbered **069**; Phase 2.6 renumbers
 it to **070** so the currency-less-listing purge (**069**) runs *first* — price
 scaling must run after the purge. Migrations have not been applied to the
 production DB, so renumbering an as-yet-unapplied migration is safe.
+
+**All code phases (0–5b) are landed on `main`.** The only remaining work is the
+author's one-time manual production rebuild (after the pre-refactor backup):
+1. apply migrations **069–072** to `data/pyvalue.db`;
+2. populate `fx_rates` (the FX refresh command) for the pairs/dates cross-currency
+   listings need — otherwise those metrics skip with `missing_fx_rate`;
+3. **normalise** — rebuild `financial_facts` from `fundamentals_raw` (now `unit_kind`
+   + major currency, weighted-average shares as `count`);
+4. clear `metrics` / `metric_compute_status`, then **compute** — rebuild metrics with
+   `Money` + FX + on-demand market cap.
+
+Until then the schema and code carry the new design while the 42.5 GB DB still holds
+pre-refactor rows.
 
 ## Notes & deviations
 - **Test layout:** the repo uses a *flat* `tests/` tree (no `tests/unit|regression|integration/`),
@@ -62,7 +75,7 @@ way a monetary value reaches metric arithmetic. The design below was agreed with
 author before implementation; it supersedes the original plan's "wrap each input in
 `Money` at the call site" sketch, which left the bare-float magnitude reachable.
 
-> **5a — full sweep landed in the working tree (pending review).**
+> **5a — full sweep landed (`db4cacb`).**
 > `src/pyvalue/facts.py` defines `MonetaryFact` / `ScalarFact` (over a shared
 > `_TypedFact`), the `to_monetary_fact` / `to_scalar_fact` mappers, the `FactReader`
 > / `RawFactSource` protocols, the `TypedFactReaderMixin` (four typed accessors) and
@@ -138,14 +151,14 @@ The raw SQLite DAO (`FinancialFactsRepository`, `storage.py:4421`) is left
 **target = listing currency** (`require_metric_ticker_currency`) and routes every
 monetary input through one seam — `require_metric_money(fact.money, target_currency=…)`
 (or `require_metric_amount_money` for a raw market price) — before any `Money`
-arithmetic. In **5a** that seam *rejects* a non-target currency: it raises a structured
-`MetricCurrencyInvariantError` (`currency_mismatch` / `missing_input_currency` /
-`missing_trading_currency`), which `wrap_metric_currency_invariants` turns into an
-unavailable metric rather than letting `Money` raise `CurrencyMismatchError` mid-batch.
-In **5b** the same seam will *convert* via `Money.convert(target, fx, as_of)` — logging
-each conversion, adding a `missing_fx_rate` reason — with no call-site change. Either
-way cross-currency mixing is impossible *by construction*; the assert-based
-`normalize_metric_amount` / `ensure_metric_currency` flow is gone.
+arithmetic. The seam **converts** a non-target-currency input to the listing currency
+via `Money.convert` (logging each conversion); if no rate is available it raises a
+structured `MetricCurrencyInvariantError` (`missing_fx_rate`), which
+`wrap_metric_currency_invariants` turns into an unavailable metric rather than letting
+`Money` raise `CurrencyMismatchError` mid-batch. (In 5a this seam instead *rejected* a
+mismatch with `currency_mismatch`; 5b swapped only the body, leaving call sites
+untouched.) Either way cross-currency mixing is impossible *by construction*; the
+assert-based `normalize_metric_amount` / `ensure_metric_currency` flow is gone.
 
 **Share-count denominators.** All share *counts* the normalizer tags `count`
 (`CommonStockSharesOutstanding` / `EntityCommonStockSharesOutstanding` *and* the
@@ -166,7 +179,7 @@ unavailable (`missing_fx_rate`); subunits never enter the data boundary.
   protocol; the `facts.py` layer mints `Money` at the boundary; all 36 metrics use the
   typed accessors and `Money` arithmetic, aligning every input through the
   `require_metric_money` seam (reject-on-mismatch).
-- **5b — FX conversion (in review):** the seam body now *converts* the input to the
+- **5b — FX conversion (landed):** the seam body now *converts* the input to the
   listing currency via `Money.convert` instead of rejecting it, logging each conversion
   and raising `missing_fx_rate` when no rate exists -- **call sites unchanged**, exactly
   as the 5a seam docstring promised. The FX service is bound once per compute batch by
