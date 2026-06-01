@@ -9,9 +9,10 @@ from dataclasses import dataclass
 import logging
 from typing import Optional
 
+from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import SHARE_COUNT_CONCEPTS, market_cap_money
-from pyvalue.storage import FinancialFactsRepository, MarketDataRepository
+from pyvalue.storage import MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ class MarketCapitalizationMetric:
     def compute(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
         cap = market_cap_money(

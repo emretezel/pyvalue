@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from pyvalue.facts import TypedFactReaderMixin
 from pyvalue.metrics import REGISTRY
 from pyvalue.metrics.accruals_ratio import AccrualsRatioMetric
 from pyvalue.metrics.base import MetricCurrencyInvariantError, metadata_for_metric
@@ -118,8 +119,13 @@ from pyvalue.metrics.working_capital import WorkingCapitalMetric
 from pyvalue.storage import FactRecord
 
 
-class _TickerCurrencyRepo:
+class _TickerCurrencyRepo(TypedFactReaderMixin):
     """Base fake facts repo exposing a fixed ticker currency and share count.
+
+    It plays the role the SQLite DAO plays in production -- a raw fact source --
+    and inherits the kind-tagged accessors (``latest_monetary_fact`` etc.) from
+    :class:`~pyvalue.facts.TypedFactReaderMixin`, so migrated metrics read
+    ``Money`` from these fakes without any call-site wrapping.
 
     Market cap is derived from a share-count fact x price, so this base supplies
     an ``EntityCommonStockSharesOutstanding`` count of 1.0 (a concept no other
@@ -132,6 +138,12 @@ class _TickerCurrencyRepo:
     def ticker_currency(self, symbol):
         return self._ticker_currency
 
+    def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        # Default to no history; subclasses override to supply concept records.
+        # Both latest_fact (below) and the inherited typed accessors read through
+        # this single hook, mirroring the production read path.
+        return []
+
     def latest_fact(self, symbol, concept):
         if concept == "EntityCommonStockSharesOutstanding":
             return fact(
@@ -143,10 +155,7 @@ class _TickerCurrencyRepo:
                 currency=None,
                 value=1.0,
             )
-        getter = getattr(self, "facts_for_concept", None)
-        if getter is None:
-            return None
-        records = getter(symbol, concept)
+        records = self.facts_for_concept(symbol, concept)
         return max(records, key=lambda record: record.end_date) if records else None
 
 
@@ -158,23 +167,35 @@ class _GBPTickerCurrencyRepo(_TickerCurrencyRepo):
     _ticker_currency = "GBP"
 
 
+# Share-count concepts read through the *scalar* boundary by already-migrated
+# metrics. The weighted-average share concepts are intentionally absent until
+# profitability_returns_growth migrates: its un-migrated body still reads them
+# through the monetary path, which requires a currency.
+_COUNT_CONCEPTS = {
+    "CommonStockSharesOutstanding",
+    "EntityCommonStockSharesOutstanding",
+}
+
+
 def fact(**kwargs):
-    # Facts default to a monetary USD value; callers override ``currency`` (and,
-    # for non-monetary facts, ``unit_kind`` + ``currency=None``) as needed. The
-    # schema couples monetary/per_share rows to a non-null currency.
+    # Facts default to a monetary USD value; the known share-count concepts
+    # default to a dimensionless ``count`` (currency=None), mirroring the real
+    # schema where the scalar read boundary rejects a currency-bearing count
+    # fact. Callers may still override ``unit_kind`` / ``currency`` explicitly.
+    is_count = kwargs.get("concept", "") in _COUNT_CONCEPTS
     base = {
         "symbol": "AAPL.US",
         "cik": "CIK",
         "concept": "",
         "fiscal_period": "FY",
         "end_date": "",
-        "unit_kind": "monetary",
+        "unit_kind": "count" if is_count else "monetary",
         "value": 0.0,
         "accn": None,
         "filed": None,
         "frame": None,
         "start_date": None,
-        "currency": "USD",
+        "currency": None if is_count else "USD",
     }
     base.update(kwargs)
     return FactRecord(**base)
@@ -6466,6 +6487,8 @@ def _build_share_count_records(
     points: list[tuple[str, str, float]],
     concept: str = "CommonStockSharesOutstanding",
 ) -> dict[str, list[FactRecord]]:
+    # Share counts are dimensionless ``count`` facts (no currency); the scalar
+    # read boundary rejects a monetary-tagged count concept.
     return {
         concept: [
             fact(
@@ -6474,6 +6497,8 @@ def _build_share_count_records(
                 fiscal_period=fiscal_period,
                 end_date=end_date,
                 value=value,
+                unit_kind="count",
+                currency=None,
             )
             for fiscal_period, end_date, value in points
         ]
@@ -6654,7 +6679,7 @@ def _build_ev_ratio_records(
     return records
 
 
-class _OwnerEarningsRepo:
+class _OwnerEarningsRepo(TypedFactReaderMixin):
     def __init__(self, records_by_concept, *, ticker_currency="USD"):
         self.records_by_concept = dict(records_by_concept)
         # Market cap is derived from a share-count fact x price. Inject the

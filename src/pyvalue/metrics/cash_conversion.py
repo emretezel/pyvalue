@@ -11,15 +11,17 @@ from typing import Optional, Sequence
 
 import logging
 
+from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     MAX_FY_FACT_AGE_DAYS,
     is_recent_fact,
-    normalize_metric_record,
+    require_metric_money,
     require_metric_ticker_currency,
+    sum_money,
 )
-from pyvalue.storage import FactRecord, FinancialFactsRepository
+from pyvalue.money import Money
 
 LOGGER = logging.getLogger(__name__)
 
@@ -50,10 +52,9 @@ class CashConversionSnapshot:
 
 
 @dataclass
-class _AmountResult:
-    total: float
+class _MoneyResult:
+    money: Money
     as_of: str
-    currency: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -61,7 +62,6 @@ class _CashConversionFYPoint:
     year: int
     value: float
     as_of: str
-    currency: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -72,16 +72,24 @@ class CashConversionTenYearSnapshot:
 
 
 class CashConversionCalculator:
-    """Shared calculator for TTM and FY-series cash conversion metrics."""
+    """Shared calculator for TTM and FY-series cash conversion metrics.
+
+    Each CFO / net-income amount is aligned to the listing currency before the
+    ratio, so cash conversion (a dimensionless CFO/NI multiple) is currency-safe.
+    """
 
     def compute_ttm(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[CashConversionSnapshot]:
+        target_currency = require_metric_ticker_currency(
+            symbol, repo, metric_id="cfo_to_ni_ttm"
+        )
         cfo = self._compute_ttm_amount(
             symbol,
             repo,
             OPERATING_CASH_FLOW_CONCEPTS,
             context="cfo_to_ni_ttm",
+            target_currency=target_currency,
         )
         if cfo is None:
             LOGGER.warning("cfo_to_ni_ttm: missing TTM CFO for %s", symbol)
@@ -92,27 +100,32 @@ class CashConversionCalculator:
             repo,
             NET_INCOME_CONCEPTS,
             context="cfo_to_ni_ttm",
+            target_currency=target_currency,
         )
         if net_income is None:
             LOGGER.warning("cfo_to_ni_ttm: missing TTM net income for %s", symbol)
             return None
-        if net_income.total <= 0:
+        if net_income.money.amount <= 0:
             LOGGER.warning("cfo_to_ni_ttm: non-positive TTM net income for %s", symbol)
             return None
 
         return CashConversionSnapshot(
-            value=cfo.total / net_income.total,
+            value=cfo.money / net_income.money,
             as_of=max(cfo.as_of, net_income.as_of),
             currency=None,
         )
 
     def compute_10y_series(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[CashConversionTenYearSnapshot]:
+        target_currency = require_metric_ticker_currency(
+            symbol, repo, metric_id="cfo_to_ni_10y_median"
+        )
         cfo_map = self._build_fy_amount_map(
             symbol,
             repo,
             OPERATING_CASH_FLOW_CONCEPTS,
+            target_currency=target_currency,
         )
         if not cfo_map:
             LOGGER.warning("cfo_to_ni_10y: missing FY CFO history for %s", symbol)
@@ -122,6 +135,7 @@ class CashConversionCalculator:
             symbol,
             repo,
             NET_INCOME_CONCEPTS,
+            target_currency=target_currency,
         )
         if not net_income_map:
             LOGGER.warning(
@@ -147,7 +161,7 @@ class CashConversionCalculator:
                     "cfo_to_ni_10y: missing strict consecutive FY chain for %s", symbol
                 )
                 return None
-            if net_income.total <= 0:
+            if net_income.money.amount <= 0:
                 LOGGER.warning(
                     "cfo_to_ni_10y: non-positive FY net income in %s for %s",
                     year,
@@ -157,9 +171,8 @@ class CashConversionCalculator:
             selected.append(
                 _CashConversionFYPoint(
                     year=year,
-                    value=cfo.total / net_income.total,
+                    value=cfo.money / net_income.money,
                     as_of=max(cfo.as_of, net_income.as_of),
-                    currency=None,
                 )
             )
 
@@ -178,13 +191,14 @@ class CashConversionCalculator:
     def _compute_ttm_amount(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         concepts: Sequence[str],
         *,
         context: str,
-    ) -> Optional[_AmountResult]:
+        target_currency: str,
+    ) -> Optional[_MoneyResult]:
         for concept in concepts:
-            records = repo.facts_for_concept(symbol, concept)
+            records = repo.monetary_facts_for_concept(symbol, concept)
             quarterly = self._filter_periods(records, QUARTERLY_PERIODS)
             if len(quarterly) < 4:
                 LOGGER.warning(
@@ -205,29 +219,26 @@ class CashConversionCalculator:
                 )
                 continue
 
-            normalized, currency = self._normalize_records(
-                quarterly[:4],
-                symbol=symbol,
-                repo=repo,
-                concept=concept,
-                context=context,
-            )
-
-            return _AmountResult(
-                total=sum(normalized),
-                as_of=quarterly[0].end_date,
-                currency=currency,
-            )
+            monies = [
+                self._money(record, concept, target_currency, symbol, context)
+                for record in quarterly[:4]
+            ]
+            return _MoneyResult(money=sum_money(monies), as_of=quarterly[0].end_date)
         return None
 
     def _build_fy_amount_map(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         concepts: Sequence[str],
-    ) -> dict[int, _AmountResult]:
-        concept_maps = [self._fy_map(symbol, repo, concept) for concept in concepts]
-        merged: dict[int, _AmountResult] = {}
+        *,
+        target_currency: str,
+    ) -> dict[int, _MoneyResult]:
+        concept_maps = [
+            self._fy_map(symbol, repo, concept, target_currency=target_currency)
+            for concept in concepts
+        ]
+        merged: dict[int, _MoneyResult] = {}
         candidate_years: set[int] = set()
         for mapped in concept_maps:
             candidate_years.update(mapped.keys())
@@ -241,28 +252,30 @@ class CashConversionCalculator:
     def _fy_map(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         concept: str,
-    ) -> dict[int, _AmountResult]:
-        records = repo.facts_for_concept(symbol, concept, fiscal_period="FY")
+        *,
+        target_currency: str,
+    ) -> dict[int, _MoneyResult]:
+        records = repo.monetary_facts_for_concept(symbol, concept, fiscal_period="FY")
         ordered = self._filter_periods(records, FY_PERIODS)
-        mapped: dict[int, _AmountResult] = {}
+        mapped: dict[int, _MoneyResult] = {}
         for record in ordered:
             year = self._extract_year(record.end_date)
             if year is None or year in mapped:
                 continue
-            value, currency = self._normalize_currency(record, symbol, repo, concept)
-            mapped[year] = _AmountResult(
-                total=value,
+            mapped[year] = _MoneyResult(
+                money=self._money(
+                    record, concept, target_currency, symbol, "cfo_to_ni_10y_median"
+                ),
                 as_of=record.end_date,
-                currency=currency,
             )
         return mapped
 
     def _filter_periods(
-        self, records: Sequence[FactRecord], periods: set[str]
-    ) -> list[FactRecord]:
-        filtered: list[FactRecord] = []
+        self, records: Sequence[MonetaryFact], periods: set[str]
+    ) -> list[MonetaryFact]:
+        filtered: list[MonetaryFact] = []
         seen_end_dates: set[str] = set()
         for record in records:
             period = (record.fiscal_period or "").upper()
@@ -270,64 +283,26 @@ class CashConversionCalculator:
                 continue
             if record.end_date in seen_end_dates:
                 continue
-            if record.value is None:
-                continue
             filtered.append(record)
             seen_end_dates.add(record.end_date)
         filtered.sort(key=lambda record: record.end_date, reverse=True)
         return filtered
 
-    def _normalize_records(
+    def _money(
         self,
-        records: Sequence[FactRecord],
-        *,
-        symbol: str,
-        repo: FinancialFactsRepository,
+        fact: MonetaryFact,
         concept: str,
-        context: str,
-    ) -> tuple[list[float], str]:
-        target_currency = require_metric_ticker_currency(
-            symbol,
-            repo,
-            metric_id=context,
-            input_name=concept,
-            as_of=records[0].end_date if records else None,
-            candidate_currencies=[record.currency for record in records],
-        )
-        normalized: list[float] = []
-        for record in records:
-            value, _ = normalize_metric_record(
-                record,
-                metric_id=context,
-                symbol=symbol,
-                input_name=concept,
-                expected_currency=target_currency,
-                contexts=(repo,),
-            )
-            normalized.append(value)
-        return normalized, target_currency
-
-    def _normalize_currency(
-        self,
-        record: FactRecord,
+        target_currency: str,
         symbol: str,
-        repo: FinancialFactsRepository,
-        concept: str,
-    ) -> tuple[float, str]:
-        return normalize_metric_record(
-            record,
-            metric_id="cfo_to_ni_10y_median",
+        metric_id: str,
+    ) -> Money:
+        return require_metric_money(
+            fact.money,
+            target_currency=target_currency,
+            metric_id=metric_id,
             symbol=symbol,
             input_name=concept,
-            expected_currency=require_metric_ticker_currency(
-                symbol,
-                repo,
-                metric_id="cfo_to_ni_10y_median",
-                input_name=concept,
-                as_of=record.end_date,
-                candidate_currencies=[record.currency],
-            ),
-            contexts=(repo,),
+            as_of=fact.end_date,
         )
 
     def _extract_year(self, value: str) -> Optional[int]:
@@ -354,7 +329,7 @@ class CFOToNITTMMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = CashConversionCalculator().compute_ttm(symbol, repo)
         if snapshot is None:
@@ -376,7 +351,7 @@ class CFOToNITenYearMedianMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = CashConversionCalculator().compute_10y_series(symbol, repo)
         if snapshot is None:

@@ -16,7 +16,8 @@ from pyvalue.metrics.utils import (
     normalize_metric_amount,
     normalize_metric_record,
 )
-from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
+from pyvalue.facts import RegionFactsRepository
+from pyvalue.storage import FactRecord, MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
 
@@ -77,7 +78,7 @@ def validate_denominator_amount(
 def resolve_enterprise_value_denominator(
     *,
     symbol: str,
-    repo: FinancialFactsRepository,
+    repo: RegionFactsRepository,
     market_repo: MarketDataRepository,
     target_currency: Optional[str],
     context: str,

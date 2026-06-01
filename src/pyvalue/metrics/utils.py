@@ -8,16 +8,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, timedelta
 import logging
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, TypeVar
 
 from pyvalue.currency import normalize_currency_code
+from pyvalue.facts import FactView, RawFactSource
 from pyvalue.metrics.base import MetricCurrencyInvariantError
-from pyvalue.money import Money, normalize_money_value
-from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
+from pyvalue.money import CurrencyMismatchError, Money, normalize_money_value
+from pyvalue.storage import FactRecord, MarketDataRepository
 
 # Default freshness windows (days)
 MAX_FACT_AGE_DAYS = 400
 MAX_FY_FACT_AGE_DAYS = 400
+
+# Metric *metadata* helpers (recency, FY-frame filtering, quarterly selection)
+# read only the provenance surface (:class:`~pyvalue.facts.FactView`), so they
+# are generic over the concrete fact type -- a raw ``FactRecord`` or a
+# kind-tagged ``MonetaryFact`` / ``ScalarFact`` -- and preserve it on return.
+FactT = TypeVar("FactT", bound=FactView)
 
 # Shares-outstanding concepts, in resolution priority. Mirrors the default order
 # in ``FinancialFactsRepository.latest_share_counts_many`` so the on-demand
@@ -44,7 +51,7 @@ class MarketCap:
 
 
 def is_recent_fact(
-    record: FactRecord | None,
+    record: FactView | None,
     *,
     max_age_days: int = MAX_FACT_AGE_DAYS,
     reference_date: date | None = None,
@@ -81,10 +88,10 @@ def has_recent_fact(
     return False
 
 
-def filter_unique_fy(records: Iterable[FactRecord]) -> Dict[str, FactRecord]:
-    """Return a dict of end_date -> FactRecord for valid full-year entries."""
+def filter_unique_fy(records: Iterable[FactT]) -> Dict[str, FactT]:
+    """Return a dict of end_date -> fact for valid full-year entries."""
 
-    unique: Dict[str, FactRecord] = {}
+    unique: Dict[str, FactT] = {}
     for record in records:
         if not _is_valid_fy_frame(record.frame):
             continue
@@ -114,12 +121,12 @@ def ttm_sum(records: Sequence[FactRecord], periods: int = 4) -> float | None:
 
 
 def latest_quarterly_records(
-    repo_fetcher,
+    repo_fetcher: Callable[[str, str], Sequence[FactT]],
     symbol: str,
     concepts: Sequence[str],
     periods: int = 4,
     max_age_days: int = MAX_FACT_AGE_DAYS,
-) -> List[FactRecord]:
+) -> List[FactT]:
     """Fetch recent quarterly records for the first concept with enough data."""
 
     for concept in concepts:
@@ -218,6 +225,105 @@ def _raise_currency_invariant(
     raise error
 
 
+def require_metric_money(
+    money: Money,
+    *,
+    target_currency: str,
+    metric_id: str,
+    symbol: str,
+    input_name: str,
+    as_of: Optional[str],
+) -> Money:
+    """Return ``money`` guaranteed to be denominated in ``target_currency``.
+
+    This is the single seam where a metric input's currency meets the listing
+    (target) currency. In Phase 5a the listing-currency invariant is enforced by
+    *rejection*: a mismatched input raises a structured
+    :class:`MetricCurrencyInvariantError` (which
+    :func:`wrap_metric_currency_invariants` turns into an unavailable metric)
+    rather than letting downstream ``Money`` arithmetic raise an uncaught
+    ``CurrencyMismatchError`` and abort the whole compute batch. Phase 5b will
+    replace the raise with an FX conversion to ``target_currency`` -- call sites
+    do not change, only this body.
+    """
+
+    if money.currency != target_currency:
+        _raise_currency_invariant(
+            metric_id=metric_id,
+            symbol=symbol,
+            input_name=input_name,
+            reason_code="currency_mismatch",
+            expected_currency=target_currency,
+            actual_currency=money.currency,
+            as_of=as_of,
+        )
+    return money
+
+
+def require_metric_amount_money(
+    amount: Optional[float],
+    currency: Optional[str],
+    *,
+    target_currency: str,
+    metric_id: str,
+    symbol: str,
+    input_name: str,
+    as_of: Optional[str],
+) -> Money:
+    """Mint ``Money`` from a raw ``(amount, currency)`` and enforce the target.
+
+    For monetary inputs that do not arrive as a kind-tagged fact -- chiefly the
+    market price read from ``market_data`` -- this mints a
+    :class:`~pyvalue.money.Money` (collapsing any subunit at the boundary) and
+    then applies :func:`require_metric_money`. A missing amount or unusable
+    currency raises ``missing_input_currency``, matching the old assert-based
+    flow.
+    """
+
+    money = Money.from_value(amount, currency)
+    if money is None:
+        _raise_currency_invariant(
+            metric_id=metric_id,
+            symbol=symbol,
+            input_name=input_name,
+            reason_code="missing_input_currency",
+            expected_currency=target_currency,
+            as_of=as_of,
+        )
+    assert money is not None
+    return require_metric_money(
+        money,
+        target_currency=target_currency,
+        metric_id=metric_id,
+        symbol=symbol,
+        input_name=input_name,
+        as_of=as_of,
+    )
+
+
+def sum_money(values: Sequence[Money]) -> Money:
+    """Return the sum of a non-empty sequence of same-currency ``Money`` values.
+
+    The float amounts are summed once and a single ``Money`` is minted, rather
+    than folding ``Money + Money`` pairwise: folding would re-normalize every
+    intermediate (a float->Decimal->float round-trip per step) and so accumulate
+    float error differently from a plain sum -- this keeps the result bit-equal
+    to summing the bare amounts, and does one normalization instead of N.
+
+    Callers must first align every value to one currency (e.g. via
+    :func:`require_metric_money`); a residual mismatch is a programming error and
+    raises ``CurrencyMismatchError``. Empty input raises ``ValueError``.
+    """
+
+    if not values:
+        raise ValueError("sum_money requires at least one value")
+    currency = values[0].currency
+    for value in values:
+        if value.currency != currency:
+            raise CurrencyMismatchError(currency, value.currency, "sum")
+    return Money.of(sum(value.amount for value in values), currency)
+
+
 def ensure_metric_currency(
     *,
     metric_id: str,
@@ -308,10 +414,14 @@ def normalize_metric_amount(
     return float(normalized_amount), resolved_currency
 
 
-def _latest_share_count_fact(
-    symbol: str, repo: FinancialFactsRepository
-) -> Optional[FactRecord]:
-    """Return the most recent positive shares-outstanding fact (Entity first)."""
+def _latest_share_count_fact(symbol: str, repo: RawFactSource) -> Optional[FactRecord]:
+    """Return the most recent positive shares-outstanding fact (Entity first).
+
+    The share count is a currency-less ``count`` fact, so it is read raw (no
+    ``Money`` minting) and ``repo`` is typed against the minimal
+    :class:`~pyvalue.facts.RawFactSource` -- satisfied by both the SQLite DAO and
+    the metric-facing :class:`~pyvalue.facts.RegionFactsRepository`.
+    """
 
     for concept in SHARE_COUNT_CONCEPTS:
         fact = repo.latest_fact(symbol, concept)
@@ -323,7 +433,7 @@ def _latest_share_count_fact(
 def market_cap_money(
     symbol: str,
     *,
-    repo: FinancialFactsRepository,
+    repo: RawFactSource,
     market_repo: MarketDataRepository,
     metric_id: str,
     target_currency: Optional[str] = None,
@@ -345,10 +455,11 @@ def market_cap_money(
     as of that date (the latter applies until ``update-market-data`` is extended
     to backfill prices at share-count dates -- see the refactor doc).
 
-    The listing-currency invariant is preserved: if ``target_currency`` (or the
-    resolved listing currency) differs from the price currency this raises a
-    structured :class:`MetricCurrencyInvariantError` rather than mixing
-    currencies. Phase 5 will replace that hard failure with an FX conversion.
+    The listing-currency invariant is preserved via the shared Money seam
+    (:func:`require_metric_amount_money`): if the price currency differs from the
+    resolved target this raises a structured
+    :class:`MetricCurrencyInvariantError` rather than mixing currencies. Phase 5b
+    will turn that seam into an FX conversion to the target instead.
     """
 
     share_fact = _latest_share_count_fact(symbol, repo)
@@ -366,19 +477,11 @@ def market_cap_money(
         )
         return None
 
-    price_currency = normalize_currency_code(snapshot.currency)
-    if price_currency is None:
-        _raise_currency_invariant(
-            metric_id=metric_id,
-            symbol=symbol,
-            input_name="market_cap_price",
-            reason_code="missing_input_currency",
-            as_of=snapshot.as_of,
-        )
-    assert price_currency is not None
-
-    cap = Money.of(snapshot.price * share_fact.value, price_currency)
-
+    # Resolve the target (listing) currency first, then mint the price and check
+    # it against the target through the shared Money seam, so market cap obeys
+    # the same 5a-reject / 5b-convert policy as every other monetary input.
+    # Market cap = price (per share) x share count, so it carries the price's
+    # (target) currency; the share count is a dimensionless multiplier.
     target = normalize_currency_code(target_currency) or resolve_metric_ticker_currency(
         symbol, *contexts
     )
@@ -391,17 +494,17 @@ def market_cap_money(
             as_of=snapshot.as_of,
         )
     assert target is not None
-    if target != cap.currency:
-        _raise_currency_invariant(
-            metric_id=metric_id,
-            symbol=symbol,
-            input_name="market_cap",
-            reason_code="currency_mismatch",
-            expected_currency=target,
-            actual_currency=cap.currency,
-            as_of=snapshot.as_of,
-        )
-    return MarketCap(money=cap, as_of=snapshot.as_of)
+
+    price_money = require_metric_amount_money(
+        snapshot.price,
+        snapshot.currency,
+        target_currency=target,
+        metric_id=metric_id,
+        symbol=symbol,
+        input_name="market_cap_price",
+        as_of=snapshot.as_of,
+    )
+    return MarketCap(money=price_money * share_fact.value, as_of=snapshot.as_of)
 
 
 def normalize_metric_record(
@@ -472,16 +575,14 @@ def align_metric_money_values(
     return aligned, resolved_currency
 
 
-def _filter_quarterly(records: Iterable[FactRecord]) -> List[FactRecord]:
-    filtered: List[FactRecord] = []
+def _filter_quarterly(records: Iterable[FactT]) -> List[FactT]:
+    filtered: List[FactT] = []
     seen_end_dates: set[str] = set()
     for record in records:
         period = (record.fiscal_period or "").upper()
         if period not in {"Q1", "Q2", "Q3", "Q4"}:
             continue
         if record.end_date in seen_end_dates:
-            continue
-        if record.value is None:
             continue
         filtered.append(record)
         seen_end_dates.add(record.end_date)
@@ -502,6 +603,9 @@ __all__ = [
     "market_cap_money",
     "normalize_metric_amount",
     "normalize_metric_record",
+    "require_metric_amount_money",
+    "require_metric_money",
     "require_metric_ticker_currency",
     "resolve_metric_ticker_currency",
+    "sum_money",
 ]

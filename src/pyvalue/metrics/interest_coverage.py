@@ -10,13 +10,15 @@ from typing import Optional, Sequence
 
 import logging
 
+from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
     is_recent_fact,
-    normalize_metric_record,
+    require_metric_money,
     require_metric_ticker_currency,
+    sum_money,
 )
-from pyvalue.storage import FactRecord, FinancialFactsRepository
+from pyvalue.money import Money
 
 LOGGER = logging.getLogger(__name__)
 
@@ -36,13 +38,13 @@ class InterestCoverageMetric:
     )
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         ebit_quarters = self._quarterly_map(
-            repo.facts_for_concept(symbol, EBIT_CONCEPTS[0])
+            repo.monetary_facts_for_concept(symbol, EBIT_CONCEPTS[0])
         )
         direct_interest_quarters = self._quarterly_map(
-            repo.facts_for_concept(symbol, INTEREST_CONCEPTS[0])
+            repo.monetary_facts_for_concept(symbol, INTEREST_CONCEPTS[0])
         )
         result = self._compute_from_maps(
             symbol=symbol,
@@ -55,7 +57,7 @@ class InterestCoverageMetric:
             return result
 
         fallback_interest_quarters = self._quarterly_map(
-            repo.facts_for_concept(symbol, INTEREST_FALLBACK_CONCEPTS[0])
+            repo.monetary_facts_for_concept(symbol, INTEREST_FALLBACK_CONCEPTS[0])
         )
         if not fallback_interest_quarters:
             LOGGER.warning(
@@ -79,10 +81,10 @@ class InterestCoverageMetric:
         self,
         *,
         symbol: str,
-        ebit_quarters: dict[str, FactRecord],
-        interest_quarters: dict[str, FactRecord],
+        ebit_quarters: dict[str, MonetaryFact],
+        interest_quarters: dict[str, MonetaryFact],
         log_failures: bool,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
     ) -> Optional[MetricResult]:
         common_dates = sorted(
             set(ebit_quarters).intersection(interest_quarters), reverse=True
@@ -107,26 +109,22 @@ class InterestCoverageMetric:
                 )
             return None
 
-        normalized_ebit, ebit_currency = self._normalize_records(
-            ebit_records,
-            symbol=symbol,
-            concept=EBIT_CONCEPTS[0],
-            repo=repo,
+        # Align every quarter to the listing currency before summing, so the
+        # EBIT/interest ratio (Money / Money) is currency-safe.
+        target_currency = require_metric_ticker_currency(
+            symbol, repo, metric_id=self.id, input_name=EBIT_CONCEPTS[0]
         )
-        normalized_interest, interest_currency = self._normalize_records(
-            interest_records,
-            symbol=symbol,
-            concept=INTEREST_CONCEPTS[0],
-            repo=repo,
+        ebit_ttm = self._ttm_money(
+            ebit_records, EBIT_CONCEPTS[0], target_currency, symbol
         )
-
-        ebit_ttm = sum(normalized_ebit)
-        interest_ttm = sum(normalized_interest)
-        if ebit_ttm <= 0:
+        interest_ttm = self._ttm_money(
+            interest_records, INTEREST_CONCEPTS[0], target_currency, symbol
+        )
+        if ebit_ttm.amount <= 0:
             if log_failures:
                 LOGGER.warning("interest_coverage: non-positive EBIT for %s", symbol)
             return None
-        if interest_ttm <= 0:
+        if interest_ttm.amount <= 0:
             if log_failures:
                 LOGGER.warning(
                     "interest_coverage: non-positive interest expense for %s", symbol
@@ -142,13 +140,35 @@ class InterestCoverageMetric:
             as_of=as_of,
         )
 
-    def _quarterly_map(self, records: Sequence[FactRecord]) -> dict[str, FactRecord]:
+    def _ttm_money(
+        self,
+        records: Sequence[MonetaryFact],
+        concept: str,
+        target_currency: str,
+        symbol: str,
+    ) -> Money:
+        monies = [
+            require_metric_money(
+                record.money,
+                target_currency=target_currency,
+                metric_id=self.id,
+                symbol=symbol,
+                input_name=concept,
+                as_of=record.end_date,
+            )
+            for record in records
+        ]
+        return sum_money(monies)
+
+    def _quarterly_map(
+        self, records: Sequence[MonetaryFact]
+    ) -> dict[str, MonetaryFact]:
         # Keep the latest record per end_date to align quarters across concepts.
         ordered = self._filter_quarterly(records)
         return {record.end_date: record for record in ordered}
 
-    def _filter_quarterly(self, records: Sequence[FactRecord]) -> list[FactRecord]:
-        filtered: list[FactRecord] = []
+    def _filter_quarterly(self, records: Sequence[MonetaryFact]) -> list[MonetaryFact]:
+        filtered: list[MonetaryFact] = []
         seen_end_dates: set[str] = set()
         for record in records:
             period = (record.fiscal_period or "").upper()
@@ -156,41 +176,10 @@ class InterestCoverageMetric:
                 continue
             if record.end_date in seen_end_dates:
                 continue
-            if record.value is None:
-                continue
             filtered.append(record)
             seen_end_dates.add(record.end_date)
         filtered.sort(key=lambda record: record.end_date, reverse=True)
         return filtered
-
-    def _normalize_records(
-        self,
-        records: Sequence[FactRecord],
-        *,
-        symbol: str,
-        concept: str,
-        repo: FinancialFactsRepository,
-    ) -> tuple[list[float], str]:
-        target_currency = require_metric_ticker_currency(
-            symbol,
-            repo,
-            metric_id=self.id,
-            input_name=concept,
-            as_of=records[0].end_date if records else None,
-            candidate_currencies=[record.currency for record in records],
-        )
-        normalized: list[float] = []
-        for record in records:
-            value, _ = normalize_metric_record(
-                record,
-                metric_id=self.id,
-                symbol=symbol,
-                input_name=concept,
-                expected_currency=target_currency,
-                contexts=(repo,),
-            )
-            normalized.append(value)
-        return normalized, target_currency
 
 
 __all__ = ["InterestCoverageMetric"]

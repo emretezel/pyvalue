@@ -11,13 +11,14 @@ from typing import Optional, Sequence
 
 import logging
 
+from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
     MAX_FY_FACT_AGE_DAYS,
-    normalize_metric_record,
-    resolve_metric_ticker_currency,
+    require_metric_money,
+    require_metric_ticker_currency,
 )
-from pyvalue.storage import FactRecord, FinancialFactsRepository
+from pyvalue.money import Money
 
 LOGGER = logging.getLogger(__name__)
 
@@ -51,18 +52,16 @@ class FundamentalConsistencySnapshot:
 
 
 @dataclass
-class _AmountResult:
-    total: float
+class _MoneyResult:
+    money: Money
     as_of: str
-    currency: Optional[str]
 
 
 @dataclass(frozen=True)
 class _FYPoint:
     year: int
-    value: float
+    money: Money
     as_of: str
-    currency: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -73,133 +72,132 @@ class _FYSeriesSnapshot:
 
 
 class FundamentalConsistencyCalculator:
-    """Shared FY-series helpers for normalized FCF and net-income consistency metrics."""
+    """Shared FY-series helpers for normalized FCF and net-income consistency metrics.
+
+    Every FY amount is aligned to the listing currency, so the FCF (= OCF -
+    capex) and net-income series are single-currency by construction.
+    """
 
     def compute_fcf_5y_median(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[FundamentalConsistencySnapshot]:
+        target_currency = require_metric_ticker_currency(
+            symbol, repo, metric_id="fcf_fy_median_5y"
+        )
         latest_five = self._latest_available_five_points(
-            self._build_fcf_points(symbol, repo, context="fcf_fy_median_5y"),
+            self._build_fcf_points(
+                symbol,
+                repo,
+                context="fcf_fy_median_5y",
+                target_currency=target_currency,
+            ),
             symbol=symbol,
             context="fcf_fy_median_5y",
         )
         if latest_five is None:
             return None
 
-        median = sorted(point.value for point in latest_five)[2]
+        median = sorted(point.money.amount for point in latest_five)[2]
         return FundamentalConsistencySnapshot(
             value=median,
             as_of=latest_five[0].as_of,
-            currency=self._combine_currency([point.currency for point in latest_five]),
+            currency=target_currency,
         )
 
     def compute_fcf_10y_series(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[_FYSeriesSnapshot]:
+        target_currency = require_metric_ticker_currency(
+            symbol, repo, metric_id="fcf_neg_years_10y"
+        )
         return self._strict_ten_year_series(
-            self._build_fcf_points(symbol, repo, context="fcf_neg_years_10y"),
+            self._build_fcf_points(
+                symbol,
+                repo,
+                context="fcf_neg_years_10y",
+                target_currency=target_currency,
+            ),
             symbol=symbol,
             context="fcf_neg_years_10y",
+            target_currency=target_currency,
         )
 
     def compute_net_income_10y_series(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[_FYSeriesSnapshot]:
+        target_currency = require_metric_ticker_currency(
+            symbol, repo, metric_id="ni_loss_years_10y"
+        )
         points = self._build_amount_points(
             symbol,
             repo,
             NET_INCOME_CONCEPTS,
             context="ni_loss_years_10y",
+            target_currency=target_currency,
         )
         return self._strict_ten_year_series(
             points,
             symbol=symbol,
             context="ni_loss_years_10y",
+            target_currency=target_currency,
         )
 
     def _build_fcf_points(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         *,
         context: str,
+        target_currency: str,
     ) -> list[_FYPoint]:
         ocf_map = self._build_fy_amount_map(
             symbol,
             repo,
             OPERATING_CASH_FLOW_CONCEPTS,
             context=context,
+            target_currency=target_currency,
         )
         capex_map = self._build_fy_amount_map(
             symbol,
             repo,
             CAPEX_CONCEPTS,
             context=context,
+            target_currency=target_currency,
         )
 
         points: list[_FYPoint] = []
         for year in sorted(ocf_map.keys(), reverse=True):
             operating = ocf_map[year]
             capex = capex_map.get(year)
-            currency = self._combine_currency(
-                [operating.currency, capex.currency if capex else None]
+            fcf = operating.money - capex.money if capex else operating.money
+            as_of = max(
+                value
+                for value in (operating.as_of, capex.as_of if capex else None)
+                if value
             )
-            if currency is None and any(
-                code is not None
-                for code in (operating.currency, capex.currency if capex else None)
-            ):
-                LOGGER.warning(
-                    "%s: currency mismatch on FY %s for %s",
-                    context,
-                    year,
-                    symbol,
-                )
-                continue
-
-            points.append(
-                _FYPoint(
-                    year=year,
-                    value=operating.total - (capex.total if capex else 0.0),
-                    as_of=max(
-                        [
-                            value
-                            for value in (
-                                operating.as_of,
-                                capex.as_of if capex else None,
-                            )
-                            if value
-                        ]
-                    ),
-                    currency=currency,
-                )
-            )
+            points.append(_FYPoint(year=year, money=fcf, as_of=as_of))
         return points
 
     def _build_amount_points(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         concepts: Sequence[str],
         *,
         context: str,
+        target_currency: str,
     ) -> list[_FYPoint]:
         amount_map = self._build_fy_amount_map(
             symbol,
             repo,
             concepts,
             context=context,
+            target_currency=target_currency,
         )
         points: list[_FYPoint] = []
         for year in sorted(amount_map.keys(), reverse=True):
             amount = amount_map[year]
-            points.append(
-                _FYPoint(
-                    year=year,
-                    value=amount.total,
-                    as_of=amount.as_of,
-                    currency=amount.currency,
-                )
-            )
+            points.append(_FYPoint(year=year, money=amount.money, as_of=amount.as_of))
         if not points:
             LOGGER.warning("%s: missing FY history for %s", context, symbol)
         return points
@@ -231,19 +229,6 @@ class FundamentalConsistencyCalculator:
                 symbol,
             )
             return None
-
-        series_currency = self._combine_currency(
-            [point.currency for point in latest_five]
-        )
-        if series_currency is None and any(
-            point.currency is not None for point in latest_five
-        ):
-            LOGGER.warning(
-                "%s: currency mismatch across selected FY series for %s",
-                context,
-                symbol,
-            )
-            return None
         return latest_five
 
     def _strict_ten_year_series(
@@ -252,6 +237,7 @@ class FundamentalConsistencyCalculator:
         *,
         symbol: str,
         context: str,
+        target_currency: str,
     ) -> Optional[_FYSeriesSnapshot]:
         if not points:
             LOGGER.warning("%s: missing FY history for %s", context, symbol)
@@ -285,35 +271,28 @@ class FundamentalConsistencyCalculator:
             )
             return None
 
-        series_currency = self._combine_currency([point.currency for point in selected])
-        if series_currency is None and any(
-            point.currency is not None for point in selected
-        ):
-            LOGGER.warning(
-                "%s: currency mismatch across selected FY series for %s",
-                context,
-                symbol,
-            )
-            return None
-
         return _FYSeriesSnapshot(
             points=tuple(selected),
             as_of=selected[0].as_of,
-            currency=series_currency,
+            currency=target_currency,
         )
 
     def _build_fy_amount_map(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         concepts: Sequence[str],
         *,
         context: str,
-    ) -> dict[int, _AmountResult]:
+        target_currency: str,
+    ) -> dict[int, _MoneyResult]:
         concept_maps = [
-            self._fy_map(symbol, repo, concept, context=context) for concept in concepts
+            self._fy_map(
+                symbol, repo, concept, context=context, target_currency=target_currency
+            )
+            for concept in concepts
         ]
-        merged: dict[int, _AmountResult] = {}
+        merged: dict[int, _MoneyResult] = {}
         candidate_years: set[int] = set()
         for mapped in concept_maps:
             candidate_years.update(mapped.keys())
@@ -328,34 +307,34 @@ class FundamentalConsistencyCalculator:
     def _fy_map(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         concept: str,
         *,
         context: str,
-    ) -> dict[int, _AmountResult]:
-        records = repo.facts_for_concept(symbol, concept, fiscal_period="FY")
+        target_currency: str,
+    ) -> dict[int, _MoneyResult]:
+        records = repo.monetary_facts_for_concept(symbol, concept, fiscal_period="FY")
         ordered = self._filter_periods(records)
-        mapped: dict[int, _AmountResult] = {}
+        mapped: dict[int, _MoneyResult] = {}
         for record in ordered:
             year = self._parse_year(record.end_date)
             if year is None or year in mapped:
                 continue
-            value, currency = self._normalize_currency(
-                record,
-                symbol=symbol,
-                repo=repo,
-                context=context,
-                input_name=concept,
-            )
-            mapped[year] = _AmountResult(
-                total=value,
+            mapped[year] = _MoneyResult(
+                money=require_metric_money(
+                    record.money,
+                    target_currency=target_currency,
+                    metric_id=context,
+                    symbol=symbol,
+                    input_name=concept,
+                    as_of=record.end_date,
+                ),
                 as_of=record.end_date,
-                currency=currency,
             )
         return mapped
 
-    def _filter_periods(self, records: Sequence[FactRecord]) -> list[FactRecord]:
-        filtered: list[FactRecord] = []
+    def _filter_periods(self, records: Sequence[MonetaryFact]) -> list[MonetaryFact]:
+        filtered: list[MonetaryFact] = []
         seen_end_dates: set[str] = set()
         for record in records:
             period = (record.fiscal_period or "").upper()
@@ -363,33 +342,9 @@ class FundamentalConsistencyCalculator:
                 continue
             if record.end_date in seen_end_dates:
                 continue
-            if record.value is None:
-                continue
             filtered.append(record)
             seen_end_dates.add(record.end_date)
         return filtered
-
-    def _normalize_currency(
-        self,
-        record: FactRecord,
-        *,
-        symbol: str,
-        repo: FinancialFactsRepository,
-        context: str,
-        input_name: str,
-    ) -> tuple[float, str]:
-        return normalize_metric_record(
-            record,
-            metric_id=context,
-            symbol=symbol,
-            input_name=input_name,
-            expected_currency=resolve_metric_ticker_currency(
-                symbol,
-                repo,
-                candidate_currencies=[record.currency],
-            ),
-            contexts=(repo,),
-        )
 
     def _is_recent_as_of(self, as_of: str, *, max_age_days: int) -> bool:
         try:
@@ -404,17 +359,6 @@ class FundamentalConsistencyCalculator:
         except ValueError:
             return None
 
-    def _combine_currency(self, values: Sequence[Optional[str]]) -> Optional[str]:
-        merged: Optional[str] = None
-        for value in values:
-            if not value:
-                continue
-            if merged is None:
-                merged = value
-            elif merged != value:
-                return None
-        return merged
-
 
 @dataclass
 class FCFFiveYearMedianMetric:
@@ -424,7 +368,7 @@ class FCFFiveYearMedianMetric:
     required_concepts = FCF_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = FundamentalConsistencyCalculator().compute_fcf_5y_median(
             symbol, repo
@@ -448,7 +392,7 @@ class NetIncomeLossYearsTenYearMetric:
     required_concepts = NET_INCOME_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = FundamentalConsistencyCalculator().compute_net_income_10y_series(
             symbol, repo
@@ -458,7 +402,7 @@ class NetIncomeLossYearsTenYearMetric:
         return MetricResult(
             symbol=symbol,
             metric_id=self.id,
-            value=float(sum(1 for point in snapshot.points if point.value < 0)),
+            value=float(sum(1 for point in snapshot.points if point.money.amount < 0)),
             as_of=snapshot.as_of,
         )
 
@@ -471,7 +415,7 @@ class FCFNegativeYearsTenYearMetric:
     required_concepts = FCF_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = FundamentalConsistencyCalculator().compute_fcf_10y_series(
             symbol, repo
@@ -481,7 +425,7 @@ class FCFNegativeYearsTenYearMetric:
         return MetricResult(
             symbol=symbol,
             metric_id=self.id,
-            value=float(sum(1 for point in snapshot.points if point.value < 0)),
+            value=float(sum(1 for point in snapshot.points if point.money.amount < 0)),
             as_of=snapshot.as_of,
         )
 

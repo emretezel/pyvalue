@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import logging
 from pathlib import Path
 import tempfile
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable, Optional, overload
 
 from pyvalue.config import Config
 from pyvalue.currency import (
@@ -151,6 +151,12 @@ class Money:
         return Money(self.amount * factor, self.currency)
 
     __rmul__ = __mul__
+
+    @overload
+    def __truediv__(self, divisor: "Money") -> float: ...
+
+    @overload
+    def __truediv__(self, divisor: float) -> "Money": ...
 
     def __truediv__(self, divisor: "float | Money") -> "Money | float":
         # Money / Money -> dimensionless ratio (float), same currency only.

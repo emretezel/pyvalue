@@ -12,13 +12,14 @@ from typing import Optional, Sequence
 
 import logging
 
+from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
     MAX_FY_FACT_AGE_DAYS,
-    normalize_metric_record,
-    resolve_metric_ticker_currency,
+    require_metric_money,
+    require_metric_ticker_currency,
 )
-from pyvalue.storage import FactRecord, FinancialFactsRepository
+from pyvalue.money import Money
 
 LOGGER = logging.getLogger(__name__)
 
@@ -36,10 +37,9 @@ REQUIRED_CONCEPTS = (
 
 
 @dataclass
-class _AmountResult:
-    total: float
+class _MoneyResult:
+    money: Money
     as_of: str
-    currency: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -47,7 +47,6 @@ class _OperatingMarginFYPoint:
     year: int
     value: float
     as_of: str
-    currency: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -59,15 +58,24 @@ class OperatingMarginSeriesSnapshot:
 
 @dataclass(frozen=True)
 class OperatingMarginSeriesCalculator:
-    """Build a strict consecutive FY operating-margin series for one horizon."""
+    """Build a strict consecutive FY operating-margin series for one horizon.
+
+    Operating income and revenue are aligned to the listing currency, so each
+    margin (operating income / revenue) is a currency-safe dimensionless ratio.
+    """
 
     metric_context: str
     series_years: int
 
     def compute_series(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[OperatingMarginSeriesSnapshot]:
-        operating_income_map = self._fy_map(symbol, repo, OPERATING_INCOME_CONCEPT)
+        target_currency = require_metric_ticker_currency(
+            symbol, repo, metric_id=self.metric_context
+        )
+        operating_income_map = self._fy_map(
+            symbol, repo, OPERATING_INCOME_CONCEPT, target_currency
+        )
         if not operating_income_map:
             LOGGER.warning(
                 "%s: missing FY operating income history for %s",
@@ -76,7 +84,7 @@ class OperatingMarginSeriesCalculator:
             )
             return None
 
-        revenue_map = self._fy_map(symbol, repo, REVENUE_CONCEPT)
+        revenue_map = self._fy_map(symbol, repo, REVENUE_CONCEPT, target_currency)
         if not revenue_map:
             LOGGER.warning(
                 "%s: missing FY revenues history for %s",
@@ -87,7 +95,7 @@ class OperatingMarginSeriesCalculator:
 
         margins_by_year: dict[int, _OperatingMarginFYPoint] = {}
         for year, revenue in revenue_map.items():
-            if revenue.total <= 0:
+            if revenue.money.amount <= 0:
                 continue
 
             operating_income = operating_income_map.get(year)
@@ -96,9 +104,8 @@ class OperatingMarginSeriesCalculator:
 
             margins_by_year[year] = _OperatingMarginFYPoint(
                 year=year,
-                value=operating_income.total / revenue.total,
+                value=operating_income.money / revenue.money,
                 as_of=max(revenue.as_of, operating_income.as_of),
-                currency=None,
             )
 
         if not margins_by_year:
@@ -135,66 +142,48 @@ class OperatingMarginSeriesCalculator:
         return OperatingMarginSeriesSnapshot(
             points=tuple(selected),
             as_of=selected[0].as_of,
-            currency=None,
+            currency=target_currency,
         )
 
     def _fy_map(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         concept: str,
-    ) -> dict[int, _AmountResult]:
-        records = repo.facts_for_concept(symbol, concept, fiscal_period="FY")
+        target_currency: str,
+    ) -> dict[int, _MoneyResult]:
+        records = repo.monetary_facts_for_concept(symbol, concept, fiscal_period="FY")
         ordered = self._filter_periods(records, FY_PERIODS)
-        mapped: dict[int, _AmountResult] = {}
+        mapped: dict[int, _MoneyResult] = {}
         for record in ordered:
             year = self._extract_year(record.end_date)
             if year is None or year in mapped:
                 continue
-            value, currency = self._normalize_currency(record, symbol, repo, concept)
-            mapped[year] = _AmountResult(
-                total=value,
+            mapped[year] = _MoneyResult(
+                money=require_metric_money(
+                    record.money,
+                    target_currency=target_currency,
+                    metric_id=self.metric_context,
+                    symbol=symbol,
+                    input_name=concept,
+                    as_of=record.end_date,
+                ),
                 as_of=record.end_date,
-                currency=currency,
             )
         return mapped
 
     def _filter_periods(
-        self, records: Sequence[FactRecord], periods: set[str]
-    ) -> list[FactRecord]:
-        filtered: list[FactRecord] = []
+        self, records: Sequence[MonetaryFact], periods: set[str]
+    ) -> list[MonetaryFact]:
+        filtered: list[MonetaryFact] = []
         seen_end_dates: set[str] = set()
         for record in records:
             period = (record.fiscal_period or "").upper()
-            if (
-                period not in periods
-                or record.end_date in seen_end_dates
-                or record.value is None
-            ):
+            if period not in periods or record.end_date in seen_end_dates:
                 continue
             filtered.append(record)
             seen_end_dates.add(record.end_date)
         return filtered
-
-    def _normalize_currency(
-        self,
-        record: FactRecord,
-        symbol: str,
-        repo: FinancialFactsRepository,
-        concept: str,
-    ) -> tuple[float, str]:
-        return normalize_metric_record(
-            record,
-            metric_id=self.metric_context,
-            symbol=symbol,
-            input_name=concept,
-            expected_currency=resolve_metric_ticker_currency(
-                symbol,
-                repo,
-                candidate_currencies=[record.currency],
-            ),
-            contexts=(repo,),
-        )
 
     def _extract_year(self, value: str) -> Optional[int]:
         if len(value) < 4:
@@ -220,7 +209,7 @@ class OperatingMarginTenYearStdMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = OperatingMarginSeriesCalculator(
             metric_context=self.id,
@@ -251,7 +240,7 @@ class OperatingMarginTenYearMinMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = OperatingMarginSeriesCalculator(
             metric_context=self.id,
@@ -278,7 +267,7 @@ class OperatingMarginSevenYearMinMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = OperatingMarginSeriesCalculator(
             metric_context=self.id,

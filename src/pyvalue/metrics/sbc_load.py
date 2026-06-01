@@ -10,14 +10,16 @@ from typing import Iterable, Optional
 
 import logging
 
+from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     is_recent_fact,
-    normalize_metric_record,
-    resolve_metric_ticker_currency,
+    require_metric_money,
+    require_metric_ticker_currency,
+    sum_money,
 )
-from pyvalue.storage import FactRecord, FinancialFactsRepository
+from pyvalue.money import Money
 
 LOGGER = logging.getLogger(__name__)
 
@@ -37,18 +39,21 @@ REQUIRED_CONCEPTS = (
 
 
 @dataclass(frozen=True)
-class _AmountResult:
-    total: float
+class _MoneyResult:
+    money: Money
     as_of: str
-    currency: Optional[str]
 
 
 class SBCLoadCalculator:
-    """Shared calculator for SBC load TTM inputs."""
+    """Shared calculator for SBC load TTM inputs.
+
+    Each TTM amount is aligned to the listing currency, so the ratios computed
+    by the metrics below (SBC / revenue, SBC / FCF) are currency-safe.
+    """
 
     def compute_ttm_sbc(
-        self, symbol: str, repo: FinancialFactsRepository, *, context: str
-    ) -> Optional[_AmountResult]:
+        self, symbol: str, repo: RegionFactsRepository, *, context: str
+    ) -> Optional[_MoneyResult]:
         return self._compute_ttm_amount(
             symbol,
             repo,
@@ -57,8 +62,8 @@ class SBCLoadCalculator:
         )
 
     def compute_ttm_revenue(
-        self, symbol: str, repo: FinancialFactsRepository, *, context: str
-    ) -> Optional[_AmountResult]:
+        self, symbol: str, repo: RegionFactsRepository, *, context: str
+    ) -> Optional[_MoneyResult]:
         return self._compute_ttm_amount(
             symbol,
             repo,
@@ -67,8 +72,8 @@ class SBCLoadCalculator:
         )
 
     def compute_ttm_fcf(
-        self, symbol: str, repo: FinancialFactsRepository, *, context: str
-    ) -> Optional[_AmountResult]:
+        self, symbol: str, repo: RegionFactsRepository, *, context: str
+    ) -> Optional[_MoneyResult]:
         operating = self._compute_ttm_amount(
             symbol,
             repo,
@@ -91,27 +96,22 @@ class SBCLoadCalculator:
             LOGGER.warning(
                 "%s: missing/stale capex for %s; assuming zero", context, symbol
             )
-            return _AmountResult(
-                total=operating.total,
-                as_of=operating.as_of,
-                currency=operating.currency,
-            )
+            return operating
 
-        return _AmountResult(
-            total=operating.total - capex.total,
+        return _MoneyResult(
+            money=operating.money - capex.money,
             as_of=max(operating.as_of, capex.as_of),
-            currency=operating.currency or capex.currency,
         )
 
     def _compute_ttm_amount(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         concept: str,
         *,
         context: str,
-    ) -> Optional[_AmountResult]:
-        records = repo.facts_for_concept(symbol, concept)
+    ) -> Optional[_MoneyResult]:
+        records = repo.monetary_facts_for_concept(symbol, concept)
         quarterly = self._filter_quarterly(records)
         if len(quarterly) < 4:
             LOGGER.warning(
@@ -132,39 +132,32 @@ class SBCLoadCalculator:
             )
             return None
 
-        target_currency = resolve_metric_ticker_currency(
+        target_currency = require_metric_ticker_currency(
             symbol,
             repo,
-            candidate_currencies=[record.currency for record in quarterly[:4]],
+            metric_id=context,
+            input_name=concept,
+            as_of=quarterly[0].end_date,
         )
-        normalized: list[float] = []
-        for record in quarterly[:4]:
-            value, _ = normalize_metric_record(
-                record,
+        monies = [
+            require_metric_money(
+                record.money,
+                target_currency=target_currency,
                 metric_id=context,
                 symbol=symbol,
                 input_name=concept,
-                expected_currency=target_currency,
-                contexts=(repo,),
+                as_of=record.end_date,
             )
-            normalized.append(value)
+            for record in quarterly[:4]
+        ]
+        return _MoneyResult(money=sum_money(monies), as_of=quarterly[0].end_date)
 
-        return _AmountResult(
-            total=sum(normalized),
-            as_of=quarterly[0].end_date,
-            currency=target_currency,
-        )
-
-    def _filter_quarterly(self, records: Iterable[FactRecord]) -> list[FactRecord]:
-        filtered: list[FactRecord] = []
+    def _filter_quarterly(self, records: Iterable[MonetaryFact]) -> list[MonetaryFact]:
+        filtered: list[MonetaryFact] = []
         seen_end_dates: set[str] = set()
         for record in records:
             period = (record.fiscal_period or "").upper()
-            if (
-                period not in QUARTERLY_PERIODS
-                or record.end_date in seen_end_dates
-                or record.value is None
-            ):
+            if period not in QUARTERLY_PERIODS or record.end_date in seen_end_dates:
                 continue
             filtered.append(record)
             seen_end_dates.add(record.end_date)
@@ -179,7 +172,7 @@ class SBCToRevenueMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         calculator = SBCLoadCalculator()
         sbc = calculator.compute_ttm_sbc(symbol, repo, context=self.id)
@@ -191,13 +184,13 @@ class SBCToRevenueMetric:
         if revenue is None:
             LOGGER.warning("%s: missing TTM revenue for %s", self.id, symbol)
             return None
-        if revenue.total <= 0:
+        if revenue.money.amount <= 0:
             LOGGER.warning("%s: non-positive TTM revenue for %s", self.id, symbol)
             return None
         return MetricResult(
             symbol=symbol,
             metric_id=self.id,
-            value=sbc.total / revenue.total,
+            value=sbc.money / revenue.money,
             as_of=max(sbc.as_of, revenue.as_of),
             unit_kind="percent",
         )
@@ -211,7 +204,7 @@ class SBCToFCFMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         calculator = SBCLoadCalculator()
         sbc = calculator.compute_ttm_sbc(symbol, repo, context=self.id)
@@ -223,13 +216,13 @@ class SBCToFCFMetric:
         if fcf is None:
             LOGGER.warning("%s: missing TTM FCF for %s", self.id, symbol)
             return None
-        if fcf.total <= 0:
+        if fcf.money.amount <= 0:
             LOGGER.warning("%s: non-positive TTM FCF for %s", self.id, symbol)
             return None
         return MetricResult(
             symbol=symbol,
             metric_id=self.id,
-            value=sbc.total / fcf.total,
+            value=sbc.money / fcf.money,
             as_of=max(sbc.as_of, fcf.as_of),
             unit_kind="percent",
         )

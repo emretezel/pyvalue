@@ -10,13 +10,14 @@ from typing import Optional
 
 import logging
 
+from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
     is_recent_fact,
-    normalize_metric_record,
+    require_metric_money,
     require_metric_ticker_currency,
 )
-from pyvalue.storage import FactRecord, FinancialFactsRepository
+from pyvalue.money import Money
 
 LOGGER = logging.getLogger(__name__)
 
@@ -26,9 +27,8 @@ TOTAL_DEBT_FALLBACK_CONCEPTS = ("TotalDebtFromBalanceSheet",)
 
 @dataclass
 class _DebtAmount:
-    value: float
+    money: Money
     as_of: str
-    currency: Optional[str]
 
 
 @dataclass
@@ -39,7 +39,7 @@ class ShortTermDebtShareMetric:
     required_concepts = tuple(DEBT_COMPONENT_CONCEPTS + TOTAL_DEBT_FALLBACK_CONCEPTS)
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         short_record = self._latest_recent_fact(repo, symbol, "ShortTermDebt")
         if short_record is None:
@@ -48,22 +48,25 @@ class ShortTermDebtShareMetric:
             )
             return None
 
-        short_value, short_currency = self._normalize_currency(
-            short_record,
+        # Resolve the listing currency once; every debt input is then aligned to
+        # it before any Money arithmetic, so the ratio is currency-safe.
+        target_currency = require_metric_ticker_currency(
             symbol,
             repo,
-            "ShortTermDebt",
+            metric_id=self.id,
+            input_name="ShortTermDebt",
+            as_of=short_record.end_date,
         )
         short_debt = _DebtAmount(
-            value=short_value,
+            money=self._money(short_record, "ShortTermDebt", target_currency, symbol),
             as_of=short_record.end_date,
-            currency=short_currency,
         )
 
         total_debt = self._compute_total_debt(
             symbol=symbol,
             repo=repo,
             short_debt=short_debt,
+            target_currency=target_currency,
         )
         if total_debt is None:
             LOGGER.warning(
@@ -71,13 +74,13 @@ class ShortTermDebtShareMetric:
             )
             return None
 
-        if total_debt.value <= 0:
+        if total_debt.money.amount <= 0:
             LOGGER.warning(
                 "short_term_debt_share: non-positive total debt for %s", symbol
             )
             return None
 
-        ratio = short_debt.value / total_debt.value
+        ratio = short_debt.money / total_debt.money
         if ratio < 0 or ratio > 1:
             LOGGER.warning("short_term_debt_share: ratio out of bounds for %s", symbol)
             return None
@@ -95,22 +98,18 @@ class ShortTermDebtShareMetric:
         self,
         *,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         short_debt: _DebtAmount,
+        target_currency: str,
     ) -> Optional[_DebtAmount]:
         long_record = self._latest_recent_fact(repo, symbol, "LongTermDebt")
         if long_record is not None:
-            long_value, long_currency = self._normalize_currency(
-                long_record,
-                symbol,
-                repo,
-                "LongTermDebt",
-                expected_currency=short_debt.currency,
+            long_money = self._money(
+                long_record, "LongTermDebt", target_currency, symbol
             )
             return _DebtAmount(
-                value=short_debt.value + long_value,
+                money=short_debt.money + long_money,
                 as_of=max(short_debt.as_of, long_record.end_date),
-                currency=short_debt.currency or long_currency,
             )
 
         total_record = self._latest_recent_fact(
@@ -118,50 +117,35 @@ class ShortTermDebtShareMetric:
         )
         if total_record is None:
             return None
-        total_value, total_currency = self._normalize_currency(
-            total_record,
-            symbol,
-            repo,
-            "TotalDebtFromBalanceSheet",
-            expected_currency=short_debt.currency,
-        )
         return _DebtAmount(
-            value=total_value,
+            money=self._money(
+                total_record, "TotalDebtFromBalanceSheet", target_currency, symbol
+            ),
             as_of=total_record.end_date,
-            currency=total_currency,
         )
 
     def _latest_recent_fact(
-        self, repo: FinancialFactsRepository, symbol: str, concept: str
-    ) -> Optional[FactRecord]:
-        record = repo.latest_fact(symbol, concept)
+        self, repo: RegionFactsRepository, symbol: str, concept: str
+    ) -> Optional[MonetaryFact]:
+        record = repo.latest_monetary_fact(symbol, concept)
         if record is None or not is_recent_fact(record):
             return None
         return record
 
-    def _normalize_currency(
+    def _money(
         self,
-        record: FactRecord,
-        symbol: str,
-        repo: FinancialFactsRepository,
+        fact: MonetaryFact,
         concept: str,
-        expected_currency: Optional[str] = None,
-    ) -> tuple[float, str]:
-        return normalize_metric_record(
-            record,
+        target_currency: str,
+        symbol: str,
+    ) -> Money:
+        return require_metric_money(
+            fact.money,
+            target_currency=target_currency,
             metric_id=self.id,
             symbol=symbol,
             input_name=concept,
-            expected_currency=expected_currency
-            or require_metric_ticker_currency(
-                symbol,
-                repo,
-                metric_id=self.id,
-                input_name=concept,
-                as_of=record.end_date,
-                candidate_currencies=[record.currency],
-            ),
-            contexts=(repo,),
+            as_of=fact.end_date,
         )
 
 

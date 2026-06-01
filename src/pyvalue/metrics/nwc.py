@@ -18,7 +18,8 @@ from pyvalue.metrics.utils import (
     normalize_metric_record,
     require_metric_ticker_currency,
 )
-from pyvalue.storage import FactRecord, FinancialFactsRepository
+from pyvalue.facts import RegionFactsRepository
+from pyvalue.storage import FactRecord
 
 LOGGER = logging.getLogger(__name__)
 
@@ -52,7 +53,7 @@ class _NWCBase:
     def _build_points(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         periods: set[str],
     ) -> list[_NWCPoint]:
         assets_map = self._period_map(
@@ -107,7 +108,7 @@ class _NWCBase:
         cash_equivalents: Optional[FactRecord],
         short_term_investments: Optional[FactRecord],
         short_term_debt: Optional[FactRecord],
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
     ) -> Optional[_NWCPoint]:
         if assets is None or liabilities is None:
             return None
@@ -159,7 +160,7 @@ class _NWCBase:
         cash_primary: Optional[FactRecord],
         cash_equivalents: Optional[FactRecord],
         short_term_investments: Optional[FactRecord],
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
     ) -> Optional[tuple[float, Optional[str]]]:
         if cash_primary is not None:
             return self._normalize_currency(
@@ -213,7 +214,7 @@ class _NWCBase:
         record: FactRecord,
         *,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         context: str,
     ) -> tuple[float, str]:
         normalized_value, normalized_currency = normalize_metric_record(
@@ -275,7 +276,7 @@ class NWCMostRecentQuarterMetric(_NWCBase):
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         points = self._build_points(symbol, repo, QUARTERLY_PERIODS)
         latest = self._select_latest_point(
@@ -300,7 +301,7 @@ class NWCFYMetric(_NWCBase):
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         points = self._build_points(symbol, repo, FY_PERIODS)
         latest = self._select_latest_point(
@@ -325,7 +326,7 @@ class DeltaNWCTTMMetric(_NWCBase):
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         points = self._build_points(symbol, repo, QUARTERLY_PERIODS)
         latest = self._select_latest_point(
@@ -375,7 +376,7 @@ class DeltaNWCFYMetric(_NWCBase):
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         points = self._build_points(symbol, repo, FY_PERIODS)
         latest = self._select_latest_point(
@@ -417,7 +418,7 @@ class DeltaNWCMaintMetric(_NWCBase):
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         points = self._build_points(symbol, repo, FY_PERIODS)
         latest = self._select_latest_point(

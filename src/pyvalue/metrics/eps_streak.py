@@ -10,13 +10,13 @@ from typing import List, Optional
 
 import logging
 
+from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
     MAX_FY_FACT_AGE_DAYS,
     filter_unique_fy,
     has_recent_fact,
 )
-from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 EPS_CONCEPTS = ["EarningsPerShare"]
 
@@ -29,11 +29,13 @@ class EPSStreakMetric:
     required_concepts = tuple(EPS_CONCEPTS)
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
-        records: List[FactRecord] = []
+        records: List[MonetaryFact] = []
         for concept in EPS_CONCEPTS:
-            records = repo.facts_for_concept(symbol, concept, fiscal_period="FY")
+            records = repo.monetary_facts_for_concept(
+                symbol, concept, fiscal_period="FY"
+            )
             if records:
                 break
         if not records:
@@ -51,7 +53,9 @@ class EPSStreakMetric:
         latest_as_of = records[0].end_date
         for end_date in sorted(unique.keys(), reverse=True):
             record = unique[end_date]
-            if record.value is None or record.value <= 0:
+            # EPS is per-share money; a non-positive amount (in any currency)
+            # ends the positive-EPS streak.
+            if record.money.amount <= 0:
                 break
             streak += 1
         return MetricResult(

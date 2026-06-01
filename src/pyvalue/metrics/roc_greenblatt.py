@@ -10,14 +10,16 @@ from typing import List, Optional
 
 import logging
 
+from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
     MAX_FY_FACT_AGE_DAYS,
     has_recent_fact,
     is_recent_fact,
-    normalize_metric_record,
+    require_metric_money,
+    require_metric_ticker_currency,
 )
-from pyvalue.storage import FactRecord, FinancialFactsRepository
+from pyvalue.money import Money
 
 EBIT_CONCEPTS = ["OperatingIncomeLoss"]
 
@@ -35,7 +37,7 @@ class ROCGreenblattMetric:
     )
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         ebit_records = self._fetch_ebit_history(symbol, repo)
         if not ebit_records:
@@ -47,14 +49,17 @@ class ROCGreenblattMetric:
             LOGGER.warning("roc_greenblatt: no recent FY EBIT fact for %s", symbol)
             return None
 
-        tangible_capital_records = self._fetch_tangible_capital_history(symbol, repo)
-        if not tangible_capital_records:
+        target_currency = require_metric_ticker_currency(
+            symbol, repo, metric_id=self.id
+        )
+        tc_map = self._fetch_tangible_capital(symbol, repo, target_currency)
+        if not tc_map:
             LOGGER.warning(
                 "roc_greenblatt: missing tangible capital components for %s", symbol
             )
             return None
-        assets_check = repo.latest_fact(symbol, "AssetsCurrent")
-        liabilities_check = repo.latest_fact(symbol, "LiabilitiesCurrent")
+        assets_check = repo.latest_monetary_fact(symbol, "AssetsCurrent")
+        liabilities_check = repo.latest_monetary_fact(symbol, "LiabilitiesCurrent")
         if assets_check is None or not is_recent_fact(
             assets_check, max_age_days=MAX_FY_FACT_AGE_DAYS
         ):
@@ -66,17 +71,21 @@ class ROCGreenblattMetric:
             LOGGER.warning("roc_greenblatt: liabilities current too old for %s", symbol)
             return None
 
-        # merge by end_date
-        tc_map = {record.end_date: record for record in tangible_capital_records}
         values: List[float] = []
         years_considered = 0
         for record in sorted(ebit_records, key=lambda r: r.end_date, reverse=True):
             tc = tc_map.get(record.end_date)
-            if tc is None or tc.value is None or tc.value <= 0:
+            if tc is None or tc.amount <= 0:
                 continue
-            if record.value is None:
-                continue
-            values.append(record.value / tc.value)
+            ebit_money = require_metric_money(
+                record.money,
+                target_currency=target_currency,
+                metric_id=self.id,
+                symbol=symbol,
+                input_name="OperatingIncomeLoss",
+                as_of=record.end_date,
+            )
+            values.append(ebit_money / tc)
             years_considered += 1
             if years_considered == 5:
                 break
@@ -90,78 +99,60 @@ class ROCGreenblattMetric:
         return MetricResult(symbol=symbol, metric_id=self.id, value=avg, as_of=latest)
 
     def _fetch_ebit_history(
-        self, symbol: str, repo: FinancialFactsRepository
-    ) -> List[FactRecord]:
-        return repo.facts_for_concept(symbol, "OperatingIncomeLoss", fiscal_period="FY")
+        self, symbol: str, repo: RegionFactsRepository
+    ) -> List[MonetaryFact]:
+        return repo.monetary_facts_for_concept(
+            symbol, "OperatingIncomeLoss", fiscal_period="FY"
+        )
 
-    def _fetch_tangible_capital_history(
-        self, symbol: str, repo: FinancialFactsRepository
-    ) -> List[FactRecord]:
-        ppe_records = repo.facts_for_concept(
+    def _fetch_tangible_capital(
+        self, symbol: str, repo: RegionFactsRepository, target_currency: str
+    ) -> dict[str, Money]:
+        """Map FY end_date -> tangible capital (PP&E + current assets - current liab)."""
+
+        ppe_records = repo.monetary_facts_for_concept(
             symbol, "PropertyPlantAndEquipmentNet", fiscal_period="FY"
         )
         if not ppe_records:
-            return []
-        assets_records = repo.facts_for_concept(
-            symbol, "AssetsCurrent", fiscal_period="FY"
+            return {}
+        assets_by_period = self._index_by_period(
+            repo.monetary_facts_for_concept(symbol, "AssetsCurrent", fiscal_period="FY")
         )
-        liabilities_records = repo.facts_for_concept(
-            symbol, "LiabilitiesCurrent", fiscal_period="FY"
+        liabilities_by_period = self._index_by_period(
+            repo.monetary_facts_for_concept(
+                symbol, "LiabilitiesCurrent", fiscal_period="FY"
+            )
         )
-        assets_by_period = self._index_by_period(assets_records)
-        liabilities_by_period = self._index_by_period(liabilities_records)
-        combined: List[FactRecord] = []
+        combined: dict[str, Money] = {}
         for ppe in ppe_records:
             assets = assets_by_period.get((ppe.end_date, ppe.fiscal_period))
             liabilities = liabilities_by_period.get((ppe.end_date, ppe.fiscal_period))
             if assets is None or liabilities is None:
                 continue
-            ppe_value, currency = normalize_metric_record(
-                ppe,
-                metric_id=self.id,
-                symbol=symbol,
-                contexts=(repo,),
+            tangible_capital = (
+                self._money(ppe, target_currency, symbol)
+                + self._money(assets, target_currency, symbol)
+                - self._money(liabilities, target_currency, symbol)
             )
-            assets_value, _ = normalize_metric_record(
-                assets,
-                metric_id=self.id,
-                symbol=symbol,
-                expected_currency=currency,
-                contexts=(repo,),
-            )
-            liabilities_value, _ = normalize_metric_record(
-                liabilities,
-                metric_id=self.id,
-                symbol=symbol,
-                expected_currency=currency,
-                contexts=(repo,),
-            )
-            value = ppe_value + assets_value - liabilities_value
-            combined.append(
-                FactRecord(
-                    symbol=ppe.symbol,
-                    cik=ppe.cik,
-                    concept="TangibleCapital",
-                    fiscal_period=ppe.fiscal_period,
-                    end_date=ppe.end_date,
-                    unit_kind=ppe.unit_kind,
-                    value=value,
-                    accn=ppe.accn,
-                    filed=ppe.filed,
-                    frame=ppe.frame,
-                    start_date=ppe.start_date,
-                    accounting_standard=ppe.accounting_standard,
-                    currency=currency,
-                )
-            )
+            combined[ppe.end_date] = tangible_capital
         return combined
 
     def _index_by_period(
-        self, records: List[FactRecord]
-    ) -> dict[tuple[Optional[str], Optional[str]], FactRecord]:
-        indexed: dict[tuple[Optional[str], Optional[str]], FactRecord] = {}
+        self, records: List[MonetaryFact]
+    ) -> dict[tuple[str, str], MonetaryFact]:
+        indexed: dict[tuple[str, str], MonetaryFact] = {}
         for record in records:
             key = (record.end_date, record.fiscal_period)
             if key not in indexed:
                 indexed[key] = record
         return indexed
+
+    def _money(self, fact: MonetaryFact, target_currency: str, symbol: str) -> Money:
+        return require_metric_money(
+            fact.money,
+            target_currency=target_currency,
+            metric_id=self.id,
+            symbol=symbol,
+            input_name=fact.concept,
+            as_of=fact.end_date,
+        )

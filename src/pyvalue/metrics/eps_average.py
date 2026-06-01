@@ -10,15 +10,16 @@ from typing import Optional
 
 import logging
 
+from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
     MAX_FY_FACT_AGE_DAYS,
     filter_unique_fy,
     has_recent_fact,
-    normalize_metric_record,
+    require_metric_money,
     require_metric_ticker_currency,
+    sum_money,
 )
-from pyvalue.storage import FinancialFactsRepository
 
 EPS_CONCEPTS = ["EarningsPerShare"]
 
@@ -34,7 +35,7 @@ class EPSAverageSixYearMetric:
     def compute(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
     ) -> Optional[MetricResult]:
         history = self._fetch_history(symbol, repo)
         if len(history) < 6:
@@ -55,20 +56,24 @@ class EPSAverageSixYearMetric:
             repo,
             metric_id=self.id,
             input_name="EarningsPerShare",
-            as_of=latest_records[0].end_date if latest_records else None,
-            candidate_currencies=[record.currency for record in latest_records],
+            as_of=latest_records[0].end_date,
         )
-        total = 0.0
-        for record in latest_records:
-            value, _ = normalize_metric_record(
-                record,
-                metric_id=self.id,
-                symbol=symbol,
-                expected_currency=target_currency,
-                contexts=(repo,),
-            )
-            total += value
-        avg = total / 6
+        # EPS is per-share money; align all six years to the listing currency,
+        # then average (sum / 6) within that single currency.
+        total = sum_money(
+            [
+                require_metric_money(
+                    record.money,
+                    target_currency=target_currency,
+                    metric_id=self.id,
+                    symbol=symbol,
+                    input_name="EarningsPerShare",
+                    as_of=record.end_date,
+                )
+                for record in latest_records
+            ]
+        )
+        avg = total.amount / 6
         as_of = latest_records[0].end_date
         return MetricResult.per_share(
             symbol=symbol,
@@ -78,9 +83,13 @@ class EPSAverageSixYearMetric:
             currency=target_currency,
         )
 
-    def _fetch_history(self, symbol: str, repo: FinancialFactsRepository):
+    def _fetch_history(
+        self, symbol: str, repo: RegionFactsRepository
+    ) -> list[MonetaryFact]:
         for concept in EPS_CONCEPTS:
-            records = repo.facts_for_concept(symbol, concept, fiscal_period="FY")
+            records = repo.monetary_facts_for_concept(
+                symbol, concept, fiscal_period="FY"
+            )
             unique = filter_unique_fy(records)
             if unique:
                 ordered = sorted(

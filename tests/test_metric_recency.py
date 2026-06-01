@@ -5,6 +5,7 @@ Author: Emre Tezel
 
 from datetime import date, timedelta
 
+from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics.eps_quarterly import EarningsPerShareTTM
 from pyvalue.metrics.eps_average import EPSAverageSixYearMetric
 from pyvalue.metrics.long_term_debt import LongTermDebtMetric
@@ -64,7 +65,7 @@ def test_metric_skips_when_latest_fact_is_stale(tmp_path):
 
     metric = LongTermDebtMetric()
 
-    assert metric.compute("AAPL.US", repo) is None
+    assert metric.compute("AAPL.US", RegionFactsRepository(repo)) is None
 
 
 def test_ttm_metric_requires_recent_quarters(tmp_path):
@@ -94,7 +95,7 @@ def test_ttm_metric_requires_recent_quarters(tmp_path):
     repo.replace_facts("AAPL.US", records)
 
     metric = EarningsPerShareTTM()
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute("AAPL.US", RegionFactsRepository(repo))
 
     assert result is not None
     assert result.value == sum(float(idx) for idx in range(1, 5))
@@ -136,7 +137,7 @@ def test_ttm_metric_skips_when_latest_quarter_is_stale(tmp_path):
 
     metric = EarningsPerShareTTM()
 
-    assert metric.compute("AAPL.US", repo) is None
+    assert metric.compute("AAPL.US", RegionFactsRepository(repo)) is None
 
 
 def test_fy_metric_accepts_when_recent_quarter_exists(tmp_path):
@@ -179,7 +180,7 @@ def test_fy_metric_accepts_when_recent_quarter_exists(tmp_path):
     repo.replace_facts("AAPL.US", fy_records)
 
     metric = EPSAverageSixYearMetric()
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute("AAPL.US", RegionFactsRepository(repo))
 
     assert result is not None
 
@@ -277,4 +278,4 @@ def test_roc_metric_uses_recent_concept_even_if_fy_old(tmp_path):
 
     metric = ROCGreenblattMetric()
 
-    assert metric.compute("TEST.US", repo) is not None
+    assert metric.compute("TEST.US", RegionFactsRepository(repo)) is not None

@@ -28,7 +28,8 @@ from pyvalue.metrics.utils import (
     normalize_metric_record,
     require_metric_ticker_currency,
 )
-from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
+from pyvalue.facts import RegionFactsRepository
+from pyvalue.storage import FactRecord, MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
 
@@ -152,7 +153,7 @@ class ProfitabilityReturnsGrowthCalculator:
     """Shared calculator for profitability, return, dividend, and growth metrics."""
 
     def compute_gross_margin_ttm(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[_AmountSnapshot]:
         revenue = self._compute_ttm_amount(
             symbol,
@@ -185,7 +186,7 @@ class ProfitabilityReturnsGrowthCalculator:
         )
 
     def compute_operating_margin_ttm(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[_AmountSnapshot]:
         revenue = self._compute_ttm_amount(
             symbol,
@@ -224,7 +225,7 @@ class ProfitabilityReturnsGrowthCalculator:
         )
 
     def compute_fcf_margin_ttm(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[_AmountSnapshot]:
         revenue = self._compute_ttm_amount(
             symbol,
@@ -256,7 +257,7 @@ class ProfitabilityReturnsGrowthCalculator:
         )
 
     def compute_gross_profit_to_assets_ttm(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[_AmountSnapshot]:
         gross_profit = self._compute_ttm_gross_profit(
             symbol,
@@ -292,7 +293,7 @@ class ProfitabilityReturnsGrowthCalculator:
         )
 
     def compute_roe_ttm(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[_AmountSnapshot]:
         net_income = self._compute_ttm_amount(
             symbol,
@@ -323,7 +324,7 @@ class ProfitabilityReturnsGrowthCalculator:
         )
 
     def compute_roa_ttm(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[_AmountSnapshot]:
         net_income = self._compute_ttm_amount(
             symbol,
@@ -354,7 +355,7 @@ class ProfitabilityReturnsGrowthCalculator:
         )
 
     def compute_roetce_ttm(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[_AmountSnapshot]:
         net_income = self._compute_ttm_amount(
             symbol,
@@ -391,7 +392,7 @@ class ProfitabilityReturnsGrowthCalculator:
     def compute_dividend_yield_ttm(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[_AmountSnapshot]:
         dividends_paid = self._compute_ttm_amount(
@@ -456,7 +457,7 @@ class ProfitabilityReturnsGrowthCalculator:
         )
 
     def compute_dividend_payout_ratio_ttm(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[_AmountSnapshot]:
         dividends_paid = self._compute_ttm_amount(
             symbol,
@@ -501,7 +502,7 @@ class ProfitabilityReturnsGrowthCalculator:
         )
 
     def compute_revenue_cagr_10y(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[_AmountSnapshot]:
         points = self._build_fy_amount_points(
             symbol,
@@ -531,7 +532,7 @@ class ProfitabilityReturnsGrowthCalculator:
         )
 
     def compute_fcf_per_share_cagr_10y(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[_AmountSnapshot]:
         fcf_points = self._build_fcf_fy_points(
             symbol,
@@ -593,7 +594,7 @@ class ProfitabilityReturnsGrowthCalculator:
         self,
         symbol: str,
         dividends_paid: _AmountSnapshot,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
         *,
         context: str,
@@ -619,7 +620,7 @@ class ProfitabilityReturnsGrowthCalculator:
     def _compute_ttm_gross_profit(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         *,
         context: str,
     ) -> Optional[_AmountSnapshot]:
@@ -643,7 +644,7 @@ class ProfitabilityReturnsGrowthCalculator:
     def _compute_ttm_cogs(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         *,
         context: str,
     ) -> Optional[_AmountSnapshot]:
@@ -756,7 +757,7 @@ class ProfitabilityReturnsGrowthCalculator:
     def _compute_ttm_fcf(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         *,
         context: str,
     ) -> Optional[_AmountSnapshot]:
@@ -796,7 +797,7 @@ class ProfitabilityReturnsGrowthCalculator:
     def _compute_avg_common_equity(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         *,
         context: str,
     ) -> Optional[_AmountSnapshot]:
@@ -820,7 +821,7 @@ class ProfitabilityReturnsGrowthCalculator:
     def _compute_avg_tangible_common_equity(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         *,
         context: str,
     ) -> Optional[_AmountSnapshot]:
@@ -847,7 +848,7 @@ class ProfitabilityReturnsGrowthCalculator:
     def _build_common_equity_points(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         periods: set[str],
         *,
         context: str,
@@ -881,7 +882,7 @@ class ProfitabilityReturnsGrowthCalculator:
     def _build_tangible_common_equity_points(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         periods: set[str],
         *,
         context: str,
@@ -1042,7 +1043,7 @@ class ProfitabilityReturnsGrowthCalculator:
     def _compute_ttm_amount(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         concepts: Sequence[str],
         *,
         context: str,
@@ -1073,7 +1074,7 @@ class ProfitabilityReturnsGrowthCalculator:
     def _latest_amount(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         concepts: Sequence[str],
         *,
         context: str,
@@ -1105,7 +1106,7 @@ class ProfitabilityReturnsGrowthCalculator:
     def _build_fcf_fy_points(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         *,
         context: str,
     ) -> list[_FYPoint]:
@@ -1164,7 +1165,7 @@ class ProfitabilityReturnsGrowthCalculator:
     def _build_fy_amount_points(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         concepts: Sequence[str],
         *,
         context: str,
@@ -1193,7 +1194,7 @@ class ProfitabilityReturnsGrowthCalculator:
     def _build_fy_amount_map(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         concepts: Sequence[str],
         *,
         context: str,
@@ -1217,7 +1218,7 @@ class ProfitabilityReturnsGrowthCalculator:
     def _fy_map(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         concept: str,
         *,
         context: str,
@@ -1335,7 +1336,7 @@ class ProfitabilityReturnsGrowthCalculator:
         records: Sequence[FactRecord],
         *,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         context: str,
         input_name: str,
         absolute: bool = False,
@@ -1367,7 +1368,7 @@ class ProfitabilityReturnsGrowthCalculator:
         record: FactRecord,
         *,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         context: str,
         input_name: str,
         absolute: bool = False,
@@ -1430,7 +1431,7 @@ class GrossMarginTTMMetric:
     required_concepts = GROSS_MARGIN_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = ProfitabilityReturnsGrowthCalculator().compute_gross_margin_ttm(
             symbol, repo
@@ -1450,7 +1451,7 @@ class OperatingMarginTTMMetric:
     required_concepts = OPERATING_MARGIN_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = ProfitabilityReturnsGrowthCalculator().compute_operating_margin_ttm(
             symbol, repo
@@ -1470,7 +1471,7 @@ class FCFMarginTTMMetric:
     required_concepts = FCF_MARGIN_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = ProfitabilityReturnsGrowthCalculator().compute_fcf_margin_ttm(
             symbol, repo
@@ -1490,7 +1491,7 @@ class ROETTMMetric:
     required_concepts = ROE_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = ProfitabilityReturnsGrowthCalculator().compute_roe_ttm(symbol, repo)
         if snapshot is None:
@@ -1508,7 +1509,7 @@ class ROATTMMetric:
     required_concepts = ROA_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = ProfitabilityReturnsGrowthCalculator().compute_roa_ttm(symbol, repo)
         if snapshot is None:
@@ -1526,7 +1527,7 @@ class ROETangibleCommonEquityTTMMetric:
     required_concepts = ROETCE_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = ProfitabilityReturnsGrowthCalculator().compute_roetce_ttm(
             symbol, repo
@@ -1549,7 +1550,7 @@ class DividendYieldTTMMetric:
     def compute(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
         snapshot = ProfitabilityReturnsGrowthCalculator().compute_dividend_yield_ttm(
@@ -1575,7 +1576,7 @@ class ShareholderYieldTTMMetric:
     def compute(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
         dividend_yield = DividendYieldTTMMetric().compute(symbol, repo, market_repo)
@@ -1606,7 +1607,7 @@ class DividendPayoutRatioTTMMetric:
     required_concepts = DIVIDEND_PAYOUT_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = (
             ProfitabilityReturnsGrowthCalculator().compute_dividend_payout_ratio_ttm(
@@ -1628,7 +1629,7 @@ class RevenueCAGR10YMetric:
     required_concepts = REVENUE_CAGR_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = ProfitabilityReturnsGrowthCalculator().compute_revenue_cagr_10y(
             symbol, repo
@@ -1648,7 +1649,7 @@ class FCFPerShareCAGR10YMetric:
     required_concepts = FCF_PER_SHARE_CAGR_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = (
             ProfitabilityReturnsGrowthCalculator().compute_fcf_per_share_cagr_10y(
@@ -1670,7 +1671,7 @@ class OwnerEarningsCAGR10YMetric:
     required_concepts = OE_ENTERPRISE_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = OwnerEarningsEnterpriseCalculator().compute_10y_cagr(symbol, repo)
         if snapshot is None:
@@ -1688,7 +1689,7 @@ class GrossProfitToAssetsTTMMetric:
     required_concepts = GROSS_PROFIT_TO_ASSETS_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = (
             ProfitabilityReturnsGrowthCalculator().compute_gross_profit_to_assets_ttm(

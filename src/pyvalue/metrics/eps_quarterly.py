@@ -10,13 +10,14 @@ from typing import Iterable, Optional
 
 import logging
 
+from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
     is_recent_fact,
-    normalize_metric_record,
+    require_metric_money,
     require_metric_ticker_currency,
+    sum_money,
 )
-from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 EPS_CONCEPTS = ["EarningsPerShare"]
 
@@ -32,14 +33,11 @@ class EarningsPerShareTTM:
     def compute(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
     ) -> Optional[MetricResult]:
         latest_records = self._fetch_quarters(symbol, repo)
         if len(latest_records) >= 4 and is_recent_fact(latest_records[0]):
-            aligned = self._align_records(symbol, repo, latest_records[:4])
-            if aligned is None:
-                return None
-            ttm_value, currency = aligned
+            ttm_value, currency = self._align_records(symbol, repo, latest_records[:4])
             as_of = latest_records[0].end_date
             return MetricResult.per_share(
                 symbol=symbol,
@@ -65,60 +63,58 @@ class EarningsPerShareTTM:
                 "eps_ttm: latest FY EPS too old for %s (%s)", symbol, fy_record.end_date
             )
             return None
-        ttm_value, currency = normalize_metric_record(
-            fy_record,
+        target_currency = require_metric_ticker_currency(
+            symbol,
+            repo,
+            metric_id=self.id,
+            input_name="EarningsPerShare",
+            as_of=fy_record.end_date,
+        )
+        money = require_metric_money(
+            fy_record.money,
+            target_currency=target_currency,
             metric_id=self.id,
             symbol=symbol,
-            expected_currency=require_metric_ticker_currency(
-                symbol,
-                repo,
-                metric_id=self.id,
-                input_name="EarningsPerShare",
-                as_of=fy_record.end_date,
-                candidate_currencies=[fy_record.currency],
-            ),
-            contexts=(repo,),
+            input_name="EarningsPerShare",
+            as_of=fy_record.end_date,
         )
-        as_of = fy_record.end_date
         return MetricResult.per_share(
             symbol=symbol,
             metric_id=self.id,
-            value=ttm_value,
-            as_of=as_of,
-            currency=currency,
+            value=money.amount,
+            as_of=fy_record.end_date,
+            currency=target_currency,
         )
 
     def _fetch_quarters(
-        self, symbol: str, repo: FinancialFactsRepository
-    ) -> list[FactRecord]:
+        self, symbol: str, repo: RegionFactsRepository
+    ) -> list[MonetaryFact]:
         for concept in EPS_CONCEPTS:
-            records = repo.facts_for_concept(symbol, concept)
+            records = repo.monetary_facts_for_concept(symbol, concept)
             quarterly = self._filter_quarterly(records)
             if len(quarterly) >= 4:
                 return quarterly[:4]
         return []
 
     def _latest_fy_eps(
-        self, symbol: str, repo: FinancialFactsRepository
-    ) -> Optional[FactRecord]:
+        self, symbol: str, repo: RegionFactsRepository
+    ) -> Optional[MonetaryFact]:
         for concept in EPS_CONCEPTS:
-            records = repo.facts_for_concept(
+            records = repo.monetary_facts_for_concept(
                 symbol, concept, fiscal_period="FY", limit=1
             )
             if records:
                 return records[0]
         return None
 
-    def _filter_quarterly(self, records: Iterable[FactRecord]) -> list[FactRecord]:
-        filtered: list[FactRecord] = []
+    def _filter_quarterly(self, records: Iterable[MonetaryFact]) -> list[MonetaryFact]:
+        filtered: list[MonetaryFact] = []
         seen_end_dates: set[str] = set()
         for record in records:
             period = (record.fiscal_period or "").upper()
             if period not in {"Q1", "Q2", "Q3", "Q4"}:
                 continue
             if record.end_date in seen_end_dates:
-                continue
-            if record.value is None:
                 continue
             filtered.append(record)
             seen_end_dates.add(record.end_date)
@@ -127,28 +123,30 @@ class EarningsPerShareTTM:
     def _align_records(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
-        records: list[FactRecord],
-    ) -> Optional[tuple[float, str]]:
+        repo: RegionFactsRepository,
+        records: list[MonetaryFact],
+    ) -> tuple[float, str]:
         target_currency = require_metric_ticker_currency(
             symbol,
             repo,
             metric_id=self.id,
             input_name="EarningsPerShare",
             as_of=records[0].end_date if records else None,
-            candidate_currencies=[record.currency for record in records],
         )
-        total = 0.0
-        for record in records:
-            value, _ = normalize_metric_record(
-                record,
-                metric_id=self.id,
-                symbol=symbol,
-                expected_currency=target_currency,
-                contexts=(repo,),
-            )
-            total += value
-        return total, target_currency
+        total = sum_money(
+            [
+                require_metric_money(
+                    record.money,
+                    target_currency=target_currency,
+                    metric_id=self.id,
+                    symbol=symbol,
+                    input_name="EarningsPerShare",
+                    as_of=record.end_date,
+                )
+                for record in records
+            ]
+        )
+        return total.amount, target_currency
 
 
 __all__ = ["EarningsPerShareTTM"]

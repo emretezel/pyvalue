@@ -20,7 +20,8 @@ from pyvalue.metrics.utils import (
     normalize_metric_record,
     require_metric_ticker_currency,
 )
-from pyvalue.storage import FactRecord, FinancialFactsRepository
+from pyvalue.facts import RegionFactsRepository
+from pyvalue.storage import FactRecord
 
 LOGGER = logging.getLogger(__name__)
 
@@ -83,7 +84,7 @@ class OwnerEarningsEquityCalculator:
     """Shared calculator for owner earnings equity numerators."""
 
     def compute_ttm(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[OwnerEarningsEquitySnapshot]:
         delta_nwc_maint = self._compute_delta_nwc_maint(symbol, repo)
         if delta_nwc_maint is None:
@@ -141,7 +142,7 @@ class OwnerEarningsEquityCalculator:
         return OwnerEarningsEquitySnapshot(value=value, as_of=as_of, currency=currency)
 
     def compute_5y_average(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[OwnerEarningsEquitySnapshot]:
         delta_nwc_maint = self._compute_delta_nwc_maint(symbol, repo)
         if delta_nwc_maint is None:
@@ -232,14 +233,14 @@ class OwnerEarningsEquityCalculator:
         )
 
     def _compute_delta_nwc_maint(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         return DeltaNWCMaintMetric().compute(symbol, repo)
 
     def _compute_ttm_amount(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         concepts: Sequence[str],
         *,
         context: str,
@@ -282,7 +283,7 @@ class OwnerEarningsEquityCalculator:
         return None
 
     def _compute_mcapex_ttm(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[_AmountResult]:
         capex = self._compute_ttm_amount(
             symbol,
@@ -313,7 +314,7 @@ class OwnerEarningsEquityCalculator:
     def _build_fy_amount_map(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         concepts: Sequence[str],
         *,
         context: str,
@@ -336,7 +337,7 @@ class OwnerEarningsEquityCalculator:
         return merged
 
     def _build_mcapex_fy_map(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> dict[str, _AmountResult]:
         capex_map = self._fy_map(
             symbol,
@@ -416,7 +417,7 @@ class OwnerEarningsEquityCalculator:
     def _fy_map(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         concept: str,
         *,
         context: str,
@@ -463,7 +464,7 @@ class OwnerEarningsEquityCalculator:
         records: Sequence[FactRecord],
         *,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         context: str,
         input_name: str,
         absolute: bool = False,
@@ -495,7 +496,7 @@ class OwnerEarningsEquityCalculator:
         record: FactRecord,
         *,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         context: str,
         input_name: str,
         absolute: bool = False,
@@ -552,7 +553,7 @@ class OwnerEarningsEquityTTMMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = OwnerEarningsEquityCalculator().compute_ttm(symbol, repo)
         if snapshot is None:
@@ -574,7 +575,7 @@ class OwnerEarningsEquityFiveYearAverageMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = OwnerEarningsEquityCalculator().compute_5y_average(symbol, repo)
         if snapshot is None:

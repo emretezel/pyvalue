@@ -19,7 +19,8 @@ from pyvalue.metrics.utils import (
     normalize_metric_record,
     require_metric_ticker_currency,
 )
-from pyvalue.storage import FactRecord, FinancialFactsRepository
+from pyvalue.facts import RegionFactsRepository
+from pyvalue.storage import FactRecord
 
 LOGGER = logging.getLogger(__name__)
 
@@ -68,7 +69,7 @@ class AccrualsRatioCalculator:
     """Shared calculator for accruals ratio inputs."""
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[AccrualsRatioSnapshot]:
         net_income = self._compute_ttm_amount(
             symbol,
@@ -131,7 +132,7 @@ class AccrualsRatioCalculator:
         )
 
     def compute_avg_total_assets(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[_AmountResult]:
         """Return the average-assets denominator used by accrual-based metrics."""
 
@@ -140,7 +141,7 @@ class AccrualsRatioCalculator:
     def _compute_ttm_amount(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         concepts: Sequence[str],
         *,
         context: str,
@@ -183,7 +184,7 @@ class AccrualsRatioCalculator:
     def _compute_avg_total_assets(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
     ) -> Optional[_AmountResult]:
         records = repo.facts_for_concept(symbol, ASSETS_CONCEPT)
         quarterly = self._filter_periods(records, QUARTERLY_PERIODS)
@@ -265,7 +266,7 @@ class AccrualsRatioCalculator:
         records: Sequence[FactRecord],
         *,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         concept: str,
         context: str,
     ) -> tuple[list[float], str]:
@@ -294,7 +295,7 @@ class AccrualsRatioCalculator:
         self,
         record: FactRecord,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
     ) -> tuple[float, str]:
         return normalize_metric_record(
             record,
@@ -335,7 +336,7 @@ class AccrualsRatioMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = AccrualsRatioCalculator().compute(symbol, repo)
         if snapshot is None:

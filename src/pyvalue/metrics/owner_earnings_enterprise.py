@@ -20,7 +20,8 @@ from pyvalue.metrics.utils import (
     normalize_metric_record,
     require_metric_ticker_currency,
 )
-from pyvalue.storage import FactRecord, FinancialFactsRepository
+from pyvalue.facts import RegionFactsRepository
+from pyvalue.storage import FactRecord
 
 LOGGER = logging.getLogger(__name__)
 
@@ -109,7 +110,7 @@ class OwnerEarningsEnterpriseCalculator:
     """Shared calculator for enterprise owner-earnings numerators."""
 
     def compute_ttm(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[OwnerEarningsEnterpriseSnapshot]:
         delta_nwc_maint = self._compute_delta_nwc_maint(symbol, repo)
         if delta_nwc_maint is None:
@@ -175,7 +176,7 @@ class OwnerEarningsEnterpriseCalculator:
         )
 
     def compute_5y_average(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[OwnerEarningsEnterpriseSnapshot]:
         latest_five = self._latest_available_five_points(
             symbol,
@@ -193,7 +194,7 @@ class OwnerEarningsEnterpriseCalculator:
         )
 
     def compute_5y_median(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[OwnerEarningsEnterpriseSnapshot]:
         latest_five = self._latest_available_five_points(
             symbol,
@@ -211,7 +212,7 @@ class OwnerEarningsEnterpriseCalculator:
         )
 
     def compute_10y_series(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[OwnerEarningsEnterpriseFYSeriesSnapshot]:
         points = self._build_fy_points(
             symbol,
@@ -269,7 +270,7 @@ class OwnerEarningsEnterpriseCalculator:
         )
 
     def compute_10y_cagr(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[OwnerEarningsEnterpriseSnapshot]:
         points = self._build_fy_points(
             symbol,
@@ -337,7 +338,7 @@ class OwnerEarningsEnterpriseCalculator:
     def _latest_available_five_points(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         *,
         context: str,
     ) -> Optional[list[_FYPoint]]:
@@ -381,7 +382,7 @@ class OwnerEarningsEnterpriseCalculator:
     def _build_fy_points(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         *,
         context: str,
     ) -> Optional[list[_FYPoint]]:
@@ -484,7 +485,7 @@ class OwnerEarningsEnterpriseCalculator:
         return points
 
     def _effective_tax_rate_ttm(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> _TaxRateResult:
         tax = self._compute_ttm_amount(
             symbol,
@@ -546,7 +547,7 @@ class OwnerEarningsEnterpriseCalculator:
     def _latest_valid_fy_tax_rate(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         *,
         context: str,
     ) -> Optional[_TaxRateResult]:
@@ -622,14 +623,14 @@ class OwnerEarningsEnterpriseCalculator:
         return _TaxRateResult(rate=rate, as_of=max(tax.as_of, pretax.as_of))
 
     def _compute_delta_nwc_maint(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         return DeltaNWCMaintMetric().compute(symbol, repo)
 
     def _compute_ttm_amount(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         concepts: Sequence[str],
         *,
         context: str,
@@ -660,7 +661,7 @@ class OwnerEarningsEnterpriseCalculator:
     def _build_fy_amount_map(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         concepts: Sequence[str],
         *,
         context: str,
@@ -685,7 +686,7 @@ class OwnerEarningsEnterpriseCalculator:
     def _build_mcapex_fy_map(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         *,
         context: str,
     ) -> dict[str, _AmountResult]:
@@ -733,7 +734,7 @@ class OwnerEarningsEnterpriseCalculator:
         return mcapex_map
 
     def _compute_mcapex_ttm(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[_AmountResult]:
         capex = self._compute_ttm_amount(
             symbol,
@@ -794,7 +795,7 @@ class OwnerEarningsEnterpriseCalculator:
     def _fy_map(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         concept: str,
         *,
         context: str,
@@ -841,7 +842,7 @@ class OwnerEarningsEnterpriseCalculator:
         records: Sequence[FactRecord],
         *,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         context: str,
         input_name: str,
         absolute: bool = False,
@@ -873,7 +874,7 @@ class OwnerEarningsEnterpriseCalculator:
         record: FactRecord,
         *,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         context: str,
         input_name: str,
         absolute: bool = False,
@@ -936,7 +937,7 @@ class OwnerEarningsEnterpriseTTMMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = OwnerEarningsEnterpriseCalculator().compute_ttm(symbol, repo)
         if snapshot is None:
@@ -958,7 +959,7 @@ class OwnerEarningsEnterpriseFiveYearAverageMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = OwnerEarningsEnterpriseCalculator().compute_5y_average(symbol, repo)
         if snapshot is None:
@@ -980,7 +981,7 @@ class OwnerEarningsEnterpriseFiveYearMedianMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = OwnerEarningsEnterpriseCalculator().compute_5y_median(symbol, repo)
         if snapshot is None:
@@ -1002,7 +1003,7 @@ class WorstOwnerEarningsEnterpriseTenYearMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = OwnerEarningsEnterpriseCalculator().compute_10y_series(symbol, repo)
         if snapshot is None:

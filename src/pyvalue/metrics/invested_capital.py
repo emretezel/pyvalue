@@ -11,14 +11,15 @@ from typing import Optional, Sequence
 
 import logging
 
+from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     MAX_FY_FACT_AGE_DAYS,
-    normalize_metric_record,
-    resolve_metric_ticker_currency,
+    require_metric_money,
+    require_metric_ticker_currency,
 )
-from pyvalue.storage import FactRecord, FinancialFactsRepository
+from pyvalue.money import Money
 
 LOGGER = logging.getLogger(__name__)
 
@@ -29,6 +30,9 @@ EQUITY_PRIMARY_CONCEPT = "StockholdersEquity"
 EQUITY_FALLBACK_CONCEPT = "CommonStockholdersEquity"
 CASH_PRIMARY_CONCEPT = "CashAndCashEquivalents"
 CASH_FALLBACK_CONCEPT = "CashAndShortTermInvestments"
+
+# Shared metric id used when resolving the listing currency for the calculator.
+_INVESTED_CAPITAL_METRIC_ID = "invested_capital"
 
 QUARTERLY_PERIODS = {"Q1", "Q2", "Q3", "Q4"}
 FY_PERIODS = {"FY"}
@@ -46,53 +50,55 @@ REQUIRED_CONCEPTS = (
 
 @dataclass
 class _Amount:
-    value: float
+    money: Money
     as_of: str
-    currency: Optional[str]
 
 
 @dataclass
 class _ICPoint:
-    value: float
+    money: Money
     as_of: str
     fiscal_period: str
-    currency: Optional[str]
 
 
 @dataclass(frozen=True)
 class InvestedCapitalSnapshot:
-    value: float
+    money: Money
     as_of: str
-    currency: Optional[str]
 
 
 class _InvestedCapitalBase:
     def _build_points(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         periods: set[str],
     ) -> list[_ICPoint]:
+        # Resolve the listing currency once; every component is aligned to it, so
+        # invested capital (debt + equity - cash) is single-currency by build.
+        target_currency = require_metric_ticker_currency(
+            symbol, repo, metric_id=_INVESTED_CAPITAL_METRIC_ID
+        )
         short_map = self._period_map(
-            repo.facts_for_concept(symbol, SHORT_TERM_DEBT_CONCEPT), periods
+            repo.monetary_facts_for_concept(symbol, SHORT_TERM_DEBT_CONCEPT), periods
         )
         long_map = self._period_map(
-            repo.facts_for_concept(symbol, LONG_TERM_DEBT_CONCEPT), periods
+            repo.monetary_facts_for_concept(symbol, LONG_TERM_DEBT_CONCEPT), periods
         )
         total_map = self._period_map(
-            repo.facts_for_concept(symbol, TOTAL_DEBT_CONCEPT), periods
+            repo.monetary_facts_for_concept(symbol, TOTAL_DEBT_CONCEPT), periods
         )
         equity_map = self._period_map(
-            repo.facts_for_concept(symbol, EQUITY_PRIMARY_CONCEPT), periods
+            repo.monetary_facts_for_concept(symbol, EQUITY_PRIMARY_CONCEPT), periods
         )
         common_equity_map = self._period_map(
-            repo.facts_for_concept(symbol, EQUITY_FALLBACK_CONCEPT), periods
+            repo.monetary_facts_for_concept(symbol, EQUITY_FALLBACK_CONCEPT), periods
         )
         cash_primary_map = self._period_map(
-            repo.facts_for_concept(symbol, CASH_PRIMARY_CONCEPT), periods
+            repo.monetary_facts_for_concept(symbol, CASH_PRIMARY_CONCEPT), periods
         )
         cash_fallback_map = self._period_map(
-            repo.facts_for_concept(symbol, CASH_FALLBACK_CONCEPT), periods
+            repo.monetary_facts_for_concept(symbol, CASH_FALLBACK_CONCEPT), periods
         )
 
         candidate_keys = sorted(
@@ -111,7 +117,7 @@ class _InvestedCapitalBase:
         for key in candidate_keys:
             debt = self._resolve_debt(
                 symbol=symbol,
-                repo=repo,
+                target_currency=target_currency,
                 key=key,
                 short_debt=short_map.get(key),
                 long_debt=long_map.get(key),
@@ -122,7 +128,7 @@ class _InvestedCapitalBase:
 
             equity = self._resolve_equity(
                 symbol=symbol,
-                repo=repo,
+                target_currency=target_currency,
                 key=key,
                 primary=equity_map.get(key),
                 fallback=common_equity_map.get(key),
@@ -132,7 +138,7 @@ class _InvestedCapitalBase:
 
             cash = self._resolve_cash(
                 symbol=symbol,
-                repo=repo,
+                target_currency=target_currency,
                 key=key,
                 primary=cash_primary_map.get(key),
                 fallback=cash_fallback_map.get(key),
@@ -140,27 +146,11 @@ class _InvestedCapitalBase:
             if cash is None:
                 continue
 
-            currency = self._merge_currency(
-                [debt.currency, equity.currency, cash.currency]
-            )
-            if currency is None and any(
-                code is not None
-                for code in (debt.currency, equity.currency, cash.currency)
-            ):
-                LOGGER.warning(
-                    "invested_capital: currency mismatch for %s on %s/%s",
-                    symbol,
-                    key[0],
-                    key[1],
-                )
-                continue
-
             points.append(
                 _ICPoint(
-                    value=debt.value + equity.value - cash.value,
+                    money=debt.money + equity.money - cash.money,
                     as_of=max(debt.as_of, equity.as_of, cash.as_of),
                     fiscal_period=key[1],
-                    currency=currency,
                 )
             )
         return points
@@ -169,53 +159,23 @@ class _InvestedCapitalBase:
         self,
         *,
         symbol: str,
-        repo: FinancialFactsRepository,
+        target_currency: str,
         key: tuple[str, str],
-        short_debt: Optional[FactRecord],
-        long_debt: Optional[FactRecord],
-        total_debt: Optional[FactRecord],
+        short_debt: Optional[MonetaryFact],
+        long_debt: Optional[MonetaryFact],
+        total_debt: Optional[MonetaryFact],
     ) -> Optional[_Amount]:
         if short_debt is not None and long_debt is not None:
-            short_value, short_currency = self._normalize_currency(
-                short_debt,
-                symbol,
-                repo,
-                SHORT_TERM_DEBT_CONCEPT,
-            )
-            long_value, long_currency = self._normalize_currency(
-                long_debt,
-                symbol,
-                repo,
-                LONG_TERM_DEBT_CONCEPT,
-            )
-            currency = self._merge_currency([short_currency, long_currency])
-            if currency is None and any(
-                code is not None for code in (short_currency, long_currency)
-            ):
-                LOGGER.warning(
-                    "invested_capital: debt currency mismatch for %s on %s/%s",
-                    symbol,
-                    key[0],
-                    key[1],
-                )
-                return None
             return _Amount(
-                value=short_value + long_value,
+                money=self._money(short_debt, target_currency, symbol)
+                + self._money(long_debt, target_currency, symbol),
                 as_of=max(short_debt.end_date, long_debt.end_date),
-                currency=currency,
             )
 
         if total_debt is not None:
-            total_value, total_currency = self._normalize_currency(
-                total_debt,
-                symbol,
-                repo,
-                TOTAL_DEBT_CONCEPT,
-            )
             return _Amount(
-                value=total_value,
+                money=self._money(total_debt, target_currency, symbol),
                 as_of=total_debt.end_date,
-                currency=total_currency,
             )
 
         one_side = short_debt or long_debt
@@ -227,23 +187,19 @@ class _InvestedCapitalBase:
                 key[1],
             )
             return None
-
-        value, currency = self._normalize_currency(
-            one_side,
-            symbol,
-            repo,
-            one_side.concept,
+        return _Amount(
+            money=self._money(one_side, target_currency, symbol),
+            as_of=one_side.end_date,
         )
-        return _Amount(value=value, as_of=one_side.end_date, currency=currency)
 
     def _resolve_equity(
         self,
         *,
         symbol: str,
-        repo: FinancialFactsRepository,
+        target_currency: str,
         key: tuple[str, str],
-        primary: Optional[FactRecord],
-        fallback: Optional[FactRecord],
+        primary: Optional[MonetaryFact],
+        fallback: Optional[MonetaryFact],
     ) -> Optional[_Amount]:
         record = primary or fallback
         if record is None:
@@ -254,22 +210,19 @@ class _InvestedCapitalBase:
                 key[1],
             )
             return None
-        value, currency = self._normalize_currency(
-            record,
-            symbol,
-            repo,
-            record.concept,
+        return _Amount(
+            money=self._money(record, target_currency, symbol),
+            as_of=record.end_date,
         )
-        return _Amount(value=value, as_of=record.end_date, currency=currency)
 
     def _resolve_cash(
         self,
         *,
         symbol: str,
-        repo: FinancialFactsRepository,
+        target_currency: str,
         key: tuple[str, str],
-        primary: Optional[FactRecord],
-        fallback: Optional[FactRecord],
+        primary: Optional[MonetaryFact],
+        fallback: Optional[MonetaryFact],
     ) -> Optional[_Amount]:
         record = primary or fallback
         if record is None:
@@ -280,59 +233,33 @@ class _InvestedCapitalBase:
                 key[1],
             )
             return None
-        value, currency = self._normalize_currency(
-            record,
-            symbol,
-            repo,
-            record.concept,
+        return _Amount(
+            money=self._money(record, target_currency, symbol),
+            as_of=record.end_date,
         )
-        return _Amount(value=value, as_of=record.end_date, currency=currency)
 
     def _period_map(
-        self, records: Sequence[FactRecord], periods: set[str]
-    ) -> dict[tuple[str, str], FactRecord]:
-        mapped: dict[tuple[str, str], FactRecord] = {}
+        self, records: Sequence[MonetaryFact], periods: set[str]
+    ) -> dict[tuple[str, str], MonetaryFact]:
+        mapped: dict[tuple[str, str], MonetaryFact] = {}
         for record in sorted(records, key=lambda item: item.end_date, reverse=True):
             period = (record.fiscal_period or "").upper()
             if period not in periods:
-                continue
-            if record.value is None:
                 continue
             key = (record.end_date, period)
             if key not in mapped:
                 mapped[key] = record
         return mapped
 
-    def _normalize_currency(
-        self,
-        record: FactRecord,
-        symbol: str,
-        repo: FinancialFactsRepository,
-        concept: str,
-    ) -> tuple[float, str]:
-        return normalize_metric_record(
-            record,
-            metric_id="invested_capital",
+    def _money(self, fact: MonetaryFact, target_currency: str, symbol: str) -> Money:
+        return require_metric_money(
+            fact.money,
+            target_currency=target_currency,
+            metric_id=_INVESTED_CAPITAL_METRIC_ID,
             symbol=symbol,
-            input_name=concept,
-            expected_currency=resolve_metric_ticker_currency(
-                symbol,
-                repo,
-                candidate_currencies=[record.currency],
-            ),
-            contexts=(repo,),
+            input_name=fact.concept,
+            as_of=fact.end_date,
         )
-
-    def _merge_currency(self, codes: Sequence[Optional[str]]) -> Optional[str]:
-        merged = None
-        for code in codes:
-            if not code:
-                continue
-            if merged is None:
-                merged = code
-            elif merged != code:
-                return None
-        return merged
 
     def _is_recent_as_of(self, as_of: str, *, max_age_days: int) -> bool:
         try:
@@ -373,17 +300,12 @@ class _InvestedCapitalBase:
             return None
         return int(year)
 
-    def _currencies_match(self, left: Optional[str], right: Optional[str]) -> bool:
-        if left and right:
-            return left == right
-        return True
-
 
 class InvestedCapitalCalculator(_InvestedCapitalBase):
     """Shared calculator for invested-capital snapshots."""
 
     def compute_mqr(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[InvestedCapitalSnapshot]:
         points = self._build_points(symbol, repo, QUARTERLY_PERIODS)
         latest = self._select_latest_point(
@@ -391,12 +313,10 @@ class InvestedCapitalCalculator(_InvestedCapitalBase):
         )
         if latest is None:
             return None
-        return InvestedCapitalSnapshot(
-            value=latest.value, as_of=latest.as_of, currency=latest.currency
-        )
+        return InvestedCapitalSnapshot(money=latest.money, as_of=latest.as_of)
 
     def compute_fy(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[InvestedCapitalSnapshot]:
         points = self._build_points(symbol, repo, FY_PERIODS)
         latest = self._select_latest_point(
@@ -404,27 +324,21 @@ class InvestedCapitalCalculator(_InvestedCapitalBase):
         )
         if latest is None:
             return None
-        return InvestedCapitalSnapshot(
-            value=latest.value, as_of=latest.as_of, currency=latest.currency
-        )
+        return InvestedCapitalSnapshot(money=latest.money, as_of=latest.as_of)
 
     def compute_fy_series(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> list[InvestedCapitalSnapshot]:
         """Return FY invested-capital points (latest first) without freshness gating."""
 
         points = self._build_points(symbol, repo, FY_PERIODS)
         return [
-            InvestedCapitalSnapshot(
-                value=point.value,
-                as_of=point.as_of,
-                currency=point.currency,
-            )
+            InvestedCapitalSnapshot(money=point.money, as_of=point.as_of)
             for point in points
         ]
 
     def compute_avg(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[InvestedCapitalSnapshot]:
         quarterly_points = self._build_points(symbol, repo, QUARTERLY_PERIODS)
         latest_quarter = self._select_latest_point(
@@ -443,18 +357,9 @@ class InvestedCapitalCalculator(_InvestedCapitalBase):
                         and point.fiscal_period == latest_quarter.fiscal_period
                         and point_year == latest_year - 1
                     ):
-                        if not self._currencies_match(
-                            latest_quarter.currency, point.currency
-                        ):
-                            LOGGER.warning(
-                                "avg_ic: quarterly currency mismatch for %s", symbol
-                            )
-                            break
-                        value = (latest_quarter.value + point.value) / 2.0
                         return InvestedCapitalSnapshot(
-                            value=value,
+                            money=(latest_quarter.money + point.money) / 2.0,
                             as_of=latest_quarter.as_of,
-                            currency=latest_quarter.currency or point.currency,
                         )
 
         fy_points = self._build_points(symbol, repo, FY_PERIODS)
@@ -483,15 +388,9 @@ class InvestedCapitalCalculator(_InvestedCapitalBase):
             LOGGER.warning("avg_ic: missing strict prior FY for %s", symbol)
             return None
 
-        if not self._currencies_match(latest_fy.currency, prior_fy.currency):
-            LOGGER.warning("avg_ic: FY currency mismatch for %s", symbol)
-            return None
-
-        value = (latest_fy.value + prior_fy.value) / 2.0
         return InvestedCapitalSnapshot(
-            value=value,
+            money=(latest_fy.money + prior_fy.money) / 2.0,
             as_of=latest_fy.as_of,
-            currency=latest_fy.currency or prior_fy.currency,
         )
 
 
@@ -503,7 +402,7 @@ class ICMostRecentQuarterMetric(_InvestedCapitalBase):
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = InvestedCapitalCalculator().compute_mqr(symbol, repo)
         if snapshot is None:
@@ -511,9 +410,9 @@ class ICMostRecentQuarterMetric(_InvestedCapitalBase):
         return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
-            value=snapshot.value,
+            value=snapshot.money.amount,
             as_of=snapshot.as_of,
-            currency=snapshot.currency,
+            currency=snapshot.money.currency,
         )
 
 
@@ -525,7 +424,7 @@ class ICFYMetric(_InvestedCapitalBase):
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = InvestedCapitalCalculator().compute_fy(symbol, repo)
         if snapshot is None:
@@ -533,9 +432,9 @@ class ICFYMetric(_InvestedCapitalBase):
         return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
-            value=snapshot.value,
+            value=snapshot.money.amount,
             as_of=snapshot.as_of,
-            currency=snapshot.currency,
+            currency=snapshot.money.currency,
         )
 
 
@@ -547,7 +446,7 @@ class AvgICMetric(_InvestedCapitalBase):
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = InvestedCapitalCalculator().compute_avg(symbol, repo)
         if snapshot is None:
@@ -555,9 +454,9 @@ class AvgICMetric(_InvestedCapitalBase):
         return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
-            value=snapshot.value,
+            value=snapshot.money.amount,
             as_of=snapshot.as_of,
-            currency=snapshot.currency,
+            currency=snapshot.money.currency,
         )
 
 

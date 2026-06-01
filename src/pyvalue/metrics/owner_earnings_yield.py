@@ -24,7 +24,8 @@ from pyvalue.metrics.owner_earnings_equity import (
     OwnerEarningsEquityCalculator,
 )
 from pyvalue.metrics.utils import SHARE_COUNT_CONCEPTS, market_cap_money
-from pyvalue.storage import FinancialFactsRepository, MarketDataRepository
+from pyvalue.facts import RegionFactsRepository
+from pyvalue.storage import MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ REQUIRED_EV_CONCEPTS = tuple(
 def _denominator_market_cap(
     *,
     symbol: str,
-    repo: FinancialFactsRepository,
+    repo: RegionFactsRepository,
     market_repo: MarketDataRepository,
     target_currency: Optional[str],
     context: str,
@@ -63,7 +64,7 @@ def _denominator_market_cap(
 def _denominator_enterprise_value(
     *,
     symbol: str,
-    repo: FinancialFactsRepository,
+    repo: RegionFactsRepository,
     market_repo: MarketDataRepository,
     target_currency: Optional[str],
     context: str,
@@ -88,7 +89,7 @@ class OwnerEarningsYieldEquityMetric:
     def compute(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
         numerator = OwnerEarningsEquityCalculator().compute_ttm(symbol, repo)
@@ -125,7 +126,7 @@ class OwnerEarningsYieldEquityFiveYearMetric:
     def compute(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
         numerator = OwnerEarningsEquityCalculator().compute_5y_average(symbol, repo)
@@ -162,7 +163,7 @@ class OwnerEarningsYieldEVMetric:
     def compute(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
         numerator = OwnerEarningsEnterpriseCalculator().compute_ttm(symbol, repo)
@@ -199,7 +200,7 @@ class OwnerEarningsYieldEVNormalizedMetric:
     def compute(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
         numerator = OwnerEarningsEnterpriseCalculator().compute_5y_median(symbol, repo)

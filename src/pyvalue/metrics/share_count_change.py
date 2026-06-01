@@ -10,13 +10,13 @@ from typing import Optional, Sequence
 
 import logging
 
+from pyvalue.facts import RegionFactsRepository, ScalarFact
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     MAX_FY_FACT_AGE_DAYS,
     is_recent_fact,
 )
-from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 LOGGER = logging.getLogger(__name__)
 
@@ -50,10 +50,14 @@ ShareCountTenYearSnapshot = ShareCountSnapshot
 
 
 class ShareCountChangeCalculator:
-    """Resolve the latest exact-year share-count comparison pair."""
+    """Resolve the latest exact-year share-count comparison pair.
+
+    Shares outstanding is a dimensionless ``count`` fact (no currency), so this
+    reads through the scalar accessor and works on bare ``float`` values.
+    """
 
     def compute_pair(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[ShareCountSnapshot]:
         return self.compute_pair_for_years(
             symbol,
@@ -65,12 +69,12 @@ class ShareCountChangeCalculator:
     def compute_pair_for_years(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         *,
         exact_years: int,
         context: str,
     ) -> Optional[ShareCountSnapshot]:
-        records = repo.facts_for_concept(symbol, SHARE_COUNT_CONCEPT)
+        records = repo.scalar_facts_for_concept(symbol, SHARE_COUNT_CONCEPT)
         if not records:
             LOGGER.warning(
                 "%s: missing outstanding share history for %s", context, symbol
@@ -112,7 +116,7 @@ class ShareCountChangeCalculator:
     def _resolve_period_pair(
         self,
         symbol: str,
-        records: Sequence[FactRecord],
+        records: Sequence[ScalarFact],
         *,
         max_age_days: int,
         exact_years: int,
@@ -181,16 +185,14 @@ class ShareCountChangeCalculator:
         )
 
     def _filter_periods(
-        self, records: Sequence[FactRecord], periods: set[str]
-    ) -> list[FactRecord]:
-        filtered: list[FactRecord] = []
+        self, records: Sequence[ScalarFact], periods: set[str]
+    ) -> list[ScalarFact]:
+        filtered: list[ScalarFact] = []
         seen: set[tuple[str, str]] = set()
         for record in records:
             fiscal_period = (record.fiscal_period or "").upper()
             key = (record.end_date, fiscal_period)
             if fiscal_period not in periods:
-                continue
-            if record.value is None:
                 continue
             if key in seen:
                 continue
@@ -198,10 +200,10 @@ class ShareCountChangeCalculator:
             seen.add(key)
         return filtered
 
-    def _to_point(self, record: FactRecord) -> Optional[_ShareCountPoint]:
+    def _to_point(self, record: ScalarFact) -> Optional[_ShareCountPoint]:
         year = self._extract_year(record.end_date)
         fiscal_period = (record.fiscal_period or "").upper()
-        if year is None or not fiscal_period or record.value is None:
+        if year is None or not fiscal_period:
             return None
         return _ShareCountPoint(
             year=year,
@@ -223,7 +225,7 @@ def _compute_share_count_cagr(
     *,
     metric_id: str,
     symbol: str,
-    repo: FinancialFactsRepository,
+    repo: RegionFactsRepository,
     exact_years: int,
 ) -> Optional[MetricResult]:
     snapshot = ShareCountChangeCalculator().compute_pair_for_years(
@@ -253,7 +255,7 @@ class ShareCountCAGR5YMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         return _compute_share_count_cagr(
             metric_id=self.id,
@@ -271,7 +273,7 @@ class ShareCountCAGR10YMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         return _compute_share_count_cagr(
             metric_id=self.id,
@@ -289,7 +291,7 @@ class Shares10YPctChangeMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = ShareCountChangeCalculator().compute_pair(symbol, repo)
         if snapshot is None:

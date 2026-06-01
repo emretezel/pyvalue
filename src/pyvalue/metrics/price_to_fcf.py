@@ -10,15 +10,18 @@ from typing import Iterable, Optional, Sequence
 
 import logging
 
+from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
     SHARE_COUNT_CONCEPTS,
     is_recent_fact,
     market_cap_money,
-    normalize_metric_record,
+    require_metric_money,
     require_metric_ticker_currency,
+    sum_money,
 )
-from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
+from pyvalue.money import Money
+from pyvalue.storage import MarketDataRepository
 
 OPERATING_CASH_FLOW_CONCEPTS = ["NetCashProvidedByUsedInOperatingActivities"]
 CAPEX_CONCEPTS = ["CapitalExpenditures"]
@@ -28,10 +31,9 @@ LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
-class _TTMResult:
-    total: float
+class _MoneyResult:
+    money: Money
     as_of: str
-    currency: Optional[str]
 
 
 @dataclass
@@ -47,14 +49,17 @@ class PriceToFCFMetric:
     def compute(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
-        fcf_result = self._compute_ttm_fcf(symbol, repo)
+        target_currency = require_metric_ticker_currency(
+            symbol, repo, metric_id=self.id, input_name="FreeCashFlow"
+        )
+        fcf_result = self._compute_ttm_fcf(symbol, repo, target_currency)
         if fcf_result is None:
             LOGGER.warning("price_to_fcf: missing TTM FCF for %s", symbol)
             return None
-        if fcf_result.total <= 0:
+        if fcf_result.money.amount <= 0:
             LOGGER.warning("price_to_fcf: non-positive TTM FCF for %s", symbol)
             return None
         cap = market_cap_money(
@@ -62,14 +67,16 @@ class PriceToFCFMetric:
             repo=repo,
             market_repo=market_repo,
             metric_id=self.id,
-            target_currency=fcf_result.currency,
+            target_currency=target_currency,
             contexts=(market_repo, repo),
         )
         if cap is None:
             LOGGER.warning("price_to_fcf: missing market cap for %s", symbol)
             return None
 
-        ratio = cap.money.amount / fcf_result.total
+        # Market cap and FCF are both in the listing currency, so the multiple
+        # (Money / Money) is currency-safe.
+        ratio = cap.money / fcf_result.money
         return MetricResult(
             symbol=symbol, metric_id=self.id, value=ratio, as_of=fcf_result.as_of
         )
@@ -77,36 +84,34 @@ class PriceToFCFMetric:
     def _compute_ttm_fcf(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
-    ) -> Optional[_TTMResult]:
-        operating = self._ttm_sum(symbol, repo, OPERATING_CASH_FLOW_CONCEPTS)
-        capex = self._ttm_sum(symbol, repo, CAPEX_CONCEPTS)
+        repo: RegionFactsRepository,
+        target_currency: str,
+    ) -> Optional[_MoneyResult]:
+        operating = self._ttm_sum(
+            symbol, repo, OPERATING_CASH_FLOW_CONCEPTS, target_currency
+        )
         if operating is None:
             return None
+        capex = self._ttm_sum(symbol, repo, CAPEX_CONCEPTS, target_currency)
         if capex is None:
             LOGGER.warning(
                 "price_to_fcf: missing/stale capex for %s; assuming zero", symbol
             )
-            capex_total = 0.0
-            capex_as_of = operating.as_of
-            capex_currency = None
-        else:
-            capex_total = capex.total
-            capex_as_of = capex.as_of
-            capex_currency = capex.currency
-        fcf_total = operating.total - capex_total
-        as_of = operating.as_of if operating.as_of >= capex_as_of else capex_as_of
-        currency = operating.currency or capex_currency
-        return _TTMResult(total=fcf_total, as_of=as_of, currency=currency)
+            return operating
+        return _MoneyResult(
+            money=operating.money - capex.money,
+            as_of=max(operating.as_of, capex.as_of),
+        )
 
     def _ttm_sum(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         concepts: Sequence[str],
-    ) -> Optional[_TTMResult]:
+        target_currency: str,
+    ) -> Optional[_MoneyResult]:
         for concept in concepts:
-            records = repo.facts_for_concept(symbol, concept)
+            records = repo.monetary_facts_for_concept(symbol, concept)
             quarterly = self._filter_quarterly(records)
             if len(quarterly) < 4:
                 LOGGER.warning(
@@ -125,13 +130,22 @@ class PriceToFCFMetric:
                     symbol,
                 )
                 continue
-            normalized, currency = self._normalize_quarterly(symbol, repo, values)
-            total = sum(normalized)
-            return _TTMResult(total=total, as_of=values[0].end_date, currency=currency)
+            monies = [
+                require_metric_money(
+                    record.money,
+                    target_currency=target_currency,
+                    metric_id=self.id,
+                    symbol=symbol,
+                    input_name="FreeCashFlow",
+                    as_of=record.end_date,
+                )
+                for record in values
+            ]
+            return _MoneyResult(money=sum_money(monies), as_of=values[0].end_date)
         return None
 
-    def _filter_quarterly(self, records: Iterable[FactRecord]) -> list[FactRecord]:
-        filtered: list[FactRecord] = []
+    def _filter_quarterly(self, records: Iterable[MonetaryFact]) -> list[MonetaryFact]:
+        filtered: list[MonetaryFact] = []
         seen_end_dates: set[str] = set()
         for record in records:
             period = (record.fiscal_period or "").upper()
@@ -139,39 +153,9 @@ class PriceToFCFMetric:
                 continue
             if record.end_date in seen_end_dates:
                 continue
-            if record.value is None:
-                continue
             filtered.append(record)
             seen_end_dates.add(record.end_date)
         return filtered
-
-    def _normalize_quarterly(
-        self,
-        symbol: str,
-        repo: FinancialFactsRepository,
-        records: list[FactRecord],
-    ) -> tuple[list[float], str]:
-        """Normalize subunit records and assert listing-currency consistency."""
-
-        currency = require_metric_ticker_currency(
-            symbol,
-            repo,
-            metric_id=self.id,
-            input_name="FreeCashFlow",
-            as_of=records[0].end_date if records else None,
-            candidate_currencies=[record.currency for record in records],
-        )
-        normalized: list[float] = []
-        for record in records:
-            value, _ = normalize_metric_record(
-                record,
-                metric_id=self.id,
-                symbol=symbol,
-                expected_currency=currency,
-                contexts=(repo,),
-            )
-            normalized.append(value)
-        return normalized, currency
 
 
 __all__ = ["PriceToFCFMetric"]

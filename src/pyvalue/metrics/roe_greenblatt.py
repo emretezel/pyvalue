@@ -10,13 +10,15 @@ from typing import List, Optional
 
 import logging
 
+from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
     MAX_FY_FACT_AGE_DAYS,
     has_recent_fact,
-    normalize_metric_record,
+    require_metric_money,
+    require_metric_ticker_currency,
 )
-from pyvalue.storage import FactRecord, FinancialFactsRepository
+from pyvalue.money import Money
 
 NET_INCOME_CONCEPTS = ["NetIncomeLossAvailableToCommonStockholdersBasic"]
 EQUITY_CONCEPTS = ["CommonStockholdersEquity"]
@@ -30,7 +32,7 @@ class ROEGreenblattMetric:
     required_concepts = tuple(NET_INCOME_CONCEPTS + EQUITY_CONCEPTS)
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         income_records = self._net_income_history(symbol, repo)
         if len(income_records) < 2:
@@ -50,13 +52,18 @@ class ROEGreenblattMetric:
         ):
             LOGGER.warning("roe_greenblatt: no recent FY equity fact for %s", symbol)
             return None
-        equity_map = {}
+
+        target_currency = require_metric_ticker_currency(
+            symbol, repo, metric_id=self.id
+        )
+
+        equity_map: dict[int, MonetaryFact] = {}
         for rec in equity_records:
             year = self._year_from_record(rec)
             if year is None:
                 continue
             equity_map[year] = rec
-        income_map = {}
+        income_map: dict[int, MonetaryFact] = {}
         for rec in income_records:
             year = self._year_from_record(rec)
             if year is None:
@@ -70,36 +77,14 @@ class ROEGreenblattMetric:
             equity_prev = equity_map.get(year - 1)
             if equity_now is None or equity_prev is None:
                 continue
-            if (
-                income.value is None
-                or equity_now.value is None
-                or equity_prev.value is None
-            ):
+            avg_equity = (
+                self._money(equity_now, target_currency, symbol)
+                + self._money(equity_prev, target_currency, symbol)
+            ) / 2
+            if avg_equity.amount == 0:
                 continue
-            equity_now_value, equity_currency = normalize_metric_record(
-                equity_now,
-                metric_id=self.id,
-                symbol=symbol,
-                contexts=(repo,),
-            )
-            equity_prev_value, _ = normalize_metric_record(
-                equity_prev,
-                metric_id=self.id,
-                symbol=symbol,
-                expected_currency=equity_currency,
-                contexts=(repo,),
-            )
-            avg_equity = (equity_now_value + equity_prev_value) / 2
-            if avg_equity == 0:
-                continue
-            income_value, _ = normalize_metric_record(
-                income,
-                metric_id=self.id,
-                symbol=symbol,
-                expected_currency=equity_currency,
-                contexts=(repo,),
-            )
-            roe_values.append(income_value / avg_equity)
+            income_money = self._money(income, target_currency, symbol)
+            roe_values.append(income_money / avg_equity)
             if len(roe_values) == 5:
                 break
         if not roe_values:
@@ -118,22 +103,32 @@ class ROEGreenblattMetric:
         )
 
     def _net_income_history(
-        self, symbol: str, repo: FinancialFactsRepository
-    ) -> List[FactRecord]:
-        return repo.facts_for_concept(
+        self, symbol: str, repo: RegionFactsRepository
+    ) -> List[MonetaryFact]:
+        return repo.monetary_facts_for_concept(
             symbol,
             "NetIncomeLossAvailableToCommonStockholdersBasic",
             fiscal_period="FY",
         )
 
     def _equity_history(
-        self, symbol: str, repo: FinancialFactsRepository
-    ) -> List[FactRecord]:
-        return repo.facts_for_concept(
+        self, symbol: str, repo: RegionFactsRepository
+    ) -> List[MonetaryFact]:
+        return repo.monetary_facts_for_concept(
             symbol, "CommonStockholdersEquity", fiscal_period="FY"
         )
 
-    def _year_from_record(self, record: FactRecord) -> Optional[int]:
+    def _money(self, fact: MonetaryFact, target_currency: str, symbol: str) -> Money:
+        return require_metric_money(
+            fact.money,
+            target_currency=target_currency,
+            metric_id=self.id,
+            symbol=symbol,
+            input_name=fact.concept,
+            as_of=fact.end_date,
+        )
+
+    def _year_from_record(self, record: MonetaryFact) -> Optional[int]:
         try:
             return int(record.end_date[:4])
         except (TypeError, ValueError):

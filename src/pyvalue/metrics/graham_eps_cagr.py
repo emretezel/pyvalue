@@ -6,28 +6,25 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import logging
 
+from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
     MAX_FY_FACT_AGE_DAYS,
     filter_unique_fy,
     has_recent_fact,
+    require_metric_money,
+    require_metric_ticker_currency,
 )
-from pyvalue.storage import FactRecord, FinancialFactsRepository
 
 EPS_CONCEPTS = ["EarningsPerShare"]
 WINDOW_YEARS = 10
 AVG_WINDOW = 3
 CAGR_YEARS = 7
 MIN_REQUIRED = WINDOW_YEARS
-
-
-def _sorted_records(records: Dict[str, FactRecord]) -> List[FactRecord]:
-    return [records[end_date] for end_date in sorted(records.keys())]
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -38,11 +35,13 @@ class GrahamEPSCAGRMetric:
     required_concepts = tuple(EPS_CONCEPTS)
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
-        records: List[FactRecord] = []
+        records: List[MonetaryFact] = []
         for concept in EPS_CONCEPTS:
-            records = repo.facts_for_concept(symbol, concept, fiscal_period="FY")
+            records = repo.monetary_facts_for_concept(
+                symbol, concept, fiscal_period="FY"
+            )
             if records:
                 break
         if len(records) < MIN_REQUIRED:
@@ -69,7 +68,29 @@ class GrahamEPSCAGRMetric:
                 len(ordered),
             )
             return None
-        cagr_value = self._compute_cagr(ordered)
+
+        # EPS is per-share money; align every year to the listing currency before
+        # the CAGR (currency cancels in the ratio, but the invariant still holds).
+        target_currency = require_metric_ticker_currency(
+            symbol,
+            repo,
+            metric_id=self.id,
+            input_name="EarningsPerShare",
+            as_of=latest_date,
+        )
+        eps_amounts = [
+            require_metric_money(
+                record.money,
+                target_currency=target_currency,
+                metric_id=self.id,
+                symbol=symbol,
+                input_name="EarningsPerShare",
+                as_of=record.end_date,
+            ).amount
+            for record in ordered
+        ]
+
+        cagr_value = self._compute_cagr(eps_amounts)
         if cagr_value is None:
             LOGGER.warning(
                 "graham_eps_cagr: could not derive CAGR value for %s", symbol
@@ -79,11 +100,11 @@ class GrahamEPSCAGRMetric:
             symbol=symbol, metric_id=self.id, value=cagr_value, as_of=latest_date
         )
 
-    def _compute_cagr(self, ordered: List[FactRecord]) -> Optional[float]:
-        eps_history = ordered[-WINDOW_YEARS:]
-        start_values = [record.value for record in eps_history[:AVG_WINDOW]]
-        end_values = [record.value for record in eps_history[-AVG_WINDOW:]]
-        if any(value is None or value <= 0 for value in start_values + end_values):
+    def _compute_cagr(self, eps_amounts: List[float]) -> Optional[float]:
+        eps_history = eps_amounts[-WINDOW_YEARS:]
+        start_values = eps_history[:AVG_WINDOW]
+        end_values = eps_history[-AVG_WINDOW:]
+        if any(value <= 0 for value in start_values + end_values):
             return None
         start_avg = sum(start_values) / AVG_WINDOW
         end_avg = sum(end_values) / AVG_WINDOW

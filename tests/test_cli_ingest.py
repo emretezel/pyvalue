@@ -9394,7 +9394,11 @@ def test_cmd_compute_metrics(tmp_path):
             ),
             make_fact(concept="StockholdersEquity", end_date=recent, value=1000),
             make_fact(
-                concept="CommonStockSharesOutstanding", end_date=recent, value=100
+                concept="CommonStockSharesOutstanding",
+                end_date=recent,
+                value=100,
+                unit_kind="count",
+                currency=None,
             ),
             make_fact(concept="Goodwill", end_date=recent, value=50),
             make_fact(
@@ -9659,6 +9663,8 @@ def test_cmd_compute_metrics_all(tmp_path):
                     end_date=end_date,
                     fiscal_period="FY",
                     value=500 + 10 * (year - (current_year - 10)),
+                    unit_kind="count",
+                    currency=None,
                 ),
                 make_fact(
                     concept="WeightedAverageNumberOfDilutedSharesOutstanding",

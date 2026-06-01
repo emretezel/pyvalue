@@ -10,9 +10,13 @@ from typing import Optional
 
 import logging
 
+from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
-from pyvalue.metrics.utils import is_recent_fact, normalize_metric_record
-from pyvalue.storage import FinancialFactsRepository
+from pyvalue.metrics.utils import (
+    is_recent_fact,
+    require_metric_money,
+    require_metric_ticker_currency,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -23,22 +27,31 @@ class LongTermDebtMetric:
     required_concepts = ("LongTermDebt",)
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
-        fact = repo.latest_fact(symbol, "LongTermDebt")
+        fact = repo.latest_monetary_fact(symbol, "LongTermDebt")
         if fact is not None and is_recent_fact(fact):
-            value, currency = normalize_metric_record(
-                fact,
+            target_currency = require_metric_ticker_currency(
+                symbol,
+                repo,
+                metric_id=self.id,
+                input_name="LongTermDebt",
+                as_of=fact.end_date,
+            )
+            money = require_metric_money(
+                fact.money,
+                target_currency=target_currency,
                 metric_id=self.id,
                 symbol=symbol,
-                contexts=(repo,),
+                input_name="LongTermDebt",
+                as_of=fact.end_date,
             )
             return MetricResult.monetary(
                 symbol=symbol,
                 metric_id=self.id,
-                value=value,
+                value=money.amount,
                 as_of=fact.end_date,
-                currency=currency,
+                currency=money.currency,
             )
         LOGGER.warning("long_term_debt: no recent long-term debt fact for %s", symbol)
         return None

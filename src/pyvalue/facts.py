@@ -57,6 +57,28 @@ class RawFactSource(Protocol):
     ) -> list[FactRecord]: ...
 
 
+class FactView(Protocol):
+    """Read-only metadata surface shared by raw and kind-tagged facts.
+
+    The metric *metadata* helpers (recency, fiscal-year frame filtering,
+    quarterly selection) only ever read these provenance fields -- never the
+    amount -- so typing them against this protocol lets them accept both a raw
+    :class:`~pyvalue.storage.FactRecord` (plain attributes) and a kind-tagged
+    :class:`MonetaryFact`/:class:`ScalarFact` (properties) interchangeably.
+    Declared as read-only properties so a plain attribute *or* a ``@property``
+    satisfies it structurally.
+    """
+
+    @property
+    def end_date(self) -> str: ...
+
+    @property
+    def fiscal_period(self) -> str: ...
+
+    @property
+    def frame(self) -> Optional[str]: ...
+
+
 @dataclass(frozen=True)
 class _TypedFact:
     """Shared metadata for a kind-tagged fact.
@@ -209,26 +231,26 @@ class FactReader(Protocol):
     ) -> List[ScalarFact]: ...
 
 
-class RegionFactsRepository:
-    """Wrap a raw fact source with a stable, kind-tagged read interface.
+class TypedFactReaderMixin:
+    """Kind-tagged fact accessors implemented over a class's own raw readers.
 
-    The legacy raw readers (``latest_fact`` / ``facts_for_concept``) are retained
-    during the Phase 5 migration; the typed accessors are defined *in terms of*
-    them, so the batch-cache subclass (which overrides only the raw readers)
-    inherits correct kind-tagged behaviour for free.
+    A class that supplies :meth:`latest_fact` and :meth:`facts_for_concept`
+    gains the four typed accessors by inheriting this mixin. Both the production
+    :class:`RegionFactsRepository` and the in-memory test fact sources use it, so
+    the ``Money``-minting boundary lives in exactly one place; defining the
+    accessors *in terms of* ``self.latest_fact`` / ``self.facts_for_concept``
+    also means a subclass that overrides only the raw readers (e.g. the batch
+    cache) inherits correct kind-tagged behaviour for free.
+
+    Concrete subclasses MUST override the two raw readers; the bodies here exist
+    only to give the accessors a typed surface to call and to fail loudly if a
+    subclass forgets.
     """
 
-    def __init__(self, repo: RawFactSource) -> None:
-        self._repo = repo
+    def latest_fact(self, symbol: str, concept: str) -> Optional[FactRecord]:
+        """Return the most recent raw record for ``concept`` (subclass hook)."""
 
-    # -- raw readers (legacy; consumed by the typed accessors below) -------
-
-    def latest_fact(
-        self,
-        symbol: str,
-        concept: str,
-    ) -> Optional[FactRecord]:
-        return self._repo.latest_fact(symbol, concept)
+        raise NotImplementedError
 
     def facts_for_concept(
         self,
@@ -237,12 +259,9 @@ class RegionFactsRepository:
         fiscal_period: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> list[FactRecord]:
-        return self._repo.facts_for_concept(
-            symbol,
-            concept,
-            fiscal_period=fiscal_period,
-            limit=limit,
-        )
+        """Return raw records for ``concept`` newest-first (subclass hook)."""
+
+        raise NotImplementedError
 
     # -- kind-tagged accessors (the metric-facing read boundary) -----------
 
@@ -284,16 +303,52 @@ class RegionFactsRepository:
             )
         ]
 
+
+class RegionFactsRepository(TypedFactReaderMixin):
+    """Wrap a raw fact source with the kind-tagged read interface metrics use.
+
+    The legacy raw readers (``latest_fact`` / ``facts_for_concept``) delegate to
+    the wrapped source; the typed accessors are inherited from
+    :class:`TypedFactReaderMixin`. ``__getattr__`` proxies any other attribute
+    (e.g. ``ticker_currency``) to the wrapped source.
+    """
+
+    def __init__(self, repo: RawFactSource) -> None:
+        self._repo = repo
+
+    def latest_fact(
+        self,
+        symbol: str,
+        concept: str,
+    ) -> Optional[FactRecord]:
+        return self._repo.latest_fact(symbol, concept)
+
+    def facts_for_concept(
+        self,
+        symbol: str,
+        concept: str,
+        fiscal_period: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> list[FactRecord]:
+        return self._repo.facts_for_concept(
+            symbol,
+            concept,
+            fiscal_period=fiscal_period,
+            limit=limit,
+        )
+
     def __getattr__(self, name: str):
         return getattr(self._repo, name)
 
 
 __all__ = [
     "FactReader",
+    "FactView",
     "MonetaryFact",
     "RawFactSource",
     "RegionFactsRepository",
     "ScalarFact",
+    "TypedFactReaderMixin",
     "to_monetary_fact",
     "to_scalar_fact",
 ]

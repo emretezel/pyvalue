@@ -10,13 +10,13 @@ from typing import Optional
 
 import logging
 
+from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
     is_recent_fact,
-    normalize_metric_record,
-    resolve_metric_ticker_currency,
+    require_metric_money,
+    require_metric_ticker_currency,
 )
-from pyvalue.storage import FinancialFactsRepository
 
 LOGGER = logging.getLogger(__name__)
 
@@ -27,10 +27,10 @@ class WorkingCapitalMetric:
     required_concepts = ("AssetsCurrent", "LiabilitiesCurrent")
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
-        assets = repo.latest_fact(symbol, "AssetsCurrent")
-        liabilities = repo.latest_fact(symbol, "LiabilitiesCurrent")
+        assets = repo.latest_monetary_fact(symbol, "AssetsCurrent")
+        liabilities = repo.latest_monetary_fact(symbol, "LiabilitiesCurrent")
         if assets is None or liabilities is None:
             LOGGER.warning("working_capital: missing assets/liabilities for %s", symbol)
             return None
@@ -45,29 +45,33 @@ class WorkingCapitalMetric:
             )
             return None
         as_of = as_of_record.end_date
-        target_currency = resolve_metric_ticker_currency(
+        target_currency = require_metric_ticker_currency(
             symbol,
             repo,
-            candidate_currencies=[assets.currency, liabilities.currency],
+            metric_id=self.id,
+            as_of=as_of,
         )
-        assets_value, resolved_currency = normalize_metric_record(
-            assets,
+        assets_money = require_metric_money(
+            assets.money,
+            target_currency=target_currency,
             metric_id=self.id,
             symbol=symbol,
-            expected_currency=target_currency,
-            contexts=(repo,),
+            input_name="AssetsCurrent",
+            as_of=assets.end_date,
         )
-        liabilities_value, _ = normalize_metric_record(
-            liabilities,
+        liabilities_money = require_metric_money(
+            liabilities.money,
+            target_currency=target_currency,
             metric_id=self.id,
             symbol=symbol,
-            expected_currency=resolved_currency,
-            contexts=(repo,),
+            input_name="LiabilitiesCurrent",
+            as_of=liabilities.end_date,
         )
+        working_capital = assets_money - liabilities_money
         return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
-            value=assets_value - liabilities_value,
+            value=working_capital.amount,
             as_of=as_of,
-            currency=resolved_currency,
+            currency=working_capital.currency,
         )

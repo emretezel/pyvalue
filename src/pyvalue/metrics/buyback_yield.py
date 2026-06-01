@@ -10,6 +10,7 @@ from typing import Iterable, Optional
 
 import logging
 
+from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.share_count_change import ShareCountChangeCalculator
 from pyvalue.metrics.utils import (
@@ -17,10 +18,12 @@ from pyvalue.metrics.utils import (
     SHARE_COUNT_CONCEPTS,
     is_recent_fact,
     market_cap_money,
-    normalize_metric_record,
+    require_metric_money,
     require_metric_ticker_currency,
+    sum_money,
 )
-from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
+from pyvalue.money import Money
+from pyvalue.storage import MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
 
@@ -46,10 +49,9 @@ REQUIRED_CONCEPTS = tuple(
 
 
 @dataclass(frozen=True)
-class _TTMResult:
-    total: float
+class _MoneyResult:
+    money: Money
     as_of: str
-    currency: Optional[str]
 
 
 @dataclass
@@ -63,62 +65,66 @@ class NetBuybackYieldMetric:
     def compute(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
         numerator = self._compute_net_buybacks_ttm(symbol, repo)
         if numerator is not None:
-            market_cap = self._market_cap_denominator(
-                symbol=symbol,
+            # Market cap is resolved in the numerator's (listing) currency, so the
+            # yield (Money / Money) is currency-safe.
+            cap = market_cap_money(
+                symbol,
                 repo=repo,
                 market_repo=market_repo,
-                target_currency=numerator.currency,
+                metric_id=self.id,
+                target_currency=numerator.money.currency,
+                contexts=(repo, market_repo),
             )
-            if market_cap is not None:
+            if cap is not None:
                 return MetricResult(
                     symbol=symbol,
                     metric_id=self.id,
-                    value=numerator.total / market_cap,
+                    value=numerator.money / cap.money,
                     as_of=numerator.as_of,
                 )
 
-        fallback = self._share_count_fallback(symbol, repo)
-        if fallback is None:
+        # Fallback: net share-count change over one year (a dimensionless rate).
+        snapshot = ShareCountChangeCalculator().compute_pair_for_years(
+            symbol,
+            repo,
+            exact_years=FALLBACK_YEARS,
+            context=self.id,
+        )
+        if snapshot is None:
             return None
+        value = -((snapshot.latest.shares / snapshot.prior.shares) - 1.0)
         return MetricResult(
             symbol=symbol,
             metric_id=self.id,
-            value=fallback.total,
-            as_of=fallback.as_of,
+            value=value,
+            as_of=snapshot.as_of,
         )
 
     def _compute_net_buybacks_ttm(
-        self, symbol: str, repo: FinancialFactsRepository
-    ) -> Optional[_TTMResult]:
+        self, symbol: str, repo: RegionFactsRepository
+    ) -> Optional[_MoneyResult]:
         primary = self._ttm_sum(symbol, repo, SALE_PURCHASE_CONCEPT)
         if primary is not None:
-            return _TTMResult(
-                total=-primary.total,
-                as_of=primary.as_of,
-                currency=primary.currency,
-            )
+            # Net buybacks = -(cash from sale/purchase of stock).
+            return _MoneyResult(money=-primary.money, as_of=primary.as_of)
 
         fallback = self._ttm_sum(symbol, repo, ISSUANCE_CAPITAL_STOCK_CONCEPT)
         if fallback is not None:
-            return _TTMResult(
-                total=-fallback.total,
-                as_of=fallback.as_of,
-                currency=fallback.currency,
-            )
+            return _MoneyResult(money=-fallback.money, as_of=fallback.as_of)
         return None
 
     def _ttm_sum(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         concept: str,
-    ) -> Optional[_TTMResult]:
-        records = repo.facts_for_concept(symbol, concept)
+    ) -> Optional[_MoneyResult]:
+        records = repo.monetary_facts_for_concept(symbol, concept)
         quarterly = self._filter_quarterly(records)
         if len(quarterly) < 4:
             LOGGER.warning(
@@ -139,50 +145,30 @@ class NetBuybackYieldMetric:
             )
             return None
 
-        normalized, currency = self._normalize_quarterly(symbol, repo, quarterly[:4])
-
-        return _TTMResult(
-            total=sum(record.value for record in normalized),
-            as_of=normalized[0].end_date,
-            currency=currency,
-        )
-
-    def _share_count_fallback(
-        self, symbol: str, repo: FinancialFactsRepository
-    ) -> Optional[_TTMResult]:
-        snapshot = ShareCountChangeCalculator().compute_pair_for_years(
+        target_currency = require_metric_ticker_currency(
             symbol,
             repo,
-            exact_years=FALLBACK_YEARS,
-            context=self.id,
-        )
-        if snapshot is None:
-            return None
-        value = -((snapshot.latest.shares / snapshot.prior.shares) - 1.0)
-        return _TTMResult(total=value, as_of=snapshot.as_of, currency=None)
-
-    def _market_cap_denominator(
-        self,
-        *,
-        symbol: str,
-        repo: FinancialFactsRepository,
-        market_repo: MarketDataRepository,
-        target_currency: Optional[str],
-    ) -> Optional[float]:
-        cap = market_cap_money(
-            symbol,
-            repo=repo,
-            market_repo=market_repo,
             metric_id=self.id,
-            target_currency=target_currency,
-            contexts=(repo, market_repo),
+            input_name="ShareRepurchases",
+            as_of=quarterly[0].end_date,
         )
-        if cap is None:
-            return None
-        return cap.money.amount
+        total = sum_money(
+            [
+                require_metric_money(
+                    record.money,
+                    target_currency=target_currency,
+                    metric_id=self.id,
+                    symbol=symbol,
+                    input_name="ShareRepurchases",
+                    as_of=record.end_date,
+                )
+                for record in quarterly[:4]
+            ]
+        )
+        return _MoneyResult(money=total, as_of=quarterly[0].end_date)
 
-    def _filter_quarterly(self, records: Iterable[FactRecord]) -> list[FactRecord]:
-        filtered: list[FactRecord] = []
+    def _filter_quarterly(self, records: Iterable[MonetaryFact]) -> list[MonetaryFact]:
+        filtered: list[MonetaryFact] = []
         seen_end_dates: set[str] = set()
         for record in records:
             period = (record.fiscal_period or "").upper()
@@ -190,53 +176,9 @@ class NetBuybackYieldMetric:
                 continue
             if record.end_date in seen_end_dates:
                 continue
-            if record.value is None:
-                continue
             filtered.append(record)
             seen_end_dates.add(record.end_date)
         return filtered
-
-    def _normalize_quarterly(
-        self,
-        symbol: str,
-        repo: FinancialFactsRepository,
-        records: list[FactRecord],
-    ) -> tuple[list[FactRecord], str]:
-        currency = require_metric_ticker_currency(
-            symbol,
-            repo,
-            metric_id=self.id,
-            input_name="ShareRepurchases",
-            as_of=records[0].end_date if records else None,
-            candidate_currencies=[record.currency for record in records],
-        )
-        normalized: list[FactRecord] = []
-        for record in records:
-            value, _ = normalize_metric_record(
-                record,
-                metric_id=self.id,
-                symbol=symbol,
-                expected_currency=currency,
-                contexts=(repo,),
-            )
-            normalized.append(
-                FactRecord(
-                    symbol=record.symbol,
-                    cik=record.cik,
-                    concept=record.concept,
-                    fiscal_period=record.fiscal_period,
-                    end_date=record.end_date,
-                    unit_kind=record.unit_kind,
-                    value=value,
-                    accn=record.accn,
-                    filed=record.filed,
-                    frame=record.frame,
-                    start_date=getattr(record, "start_date", None),
-                    accounting_standard=getattr(record, "accounting_standard", None),
-                    currency=currency,
-                )
-            )
-        return normalized, currency
 
 
 __all__ = ["NetBuybackYieldMetric"]

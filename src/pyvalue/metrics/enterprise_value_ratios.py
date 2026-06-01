@@ -21,7 +21,8 @@ from pyvalue.metrics.utils import (
     normalize_metric_record,
     resolve_metric_ticker_currency,
 )
-from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
+from pyvalue.facts import RegionFactsRepository
+from pyvalue.storage import FactRecord, MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
 
@@ -68,12 +69,12 @@ class EnterpriseValueRatioCalculator:
     """Shared numerator calculators for EV-based valuation metrics."""
 
     def compute_ttm_ebit(
-        self, symbol: str, repo: FinancialFactsRepository, *, context: str
+        self, symbol: str, repo: RegionFactsRepository, *, context: str
     ) -> Optional[_TTMResult]:
         return self._compute_ttm_amount(symbol, repo, EBIT_CONCEPT, context=context)
 
     def compute_ttm_fcf(
-        self, symbol: str, repo: FinancialFactsRepository, *, context: str
+        self, symbol: str, repo: RegionFactsRepository, *, context: str
     ) -> Optional[_TTMResult]:
         operating = self._compute_ttm_amount(
             symbol,
@@ -108,7 +109,7 @@ class EnterpriseValueRatioCalculator:
         )
 
     def compute_ttm_ebitda(
-        self, symbol: str, repo: FinancialFactsRepository, *, context: str
+        self, symbol: str, repo: RegionFactsRepository, *, context: str
     ) -> Optional[_TTMResult]:
         ebit_records = self._filter_quarterly(
             repo.facts_for_concept(symbol, EBIT_CONCEPT)
@@ -176,7 +177,7 @@ class EnterpriseValueRatioCalculator:
     def _compute_ttm_amount(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         concept: str,
         *,
         context: str,
@@ -247,7 +248,7 @@ class EnterpriseValueRatioCalculator:
         record: FactRecord,
         *,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         context: str,
         expected_currency: Optional[str],
     ) -> tuple[float, str]:
@@ -272,7 +273,7 @@ class EBITYieldEVMetric:
     def compute(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
         numerator = EnterpriseValueRatioCalculator().compute_ttm_ebit(
@@ -311,7 +312,7 @@ class FCFYieldEVMetric:
     def compute(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
         numerator = EnterpriseValueRatioCalculator().compute_ttm_fcf(
@@ -350,7 +351,7 @@ class EVToEBITMetric:
     def compute(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
         numerator = EnterpriseValueRatioCalculator().compute_ttm_ebit(
@@ -392,7 +393,7 @@ class EVToEBITDAMetric:
     def compute(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
         numerator = EnterpriseValueRatioCalculator().compute_ttm_ebitda(

@@ -5,6 +5,7 @@ Author: Emre Tezel
 
 from datetime import date, timedelta
 
+from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics.long_term_debt import LongTermDebtMetric
 from pyvalue.normalization import SECFactsNormalizer
 from pyvalue.storage import (
@@ -86,7 +87,7 @@ def test_long_term_debt_metric_uses_other_long_term_debt_fallback(tmp_path):
     repo.replace_facts("TEST.US", records)
 
     metric = LongTermDebtMetric()
-    result = metric.compute("TEST.US", repo)
+    result = metric.compute("TEST.US", RegionFactsRepository(repo))
 
     assert result is not None
     assert result.value == 340.0
@@ -127,7 +128,7 @@ def test_long_term_debt_metric_uses_lease_including_current_fallback(tmp_path):
     repo.replace_facts("TEST.US", records)
 
     metric = LongTermDebtMetric()
-    result = metric.compute("TEST.US", repo)
+    result = metric.compute("TEST.US", RegionFactsRepository(repo))
 
     assert result is not None
     assert result.value == 510.0
@@ -181,7 +182,7 @@ def test_long_term_debt_metric_uses_operating_lease_noncurrent_fallback(tmp_path
     repo.replace_facts("TEST.US", records)
 
     metric = LongTermDebtMetric()
-    result = metric.compute("TEST.US", repo)
+    result = metric.compute("TEST.US", RegionFactsRepository(repo))
 
     assert result is not None
     assert result.value == 64.0
