@@ -917,7 +917,12 @@ def test_financial_facts_repository_initialize_schema_ignores_locked_perf_index(
     monkeypatch, tmp_path
 ):
     repo = FinancialFactsRepository(tmp_path / "locked-index.db")
-    monkeypatch.setattr(storage, "apply_migrations", lambda db_path: None)
+    # ``initialize_schema`` calls ``apply_migrations`` bound in the
+    # ``financial_facts`` submodule (storage was split into a package), so patch
+    # it there rather than on the package facade.
+    monkeypatch.setattr(
+        storage.financial_facts, "apply_migrations", lambda db_path: None
+    )
     monkeypatch.setattr(repo._security_repo(), "initialize_schema", lambda: None)
 
     class FakeConn:
