@@ -7752,7 +7752,10 @@ criteria:
         config_path=str(screen_path),
         provider="EODHD",
         database=str(db_path),
-        output_csv=None,
+        # Write under tmp_path: cmd_run_screen_bulk falls back to the default
+        # data/screen_results_*.csv path when output_csv is None, which would
+        # leave an artifact in the repo's data/ directory.
+        output_csv=str(tmp_path / "screen_results.csv"),
         exchange_code="LSE",
     )
 
