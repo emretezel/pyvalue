@@ -11,19 +11,24 @@ from typing import Optional, Sequence
 
 import logging
 
+from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.nwc import DeltaNWCMaintMetric
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     MAX_FY_FACT_AGE_DAYS,
     is_recent_fact,
-    normalize_metric_record,
+    require_metric_amount_money,
+    require_metric_money,
     require_metric_ticker_currency,
+    sum_money,
 )
-from pyvalue.facts import RegionFactsRepository
-from pyvalue.storage import FactRecord
+from pyvalue.money import Money
 
 LOGGER = logging.getLogger(__name__)
+
+TTM_CONTEXT = "oe_equity_ttm"
+FIVE_YEAR_CONTEXT = "oe_equity_5y_avg"
 
 NI_PRIMARY_CONCEPT = "NetIncomeLoss"
 NI_FALLBACK_CONCEPT = "NetIncomeLossAvailableToCommonStockholdersBasic"
@@ -61,32 +66,40 @@ REQUIRED_CONCEPTS = tuple(
 
 @dataclass(frozen=True)
 class OwnerEarningsEquitySnapshot:
-    value: float
+    money: Money
     as_of: str
-    currency: Optional[str]
 
 
 @dataclass
 class _AmountResult:
-    total: float
+    money: Money
     as_of: str
-    currency: Optional[str]
 
 
 @dataclass
 class _FYPoint:
-    value: float
+    money: Money
     as_of: str
-    currency: Optional[str]
 
 
 class OwnerEarningsEquityCalculator:
-    """Shared calculator for owner earnings equity numerators."""
+    """Shared calculator for owner earnings equity numerators.
+
+    Every monetary input -- net income, D&A, maintenance capex and the
+    maintenance NWC change -- is aligned to the listing currency through the
+    shared Money seam before any arithmetic, so owner earnings is single-currency
+    by build and there is no per-input currency reconciliation to do.
+    """
 
     def compute_ttm(
         self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[OwnerEarningsEquitySnapshot]:
-        delta_nwc_maint = self._compute_delta_nwc_maint(symbol, repo)
+        target_currency = require_metric_ticker_currency(
+            symbol, repo, metric_id=TTM_CONTEXT
+        )
+        delta_nwc_maint = self._delta_nwc_maint_money(
+            symbol, repo, target_currency=target_currency, context=TTM_CONTEXT
+        )
         if delta_nwc_maint is None:
             LOGGER.warning("oe_equity_ttm: missing delta_nwc_maint for %s", symbol)
             return None
@@ -95,8 +108,8 @@ class OwnerEarningsEquityCalculator:
             symbol,
             repo,
             NI_CONCEPTS,
-            context="oe_equity_ttm",
-            absolute=False,
+            target_currency=target_currency,
+            context=TTM_CONTEXT,
         )
         if ni is None:
             LOGGER.warning("oe_equity_ttm: missing TTM net income for %s", symbol)
@@ -106,45 +119,39 @@ class OwnerEarningsEquityCalculator:
             symbol,
             repo,
             DA_PRIMARY_CONCEPTS,
-            context="oe_equity_ttm",
-            absolute=False,
+            target_currency=target_currency,
+            context=TTM_CONTEXT,
         )
         if da is None:
             da = self._compute_ttm_amount(
                 symbol,
                 repo,
                 DA_FALLBACK_CONCEPTS,
-                context="oe_equity_ttm",
-                absolute=False,
+                target_currency=target_currency,
+                context=TTM_CONTEXT,
             )
 
-        mcapex = self._compute_mcapex_ttm(symbol, repo)
+        mcapex = self._compute_mcapex_ttm(symbol, repo, target_currency=target_currency)
         if mcapex is None:
             LOGGER.warning("oe_equity_ttm: missing TTM mcapex inputs for %s", symbol)
             return None
 
-        currency = self._combine_currency(
-            [ni.currency, da.currency if da else None, mcapex.currency]
-        )
-        if currency is None and any(
-            code is not None
-            for code in (ni.currency, da.currency if da else None, mcapex.currency)
-        ):
-            LOGGER.warning("oe_equity_ttm: currency mismatch for %s", symbol)
-            return None
-
-        da_total = da.total if da is not None else 0.0
+        da_money = da.money if da is not None else Money.of(0.0, target_currency)
         as_of_dates = [ni.as_of, mcapex.as_of, delta_nwc_maint.as_of]
         if da is not None:
             as_of_dates.append(da.as_of)
-        as_of = max(as_of_dates)
-        value = ni.total + da_total - mcapex.total - delta_nwc_maint.value
-        return OwnerEarningsEquitySnapshot(value=value, as_of=as_of, currency=currency)
+        value = ni.money + da_money - mcapex.money - delta_nwc_maint.money
+        return OwnerEarningsEquitySnapshot(money=value, as_of=max(as_of_dates))
 
     def compute_5y_average(
         self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[OwnerEarningsEquitySnapshot]:
-        delta_nwc_maint = self._compute_delta_nwc_maint(symbol, repo)
+        target_currency = require_metric_ticker_currency(
+            symbol, repo, metric_id=FIVE_YEAR_CONTEXT
+        )
+        delta_nwc_maint = self._delta_nwc_maint_money(
+            symbol, repo, target_currency=target_currency, context=FIVE_YEAR_CONTEXT
+        )
         if delta_nwc_maint is None:
             LOGGER.warning("oe_equity_5y_avg: missing delta_nwc_maint for %s", symbol)
             return None
@@ -153,17 +160,19 @@ class OwnerEarningsEquityCalculator:
             symbol,
             repo,
             NI_CONCEPTS,
-            context="oe_equity_5y_avg",
-            absolute=False,
+            target_currency=target_currency,
+            context=FIVE_YEAR_CONTEXT,
         )
         da_map = self._build_fy_amount_map(
             symbol,
             repo,
             DA_PRIMARY_CONCEPTS + DA_FALLBACK_CONCEPTS,
-            context="oe_equity_5y_avg",
-            absolute=False,
+            target_currency=target_currency,
+            context=FIVE_YEAR_CONTEXT,
         )
-        mcapex_map = self._build_mcapex_fy_map(symbol, repo)
+        mcapex_map = self._build_mcapex_fy_map(
+            symbol, repo, target_currency=target_currency
+        )
 
         candidate_dates = sorted(
             set(ni_map.keys()).intersection(mcapex_map.keys()),
@@ -174,26 +183,9 @@ class OwnerEarningsEquityCalculator:
             ni = ni_map[end_date]
             mcapex = mcapex_map[end_date]
             da = da_map.get(end_date)
-
-            point_currency = self._combine_currency(
-                [ni.currency, da.currency if da else None, mcapex.currency]
-            )
-            if point_currency is None and any(
-                code is not None
-                for code in (ni.currency, da.currency if da else None, mcapex.currency)
-            ):
-                LOGGER.warning(
-                    "oe_equity_5y_avg: currency mismatch on %s for %s",
-                    end_date,
-                    symbol,
-                )
-                continue
-
-            point_value = ni.total + (da.total if da is not None else 0.0)
-            point_value = point_value - mcapex.total - delta_nwc_maint.value
-            points.append(
-                _FYPoint(value=point_value, as_of=end_date, currency=point_currency)
-            )
+            da_money = da.money if da is not None else Money.of(0.0, target_currency)
+            point_value = ni.money + da_money - mcapex.money - delta_nwc_maint.money
+            points.append(_FYPoint(money=point_value, as_of=end_date))
 
         if len(points) < 5:
             LOGGER.warning(
@@ -213,29 +205,33 @@ class OwnerEarningsEquityCalculator:
             return None
 
         latest_five = points[:5]
-        series_currency = self._combine_currency(
-            [point.currency for point in latest_five]
-        )
-        if series_currency is None and any(
-            point.currency is not None for point in latest_five
-        ):
-            LOGGER.warning(
-                "oe_equity_5y_avg: currency mismatch across selected FY series for %s",
-                symbol,
-            )
-            return None
-
-        average = sum(point.value for point in latest_five) / 5.0
+        average = sum_money([point.money for point in latest_five]) / 5.0
         return OwnerEarningsEquitySnapshot(
-            value=average,
+            money=average,
             as_of=latest_five[0].as_of,
-            currency=series_currency,
         )
 
-    def _compute_delta_nwc_maint(
-        self, symbol: str, repo: RegionFactsRepository
-    ) -> Optional[MetricResult]:
-        return DeltaNWCMaintMetric().compute(symbol, repo)
+    def _delta_nwc_maint_money(
+        self,
+        symbol: str,
+        repo: RegionFactsRepository,
+        *,
+        target_currency: str,
+        context: str,
+    ) -> Optional[_AmountResult]:
+        result = DeltaNWCMaintMetric().compute(symbol, repo)
+        if result is None:
+            return None
+        money = require_metric_amount_money(
+            result.value,
+            result.currency,
+            target_currency=target_currency,
+            metric_id=context,
+            symbol=symbol,
+            input_name="delta_nwc_maint",
+            as_of=result.as_of,
+        )
+        return _AmountResult(money=money, as_of=result.as_of)
 
     def _compute_ttm_amount(
         self,
@@ -243,11 +239,12 @@ class OwnerEarningsEquityCalculator:
         repo: RegionFactsRepository,
         concepts: Sequence[str],
         *,
+        target_currency: str,
         context: str,
         absolute: bool = False,
     ) -> Optional[_AmountResult]:
         for concept in concepts:
-            records = repo.facts_for_concept(symbol, concept)
+            records = repo.monetary_facts_for_concept(symbol, concept)
             quarterly = self._filter_periods(records, QUARTERLY_PERIODS)
             if len(quarterly) < 4:
                 LOGGER.warning(
@@ -267,36 +264,40 @@ class OwnerEarningsEquityCalculator:
                     symbol,
                 )
                 continue
-            normalized, currency = self._normalize_records(
-                quarterly[:4],
-                symbol=symbol,
-                repo=repo,
-                context=context,
-                input_name=concept,
-                absolute=absolute,
-            )
-            return _AmountResult(
-                total=sum(normalized),
-                as_of=quarterly[0].end_date,
-                currency=currency,
-            )
+            monies = [
+                self._money(
+                    record,
+                    target_currency=target_currency,
+                    symbol=symbol,
+                    context=context,
+                    absolute=absolute,
+                )
+                for record in quarterly[:4]
+            ]
+            return _AmountResult(money=sum_money(monies), as_of=quarterly[0].end_date)
         return None
 
     def _compute_mcapex_ttm(
-        self, symbol: str, repo: RegionFactsRepository
+        self,
+        symbol: str,
+        repo: RegionFactsRepository,
+        *,
+        target_currency: str,
     ) -> Optional[_AmountResult]:
         capex = self._compute_ttm_amount(
             symbol,
             repo,
             CAPEX_CONCEPTS,
-            context="oe_equity_ttm",
+            target_currency=target_currency,
+            context=TTM_CONTEXT,
             absolute=True,
         )
         da = self._compute_ttm_amount(
             symbol,
             repo,
             DA_PRIMARY_CONCEPTS,
-            context="oe_equity_ttm",
+            target_currency=target_currency,
+            context=TTM_CONTEXT,
             absolute=True,
         )
         if da is None:
@@ -304,12 +305,11 @@ class OwnerEarningsEquityCalculator:
                 symbol,
                 repo,
                 DA_FALLBACK_CONCEPTS,
-                context="oe_equity_ttm",
+                target_currency=target_currency,
+                context=TTM_CONTEXT,
                 absolute=True,
             )
-        return self._compute_mcapex_value(
-            capex, da, symbol=symbol, context="oe_equity_ttm"
-        )
+        return self._compute_mcapex_value(capex, da, target_currency=target_currency)
 
     def _build_fy_amount_map(
         self,
@@ -317,11 +317,19 @@ class OwnerEarningsEquityCalculator:
         repo: RegionFactsRepository,
         concepts: Sequence[str],
         *,
+        target_currency: str,
         context: str,
         absolute: bool = False,
     ) -> dict[str, _AmountResult]:
         maps = [
-            self._fy_map(symbol, repo, concept, context=context, absolute=absolute)
+            self._fy_map(
+                symbol,
+                repo,
+                concept,
+                target_currency=target_currency,
+                context=context,
+                absolute=absolute,
+            )
             for concept in concepts
         ]
         candidate_dates: set[str] = set()
@@ -337,27 +345,34 @@ class OwnerEarningsEquityCalculator:
         return merged
 
     def _build_mcapex_fy_map(
-        self, symbol: str, repo: RegionFactsRepository
+        self,
+        symbol: str,
+        repo: RegionFactsRepository,
+        *,
+        target_currency: str,
     ) -> dict[str, _AmountResult]:
         capex_map = self._fy_map(
             symbol,
             repo,
             CAPEX_CONCEPT,
-            context="oe_equity_5y_avg",
+            target_currency=target_currency,
+            context=FIVE_YEAR_CONTEXT,
             absolute=True,
         )
         da_primary_map = self._fy_map(
             symbol,
             repo,
             DA_PRIMARY_CONCEPT,
-            context="oe_equity_5y_avg",
+            target_currency=target_currency,
+            context=FIVE_YEAR_CONTEXT,
             absolute=True,
         )
         da_fallback_map = self._fy_map(
             symbol,
             repo,
             DA_FALLBACK_CONCEPT,
-            context="oe_equity_5y_avg",
+            target_currency=target_currency,
+            context=FIVE_YEAR_CONTEXT,
             absolute=True,
         )
 
@@ -372,10 +387,7 @@ class OwnerEarningsEquityCalculator:
             capex = capex_map.get(end_date)
             da = da_primary_map.get(end_date) or da_fallback_map.get(end_date)
             value = self._compute_mcapex_value(
-                capex,
-                da,
-                symbol=symbol,
-                context="oe_equity_5y_avg",
+                capex, da, target_currency=target_currency
             )
             if value is None:
                 continue
@@ -387,32 +399,21 @@ class OwnerEarningsEquityCalculator:
         capex: Optional[_AmountResult],
         da: Optional[_AmountResult],
         *,
-        symbol: str,
-        context: str,
+        target_currency: str,
     ) -> Optional[_AmountResult]:
         if capex is None and da is None:
             return None
         if capex is not None and da is not None:
-            if not self._currencies_match(capex.currency, da.currency):
-                LOGGER.warning("%s: mcapex currency mismatch for %s", context, symbol)
-                return None
+            # Maintenance capex is bounded by 1.1x D&A so a one-off growth-capex
+            # spike does not understate owner earnings.
             return _AmountResult(
-                total=min(capex.total, DA_MULTIPLIER * da.total),
+                money=min(capex.money, da.money * DA_MULTIPLIER),
                 as_of=max(capex.as_of, da.as_of),
-                currency=capex.currency or da.currency,
             )
         if capex is not None:
-            return _AmountResult(
-                total=capex.total,
-                as_of=capex.as_of,
-                currency=capex.currency,
-            )
+            return _AmountResult(money=capex.money, as_of=capex.as_of)
         assert da is not None
-        return _AmountResult(
-            total=DA_MULTIPLIER * da.total,
-            as_of=da.as_of,
-            currency=da.currency,
-        )
+        return _AmountResult(money=da.money * DA_MULTIPLIER, as_of=da.as_of)
 
     def _fy_map(
         self,
@@ -420,32 +421,30 @@ class OwnerEarningsEquityCalculator:
         repo: RegionFactsRepository,
         concept: str,
         *,
+        target_currency: str,
         context: str,
         absolute: bool = False,
     ) -> dict[str, _AmountResult]:
-        records = repo.facts_for_concept(symbol, concept, fiscal_period="FY")
+        records = repo.monetary_facts_for_concept(symbol, concept, fiscal_period="FY")
         ordered = self._filter_periods(records, FY_PERIODS)
         mapped: dict[str, _AmountResult] = {}
         for record in ordered:
-            value, currency = self._normalize_currency(
-                record,
-                symbol=symbol,
-                repo=repo,
-                context=context,
-                input_name=concept,
-                absolute=absolute,
-            )
             mapped[record.end_date] = _AmountResult(
-                total=value,
+                money=self._money(
+                    record,
+                    target_currency=target_currency,
+                    symbol=symbol,
+                    context=context,
+                    absolute=absolute,
+                ),
                 as_of=record.end_date,
-                currency=currency,
             )
         return mapped
 
     def _filter_periods(
-        self, records: Sequence[FactRecord], periods: set[str]
-    ) -> list[FactRecord]:
-        filtered: list[FactRecord] = []
+        self, records: Sequence[MonetaryFact], periods: set[str]
+    ) -> list[MonetaryFact]:
+        filtered: list[MonetaryFact] = []
         seen_end_dates: set[str] = set()
         for record in records:
             period = (record.fiscal_period or "").upper()
@@ -453,73 +452,28 @@ class OwnerEarningsEquityCalculator:
                 continue
             if record.end_date in seen_end_dates:
                 continue
-            if record.value is None:
-                continue
             filtered.append(record)
             seen_end_dates.add(record.end_date)
         return filtered
 
-    def _normalize_records(
+    def _money(
         self,
-        records: Sequence[FactRecord],
+        fact: MonetaryFact,
         *,
+        target_currency: str,
         symbol: str,
-        repo: RegionFactsRepository,
         context: str,
-        input_name: str,
         absolute: bool = False,
-    ) -> tuple[list[float], str]:
-        currency = require_metric_ticker_currency(
-            symbol,
-            repo,
-            metric_id=context,
-            input_name=input_name,
-            as_of=records[0].end_date if records else None,
-            candidate_currencies=[record.currency for record in records],
-        )
-        normalized: list[float] = []
-        for record in records:
-            value, code = self._normalize_currency(
-                record,
-                symbol=symbol,
-                repo=repo,
-                context=context,
-                input_name=input_name,
-                absolute=absolute,
-            )
-            normalized.append(value)
-            currency = code
-        return normalized, currency
-
-    def _normalize_currency(
-        self,
-        record: FactRecord,
-        *,
-        symbol: str,
-        repo: RegionFactsRepository,
-        context: str,
-        input_name: str,
-        absolute: bool = False,
-    ) -> tuple[float, str]:
-        target_currency = require_metric_ticker_currency(
-            symbol,
-            repo,
-            metric_id=context,
-            input_name=input_name,
-            as_of=record.end_date,
-            candidate_currencies=[record.currency],
-        )
-        value, code = normalize_metric_record(
-            record,
+    ) -> Money:
+        money = require_metric_money(
+            fact.money,
+            target_currency=target_currency,
             metric_id=context,
             symbol=symbol,
-            input_name=input_name,
-            expected_currency=target_currency,
-            contexts=(repo,),
+            input_name=fact.concept,
+            as_of=fact.end_date,
         )
-        if absolute:
-            value = abs(value)
-        return value, code
+        return abs(money) if absolute else money
 
     def _is_recent_as_of(self, as_of: str, *, max_age_days: int) -> bool:
         try:
@@ -527,22 +481,6 @@ class OwnerEarningsEquityCalculator:
         except ValueError:
             return False
         return end_date >= (date.today() - timedelta(days=max_age_days))
-
-    def _currencies_match(self, left: Optional[str], right: Optional[str]) -> bool:
-        if left and right:
-            return left == right
-        return True
-
-    def _combine_currency(self, values: Sequence[Optional[str]]) -> Optional[str]:
-        merged = None
-        for value in values:
-            if not value:
-                continue
-            if merged is None:
-                merged = value
-            elif merged != value:
-                return None
-        return merged
 
 
 @dataclass
@@ -561,9 +499,9 @@ class OwnerEarningsEquityTTMMetric:
         return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
-            value=snapshot.value,
+            value=snapshot.money.amount,
             as_of=snapshot.as_of,
-            currency=snapshot.currency,
+            currency=snapshot.money.currency,
         )
 
 
@@ -583,9 +521,9 @@ class OwnerEarningsEquityFiveYearAverageMetric:
         return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
-            value=snapshot.value,
+            value=snapshot.money.amount,
             as_of=snapshot.as_of,
-            currency=snapshot.currency,
+            currency=snapshot.money.currency,
         )
 
 

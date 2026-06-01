@@ -10,6 +10,7 @@ from typing import Iterable, Optional, Sequence
 
 import logging
 
+from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.enterprise_value import (
     EV_FALLBACK_REQUIRED_CONCEPTS,
@@ -18,11 +19,12 @@ from pyvalue.metrics.enterprise_value import (
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     is_recent_fact,
-    normalize_metric_record,
-    resolve_metric_ticker_currency,
+    require_metric_money,
+    require_metric_ticker_currency,
+    sum_money,
 )
-from pyvalue.facts import RegionFactsRepository
-from pyvalue.storage import FactRecord, MarketDataRepository
+from pyvalue.money import Money
+from pyvalue.storage import MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
 
@@ -60,9 +62,8 @@ EBITDA_REQUIRED_CONCEPTS = tuple(
 
 @dataclass(frozen=True)
 class _TTMResult:
-    total: float
+    money: Money
     as_of: str
-    currency: Optional[str]
 
 
 class EnterpriseValueRatioCalculator:
@@ -96,23 +97,18 @@ class EnterpriseValueRatioCalculator:
             LOGGER.warning(
                 "%s: missing/stale capex for %s; assuming zero", context, symbol
             )
-            return _TTMResult(
-                total=operating.total,
-                as_of=operating.as_of,
-                currency=operating.currency,
-            )
+            return operating
 
         return _TTMResult(
-            total=operating.total - capex.total,
+            money=operating.money - capex.money,
             as_of=max(operating.as_of, capex.as_of),
-            currency=operating.currency,
         )
 
     def compute_ttm_ebitda(
         self, symbol: str, repo: RegionFactsRepository, *, context: str
     ) -> Optional[_TTMResult]:
         ebit_records = self._filter_quarterly(
-            repo.facts_for_concept(symbol, EBIT_CONCEPT)
+            repo.monetary_facts_for_concept(symbol, EBIT_CONCEPT)
         )
         if len(ebit_records) < 4:
             LOGGER.warning("%s: need 4 quarterly EBIT records for %s", context, symbol)
@@ -127,18 +123,16 @@ class EnterpriseValueRatioCalculator:
             return None
 
         da_primary = self._quarterly_map(
-            repo.facts_for_concept(symbol, DA_PRIMARY_CONCEPT)
+            repo.monetary_facts_for_concept(symbol, DA_PRIMARY_CONCEPT)
         )
         da_fallback = self._quarterly_map(
-            repo.facts_for_concept(symbol, DA_FALLBACK_CONCEPT)
+            repo.monetary_facts_for_concept(symbol, DA_FALLBACK_CONCEPT)
         )
 
-        total = 0.0
-        currency = resolve_metric_ticker_currency(
-            symbol,
-            repo,
-            candidate_currencies=[record.currency for record in ebit_records[:4]],
+        target_currency = require_metric_ticker_currency(
+            symbol, repo, metric_id=context
         )
+        quarter_totals: list[Money] = []
         for ebit_record in ebit_records[:4]:
             da_record = da_primary.get(ebit_record.end_date) or da_fallback.get(
                 ebit_record.end_date
@@ -152,26 +146,14 @@ class EnterpriseValueRatioCalculator:
                 )
                 return None
 
-            ebit_value, _ = self._normalize_record(
-                ebit_record,
-                symbol=symbol,
-                repo=repo,
-                context=context,
-                expected_currency=currency,
+            quarter_totals.append(
+                self._money(ebit_record, target_currency, symbol, context)
+                + self._money(da_record, target_currency, symbol, context)
             )
-            da_value, _ = self._normalize_record(
-                da_record,
-                symbol=symbol,
-                repo=repo,
-                context=context,
-                expected_currency=currency,
-            )
-            total += ebit_value + da_value
 
         return _TTMResult(
-            total=total,
+            money=sum_money(quarter_totals),
             as_of=ebit_records[0].end_date,
-            currency=currency,
         )
 
     def _compute_ttm_amount(
@@ -182,7 +164,9 @@ class EnterpriseValueRatioCalculator:
         *,
         context: str,
     ) -> Optional[_TTMResult]:
-        quarterly = self._filter_quarterly(repo.facts_for_concept(symbol, concept))
+        quarterly = self._filter_quarterly(
+            repo.monetary_facts_for_concept(symbol, concept)
+        )
         if len(quarterly) < 4:
             LOGGER.warning(
                 "%s: need 4 quarterly %s records for %s, found %s",
@@ -202,30 +186,20 @@ class EnterpriseValueRatioCalculator:
             )
             return None
 
-        normalized: list[float] = []
-        currency = resolve_metric_ticker_currency(
-            symbol,
-            repo,
-            candidate_currencies=[record.currency for record in quarterly[:4]],
+        target_currency = require_metric_ticker_currency(
+            symbol, repo, metric_id=context
         )
-        for record in quarterly[:4]:
-            value, _ = self._normalize_record(
-                record,
-                symbol=symbol,
-                repo=repo,
-                context=context,
-                expected_currency=currency,
-            )
-            normalized.append(value)
-
+        monies = [
+            self._money(record, target_currency, symbol, context)
+            for record in quarterly[:4]
+        ]
         return _TTMResult(
-            total=sum(normalized),
+            money=sum_money(monies),
             as_of=quarterly[0].end_date,
-            currency=currency,
         )
 
-    def _filter_quarterly(self, records: Iterable[FactRecord]) -> list[FactRecord]:
-        filtered: list[FactRecord] = []
+    def _filter_quarterly(self, records: Iterable[MonetaryFact]) -> list[MonetaryFact]:
+        filtered: list[MonetaryFact] = []
         seen_end_dates: set[str] = set()
         for record in records:
             period = (record.fiscal_period or "").upper()
@@ -233,33 +207,27 @@ class EnterpriseValueRatioCalculator:
                 continue
             if record.end_date in seen_end_dates:
                 continue
-            if record.value is None:
-                continue
             filtered.append(record)
             seen_end_dates.add(record.end_date)
         filtered.sort(key=lambda record: record.end_date, reverse=True)
         return filtered
 
-    def _quarterly_map(self, records: Sequence[FactRecord]) -> dict[str, FactRecord]:
+    def _quarterly_map(
+        self, records: Sequence[MonetaryFact]
+    ) -> dict[str, MonetaryFact]:
         return {record.end_date: record for record in self._filter_quarterly(records)}
 
-    def _normalize_record(
-        self,
-        record: FactRecord,
-        *,
-        symbol: str,
-        repo: RegionFactsRepository,
-        context: str,
-        expected_currency: Optional[str],
-    ) -> tuple[float, str]:
-        normalized_value, normalized_currency = normalize_metric_record(
-            record,
+    def _money(
+        self, fact: MonetaryFact, target_currency: str, symbol: str, context: str
+    ) -> Money:
+        return require_metric_money(
+            fact.money,
+            target_currency=target_currency,
             metric_id=context,
             symbol=symbol,
-            expected_currency=expected_currency,
-            contexts=(repo,),
+            input_name=fact.concept,
+            as_of=fact.end_date,
         )
-        return normalized_value, normalized_currency
 
 
 @dataclass
@@ -287,7 +255,7 @@ class EBITYieldEVMetric:
             symbol=symbol,
             repo=repo,
             market_repo=market_repo,
-            target_currency=numerator.currency,
+            target_currency=numerator.money.currency,
             context=self.id,
         )
         if enterprise_value is None:
@@ -296,7 +264,7 @@ class EBITYieldEVMetric:
         return MetricResult(
             symbol=symbol,
             metric_id=self.id,
-            value=numerator.total / enterprise_value,
+            value=numerator.money / enterprise_value,
             as_of=numerator.as_of,
         )
 
@@ -326,7 +294,7 @@ class FCFYieldEVMetric:
             symbol=symbol,
             repo=repo,
             market_repo=market_repo,
-            target_currency=numerator.currency,
+            target_currency=numerator.money.currency,
             context=self.id,
         )
         if enterprise_value is None:
@@ -335,7 +303,7 @@ class FCFYieldEVMetric:
         return MetricResult(
             symbol=symbol,
             metric_id=self.id,
-            value=numerator.total / enterprise_value,
+            value=numerator.money / enterprise_value,
             as_of=numerator.as_of,
         )
 
@@ -360,7 +328,7 @@ class EVToEBITMetric:
         if numerator is None:
             LOGGER.warning("%s: missing denominator EBIT for %s", self.id, symbol)
             return None
-        if numerator.total <= 0:
+        if numerator.money.amount <= 0:
             LOGGER.warning("%s: non-positive EBIT for %s", self.id, symbol)
             return None
 
@@ -368,7 +336,7 @@ class EVToEBITMetric:
             symbol=symbol,
             repo=repo,
             market_repo=market_repo,
-            target_currency=numerator.currency,
+            target_currency=numerator.money.currency,
             context=self.id,
         )
         if enterprise_value is None:
@@ -377,7 +345,7 @@ class EVToEBITMetric:
         return MetricResult(
             symbol=symbol,
             metric_id=self.id,
-            value=enterprise_value / numerator.total,
+            value=enterprise_value / numerator.money,
             as_of=numerator.as_of,
         )
 
@@ -402,7 +370,7 @@ class EVToEBITDAMetric:
         if numerator is None:
             LOGGER.warning("%s: missing denominator EBITDA for %s", self.id, symbol)
             return None
-        if numerator.total <= 0:
+        if numerator.money.amount <= 0:
             LOGGER.warning("%s: non-positive EBITDA for %s", self.id, symbol)
             return None
 
@@ -410,7 +378,7 @@ class EVToEBITDAMetric:
             symbol=symbol,
             repo=repo,
             market_repo=market_repo,
-            target_currency=numerator.currency,
+            target_currency=numerator.money.currency,
             context=self.id,
         )
         if enterprise_value is None:
@@ -419,7 +387,7 @@ class EVToEBITDAMetric:
         return MetricResult(
             symbol=symbol,
             metric_id=self.id,
-            value=enterprise_value / numerator.total,
+            value=enterprise_value / numerator.money,
             as_of=numerator.as_of,
         )
 

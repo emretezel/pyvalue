@@ -168,9 +168,16 @@ EODHD_TARGET_CONCEPTS = {
     concept for statement in EODHD_STATEMENT_FIELDS.values() for concept in statement
 } | EODHD_EXTRA_CONCEPTS
 EODHD_DERIVED_OVERRIDE_CONCEPTS = ("CommonStockholdersEquity",)
+# Share *counts*: stored as ``unit_kind='count'`` with NULL currency (a share
+# count is a quantity, not money). This covers both the outstanding-share
+# concepts and the income-statement weighted-average share counts -- the latter
+# would otherwise fall through to the monetary branch and be mislabeled money
+# with a currency (they feed per-share denominators, e.g. fcf_per_share_cagr_10y).
 SHARE_FACT_CONCEPTS = {
     "CommonStockSharesOutstanding",
     "EntityCommonStockSharesOutstanding",
+    "WeightedAverageNumberOfDilutedSharesOutstanding",
+    "WeightedAverageNumberOfSharesOutstandingBasic",
 }
 LOGGER = logging.getLogger(__name__)
 

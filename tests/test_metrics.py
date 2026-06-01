@@ -167,13 +167,15 @@ class _GBPTickerCurrencyRepo(_TickerCurrencyRepo):
     _ticker_currency = "GBP"
 
 
-# Share-count concepts read through the *scalar* boundary by already-migrated
-# metrics. The weighted-average share concepts are intentionally absent until
-# profitability_returns_growth migrates: its un-migrated body still reads them
-# through the monetary path, which requires a currency.
+# Share-count concepts read through the *scalar* boundary (a count is a quantity,
+# not money, so currency=None). The EODHD normalizer tags all of these
+# ``unit_kind='count'``, including the income-statement weighted-average share
+# counts, which ``fcf_per_share_cagr_10y`` reads via the scalar accessor.
 _COUNT_CONCEPTS = {
     "CommonStockSharesOutstanding",
     "EntityCommonStockSharesOutstanding",
+    "WeightedAverageNumberOfDilutedSharesOutstanding",
+    "WeightedAverageNumberOfSharesOutstandingBasic",
 }
 
 
@@ -12592,11 +12594,9 @@ def test_fcf_per_share_cagr_10y_metric_computes_happy_path():
                     concept="WeightedAverageNumberOfDilutedSharesOutstanding",
                     fiscal_period="FY",
                     end_date=f"{latest_year}-09-30",
-                    # Shares default to the monetary-USD fact shape: this metric
-                    # still currency-validates the per-share denominator against
-                    # the ticker currency (the share-as-count model lands in the
-                    # Phase 5 Money rework). Previously this currency was derived
-                    # from unit="USD"; it is now explicit via the fact() default.
+                    # Diluted shares are a count fact (unit_kind="count",
+                    # currency=None) via the fact() default; the metric reads them
+                    # through the scalar boundary and divides FCF by the count.
                     value=10.0,
                 ),
                 fact(
@@ -12604,11 +12604,9 @@ def test_fcf_per_share_cagr_10y_metric_computes_happy_path():
                     concept="WeightedAverageNumberOfDilutedSharesOutstanding",
                     fiscal_period="FY",
                     end_date=f"{latest_year - 10}-09-30",
-                    # Shares default to the monetary-USD fact shape: this metric
-                    # still currency-validates the per-share denominator against
-                    # the ticker currency (the share-as-count model lands in the
-                    # Phase 5 Money rework). Previously this currency was derived
-                    # from unit="USD"; it is now explicit via the fact() default.
+                    # Diluted shares are a count fact (unit_kind="count",
+                    # currency=None) via the fact() default; the metric reads them
+                    # through the scalar boundary and divides FCF by the count.
                     value=10.0,
                 ),
             ],

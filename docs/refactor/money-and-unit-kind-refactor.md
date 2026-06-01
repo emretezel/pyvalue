@@ -62,14 +62,32 @@ way a monetary value reaches metric arithmetic. The design below was agreed with
 author before implementation; it supersedes the original plan's "wrap each input in
 `Money` at the call site" sketch, which left the bare-float magnitude reachable.
 
-> **5a progress — foundation landed in the working tree (pending review).**
-> `src/pyvalue/facts.py` now defines `MonetaryFact` / `ScalarFact` (over a shared
+> **5a — full sweep landed in the working tree (pending review).**
+> `src/pyvalue/facts.py` defines `MonetaryFact` / `ScalarFact` (over a shared
 > `_TypedFact`), the `to_monetary_fact` / `to_scalar_fact` mappers, the `FactReader`
-> and `RawFactSource` protocols, and the four typed accessors on
-> `RegionFactsRepository`. `tests/test_facts.py` (12 tests) covers minting,
-> per-share-is-money, subunit collapse, wrong-kind raises, and the currency-less drop.
-> Gate green: ruff, mypy (93 files), 845 pytest. **Next:** sweep the 36 metric files
-> onto the typed accessors + `Money` arithmetic (task #8).
+> / `RawFactSource` protocols, the `TypedFactReaderMixin` (four typed accessors) and
+> `RegionFactsRepository`. **All 36 metric files** now resolve `target = listing
+> currency`, read through the typed accessors, align every input through the shared
+> `require_metric_money` / `require_metric_amount_money` seam, and do `Money`
+> arithmetic — no metric reads a bare monetary `float`. The dead assert-based helpers
+> (`normalize_metric_amount`, `normalize_metric_record`, `ensure_metric_currency`,
+> `align_metric_money_values`) have been removed from `metrics/utils.py`. Gate green:
+> ruff, mypy (93 files), 846 pytest.
+>
+> **Data-modelling fix applied (weighted-average shares → `count`).** The EODHD
+> normalizer previously tagged only `CommonStockSharesOutstanding` /
+> `EntityCommonStockSharesOutstanding` as `count`; the weighted-average share
+> concepts (`WeightedAverageNumberOfDilutedSharesOutstanding`,
+> `WeightedAverageNumberOfSharesOutstandingBasic`) fell through the else-branch and
+> were stored as **`monetary` with a currency** — a share count mislabeled as money.
+> They are now in `SHARE_FACT_CONCEPTS` (`normalization/eodhd.py`), so they normalize
+> to `unit_kind='count'` with NULL currency. `fcf_per_share_cagr_10y` reads diluted
+> shares through the **scalar** accessor and computes per-share as
+> `FCF (Money) / share-count (float)` → a per-share `Money`; the CAGR is then a
+> same-currency `Money / Money` ratio. Regression test:
+> `test_eodhd_normalizes_weighted_average_shares_as_count`. (Takes effect on the
+> next `normalise`, which rebuilds `financial_facts` from raw — no migration; the
+> schema already permits `count` + NULL currency.)
 
 **Problem this closes.** `FactRecord` (`storage.py:319`) carries `value: float` next
 to `currency: Optional[str]` and `unit_kind`, and the DAO hands that out unchanged.
@@ -117,20 +135,26 @@ The raw SQLite DAO (`FinancialFactsRepository`, `storage.py:4421`) is left
   there). `Money` is a read-time, in-memory domain type and is never persisted.
 
 **Metric rework (the locked currency rule, applied).** Each metric resolves
-**target = listing currency** (`require_metric_ticker_currency`, `metrics/utils.py:162`),
-then converts every `Money` input via `Money.convert(target, fx, as_of)` — **logging each
-conversion** — before any arithmetic; a missing FX rate skips the metric with a
-structured reason (`MetricCurrencyInvariantError`; add a `missing_fx_rate` reason code
-alongside the existing `missing_input_currency` / `missing_trading_currency` /
-`currency_mismatch`). This replaces the assert-based `normalize_metric_amount`
-(`:273`) / `ensure_metric_currency` (`:221`) flow. Cross-currency mixing then becomes
-impossible *by construction* (`Money` raises) rather than by convention.
+**target = listing currency** (`require_metric_ticker_currency`) and routes every
+monetary input through one seam — `require_metric_money(fact.money, target_currency=…)`
+(or `require_metric_amount_money` for a raw market price) — before any `Money`
+arithmetic. In **5a** that seam *rejects* a non-target currency: it raises a structured
+`MetricCurrencyInvariantError` (`currency_mismatch` / `missing_input_currency` /
+`missing_trading_currency`), which `wrap_metric_currency_invariants` turns into an
+unavailable metric rather than letting `Money` raise `CurrencyMismatchError` mid-batch.
+In **5b** the same seam will *convert* via `Money.convert(target, fx, as_of)` — logging
+each conversion, adding a `missing_fx_rate` reason — with no call-site change. Either
+way cross-currency mixing is impossible *by construction*; the assert-based
+`normalize_metric_amount` / `ensure_metric_currency` flow is gone.
 
-**Share-count denominators.** Share *counts* are `ScalarFact` (`unit_kind = count`, no
-currency); `per_share` values (EPS, DPS) are `MonetaryFact` (they carry a currency).
-This fixes the Phase 3 known item — metrics that still currency-validate a share-count
-denominator (e.g. `fcf_per_share_cagr_10y`) — by making the count a scalar the type
-system will not let you treat as money.
+**Share-count denominators.** All share *counts* the normalizer tags `count`
+(`CommonStockSharesOutstanding` / `EntityCommonStockSharesOutstanding` *and* the
+weighted-average concepts — see the data-modelling fix above) are `ScalarFact` (no
+currency) and read through the scalar accessors (share-count-change, buyback,
+on-demand market cap, and `fcf_per_share_cagr_10y`'s diluted-share denominator);
+`per_share` values (EPS, DPS) are `MonetaryFact` (they carry a currency). So a
+per-share metric divides money by a share quantity (`Money / float` → a per-share
+`Money`) — the type system will not let a share count be treated as money.
 
 **Docs/rule.** Update CLAUDE.md + AGENTS.md (byte-identical): metrics convert all
 monetary inputs to the listing currency via `fx_rates`, logging each conversion; a
@@ -193,10 +217,10 @@ vocabulary with the existing `metrics.unit_kind` enum (`MetricUnitKind`).
   legacy-data migration tests were pinned to their own version via `target_version`
   so migration 071 no longer wipes their subjects; added migration-071 schema/CHECK
   and empty-rebuild regression tests. Quality gate green (ruff, mypy, 844 tests).
-- **Known Phase 5 item:** several metrics still currency-validate share-count
-  denominators (e.g. `fcf_per_share_cagr_10y`). That was masked before by the
-  `unit`→currency derivation; the proper share-as-count handling lands with the
-  Money rework in Phase 5.
+- **Known Phase 5 item — resolved in 5a:** `fcf_per_share_cagr_10y` no longer
+  currency-validates its share-count denominator. The weighted-average share
+  concepts are now tagged `count` (see Phase 5's data-modelling fix), so the metric
+  reads them through the scalar accessor and divides `Money` by a share quantity.
 
 ### Phase 4 — remove derived `market_data.market_cap`; compute on demand
 `market_cap` is shares-outstanding x price — a value derivable from other stored

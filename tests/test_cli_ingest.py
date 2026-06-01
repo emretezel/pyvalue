@@ -9671,6 +9671,8 @@ def test_cmd_compute_metrics_all(tmp_path):
                     end_date=end_date,
                     fiscal_period="FY",
                     value=480 + 8 * (year - (current_year - 10)),
+                    unit_kind="count",
+                    currency=None,
                 ),
             ]
         )

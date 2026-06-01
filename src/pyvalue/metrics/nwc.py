@@ -11,15 +11,15 @@ from typing import Optional, Sequence
 
 import logging
 
+from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     MAX_FY_FACT_AGE_DAYS,
-    normalize_metric_record,
+    require_metric_money,
     require_metric_ticker_currency,
 )
-from pyvalue.facts import RegionFactsRepository
-from pyvalue.storage import FactRecord
+from pyvalue.money import Money
 
 LOGGER = logging.getLogger(__name__)
 
@@ -40,13 +40,16 @@ REQUIRED_CONCEPTS = (
 QUARTERLY_PERIODS = {"Q1", "Q2", "Q3", "Q4"}
 FY_PERIODS = {"FY"}
 
+# Shared metric id used when resolving the listing currency and aligning every
+# NWC component to it; all five NWC metrics share the same currency invariant.
+_NWC_METRIC_ID = "nwc"
+
 
 @dataclass
 class _NWCPoint:
-    value: float
+    money: Money
     as_of: str
     fiscal_period: str
-    currency: Optional[str]
 
 
 class _NWCBase:
@@ -56,23 +59,30 @@ class _NWCBase:
         repo: RegionFactsRepository,
         periods: set[str],
     ) -> list[_NWCPoint]:
+        # Resolve the listing currency once; every component is aligned to it via
+        # the shared Money seam, so each NWC point is single-currency by build.
+        target_currency = require_metric_ticker_currency(
+            symbol, repo, metric_id=_NWC_METRIC_ID
+        )
         assets_map = self._period_map(
-            repo.facts_for_concept(symbol, ASSETS_CURRENT_CONCEPT), periods
+            repo.monetary_facts_for_concept(symbol, ASSETS_CURRENT_CONCEPT), periods
         )
         liabilities_map = self._period_map(
-            repo.facts_for_concept(symbol, LIABILITIES_CURRENT_CONCEPT), periods
+            repo.monetary_facts_for_concept(symbol, LIABILITIES_CURRENT_CONCEPT),
+            periods,
         )
         cash_primary_map = self._period_map(
-            repo.facts_for_concept(symbol, CASH_PRIMARY_CONCEPT), periods
+            repo.monetary_facts_for_concept(symbol, CASH_PRIMARY_CONCEPT), periods
         )
         cash_eq_map = self._period_map(
-            repo.facts_for_concept(symbol, CASH_EQUIVALENTS_CONCEPT), periods
+            repo.monetary_facts_for_concept(symbol, CASH_EQUIVALENTS_CONCEPT), periods
         )
         short_term_investments_map = self._period_map(
-            repo.facts_for_concept(symbol, SHORT_TERM_INVESTMENTS_CONCEPT), periods
+            repo.monetary_facts_for_concept(symbol, SHORT_TERM_INVESTMENTS_CONCEPT),
+            periods,
         )
         short_term_debt_map = self._period_map(
-            repo.facts_for_concept(symbol, SHORT_TERM_DEBT_CONCEPT), periods
+            repo.monetary_facts_for_concept(symbol, SHORT_TERM_DEBT_CONCEPT), periods
         )
 
         candidate_keys = sorted(
@@ -84,6 +94,7 @@ class _NWCBase:
         for key in candidate_keys:
             point = self._compute_point_for_key(
                 symbol=symbol,
+                target_currency=target_currency,
                 key=key,
                 assets=assets_map.get(key),
                 liabilities=liabilities_map.get(key),
@@ -91,7 +102,6 @@ class _NWCBase:
                 cash_equivalents=cash_eq_map.get(key),
                 short_term_investments=short_term_investments_map.get(key),
                 short_term_debt=short_term_debt_map.get(key),
-                repo=repo,
             )
             if point is not None:
                 points.append(point)
@@ -101,71 +111,61 @@ class _NWCBase:
         self,
         *,
         symbol: str,
+        target_currency: str,
         key: tuple[str, str],
-        assets: Optional[FactRecord],
-        liabilities: Optional[FactRecord],
-        cash_primary: Optional[FactRecord],
-        cash_equivalents: Optional[FactRecord],
-        short_term_investments: Optional[FactRecord],
-        short_term_debt: Optional[FactRecord],
-        repo: RegionFactsRepository,
+        assets: Optional[MonetaryFact],
+        liabilities: Optional[MonetaryFact],
+        cash_primary: Optional[MonetaryFact],
+        cash_equivalents: Optional[MonetaryFact],
+        short_term_investments: Optional[MonetaryFact],
+        short_term_debt: Optional[MonetaryFact],
     ) -> Optional[_NWCPoint]:
         if assets is None or liabilities is None:
             return None
 
-        assets_value, assets_currency = self._normalize_currency(
-            assets, symbol=symbol, repo=repo, context="nwc"
-        )
-        liabilities_value, liabilities_currency = self._normalize_currency(
-            liabilities, symbol=symbol, repo=repo, context="nwc"
-        )
+        assets_money = self._money(assets, target_currency, symbol)
+        liabilities_money = self._money(liabilities, target_currency, symbol)
 
-        cash_amount = self._cash_amount(
+        cash_money = self._cash_amount(
             symbol=symbol,
+            target_currency=target_currency,
             key=key,
             cash_primary=cash_primary,
             cash_equivalents=cash_equivalents,
             short_term_investments=short_term_investments,
-            repo=repo,
         )
-        if cash_amount is None:
+        if cash_money is None:
             return None
-        cash_value, cash_currency = cash_amount
 
-        short_term_debt_value = 0.0
-        short_term_debt_currency = None
-        if short_term_debt is not None:
-            short_term_debt_value, short_term_debt_currency = self._normalize_currency(
-                short_term_debt,
-                symbol=symbol,
-                repo=repo,
-                context="nwc",
-            )
-        currency = assets_currency
+        zero = Money.of(0.0, target_currency)
+        short_term_debt_money = (
+            self._money(short_term_debt, target_currency, symbol)
+            if short_term_debt is not None
+            else zero
+        )
 
-        adjusted_liabilities = max(liabilities_value - short_term_debt_value, 0.0)
-        nwc_value = (assets_value - cash_value) - adjusted_liabilities
+        # Operating liabilities exclude interest-bearing short-term debt, floored
+        # at zero so an over-large debt figure cannot turn liabilities negative.
+        adjusted_liabilities = max(liabilities_money - short_term_debt_money, zero)
+        nwc_money = (assets_money - cash_money) - adjusted_liabilities
         return _NWCPoint(
-            value=nwc_value,
+            money=nwc_money,
             as_of=key[0],
             fiscal_period=key[1],
-            currency=currency,
         )
 
     def _cash_amount(
         self,
         *,
         symbol: str,
+        target_currency: str,
         key: tuple[str, str],
-        cash_primary: Optional[FactRecord],
-        cash_equivalents: Optional[FactRecord],
-        short_term_investments: Optional[FactRecord],
-        repo: RegionFactsRepository,
-    ) -> Optional[tuple[float, Optional[str]]]:
+        cash_primary: Optional[MonetaryFact],
+        cash_equivalents: Optional[MonetaryFact],
+        short_term_investments: Optional[MonetaryFact],
+    ) -> Optional[Money]:
         if cash_primary is not None:
-            return self._normalize_currency(
-                cash_primary, symbol=symbol, repo=repo, context="nwc"
-            )
+            return self._money(cash_primary, target_currency, symbol)
 
         if cash_equivalents is None and short_term_investments is None:
             LOGGER.warning(
@@ -173,65 +173,39 @@ class _NWCBase:
             )
             return None
 
-        cash_eq_value = 0.0
-        cash_eq_currency = None
+        cash_money = Money.of(0.0, target_currency)
         if cash_equivalents is not None:
-            cash_eq_value, cash_eq_currency = self._normalize_currency(
-                cash_equivalents, symbol=symbol, repo=repo, context="nwc"
+            cash_money = cash_money + self._money(
+                cash_equivalents, target_currency, symbol
             )
-
-        short_term_investments_value = 0.0
-        short_term_investments_currency = None
         if short_term_investments is not None:
-            (
-                short_term_investments_value,
-                short_term_investments_currency,
-            ) = self._normalize_currency(
-                short_term_investments, symbol=symbol, repo=repo, context="nwc"
+            cash_money = cash_money + self._money(
+                short_term_investments, target_currency, symbol
             )
-
-        currency = cash_eq_currency or short_term_investments_currency
-
-        return cash_eq_value + short_term_investments_value, currency
+        return cash_money
 
     def _period_map(
-        self, records: Sequence[FactRecord], periods: set[str]
-    ) -> dict[tuple[str, str], FactRecord]:
-        mapped: dict[tuple[str, str], FactRecord] = {}
+        self, records: Sequence[MonetaryFact], periods: set[str]
+    ) -> dict[tuple[str, str], MonetaryFact]:
+        mapped: dict[tuple[str, str], MonetaryFact] = {}
         for record in records:
             period = (record.fiscal_period or "").upper()
             if period not in periods:
-                continue
-            if record.value is None:
                 continue
             key = (record.end_date, period)
             if key not in mapped:
                 mapped[key] = record
         return mapped
 
-    def _normalize_currency(
-        self,
-        record: FactRecord,
-        *,
-        symbol: str,
-        repo: RegionFactsRepository,
-        context: str,
-    ) -> tuple[float, str]:
-        normalized_value, normalized_currency = normalize_metric_record(
-            record,
-            metric_id=context,
+    def _money(self, fact: MonetaryFact, target_currency: str, symbol: str) -> Money:
+        return require_metric_money(
+            fact.money,
+            target_currency=target_currency,
+            metric_id=_NWC_METRIC_ID,
             symbol=symbol,
-            expected_currency=require_metric_ticker_currency(
-                symbol,
-                repo,
-                metric_id=context,
-                input_name=record.concept,
-                as_of=record.end_date,
-                candidate_currencies=[record.currency],
-            ),
-            contexts=(repo,),
+            input_name=fact.concept,
+            as_of=fact.end_date,
         )
-        return normalized_value, normalized_currency
 
     def _extract_year(self, value: str) -> Optional[int]:
         if len(value) < 4:
@@ -287,9 +261,9 @@ class NWCMostRecentQuarterMetric(_NWCBase):
         return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
-            value=latest.value,
+            value=latest.money.amount,
             as_of=latest.as_of,
-            currency=latest.currency,
+            currency=latest.money.currency,
         )
 
 
@@ -312,9 +286,9 @@ class NWCFYMetric(_NWCBase):
         return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
-            value=latest.value,
+            value=latest.money.amount,
             as_of=latest.as_of,
-            currency=latest.currency,
+            currency=latest.money.currency,
         )
 
 
@@ -359,12 +333,13 @@ class DeltaNWCTTMMetric(_NWCBase):
                 symbol,
             )
             return None
+        delta = latest.money - prior.money
         return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
-            value=latest.value - prior.value,
+            value=delta.amount,
             as_of=latest.as_of,
-            currency=latest.currency,
+            currency=delta.currency,
         )
 
 
@@ -401,12 +376,13 @@ class DeltaNWCFYMetric(_NWCBase):
         if prior is None:
             LOGGER.warning("delta_nwc_fy: missing strict prior FY for %s", symbol)
             return None
+        delta = latest.money - prior.money
         return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
-            value=latest.value - prior.value,
+            value=delta.amount,
             as_of=latest.as_of,
-            currency=latest.currency,
+            currency=delta.currency,
         )
 
 
@@ -455,17 +431,20 @@ class DeltaNWCMaintMetric(_NWCBase):
             )
             return None
 
-        delta_latest = by_year[latest_year].value - by_year[latest_year - 1].value
-        delta_prev_1 = by_year[latest_year - 1].value - by_year[latest_year - 2].value
-        delta_prev_2 = by_year[latest_year - 2].value - by_year[latest_year - 3].value
+        delta_latest = by_year[latest_year].money - by_year[latest_year - 1].money
+        delta_prev_1 = by_year[latest_year - 1].money - by_year[latest_year - 2].money
+        delta_prev_2 = by_year[latest_year - 2].money - by_year[latest_year - 3].money
         average_delta = (delta_latest + delta_prev_1 + delta_prev_2) / 3.0
 
+        # Maintenance NWC investment is floored at zero: a shrinking NWC frees
+        # cash rather than consuming it, so it does not reduce owner earnings.
+        floored = max(average_delta, Money.of(0.0, average_delta.currency))
         return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
-            value=max(average_delta, 0.0),
+            value=floored.amount,
             as_of=latest.as_of,
-            currency=latest.currency,
+            currency=floored.currency,
         )
 
 

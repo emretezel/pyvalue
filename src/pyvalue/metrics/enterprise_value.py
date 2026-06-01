@@ -9,15 +9,15 @@ from typing import Optional
 
 import logging
 
+from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricCurrencyInvariantError
 from pyvalue.metrics.utils import (
     SHARE_COUNT_CONCEPTS,
     market_cap_money,
-    normalize_metric_amount,
-    normalize_metric_record,
+    require_metric_money,
 )
-from pyvalue.facts import RegionFactsRepository
-from pyvalue.storage import FactRecord, MarketDataRepository
+from pyvalue.money import Money
+from pyvalue.storage import MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
 
@@ -33,46 +33,19 @@ EV_FALLBACK_REQUIRED_CONCEPTS = (
 )
 
 
-def normalize_fact_value(
-    record: FactRecord,
-    *,
-    metric_id: str,
-    symbol: str,
-    expected_currency: Optional[str],
-    contexts: tuple[object, ...],
-) -> tuple[float, str]:
-    """Normalize one EV fact and enforce the listing-currency invariant."""
+def _money(
+    fact: MonetaryFact, *, target_currency: str, symbol: str, context: str
+) -> Money:
+    """Align one EV fact to the target (listing) currency via the Money seam."""
 
-    normalized_value, normalized_currency = normalize_metric_record(
-        record,
-        metric_id=metric_id,
-        symbol=symbol,
-        expected_currency=expected_currency,
-        contexts=contexts,
-    )
-    return normalized_value, normalized_currency
-
-
-def validate_denominator_amount(
-    *,
-    symbol: str,
-    amount: float,
-    source_currency: Optional[str],
-    target_currency: Optional[str],
-    as_of: str,
-    context: str,
-    contexts: tuple[object, ...],
-) -> float:
-    return normalize_metric_amount(
-        amount,
-        source_currency,
+    return require_metric_money(
+        fact.money,
+        target_currency=target_currency,
         metric_id=context,
         symbol=symbol,
-        input_name="denominator",
-        as_of=as_of,
-        expected_currency=target_currency,
-        contexts=contexts,
-    )[0]
+        input_name=fact.concept,
+        as_of=fact.end_date,
+    )
 
 
 def resolve_enterprise_value_denominator(
@@ -80,20 +53,26 @@ def resolve_enterprise_value_denominator(
     symbol: str,
     repo: RegionFactsRepository,
     market_repo: MarketDataRepository,
-    target_currency: Optional[str],
+    target_currency: str,
     context: str,
-) -> Optional[float]:
-    """Resolve EV using normalized EV first, then the existing debt/cash fallback."""
+) -> Optional[Money]:
+    """Resolve EV (as ``Money``) using the EV fact first, then a debt/cash build.
 
-    ev_fact = repo.latest_fact(symbol, "EnterpriseValue")
+    The reported ``EnterpriseValue`` fact wins when present and positive; failing
+    that, EV is rebuilt as market cap + total debt - cash. Every input is aligned
+    to ``target_currency`` through the shared Money seam, so the result is a
+    single-currency ``Money`` and a mismatched EV fact degrades to the fallback
+    rather than mixing currencies.
+    """
+
+    ev_fact = repo.latest_monetary_fact(symbol, "EnterpriseValue")
     if ev_fact is not None:
         try:
-            ev_value, _ = normalize_fact_value(
+            ev_money = _money(
                 ev_fact,
-                metric_id=context,
+                target_currency=target_currency,
                 symbol=symbol,
-                expected_currency=target_currency,
-                contexts=(repo, market_repo),
+                context=context,
             )
         except MetricCurrencyInvariantError as exc:
             LOGGER.warning(
@@ -103,8 +82,8 @@ def resolve_enterprise_value_denominator(
                 exc.summary_reason,
             )
         else:
-            if ev_value > 0:
-                return ev_value
+            if ev_money.amount > 0:
+                return ev_money
             LOGGER.warning(
                 "%s: non-positive normalized enterprise value for %s; trying fallback",
                 context,
@@ -122,50 +101,34 @@ def resolve_enterprise_value_denominator(
     if cap is None:
         LOGGER.warning("%s: missing market cap for %s", context, symbol)
         return None
-    market_cap = cap.money.amount
 
-    short_debt = repo.latest_fact(symbol, "ShortTermDebt")
-    long_debt = repo.latest_fact(symbol, "LongTermDebt")
-    cash = repo.latest_fact(symbol, "CashAndShortTermInvestments")
+    short_debt = repo.latest_monetary_fact(symbol, "ShortTermDebt")
+    long_debt = repo.latest_monetary_fact(symbol, "LongTermDebt")
+    cash = repo.latest_monetary_fact(symbol, "CashAndShortTermInvestments")
     if short_debt is None or long_debt is None or cash is None:
         LOGGER.warning(
             "%s: missing EV fallback debt/cash facts for %s", context, symbol
         )
         return None
 
-    short_value, _ = normalize_fact_value(
-        short_debt,
-        metric_id=context,
-        symbol=symbol,
-        expected_currency=target_currency,
-        contexts=(repo, market_repo),
+    enterprise_value = (
+        cap.money
+        + _money(
+            short_debt, target_currency=target_currency, symbol=symbol, context=context
+        )
+        + _money(
+            long_debt, target_currency=target_currency, symbol=symbol, context=context
+        )
+        - _money(cash, target_currency=target_currency, symbol=symbol, context=context)
     )
-    long_value, _ = normalize_fact_value(
-        long_debt,
-        metric_id=context,
-        symbol=symbol,
-        expected_currency=target_currency,
-        contexts=(repo, market_repo),
-    )
-    cash_value, _ = normalize_fact_value(
-        cash,
-        metric_id=context,
-        symbol=symbol,
-        expected_currency=target_currency,
-        contexts=(repo, market_repo),
-    )
-
-    ev_value = market_cap + short_value + long_value - cash_value
-    if ev_value <= 0:
+    if enterprise_value.amount <= 0:
         LOGGER.warning("%s: non-positive derived EV for %s", context, symbol)
         return None
 
-    return ev_value
+    return enterprise_value
 
 
 __all__ = [
     "EV_FALLBACK_REQUIRED_CONCEPTS",
-    "normalize_fact_value",
     "resolve_enterprise_value_denominator",
-    "validate_denominator_amount",
 ]

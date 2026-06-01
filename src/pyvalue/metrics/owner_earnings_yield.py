@@ -10,6 +10,7 @@ from typing import Optional
 
 import logging
 
+from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.enterprise_value import (
     EV_FALLBACK_REQUIRED_CONCEPTS,
@@ -24,7 +25,7 @@ from pyvalue.metrics.owner_earnings_equity import (
     OwnerEarningsEquityCalculator,
 )
 from pyvalue.metrics.utils import SHARE_COUNT_CONCEPTS, market_cap_money
-from pyvalue.facts import RegionFactsRepository
+from pyvalue.money import Money
 from pyvalue.storage import MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -45,9 +46,9 @@ def _denominator_market_cap(
     symbol: str,
     repo: RegionFactsRepository,
     market_repo: MarketDataRepository,
-    target_currency: Optional[str],
+    target_currency: str,
     context: str,
-) -> Optional[float]:
+) -> Optional[Money]:
     cap = market_cap_money(
         symbol,
         repo=repo,
@@ -58,7 +59,7 @@ def _denominator_market_cap(
     )
     if cap is None:
         return None
-    return cap.money.amount
+    return cap.money
 
 
 def _denominator_enterprise_value(
@@ -66,9 +67,9 @@ def _denominator_enterprise_value(
     symbol: str,
     repo: RegionFactsRepository,
     market_repo: MarketDataRepository,
-    target_currency: Optional[str],
+    target_currency: str,
     context: str,
-) -> Optional[float]:
+) -> Optional[Money]:
     return resolve_enterprise_value_denominator(
         symbol=symbol,
         repo=repo,
@@ -101,7 +102,7 @@ class OwnerEarningsYieldEquityMetric:
             symbol=symbol,
             repo=repo,
             market_repo=market_repo,
-            target_currency=numerator.currency,
+            target_currency=numerator.money.currency,
             context=self.id,
         )
         if market_cap is None:
@@ -110,7 +111,7 @@ class OwnerEarningsYieldEquityMetric:
         return MetricResult(
             symbol=symbol,
             metric_id=self.id,
-            value=numerator.value / market_cap,
+            value=numerator.money / market_cap,
             as_of=numerator.as_of,
         )
 
@@ -138,7 +139,7 @@ class OwnerEarningsYieldEquityFiveYearMetric:
             symbol=symbol,
             repo=repo,
             market_repo=market_repo,
-            target_currency=numerator.currency,
+            target_currency=numerator.money.currency,
             context=self.id,
         )
         if market_cap is None:
@@ -147,7 +148,7 @@ class OwnerEarningsYieldEquityFiveYearMetric:
         return MetricResult(
             symbol=symbol,
             metric_id=self.id,
-            value=numerator.value / market_cap,
+            value=numerator.money / market_cap,
             as_of=numerator.as_of,
         )
 
@@ -175,7 +176,7 @@ class OwnerEarningsYieldEVMetric:
             symbol=symbol,
             repo=repo,
             market_repo=market_repo,
-            target_currency=numerator.currency,
+            target_currency=numerator.money.currency,
             context=self.id,
         )
         if enterprise_value is None:
@@ -184,7 +185,7 @@ class OwnerEarningsYieldEVMetric:
         return MetricResult(
             symbol=symbol,
             metric_id=self.id,
-            value=numerator.value / enterprise_value,
+            value=numerator.money / enterprise_value,
             as_of=numerator.as_of,
         )
 
@@ -212,7 +213,7 @@ class OwnerEarningsYieldEVNormalizedMetric:
             symbol=symbol,
             repo=repo,
             market_repo=market_repo,
-            target_currency=numerator.currency,
+            target_currency=numerator.money.currency,
             context=self.id,
         )
         if enterprise_value is None:
@@ -221,7 +222,7 @@ class OwnerEarningsYieldEVNormalizedMetric:
         return MetricResult(
             symbol=symbol,
             metric_id=self.id,
-            value=numerator.value / enterprise_value,
+            value=numerator.money / enterprise_value,
             as_of=numerator.as_of,
         )
 

@@ -143,6 +143,62 @@ def test_eodhd_normalizes_statement_share_fields_as_shares():
     assert entity[0].currency is None
 
 
+def test_eodhd_normalizes_weighted_average_shares_as_count():
+    """Weighted-average share counts are ``count`` facts, not monetary (regression).
+
+    EODHD reports ``weightedAverageShsOutDil`` / ``weightedAverageShsOut`` on the
+    income statement. They are share *quantities*, so they must normalize to
+    ``unit_kind='count'`` with no currency -- not to a monetary value carrying the
+    statement currency (which would let ``fcf_per_share_cagr_10y`` treat a share
+    count as money).
+    """
+
+    normalizer = EODHDFactsNormalizer(
+        concepts=[
+            "WeightedAverageNumberOfDilutedSharesOutstanding",
+            "WeightedAverageNumberOfSharesOutstandingBasic",
+        ]
+    )
+    payload = {
+        "Financials": {
+            "Income_Statement": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "weightedAverageShsOutDil": 1200,
+                        "weightedAverageShsOut": 1000,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+    diluted = [
+        r
+        for r in records
+        if r.concept == "WeightedAverageNumberOfDilutedSharesOutstanding"
+        and r.fiscal_period == "FY"
+    ]
+    basic = [
+        r
+        for r in records
+        if r.concept == "WeightedAverageNumberOfSharesOutstandingBasic"
+        and r.fiscal_period == "FY"
+    ]
+
+    assert diluted
+    assert basic
+    assert diluted[0].unit_kind == "count"
+    assert diluted[0].currency is None
+    assert diluted[0].value == 1200.0
+    assert basic[0].unit_kind == "count"
+    assert basic[0].currency is None
+    assert basic[0].value == 1000.0
+
+
 def test_eodhd_prefers_dedicated_outstanding_shares_over_scaled_statement_duplicate():
     normalizer = EODHDFactsNormalizer()
     payload = {

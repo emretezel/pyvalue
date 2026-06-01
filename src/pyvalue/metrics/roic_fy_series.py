@@ -11,6 +11,7 @@ from typing import Optional, Sequence
 
 import logging
 
+from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.invested_capital import (
     CASH_FALLBACK_CONCEPT,
@@ -24,12 +25,14 @@ from pyvalue.metrics.invested_capital import (
 )
 from pyvalue.metrics.utils import (
     MAX_FY_FACT_AGE_DAYS,
-    normalize_metric_record,
+    require_metric_money,
     require_metric_ticker_currency,
 )
-from pyvalue.storage import FactRecord, FinancialFactsRepository
+from pyvalue.money import Money
 
 LOGGER = logging.getLogger(__name__)
+
+_METRIC_ID = "roic_fy_series"
 
 EBIT_CONCEPT = "OperatingIncomeLoss"
 TAX_EXPENSE_CONCEPT = "IncomeTaxExpense"
@@ -75,9 +78,8 @@ REQUIRED_CONCEPTS = tuple(
 
 @dataclass(frozen=True)
 class _AmountResult:
-    total: float
+    money: Money
     as_of: str
-    currency: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -160,12 +162,21 @@ class ROICFYSeriesDiagnostic:
 
 
 class ROICFYSeriesCalculator:
-    """Build strict-window FY ROIC series diagnostics and snapshots."""
+    """Build strict-window FY ROIC series diagnostics and snapshots.
+
+    Every monetary input is aligned to the listing currency through the shared
+    Money seam (:func:`require_metric_money`), which *raises* a structured
+    invariant error on a currency it cannot reconcile. So by the time amounts
+    reach the per-year math here they are all one currency by construction --
+    there is no per-year/per-component currency reconciliation to do, and a
+    genuine conflict surfaces as an unavailable metric (the wrapped ``compute``
+    turns the raise into ``None``) rather than a silently dropped year.
+    """
 
     def diagnose_series(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         window_years: int = DEFAULT_SERIES_YEARS,
     ) -> ROICFYSeriesDiagnostic:
         ebit_map = self._fy_map(symbol, repo, EBIT_CONCEPT)
@@ -196,25 +207,12 @@ class ROICFYSeriesCalculator:
                 roic_failure_by_year[year] = FAILURE_MISSING_PRIOR_FY_INVESTED_CAPITAL
                 continue
 
-            ic_currency = self._combine_currency(
-                [ic_current.currency, ic_previous.currency]
-            )
-            if ic_currency is None and any(
-                code is not None for code in (ic_current.currency, ic_previous.currency)
-            ):
-                roic_failure_by_year[year] = FAILURE_CURRENCY_CONFLICT
-                continue
-
-            avg_ic = (ic_current.total + ic_previous.total) / 2.0
-            if avg_ic == 0:
+            avg_ic = (ic_current.money + ic_previous.money) / 2.0
+            if avg_ic.amount == 0:
                 roic_failure_by_year[year] = FAILURE_ZERO_AVERAGE_INVESTED_CAPITAL
                 continue
 
-            if not self._currencies_match(ebit.currency, ic_currency):
-                roic_failure_by_year[year] = FAILURE_CURRENCY_CONFLICT
-                continue
-
-            nopat = ebit.total * (1.0 - tax_rate.rate)
+            nopat = ebit.money * (1.0 - tax_rate.rate)
             as_of_values = [ebit.as_of, ic_current.as_of, ic_previous.as_of]
             if tax_rate.as_of is not None:
                 as_of_values.append(tax_rate.as_of)
@@ -222,7 +220,7 @@ class ROICFYSeriesCalculator:
                 year=year,
                 value=nopat / avg_ic,
                 as_of=max(as_of_values),
-                currency=ebit.currency or ic_currency,
+                currency=ebit.money.currency,
             )
 
         latest_ebit_year = max(ebit_map.keys()) if ebit_map else None
@@ -248,17 +246,11 @@ class ROICFYSeriesCalculator:
                 max_age_days=MAX_FY_FACT_AGE_DAYS,
             )
             if latest_point_is_recent:
-                series_currency = self._combine_currency(
-                    [point.currency for point in selected_points]
+                snapshot = ROICFYSeriesSnapshot(
+                    points=selected_points,
+                    as_of=selected_points[0].as_of,
+                    currency=selected_points[0].currency,
                 )
-                if series_currency is not None or not any(
-                    point.currency is not None for point in selected_points
-                ):
-                    snapshot = ROICFYSeriesSnapshot(
-                        points=selected_points,
-                        as_of=selected_points[0].as_of,
-                        currency=series_currency,
-                    )
 
         all_years = (
             set(ebit_map.keys())
@@ -326,7 +318,7 @@ class ROICFYSeriesCalculator:
     def compute_series(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         window_years: int = DEFAULT_SERIES_YEARS,
     ) -> Optional[ROICFYSeriesSnapshot]:
         diagnostic = self.diagnose_series(symbol, repo, window_years=window_years)
@@ -344,7 +336,7 @@ class ROICFYSeriesCalculator:
         return None
 
     def compute_incremental_5y(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[IncrementalROICSnapshot]:
         ebit_map = self._fy_map(symbol, repo, EBIT_CONCEPT)
         if not ebit_map:
@@ -376,26 +368,6 @@ class ROICFYSeriesCalculator:
             LOGGER.warning("iroic_5y: latest FY point too old for %s", symbol)
             return None
 
-        pair_currency = self._combine_currency(
-            [
-                latest_ebit.currency,
-                prior_ebit.currency,
-                latest_ic.currency,
-                prior_ic.currency,
-            ]
-        )
-        if pair_currency is None and any(
-            code is not None
-            for code in (
-                latest_ebit.currency,
-                prior_ebit.currency,
-                latest_ic.currency,
-                prior_ic.currency,
-            )
-        ):
-            LOGGER.warning("iroic_5y: currency mismatch across FY pair for %s", symbol)
-            return None
-
         tax_map = self._fy_map(symbol, repo, TAX_EXPENSE_CONCEPT)
         pretax_map = self._fy_map(symbol, repo, PRETAX_INCOME_CONCEPT)
         latest_valid_tax_rate = self._latest_valid_fy_tax_rate(tax_map, pretax_map)
@@ -412,19 +384,19 @@ class ROICFYSeriesCalculator:
             latest_valid_tax_rate=latest_valid_tax_rate,
         )
 
-        latest_nopat = latest_ebit.total * (1.0 - latest_tax_rate.rate)
-        prior_nopat = prior_ebit.total * (1.0 - prior_tax_rate.rate)
+        latest_nopat = latest_ebit.money * (1.0 - latest_tax_rate.rate)
+        prior_nopat = prior_ebit.money * (1.0 - prior_tax_rate.rate)
         delta_nopat = latest_nopat - prior_nopat
 
-        delta_ic = latest_ic.total - prior_ic.total
-        if delta_ic <= 0:
+        delta_ic = latest_ic.money - prior_ic.money
+        if delta_ic.amount <= 0:
             LOGGER.warning(
                 "iroic_5y: non-positive delta invested capital for %s", symbol
             )
             return None
 
-        ic_scale = max(abs(latest_ic.total), abs(prior_ic.total), 1.0)
-        relative_delta_ic = abs(delta_ic) / ic_scale
+        ic_scale = max(abs(latest_ic.money.amount), abs(prior_ic.money.amount), 1.0)
+        relative_delta_ic = abs(delta_ic.amount) / ic_scale
         if relative_delta_ic < IROIC_MIN_RELATIVE_DELTA_IC:
             LOGGER.warning("iroic_5y: tiny delta invested capital for %s", symbol)
             return None
@@ -436,7 +408,7 @@ class ROICFYSeriesCalculator:
         return IncrementalROICSnapshot(
             value=delta_nopat / delta_ic,
             as_of=max(as_of_values),
-            currency=pair_currency,
+            currency=latest_ebit.money.currency,
         )
 
     def _build_year_diagnostic(
@@ -470,7 +442,7 @@ class ROICFYSeriesCalculator:
             year=year,
             ebit_available=ebit is not None,
             ebit_as_of=ebit.as_of if ebit else None,
-            ebit_currency=ebit.currency if ebit else None,
+            ebit_currency=ebit.money.currency if ebit else None,
             tax_available=tax is not None,
             pretax_available=pretax is not None,
             tax_rate=tax_rate.rate if tax_rate else None,
@@ -579,28 +551,28 @@ class ROICFYSeriesCalculator:
         return None
 
     def _fy_invested_capital_diagnostics(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> tuple[dict[int, _AmountResult], dict[int, _InvestedCapitalYearDiagnostic]]:
         short_map = self._fy_period_map(
-            repo.facts_for_concept(symbol, SHORT_TERM_DEBT_CONCEPT)
+            repo.monetary_facts_for_concept(symbol, SHORT_TERM_DEBT_CONCEPT)
         )
         long_map = self._fy_period_map(
-            repo.facts_for_concept(symbol, LONG_TERM_DEBT_CONCEPT)
+            repo.monetary_facts_for_concept(symbol, LONG_TERM_DEBT_CONCEPT)
         )
         total_map = self._fy_period_map(
-            repo.facts_for_concept(symbol, TOTAL_DEBT_CONCEPT)
+            repo.monetary_facts_for_concept(symbol, TOTAL_DEBT_CONCEPT)
         )
         equity_map = self._fy_period_map(
-            repo.facts_for_concept(symbol, EQUITY_PRIMARY_CONCEPT)
+            repo.monetary_facts_for_concept(symbol, EQUITY_PRIMARY_CONCEPT)
         )
         common_equity_map = self._fy_period_map(
-            repo.facts_for_concept(symbol, EQUITY_FALLBACK_CONCEPT)
+            repo.monetary_facts_for_concept(symbol, EQUITY_FALLBACK_CONCEPT)
         )
         cash_primary_map = self._fy_period_map(
-            repo.facts_for_concept(symbol, CASH_PRIMARY_CONCEPT)
+            repo.monetary_facts_for_concept(symbol, CASH_PRIMARY_CONCEPT)
         )
         cash_fallback_map = self._fy_period_map(
-            repo.facts_for_concept(symbol, CASH_FALLBACK_CONCEPT)
+            repo.monetary_facts_for_concept(symbol, CASH_FALLBACK_CONCEPT)
         )
 
         candidate_keys = sorted(
@@ -682,36 +654,16 @@ class ROICFYSeriesCalculator:
                 )
                 continue
 
-            currency = self._combine_currency(
-                [debt.currency, equity.currency, cash.currency]
-            )
-            if currency is None and any(
-                code is not None
-                for code in (debt.currency, equity.currency, cash.currency)
-            ):
-                failure_by_year.setdefault(
-                    year,
-                    _InvestedCapitalYearDiagnostic(
-                        year=year,
-                        available=False,
-                        as_of=max(debt.as_of, equity.as_of, cash.as_of),
-                        currency=None,
-                        failure_reason=FAILURE_CURRENCY_CONFLICT,
-                    ),
-                )
-                continue
-
             point = _AmountResult(
-                total=debt.total + equity.total - cash.total,
+                money=debt.money + equity.money - cash.money,
                 as_of=max(debt.as_of, equity.as_of, cash.as_of),
-                currency=currency,
             )
             ic_map[year] = point
             failure_by_year[year] = _InvestedCapitalYearDiagnostic(
                 year=year,
                 available=True,
                 as_of=point.as_of,
-                currency=point.currency,
+                currency=point.money.currency,
                 failure_reason=None,
             )
 
@@ -721,50 +673,26 @@ class ROICFYSeriesCalculator:
         self,
         *,
         symbol: str,
-        repo: FinancialFactsRepository,
-        short_debt: Optional[FactRecord],
-        long_debt: Optional[FactRecord],
-        total_debt: Optional[FactRecord],
+        repo: RegionFactsRepository,
+        short_debt: Optional[MonetaryFact],
+        long_debt: Optional[MonetaryFact],
+        total_debt: Optional[MonetaryFact],
     ) -> tuple[Optional[_AmountResult], Optional[str]]:
         if short_debt is not None and long_debt is not None:
-            short_value, short_currency = self._normalize_currency(
-                short_debt,
-                symbol,
-                repo,
-                SHORT_TERM_DEBT_CONCEPT,
-            )
-            long_value, long_currency = self._normalize_currency(
-                long_debt,
-                symbol,
-                repo,
-                LONG_TERM_DEBT_CONCEPT,
-            )
-            currency = self._combine_currency([short_currency, long_currency])
-            if currency is None and any(
-                code is not None for code in (short_currency, long_currency)
-            ):
-                return None, FAILURE_CURRENCY_CONFLICT
             return (
                 _AmountResult(
-                    total=short_value + long_value,
+                    money=self._money(short_debt, symbol, repo)
+                    + self._money(long_debt, symbol, repo),
                     as_of=max(short_debt.end_date, long_debt.end_date),
-                    currency=currency,
                 ),
                 None,
             )
 
         if total_debt is not None:
-            total_value, total_currency = self._normalize_currency(
-                total_debt,
-                symbol,
-                repo,
-                TOTAL_DEBT_CONCEPT,
-            )
             return (
                 _AmountResult(
-                    total=total_value,
+                    money=self._money(total_debt, symbol, repo),
                     as_of=total_debt.end_date,
-                    currency=total_currency,
                 ),
                 None,
             )
@@ -773,14 +701,11 @@ class ROICFYSeriesCalculator:
         if one_side is None:
             return None, FAILURE_MISSING_INVESTED_CAPITAL_DEBT_INPUT
 
-        value, currency = self._normalize_currency(
-            one_side,
-            symbol,
-            repo,
-            one_side.concept,
-        )
         return (
-            _AmountResult(total=value, as_of=one_side.end_date, currency=currency),
+            _AmountResult(
+                money=self._money(one_side, symbol, repo),
+                as_of=one_side.end_date,
+            ),
             None,
         )
 
@@ -788,34 +713,29 @@ class ROICFYSeriesCalculator:
         self,
         *,
         symbol: str,
-        repo: FinancialFactsRepository,
-        primary: Optional[FactRecord],
-        fallback: Optional[FactRecord],
+        repo: RegionFactsRepository,
+        primary: Optional[MonetaryFact],
+        fallback: Optional[MonetaryFact],
         missing_failure: str,
     ) -> tuple[Optional[_AmountResult], Optional[str]]:
         record = primary or fallback
         if record is None:
             return None, missing_failure
-        value, currency = self._normalize_currency(
-            record,
-            symbol,
-            repo,
-            record.concept,
-        )
         return (
-            _AmountResult(total=value, as_of=record.end_date, currency=currency),
+            _AmountResult(
+                money=self._money(record, symbol, repo),
+                as_of=record.end_date,
+            ),
             None,
         )
 
     def _fy_period_map(
-        self, records: Sequence[FactRecord]
-    ) -> dict[tuple[str, str], FactRecord]:
-        mapped: dict[tuple[str, str], FactRecord] = {}
+        self, records: Sequence[MonetaryFact]
+    ) -> dict[tuple[str, str], MonetaryFact]:
+        mapped: dict[tuple[str, str], MonetaryFact] = {}
         for record in sorted(records, key=lambda item: item.end_date, reverse=True):
             period = (record.fiscal_period or "").upper()
             if period not in FY_PERIODS:
-                continue
-            if record.value is None:
                 continue
             key = (record.end_date, period)
             if key not in mapped:
@@ -825,26 +745,19 @@ class ROICFYSeriesCalculator:
     def _fy_map(
         self,
         symbol: str,
-        repo: FinancialFactsRepository,
+        repo: RegionFactsRepository,
         concept: str,
     ) -> dict[int, _AmountResult]:
-        records = repo.facts_for_concept(symbol, concept, fiscal_period="FY")
+        records = repo.monetary_facts_for_concept(symbol, concept, fiscal_period="FY")
         ordered = self._filter_periods(records, FY_PERIODS)
         mapped: dict[int, _AmountResult] = {}
         for record in ordered:
             year = self._extract_year(record.end_date)
             if year is None or year in mapped:
                 continue
-            value, currency = self._normalize_currency(
-                record,
-                symbol,
-                repo,
-                concept,
-            )
             mapped[year] = _AmountResult(
-                total=value,
+                money=self._money(record, symbol, repo),
                 as_of=record.end_date,
-                currency=currency,
             )
         return mapped
 
@@ -902,11 +815,9 @@ class ROICFYSeriesCalculator:
     ) -> Optional[_TaxRateResult]:
         if tax is None or pretax is None:
             return None
-        if not self._currencies_match(tax.currency, pretax.currency):
+        if pretax.money.amount <= PRETAX_MIN_ABS:
             return None
-        if pretax.total <= PRETAX_MIN_ABS:
-            return None
-        rate = tax.total / pretax.total
+        rate = tax.money / pretax.money
         if rate < 0 or rate > 1:
             return None
         return _TaxRateResult(
@@ -923,9 +834,9 @@ class ROICFYSeriesCalculator:
         return tuple(range(latest_year, latest_year - window_years, -1))
 
     def _filter_periods(
-        self, records: Sequence[FactRecord], periods: set[str]
-    ) -> list[FactRecord]:
-        filtered: list[FactRecord] = []
+        self, records: Sequence[MonetaryFact], periods: set[str]
+    ) -> list[MonetaryFact]:
+        filtered: list[MonetaryFact] = []
         seen_end_dates: set[str] = set()
         for record in records:
             period = (record.fiscal_period or "").upper()
@@ -933,50 +844,28 @@ class ROICFYSeriesCalculator:
                 continue
             if record.end_date in seen_end_dates:
                 continue
-            if record.value is None:
-                continue
             filtered.append(record)
             seen_end_dates.add(record.end_date)
         return filtered
 
-    def _normalize_currency(
-        self,
-        record: FactRecord,
-        symbol: str,
-        repo: FinancialFactsRepository,
-        concept: str,
-    ) -> tuple[float, str]:
-        return normalize_metric_record(
-            record,
-            metric_id="roic_fy_series",
-            symbol=symbol,
-            input_name=concept,
-            expected_currency=require_metric_ticker_currency(
-                symbol,
-                repo,
-                metric_id="roic_fy_series",
-                input_name=concept,
-                as_of=record.end_date,
-                candidate_currencies=[record.currency],
-            ),
-            contexts=(repo,),
+    def _money(
+        self, fact: MonetaryFact, symbol: str, repo: RegionFactsRepository
+    ) -> Money:
+        target_currency = require_metric_ticker_currency(
+            symbol,
+            repo,
+            metric_id=_METRIC_ID,
+            input_name=fact.concept,
+            as_of=fact.end_date,
         )
-
-    def _combine_currency(self, values: Sequence[Optional[str]]) -> Optional[str]:
-        merged = None
-        for value in values:
-            if not value:
-                continue
-            if merged is None:
-                merged = value
-            elif merged != value:
-                return None
-        return merged
-
-    def _currencies_match(self, left: Optional[str], right: Optional[str]) -> bool:
-        if left and right:
-            return left == right
-        return True
+        return require_metric_money(
+            fact.money,
+            target_currency=target_currency,
+            metric_id=_METRIC_ID,
+            symbol=symbol,
+            input_name=fact.concept,
+            as_of=fact.end_date,
+        )
 
     def _extract_year(self, value: str) -> Optional[int]:
         if len(value) < 4:
@@ -1005,7 +894,7 @@ class ROIC10YMedianMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = ROICFYSeriesCalculator().compute_series(
             symbol, repo, window_years=DEFAULT_SERIES_YEARS
@@ -1031,7 +920,7 @@ class ROIC7YMedianMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = ROICFYSeriesCalculator().compute_series(
             symbol, repo, window_years=STRICT_7Y_YEARS
@@ -1056,7 +945,7 @@ class ROICYearsAbove12PctMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = ROICFYSeriesCalculator().compute_series(
             symbol, repo, window_years=DEFAULT_SERIES_YEARS
@@ -1080,7 +969,7 @@ class ROIC10YMinMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = ROICFYSeriesCalculator().compute_series(
             symbol, repo, window_years=DEFAULT_SERIES_YEARS
@@ -1104,7 +993,7 @@ class ROIC7YMinMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = ROICFYSeriesCalculator().compute_series(
             symbol, repo, window_years=STRICT_7Y_YEARS
@@ -1128,7 +1017,7 @@ class IncrementalROICFiveYearMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: FinancialFactsRepository
+        self, symbol: str, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = ROICFYSeriesCalculator().compute_incremental_5y(symbol, repo)
         if snapshot is None:
