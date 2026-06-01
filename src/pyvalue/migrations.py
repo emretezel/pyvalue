@@ -7724,6 +7724,65 @@ def _migration_071_financial_facts_unit_kind(conn: sqlite3.Connection) -> None:
         conn.execute("DELETE FROM fundamentals_normalization_state")
 
 
+def _migration_072_drop_market_data_market_cap(conn: sqlite3.Connection) -> None:
+    """Drop the derived ``market_data.market_cap`` column.
+
+    Market cap is shares-outstanding x price -- a value derivable entirely from
+    other stored facts, so persisting it duplicated state that could silently go
+    stale relative to its inputs. It is now computed on demand (a share-count
+    ``financial_facts`` row x the ``market_data`` price as of that share count's
+    date; see ``metrics.utils.market_cap_money``), so the stored column is
+    removed.
+
+    Unlike migration 071's ``financial_facts`` rebuild, ``market_data`` is NOT
+    regenerated from ``fundamentals_raw`` -- its price rows come from the market
+    refresh, not from normalization -- so the existing ~222k rows are COPIED
+    into the new shape (only ``market_cap`` is dropped); ``price``, ``volume``,
+    ``source_provider`` and ``updated_at`` are preserved. ``market_data`` is a
+    leaf table (nothing references it; no view selects from it), so the
+    drop/recreate is self-contained.
+
+    Idempotent: a ``market_data`` table that no longer declares ``market_cap`` is
+    left untouched.
+    """
+
+    if not _table_exists(conn, "market_data"):
+        return
+    ddl_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'market_data'"
+    ).fetchone()
+    if ddl_row is None:
+        return
+    if "market_cap" not in ddl_row[0]:
+        return
+
+    conn.execute(
+        """
+        CREATE TABLE market_data__new (
+            listing_id INTEGER NOT NULL,
+            as_of DATE NOT NULL,
+            price REAL NOT NULL,
+            volume INTEGER,
+            source_provider TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (listing_id, as_of),
+            FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO market_data__new (
+            listing_id, as_of, price, volume, source_provider, updated_at
+        )
+        SELECT listing_id, as_of, price, volume, source_provider, updated_at
+        FROM market_data
+        """
+    )
+    conn.execute("DROP TABLE market_data")
+    conn.execute("ALTER TABLE market_data__new RENAME TO market_data")
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -7796,6 +7855,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_069_purge_currencyless_listings,
     _migration_070_market_data_price_major_currency,
     _migration_071_financial_facts_unit_kind,
+    _migration_072_drop_market_data_market_cap,
 ]
 
 

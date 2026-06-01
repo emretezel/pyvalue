@@ -140,7 +140,6 @@ CREATE TABLE "market_data" (
             as_of DATE NOT NULL,
             price REAL NOT NULL,
             volume INTEGER,
-            market_cap REAL,
             source_provider TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             PRIMARY KEY (listing_id, as_of),

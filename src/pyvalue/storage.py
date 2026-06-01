@@ -353,7 +353,6 @@ class MarketSnapshotRecord:
     as_of: str
     price: float
     volume: Optional[int] = None
-    market_cap: Optional[float] = None
     currency: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -5889,7 +5888,6 @@ class MarketDataRepository(SQLiteStore):
         as_of: str,
         price: float,
         volume: Optional[int] = None,
-        market_cap: Optional[float] = None,
         currency: Optional[str] = None,
         source_provider: Optional[str] = None,
     ) -> None:
@@ -5903,7 +5901,6 @@ class MarketDataRepository(SQLiteStore):
                     as_of=as_of,
                     price=price,
                     volume=volume,
-                    market_cap=market_cap,
                     currency=currency,
                     source_provider=(source_provider or "EODHD").strip().upper(),
                 )
@@ -5921,7 +5918,6 @@ class MarketDataRepository(SQLiteStore):
                 row.as_of,
                 row.price,
                 row.volume,
-                row.market_cap,
                 row.source_provider.strip().upper(),
                 updated_at,
             )
@@ -5935,14 +5931,12 @@ class MarketDataRepository(SQLiteStore):
                     as_of,
                     price,
                     volume,
-                    market_cap,
                     source_provider,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(listing_id, as_of) DO UPDATE SET
                     price = excluded.price,
                     volume = excluded.volume,
-                    market_cap = excluded.market_cap,
                     source_provider = excluded.source_provider,
                     updated_at = excluded.updated_at
                 """,
@@ -5958,7 +5952,6 @@ class MarketDataRepository(SQLiteStore):
             price=record.price,
             as_of=record.as_of,
             volume=record.volume,
-            market_cap=record.market_cap,
             currency=record.currency,
         )
 
@@ -5977,7 +5970,7 @@ class MarketDataRepository(SQLiteStore):
             row = conn.execute(
                 """
                 SELECT s.canonical_symbol, md.listing_id AS security_id, md.as_of, md.price, md.volume,
-                       md.market_cap, l.currency, md.updated_at
+                       l.currency, md.updated_at
                 FROM market_data md
                 JOIN securities s ON s.security_id = md.listing_id
                 JOIN listing l ON l.listing_id = md.listing_id
@@ -5995,7 +5988,6 @@ class MarketDataRepository(SQLiteStore):
             as_of=row["as_of"],
             price=row["price"],
             volume=row["volume"],
-            market_cap=row["market_cap"],
             # market_data.price is stored in the major currency, so report the
             # listing currency collapsed to its base (GBX -> GBP) -- never a
             # subunit. This keeps the (price, currency) pair self-consistent so
@@ -6055,7 +6047,6 @@ class MarketDataRepository(SQLiteStore):
                         md.as_of,
                         md.price,
                         md.volume,
-                        md.market_cap,
                         l.currency,
                         md.updated_at
                     FROM latest
@@ -6075,7 +6066,6 @@ class MarketDataRepository(SQLiteStore):
                         as_of=row["as_of"],
                         price=row["price"],
                         volume=row["volume"],
-                        market_cap=row["market_cap"],
                         # Stored price is major; collapse listing currency to
                         # its base so the (price, currency) pair is consistent.
                         currency=canonical_trading_currency(row["currency"]),
@@ -6089,50 +6079,50 @@ class MarketDataRepository(SQLiteStore):
                 _query(conn)
         return snapshots
 
-    def update_market_cap(self, symbol: str, market_cap: float) -> int:
+    def price_as_of(
+        self, symbol: str, on_or_before: str
+    ) -> Optional[MarketSnapshotRecord]:
+        """Return the latest price snapshot on or before ``on_or_before``.
+
+        Market cap is computed as a share-count fact x the price *as of that
+        fact's date* (see ``metrics.utils.market_cap_money``); this resolves that
+        price by taking the most recent ``market_data`` row whose ``as_of`` does
+        not exceed the requested date (so a share count dated on a non-trading
+        day still pairs with the prior trading day's close). The reported
+        currency is the listing's base (major) currency, consistent with the
+        stored major price.
+        """
+
         self.initialize_schema()
         security_id = self._security_repo().resolve_id(symbol)
         if security_id is None:
-            return 0
+            return None
         with self._connect() as conn:
-            cursor = conn.execute(
+            row = conn.execute(
                 """
-                UPDATE market_data
-                SET market_cap = ?, updated_at = ?
-                WHERE listing_id = ?
-                  AND as_of = (
-                      SELECT MAX(as_of)
-                      FROM market_data
-                      WHERE listing_id = ?
-                  )
+                SELECT s.canonical_symbol, md.listing_id AS security_id, md.as_of,
+                       md.price, md.volume, l.currency, md.updated_at
+                FROM market_data md
+                JOIN securities s ON s.security_id = md.listing_id
+                JOIN listing l ON l.listing_id = md.listing_id
+                WHERE md.listing_id = ?
+                  AND md.as_of <= ?
+                ORDER BY md.as_of DESC
+                LIMIT 1
                 """,
-                (market_cap, _utc_now_iso(), security_id, security_id),
-            )
-        return int(cursor.rowcount or 0)
-
-    def update_market_caps_many(
-        self,
-        rows: Sequence[Tuple[int, str, float]],
-    ) -> int:
-        self.initialize_schema()
-        if not rows:
-            return 0
-        updated_at = _utc_now_iso()
-        payload = [
-            (market_cap, updated_at, security_id, as_of)
-            for security_id, as_of, market_cap in rows
-        ]
-        with self._connect() as conn:
-            before = conn.total_changes
-            conn.executemany(
-                """
-                UPDATE market_data
-                SET market_cap = ?, updated_at = ?
-                WHERE listing_id = ? AND as_of = ?
-                """,
-                payload,
-            )
-            return int(conn.total_changes - before)
+                (security_id, on_or_before),
+            ).fetchone()
+        if row is None:
+            return None
+        return MarketSnapshotRecord(
+            security_id=row["security_id"],
+            symbol=row["canonical_symbol"],
+            as_of=row["as_of"],
+            price=row["price"],
+            volume=row["volume"],
+            currency=canonical_trading_currency(row["currency"]),
+            updated_at=row["updated_at"],
+        )
 
 
 class EntityMetadataRepository(SQLiteStore):

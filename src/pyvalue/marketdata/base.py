@@ -16,7 +16,6 @@ class PriceData:
     as_of: str
     currency: Optional[str] = None
     volume: Optional[int] = None
-    market_cap: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -28,7 +27,6 @@ class MarketDataUpdate:
     as_of: str
     price: float
     volume: Optional[int] = None
-    market_cap: Optional[float] = None
     currency: Optional[str] = None
     source_provider: str = "EODHD"
 

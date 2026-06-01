@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Stores price, volume, and market-cap snapshots for canonical listings.
+Stores price and volume snapshots for canonical listings.
 
 ## Grain
 
@@ -23,9 +23,8 @@ One row per `(listing_id, as_of)` snapshot date.
 | --- | --- | --- | --- | --- |
 | `listing_id` | `INTEGER` | no | PK, idx | canonical listing identity |
 | `as_of` | `DATE` | no | PK, idx | snapshot date |
-| `price` | `REAL` | no |  | latest close or provider price |
+| `price` | `REAL` | no |  | latest close or provider price, in the **major** currency (`canonical_trading_currency(listing.currency)`) |
 | `volume` | `INTEGER` | yes |  | provider volume |
-| `market_cap` | `REAL` | yes |  | market capitalization in base(`listing.currency`) |
 | `source_provider` | `TEXT` | no |  | provenance |
 | `updated_at` | `TEXT` | no |  | write timestamp |
 
@@ -48,13 +47,14 @@ One row per `(listing_id, as_of)` snapshot date.
 
 ## Main Read Paths
 
-- latest market data lookup for price and market-cap metrics
-- market-cap recalculation
+- latest price lookup for price-based metrics
+- price *as of* a share-count fact's date, paired with that fact to compute
+  market cap on demand (`MarketDataRepository.price_as_of` /
+  `metrics.utils.market_cap_money`)
 
 ## Main Write Paths
 
 - `update-market-data`
-- `recalc-market-cap`
 
 ## Sample Rows
 
@@ -115,7 +115,13 @@ One row per `(listing_id, as_of)` snapshot date.
 
 ## Review Notes
 
-- `market_data.price` is stored in the listing quote unit from
-  `listing.currency`, including subunits such as `GBX`, `ZAC`, and `ILA`.
-- `market_data.market_cap` is stored in base(`listing.currency`).
+- `market_data.price` is stored in the **major** currency
+  (`canonical_trading_currency(listing.currency)`): subunit quotes
+  (`GBX`/`ZAC`/`ILA`) are divided by their divisor before persistence
+  (migration 070), so subunits never cross the data boundary.
+- The derived `market_cap` column was **removed (migration 072)**: market cap is
+  shares-outstanding x price, so it is computed on demand as a share-count
+  `financial_facts` row x the price as of that fact's date
+  (`metrics.utils.market_cap_money`) rather than stored. The generated Live
+  Stats / Sample Rows above predate migration 072 and still show the column.
 - Market-data rows do not persist a duplicate currency column.

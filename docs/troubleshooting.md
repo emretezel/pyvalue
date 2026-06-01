@@ -95,15 +95,19 @@ freshness window.
 
 ## Market Cap Looks Wrong or Missing
 
+Market cap is computed on demand as a share-count fact x the `market_data` price
+*as of that fact's date* (it is no longer a stored column). It is missing when
+there is no shares-outstanding fact, or no stored price at or before the latest
+share-count date.
+
 Typical causes:
 - market data not refreshed yet
-- share-count facts were missing when prices were first stored
+- no shares-outstanding fact normalized for the symbol
 
 Fix:
 
 ```bash
 pyvalue update-market-data --provider EODHD --exchange-codes US
-pyvalue recalc-market-cap --exchange-codes US
 ```
 
 ## Stale Data

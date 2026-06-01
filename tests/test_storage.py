@@ -1428,7 +1428,6 @@ def test_market_data_repository_latest_snapshots_many_matches_single_lookup(tmp_
                 price=9.0,
                 volume=90,
                 currency="USD",
-                market_cap=900.0,
             ),
             MarketDataUpdate(
                 security_id=by_symbol["AAA.US"].security_id,
@@ -1437,7 +1436,6 @@ def test_market_data_repository_latest_snapshots_many_matches_single_lookup(tmp_
                 price=10.0,
                 volume=100,
                 currency="USD",
-                market_cap=1000.0,
             ),
             MarketDataUpdate(
                 security_id=by_symbol["BBB.US"].security_id,
@@ -1446,7 +1444,6 @@ def test_market_data_repository_latest_snapshots_many_matches_single_lookup(tmp_
                 price=20.0,
                 volume=200,
                 currency="USD",
-                market_cap=2000.0,
             ),
         ]
     )
@@ -1457,9 +1454,35 @@ def test_market_data_repository_latest_snapshots_many_matches_single_lookup(tmp_
     assert snapshots["AAA.US"].security_id == by_symbol["AAA.US"].security_id
     assert snapshots["AAA.US"].as_of == repo.latest_snapshot("AAA.US").as_of
     assert snapshots["AAA.US"].price == repo.latest_snapshot("AAA.US").price
-    assert snapshots["AAA.US"].market_cap == repo.latest_snapshot("AAA.US").market_cap
     assert snapshots["BBB.US"].as_of == repo.latest_snapshot("BBB.US").as_of
     assert snapshots["BBB.US"].price == repo.latest_snapshot("BBB.US").price
+
+
+def test_market_data_repository_price_as_of_returns_latest_on_or_before(tmp_path):
+    # ``price_as_of`` resolves the price the on-demand market cap pairs with a
+    # share-count fact: the most recent snapshot whose ``as_of`` does not exceed
+    # the requested date, reported in the listing's base currency.
+    db_path = tmp_path / "price-as-of.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock", "Currency": "USD"}],
+    )
+    repo = MarketDataRepository(db_path)
+    repo.initialize_schema()
+    repo.upsert_price("AAA.US", "2026-01-15", 10.0, currency="USD")
+    repo.upsert_price("AAA.US", "2026-03-31", 12.0, currency="USD")
+
+    assert repo.price_as_of("AAA.US", "2026-02-01").price == 10.0
+    assert repo.price_as_of("AAA.US", "2026-03-31").price == 12.0
+    assert repo.price_as_of("AAA.US", "2026-04-15").price == 12.0
+    assert repo.price_as_of("AAA.US", "2026-03-31").currency == "USD"
+    # No snapshot on or before the date -> None.
+    assert repo.price_as_of("AAA.US", "2026-01-01") is None
+    # Unknown symbol -> None.
+    assert repo.price_as_of("ZZZ.US", "2026-03-31") is None
 
 
 def test_financial_facts_repository_latest_share_counts_many_matches_single_lookup(
@@ -1785,87 +1808,6 @@ def test_migration_029_creates_fin_facts_security_concept_latest_index(tmp_path)
             "AND name='idx_fin_facts_security_concept_latest'"
         ).fetchone()
     assert after is not None
-
-
-def test_market_data_repository_update_market_caps_many_matches_single_update(tmp_path):
-    db_path = tmp_path / "market-cap-updates-many.db"
-    ticker_repo = SupportedTickerRepository(db_path)
-    ticker_repo.initialize_schema()
-    ticker_repo.replace_for_exchange(
-        "EODHD",
-        "US",
-        [
-            {
-                "Code": "AAA",
-                "Name": "AAA Inc",
-                "Type": "Common Stock",
-                "Currency": "USD",
-            },
-            {
-                "Code": "BBB",
-                "Name": "BBB Inc",
-                "Type": "Common Stock",
-                "Currency": "USD",
-            },
-        ],
-    )
-    rows = ticker_repo.list_for_exchange("EODHD", "US")
-    by_symbol = {row.symbol: row for row in rows}
-
-    repo = MarketDataRepository(db_path)
-    repo.initialize_schema()
-    repo.upsert_prices(
-        [
-            MarketDataUpdate(
-                security_id=by_symbol["AAA.US"].security_id,
-                symbol="AAA.US",
-                as_of="2026-03-28",
-                price=9.0,
-                volume=90,
-                currency="USD",
-                market_cap=900.0,
-            ),
-            MarketDataUpdate(
-                security_id=by_symbol["AAA.US"].security_id,
-                symbol="AAA.US",
-                as_of="2026-03-29",
-                price=10.0,
-                volume=100,
-                currency="USD",
-                market_cap=1000.0,
-            ),
-            MarketDataUpdate(
-                security_id=by_symbol["BBB.US"].security_id,
-                symbol="BBB.US",
-                as_of="2026-03-29",
-                price=20.0,
-                volume=200,
-                currency="USD",
-                market_cap=2000.0,
-            ),
-        ]
-    )
-
-    updated = repo.update_market_caps_many(
-        [
-            (by_symbol["AAA.US"].security_id, "2026-03-29", 1500.0),
-            (by_symbol["BBB.US"].security_id, "2026-03-29", 2500.0),
-        ]
-    )
-
-    assert updated == 2
-    assert repo.latest_snapshot("AAA.US").market_cap == 1500.0
-    assert repo.latest_snapshot("BBB.US").market_cap == 2500.0
-    with sqlite3.connect(db_path) as conn:
-        historical = conn.execute(
-            """
-                SELECT market_cap
-                FROM market_data md
-                JOIN securities s ON s.security_id = md.listing_id
-                WHERE s.canonical_symbol = 'AAA.US' AND md.as_of = '2026-03-28'
-                """
-        ).fetchone()[0]
-    assert historical == 900.0
 
 
 def test_latest_share_counts_many_prefers_best_same_date_share_fact(tmp_path):

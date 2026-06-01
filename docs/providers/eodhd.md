@@ -289,11 +289,8 @@ Important market-data options:
   before market-data refresh planning and progress accounting
 - retry backoff is respected by default; use `--retry-failed-now` to bypass it
 
-Market cap can be recalculated later from stored prices and latest share counts:
-
-```bash
-pyvalue recalc-market-cap --exchange-codes US
-```
+Market cap is not stored; it is computed on demand as a share-count fact x the
+`market_data` price as of that fact's date (`metrics.utils.market_cap_money`).
 
 ## EODHD-Oriented Metrics
 

@@ -47,7 +47,6 @@ from pyvalue.currency import (
     is_monetary_unit_kind,
     metric_currency_or_none,
     normalize_currency_code,
-    normalize_monetary_amount,
 )
 from pyvalue.ingestion import EODHDFundamentalsClient, SECCompanyFactsClient
 from pyvalue.fx import (
@@ -1377,7 +1376,6 @@ def _build_market_data_update(
         as_of=prepared.as_of,
         price=prepared.price,
         volume=prepared.volume,
-        market_cap=prepared.market_cap,
         currency=prepared.currency,
         source_provider="EODHD",
     )
@@ -1638,17 +1636,6 @@ def build_parser() -> argparse.ArgumentParser:
         default="data/pyvalue.db",
         help="SQLite database file used for storage (default: %(default)s)",
     )
-
-    recalc_market_cap = subparsers.add_parser(
-        "recalc-market-cap",
-        help="Recompute stored market caps using latest price and share counts.",
-    )
-    recalc_market_cap.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file used for storage (default: %(default)s)",
-    )
-    add_scope_args(recalc_market_cap)
 
     clear_facts = subparsers.add_parser(
         "clear-financial-facts",
@@ -3729,7 +3716,6 @@ def _price_data_from_snapshot_record(record: MarketSnapshotRecord) -> PriceData:
         as_of=record.as_of,
         currency=record.currency,
         volume=record.volume,
-        market_cap=record.market_cap,
     )
 
 
@@ -6970,18 +6956,47 @@ def _write_screen_failure_report_csv(
                 )
 
 
+def _estimate_market_caps(
+    fact_repo: FinancialFactsRepository,
+    snapshots_by_symbol: Mapping[str, MarketSnapshotRecord],
+) -> Dict[str, Optional[float]]:
+    """Estimate market caps (latest shares x latest price) for report examples.
+
+    Market cap is no longer a stored column; this is a diagnostic-only sizing
+    heuristic used to pick a representative (large) failing example. It pairs the
+    latest share count with the latest price rather than the share-count-dated
+    price the metrics use -- close enough for ranking examples by size, and cheap
+    (one bulk share-count read over the already-loaded snapshots).
+    """
+
+    estimates: Dict[str, Optional[float]] = {}
+    if not snapshots_by_symbol:
+        return estimates
+    share_counts = fact_repo.latest_share_counts_many(
+        list(snapshots_by_symbol.keys()),
+        security_ids_by_symbol={
+            symbol: snapshot.security_id
+            for symbol, snapshot in snapshots_by_symbol.items()
+        },
+    )
+    for symbol, snapshot in snapshots_by_symbol.items():
+        shares = share_counts.get(symbol)
+        if (
+            shares is None
+            or shares <= 0
+            or snapshot.price is None
+            or snapshot.price <= 0
+        ):
+            continue
+        estimates[symbol] = snapshot.price * shares
+    return estimates
+
+
 def _metric_market_cap(
-    market_repo: MarketDataRepository,
     market_caps: Dict[str, Optional[float]],
     symbol: str,
 ) -> Optional[float]:
-    cap = market_caps.get(symbol)
-    if symbol in market_caps:
-        return cap
-    snapshot = market_repo.latest_snapshot(symbol)
-    cap = snapshot.market_cap if snapshot else None
-    market_caps[symbol] = cap
-    return cap
+    return market_caps.get(symbol)
 
 
 def _record_failure_example(
@@ -7003,7 +7018,6 @@ def _record_failure_example(
 def _record_metric_failure_reason(
     failures: Dict[str, Counter],
     examples: Dict[str, Dict[str, tuple[str, Optional[float]]]],
-    market_repo: MarketDataRepository,
     market_caps: Dict[str, Optional[float]],
     *,
     metric_id: str,
@@ -7011,7 +7025,7 @@ def _record_metric_failure_reason(
     symbol: str,
 ) -> None:
     failures[metric_id][reason] += 1
-    cap = _metric_market_cap(market_repo, market_caps, symbol)
+    cap = _metric_market_cap(market_caps, symbol)
     _record_failure_example(examples, metric_id, reason, symbol, cap)
 
 
@@ -7058,11 +7072,7 @@ def _recompute_missing_screen_metrics(
     )
 
     snapshots_by_symbol = market_repo.latest_snapshots_many(symbols_to_recompute)
-    market_caps: Dict[str, Optional[float]] = {
-        symbol: None for symbol in symbols_to_recompute
-    }
-    for symbol, snapshot in snapshots_by_symbol.items():
-        market_caps[symbol] = snapshot.market_cap
+    market_caps = _estimate_market_caps(fact_repo, snapshots_by_symbol)
 
     availability_states = availability_repo.states_many(
         symbols_to_recompute,
@@ -7079,7 +7089,6 @@ def _recompute_missing_screen_metrics(
                 _record_metric_failure_reason(
                     failures,
                     examples,
-                    market_repo,
                     market_caps,
                     metric_id=metric_id,
                     reason="unknown_metric_id",
@@ -7096,7 +7105,6 @@ def _recompute_missing_screen_metrics(
                 _record_metric_failure_reason(
                     failures,
                     examples,
-                    market_repo,
                     market_caps,
                     metric_id=metric_id,
                     reason=state.status_record.reason_code or "no warning emitted",
@@ -7141,7 +7149,6 @@ def _recompute_missing_screen_metrics(
                     _record_metric_failure_reason(
                         failures,
                         examples,
-                        market_repo,
                         market_caps,
                         metric_id=attempt.metric_id,
                         reason=reason,
@@ -7273,14 +7280,13 @@ def cmd_report_metric_failures(
     examples: Dict[str, Dict[str, tuple[str, Optional[float]]]] = {
         getattr(cls, "id", cls.__name__): {} for cls in metric_classes
     }
-    market_caps: Dict[str, Optional[float]] = {
-        symbol: None for symbol in selected_symbols
-    }
-    for symbol, snapshot in market_repo.latest_snapshots_many(
-        selected_symbols,
-        chunk_size=METRICS_COMPUTE_BATCH_SIZE,
-    ).items():
-        market_caps[symbol] = snapshot.market_cap
+    market_caps = _estimate_market_caps(
+        fact_repo,
+        market_repo.latest_snapshots_many(
+            selected_symbols,
+            chunk_size=METRICS_COMPUTE_BATCH_SIZE,
+        ),
+    )
 
     for metric_cls in metric_classes:
         metric_id = getattr(metric_cls, "id", metric_cls.__name__)
@@ -7308,7 +7314,6 @@ def cmd_report_metric_failures(
                     _record_metric_failure_reason(
                         failures,
                         examples,
-                        market_repo,
                         market_caps,
                         metric_id=metric_id,
                         reason=reason,
@@ -7346,7 +7351,6 @@ def cmd_report_metric_failures(
                     _record_metric_failure_reason(
                         failures,
                         examples,
-                        market_repo,
                         market_caps,
                         metric_id=metric_id,
                         reason=attempt.reason_code or "no warning emitted",
@@ -7612,101 +7616,6 @@ def cmd_purge_us_nonfilers(database: str, apply: bool) -> int:
 
     ticker_repo.delete_symbols("SEC", to_remove)
     print(f"Deleted {len(to_remove)} SEC US supported tickers from provider_listing.")
-    return 0
-
-
-def cmd_recalc_market_cap(
-    database: str,
-    symbols: Optional[Sequence[str]],
-    exchange_codes: Optional[Sequence[str]],
-    all_supported: bool,
-) -> int:
-    """Recompute market cap values for stored market data."""
-
-    db_path = _resolve_database_path(database)
-    market_repo = MarketDataRepository(db_path)
-    base_fact_repo = FinancialFactsRepository(db_path)
-    selected_symbols, explicit_symbols, resolved_exchange_codes = (
-        _resolve_canonical_scope_symbols(
-            str(db_path),
-            symbols,
-            exchange_codes,
-            all_supported,
-        )
-    )
-    scope_label = _scope_label(
-        explicit_symbols,
-        resolved_exchange_codes,
-        "all supported tickers",
-    )
-    print(
-        f"Preparing market cap recalculation for {scope_label} "
-        f"(selected={len(selected_symbols)})",
-        flush=True,
-    )
-    print(
-        f"Loading latest market data for {len(selected_symbols)} symbols",
-        flush=True,
-    )
-    snapshots_by_symbol = market_repo.latest_snapshots_many(selected_symbols)
-    symbols_with_market_data = [
-        symbol for symbol in selected_symbols if symbol in snapshots_by_symbol
-    ]
-    if not symbols_with_market_data:
-        print(f"No market data found to update for {scope_label}.")
-        return 0
-
-    total = len(symbols_with_market_data)
-    print(
-        f"Recomputing market cap for {total} symbols in {scope_label}",
-        flush=True,
-    )
-    try:
-        print(
-            f"Loading latest share counts for {total} symbols",
-            flush=True,
-        )
-        share_counts = base_fact_repo.latest_share_counts_many(
-            symbols_with_market_data,
-            security_ids_by_symbol={
-                symbol: snapshots_by_symbol[symbol].security_id
-                for symbol in symbols_with_market_data
-            },
-        )
-        print(
-            f"Loaded latest share counts for {len(share_counts)} symbols",
-            flush=True,
-        )
-        pending_updates: List[Tuple[int, str, float]] = []
-        updated_symbols: List[Tuple[int, str]] = []
-        for idx, symbol in enumerate(symbols_with_market_data, 1):
-            shares = share_counts.get(symbol)
-            if shares is None or shares <= 0:
-                LOGGER.warning("Skipping %s due to missing share count", symbol)
-                continue
-            snapshot = snapshots_by_symbol[symbol]
-            base_price, _ = normalize_monetary_amount(
-                snapshot.price,
-                snapshot.currency,
-            )
-            if base_price is None:
-                LOGGER.warning("Skipping %s due to invalid price", symbol)
-                continue
-            pending_updates.append(
-                (snapshot.security_id, snapshot.as_of, float(base_price) * shares)
-            )
-            updated_symbols.append((idx, symbol))
-        print(
-            f"Applying market cap updates for {len(pending_updates)} symbols",
-            flush=True,
-        )
-        updated_rows = market_repo.update_market_caps_many(pending_updates)
-        for idx, symbol in updated_symbols:
-            print(f"[{idx}/{total}] Updated market cap for {symbol}", flush=True)
-    except KeyboardInterrupt:
-        return _cancel_cli_command("\nMarket cap recalculation cancelled by user.")
-
-    print(f"Updated market cap for {updated_rows} rows in {db_path}")
     return 0
 
 
@@ -8980,13 +8889,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 exchange_codes=args.exchange_codes,
                 all_supported=args.all_supported,
                 output_csv=args.output_csv,
-            )
-        if args.command == "recalc-market-cap":
-            return cmd_recalc_market_cap(
-                database=args.database,
-                symbols=args.symbols,
-                exchange_codes=args.exchange_codes,
-                all_supported=args.all_supported,
             )
         if args.command == "run-screen":
             return cmd_run_screen_stage(

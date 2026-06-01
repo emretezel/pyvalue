@@ -203,6 +203,39 @@ def _seed_listing(
     return repo
 
 
+def _seed_share_count(db_path, symbol: str, as_of: str, shares: float) -> None:
+    """Add a co-dated shares-outstanding fact without wiping existing facts.
+
+    Market cap is computed on demand as a share-count fact x the price as of that
+    fact's date, so market-cap tests seed a share count dated with the price. The
+    existing facts are read back and re-written so the (destructive)
+    ``replace_facts`` does not drop facts other tests seeded for the symbol.
+    """
+
+    repo = FinancialFactsRepository(db_path)
+    repo.initialize_schema()
+    preserved = [
+        record
+        for record in repo.facts_for_symbol(symbol)
+        if record.concept != "CommonStockSharesOutstanding"
+    ]
+    repo.replace_facts(
+        symbol,
+        preserved
+        + [
+            FactRecord(
+                symbol=symbol,
+                cik=None,
+                concept="CommonStockSharesOutstanding",
+                fiscal_period="INSTANT",
+                end_date=as_of,
+                unit_kind="count",
+                value=shares,
+            )
+        ],
+    )
+
+
 def store_market_data(
     db_path,
     symbol: str,
@@ -217,9 +250,13 @@ def store_market_data(
         symbol,
         as_of,
         price,
-        market_cap=market_cap,
         currency=currency,
     )
+    if market_cap is not None:
+        # Reproduce the requested market cap from its on-demand inputs:
+        # shares = market_cap / price, dated with the price so price_as_of pairs
+        # them. Callers seed any non-share facts before calling this helper.
+        _seed_share_count(db_path, symbol, as_of, market_cap / price)
     return repo
 
 
@@ -3049,7 +3086,6 @@ def test_cmd_update_market_data_stage_marks_bulk_validation_failure_per_symbol(
             as_of=data.as_of,
             price=data.price,
             volume=data.volume,
-            market_cap=data.market_cap,
             currency=data.currency,
             source_provider="EODHD",
         )
@@ -4217,13 +4253,8 @@ def test_compute_metrics_for_symbol_matches_real_metrics(tmp_path):
     )
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    market_repo.upsert_price(
-        "AAA.US",
-        recent,
-        price=25.0,
-        market_cap=2500.0,
-        currency="USD",
-    )
+    market_repo.upsert_price("AAA.US", recent, price=25.0, currency="USD")
+    _seed_share_count(db_path, "AAA.US", recent, 2500.0 / 25.0)
 
     metric_ids = ["working_capital", "market_cap", "eps_6y_avg"]
     expected = {}
@@ -4571,9 +4602,10 @@ def test_compute_metrics_batch_worker_suppresses_metric_warnings_by_default(
     assert "Metric dummy_metric could not be computed for BBB.US" in log_text
 
 
-def test_compute_metric_batch_results_skips_fact_prefetch_for_market_cap(
-    monkeypatch, tmp_path
-):
+def test_compute_metric_batch_results_uses_share_facts_for_market_cap(tmp_path):
+    # Market cap is derived (a share-count fact x the price as of that fact's
+    # date), so the batch path preloads the share-count concepts and the metric
+    # computes from them rather than from a removed stored column.
     db_path = tmp_path / "metric-batch-market-cap.db"
     recent_date = (date.today() - timedelta(days=1)).isoformat()
     store_catalog_listings(
@@ -4582,23 +4614,14 @@ def test_compute_metric_batch_results_skips_fact_prefetch_for_market_cap(
         [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
         provider="SEC",
     )
-    market_repo = MarketDataRepository(db_path)
-    market_repo.initialize_schema()
-    market_repo.upsert_price(
+    # 10 shares x 12.0 price = 120.0 market cap, co-dated at recent_date.
+    store_market_data(
+        db_path,
         "AAA.US",
         recent_date,
-        12.0,
+        price=12.0,
         market_cap=120.0,
         currency="USD",
-    )
-
-    def fail_facts_for_symbols_many(self, symbols, chunk_size=25):
-        raise AssertionError("financial facts should not be prefetched for market_cap")
-
-    monkeypatch.setattr(
-        FinancialFactsRepository,
-        "facts_for_symbols_many",
-        fail_facts_for_symbols_many,
     )
 
     results = cli._compute_metric_batch_results(
@@ -4666,20 +4689,10 @@ def test_compute_metric_batch_results_reuses_shared_read_connection_per_batch(
     )
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    market_repo.upsert_price(
-        "AAA.US",
-        recent_date,
-        12.0,
-        market_cap=120.0,
-        currency="USD",
-    )
-    market_repo.upsert_price(
-        "BBB.US",
-        recent_date,
-        9.0,
-        market_cap=90.0,
-        currency="USD",
-    )
+    market_repo.upsert_price("AAA.US", recent_date, 12.0, currency="USD")
+    market_repo.upsert_price("BBB.US", recent_date, 9.0, currency="USD")
+    _seed_share_count(db_path, "AAA.US", recent_date, 10.0)
+    _seed_share_count(db_path, "BBB.US", recent_date, 10.0)
 
     calls = {"resolve_ids_many": 0}
     observed_connection_ids = []
@@ -5601,20 +5614,10 @@ def test_cmd_compute_metrics_stage_parallel_workers_skip_schema_init(
     )
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    market_repo.upsert_price(
-        "AAA.US",
-        recent_date,
-        12.0,
-        market_cap=120.0,
-        currency="USD",
-    )
-    market_repo.upsert_price(
-        "BBB.US",
-        recent_date,
-        9.0,
-        market_cap=90.0,
-        currency="USD",
-    )
+    market_repo.upsert_price("AAA.US", recent_date, 12.0, currency="USD")
+    market_repo.upsert_price("BBB.US", recent_date, 9.0, currency="USD")
+    _seed_share_count(db_path, "AAA.US", recent_date, 10.0)
+    _seed_share_count(db_path, "BBB.US", recent_date, 10.0)
 
     class InlineExecutor:
         def submit(self, fn, *args, **kwargs):
@@ -7263,354 +7266,6 @@ def test_cmd_normalize_sec_facts_bulk_process_pool_smoke(monkeypatch, tmp_path):
     ]
 
 
-def test_cmd_recalc_market_cap(tmp_path):
-    db_path = tmp_path / "marketcap.db"
-    store_catalog_listings(
-        db_path,
-        "US",
-        [
-            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
-            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
-        ],
-        provider="SEC",
-    )
-    fact_repo = FinancialFactsRepository(db_path)
-    fact_repo.initialize_schema()
-    fact_repo.replace_facts(
-        "AAA.US",
-        [
-            make_fact(
-                concept="CommonStockSharesOutstanding",
-                end_date="2023-12-31",
-                value=100,
-                symbol="AAA.US",
-            )
-        ],
-    )
-    market_repo = MarketDataRepository(db_path)
-    market_repo.initialize_schema()
-    market_repo.upsert_price("AAA.US", "2023-12-31", price=40.0, market_cap=4000.0)
-    market_repo.upsert_price("AAA.US", "2024-01-01", price=50.0)
-    market_repo.upsert_price("BBB.US", "2024-01-01", price=70.0)
-
-    rc = cli.cmd_recalc_market_cap(
-        database=str(db_path),
-        symbols=None,
-        exchange_codes=["US"],
-        all_supported=False,
-    )
-    assert rc == 0
-    snapshot = market_repo.latest_snapshot("AAA.US")
-    assert snapshot.market_cap == 5000.0
-    with market_repo._connect() as conn:
-        historical_cap = conn.execute(
-            """
-            SELECT market_cap
-            FROM market_data md
-            JOIN securities s ON s.security_id = md.listing_id
-            WHERE s.canonical_symbol = 'AAA.US' AND md.as_of = '2023-12-31'
-            """
-        ).fetchone()[0]
-    assert historical_cap == 4000.0
-    snapshot_b = market_repo.latest_snapshot("BBB.US")
-    assert snapshot_b.market_cap is None
-
-
-def test_cmd_recalc_market_cap_uses_major_currency_for_subunit_quote_prices(tmp_path):
-    db_path = tmp_path / "marketcap-subunits.db"
-    # market_data.price is stored in the MAJOR currency now, so recalc is simply
-    # major_price * shares, and snapshots report the base currency for subunit
-    # listings (GBX -> GBP, ZAC -> ZAR, ILA -> ILS).
-    cases = [
-        ("AAA.LSE", "LSE", "GBX", "GBP", 2.5, 100, 250.0),
-        ("BBB.JSE", "JSE", "ZAC", "ZAR", 12.34, 20, 246.8),
-        ("CCC.TA", "TA", "ILA", "ILS", 9.87, 10, 98.7),
-    ]
-    for (
-        symbol,
-        exchange_code,
-        quote_currency,
-        _base,
-        _price,
-        _shares,
-        _expected,
-    ) in cases:
-        store_catalog_listings(
-            db_path,
-            exchange_code,
-            [
-                Listing(
-                    symbol=symbol,
-                    security_name=f"{symbol} Ltd",
-                    exchange=exchange_code,
-                    currency=quote_currency,
-                )
-            ],
-            provider="EODHD",
-        )
-
-    fact_repo = FinancialFactsRepository(db_path)
-    fact_repo.initialize_schema()
-    market_repo = MarketDataRepository(db_path)
-    market_repo.initialize_schema()
-    for symbol, _exchange_code, _quote, _base, price, shares, _expected in cases:
-        fact_repo.replace_facts(
-            symbol,
-            [
-                make_fact(
-                    concept="CommonStockSharesOutstanding",
-                    end_date="2023-12-31",
-                    value=shares,
-                    symbol=symbol,
-                )
-            ],
-        )
-        market_repo.upsert_price(symbol, "2024-01-01", price=price)
-
-    rc = cli.cmd_recalc_market_cap(
-        database=str(db_path),
-        symbols=[case[0] for case in cases],
-        exchange_codes=None,
-        all_supported=False,
-    )
-
-    assert rc == 0
-    for (
-        symbol,
-        _exchange_code,
-        _quote,
-        base_currency,
-        price,
-        _shares,
-        expected,
-    ) in cases:
-        snapshot = market_repo.latest_snapshot(symbol)
-        assert snapshot is not None
-        assert snapshot.price == price
-        assert snapshot.currency == base_currency
-        assert snapshot.market_cap == pytest.approx(expected)
-
-
-def test_cmd_recalc_market_cap_prints_status_before_market_data_scan(
-    monkeypatch, tmp_path, capsys
-):
-    db_path = tmp_path / "marketcap-status.db"
-    store_catalog_listings(
-        db_path,
-        "US",
-        [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
-        provider="SEC",
-    )
-
-    def fake_latest_snapshots_many(
-        self,
-        symbols,
-        chunk_size=500,
-        *,
-        security_ids_by_symbol=None,
-        connection=None,
-    ):
-        output = capsys.readouterr().out
-        assert "Preparing market cap recalculation for US (selected=1)" in output
-        assert "Loading latest market data for 1 symbols" in output
-        return {}
-
-    monkeypatch.setattr(
-        MarketDataRepository,
-        "latest_snapshots_many",
-        fake_latest_snapshots_many,
-    )
-
-    rc = cli.cmd_recalc_market_cap(
-        database=str(db_path),
-        symbols=None,
-        exchange_codes=["US"],
-        all_supported=False,
-    )
-
-    assert rc == 0
-    output = capsys.readouterr().out
-    assert "No market data found to update for US." in output
-
-
-def test_cmd_recalc_market_cap_symbol_scope(tmp_path):
-    db_path = tmp_path / "marketcap-symbol-scope.db"
-    store_catalog_listings(
-        db_path,
-        "US",
-        [
-            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
-            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
-        ],
-        provider="SEC",
-    )
-    fact_repo = FinancialFactsRepository(db_path)
-    fact_repo.initialize_schema()
-    fact_repo.replace_facts(
-        "AAA.US",
-        [
-            make_fact(
-                concept="CommonStockSharesOutstanding",
-                end_date="2023-12-31",
-                value=100,
-                symbol="AAA.US",
-            )
-        ],
-    )
-    fact_repo.replace_facts(
-        "BBB.US",
-        [
-            make_fact(
-                concept="CommonStockSharesOutstanding",
-                end_date="2023-12-31",
-                value=200,
-                symbol="BBB.US",
-            )
-        ],
-    )
-    market_repo = MarketDataRepository(db_path)
-    market_repo.initialize_schema()
-    market_repo.upsert_price("AAA.US", "2024-01-01", price=50.0)
-    market_repo.upsert_price("BBB.US", "2024-01-01", price=70.0)
-
-    rc = cli.cmd_recalc_market_cap(
-        database=str(db_path),
-        symbols=["BBB.US"],
-        exchange_codes=None,
-        all_supported=False,
-    )
-
-    assert rc == 0
-    assert market_repo.latest_snapshot("AAA.US").market_cap is None
-    assert market_repo.latest_snapshot("BBB.US").market_cap == 14000.0
-
-
-def test_cmd_recalc_market_cap_all_supported_scope(tmp_path):
-    db_path = tmp_path / "marketcap-all-supported.db"
-    store_catalog_listings(
-        db_path,
-        "US",
-        [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
-        provider="SEC",
-    )
-    store_catalog_listings(
-        db_path,
-        "LSE",
-        [Listing(symbol="SHEL.LSE", security_name="Shell PLC", exchange="LSE")],
-        provider="EODHD",
-    )
-    fact_repo = FinancialFactsRepository(db_path)
-    fact_repo.initialize_schema()
-    fact_repo.replace_facts(
-        "AAA.US",
-        [
-            make_fact(
-                concept="CommonStockSharesOutstanding",
-                end_date="2023-12-31",
-                value=100,
-                symbol="AAA.US",
-            )
-        ],
-    )
-    fact_repo.replace_facts(
-        "SHEL.LSE",
-        [
-            make_fact(
-                concept="CommonStockSharesOutstanding",
-                end_date="2023-12-31",
-                value=50,
-                symbol="SHEL.LSE",
-            )
-        ],
-    )
-    market_repo = MarketDataRepository(db_path)
-    market_repo.initialize_schema()
-    market_repo.upsert_price("AAA.US", "2024-01-01", price=50.0)
-    market_repo.upsert_price("SHEL.LSE", "2024-01-01", price=25.0)
-
-    rc = cli.cmd_recalc_market_cap(
-        database=str(db_path),
-        symbols=None,
-        exchange_codes=None,
-        all_supported=True,
-    )
-
-    assert rc == 0
-    assert market_repo.latest_snapshot("AAA.US").market_cap == 5000.0
-    assert market_repo.latest_snapshot("SHEL.LSE").market_cap == 1250.0
-
-
-def test_cmd_recalc_market_cap_reports_loaded_share_counts(tmp_path, capsys):
-    db_path = tmp_path / "marketcap-share-count-status.db"
-    store_catalog_listings(
-        db_path,
-        "US",
-        [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
-        provider="SEC",
-    )
-    fact_repo = FinancialFactsRepository(db_path)
-    fact_repo.initialize_schema()
-    fact_repo.replace_facts(
-        "AAA.US",
-        [
-            make_fact(
-                concept="CommonStockSharesOutstanding",
-                end_date="2023-12-31",
-                value=100,
-                symbol="AAA.US",
-            )
-        ],
-    )
-    market_repo = MarketDataRepository(db_path)
-    market_repo.initialize_schema()
-    market_repo.upsert_price("AAA.US", "2024-01-01", price=50.0)
-
-    rc = cli.cmd_recalc_market_cap(
-        database=str(db_path),
-        symbols=["AAA.US"],
-        exchange_codes=None,
-        all_supported=False,
-    )
-
-    assert rc == 0
-    output = capsys.readouterr().out
-    assert "Loaded latest share counts for 1 symbols" in output
-
-
-def test_cmd_recalc_market_cap_interrupts_cleanly(monkeypatch, tmp_path, capsys):
-    db_path = tmp_path / "recalc-market-cap-interrupt.db"
-    store_catalog_listings(
-        db_path,
-        "US",
-        [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
-        provider="SEC",
-    )
-    market_repo = MarketDataRepository(db_path)
-    market_repo.initialize_schema()
-    market_repo.upsert_price("AAA.US", "2024-01-01", 10.0, market_cap=100.0)
-
-    def interrupting_latest_share_counts_many(*args, **kwargs):
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(
-        FinancialFactsRepository,
-        "latest_share_counts_many",
-        interrupting_latest_share_counts_many,
-    )
-
-    rc = cli.cmd_recalc_market_cap(
-        database=str(db_path),
-        symbols=["AAA.US"],
-        exchange_codes=None,
-        all_supported=False,
-    )
-
-    assert rc == 1
-    output = capsys.readouterr().out
-    assert "Market cap recalculation cancelled by user." in output
-    assert "Updated market cap for" not in output
-
-
 def test_cmd_refresh_security_metadata_backfills_eodhd_fields_and_sec_name_fallback(
     tmp_path, capsys
 ):
@@ -8857,8 +8512,12 @@ def test_cmd_report_metric_failures_uses_highest_market_cap_example(tmp_path, ca
     )
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    market_repo.upsert_price("AAA.US", "2024-01-01", price=10.0, market_cap=100.0)
-    market_repo.upsert_price("BBB.US", "2024-01-01", price=10.0, market_cap=200.0)
+    market_repo.upsert_price("AAA.US", "2024-01-01", price=10.0)
+    market_repo.upsert_price("BBB.US", "2024-01-01", price=10.0)
+    # Market cap is estimated from shares x price for the report example; BBB's
+    # larger share count makes it the higher-market-cap example.
+    _seed_share_count(db_path, "AAA.US", "2024-01-01", 10.0)
+    _seed_share_count(db_path, "BBB.US", "2024-01-01", 20.0)
 
     rc = cli.cmd_report_metric_failures(
         database=str(db_path),
@@ -9106,13 +8765,8 @@ def test_cmd_report_screen_failures_dedupes_metric_na_counts(tmp_path, capsys):
     metrics_repo.upsert("AAA.US", "working_capital", 10.0, as_of)
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    market_repo.upsert_price(
-        "BBB.US",
-        as_of,
-        price=10.0,
-        market_cap=250.0,
-        currency="USD",
-    )
+    market_repo.upsert_price("BBB.US", as_of, price=10.0, currency="USD")
+    _seed_share_count(db_path, "BBB.US", as_of, 25.0)
 
     screen_path = tmp_path / "screen.yml"
     screen_path.write_text(
@@ -9275,7 +8929,8 @@ def test_cmd_report_screen_failures_reports_progress_by_phase(
     metrics_repo.upsert("AAA.US", "working_capital", 10.0, as_of)
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    market_repo.upsert_price("BBB.US", as_of, price=10.0, market_cap=250.0)
+    market_repo.upsert_price("BBB.US", as_of, price=10.0)
+    _seed_share_count(db_path, "BBB.US", as_of, 25.0)
 
     screen_path = tmp_path / "screen.yml"
     screen_path.write_text(
@@ -9432,7 +9087,8 @@ def test_cmd_report_screen_failures_recompute_uses_symbol_caches(
     )
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    market_repo.upsert_price("AAA.US", "2024-12-31", price=25.0, market_cap=1000.0)
+    market_repo.upsert_price("AAA.US", "2024-12-31", price=25.0)
+    _seed_share_count(db_path, "AAA.US", "2024-12-31", 40.0)
 
     fact_calls = {"count": 0}
     facts_many_calls = {"count": 0, "symbols": [], "concepts": None}
@@ -10408,19 +10064,9 @@ def test_cmd_compute_metrics_all(tmp_path):
     metrics_repo.initialize_schema()
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
+    market_repo.upsert_price("AAPL.US", q3, 150.0, currency="USD")
     market_repo.upsert_price(
-        "AAPL.US",
-        q3,
-        150.0,
-        market_cap=50000.0,
-        currency="USD",
-    )
-    market_repo.upsert_price(
-        "AAPL.US",
-        f"{current_year - 5}-09-30",
-        100.0,
-        market_cap=30000.0,
-        currency="USD",
+        "AAPL.US", f"{current_year - 5}-09-30", 100.0, currency="USD"
     )
 
     rc = cli.cmd_compute_metrics(

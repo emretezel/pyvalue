@@ -12,8 +12,9 @@ import logging
 
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
+    SHARE_COUNT_CONCEPTS,
     is_recent_fact,
-    normalize_market_cap_amount,
+    market_cap_money,
     normalize_metric_record,
     require_metric_ticker_currency,
 )
@@ -36,7 +37,11 @@ class _TTMResult:
 @dataclass
 class PriceToFCFMetric:
     id: str = "price_to_fcf"
-    required_concepts = tuple(OPERATING_CASH_FLOW_CONCEPTS + CAPEX_CONCEPTS)
+    # Numerator is market cap (shares x price); preload the share-count concepts
+    # market_cap_money resolves alongside the FCF concepts.
+    required_concepts = tuple(
+        OPERATING_CASH_FLOW_CONCEPTS + CAPEX_CONCEPTS + list(SHARE_COUNT_CONCEPTS)
+    )
     uses_market_data = True
 
     def compute(
@@ -52,21 +57,19 @@ class PriceToFCFMetric:
         if fcf_result.total <= 0:
             LOGGER.warning("price_to_fcf: non-positive TTM FCF for %s", symbol)
             return None
-        snapshot = market_repo.latest_snapshot(symbol)
-        if snapshot is None or snapshot.market_cap is None or snapshot.market_cap <= 0:
+        cap = market_cap_money(
+            symbol,
+            repo=repo,
+            market_repo=market_repo,
+            metric_id=self.id,
+            target_currency=fcf_result.currency,
+            contexts=(market_repo, repo),
+        )
+        if cap is None:
             LOGGER.warning("price_to_fcf: missing market cap for %s", symbol)
             return None
 
-        market_cap, _ = normalize_market_cap_amount(
-            snapshot.market_cap,
-            metric_id=self.id,
-            symbol=symbol,
-            as_of=snapshot.as_of,
-            expected_currency=fcf_result.currency,
-            contexts=(market_repo, repo),
-        )
-
-        ratio = market_cap / fcf_result.total
+        ratio = cap.money.amount / fcf_result.total
         return MetricResult(
             symbol=symbol, metric_id=self.id, value=ratio, as_of=fcf_result.as_of
         )

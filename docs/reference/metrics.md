@@ -71,12 +71,12 @@ Columns:
 
 | English Descriptive Name of the Metric | pyvalue key | How is it calculated | Why is it important in identifying quality/value stocks |
 | --- | --- | --- | --- |
-| Market Capitalization | `market_cap` | Latest stored market-cap snapshot from `market_data`. | Size matters for liquidity, survivability, and practical investability. |
+| Market Capitalization | `market_cap` | Computed on demand: latest shares-outstanding fact x the `market_data` price as of that fact's date. | Size matters for liquidity, survivability, and practical investability. |
 | Earnings Yield | `earnings_yield` | `EPS_TTM / latest price`. | A simple inverse-PE view of how much earnings you get per dollar paid. |
 | Price to Free Cash Flow | `price_to_fcf` | Latest market cap divided by `FCF_TTM`, where `FCF_TTM = OCF_TTM - Capex_TTM`. | Useful when accounting earnings understate or distort cash generation. |
 | Graham Multiplier | `graham_multiplier` | `(Price / TTM EPS) * (Price / TBVPS)`. | Enforces discipline against overpaying for both earnings and balance-sheet value. |
-| Owner Earnings Yield on Equity (TTM) | `oey_equity` | EODHD-oriented: `oe_equity_ttm / market_cap_snapshot`. | Values the business against a maintenance-adjusted equity cash-earnings proxy. |
-| Owner Earnings Yield on Equity (5Y) | `oey_equity_5y` | EODHD-oriented: `oe_equity_5y_avg / market_cap_snapshot`. | Pairs current equity value with a normalized owner-earnings baseline. |
+| Owner Earnings Yield on Equity (TTM) | `oey_equity` | EODHD-oriented: `oe_equity_ttm / market_cap`. | Values the business against a maintenance-adjusted equity cash-earnings proxy. |
+| Owner Earnings Yield on Equity (5Y) | `oey_equity_5y` | EODHD-oriented: `oe_equity_5y_avg / market_cap`. | Pairs current equity value with a normalized owner-earnings baseline. |
 | Owner Earnings Yield on EV (TTM) | `oey_ev` | EODHD-oriented: `oe_ev_ttm / EV`, where EV prefers normalized `EnterpriseValue` and falls back to derived EV. | A capital-structure-neutral owner-earnings yield. |
 | Owner Earnings Yield on EV (Normalized) | `oey_ev_norm` | EODHD-oriented: `oe_ev_fy_median_5y / EV`, using the same EV denominator policy as `oey_ev`. | Helps avoid buying a business on peak recent owner earnings. |
 | EBIT Yield on EV | `ebit_yield_ev` | EODHD-oriented: `EBIT_TTM / EV`. | A simple enterprise earnings-yield lens before owner-earnings refinements. |
@@ -121,13 +121,13 @@ Columns:
 | Share Count CAGR (5Y) | `share_count_cagr_5y` | Uses point-in-time outstanding shares only: `((Shares_t / Shares_t-5)^(1/5)) - 1`, preferring MRQ then falling back to FY. | Flags more recent dilution or buyback behavior that may matter more than decade-old capital allocation. |
 | Share Count CAGR (10Y) | `share_count_cagr_10y` | Uses point-in-time outstanding shares only: `((Shares_t / Shares_t-10)^(1/10)) - 1`, preferring MRQ then falling back to FY. | Long-run dilution or shrinkage materially changes per-share value compounding. |
 | Share Count Percentage Change (10Y) | `shares_10y_pct_change` | Exact 10-year point-in-time share-count change: `(Shares_t / Shares_t-10) - 1`, using the same pairing rules as `share_count_cagr_10y`. | Gives a direct measure of dilution or buyback behavior over a decade. |
-| Net Buyback Yield | `net_buyback_yield` | EODHD-oriented: primary `-TTM(SalePurchaseOfStock) / market_cap_snapshot`, with issuance-only fallback and 1Y share-count fallback. | Captures whether management is shrinking or diluting the share base in value-relevant terms. |
+| Net Buyback Yield | `net_buyback_yield` | EODHD-oriented: primary `-TTM(SalePurchaseOfStock) / market_cap`, with issuance-only fallback and 1Y share-count fallback. | Captures whether management is shrinking or diluting the share base in value-relevant terms. |
 
 ## Shareholder Returns / Distribution
 
 | English Descriptive Name of the Metric | pyvalue key | How is it calculated | Why is it important in identifying quality/value stocks |
 | --- | --- | --- | --- |
-| Dividend Yield (TTM) | `dividend_yield_ttm` | Primary `abs(CommonStockDividendsPaid_TTM) / market_cap_snapshot`; fallback `CommonStockDividendsPerShareCashPaid / latest price` when the cash-dividend path is unavailable. | Separates actual cash returned to owners from forward-looking provider yield fields. |
+| Dividend Yield (TTM) | `dividend_yield_ttm` | Primary `abs(CommonStockDividendsPaid_TTM) / market_cap`; fallback `CommonStockDividendsPerShareCashPaid / latest price` when the cash-dividend path is unavailable. | Separates actual cash returned to owners from forward-looking provider yield fields. |
 | Shareholder Yield (TTM) | `shareholder_yield_ttm` | `dividend_yield_ttm + net_buyback_yield`, emitted only when both inputs are available. | Combines cash dividends and buybacks into one capital-allocation return measure. |
 | Dividend Payout Ratio (TTM) | `dividend_payout_ratio_ttm` | `abs(CommonStockDividendsPaid_TTM) / NetIncome_TTM`, only when `NetIncome_TTM > 0`. | Flags whether the dividend is comfortably covered by trailing earnings. |
 

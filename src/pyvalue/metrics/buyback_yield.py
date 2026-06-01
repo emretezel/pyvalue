@@ -14,8 +14,9 @@ from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.share_count_change import ShareCountChangeCalculator
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
+    SHARE_COUNT_CONCEPTS,
     is_recent_fact,
-    normalize_market_cap_amount,
+    market_cap_money,
     normalize_metric_record,
     require_metric_ticker_currency,
 )
@@ -30,10 +31,17 @@ SHARE_COUNT_CONCEPT = "CommonStockSharesOutstanding"
 QUARTERLY_PERIODS = {"Q1", "Q2", "Q3", "Q4"}
 FALLBACK_YEARS = 1
 
-REQUIRED_CONCEPTS = (
-    SALE_PURCHASE_CONCEPT,
-    ISSUANCE_CAPITAL_STOCK_CONCEPT,
-    SHARE_COUNT_CONCEPT,
+REQUIRED_CONCEPTS = tuple(
+    dict.fromkeys(
+        (
+            SALE_PURCHASE_CONCEPT,
+            ISSUANCE_CAPITAL_STOCK_CONCEPT,
+            SHARE_COUNT_CONCEPT,
+            # Denominator market cap = shares x price; preload the share-count
+            # concepts market_cap_money resolves.
+            *SHARE_COUNT_CONCEPTS,
+        )
+    )
 )
 
 
@@ -62,6 +70,7 @@ class NetBuybackYieldMetric:
         if numerator is not None:
             market_cap = self._market_cap_denominator(
                 symbol=symbol,
+                repo=repo,
                 market_repo=market_repo,
                 target_currency=numerator.currency,
             )
@@ -156,37 +165,21 @@ class NetBuybackYieldMetric:
         self,
         *,
         symbol: str,
+        repo: FinancialFactsRepository,
         market_repo: MarketDataRepository,
         target_currency: Optional[str],
     ) -> Optional[float]:
-        snapshot = market_repo.latest_snapshot(symbol)
-        if snapshot is None or snapshot.market_cap is None:
-            LOGGER.warning("%s: missing market cap snapshot for %s", self.id, symbol)
-            return None
-        if snapshot.market_cap <= 0:
-            LOGGER.warning(
-                "%s: non-positive market cap snapshot for %s",
-                self.id,
-                symbol,
-            )
-            return None
-
-        converted, _ = normalize_market_cap_amount(
-            snapshot.market_cap,
+        cap = market_cap_money(
+            symbol,
+            repo=repo,
+            market_repo=market_repo,
             metric_id=self.id,
-            symbol=symbol,
-            as_of=snapshot.as_of,
-            expected_currency=target_currency,
-            contexts=(market_repo,),
+            target_currency=target_currency,
+            contexts=(repo, market_repo),
         )
-        if converted <= 0:
-            LOGGER.warning(
-                "%s: non-positive market cap for %s",
-                self.id,
-                symbol,
-            )
+        if cap is None:
             return None
-        return converted
+        return cap.money.amount
 
     def _filter_quarterly(self, records: Iterable[FactRecord]) -> list[FactRecord]:
         filtered: list[FactRecord] = []

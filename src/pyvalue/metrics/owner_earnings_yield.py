@@ -23,12 +23,17 @@ from pyvalue.metrics.owner_earnings_equity import (
     REQUIRED_CONCEPTS as OE_EQUITY_REQUIRED_CONCEPTS,
     OwnerEarningsEquityCalculator,
 )
-from pyvalue.metrics.utils import normalize_market_cap_amount
+from pyvalue.metrics.utils import SHARE_COUNT_CONCEPTS, market_cap_money
 from pyvalue.storage import FinancialFactsRepository, MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
 
-REQUIRED_CONCEPTS = OE_EQUITY_REQUIRED_CONCEPTS
+# The equity-yield denominator is market cap (shares x price), so preload the
+# share-count concepts market_cap_money resolves alongside the owner-earnings
+# equity concepts.
+REQUIRED_CONCEPTS = tuple(
+    dict.fromkeys(OE_EQUITY_REQUIRED_CONCEPTS + SHARE_COUNT_CONCEPTS)
+)
 REQUIRED_EV_CONCEPTS = tuple(
     dict.fromkeys(OE_EV_REQUIRED_CONCEPTS + EV_FALLBACK_REQUIRED_CONCEPTS)
 )
@@ -37,26 +42,22 @@ REQUIRED_EV_CONCEPTS = tuple(
 def _denominator_market_cap(
     *,
     symbol: str,
+    repo: FinancialFactsRepository,
     market_repo: MarketDataRepository,
     target_currency: Optional[str],
     context: str,
 ) -> Optional[float]:
-    snapshot = market_repo.latest_snapshot(symbol)
-    if snapshot is None or snapshot.market_cap is None:
-        LOGGER.warning("%s: missing market cap snapshot for %s", context, symbol)
-        return None
-    if snapshot.market_cap <= 0:
-        LOGGER.warning("%s: non-positive market cap snapshot for %s", context, symbol)
-        return None
-
-    return normalize_market_cap_amount(
-        snapshot.market_cap,
+    cap = market_cap_money(
+        symbol,
+        repo=repo,
+        market_repo=market_repo,
         metric_id=context,
-        symbol=symbol,
-        as_of=snapshot.as_of,
-        expected_currency=target_currency,
-        contexts=(market_repo,),
-    )[0]
+        target_currency=target_currency,
+        contexts=(repo, market_repo),
+    )
+    if cap is None:
+        return None
+    return cap.money.amount
 
 
 def _denominator_enterprise_value(
@@ -97,6 +98,7 @@ class OwnerEarningsYieldEquityMetric:
 
         market_cap = _denominator_market_cap(
             symbol=symbol,
+            repo=repo,
             market_repo=market_repo,
             target_currency=numerator.currency,
             context=self.id,
@@ -133,6 +135,7 @@ class OwnerEarningsYieldEquityFiveYearMetric:
 
         market_cap = _denominator_market_cap(
             symbol=symbol,
+            repo=repo,
             market_repo=market_repo,
             target_currency=numerator.currency,
             context=self.id,

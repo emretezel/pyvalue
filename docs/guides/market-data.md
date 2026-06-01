@@ -9,9 +9,7 @@ below only include it when the extra clarity helps.
 
 This covers:
 - latest prices
-- stored market-cap snapshots
 - bulk quote refreshes
-- later market-cap recalculation using updated share counts
 
 Storage invariants:
 - `listing.currency` is the authoritative listing quote unit and may be a
@@ -21,7 +19,9 @@ Storage invariants:
   Subunits never cross the data boundary: an incoming pence/cent/agorot quote is
   divided by its subunit divisor before it is written, and the snapshot read
   path reports the same base currency so the price and currency stay consistent.
-- `market_data.market_cap` is stored in base(`listing.currency`)
+- there is no stored `market_cap` column (removed in migration 072): market cap
+  is computed on demand as a share-count fact x the price as of that fact's date
+  (`metrics.utils.market_cap_money`)
 - market-data rows do not persist a duplicate currency column
 
 ## Update One Symbol
@@ -94,20 +94,15 @@ The report defaults to the same 30-day freshness window and shows:
 `Stored` means a snapshot exists in the DB. `Fresh` means the symbol currently
 counts as complete for the selected freshness window.
 
-Rejected price anomalies show up in `Recent failures` with the rejection
-message, so they are visible in the same place as API or network failures.
+## Market Cap
 
-## Recalculate Market Cap
-
-If prices were ingested before useful share-count facts were available, recompute stored market caps later:
-
-```bash
-pyvalue recalc-market-cap --exchange-codes US
-```
-
-This uses the latest stored price (already in the major currency), multiplies by
-the latest normalized share count, and updates only the latest stored
-`market_data.as_of` row for each selected symbol.
+Market cap is not stored. It is computed on demand as a share-count
+`financial_facts` row x the `market_data` price *as of that fact's date*
+(`metrics.utils.market_cap_money`), so a price and a share count are never
+multiplied across mismatched dates. For this to resolve, `market_data` must hold
+a price at or before each share-count date; a future enhancement to
+`update-market-data` will backfill those share-count-dated prices alongside the
+latest day.
 
 ## Operational Notes
 

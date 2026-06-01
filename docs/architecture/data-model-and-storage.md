@@ -123,13 +123,21 @@ Currency and unit semantics:
 
 ### `market_data`
 
-Stores latest quote and market-cap snapshot information by `listing_id`.
+Stores latest quote snapshot information by `listing_id`.
 `market_data.price` is stored in the **major** currency
 (`canonical_trading_currency(listing.currency)`): subunit quotes (`GBX`/`GBP0.01`
 -> `GBP`, `ZAC` -> `ZAR`, `ILA` -> `ILS`) are divided by their subunit divisor
 before persistence, so subunits never cross the data boundary, and the snapshot
-read path reports that same base currency. `market_data.market_cap` is stored in
-base(`listing.currency`). The table does not persist a duplicate currency column.
+read path reports that same base currency. The table does not persist a
+duplicate currency column.
+
+The derived `market_cap` column was removed (migration 072): market cap is
+shares-outstanding x price, so it is computed on demand as a share-count
+`financial_facts` row x the price *as of that fact's date*
+(`MarketDataRepository.price_as_of` paired by `metrics.utils.market_cap_money`),
+not persisted. The on-demand value pairs the share count with its
+contemporaneous price, so a price and a share count are never multiplied across
+mismatched dates.
 
 ### `market_data_fetch_state`
 

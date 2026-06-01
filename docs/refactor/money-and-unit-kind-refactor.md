@@ -37,8 +37,8 @@ A single pre-refactor backup covers the whole effort:
 | 1 | `Money` value type (additive) | Landed (`9f6b98c`) |
 | 2 | `market_data.price` → major currency + migration 070 | Landed (`5cdfeeb`)\* |
 | 2.6 | Purge currency-less listings + `listing.currency` NOT NULL + migration 069 | Landed (`df117d4`) |
-| 3 | `unit` → `unit_kind` rebuild + migration 071 | In review |
-| 4 | Remove `market_data.market_cap` + migration 072 | Not started |
+| 3 | `unit` → `unit_kind` rebuild + migration 071 | Landed (`a1bf04d`) |
+| 4 | Remove `market_data.market_cap` + migration 072 | In review |
 | 5 | Full `Money` adoption across metrics + docs/rule update | Not started |
 
 \* Phase 2 landed with the price migration numbered **069**; Phase 2.6 renumbers
@@ -96,6 +96,62 @@ vocabulary with the existing `metrics.unit_kind` enum (`MetricUnitKind`).
   denominators (e.g. `fcf_per_share_cagr_10y`). That was masked before by the
   `unit`→currency derivation; the proper share-as-count handling lands with the
   Money rework in Phase 5.
+
+### Phase 4 — remove derived `market_data.market_cap`; compute on demand
+`market_cap` is shares-outstanding x price — a value derivable from other stored
+facts — so persisting it duplicated state that could go stale relative to its
+inputs. It is removed and computed on demand.
+
+**Author decision (this phase reframed the original plan):** market cap pairs the
+latest **share-count fact** with the `market_data` price *as of that fact's date*,
+not the latest price. Co-dating the share count with its contemporaneous price
+means a price and a share count are never multiplied across mismatched dates —
+which in turn **obviates the cross-snapshot suspicious-jump guard**, so that guard
+is removed entirely. Extending `update-market-data` to backfill a price at each
+share-count date (plus the most recent day) is a **separate, later change**; this
+phase assumes those co-dated prices exist and resolves market cap to `None` when
+they do not.
+
+- Migration **072** (`_migration_072_drop_market_data_market_cap`): rebuilds
+  `market_data` without `market_cap`, **copying** the existing rows (price,
+  volume, source_provider, updated_at) — unlike the financial_facts rebuild,
+  `market_data` is not regenerated from raw. Leaf table (nothing references it,
+  no view selects from it), so the drop/recreate is self-contained. Idempotent.
+- `MarketDataRepository.price_as_of(symbol, on_or_before)` (new): the most recent
+  snapshot with `as_of <= on_or_before`, reported in the listing's base currency.
+  `update_market_cap` / `update_market_caps_many` and the `recalc-market-cap` CLI
+  command are removed.
+- `metrics.utils.market_cap_money(...) -> Optional[MarketCap]` (new): latest
+  shares-outstanding fact (`EntityCommonStockSharesOutstanding`, then
+  `CommonStockSharesOutstanding`) x `price_as_of(fact.end_date)`, as `Money`, plus
+  the price date. Preserves the listing-currency invariant: a price currency that
+  differs from the target raises `MetricCurrencyInvariantError` (Phase 5 will
+  FX-convert instead). The 6 consumers (`market_capitalization`,
+  `enterprise_value` EV fallback, `buyback_yield`, `owner_earnings_yield`,
+  `price_to_fcf`, `profitability` dividend yield) cut over to it.
+- **Concept declaration:** because the batch fact preload is restricted to each
+  metric's `required_concepts` (and the cached reader does not fall back to the
+  live DB on a miss), every market-cap-consuming metric now declares the
+  share-count concepts in `required_concepts` (centralized via
+  `EV_FALLBACK_REQUIRED_CONCEPTS` for the EV metrics). `MarketCapitalizationMetric`
+  flips to `uses_financial_facts = True`.
+- `PriceData` / `MarketDataUpdate` / `MarketSnapshotRecord` drop `market_cap`; the
+  ingest path (`prepare_price_data`) just collapses the quote to its major
+  currency (no market-cap derivation, no validation); the unused
+  `MarketDataService` share/fundamentals helpers were removed. The
+  metric-failure report's `market_cap` example column is now a cheap estimate
+  (bulk latest-shares x latest-price), a diagnostic-only sizing heuristic.
+- **Known follow-ups:** (1) `update-market-data` must be extended to store
+  share-count-dated prices, else market cap resolves to `None` for most symbols
+  after the rebuild; (2) in the batch path `market_cap_money` issues a per-symbol
+  `price_as_of` query rather than reusing the preloaded latest snapshot (the
+  snapshot is the latest day, not the as-of-share-date price) — a perf cost to
+  revisit with the `update-market-data` change.
+- **Behaviour change:** a >50x price move between refreshes is now stored without
+  error (the guard is gone). Tests: removed the guard + market-cap-derivation +
+  `recalc-market-cap` tests; added `price_as_of`, migration-072, share-fact batch,
+  and a `market_cap_money` co-dating regression test. Quality gate green (ruff,
+  mypy, 832 tests).
 
 ### Phase 2.6 — purge currency-less listings + `listing.currency` NOT NULL
 Author decision: a listing's currency comes **only** from the

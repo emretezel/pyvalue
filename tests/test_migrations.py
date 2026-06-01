@@ -910,7 +910,7 @@ def test_migration_canonicalizes_listing_quote_currency_and_market_data(tmp_path
         }
         market_rows = conn.execute(
             """
-            SELECT listing_id, price, market_cap
+            SELECT listing_id, price
             FROM market_data
             ORDER BY listing_id
             """
@@ -922,12 +922,12 @@ def test_migration_canonicalizes_listing_quote_currency_and_market_data(tmp_path
     assert "idx_provider_listing_currency_nonnull" not in provider_listing_index_names
     assert "idx_market_data_currency_nonnull" not in market_data_index_names
     assert "idx_listing_currency_nonnull" in listing_index_names
-    # Migration 069 then converts the subunit-listing prices to the major
-    # currency (divide by 100); market_cap is left unchanged.
+    # Migration 070 then converts the subunit-listing prices to the major
+    # currency (divide by 100); migration 072 drops the derived market_cap column.
     assert market_rows == [
-        (1, 27.835, 1000.0),
-        (3, 12.34, 1234.0),
-        (4, 12.34, 500.0),
+        (1, 27.835),
+        (3, 12.34),
+        (4, 12.34),
     ]
 
 
@@ -2346,9 +2346,9 @@ def test_migration_047_preserves_valid_rows(tmp_path):
         conn.execute(
             """
             INSERT INTO market_data (
-                listing_id, as_of, price, volume, market_cap,
+                listing_id, as_of, price, volume,
                 source_provider, updated_at
-            ) VALUES (?, '2026-01-01', 10.0, 1000, 1.5e9, 'EODHD',
+            ) VALUES (?, '2026-01-01', 10.0, 1000, 'EODHD',
                       '2026-01-01T00:00:00+00:00')
             """,
             (listing_id,),
@@ -2361,12 +2361,12 @@ def test_migration_047_preserves_valid_rows(tmp_path):
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute(
             """
-            SELECT listing_id, as_of, price, volume, market_cap, source_provider
+            SELECT listing_id, as_of, price, volume, source_provider
             FROM market_data
             """
         ).fetchall()
 
-    assert rows == [(listing_id, "2026-01-01", 10.0, 1000, 1.5e9, "EODHD")]
+    assert rows == [(listing_id, "2026-01-01", 10.0, 1000, "EODHD")]
 
 
 # ----------------------------------------------------------------------
@@ -4516,3 +4516,68 @@ def test_migration_071_rebuilds_empty_and_clears_normalization_state(tmp_path):
     assert fact_count == 0
     assert state_count == 0
     assert "unit_kind" in columns
+
+
+def test_migration_072_drops_market_cap_and_preserves_rows(tmp_path):
+    """Migration 072 drops derived ``market_data.market_cap`` while copying every
+    other column and row (market_data is not regenerated from raw)."""
+
+    from pyvalue.migrations import _migration_072_drop_market_data_market_cap
+
+    db_path = tmp_path / "market-cap-072.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE listing (listing_id INTEGER PRIMARY KEY, "
+            "currency TEXT NOT NULL)"
+        )
+        conn.execute("INSERT INTO listing (listing_id, currency) VALUES (1, 'USD')")
+        # Pre-072 shape: market_data still carries the derived market_cap column.
+        conn.execute(
+            """
+            CREATE TABLE market_data (
+                listing_id INTEGER NOT NULL,
+                as_of DATE NOT NULL,
+                price REAL NOT NULL,
+                volume INTEGER,
+                market_cap REAL,
+                source_provider TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (listing_id, as_of),
+                FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO market_data (
+                listing_id, as_of, price, volume, market_cap,
+                source_provider, updated_at
+            ) VALUES (1, '2026-01-02', 10.0, 1000, 1.5e9, 'EODHD',
+                      '2026-01-02T00:00:00+00:00')
+            """
+        )
+        conn.commit()
+
+        _migration_072_drop_market_data_market_cap(conn)
+
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(market_data)").fetchall()
+        }
+        rows = conn.execute(
+            """
+            SELECT listing_id, as_of, price, volume, source_provider, updated_at
+            FROM market_data
+            """
+        ).fetchall()
+        foreign_keys = conn.execute("PRAGMA foreign_key_list(market_data)").fetchall()
+
+        # Idempotent: a table that no longer declares market_cap is left untouched.
+        _migration_072_drop_market_data_market_cap(conn)
+        rerun_row_count = conn.execute("SELECT COUNT(*) FROM market_data").fetchone()[0]
+
+    assert "market_cap" not in columns
+    assert rows == [(1, "2026-01-02", 10.0, 1000, "EODHD", "2026-01-02T00:00:00+00:00")]
+    # The PK and the outgoing FK to listing are recreated on the rebuilt table.
+    assert len(foreign_keys) == 1
+    assert foreign_keys[0][2] == "listing"
+    assert rerun_row_count == 1

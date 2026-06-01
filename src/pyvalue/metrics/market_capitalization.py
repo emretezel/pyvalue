@@ -10,7 +10,7 @@ import logging
 from typing import Optional
 
 from pyvalue.metrics.base import MetricResult
-from pyvalue.metrics.utils import normalize_market_cap_amount
+from pyvalue.metrics.utils import SHARE_COUNT_CONCEPTS, market_cap_money
 from pyvalue.storage import FinancialFactsRepository, MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -18,10 +18,13 @@ LOGGER = logging.getLogger(__name__)
 
 @dataclass
 class MarketCapitalizationMetric:
+    # Market cap is now derived (shares-outstanding fact x price as of that
+    # fact's date) rather than read from a stored column, so this metric reads
+    # financial facts and must declare the share-count concepts it preloads.
     id: str = "market_cap"
-    required_concepts: tuple[str, ...] = ()
+    required_concepts: tuple[str, ...] = SHARE_COUNT_CONCEPTS
     uses_market_data = True
-    uses_financial_facts = False
+    uses_financial_facts = True
 
     def compute(
         self,
@@ -29,26 +32,22 @@ class MarketCapitalizationMetric:
         repo: FinancialFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
-        snapshot = market_repo.latest_snapshot(symbol)
-        if snapshot is None or snapshot.market_cap is None or snapshot.as_of is None:
-            LOGGER.warning("market_cap: missing market cap snapshot for %s", symbol)
-            return None
-        if snapshot.market_cap <= 0:
-            LOGGER.warning("market_cap: non-positive market cap for %s", symbol)
-            return None
-        value, currency = normalize_market_cap_amount(
-            snapshot.market_cap,
+        cap = market_cap_money(
+            symbol,
+            repo=repo,
+            market_repo=market_repo,
             metric_id=self.id,
-            symbol=symbol,
-            as_of=snapshot.as_of,
             contexts=(market_repo, repo),
         )
+        if cap is None:
+            LOGGER.warning("market_cap: no market cap for %s", symbol)
+            return None
         return MetricResult.monetary(
             symbol=symbol,
             metric_id=self.id,
-            value=value,
-            as_of=snapshot.as_of,
-            currency=currency,
+            value=cap.money.amount,
+            as_of=cap.as_of,
+            currency=cap.money.currency,
         )
 
 

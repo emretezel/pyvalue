@@ -11,7 +11,8 @@ import logging
 
 from pyvalue.metrics.base import MetricCurrencyInvariantError
 from pyvalue.metrics.utils import (
-    normalize_market_cap_amount,
+    SHARE_COUNT_CONCEPTS,
+    market_cap_money,
     normalize_metric_amount,
     normalize_metric_record,
 )
@@ -24,6 +25,10 @@ EV_FALLBACK_REQUIRED_CONCEPTS = (
     "ShortTermDebt",
     "LongTermDebt",
     "CashAndShortTermInvestments",
+    # The market-cap fallback (market cap = shares x price) reads a share-count
+    # fact, so every EV metric that can fall back must preload it. See
+    # metrics.utils.market_cap_money.
+    *SHARE_COUNT_CONCEPTS,
 )
 
 
@@ -105,21 +110,18 @@ def resolve_enterprise_value_denominator(
                 symbol,
             )
 
-    snapshot = market_repo.latest_snapshot(symbol)
-    if snapshot is None or snapshot.market_cap is None:
-        LOGGER.warning("%s: missing market cap snapshot for %s", context, symbol)
-        return None
-    if snapshot.market_cap <= 0:
-        LOGGER.warning("%s: non-positive market cap snapshot for %s", context, symbol)
-        return None
-    market_cap = normalize_market_cap_amount(
-        snapshot.market_cap,
+    cap = market_cap_money(
+        symbol,
+        repo=repo,
+        market_repo=market_repo,
         metric_id=context,
-        symbol=symbol,
-        as_of=snapshot.as_of,
-        expected_currency=target_currency,
+        target_currency=target_currency,
         contexts=(market_repo, repo),
-    )[0]
+    )
+    if cap is None:
+        LOGGER.warning("%s: missing market cap for %s", context, symbol)
+        return None
+    market_cap = cap.money.amount
 
     short_debt = repo.latest_fact(symbol, "ShortTermDebt")
     long_debt = repo.latest_fact(symbol, "LongTermDebt")

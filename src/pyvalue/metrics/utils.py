@@ -5,20 +5,42 @@ Author: Emre Tezel
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, timedelta
 import logging
 from typing import Dict, Iterable, List, Optional, Sequence
 
 from pyvalue.currency import normalize_currency_code
 from pyvalue.metrics.base import MetricCurrencyInvariantError
-from pyvalue.money import normalize_money_value
-from pyvalue.storage import FactRecord
+from pyvalue.money import Money, normalize_money_value
+from pyvalue.storage import FactRecord, FinancialFactsRepository, MarketDataRepository
 
 # Default freshness windows (days)
 MAX_FACT_AGE_DAYS = 400
 MAX_FY_FACT_AGE_DAYS = 400
 
+# Shares-outstanding concepts, in resolution priority. Mirrors the default order
+# in ``FinancialFactsRepository.latest_share_counts_many`` so the on-demand
+# market-cap share count matches the bulk reader.
+SHARE_COUNT_CONCEPTS: tuple[str, ...] = (
+    "EntityCommonStockSharesOutstanding",
+    "CommonStockSharesOutstanding",
+)
+
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class MarketCap:
+    """Market capitalization as ``Money`` plus the price date it was computed for.
+
+    ``as_of`` is the ``market_data`` price date paired with the share-count fact
+    (so callers that report a market-cap-derived value -- e.g. the
+    ``market_cap`` metric itself -- can stamp the right observation date).
+    """
+
+    money: Money
+    as_of: str
 
 
 def is_recent_fact(
@@ -286,40 +308,100 @@ def normalize_metric_amount(
     return float(normalized_amount), resolved_currency
 
 
-def normalize_market_cap_amount(
-    amount: float,
-    *,
-    metric_id: str,
-    symbol: str,
-    input_name: str = "market_cap",
-    as_of: Optional[str],
-    expected_currency: Optional[str] = None,
-    contexts: Sequence[object] = (),
-) -> tuple[float, str]:
-    """Assert a stored market cap against the listing's base currency."""
+def _latest_share_count_fact(
+    symbol: str, repo: FinancialFactsRepository
+) -> Optional[FactRecord]:
+    """Return the most recent positive shares-outstanding fact (Entity first)."""
 
-    base_currency = normalize_currency_code(
-        expected_currency
-    ) or resolve_metric_ticker_currency(symbol, *contexts)
-    if base_currency is None:
+    for concept in SHARE_COUNT_CONCEPTS:
+        fact = repo.latest_fact(symbol, concept)
+        if fact is not None and fact.value is not None and fact.value > 0:
+            return fact
+    return None
+
+
+def market_cap_money(
+    symbol: str,
+    *,
+    repo: FinancialFactsRepository,
+    market_repo: MarketDataRepository,
+    metric_id: str,
+    target_currency: Optional[str] = None,
+    contexts: Sequence[object] = (),
+) -> Optional[MarketCap]:
+    """Compute market cap on demand as a share-count fact x a co-dated price.
+
+    Market cap is shares-outstanding x price, so persisting it (the removed
+    ``market_data.market_cap`` column, migration 072) duplicated derivable
+    state. The amount is the latest shares-outstanding ``financial_facts`` row
+    times the ``market_data`` price *as of that fact's date*
+    (:meth:`MarketDataRepository.price_as_of`). Co-dating the share count with
+    its contemporaneous price means we never multiply today's price by a stale
+    share count -- and it removes the need for the old cross-snapshot
+    suspicious-jump guard.
+
+    The stored price is already in the listing's major currency, so the market
+    cap is too. Returns ``None`` when there is no usable share count or no price
+    as of that date (the latter applies until ``update-market-data`` is extended
+    to backfill prices at share-count dates -- see the refactor doc).
+
+    The listing-currency invariant is preserved: if ``target_currency`` (or the
+    resolved listing currency) differs from the price currency this raises a
+    structured :class:`MetricCurrencyInvariantError` rather than mixing
+    currencies. Phase 5 will replace that hard failure with an FX conversion.
+    """
+
+    share_fact = _latest_share_count_fact(symbol, repo)
+    if share_fact is None:
+        LOGGER.warning("%s: no shares-outstanding fact for %s", metric_id, symbol)
+        return None
+
+    snapshot = market_repo.price_as_of(symbol, share_fact.end_date)
+    if snapshot is None or snapshot.price is None or snapshot.price <= 0:
+        LOGGER.warning(
+            "%s: no market price as of %s for %s",
+            metric_id,
+            share_fact.end_date,
+            symbol,
+        )
+        return None
+
+    price_currency = normalize_currency_code(snapshot.currency)
+    if price_currency is None:
         _raise_currency_invariant(
             metric_id=metric_id,
             symbol=symbol,
-            input_name=input_name,
-            reason_code="missing_trading_currency",
-            as_of=as_of,
+            input_name="market_cap_price",
+            reason_code="missing_input_currency",
+            as_of=snapshot.as_of,
         )
-    assert base_currency is not None
-    return normalize_metric_amount(
-        amount,
-        base_currency,
-        metric_id=metric_id,
-        symbol=symbol,
-        input_name=input_name,
-        as_of=as_of,
-        expected_currency=base_currency,
-        contexts=contexts,
+    assert price_currency is not None
+
+    cap = Money.of(snapshot.price * share_fact.value, price_currency)
+
+    target = normalize_currency_code(target_currency) or resolve_metric_ticker_currency(
+        symbol, *contexts
     )
+    if target is None:
+        _raise_currency_invariant(
+            metric_id=metric_id,
+            symbol=symbol,
+            input_name="market_cap",
+            reason_code="missing_trading_currency",
+            as_of=snapshot.as_of,
+        )
+    assert target is not None
+    if target != cap.currency:
+        _raise_currency_invariant(
+            metric_id=metric_id,
+            symbol=symbol,
+            input_name="market_cap",
+            reason_code="currency_mismatch",
+            expected_currency=target,
+            actual_currency=cap.currency,
+            as_of=snapshot.as_of,
+        )
+    return MarketCap(money=cap, as_of=snapshot.as_of)
 
 
 def normalize_metric_record(
@@ -416,7 +498,8 @@ __all__ = [
     "has_recent_fact",
     "align_metric_money_values",
     "ensure_metric_currency",
-    "normalize_market_cap_amount",
+    "MarketCap",
+    "market_cap_money",
     "normalize_metric_amount",
     "normalize_metric_record",
     "require_metric_ticker_currency",

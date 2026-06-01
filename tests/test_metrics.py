@@ -118,14 +118,44 @@ from pyvalue.metrics.working_capital import WorkingCapitalMetric
 from pyvalue.storage import FactRecord
 
 
-class _USDTickerCurrencyRepo:
+class _TickerCurrencyRepo:
+    """Base fake facts repo exposing a fixed ticker currency and share count.
+
+    Market cap is derived from a share-count fact x price, so this base supplies
+    an ``EntityCommonStockSharesOutstanding`` count of 1.0 (a concept no other
+    metric reads) -- letting a fake market repo's price pin the derived market
+    cap -- and defers every other concept to the subclass's ``facts_for_concept``.
+    """
+
+    _ticker_currency = "USD"
+
     def ticker_currency(self, symbol):
-        return "USD"
+        return self._ticker_currency
+
+    def latest_fact(self, symbol, concept):
+        if concept == "EntityCommonStockSharesOutstanding":
+            return fact(
+                symbol=symbol,
+                concept=concept,
+                fiscal_period="INSTANT",
+                end_date="2099-12-31",
+                unit_kind="count",
+                currency=None,
+                value=1.0,
+            )
+        getter = getattr(self, "facts_for_concept", None)
+        if getter is None:
+            return None
+        records = getter(symbol, concept)
+        return max(records, key=lambda record: record.end_date) if records else None
 
 
-class _GBPTickerCurrencyRepo:
-    def ticker_currency(self, symbol):
-        return "GBP"
+class _USDTickerCurrencyRepo(_TickerCurrencyRepo):
+    _ticker_currency = "USD"
+
+
+class _GBPTickerCurrencyRepo(_TickerCurrencyRepo):
+    _ticker_currency = "GBP"
 
 
 def fact(**kwargs):
@@ -211,19 +241,105 @@ def test_market_capitalization_metric_uses_listing_currency_for_market_cap():
     metric = MarketCapitalizationMetric()
     symbol = "AAPL.US"
 
+    # The stored price is in the listing's (major) currency, so the derived
+    # market cap is reported in that same currency.
     result = metric.compute(
         symbol,
         _OwnerEarningsRepo({}, ticker_currency="USD"),
         _build_market_repo(
             market_cap=100.0,
             as_of=date.today().isoformat(),
-            currency="EUR",
+            currency="USD",
             ticker_currency="USD",
         ),
     )
     assert result is not None
     assert result.value == 100.0
     assert result.currency == "USD"
+
+
+def test_market_cap_money_pairs_share_count_with_codated_price(tmp_path):
+    # The defining behaviour of the on-demand market cap: it multiplies the
+    # latest share-count fact by the price AS OF that fact's date, not by the
+    # most recent price.
+    from pyvalue.metrics.utils import market_cap_money
+    from pyvalue.storage import (
+        FinancialFactsRepository,
+        MarketDataRepository,
+        SupportedTickerRepository,
+    )
+
+    db_path = tmp_path / "market-cap-money.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock", "Currency": "USD"}],
+    )
+    facts = FinancialFactsRepository(db_path)
+    facts.initialize_schema()
+    facts.replace_facts(
+        "AAA.US",
+        [
+            FactRecord(
+                symbol="AAA.US",
+                concept="CommonStockSharesOutstanding",
+                fiscal_period="INSTANT",
+                end_date="2026-01-31",
+                unit_kind="count",
+                value=100.0,
+            )
+        ],
+    )
+    market = MarketDataRepository(db_path)
+    market.initialize_schema()
+    market.upsert_price("AAA.US", "2026-01-31", 10.0, currency="USD")
+    market.upsert_price("AAA.US", "2026-03-31", 99.0, currency="USD")
+
+    cap = market_cap_money(
+        "AAA.US",
+        repo=facts,
+        market_repo=market,
+        metric_id="market_cap",
+        target_currency="USD",
+    )
+    assert cap is not None
+    # 100 shares x the co-dated price (10.0), NOT the latest price (99.0).
+    assert cap.money.amount == 1000.0
+    assert cap.money.currency == "USD"
+    assert cap.as_of == "2026-01-31"
+
+    # No share-count fact for an unrelated symbol -> no market cap.
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [
+            {
+                "Code": "AAA",
+                "Name": "AAA Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
+            {
+                "Code": "BBB",
+                "Name": "BBB Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
+        ],
+    )
+    market.upsert_price("BBB.US", "2026-01-31", 10.0, currency="USD")
+    assert (
+        market_cap_money(
+            "BBB.US",
+            repo=facts,
+            market_repo=market,
+            metric_id="market_cap",
+            target_currency="USD",
+        )
+        is None
+    )
 
 
 def test_fx_rate_store_removed_from_public_api():
@@ -408,7 +524,11 @@ def _build_metric_repo(
             if concept in latest_records:
                 return latest_records[concept]
             records = concept_records.get(concept, [])
-            return records[0] if records else None
+            if records:
+                return records[0]
+            # Defer to the base for the Entity-shares count that market_cap_money
+            # reads (so market-cap-backed metrics resolve a share count here too).
+            return super().latest_fact(symbol, concept)
 
         def ticker_currency(self, symbol):
             return ticker_currency
@@ -4206,6 +4326,12 @@ def test_price_to_fcf_metric():
 
             return Snapshot()
 
+        def price_as_of(self, symbol, on_or_before):
+            snapshot = self.latest_snapshot(symbol)
+            snapshot.price = snapshot.market_cap
+            snapshot.security_id = 1
+            return snapshot
+
         def ticker_currency(self, symbol):
             return "USD"
 
@@ -4267,6 +4393,12 @@ def test_price_to_fcf_metric_uses_zero_capex_when_missing():
                 currency = "USD"
 
             return Snapshot()
+
+        def price_as_of(self, symbol, on_or_before):
+            snapshot = self.latest_snapshot(symbol)
+            snapshot.price = snapshot.market_cap
+            snapshot.security_id = 1
+            return snapshot
 
         def ticker_currency(self, symbol):
             return "USD"
@@ -4411,6 +4543,12 @@ def test_market_capitalization_metric():
                 currency = "USD"
 
             return Snapshot()
+
+        def price_as_of(self, symbol, on_or_before):
+            snapshot = self.latest_snapshot(symbol)
+            snapshot.price = snapshot.market_cap
+            snapshot.security_id = 1
+            return snapshot
 
         def ticker_currency(self, symbol):
             return "USD"
@@ -6342,6 +6480,30 @@ def _build_share_count_records(
     }
 
 
+def _share_count_records(symbol, as_of, shares=1.0):
+    """An Entity-shares count fact that market_cap_money pairs with the price.
+
+    Market cap is now derived as a share-count fact x the price as of that fact's
+    date. ``market_cap_money`` prefers ``EntityCommonStockSharesOutstanding`` --
+    a concept no other metric reads -- so seeding shares=1.0 here lets a test pin
+    market cap purely through the fake market repo's price (shares x price ==
+    price) without disturbing share-count metrics that read
+    ``CommonStockSharesOutstanding``.
+    """
+
+    return [
+        FactRecord(
+            symbol=symbol,
+            cik=None,
+            concept="EntityCommonStockSharesOutstanding",
+            fiscal_period="INSTANT",
+            end_date=as_of,
+            unit_kind="count",
+            value=shares,
+        )
+    ]
+
+
 def _build_market_repo(
     *,
     market_cap,
@@ -6350,17 +6512,26 @@ def _build_market_repo(
     price=100.0,
     ticker_currency="USD",
 ):
+    # Market cap is derived (share-count fact x price as of that fact's date), so
+    # these tests pin the market cap directly by returning a price_as_of price
+    # equal to ``market_cap`` and pairing it with a shares=1.0 fact (see
+    # _share_count_records). A None market_cap means "no price as of that date",
+    # i.e. the metric sees a missing market cap.
+    class Snapshot:
+        def __init__(self, snapshot_price):
+            self.security_id = 1
+            self.price = snapshot_price
+            self.as_of = as_of
+            self.currency = currency
+
     class DummyMarketRepo:
         def latest_snapshot(self, symbol):
-            class Snapshot:
-                pass
+            return Snapshot(price)
 
-            snapshot = Snapshot()
-            snapshot.market_cap = market_cap
-            snapshot.as_of = as_of
-            snapshot.currency = currency
-            snapshot.price = price
-            return snapshot
+        def price_as_of(self, symbol, on_or_before):
+            if market_cap is None:
+                return None
+            return Snapshot(market_cap)
 
         def ticker_currency(self, symbol):
             return ticker_currency
@@ -6485,7 +6656,16 @@ def _build_ev_ratio_records(
 
 class _OwnerEarningsRepo:
     def __init__(self, records_by_concept, *, ticker_currency="USD"):
-        self.records_by_concept = records_by_concept
+        self.records_by_concept = dict(records_by_concept)
+        # Market cap is derived from a share-count fact x price. Inject the
+        # Entity-shares concept (read only by market_cap_money) so market-cap-backed
+        # metrics resolve a 1.0 share count and the fake market repo's price pins
+        # the cap; share-count metrics read CommonStockSharesOutstanding and are
+        # unaffected.
+        self.records_by_concept.setdefault(
+            "EntityCommonStockSharesOutstanding",
+            _share_count_records("AAPL.US", "2099-12-31"),
+        )
         self._ticker_currency = ticker_currency
 
     def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
@@ -8686,6 +8866,12 @@ def test_oey_equity_metric_computes_ratio_from_ttm_numerator():
 
             return Snapshot()
 
+        def price_as_of(self, symbol, on_or_before):
+            snapshot = self.latest_snapshot(symbol)
+            snapshot.price = snapshot.market_cap
+            snapshot.security_id = 1
+            return snapshot
+
     result = metric.compute(
         symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
     )
@@ -8780,6 +8966,12 @@ def test_oey_equity_5y_metric_computes_ratio_from_5y_numerator():
                 currency = "USD"
 
             return Snapshot()
+
+        def price_as_of(self, symbol, on_or_before):
+            snapshot = self.latest_snapshot(symbol)
+            snapshot.price = snapshot.market_cap
+            snapshot.security_id = 1
+            return snapshot
 
     result = metric.compute(
         symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
@@ -8884,6 +9076,12 @@ def test_oey_equity_metric_returns_none_when_market_cap_missing():
 
             return Snapshot()
 
+        def price_as_of(self, symbol, on_or_before):
+            snapshot = self.latest_snapshot(symbol)
+            snapshot.price = snapshot.market_cap
+            snapshot.security_id = 1
+            return snapshot
+
     result = metric.compute(
         symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
     )
@@ -8985,6 +9183,12 @@ def test_oey_equity_metric_returns_none_when_market_cap_non_positive():
 
             return Snapshot()
 
+        def price_as_of(self, symbol, on_or_before):
+            snapshot = self.latest_snapshot(symbol)
+            snapshot.price = snapshot.market_cap
+            snapshot.security_id = 1
+            return snapshot
+
     result = metric.compute(
         symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
     )
@@ -9008,6 +9212,12 @@ def test_oey_equity_metric_returns_none_when_numerator_missing():
                 currency = "USD"
 
             return Snapshot()
+
+        def price_as_of(self, symbol, on_or_before):
+            snapshot = self.latest_snapshot(symbol)
+            snapshot.price = snapshot.market_cap
+            snapshot.security_id = 1
+            return snapshot
 
     result = metric.compute(
         symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
@@ -9135,14 +9345,22 @@ def test_oey_equity_metric_uses_listing_currency_for_market_cap():
         }
     )
 
+    # The stored price is in the listing's (major) currency, so the snapshot
+    # currency matches the ticker currency.
     class DummyMarketRepo:
         def latest_snapshot(self, symbol):
             class Snapshot:
                 market_cap = 100.0
                 as_of = q3
-                currency = "EUR"
+                currency = "USD"
 
             return Snapshot()
+
+        def price_as_of(self, symbol, on_or_before):
+            snapshot = self.latest_snapshot(symbol)
+            snapshot.price = snapshot.market_cap
+            snapshot.security_id = 1
+            return snapshot
 
         def ticker_currency(self, symbol):
             return "USD"
@@ -9249,6 +9467,12 @@ def test_oey_equity_metric_allows_negative_values():
 
             return Snapshot()
 
+        def price_as_of(self, symbol, on_or_before):
+            snapshot = self.latest_snapshot(symbol)
+            snapshot.price = snapshot.market_cap
+            snapshot.security_id = 1
+            return snapshot
+
     result = metric.compute(
         symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
     )
@@ -9335,6 +9559,12 @@ def test_oey_ev_metric_falls_back_to_derived_ev_when_primary_missing():
 
             return Snapshot()
 
+        def price_as_of(self, symbol, on_or_before):
+            snapshot = self.latest_snapshot(symbol)
+            snapshot.price = snapshot.market_cap
+            snapshot.security_id = 1
+            return snapshot
+
     result = metric.compute(
         symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
     )
@@ -9390,6 +9620,12 @@ def test_oey_ev_metric_falls_back_to_derived_ev_when_primary_non_positive():
 
             return Snapshot()
 
+        def price_as_of(self, symbol, on_or_before):
+            snapshot = self.latest_snapshot(symbol)
+            snapshot.price = snapshot.market_cap
+            snapshot.security_id = 1
+            return snapshot
+
     result = metric.compute(
         symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
     )
@@ -9424,6 +9660,12 @@ def test_oey_ev_metric_returns_none_when_ev_primary_and_fallback_unavailable():
                 currency = "USD"
 
             return Snapshot()
+
+        def price_as_of(self, symbol, on_or_before):
+            snapshot = self.latest_snapshot(symbol)
+            snapshot.price = snapshot.market_cap
+            snapshot.security_id = 1
+            return snapshot
 
     result = metric.compute(
         symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
@@ -9462,6 +9704,9 @@ def test_oey_ev_metric_returns_none_for_enterprise_value_currency_mismatch():
 
     class DummyMarketRepo:
         def latest_snapshot(self, symbol):
+            return None
+
+        def price_as_of(self, symbol, on_or_before):
             return None
 
         def ticker_currency(self, symbol):
@@ -9506,6 +9751,9 @@ def test_oey_ev_metric_returns_none_when_enterprise_value_missing():
 
     class DummyMarketRepo:
         def latest_snapshot(self, symbol):
+            return None
+
+        def price_as_of(self, symbol, on_or_before):
             return None
 
         def ticker_currency(self, symbol):
@@ -10981,7 +11229,7 @@ def test_net_buyback_yield_metric_uses_listing_currency_for_market_cap():
         _build_market_repo(
             market_cap=500.0,
             as_of=q3,
-            currency="EUR",
+            currency="USD",
             ticker_currency="USD",
         ),
     )

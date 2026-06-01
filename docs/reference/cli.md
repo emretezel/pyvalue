@@ -21,8 +21,8 @@ Provider rules:
   `normalize-fundamentals`, and `update-market-data` accept `--provider` and
   default it to `EODHD`
 - `compute-metrics`, `run-screen`, `report-fact-freshness`,
-  `report-metric-coverage`, `report-metric-failures`,
-  `report-screen-failures`, and `recalc-market-cap`
+  `report-metric-coverage`, `report-metric-failures`, and
+  `report-screen-failures`
   are provider-agnostic and operate on canonical symbols
 
 For EODHD-backed symbols, downstream stage commands and canonical-scope
@@ -246,18 +246,7 @@ Notes:
 
 - `Stored` means a market-data snapshot exists in the database
 - `Fresh` means the latest snapshot satisfies the selected freshness window
-- `Recent failures` includes rejected price anomalies as well as API/network
-  failures
-
-### `recalc-market-cap`
-
-Recompute stored market caps using the latest price and latest share-count facts.
-
-Key options:
-
-- optional scope selector: `--symbols`, `--exchange-codes`, or
-  `--all-supported` (defaults to the full supported universe)
-- `--database <path>`
+- `Recent failures` lists API/network failures
 
 ## Metric Commands
 

@@ -22,8 +22,9 @@ from pyvalue.metrics.owner_earnings_enterprise import (
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     MAX_FY_FACT_AGE_DAYS,
+    SHARE_COUNT_CONCEPTS,
     is_recent_fact,
-    normalize_market_cap_amount,
+    market_cap_money,
     normalize_metric_record,
     require_metric_ticker_currency,
 )
@@ -94,7 +95,11 @@ ROETCE_REQUIRED_CONCEPTS = tuple(
     )
 )
 DIVIDEND_REQUIRED_CONCEPTS = tuple(
-    dict.fromkeys(DIVIDENDS_PAID_CONCEPTS + DIVIDENDS_PER_SHARE_CONCEPTS)
+    # The cash dividend yield divides by market cap (shares x price), so preload
+    # the share-count concepts market_cap_money resolves.
+    dict.fromkeys(
+        DIVIDENDS_PAID_CONCEPTS + DIVIDENDS_PER_SHARE_CONCEPTS + SHARE_COUNT_CONCEPTS
+    )
 )
 DIVIDEND_PAYOUT_REQUIRED_CONCEPTS = tuple(
     dict.fromkeys(
@@ -593,31 +598,21 @@ class ProfitabilityReturnsGrowthCalculator:
         *,
         context: str,
     ) -> Optional[_AmountSnapshot]:
-        snapshot = market_repo.latest_snapshot(symbol)
-        if snapshot is None or snapshot.market_cap is None or snapshot.market_cap <= 0:
-            LOGGER.warning("%s: missing market cap snapshot for %s", context, symbol)
-            return None
-
-        market_cap = normalize_market_cap_amount(
-            snapshot.market_cap,
+        cap = market_cap_money(
+            symbol,
+            repo=repo,
+            market_repo=market_repo,
             metric_id=context,
-            symbol=symbol,
-            as_of=snapshot.as_of,
-            expected_currency=dividends_paid.currency,
+            target_currency=dividends_paid.currency,
             contexts=(market_repo, repo),
-        )[0]
-        if market_cap is None or market_cap <= 0:
-            if market_cap is not None:
-                LOGGER.warning(
-                    "%s: non-positive market cap for %s",
-                    context,
-                    symbol,
-                )
+        )
+        if cap is None:
+            LOGGER.warning("%s: missing market cap for %s", context, symbol)
             return None
 
         return _AmountSnapshot(
-            value=dividends_paid.value / market_cap,
-            as_of=max(dividends_paid.as_of, snapshot.as_of),
+            value=dividends_paid.value / cap.money.amount,
+            as_of=max(dividends_paid.as_of, cap.as_of),
             currency=dividends_paid.currency,
         )
 
