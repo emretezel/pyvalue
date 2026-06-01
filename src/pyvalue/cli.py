@@ -49,7 +49,7 @@ from pyvalue.currency import (
     normalize_currency_code,
 )
 from pyvalue.ingestion import EODHDFundamentalsClient, SECCompanyFactsClient
-from pyvalue.fx import (
+from pyvalue.money.fx import (
     EODHDFXProvider,
     FXService,
     FrankfurterProvider,

@@ -9,7 +9,7 @@ from datetime import date
 import sqlite3
 
 import pyvalue.cli as cli
-from pyvalue.fx import FXCatalogEntry
+from pyvalue.money.fx import FXCatalogEntry
 from pyvalue.screening import RankingDefinition, RankingMetric, ScreenDefinition
 from pyvalue.persistence.storage import (
     EntityMetadataRepository,

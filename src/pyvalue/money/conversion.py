@@ -18,7 +18,7 @@ from pyvalue.currency import (
     normalize_currency_code,
     normalize_monetary_amount,
 )
-from pyvalue.fx import FXService, MissingFXRateError
+from .fx import FXService, MissingFXRateError
 from pyvalue.persistence.storage import FactRecord
 
 

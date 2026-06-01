@@ -355,7 +355,7 @@ listings are deleted (not backfilled), and the column is made NOT NULL.
   (new major vs old pence). Run 069 immediately after deploy.
 
 ### Phase 1 — `Money` value type
-- Added `Money` (frozen dataclass) + `CurrencyMismatchError` to `src/pyvalue/money.py`,
+- Added `Money` (frozen dataclass) + `CurrencyMismatchError` to `src/pyvalue/money/conversion.py`,
   composing `currency.normalize_monetary_amount` (subunit collapse) and
   `FXService.convert_amount` (no duplicated logic). Currency-safe `+ - * / < <= > >=`,
   scalar mul/div, `Money/Money → float` ratio, `convert`/`convert_or_raise`.

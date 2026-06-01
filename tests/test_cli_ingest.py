@@ -4376,7 +4376,7 @@ def test_suppress_console_missing_fx_warnings_filters_only_missing_fx_noise(
     cli.setup_logging(log_dir=log_dir)
     try:
         with cli.suppress_console_missing_fx_warnings(True):
-            logging.getLogger("pyvalue.fx").warning(
+            logging.getLogger("pyvalue.money.fx").warning(
                 "Missing FX rate | provider=%s base=%s quote=%s as_of=%s operation=get_fx_rate",
                 "EODHD",
                 "NLG",
@@ -4392,7 +4392,7 @@ def test_suppress_console_missing_fx_warnings_filters_only_missing_fx_noise(
                 "EUR",
                 "2000-06-30",
             )
-            logging.getLogger("pyvalue.fx").warning(
+            logging.getLogger("pyvalue.money.fx").warning(
                 "Stale FX rate used | provider=%s base=%s quote=%s requested_as_of=%s rate_date=%s age_days=%s source_kind=%s",
                 "EODHD",
                 "EUR",

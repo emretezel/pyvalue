@@ -20,7 +20,7 @@ from pyvalue.currency import (
     normalize_currency_code,
 )
 from pyvalue.facts import RegionFactsRepository
-from pyvalue.fx import FXService
+from pyvalue.money.fx import FXService
 from pyvalue.persistence.storage import (
     FinancialFactsRepository,
     MarketDataRepository,

@@ -15,7 +15,7 @@ from pyvalue.currency import (
     normalize_currency_code,
     raw_currency_code,
 )
-from pyvalue.fx import FXService
+from pyvalue.money.fx import FXService
 from pyvalue.money import choose_target_currency, convert_money_value
 from pyvalue.metrics.utils import is_recent_fact
 from pyvalue.persistence.storage import FactRecord

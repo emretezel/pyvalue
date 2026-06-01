@@ -19,7 +19,7 @@ from pyvalue.currency import (
     normalize_monetary_amount,
     resolve_eodhd_currency,
 )
-from pyvalue.fx import (
+from pyvalue.money.fx import (
     EODHDFXProvider,
     FXService,
     FrankfurterProvider,

@@ -23,7 +23,7 @@ from typing import (
 
 from pyvalue.currency import normalize_currency_code
 from pyvalue.facts import FactView, RawFactSource
-from pyvalue.fx import FXService
+from pyvalue.money.fx import FXService
 from pyvalue.metrics.base import MetricCurrencyInvariantError
 from pyvalue.money import CurrencyMismatchError, Money, fx_service_for_context
 from pyvalue.persistence.storage import FactRecord, MarketDataRepository
@@ -240,7 +240,7 @@ def _raise_currency_invariant(
 # -- listing-currency FX context (Phase 5b) ----------------------------------
 #
 # The seam below converts every cross-currency metric input to the listing
-# currency. It needs an :class:`~pyvalue.fx.FXService`, but the metric ``compute``
+# currency. It needs an :class:`~pyvalue.money.fx.FXService`, but the metric ``compute``
 # signatures (and the ~36 ``_money`` call sites) deliberately do not carry one --
 # the 5a seam promised "call sites do not change, only this body". So the compute
 # driver binds one FX service for the whole batch via

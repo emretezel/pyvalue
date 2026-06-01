@@ -20,7 +20,7 @@ from pyvalue.currency import (
     subunit_divisor,
     warn_missing_monetary_currency,
 )
-from pyvalue.fx import FXService
+from pyvalue.money.fx import FXService
 from pyvalue.money import choose_target_currency, convert_money_value
 from pyvalue.persistence.storage import FactRecord
 

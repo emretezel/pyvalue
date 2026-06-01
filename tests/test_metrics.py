@@ -216,7 +216,7 @@ def test_metric_modules_do_not_use_metric_side_fx_helpers():
         "fx_converter_for_context",
         "align_money_values",
         "convert_denominator_amount",
-        "from pyvalue.fx import FXService",
+        "from pyvalue.money.fx import FXService",
         ".convert_amount(",
     )
     allowed_files = {"utils.py"}
@@ -482,7 +482,7 @@ def test_market_cap_money_pairs_share_count_with_codated_price(tmp_path):
 
 
 def test_fx_rate_store_removed_from_public_api():
-    import pyvalue.fx as fx
+    import pyvalue.money.fx as fx
 
     assert not hasattr(fx, "FXRateStore")
 

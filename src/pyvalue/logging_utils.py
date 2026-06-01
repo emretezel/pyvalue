@@ -100,7 +100,7 @@ class _ConsoleMissingFXWarningFilter(logging.Filter):
         if record.levelno != logging.WARNING:
             return True
         if (
-            record.name == "pyvalue.fx"
+            record.name == "pyvalue.money.fx"
             and record.msg
             == "Missing FX rate | provider=%s base=%s quote=%s as_of=%s operation=get_fx_rate"
         ):

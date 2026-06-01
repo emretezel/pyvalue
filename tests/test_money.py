@@ -13,7 +13,7 @@ from hypothesis import given, strategies as st
 import pytest
 
 from pyvalue.currency import normalize_currency_code
-from pyvalue.fx import FXService, MissingFXRateError
+from pyvalue.money.fx import FXService, MissingFXRateError
 from pyvalue.money import CurrencyMismatchError, Money
 
 

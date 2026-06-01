@@ -1,4 +1,4 @@
-from pyvalue.fx import FXService
+from pyvalue.money.fx import FXService
 from pyvalue.normalization.eodhd import EODHDFactsNormalizer
 from pyvalue.persistence.storage import FXRateRecord, FXRatesRepository
 
