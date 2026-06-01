@@ -10,7 +10,6 @@ This directory is the main documentation home for `pyvalue`. Each file owns one 
 ## Provider Documentation
 
 - [EODHD](providers/eodhd.md): global fundamentals, universe loading, and market-data behavior.
-- [SEC](providers/sec.md): SEC-only fundamentals, `User-Agent` requirements, and provider limitations.
 
 ## Task Guides
 

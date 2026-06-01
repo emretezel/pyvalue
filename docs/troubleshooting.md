@@ -8,15 +8,6 @@ Typical error:
 Fix:
 - add `[eodhd].api_key` to `private/config.toml`
 
-## Missing SEC User-Agent
-
-Typical problem:
-- SEC requests fail or are rejected
-
-Fix:
-- set `[sec].user_agent` in `private/config.toml`
-- or export `PYVALUE_SEC_USER_AGENT`
-
 ## No Raw Fundamentals Found During Normalization
 
 Typical cause:
@@ -48,8 +39,7 @@ Typical cause:
 - you tried a provider/exchange bulk workflow before refreshing or loading the canonical catalog
 
 Fix:
-- SEC: run `refresh-supported-exchanges --provider SEC` and `refresh-supported-tickers --provider SEC --exchange-codes US`
-- EODHD: run `refresh-supported-exchanges --provider EODHD` and `refresh-supported-tickers --provider EODHD --exchange-codes <CODE>`
+- run `refresh-supported-exchanges --provider EODHD` and `refresh-supported-tickers --provider EODHD --exchange-codes <CODE>`
 
 ## No Eligible Supported Tickers Found
 
@@ -119,6 +109,16 @@ Fix:
 - refresh fundamentals and/or market data
 - re-run normalization
 - re-run metric computation
+
+## Reclaiming Space After the Provider Cleanup
+
+Typical problem:
+- the database file stays large after the SEC/Frankfurter cleanup migration (073)
+  deleted the Frankfurter FX rows and rebuilt `financial_facts`
+
+Fix:
+- `VACUUM` cannot run inside a migration transaction, so reclaim the freed pages
+  manually once, after upgrading: `sqlite3 data/pyvalue.db 'VACUUM;'`
 
 ## Related Docs
 

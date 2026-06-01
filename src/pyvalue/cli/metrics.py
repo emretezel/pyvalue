@@ -56,7 +56,6 @@ from pyvalue.persistence.storage import (
     MetricComputeStatusRepository,
     MetricsRepository,
     StoredMetricRow,
-    SupportedTickerRepository,
 )
 
 from ._common import (
@@ -72,11 +71,7 @@ from ._common import (
     _MetricWarningCollector,
     _ProfiledComputedMetricsBatchResult,
     _batch_values,
-    _catalog_bootstrap_guidance,
-    _format_market_symbol,
     _metric_status_rows_from_attempts,
-    _normalize_provider,
-    _reconcile_eodhd_listing_scope,
     _resolve_canonical_scope_symbols,
     _resolve_database_path,
 )
@@ -1194,98 +1189,6 @@ def cmd_compute_metrics_stage(
         cancelled_message="\nMetric computation cancelled by user.",
         suppress_metric_warnings=not show_metric_warnings,
         profile=profile,
-    )
-
-
-def cmd_compute_metrics(
-    symbol: str,
-    metric_ids: Sequence[str],
-    database: str,
-    run_all: bool,
-    exchange_code: Optional[str],
-    show_metric_warnings: bool = False,
-) -> int:
-    """Compute one or more metrics and store the results."""
-
-    db_path = _resolve_database_path(database)
-    symbol_upper = symbol.strip().upper()
-    if "." not in symbol_upper:
-        if not exchange_code:
-            raise SystemExit(
-                "--exchange-code is required when symbol has no exchange suffix (e.g., AAPL.US)."
-            )
-        symbol_upper = _format_market_symbol(symbol_upper, exchange_code)
-    ids_to_compute = _validated_metric_ids(
-        list(REGISTRY.keys()) if run_all else list(metric_ids)
-    )
-
-    metrics_repo = MetricsRepository(db_path)
-    metrics_repo.initialize_schema()
-    status_repo = MetricComputeStatusRepository(db_path)
-    status_repo.initialize_schema()
-    fact_repo = FinancialFactsRepository(db_path)
-    market_repo = (
-        MarketDataRepository(db_path)
-        if _metrics_use_market_data(ids_to_compute)
-        else None
-    )
-    result = _compute_metric_batch_results(
-        [symbol_upper],
-        ids_to_compute,
-        fact_repo,
-        market_repo,
-        suppress_metric_warnings=not show_metric_warnings,
-    )[0]
-    if result.rows:
-        metrics_repo.upsert_many(result.rows)
-    status_rows = _metric_status_rows_from_attempts(result.attempts)
-    if status_rows:
-        status_repo.upsert_many(status_rows)
-    _print_metric_invariant_failure_summary(result.failures, symbol=symbol_upper)
-    print(f"Computed {result.computed_count} metrics for {symbol_upper} in {database}")
-    return 0
-
-
-def cmd_compute_metrics_bulk(
-    provider: str,
-    database: str,
-    metric_ids: Optional[Sequence[str]],
-    exchange_code: Optional[str],
-    show_metric_warnings: bool = False,
-) -> int:
-    """Compute metrics for all supported tickers in one provider/exchange slice."""
-
-    db_path = _resolve_database_path(database)
-    provider_norm = _normalize_provider(provider)
-    ticker_repo = SupportedTickerRepository(db_path)
-    ticker_repo.initialize_schema()
-    if not exchange_code:
-        raise SystemExit("--exchange-code is required for bulk metric computation.")
-
-    exchange_norm = exchange_code.upper()
-    if provider_norm == "EODHD":
-        _reconcile_eodhd_listing_scope(
-            str(db_path),
-            exchange_codes=[exchange_norm],
-        )
-    symbols = ticker_repo.list_symbols_by_exchange(
-        provider_norm,
-        exchange_norm,
-        primary_only=provider_norm == "EODHD",
-    )
-    if not symbols:
-        raise SystemExit(
-            f"No supported tickers found for provider {provider_norm} on exchange {exchange_norm}. "
-            f"{_catalog_bootstrap_guidance(provider_norm)}"
-        )
-
-    ids_to_compute = _validated_metric_ids(metric_ids)
-    return _run_metric_computation(
-        database=str(db_path),
-        symbols=symbols,
-        metric_ids=ids_to_compute,
-        cancelled_message="\nBulk metric computation cancelled by user.",
-        suppress_metric_warnings=not show_metric_warnings,
     )
 
 

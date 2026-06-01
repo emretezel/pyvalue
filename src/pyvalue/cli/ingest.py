@@ -1,4 +1,4 @@
-"""CLI handlers for ingesting raw fundamentals (EODHD/SEC) and ingest progress reports.
+"""CLI handlers for ingesting raw fundamentals (EODHD) and ingest progress reports.
 
 Author: Emre Tezel
 """
@@ -22,7 +22,7 @@ from typing import (
 )
 
 from pyvalue.config import Config
-from pyvalue.ingestion import EODHDFundamentalsClient, SECCompanyFactsClient
+from pyvalue.ingestion import EODHDFundamentalsClient
 from pyvalue.persistence.storage import (
     FundamentalsUpdate,
     FundamentalsRepository,
@@ -49,7 +49,6 @@ from ._common import (
     _normalize_provider,
     _normalize_provider_scope_symbol,
     _parse_exchange_filters,
-    _qualify_symbol,
     _reconcile_eodhd_listing_scope,
     _require_eodhd_key,
     _resolve_database_path,
@@ -399,51 +398,6 @@ def _run_eodhd_fundamentals_ingestion(
     return 0
 
 
-def cmd_ingest_fundamentals_global(
-    provider: str,
-    database: str,
-    exchange_codes: Optional[Sequence[str]],
-    rate: Optional[float],
-    max_symbols: Optional[int],
-    max_age_days: Optional[int],
-    respect_backoff: bool,
-) -> int:
-    """Fetch EODHD fundamentals across supported tickers with quota awareness."""
-
-    provider_norm = provider.strip().upper()
-    if provider_norm != "EODHD":
-        raise SystemExit(
-            "ingest-fundamentals-global currently only supports provider=EODHD."
-        )
-
-    requested_exchange_codes = _parse_exchange_filters(exchange_codes)
-    api_key = _require_eodhd_key()
-    prepared = _prepare_eodhd_fundamentals_run(
-        database=database,
-        api_key=api_key,
-        exchange_codes=sorted(requested_exchange_codes)
-        if requested_exchange_codes
-        else None,
-        provider_symbols=None,
-        rate=rate,
-        max_symbols=max_symbols,
-        max_age_days=max_age_days,
-        respect_backoff=respect_backoff,
-        missing_only=max_age_days is None,
-    )
-    scope_label = (
-        ", ".join(sorted(requested_exchange_codes))
-        if requested_exchange_codes
-        else "all exchanges"
-    )
-    return _run_eodhd_fundamentals_ingestion(
-        database=database,
-        api_key=api_key,
-        scope_label=scope_label,
-        prepared=prepared,
-    )
-
-
 def cmd_report_ingest_progress(
     provider: str,
     database: str,
@@ -617,95 +571,14 @@ def cmd_ingest_fundamentals_stage(
     max_symbols: Optional[int],
     max_age_days: Optional[int],
     respect_backoff: bool,
-    user_agent: Optional[str],
-    cik: Optional[str],
 ) -> int:
     """Unified fundamentals ingestion over symbol, exchange, or full supported scope."""
 
     db_path = _resolve_database_path(database)
-    provider_norm = _normalize_provider(provider)
-
-    if provider_norm == "SEC":
-        scope_rows, symbol_filters, resolved_exchange_codes = (
-            _resolve_provider_scope_rows(
-                str(db_path),
-                provider_norm,
-                symbols,
-                exchange_codes,
-                all_supported,
-            )
-        )
-        ticker_repo = SupportedTickerRepository(db_path)
-        scope_label = _scope_label(symbol_filters, resolved_exchange_codes)
-        if cik and len(scope_rows) != 1:
-            raise SystemExit(
-                "--cik can only be used when ingesting exactly one SEC symbol."
-            )
-        rate_value = rate if rate is not None else 9.0
-        sec_client = SECCompanyFactsClient(user_agent=user_agent)
-        fundamentals_repo = FundamentalsRepository(db_path)
-        fundamentals_repo.initialize_schema()
-        eligible = ticker_repo.list_eligible_for_fundamentals(
-            provider=provider_norm,
-            exchange_codes=resolved_exchange_codes,
-            max_age_days=max_age_days,
-            max_symbols=max_symbols,
-            respect_backoff=respect_backoff,
-            missing_only=max_age_days is None,
-            provider_symbols=symbol_filters,
-        )
-        if not eligible:
-            print(
-                f"No eligible supported tickers found for {scope_label}. "
-                "Refresh supported tickers first or relax freshness filters."
-            )
-            return 0
-        min_interval = 1.0 / rate_value if rate_value and rate_value > 0 else 0.0
-        total = len(eligible)
-        processed = 0
-        print(
-            f"Fetching SEC company facts for {total} supported tickers across {scope_label} "
-            f"at <= {rate_value:.2f} req/s"
-        )
-        try:
-            last_fetch = 0.0
-            for idx, ticker in enumerate(eligible, 1):
-                if min_interval > 0 and last_fetch:
-                    elapsed = time.perf_counter() - last_fetch
-                    if elapsed < min_interval:
-                        time.sleep(min_interval - elapsed)
-                try:
-                    cik_value = cik
-                    if cik_value is None:
-                        info = sec_client.resolve_company(ticker.code)
-                        cik_value = info.cik
-                    payload = sec_client.fetch_company_facts(cik_value)
-                except Exception as exc:  # pragma: no cover - network errors
-                    LOGGER.error(
-                        "Failed to fetch SEC company facts for %s: %s",
-                        ticker.symbol,
-                        exc,
-                    )
-                    last_fetch = time.perf_counter()
-                    continue
-                last_fetch = time.perf_counter()
-                fundamentals_repo.upsert(
-                    "SEC",
-                    ticker.symbol,
-                    payload,
-                    exchange="US",
-                )
-                processed += 1
-                print(
-                    f"[{idx}/{total}] Stored company facts for {ticker.symbol}",
-                    flush=True,
-                )
-        except KeyboardInterrupt:
-            return _cancel_cli_command(
-                f"\nCancelled after {processed} of {total} symbols."
-            )
-        print(f"Stored company facts for {processed} symbols in {db_path}")
-        return 0
+    # Validate the provider selector. EODHD is currently the only supported
+    # provider; the --provider flag is retained so a future provider can be
+    # re-introduced with a single change in _normalize_provider.
+    _normalize_provider(provider)
 
     api_key = _require_eodhd_key()
     scope_label, symbol_filters, resolved_exchange_codes = _resolve_eodhd_stage_scope(
@@ -731,224 +604,3 @@ def cmd_ingest_fundamentals_stage(
         scope_label=scope_label,
         prepared=prepared,
     )
-
-
-def cmd_ingest_eodhd_fundamentals(
-    symbol: str,
-    database: str,
-    exchange_code: Optional[str],
-) -> int:
-    """Fetch EODHD fundamentals for a ticker and store raw payload."""
-
-    api_key = _require_eodhd_key()
-    client = EODHDFundamentalsClient(api_key=api_key)
-    base_symbol = symbol.upper()
-    inferred_exchange = None
-    if "." in base_symbol:
-        base, suffix = base_symbol.split(".", 1)
-        base_symbol = base
-        inferred_exchange = suffix
-    if not exchange_code and not inferred_exchange:
-        raise SystemExit(
-            "--exchange-code is required when provider=EODHD and symbol has no exchange suffix."
-        )
-    exch_code = (inferred_exchange or exchange_code or "").upper() or None
-    qualified_symbol = _qualify_symbol(base_symbol, exch_code)
-    fetch_symbol = qualified_symbol
-    payload = client.fetch_fundamentals(fetch_symbol, exchange_code=None)
-    storage_symbol = qualified_symbol
-    repo = FundamentalsRepository(database)
-    repo.initialize_schema()
-    ticker_repo = SupportedTickerRepository(database)
-    listing_currency = ticker_repo.fetch_currency(storage_symbol, provider="EODHD")
-    repo.upsert(
-        "EODHD",
-        storage_symbol,
-        payload,
-        listing_currency=listing_currency,
-        exchange=exch_code,
-    )
-    print(f"Stored EODHD fundamentals for {storage_symbol} in {database}")
-    return 0
-
-
-def cmd_ingest_eodhd_fundamentals_bulk(
-    database: str,
-    rate: float,
-    exchange_code: Optional[str],
-) -> int:
-    """Fetch EODHD fundamentals for an exchange from stored supported tickers."""
-
-    return cmd_ingest_fundamentals_bulk(
-        provider="EODHD",
-        database=database,
-        rate=rate,
-        exchange_code=exchange_code,
-        user_agent=None,
-        max_symbols=None,
-        max_age_days=None,
-        respect_backoff=True,
-    )
-
-
-def cmd_ingest_fundamentals(
-    provider: str,
-    symbol: str,
-    database: str,
-    exchange_code: Optional[str],
-    user_agent: Optional[str],
-    cik: Optional[str],
-) -> int:
-    """Fetch fundamentals for a ticker from the specified provider."""
-
-    provider_norm = _normalize_provider(provider)
-    if provider_norm == "SEC":
-        symbol_upper = symbol.strip().upper()
-        if "." in symbol_upper:
-            if not symbol_upper.endswith(".US"):
-                raise SystemExit(
-                    "SEC ingestion requires a .US suffix or an unqualified US symbol."
-                )
-            if exchange_code and exchange_code.upper() != "US":
-                raise SystemExit("SEC ingestion only supports --exchange-code US.")
-        else:
-            if not exchange_code:
-                raise SystemExit(
-                    "--exchange-code is required when SEC symbol has no suffix."
-                )
-            if exchange_code.upper() != "US":
-                raise SystemExit("SEC ingestion only supports --exchange-code US.")
-        client = SECCompanyFactsClient(user_agent=user_agent)
-        symbol_qualified = _qualify_symbol(symbol, exchange="US")
-        if cik:
-            cik_value = cik
-        else:
-            info = client.resolve_company(symbol_qualified.split(".")[0])
-            cik_value = info.cik
-            symbol_qualified = _qualify_symbol(info.symbol, exchange="US")
-            LOGGER.info(
-                "Resolved %s to CIK %s (%s)", symbol_qualified, cik_value, info.name
-            )
-
-        payload = client.fetch_company_facts(cik_value)
-        fundamentals_repo = FundamentalsRepository(database)
-        fundamentals_repo.initialize_schema()
-        fundamentals_repo.upsert(
-            "SEC", symbol_qualified.upper(), payload, exchange="US"
-        )
-        print(
-            f"Stored SEC company facts for {symbol_qualified} ({cik_value}) in {database}"
-        )
-        return 0
-    if provider_norm == "EODHD":
-        if not exchange_code and "." not in symbol:
-            raise SystemExit(
-                "--exchange-code is required when provider=EODHD and symbol has no exchange suffix."
-            )
-        return cmd_ingest_eodhd_fundamentals(
-            symbol=symbol, database=database, exchange_code=exchange_code
-        )
-    raise SystemExit(f"Unsupported provider: {provider}")
-
-
-def cmd_ingest_fundamentals_bulk(
-    provider: str,
-    database: str,
-    rate: Optional[float],
-    exchange_code: Optional[str],
-    user_agent: Optional[str],
-    max_symbols: Optional[int],
-    max_age_days: Optional[int],
-    respect_backoff: bool,
-) -> int:
-    """Fetch fundamentals in bulk for the specified provider."""
-
-    provider_norm = _normalize_provider(provider)
-    if not exchange_code:
-        raise SystemExit("--exchange-code is required for bulk fundamentals ingestion.")
-    if provider_norm == "SEC":
-        exchange_norm = exchange_code.upper()
-        rate_value = rate if rate is not None else 9.0
-        client = SECCompanyFactsClient(user_agent=user_agent)
-        fundamentals_repo = FundamentalsRepository(database)
-        fundamentals_repo.initialize_schema()
-
-        ticker_repo = SupportedTickerRepository(database)
-        symbols = ticker_repo.list_symbols_by_exchange(provider_norm, exchange_norm)
-        if not symbols:
-            raise SystemExit(
-                f"No supported tickers found for provider {provider_norm} on exchange {exchange_norm}. "
-                "Run load-universe --provider SEC first."
-            )
-
-        min_interval = 1.0 / rate_value if rate_value and rate_value > 0 else 0.0
-        last_fetch = 0.0
-        total = len(symbols)
-        processed = 0
-        print(
-            f"Fetching SEC company facts for {total} symbols on {exchange_norm} "
-            f"at <= {rate_value:.2f} req/s"
-        )
-
-        try:
-            for idx, symbol in enumerate(symbols, 1):
-                try:
-                    info = client.resolve_company(symbol.split(".")[0])
-                except Exception as exc:  # pragma: no cover - rare network errors
-                    LOGGER.error("Failed to resolve CIK for %s: %s", symbol, exc)
-                    continue
-
-                if min_interval > 0 and last_fetch:
-                    elapsed = time.perf_counter() - last_fetch
-                    if elapsed < min_interval:
-                        time.sleep(min_interval - elapsed)
-
-                try:
-                    payload = client.fetch_company_facts(info.cik)
-                except Exception as exc:  # pragma: no cover - network errors
-                    LOGGER.error(
-                        "Failed to fetch company facts for %s: %s", info.symbol, exc
-                    )
-                    last_fetch = time.perf_counter()
-                    continue
-
-                last_fetch = time.perf_counter()
-                qualified = _qualify_symbol(info.symbol, exchange="US")
-                fundamentals_repo.upsert(
-                    "SEC",
-                    qualified,
-                    payload,
-                    exchange=exchange_norm,
-                )
-                processed += 1
-                print(
-                    f"[{idx}/{total}] Stored company facts for {qualified}", flush=True
-                )
-        except KeyboardInterrupt:
-            return _cancel_cli_command(
-                f"\nCancelled after {processed} of {total} symbols."
-            )
-
-        print(f"Stored company facts for {processed} symbols in {database}")
-        return 0
-    if provider_norm == "EODHD":
-        exchange_norm = exchange_code.upper()
-        api_key = _require_eodhd_key()
-        prepared = _prepare_eodhd_fundamentals_run(
-            database=database,
-            api_key=api_key,
-            exchange_codes=[exchange_norm],
-            provider_symbols=None,
-            rate=rate,
-            max_symbols=max_symbols,
-            max_age_days=max_age_days,
-            respect_backoff=respect_backoff,
-            missing_only=False,
-        )
-        return _run_eodhd_fundamentals_ingestion(
-            database=database,
-            api_key=api_key,
-            scope_label=exchange_norm,
-            prepared=prepared,
-        )
-    raise SystemExit(f"Unsupported provider: {provider}")

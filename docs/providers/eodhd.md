@@ -2,10 +2,10 @@
 
 ## What EODHD Covers
 
-EODHD is the recommended provider for most `pyvalue` workflows.
+EODHD is the only provider supported by `pyvalue`.
 
 CLI commands that accept `--provider` already default to `EODHD`, so the flag
-is optional unless you want to be explicit or switch to `SEC`.
+is optional.
 
 It covers:
 - global exchange universes

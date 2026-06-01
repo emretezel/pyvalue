@@ -44,13 +44,10 @@ from ._common import (
     MARKET_DATA_WRITE_BATCH_SIZE,
     _MarketDataExchangeTask,
     _PlannedMarketDataRun,
-    _catalog_bootstrap_guidance,
     _ensure_eodhd_listing_scope_cached,
     _eodhd_request_budget,
-    _format_market_symbol,
     _normalize_provider,
     _parse_exchange_filters,
-    _reconcile_eodhd_listing_scope,
     _require_eodhd_key,
     _resolve_database_path,
     _resolve_provider_scope_rows,
@@ -208,122 +205,6 @@ def _fetch_symbol_market_data(
     provider = _get_thread_local_market_data_provider(api_key)
     limiter.acquire()
     return provider.latest_price(symbol)
-
-
-def cmd_update_market_data_global(
-    provider: str,
-    database: str,
-    exchange_codes: Optional[Sequence[str]],
-    rate: Optional[float],
-    max_symbols: Optional[int],
-    max_age_days: int,
-    respect_backoff: bool,
-) -> int:
-    """Refresh EODHD market data across supported tickers with quota awareness."""
-
-    provider_norm = provider.strip().upper()
-    if provider_norm != "EODHD":
-        raise SystemExit(
-            "update-market-data-global currently only supports provider=EODHD."
-        )
-
-    api_key = _require_eodhd_key()
-    client = EODHDFundamentalsClient(api_key=api_key)
-    config = Config()
-    buffer_calls = max(config.eodhd_market_data_daily_buffer_calls, 0)
-    rate_value = _resolve_eodhd_market_data_rate(rate)
-    requested_exchange_codes = _parse_exchange_filters(exchange_codes)
-    user_meta = client.user_metadata()
-    daily_limit, used_calls, usable_requests = _eodhd_request_budget(
-        user_meta, buffer_calls, EODHD_MARKET_DATA_CALL_COST
-    )
-    request_budget = usable_requests
-    if max_symbols is not None:
-        request_budget = min(request_budget, max_symbols)
-    if request_budget <= 0:
-        print(
-            "No EODHD market data request budget available for this run "
-            f"(daily_limit={daily_limit}, used_calls={used_calls}, "
-            f"buffer_calls={buffer_calls})."
-        )
-        return 0
-
-    ticker_repo = SupportedTickerRepository(database)
-    _reconcile_eodhd_listing_scope(
-        database,
-        exchange_codes=sorted(requested_exchange_codes)
-        if requested_exchange_codes
-        else None,
-    )
-    eligible = ticker_repo.list_eligible_for_market_data(
-        provider=provider_norm,
-        exchange_codes=sorted(requested_exchange_codes)
-        if requested_exchange_codes
-        else None,
-        max_age_days=max_age_days,
-        max_symbols=request_budget,
-        respect_backoff=respect_backoff,
-        primary_only=True,
-    )
-    if not eligible:
-        scope = (
-            ", ".join(sorted(requested_exchange_codes))
-            if requested_exchange_codes
-            else "all exchanges"
-        )
-        print(
-            f"No eligible supported tickers found for {scope}. "
-            "Run refresh-supported-tickers first or relax freshness filters."
-        )
-        return 0
-
-    service = MarketDataService(db_path=database, config=config)
-    state_repo = MarketDataFetchStateRepository(database)
-    state_repo.initialize_schema()
-    interval = 60.0 / rate_value
-    total = len(eligible)
-    processed = 0
-    attempted = 0
-    scope_label = (
-        ", ".join(sorted(requested_exchange_codes))
-        if requested_exchange_codes
-        else "all exchanges"
-    )
-    print(
-        f"Fetching EODHD market data for {total} supported tickers across {scope_label} "
-        f"at <= {rate_value:.2f} req/min "
-        f"(daily_limit={daily_limit}, used_calls={used_calls}, "
-        f"buffer_calls={buffer_calls}, budget_requests={request_budget})"
-    )
-
-    try:
-        for idx, ticker in enumerate(eligible, 1):
-            attempted += 1
-            start = time.perf_counter()
-            try:
-                data = service.refresh_symbol(ticker.symbol)
-                state_repo.mark_success("EODHD", ticker.symbol)
-                processed += 1
-                print(
-                    f"[{idx}/{total}] Stored market data for {data.symbol}",
-                    flush=True,
-                )
-            except Exception as exc:  # pragma: no cover - network errors
-                LOGGER.error(
-                    "Failed to refresh market data for %s: %s", ticker.symbol, exc
-                )
-                state_repo.mark_failure("EODHD", ticker.symbol, str(exc))
-
-            elapsed = time.perf_counter() - start
-            if elapsed < interval:
-                time.sleep(interval - elapsed)
-    except KeyboardInterrupt:
-        return _cancel_cli_command(f"\nCancelled after {attempted} attempted symbols.")
-
-    print(
-        f"Stored market data for {processed} of {attempted} attempted symbols in {database}"
-    )
-    return 0
 
 
 def cmd_report_market_data_progress(
@@ -729,84 +610,4 @@ def cmd_update_market_data_stage(
     print(
         f"Stored market data for {processed} of {total} planned supported tickers in {db_path}"
     )
-    return 0
-
-
-def cmd_update_market_data(
-    symbol: str, database: str, exchange_code: Optional[str]
-) -> int:
-    """Fetch latest market data for a ticker and store it."""
-
-    symbol_clean = symbol.strip().upper()
-    if "." not in symbol_clean:
-        if not exchange_code:
-            raise SystemExit(
-                "--exchange-code is required when symbol has no exchange suffix (e.g., AAPL.US)."
-            )
-        symbol_clean = _format_market_symbol(symbol_clean, exchange_code)
-
-    service = MarketDataService(db_path=database)
-    data = service.refresh_symbol(symbol_clean)
-    print(
-        f"Stored market data for {data.symbol}: price={data.price} as_of={data.as_of} in {database}"
-    )
-    return 0
-
-
-def cmd_update_market_data_bulk(
-    provider: str,
-    database: str,
-    rate: float,
-    exchange_code: Optional[str],
-) -> int:
-    """Fetch market data for every supported ticker in one provider/exchange slice."""
-
-    if not exchange_code:
-        raise SystemExit("--exchange-code is required for bulk market data updates.")
-
-    provider_norm = _normalize_provider(provider)
-    ticker_repo = SupportedTickerRepository(database)
-    ticker_repo.initialize_schema()
-    exchange_norm = exchange_code.upper()
-    listing_rows = ticker_repo.list_symbols_by_exchange(provider_norm, exchange_norm)
-    if provider_norm == "EODHD":
-        _reconcile_eodhd_listing_scope(
-            database,
-            exchange_codes=[exchange_norm],
-        )
-        listing_rows = ticker_repo.list_symbols_by_exchange(
-            provider_norm,
-            exchange_norm,
-            primary_only=True,
-        )
-    if not listing_rows:
-        raise SystemExit(
-            f"No supported tickers found for provider {provider_norm} on exchange {exchange_norm}. "
-            f"{_catalog_bootstrap_guidance(provider_norm)}"
-        )
-    pairs = [(symbol, exchange_norm) for symbol in listing_rows]
-
-    service = MarketDataService(db_path=database)
-    interval = 60.0 / rate if rate and rate > 0 else 0.0
-    total = len(pairs)
-    processed = 0
-    print(f"Updating market data for {total} symbols at <= {rate:.2f} per minute")
-
-    try:
-        for idx, (symbol, exchange) in enumerate(pairs, 1):
-            start = time.perf_counter()
-            try:
-                fetch_symbol = _format_market_symbol(symbol, exchange)
-                service.refresh_symbol(symbol, fetch_symbol=fetch_symbol)
-                processed += 1
-                print(f"[{idx}/{total}] Stored market data for {symbol}", flush=True)
-            except Exception as exc:  # pragma: no cover - network failures
-                LOGGER.error("Failed to refresh market data for %s: %s", symbol, exc)
-            elapsed = time.perf_counter() - start
-            if interval > 0 and elapsed < interval:
-                time.sleep(interval - elapsed)
-    except KeyboardInterrupt:
-        return _cancel_cli_command(f"\nCancelled after {processed} of {total} symbols.")
-
-    print(f"Stored market data for {processed} symbols in {database}")
     return 0

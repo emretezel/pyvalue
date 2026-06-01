@@ -11,7 +11,7 @@ One row per issuer record created during catalog backfill or listing creation.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-05-11`
+- Snapshot source: `data/pyvalue.db` on `2026-06-01`
 - Row count: `68,728`
 - Table size: `64,503,808 bytes` (`61.5 MiB`)
 - Approximate bytes per row: `938.5`
@@ -58,7 +58,7 @@ One row per issuer record created during catalog backfill or listing creation.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-05-11`
+- Snapshot source: `data/pyvalue.db` on `2026-06-01`
 - Sample window: first `5` rows returned by SQLite ordered by `issuer_id ASC`
 
 ```json

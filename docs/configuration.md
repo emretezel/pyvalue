@@ -36,23 +36,6 @@ Optional EODHD throttling and quota settings:
 - `market_data_requests_per_minute`: default `950`, capped at the EODHD limit of `1000`; used by `update-market-data --provider EODHD` across both exchange-bulk and per-symbol market-data requests
 - `market_data_daily_buffer_calls`: default `5000`, reserved from the shared daily call budget so market-data refresh stops early instead of consuming the full allowance
 
-## SEC User-Agent
-
-SEC requires a descriptive `User-Agent` with contact details.
-
-Preferred config:
-
-```toml
-[sec]
-user_agent = "pyvalue/0.1 (contact: you@example.com)"
-```
-
-You can also use an environment variable:
-
-```bash
-export PYVALUE_SEC_USER_AGENT="pyvalue/0.1 (contact: you@example.com)"
-```
-
 ## FX Configuration
 
 FX behavior is configured under an optional `[fx]` section:
@@ -67,8 +50,7 @@ stale_warning_days = 7
 
 Settings:
 
-- `provider`: default `EODHD`; `FRANKFURTER` remains available for explicit
-  refreshes
+- `provider`: default `EODHD` (the only supported FX provider)
 - `pivot_currency`: primary triangulation pivot, default `USD`
 - `secondary_pivot_currency`: optional secondary pivot after the primary
   direct/inverse lookup path, default `EUR`
@@ -115,6 +97,5 @@ Use a separate database path when you want to:
 ## Related Docs
 
 - [EODHD Provider Guide](providers/eodhd.md)
-- [SEC Provider Guide](providers/sec.md)
 - [CLI Reference](reference/cli.md)
 - [Getting Started](getting-started.md)

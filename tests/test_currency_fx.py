@@ -22,7 +22,6 @@ from pyvalue.currency import (
 from pyvalue.money.fx import (
     EODHDFXProvider,
     FXService,
-    FrankfurterProvider,
     MissingFXRateError,
     parse_eodhd_fx_catalog_entry,
 )
@@ -523,85 +522,6 @@ def test_eodhd_provider_fetch_history_uses_close_rate():
         "to": "2024-01-02",
         "order": "a",
     }
-
-
-def test_frankfurter_provider_retries_without_unsupported_quotes():
-    session = _FakeSession(
-        [
-            _FakeResponse(
-                422,
-                {"status": 422, "message": "invalid currency: BEF"},
-            ),
-            _FakeResponse(
-                200,
-                [
-                    {
-                        "date": "2024-01-10",
-                        "base": "USD",
-                        "quote": "EUR",
-                        "rate": 0.91,
-                    },
-                    {
-                        "date": "2024-01-10",
-                        "base": "USD",
-                        "quote": "CNY",
-                        "rate": 7.12,
-                    },
-                ],
-                headers={"Date": "Wed, 10 Jan 2024 00:00:00 GMT"},
-            ),
-        ]
-    )
-    provider = FrankfurterProvider(session=session)
-
-    rows = provider.fetch_rates(
-        base_currency="USD",
-        quote_currencies=["EUR", "CNY", "BEF"],
-        start_date=date(2024, 1, 10),
-        end_date=date(2024, 1, 10),
-    )
-
-    assert [row.quote_currency for row in rows] == ["EUR", "CNY"]
-    assert session.calls[0][1]["quotes"] == "BEF,CNY,EUR"
-    assert session.calls[1][1]["quotes"] == "CNY,EUR"
-
-
-def test_frankfurter_provider_normalizes_subunit_currencies_before_request():
-    session = _FakeSession(
-        [
-            _FakeResponse(
-                200,
-                [
-                    {
-                        "date": "2024-01-10",
-                        "base": "ZAR",
-                        "quote": "ILS",
-                        "rate": 0.20,
-                    },
-                    {
-                        "date": "2024-01-10",
-                        "base": "ZAR",
-                        "quote": "USD",
-                        "rate": 0.05,
-                    },
-                ],
-                headers={"Date": "Wed, 10 Jan 2024 00:00:00 GMT"},
-            )
-        ]
-    )
-    provider = FrankfurterProvider(session=session)
-
-    rows = provider.fetch_rates(
-        base_currency="ZAC",
-        quote_currencies=["ILA", "USD"],
-        start_date=date(2024, 1, 10),
-        end_date=date(2024, 1, 10),
-    )
-
-    assert session.calls[0][1]["base"] == "ZAR"
-    assert session.calls[0][1]["quotes"] == "ILS,USD"
-    assert [row.base_currency for row in rows] == ["ZAR", "ZAR"]
-    assert [row.quote_currency for row in rows] == ["ILS", "USD"]
 
 
 def test_canonical_trading_currency_normalizes_subunits():

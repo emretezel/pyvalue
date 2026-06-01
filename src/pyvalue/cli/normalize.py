@@ -23,9 +23,8 @@ from typing import (
 
 from pyvalue.money.fx import (
     FXService,
-    MissingFXRateError,
 )
-from pyvalue.normalization import EODHDFactsNormalizer, SECFactsNormalizer
+from pyvalue.normalization import EODHDFactsNormalizer
 from pyvalue.logging_utils import (
     suppress_console_missing_fx_warnings,
 )
@@ -45,14 +44,11 @@ from ._common import (
     LOGGER,
     NORMALIZATION_MAX_WORKERS,
     _NormalizedFactsResult,
-    _catalog_bootstrap_guidance,
     _extract_entity_description_from_eodhd,
     _extract_entity_industry_from_eodhd,
     _extract_entity_name_from_eodhd,
-    _extract_entity_name_from_sec,
     _extract_entity_sector_from_eodhd,
     _normalize_provider,
-    _qualify_symbol,
     _reconcile_eodhd_listing_scope,
     _resolve_database_path,
     _resolve_provider_scope_rows,
@@ -72,21 +68,6 @@ _process_local_fx_service: Optional[FXService] = None
 _process_local_fx_service_db: Optional[str] = None
 _process_local_ticker_repo: Optional[SupportedTickerRepository] = None
 _process_local_ticker_repo_db: Optional[str] = None
-
-
-def _select_listing_symbols_by_exchange(
-    database: str,
-    provider: str,
-    exchange_code: str,
-    *,
-    primary_only: bool = False,
-) -> List[str]:
-    ticker_repo = SupportedTickerRepository(database)
-    return ticker_repo.list_symbols_by_exchange(
-        provider,
-        exchange_code,
-        primary_only=primary_only,
-    )
 
 
 def cmd_normalize_fundamentals_stage(
@@ -118,17 +99,11 @@ def cmd_normalize_fundamentals_stage(
             f"No {provider_norm} raw fundamentals found in the requested scope. "
             "Run ingest-fundamentals first."
         )
-    if provider_norm == "SEC":
-        return cmd_normalize_us_facts_bulk(
-            database=str(db_path), symbols=selected_symbols, force=force
-        )
-    if provider_norm == "EODHD":
-        return cmd_normalize_eodhd_fundamentals_bulk(
-            database=str(db_path),
-            symbols=selected_symbols,
-            force=force,
-        )
-    raise SystemExit(f"Unsupported provider: {provider}")
+    return cmd_normalize_eodhd_fundamentals_bulk(
+        database=str(db_path),
+        symbols=selected_symbols,
+        force=force,
+    )
 
 
 def _normalization_required(
@@ -187,124 +162,6 @@ def _print_normalization_up_to_date(
     )
 
 
-def cmd_normalize_us_facts(
-    symbol: str,
-    database: str,
-    force: bool = False,
-) -> int:
-    """Normalize previously ingested SEC facts for downstream metrics."""
-
-    symbol = _qualify_symbol(symbol, exchange="US")
-    fund_repo = FundamentalsRepository(database)
-    fund_repo.initialize_schema()
-    candidates_to_normalize, candidate_map, skipped = _plan_normalization_selection(
-        database=database,
-        provider="SEC",
-        symbols=[symbol.upper()],
-        force=force,
-    )
-    payload_record = fund_repo.fetch_payload_with_hash("SEC", symbol.upper())
-    if payload_record is None:
-        raise SystemExit(
-            f"No raw SEC payload found for {symbol}. Run ingest-fundamentals --provider SEC before normalization."
-        )
-    if skipped and not candidates_to_normalize:
-        _print_normalization_up_to_date("SEC", database)
-        return 0
-
-    payload, payload_hash = payload_record
-    fx_repo = _SchemaReadyFXRatesRepository(database)
-    fx_service = FXService(database, repository=fx_repo)
-    normalizer = SECFactsNormalizer(fx_service=fx_service)
-    try:
-        records = normalizer.normalize(payload, symbol=symbol.upper())
-    except MissingFXRateError as exc:
-        raise SystemExit(
-            f"SEC normalization failed for {symbol.upper()}: {exc}"
-        ) from exc
-
-    fact_repo = FinancialFactsRepository(database)
-    fact_repo.initialize_schema()
-    entity_repo = EntityMetadataRepository(database)
-    entity_repo.initialize_schema()
-    state_repo = FundamentalsNormalizationStateRepository(database)
-    state_repo.initialize_schema()
-    entity_name = payload.get("entityName")
-    if entity_name:
-        entity_repo.upsert(symbol.upper(), entity_name)
-    stored = fact_repo.replace_facts(
-        symbol.upper(),
-        records,
-        source_provider="SEC",
-    )
-    candidate = candidate_map.get(symbol.upper())
-    security_id = (
-        candidate.security_id
-        if candidate is not None
-        else fact_repo._security_repo().ensure_from_symbol(symbol.upper()).security_id
-    )
-    state_repo.mark_success("SEC", symbol.upper(), security_id, payload_hash)
-    print(f"Stored {stored} normalized facts for {symbol.upper()} in {database}")
-    return 0
-
-
-def cmd_normalize_us_facts_bulk(
-    database: str,
-    symbols: Optional[Sequence[str]] = None,
-    force: bool = False,
-) -> int:
-    """Normalize raw SEC facts for every stored ticker in parallel."""
-
-    fund_repo = FundamentalsRepository(database)
-    fund_repo.initialize_schema()
-
-    if symbols is None:
-        symbols = fund_repo.symbols("SEC")
-        if not symbols:
-            raise SystemExit(
-                "No raw SEC facts found. Run ingest-fundamentals --provider SEC first."
-            )
-    else:
-        symbols = [symbol.upper() for symbol in symbols]
-        if not symbols:
-            raise SystemExit("No symbols provided for SEC normalization.")
-
-    requested_total = len(symbols)
-    if force:
-        print(
-            f"Force re-normalization requested for {requested_total} SEC symbols; "
-            "skipping freshness scan",
-            flush=True,
-        )
-        symbols_to_normalize = list(symbols)
-        candidates: Dict[str, FundamentalsNormalizationCandidate] = {}
-        skipped = 0
-    else:
-        print(
-            f"Checking SEC normalization freshness for {requested_total} symbols",
-            flush=True,
-        )
-        symbols_to_normalize, candidates, skipped = _plan_normalization_selection(
-            database=database,
-            provider="SEC",
-            symbols=symbols,
-            force=False,
-        )
-    if not symbols_to_normalize:
-        _print_normalization_up_to_date("SEC", database)
-        return 0
-
-    return _run_bulk_normalization(
-        database=database,
-        provider="SEC",
-        symbols=symbols_to_normalize,
-        worker=_normalize_sec_symbol_worker,
-        candidate_map=candidates,
-        requested_total=requested_total,
-        skipped=skipped,
-    )
-
-
 def _normalization_worker_count(total_symbols: int) -> int:
     """Return an automatic worker count for bulk normalization."""
 
@@ -316,18 +173,14 @@ def _normalization_worker_count(total_symbols: int) -> int:
 
 def _normalization_record_to_row(record: FactRecord) -> StoredFactRow:
     return (
-        record.cik,
         record.concept,
         record.fiscal_period,
         record.end_date,
         record.unit_kind,
         record.value,
-        record.accn,
         record.filed,
         record.frame,
-        getattr(record, "start_date", None),
-        getattr(record, "accounting_standard", None),
-        getattr(record, "currency", None),
+        record.currency,
     )
 
 
@@ -361,30 +214,6 @@ def _get_or_create_ticker_repo(
         _process_local_ticker_repo = _SchemaReadySupportedTickerRepository(database)
         _process_local_ticker_repo_db = db_key
     return _process_local_ticker_repo
-
-
-def _normalize_sec_symbol_worker(
-    database: Union[str, Path], symbol: str
-) -> Optional[_NormalizedFactsResult]:
-    """Normalize one stored SEC payload and return facts plus metadata."""
-
-    fund_repo = FundamentalsRepository(database)
-    payload_record = fund_repo.fetch_payload_with_hash("SEC", symbol)
-    if payload_record is None:
-        return None
-    payload, payload_hash = payload_record
-    fx_service = _get_or_create_fx_service(database)
-    normalizer = SECFactsNormalizer(fx_service=fx_service)
-    rows = tuple(
-        _normalization_record_to_row(record)
-        for record in normalizer.normalize(payload, symbol=symbol)
-    )
-    return _NormalizedFactsResult(
-        symbol=symbol,
-        rows=rows,
-        payload_hash=payload_hash,
-        entity_name=_extract_entity_name_from_sec(payload),
-    )
 
 
 def _normalize_eodhd_symbol_worker(
@@ -609,89 +438,6 @@ def _run_bulk_normalization(
     return 0
 
 
-def cmd_normalize_eodhd_fundamentals(
-    symbol: str,
-    database: str,
-    force: bool = False,
-) -> int:
-    """Normalize stored EODHD fundamentals for downstream metrics."""
-
-    fund_repo = FundamentalsRepository(database)
-    symbol_upper = symbol.upper()
-    candidates_to_normalize, candidate_map, skipped = _plan_normalization_selection(
-        database=database,
-        provider="EODHD",
-        symbols=[symbol_upper],
-        force=force,
-    )
-    payload_record = fund_repo.fetch_payload_with_hash("EODHD", symbol_upper)
-    if payload_record is None:
-        raise SystemExit(
-            f"No EODHD fundamentals found for {symbol}. Run ingest-fundamentals --provider EODHD first."
-        )
-    if skipped and not candidates_to_normalize:
-        _print_normalization_up_to_date("EODHD", database)
-        return 0
-
-    payload, payload_hash = payload_record
-
-    ticker_repo = _SchemaReadySupportedTickerRepository(database)
-    target_currency = _resolve_ticker_target_currency(
-        database, symbol_upper, payload, ticker_repo=ticker_repo
-    )
-    if target_currency is None:
-        raise SystemExit(
-            "EODHD normalization failed for "
-            f"{symbol_upper}: missing listing/provider-listing currency"
-        )
-    fx_repo = _SchemaReadyFXRatesRepository(database)
-    fx_service = FXService(database, repository=fx_repo)
-    normalizer = EODHDFactsNormalizer(fx_service=fx_service)
-    try:
-        with suppress_console_missing_fx_warnings(True):
-            records = normalizer.normalize(
-                payload, symbol=symbol_upper, target_currency=target_currency
-            )
-    except MissingFXRateError as exc:
-        raise SystemExit(
-            f"EODHD normalization failed for {symbol_upper}: {exc}"
-        ) from exc
-
-    fact_repo = FinancialFactsRepository(database)
-    fact_repo.initialize_schema()
-    entity_repo = EntityMetadataRepository(database)
-    entity_repo.initialize_schema()
-    state_repo = FundamentalsNormalizationStateRepository(database)
-    state_repo.initialize_schema()
-    entity_name = _extract_entity_name_from_eodhd(payload)
-    entity_description = _extract_entity_description_from_eodhd(payload)
-    entity_sector = _extract_entity_sector_from_eodhd(payload)
-    entity_industry = _extract_entity_industry_from_eodhd(payload)
-    if entity_name or entity_description or entity_sector or entity_industry:
-        entity_repo.upsert(
-            symbol_upper,
-            entity_name,
-            description=entity_description,
-            sector=entity_sector,
-            industry=entity_industry,
-        )
-
-    stored = fact_repo.replace_facts(
-        symbol_upper,
-        records,
-        source_provider="EODHD",
-    )
-    candidate = candidate_map.get(symbol_upper)
-    security_id = (
-        candidate.security_id
-        if candidate is not None
-        else fact_repo._security_repo().ensure_from_symbol(symbol_upper).security_id
-    )
-    state_repo.mark_success("EODHD", symbol_upper, security_id, payload_hash)
-    print(f"Stored {stored} normalized facts for {symbol_upper} in {database}")
-    return 0
-
-
 def cmd_normalize_eodhd_fundamentals_bulk(
     database: str,
     symbols: Optional[Sequence[str]] = None,
@@ -765,107 +511,3 @@ def cmd_normalize_eodhd_fundamentals_bulk(
         requested_total=requested_total,
         skipped=skipped,
     )
-
-
-def cmd_normalize_fundamentals(
-    provider: str,
-    symbol: str,
-    database: str,
-    exchange_code: Optional[str],
-    force: bool = False,
-) -> int:
-    """Normalize stored fundamentals for a ticker using the provider-specific ruleset."""
-
-    provider_norm = _normalize_provider(provider)
-    if provider_norm == "SEC":
-        symbol_upper = symbol.strip().upper()
-        if "." in symbol_upper:
-            if not symbol_upper.endswith(".US"):
-                raise SystemExit(
-                    "SEC normalization requires a .US suffix or an unqualified US symbol."
-                )
-            if exchange_code and exchange_code.upper() != "US":
-                raise SystemExit("SEC normalization only supports --exchange-code US.")
-        else:
-            if not exchange_code:
-                raise SystemExit(
-                    "--exchange-code is required when SEC symbol has no suffix."
-                )
-            if exchange_code.upper() != "US":
-                raise SystemExit("SEC normalization only supports --exchange-code US.")
-        return cmd_normalize_us_facts(symbol=symbol, database=database, force=force)
-    if provider_norm == "EODHD":
-        symbol_upper = symbol.strip().upper()
-        inferred_exchange = None
-        base_symbol = symbol_upper
-        if "." in symbol_upper:
-            base_symbol, inferred_exchange = symbol_upper.split(".", 1)
-        if not exchange_code and not inferred_exchange:
-            raise SystemExit(
-                "--exchange-code is required for EODHD normalization when symbol has no exchange suffix."
-            )
-        exch_code = inferred_exchange or exchange_code
-        qualified = (
-            _qualify_symbol(base_symbol, exch_code) if exch_code else symbol_upper
-        )
-        return cmd_normalize_eodhd_fundamentals(
-            symbol=qualified,
-            database=database,
-            force=force,
-        )
-    raise SystemExit(f"Unsupported provider: {provider}")
-
-
-def cmd_normalize_fundamentals_bulk(
-    provider: str,
-    database: str,
-    exchange_code: Optional[str],
-    force: bool = False,
-) -> int:
-    """Normalize stored fundamentals in bulk for the specified provider."""
-
-    provider_norm = _normalize_provider(provider)
-    if not exchange_code:
-        if provider_norm == "SEC":
-            exchange_norm = "US"
-        else:
-            raise SystemExit(
-                "--exchange-code is required for bulk fundamentals normalization."
-            )
-    else:
-        exchange_norm = exchange_code.upper()
-    if provider_norm == "SEC" and exchange_norm != "US":
-        raise SystemExit("SEC normalization only supports --exchange-code US.")
-    symbols_for_exchange = _select_listing_symbols_by_exchange(
-        database=database,
-        provider=provider_norm,
-        exchange_code=exchange_norm,
-        primary_only=provider_norm == "EODHD",
-    )
-    if not symbols_for_exchange:
-        raise SystemExit(
-            f"No supported tickers found for provider {provider_norm} on exchange {exchange_norm}. "
-            f"{_catalog_bootstrap_guidance(provider_norm)}"
-        )
-    fund_repo = FundamentalsRepository(database)
-    fund_repo.initialize_schema()
-    raw_symbols = set(fund_repo.symbols(provider_norm))
-    symbols = [symbol for symbol in symbols_for_exchange if symbol in raw_symbols]
-    if not symbols:
-        raise SystemExit(
-            f"No {provider_norm} fundamentals found for exchange {exchange_norm}. "
-            "Run ingest-fundamentals-bulk first."
-        )
-    if provider_norm == "SEC":
-        return cmd_normalize_us_facts_bulk(
-            database=database,
-            symbols=symbols,
-            force=force,
-        )
-    if provider_norm == "EODHD":
-        return cmd_normalize_eodhd_fundamentals_bulk(
-            database=database,
-            symbols=symbols,
-            force=force,
-        )
-    raise SystemExit(f"Unsupported provider: {provider}")

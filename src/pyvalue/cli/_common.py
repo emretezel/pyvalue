@@ -53,8 +53,6 @@ FUNDAMENTALS_WORKERS = 16
 FUNDAMENTALS_RATE_LIMIT_BURST = 2
 FUNDAMENTALS_WRITE_BATCH_SIZE = 25
 FUNDAMENTALS_WRITE_BATCH_INTERVAL_SECONDS = 0.25
-FX_REFRESH_MAX_QUOTES_PER_REQUEST = 25
-FX_REFRESH_MAX_DAYS_PER_REQUEST = 730
 FX_FULL_BACKFILL_START = date(1900, 1, 1)
 FUNDAMENTALS_PROGRESS_INTERVAL_SECONDS = 5.0
 FUNDAMENTALS_PROGRESS_SYMBOL_STEP = 250
@@ -283,18 +281,19 @@ def _format_market_symbol(symbol: str, exchange: Optional[str]) -> str:
 
 
 def _normalize_provider(provider: Optional[str]) -> str:
+    # EODHD is currently the only supported provider. The --provider flag and
+    # this validation seam are retained so a future provider can be added by
+    # widening the accepted set below.
     if not provider:
-        raise SystemExit("Provider is required (SEC or EODHD).")
+        raise SystemExit("Provider is required (EODHD).")
     normalized = provider.strip().upper()
-    if normalized not in {"SEC", "EODHD"}:
+    if normalized != "EODHD":
         raise SystemExit(f"Unsupported provider: {provider}")
     return normalized
 
 
 def _catalog_bootstrap_guidance(provider: str) -> str:
     provider_norm = provider.strip().upper()
-    if provider_norm == "SEC":
-        return "Run refresh-supported-exchanges --provider SEC and refresh-supported-tickers --provider SEC first."
     if provider_norm == "EODHD":
         return "Run refresh-supported-exchanges --provider EODHD and refresh-supported-tickers --provider EODHD first."
     return "Populate provider_listing first."
@@ -411,10 +410,8 @@ def _validate_scope_selector(
 
 def _normalize_provider_scope_symbol(provider: str, symbol: str) -> str:
     candidate = symbol.strip().upper()
-    ticker, suffix = candidate.rsplit(".", 1) if "." in candidate else (candidate, None)
-    provider_norm = _normalize_provider(provider)
-    if provider_norm == "SEC":
-        return f"{ticker}.US"
+    _, suffix = candidate.rsplit(".", 1) if "." in candidate else (candidate, None)
+    _normalize_provider(provider)
     if suffix is None:
         raise SystemExit(
             "EODHD --symbols entries must be fully qualified, for example SHEL.LSE."
@@ -805,11 +802,6 @@ def _extract_entity_industry_from_eodhd(payload: Dict) -> Optional[str]:
     general = payload.get("General") or {}
     industry = str(general.get("Industry") or "").strip()
     return industry or None
-
-
-def _extract_entity_name_from_sec(payload: Dict) -> Optional[str]:
-    entity_name = str(payload.get("entityName") or "").strip()
-    return entity_name or None
 
 
 class _MetricWarningCollector(logging.Handler):

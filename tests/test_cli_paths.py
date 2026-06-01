@@ -45,7 +45,7 @@ def test_resolve_canonical_scope_symbols_defaults_to_all_supported(tmp_path):
     repo = SupportedTickerRepository(tmp_path / "scope.db")
     repo.initialize_schema()
     repo.replace_from_listings(
-        "SEC",
+        "EODHD",
         "US",
         [
             Listing(
@@ -93,7 +93,7 @@ def test_resolve_provider_scope_rows_defaults_to_all_supported(tmp_path):
     repo = SupportedTickerRepository(tmp_path / "provider-scope.db")
     repo.initialize_schema()
     repo.replace_from_listings(
-        "SEC",
+        "EODHD",
         "US",
         [
             Listing(
@@ -114,7 +114,7 @@ def test_resolve_provider_scope_rows_defaults_to_all_supported(tmp_path):
 
     rows, symbols, exchanges = _resolve_provider_scope_rows(
         str(tmp_path / "provider-scope.db"),
-        provider="SEC",
+        provider="EODHD",
         symbols=None,
         exchange_codes=None,
         all_supported=False,

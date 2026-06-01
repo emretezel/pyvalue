@@ -30,8 +30,8 @@ The main persisted layers are:
 ### `provider`
 
 Global provider metadata lives here. `provider_id` is the physical FK key, while
-`provider_code` remains the stable external namespace string such as `EODHD`,
-`SEC`, or `FRANKFURTER`.
+`provider_code` remains the stable external namespace string; `EODHD` is the
+only registered provider.
 
 ### `exchange`
 

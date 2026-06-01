@@ -24,7 +24,7 @@ Columns:
 
 | English Descriptive Name of the Metric | pyvalue key | How is it calculated | Why is it important in identifying quality/value stocks |
 | --- | --- | --- | --- |
-| Long-Term Debt | `long_term_debt` | SEC: combines current and noncurrent long-term debt components with fallback rollups. | High debt can destroy value when a business hits a downturn or refinancing window. |
+| Long-Term Debt | `long_term_debt` | Latest reported long-term debt fact (current and noncurrent components plus fallback rollups are resolved during EODHD normalization). | High debt can destroy value when a business hits a downturn or refinancing window. |
 | Short-Term Debt Share | `short_term_debt_share` | EODHD-oriented: `ShortTermDebt / TotalDebt`, with denominator falling back to `TotalDebtFromBalanceSheet` when needed. | Measures refinancing pressure by showing how much debt matures soon. |
 | Debt Paydown Years | `debt_paydown_years` | EODHD-oriented: `TotalDebt / FCF_TTM`, where debt uses layered fallback and `FCF_TTM = OCF_TTM - Capex_TTM`. | Lower values indicate the balance sheet could be repaired faster with current cash generation. |
 | Free Cash Flow to Debt | `fcf_to_debt` | EODHD-oriented reciprocal of debt paydown years: `FCF_TTM / TotalDebt`. | Higher values show stronger debt-service capacity from internally generated cash. |

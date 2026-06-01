@@ -11,10 +11,10 @@ One row per `listing_id`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-05-11`
-- Row count: `61,987`
+- Snapshot source: `data/pyvalue.db` on `2026-06-01`
+- Row count: `61,058`
 - Table size: `2,564,096 bytes` (`2.4 MiB`)
-- Approximate bytes per row: `41.4`
+- Approximate bytes per row: `42.0`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -54,7 +54,7 @@ One row per `listing_id`.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-05-11`
+- Snapshot source: `data/pyvalue.db` on `2026-06-01`
 - Sample window: first `5` rows returned by SQLite ordered by `listing_id ASC`
 
 ```json

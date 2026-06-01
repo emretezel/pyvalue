@@ -6,7 +6,6 @@
 - Conda environment named `pyvalue`
 - SQLite available locally
 - EODHD credentials if you want global fundamentals or any market data
-- SEC `User-Agent` if you want SEC fundamentals
 
 ## Install
 

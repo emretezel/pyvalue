@@ -156,11 +156,10 @@ class FactRecord:
     """Normalized financial fact ready for storage."""
 
     symbol: str
-    cik: Optional[str] = None
     concept: str = ""
-    # fiscal_period defaults to ``"INSTANT"`` (matches the SEC company
-    # facts convention for point-in-time values) rather than ``None`` so
-    # the column can be NOT NULL at the schema level (migration 065).
+    # fiscal_period defaults to ``"INSTANT"`` (the convention for point-in-time
+    # values) rather than ``None`` so the column can be NOT NULL at the schema
+    # level (migration 065).
     fiscal_period: str = "INSTANT"
     end_date: str = ""
     # ``unit_kind`` classifies the fact (monetary / per_share / count / ...);
@@ -171,11 +170,10 @@ class FactRecord:
     # a stored fact.
     unit_kind: MetricUnitKind = "other"
     value: float = 0.0
-    accn: Optional[str] = None
+    # ``filed`` is the EODHD filing date; ``frame`` is the derived ``CY####``
+    # period tag consumed by the FY-frame metric filters.
     filed: Optional[str] = None
     frame: Optional[str] = None
-    start_date: Optional[str] = None
-    accounting_standard: Optional[str] = None
     currency: Optional[str] = None
 
 
@@ -216,16 +214,14 @@ class MetricComputeStatusRecord:
     market_data_updated_at: Optional[str] = None
 
 
+# Row shape consumed by ``FinancialFactsRepository.replace_fact_rows`` in column
+# order: concept, fiscal_period, end_date, unit_kind, value, filed, frame, currency.
 StoredFactRow = Tuple[
-    Optional[str],
     str,
     Optional[str],
     str,
     str,
     float,
-    Optional[str],
-    Optional[str],
-    Optional[str],
     Optional[str],
     Optional[str],
     Optional[str],

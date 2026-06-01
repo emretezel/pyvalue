@@ -162,18 +162,14 @@ class FinancialFactsRepository(SQLiteStore):
     ) -> int:
         rows = [
             (
-                record.cik,
                 record.concept,
                 record.fiscal_period,
                 record.end_date,
                 record.unit_kind,
                 record.value,
-                record.accn,
                 record.filed,
                 record.frame,
-                getattr(record, "start_date", None),
-                getattr(record, "accounting_standard", None),
-                getattr(record, "currency", None),
+                record.currency,
             )
             for record in records
         ]
@@ -195,32 +191,24 @@ class FinancialFactsRepository(SQLiteStore):
         prepared_rows = [
             (
                 security.security_id,
-                cik,
                 concept,
                 fiscal_period,
                 end_date,
                 unit_kind,
                 value,
-                accn,
                 filed,
                 frame,
-                start_date,
-                accounting_standard,
                 currency,
                 provider,
             )
             for (
-                cik,
                 concept,
                 fiscal_period,
                 end_date,
                 unit_kind,
                 value,
-                accn,
                 filed,
                 frame,
-                start_date,
-                accounting_standard,
                 currency,
             ) in rows
         ]
@@ -233,10 +221,9 @@ class FinancialFactsRepository(SQLiteStore):
                 conn.executemany(
                     """
                     INSERT OR REPLACE INTO financial_facts (
-                        listing_id, cik, concept, fiscal_period, end_date, unit_kind,
-                        value, accn, filed, frame, start_date, accounting_standard,
-                        currency, source_provider
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        listing_id, concept, fiscal_period, end_date, unit_kind,
+                        value, filed, frame, currency, source_provider
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     prepared_rows,
                 )
@@ -258,9 +245,9 @@ class FinancialFactsRepository(SQLiteStore):
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT s.canonical_symbol, ff.cik, ff.concept, ff.fiscal_period,
-                       ff.end_date, ff.unit_kind, ff.value, ff.accn, ff.filed, ff.frame,
-                       ff.start_date, ff.accounting_standard, ff.currency
+                SELECT s.canonical_symbol, ff.concept, ff.fiscal_period,
+                       ff.end_date, ff.unit_kind, ff.value, ff.filed, ff.frame,
+                       ff.currency
                 FROM financial_facts ff
                 JOIN securities s ON s.security_id = ff.listing_id
                 WHERE ff.listing_id = ? AND ff.concept = ?
@@ -285,8 +272,8 @@ class FinancialFactsRepository(SQLiteStore):
         if security_id is None:
             return []
         query = [
-            "SELECT s.canonical_symbol, ff.cik, ff.concept, ff.fiscal_period, ff.end_date,",
-            "ff.unit_kind, ff.value, ff.accn, ff.filed, ff.frame, ff.start_date, ff.accounting_standard, ff.currency",
+            "SELECT s.canonical_symbol, ff.concept, ff.fiscal_period, ff.end_date,",
+            "ff.unit_kind, ff.value, ff.filed, ff.frame, ff.currency",
             "FROM financial_facts ff",
             "JOIN securities s ON s.security_id = ff.listing_id",
             "WHERE ff.listing_id = ? AND ff.concept = ?",
@@ -311,9 +298,9 @@ class FinancialFactsRepository(SQLiteStore):
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT s.canonical_symbol, ff.cik, ff.concept, ff.fiscal_period,
-                       ff.end_date, ff.unit_kind, ff.value, ff.accn, ff.filed, ff.frame,
-                       ff.start_date, ff.accounting_standard, ff.currency
+                SELECT s.canonical_symbol, ff.concept, ff.fiscal_period,
+                       ff.end_date, ff.unit_kind, ff.value, ff.filed, ff.frame,
+                       ff.currency
                 FROM financial_facts ff
                 JOIN securities s ON s.security_id = ff.listing_id
                 WHERE ff.listing_id = ?
@@ -399,17 +386,13 @@ class FinancialFactsRepository(SQLiteStore):
                     f"""
                     SELECT
                         ff.listing_id,
-                        ff.cik,
                         ff.concept,
                         ff.fiscal_period,
                         ff.end_date,
                         ff.unit_kind,
                         ff.value,
-                        ff.accn,
                         ff.filed,
                         ff.frame,
-                        ff.start_date,
-                        ff.accounting_standard,
                         ff.currency
                     FROM financial_facts ff INDEXED BY idx_fin_facts_security_concept_latest
                     WHERE ff.listing_id IN ({placeholders}){concept_clause}
@@ -422,17 +405,13 @@ class FinancialFactsRepository(SQLiteStore):
                     grouped[symbol].append(
                         FactRecord(
                             symbol=symbol,
-                            cik=row["cik"],
                             concept=row["concept"],
                             fiscal_period=row["fiscal_period"],
                             end_date=row["end_date"],
                             unit_kind=row["unit_kind"],
                             value=row["value"],
-                            accn=row["accn"],
                             filed=row["filed"],
                             frame=row["frame"],
-                            start_date=row["start_date"],
-                            accounting_standard=row["accounting_standard"],
                             currency=row["currency"],
                         )
                     )

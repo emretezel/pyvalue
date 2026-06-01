@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import time
 from typing import (
-    Dict,
     List,
     Optional,
     Sequence,
@@ -23,11 +22,6 @@ from pyvalue.persistence.storage import (
 from ._common import (
     SECURITY_METADATA_CHUNK_SIZE,
     SECURITY_METADATA_PROGRESS_INTERVAL_SECONDS,
-    _extract_entity_description_from_eodhd,
-    _extract_entity_industry_from_eodhd,
-    _extract_entity_name_from_eodhd,
-    _extract_entity_name_from_sec,
-    _extract_entity_sector_from_eodhd,
     _print_symbol_progress,
     _resolve_canonical_scope_symbols,
     _resolve_database_path,
@@ -35,33 +29,6 @@ from ._common import (
 from ._batch import (
     _cancel_cli_command,
 )
-
-
-def _metadata_update_from_raw_payloads(
-    eodhd_payload: Optional[Dict],
-    sec_payload: Optional[Dict],
-) -> Dict[str, Optional[str]]:
-    entity_name = (
-        _extract_entity_name_from_eodhd(eodhd_payload) if eodhd_payload else None
-    )
-    if entity_name is None and sec_payload is not None:
-        entity_name = _extract_entity_name_from_sec(sec_payload)
-    return {
-        "entity_name": entity_name,
-        "description": (
-            _extract_entity_description_from_eodhd(eodhd_payload)
-            if eodhd_payload
-            else None
-        ),
-        "sector": (
-            _extract_entity_sector_from_eodhd(eodhd_payload) if eodhd_payload else None
-        ),
-        "industry": (
-            _extract_entity_industry_from_eodhd(eodhd_payload)
-            if eodhd_payload
-            else None
-        ),
-    }
 
 
 def cmd_refresh_security_metadata(

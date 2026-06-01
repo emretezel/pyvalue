@@ -1,9 +1,8 @@
-"""Universe loaders and models for stock listings.
+"""Universe models for stock listings.
 
 Author: Emre Tezel
 """
 
-from .us import USUniverseLoader, Listing
-from .uk import UKUniverseLoader
+from .models import Listing
 
-__all__ = ["USUniverseLoader", "UKUniverseLoader", "Listing"]
+__all__ = ["Listing"]

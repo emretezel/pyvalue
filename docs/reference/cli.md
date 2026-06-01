@@ -43,15 +43,13 @@ Refresh and persist the provider-supported exchange catalog.
 
 Key options:
 
-- `--provider {SEC,EODHD}`
+- `--provider {EODHD}`
 - default provider: `EODHD`
 - `--database <path>`
 
 Notes:
 
 - `EODHD` refreshes the live exchange list from EODHD
-- `SEC` creates the fixed `US` canonical exchange row used by the SEC/Nasdaq
-  ticker catalog
 
 ### `refresh-supported-tickers`
 
@@ -59,11 +57,10 @@ Refresh and persist the provider-supported ticker catalog.
 
 Key options:
 
-- `--provider {SEC,EODHD}`
+- `--provider {EODHD}`
 - default provider: `EODHD`
 - `--exchange-codes <codes...>`
 - `--all-supported`
-- `--include-etfs` for SEC only
 - `--database <path>`
 
 Notes:
@@ -72,8 +69,6 @@ Notes:
   supported exchange catalog for the provider
 - `EODHD` reads `exchange-symbol-list/<EXCHANGE_CODE>` and keeps only
   `Common Stock`, `Preferred Stock`, and `Stock`
-- `SEC` reads Nasdaq Trader symbol directories and materializes provider symbols
-  as `TICKER.US`
 - Removed provider symbols are deleted from `provider_listing` and the relevant
   fetch-state tables; historical fundamentals, market data, and metrics remain
 
@@ -85,12 +80,10 @@ Download fundamentals for supported tickers from the chosen provider.
 
 Key options:
 
-- `--provider {SEC,EODHD}`
+- `--provider {EODHD}`
 - default provider: `EODHD`
 - optional scope selector: `--symbols`, `--exchange-codes`, or
   `--all-supported` (defaults to the full supported universe)
-- `--user-agent <value>` for SEC
-- `--cik <10-digit-cik>` optional SEC override
 - `--rate <float>`
 - `--max-symbols <int>`
 - `--max-age-days <int>` default `30`
@@ -99,7 +92,6 @@ Key options:
 
 Notes:
 
-- `SEC` rate is requests per second
 - `EODHD` rate is symbols per minute
 - `EODHD` uses the stored supported-ticker catalog plus daily quota checks,
   a concurrent worker pool, and retry backoff for multi-day runs
@@ -166,7 +158,7 @@ Normalize stored fundamentals into canonical `financial_facts`.
 
 Key options:
 
-- `--provider {SEC,EODHD}`
+- `--provider {EODHD}`
 - default provider: `EODHD`
 - optional scope selector: `--symbols`, `--exchange-codes`, or
   `--all-supported` (defaults to the full supported universe)
@@ -289,8 +281,6 @@ Notes:
 
 - with the default `EODHD` provider, the command syncs the FOREX catalog into
   `fx_supported_pairs` first
-- the legacy Frankfurter discovery path only considers supported-ticker
-  currencies from listings that are primary after EODHD raw classification
 - EODHD refresh iterates canonical six-letter pairs only; three-letter
   shorthand aliases such as `EUR` are tracked as aliases to `USDEUR` and are
   not refreshed separately
@@ -454,16 +444,6 @@ Notes:
 - intended for metadata backfills after ingesting raw fundamentals
 
 ## Maintenance Commands
-
-### `purge-us-nonfilers`
-
-Identify or delete SEC US supported tickers with no stored 10-K or 10-Q filing
-coverage.
-
-Key options:
-
-- `--apply`
-- `--database <path>`
 
 ### `clear-financial-facts`
 

@@ -1,6 +1,6 @@
 # pyvalue
 
-pyvalue is a fundamental-data ingestion, normalization, metric-computation, and stock-screening toolkit built for value-oriented workflows. It supports SEC fundamentals for US issuers and EODHD for global fundamentals and market data, with everything persisted in SQLite for repeatable analysis.
+pyvalue is a fundamental-data ingestion, normalization, metric-computation, and stock-screening toolkit built for value-oriented workflows. It uses EODHD for global fundamentals and market data, with everything persisted in SQLite for repeatable analysis.
 
 ## Disclaimer
 
@@ -46,7 +46,7 @@ Upgrade note:
 ## What pyvalue does
 
 - Load canonical provider ticker catalogs into SQLite.
-- Ingest raw fundamentals from SEC or EODHD.
+- Ingest raw fundamentals from EODHD.
 - Classify EODHD listings as primary or secondary from raw fundamentals and
   keep only primary listings in downstream market-data, normalization, metric,
   FX-discovery, and screening scopes.
@@ -106,8 +106,7 @@ the first run, and later tops up only the missing older/newer outer ranges.
 
 ## Supported Providers
 
-- `SEC`: US-only fundamentals. Coverage is useful, but normalization and metric coverage are less complete than EODHD.
-- `EODHD`: Global fundamentals and all market data. This is the recommended provider for most workflows, including US fundamentals.
+- `EODHD`: Global fundamentals and all market data. This is the only supported provider.
 
 ## Documentation
 
@@ -117,7 +116,6 @@ Core pages:
 - [Getting Started](docs/getting-started.md)
 - [Configuration](docs/configuration.md)
 - [EODHD Provider Guide](docs/providers/eodhd.md)
-- [SEC Provider Guide](docs/providers/sec.md)
 - [CLI Reference](docs/reference/cli.md)
 - [Metrics Catalog](docs/reference/metrics.md)
 - [Screening Guide](docs/guides/screening.md)

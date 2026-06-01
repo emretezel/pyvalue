@@ -9,7 +9,6 @@ CREATE TABLE "exchange" (
         );
 CREATE TABLE "financial_facts" (
             listing_id INTEGER NOT NULL,
-            cik TEXT,
             concept TEXT NOT NULL,
             fiscal_period TEXT NOT NULL
                 CHECK (fiscal_period IN ('FY','Q1','Q2','Q3','Q4','TTM','INSTANT')),
@@ -19,14 +18,11 @@ CREATE TABLE "financial_facts" (
                     'monetary','per_share','ratio','percent','multiple','count','other'
                 )),
             value REAL NOT NULL,
-            accn TEXT,
             filed TEXT,
             frame TEXT,
-            start_date TEXT,
-            accounting_standard TEXT,
             currency TEXT
                 CHECK (
-                    (currency IS NULL OR (length(currency) = 3 AND currency = upper(currency) AND currency GLOB '[A-Z][A-Z][A-Z]' AND currency NOT IN ('GBX','GBP0.01','ZAC','ILA')))
+                    (currency IS NULL OR (length(currency) = 3 AND currency = upper(currency) AND currency GLOB '[A-Z][A-Z][A-Z]' AND currency NOT IN ('GBX', 'GBP0.01', 'ZAC', 'ILA')))
                     AND (
                         (unit_kind IN ('monetary','per_share') AND currency IS NOT NULL)
                         OR (unit_kind NOT IN ('monetary','per_share') AND currency IS NULL)
@@ -128,8 +124,8 @@ CREATE TABLE "listing" (
                        AND symbol = upper(trim(symbol))
                        AND instr(symbol, ' ') = 0
                        AND symbol GLOB '[A-Z0-9.&^*-]*'),
-            currency TEXT
-                CHECK (currency IS NULL OR (length(currency) = 3 AND currency = upper(currency) AND currency GLOB '[A-Z][A-Z][A-Z]')),
+            currency TEXT NOT NULL
+                CHECK (length(currency) = 3 AND currency = upper(currency) AND currency GLOB '[A-Z][A-Z][A-Z]'),
             primary_listing_status TEXT NOT NULL DEFAULT 'unknown',
             UNIQUE (exchange_id, symbol),
             FOREIGN KEY (issuer_id) REFERENCES issuer(issuer_id),

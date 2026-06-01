@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Description
-pyvalue is a Python toolkit for ingesting, normalizing, and screening fundamental market data with a focus on value-investing workflows. It supports SEC (US-only) and EODHD data sources, stores results in SQLite, and exposes a CLI for universe loading, metric computation, and screening.
+pyvalue is a Python toolkit for ingesting, normalizing, and screening fundamental market data with a focus on value-investing workflows. It uses EODHD as its data source, stores results in SQLite, and exposes a CLI for universe loading, metric computation, and screening.
 
 ## Agent Operating Rules
 
@@ -162,6 +162,6 @@ The whole codebase must be clean — "the file I touched is clean" is not enough
 - **Keep documentation in sync with the code.** When you change behaviour, update the relevant doc file in the same commit (and the per-table file under `docs/database/` for any schema change). For each change, explicitly decide whether docs need an update and locate the canonical file in `docs/` to edit.
 
 ## Configuration & Data Notes
-- Store credentials in `private/config.toml` or environment variables like `PYVALUE_SEC_USER_AGENT`; never commit secrets.
+- Store credentials in `private/config.toml` (for example `[eodhd].api_key`); never commit secrets.
 - Screen outputs default to `data/screen_results_*.csv` and are treated as local artifacts.
 - If you import a new third-party package, add it to `pyproject.toml` under `[project].dependencies`.

@@ -11,10 +11,10 @@ One row per `(listing_id, as_of)` snapshot date.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-05-11`
-- Row count: `222,774`
-- Table size: `17,764,352 bytes` (`16.9 MiB`)
-- Approximate bytes per row: `79.7`
+- Snapshot source: `data/pyvalue.db` on `2026-06-01`
+- Row count: `221,186`
+- Table size: `16,031,744 bytes` (`15.3 MiB`)
+- Approximate bytes per row: `72.5`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -59,7 +59,7 @@ One row per `(listing_id, as_of)` snapshot date.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-05-11`
+- Snapshot source: `data/pyvalue.db` on `2026-06-01`
 - Sample window: first `5` rows returned by SQLite ordered by `listing_id ASC, as_of ASC`
 
 ```json
@@ -69,7 +69,6 @@ One row per `(listing_id, as_of)` snapshot date.
     "as_of": "2026-03-20",
     "price": 30.02,
     "volume": 349376,
-    "market_cap": 3288961180.0,
     "source_provider": "EODHD",
     "updated_at": "2026-04-02T14:21:31.509182+00:00"
   },
@@ -78,7 +77,6 @@ One row per `(listing_id, as_of)` snapshot date.
     "as_of": "2026-04-02",
     "price": 30.02,
     "volume": 350816,
-    "market_cap": 3288961180.0,
     "source_provider": "EODHD",
     "updated_at": "2026-04-06T12:14:35.451739+00:00"
   },
@@ -87,7 +85,6 @@ One row per `(listing_id, as_of)` snapshot date.
     "as_of": "2026-04-10",
     "price": 32.26,
     "volume": 387867,
-    "market_cap": 3515662540.0,
     "source_provider": "EODHD",
     "updated_at": "2026-04-13T16:12:29.084722+00:00"
   },
@@ -96,7 +93,6 @@ One row per `(listing_id, as_of)` snapshot date.
     "as_of": "2026-03-20",
     "price": 26.43,
     "volume": 11551525,
-    "market_cap": 21926592300.0,
     "source_provider": "EODHD",
     "updated_at": "2026-04-02T14:21:31.509182+00:00"
   },
@@ -105,7 +101,6 @@ One row per `(listing_id, as_of)` snapshot date.
     "as_of": "2026-04-02",
     "price": 27.94,
     "volume": 1975088,
-    "market_cap": 23179303400.0,
     "source_provider": "EODHD",
     "updated_at": "2026-04-06T12:14:34.283301+00:00"
   }

@@ -215,14 +215,12 @@ class EODHDFactsNormalizer:
         self,
         payload: Dict,
         symbol: str,
-        accounting_standard: Optional[str] = None,
         target_currency: Optional[str] = None,
     ) -> List[FactRecord]:
         if not payload:
             return []
 
         general = payload.get("General") or {}
-        accounting_standard = accounting_standard or general.get("AccountingStandard")
         currency_code = general.get("CurrencyCode")
         records: List[FactRecord] = []
 
@@ -234,7 +232,6 @@ class EODHDFactsNormalizer:
                     statement_payload,
                     field_map,
                     symbol=symbol,
-                    accounting_standard=accounting_standard,
                     statement_currency=self._normalize_statement_currency(
                         statement_payload
                     ),
@@ -246,31 +243,21 @@ class EODHDFactsNormalizer:
             self._normalize_enterprise_value(
                 payload,
                 symbol=symbol,
-                accounting_standard=accounting_standard,
                 default_currency=currency_code,
             )
         )
+        records.extend(self._normalize_share_counts(payload, symbol, currency_code))
         records.extend(
-            self._normalize_share_counts(
-                payload, symbol, accounting_standard, currency_code
-            )
-        )
-        records.extend(
-            self._normalize_outstanding_shares(
-                payload, symbol, accounting_standard, currency_code
-            )
+            self._normalize_outstanding_shares(payload, symbol, currency_code)
         )
         records.extend(
             self._normalize_dividends_per_share(
                 payload,
                 symbol=symbol,
-                accounting_standard=accounting_standard,
                 default_currency=currency_code,
             )
         )
-        records.extend(
-            self._normalize_earnings_eps(payload, symbol, accounting_standard)
-        )
+        records.extend(self._normalize_earnings_eps(payload, symbol))
         indexed = self._index_records(records)
         self._merge_derived_records(
             records,
@@ -377,7 +364,6 @@ class EODHDFactsNormalizer:
         statement_payload: Dict,
         field_map: Dict[str, List[str]],
         symbol: str,
-        accounting_standard: Optional[str],
         statement_currency: Optional[str],
         payload_currency: Optional[str],
     ) -> List[FactRecord]:
@@ -636,11 +622,8 @@ class EODHDFactsNormalizer:
                             end_date=end_date,
                             unit_kind=unit_kind,
                             value=normalized_value,
-                            accn=None,
                             filed=entry.get("filing_date"),
                             frame=frame,
-                            start_date=None,
-                            accounting_standard=accounting_standard,
                             currency=normalized_currency,
                         )
                     )
@@ -651,7 +634,6 @@ class EODHDFactsNormalizer:
         payload: Dict,
         *,
         symbol: str,
-        accounting_standard: Optional[str],
         default_currency: Optional[str],
     ) -> List[FactRecord]:
         if "EnterpriseValue" not in self.concepts:
@@ -706,11 +688,8 @@ class EODHDFactsNormalizer:
                 end_date=end_date,
                 unit_kind="monetary",
                 value=normalized_value,
-                accn=None,
                 filed=None,
                 frame=None,
-                start_date=None,
-                accounting_standard=accounting_standard,
                 currency=normalized_currency,
             )
         ]
@@ -744,7 +723,6 @@ class EODHDFactsNormalizer:
         self,
         payload: Dict,
         symbol: str,
-        accounting_standard: Optional[str],
         default_currency: Optional[str],
     ) -> List[FactRecord]:
         """Map SharesStats.SharesOutstanding to an INSTANT share-count snapshot.
@@ -775,11 +753,8 @@ class EODHDFactsNormalizer:
                 end_date=end_date,
                 unit_kind="count",
                 value=shares,
-                accn=None,
                 filed=None,
                 frame=None,
-                start_date=None,
-                accounting_standard=accounting_standard,
                 currency=None,
             )
         ]
@@ -788,7 +763,6 @@ class EODHDFactsNormalizer:
         self,
         payload: Dict,
         symbol: str,
-        accounting_standard: Optional[str],
         default_currency: Optional[str],
     ) -> List[FactRecord]:
         shares_payload = payload.get("outstandingShares") or {}
@@ -834,11 +808,8 @@ class EODHDFactsNormalizer:
                         end_date=end_date,
                         unit_kind="count",
                         value=shares,
-                        accn=None,
                         filed=None,
                         frame=frame,
-                        start_date=None,
-                        accounting_standard=accounting_standard,
                         currency=None,
                     )
                 )
@@ -849,7 +820,6 @@ class EODHDFactsNormalizer:
         payload: Dict,
         *,
         symbol: str,
-        accounting_standard: Optional[str],
         default_currency: Optional[str],
     ) -> List[FactRecord]:
         if "CommonStockDividendsPerShareCashPaid" not in self.concepts:
@@ -901,11 +871,8 @@ class EODHDFactsNormalizer:
                 end_date=end_date,
                 unit_kind="per_share",
                 value=normalized_value,
-                accn=None,
                 filed=None,
                 frame=None,
-                start_date=None,
-                accounting_standard=accounting_standard,
                 currency=normalized_currency,
             )
         ]
@@ -1080,7 +1047,6 @@ class EODHDFactsNormalizer:
         self,
         payload: Dict,
         symbol: str,
-        accounting_standard: Optional[str],
     ) -> List[FactRecord]:
         earnings = payload.get("Earnings") or {}
         history = earnings.get("History") or {}
@@ -1157,11 +1123,8 @@ class EODHDFactsNormalizer:
                     end_date=date_str,
                     unit_kind="per_share",
                     value=normalized_value,
-                    accn=None,
                     filed=None,
                     frame=self._build_frame(date_str, period or "FY"),
-                    start_date=None,
-                    accounting_standard=accounting_standard,
                     currency=normalized_currency,
                 )
             )
@@ -1471,17 +1434,13 @@ class EODHDFactsNormalizer:
     ) -> FactRecord:
         return FactRecord(
             symbol=base.symbol,
-            cik=base.cik,
             concept=concept,
             fiscal_period=base.fiscal_period,
             end_date=base.end_date,
             unit_kind="monetary",
             value=value,
-            accn=base.accn,
             filed=base.filed,
             frame=base.frame,
-            start_date=base.start_date,
-            accounting_standard=base.accounting_standard,
             currency=currency,
         )
 
@@ -1972,17 +1931,13 @@ class EODHDFactsNormalizer:
     def _alias_record(self, base: FactRecord, concept: str) -> FactRecord:
         return FactRecord(
             symbol=base.symbol,
-            cik=base.cik,
             concept=concept,
             fiscal_period=base.fiscal_period,
             end_date=base.end_date,
             unit_kind=base.unit_kind,
             value=base.value,
-            accn=base.accn,
             filed=base.filed,
             frame=base.frame,
-            start_date=base.start_date,
-            accounting_standard=base.accounting_standard,
             currency=base.currency,
         )
 
@@ -2130,7 +2085,6 @@ class EODHDFactsNormalizer:
             converted.append(
                 FactRecord(
                     symbol=record.symbol,
-                    cik=record.cik,
                     concept=record.concept,
                     fiscal_period=record.fiscal_period,
                     end_date=record.end_date,
@@ -2138,11 +2092,8 @@ class EODHDFactsNormalizer:
                     # (monetary vs per_share) is preserved.
                     unit_kind=record.unit_kind,
                     value=new_value,
-                    accn=record.accn,
                     filed=record.filed,
                     frame=record.frame,
-                    start_date=record.start_date,
-                    accounting_standard=record.accounting_standard,
                     currency=target_currency,
                 )
             )

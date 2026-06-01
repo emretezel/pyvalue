@@ -193,16 +193,13 @@ def fact(**kwargs):
     is_count = kwargs.get("concept", "") in _COUNT_CONCEPTS
     base = {
         "symbol": "AAPL.US",
-        "cik": "CIK",
         "concept": "",
         "fiscal_period": "FY",
         "end_date": "",
         "unit_kind": "count" if is_count else "monetary",
         "value": 0.0,
-        "accn": None,
         "filed": None,
         "frame": None,
-        "start_date": None,
         "currency": None if is_count else "USD",
     }
     base.update(kwargs)
@@ -6637,7 +6634,6 @@ def _share_count_records(symbol, as_of, shares=1.0):
     return [
         FactRecord(
             symbol=symbol,
-            cik=None,
             concept="EntityCommonStockSharesOutstanding",
             fiscal_period="INSTANT",
             end_date=as_of,

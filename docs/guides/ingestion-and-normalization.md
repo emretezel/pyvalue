@@ -19,16 +19,6 @@ pyvalue normalize-fundamentals --provider EODHD --symbols AAPL.US
 pyvalue compute-metrics --symbols AAPL.US
 ```
 
-SEC example:
-
-```bash
-pyvalue refresh-supported-exchanges --provider SEC
-pyvalue refresh-supported-tickers --provider SEC --exchange-codes US
-pyvalue ingest-fundamentals --provider SEC --symbols AAPL.US
-pyvalue normalize-fundamentals --provider SEC --symbols AAPL.US
-pyvalue compute-metrics --symbols AAPL.US
-```
-
 ## Exchange-Scoped Workflow
 
 Typical exchange-level run:
@@ -82,7 +72,7 @@ provider-symbol replaces the previous raw payload for that provider-symbol.
 Normalization converts provider-specific raw payloads into provider-agnostic
 facts in `financial_facts`, keyed by canonical `listing_id`.
 
-That gives metrics a stable input model regardless of whether facts came from SEC or EODHD.
+That gives metrics a stable input model independent of the raw EODHD payload shape.
 
 Bulk normalization runs over `--exchange-codes` or `--all-supported`
 parallelize automatically. The stage normalizes only symbols that already have
@@ -123,7 +113,7 @@ Re-run normalization when:
 - normalization rules changed
 - you added new normalized concepts or fallback logic
 
-For large EODHD or SEC refreshes, `pyvalue normalize-fundamentals --all-supported`
+For large EODHD refreshes, `pyvalue normalize-fundamentals --all-supported`
 is the fastest way to reprocess every stale stored raw payload in the catalog.
 Add `--force` if you want to reprocess every stored raw payload regardless of
 freshness.
@@ -131,6 +121,5 @@ freshness.
 ## Related Docs
 
 - [EODHD Provider Guide](../providers/eodhd.md)
-- [SEC Provider Guide](../providers/sec.md)
 - [Normalization and Facts](../architecture/normalization-and-facts.md)
 - [CLI Reference](../reference/cli.md)

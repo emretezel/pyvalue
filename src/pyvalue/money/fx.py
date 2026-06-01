@@ -24,7 +24,6 @@ from pyvalue.persistence.storage import FXRateRecord, FXRatesRepository
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_PROVIDER = "EODHD"
-DEFAULT_FRANKFURTER_API_BASE = "https://api.frankfurter.dev/v2"
 DEFAULT_EODHD_API_BASE = "https://eodhd.com/api"
 
 
@@ -161,153 +160,6 @@ class FXRefreshProvider(Protocol):
         start_date: date,
         end_date: date,
     ) -> list[FXRateRecord]: ...
-
-
-class FrankfurterProvider:
-    """Fetch direct FX rates from the Frankfurter v2 API."""
-
-    provider_name = "FRANKFURTER"
-
-    def __init__(
-        self,
-        session: Optional[requests.Session] = None,
-        api_base: str = DEFAULT_FRANKFURTER_API_BASE,
-    ) -> None:
-        self.session = session or requests.Session()
-        self.api_base = api_base.rstrip("/")
-
-    def fetch_rates(
-        self,
-        *,
-        base_currency: str,
-        quote_currencies: Sequence[str],
-        start_date: date,
-        end_date: date,
-    ) -> list[FXRateRecord]:
-        remaining_quotes = sorted(
-            {
-                code
-                for code in (normalize_currency_code(item) for item in quote_currencies)
-                if code is not None and code != normalize_currency_code(base_currency)
-            }
-        )
-        base = normalize_currency_code(base_currency)
-        if base is None or not remaining_quotes:
-            return []
-
-        while True:
-            params = {
-                "base": base,
-                "quotes": ",".join(remaining_quotes),
-            }
-            if start_date == end_date:
-                params["date"] = start_date.isoformat()
-            else:
-                params["from"] = start_date.isoformat()
-                params["to"] = end_date.isoformat()
-
-            response = self.session.get(
-                f"{self.api_base}/rates",
-                params=params,
-                timeout=30,
-            )
-            if response.status_code not in {400, 404, 422}:
-                break
-            invalid_currencies = self._extract_invalid_currencies(response)
-            invalid_quotes = [
-                quote for quote in remaining_quotes if quote in invalid_currencies
-            ]
-            if base in invalid_currencies or not invalid_quotes:
-                LOGGER.warning(
-                    "Frankfurter FX request failed | base=%s quotes=%s status=%s body=%s",
-                    base,
-                    ",".join(remaining_quotes),
-                    response.status_code,
-                    response.text[:500],
-                )
-                return []
-            LOGGER.warning(
-                "Frankfurter FX request skipped unsupported currencies | base=%s unsupported_quotes=%s requested_quotes=%s status=%s",
-                base,
-                ",".join(invalid_quotes),
-                ",".join(remaining_quotes),
-                response.status_code,
-            )
-            remaining_quotes = [
-                quote for quote in remaining_quotes if quote not in invalid_currencies
-            ]
-            if not remaining_quotes:
-                return []
-
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, list):
-            raise ValueError(f"Unexpected Frankfurter FX response: {payload!r}")
-
-        fetched_at = response.headers.get("Date")
-        timestamp = fetched_at or start_date.isoformat()
-        records: list[FXRateRecord] = []
-        for entry in payload:
-            if not isinstance(entry, dict):
-                continue
-            entry_date = str(entry.get("date") or "").strip()
-            quote = normalize_currency_code(entry.get("quote"))
-            rate = entry.get("rate")
-            if not entry_date or quote is None or rate is None:
-                continue
-            records.append(
-                FXRateRecord(
-                    provider=self.provider_name,
-                    rate_date=entry_date,
-                    base_currency=base,
-                    quote_currency=quote,
-                    rate=float(rate),
-                    fetched_at=timestamp,
-                    source_kind="provider",
-                    meta_json=json.dumps({"provider": self.provider_name}),
-                )
-            )
-        return records
-
-    def list_catalog(self) -> list[FXCatalogEntry]:
-        raise NotImplementedError("Frankfurter does not support catalog sync")
-
-    def fetch_history(
-        self,
-        *,
-        canonical_symbol: str,
-        start_date: date,
-        end_date: date,
-    ) -> list[FXRateRecord]:
-        base = normalize_currency_code(canonical_symbol[:3])
-        quote = normalize_currency_code(canonical_symbol[3:])
-        if base is None or quote is None:
-            raise ValueError(f"Unexpected FX symbol: {canonical_symbol}")
-        return self.fetch_rates(
-            base_currency=base,
-            quote_currencies=[quote],
-            start_date=start_date,
-            end_date=end_date,
-        )
-
-    @staticmethod
-    def _extract_invalid_currencies(response: requests.Response) -> set[str]:
-        """Parse unsupported currency codes from a Frankfurter error response."""
-
-        try:
-            payload = response.json()
-        except ValueError:
-            return set()
-        if not isinstance(payload, dict):
-            return set()
-        message = payload.get("message")
-        if not isinstance(message, str):
-            return set()
-        prefix = "invalid currency:"
-        if not message.lower().startswith(prefix):
-            return set()
-        raw_codes = message.split(":", 1)[1]
-        return {code.strip().upper() for code in raw_codes.split(",") if code.strip()}
 
 
 class EODHDFXProvider:
@@ -728,7 +580,6 @@ __all__ = [
     "FXRefreshProvider",
     "FXService",
     "FXSeries",
-    "FrankfurterProvider",
     "MissingFXRateError",
     "parse_eodhd_fx_catalog_entry",
 ]

@@ -11,10 +11,10 @@ One row per provider.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-05-11`
-- Row count: `3`
+- Snapshot source: `data/pyvalue.db` on `2026-06-01`
+- Row count: `1`
 - Table size: `4,096 bytes` (`4.0 KiB`)
-- Approximate bytes per row: `1,365.3`
+- Approximate bytes per row: `4,096.0`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -22,7 +22,7 @@ One row per provider.
 | Column | Type | Null | Key | Notes |
 | --- | --- | --- | --- | --- |
 | `provider_id` | `INTEGER` | no | PK | surrogate key used by catalog FKs |
-| `provider_code` | `TEXT` | no | unique | stable uppercase namespace such as `EODHD`, `SEC`, or `FRANKFURTER` |
+| `provider_code` | `TEXT` | no | unique | stable uppercase namespace; `EODHD` is the only registered provider |
 | `display_name` | `TEXT` | no |  | human-readable provider name |
 | `description` | `TEXT` | yes |  | optional provider summary |
 | `created_at` | `TEXT` | no |  | initial seed timestamp |
@@ -61,8 +61,8 @@ One row per provider.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-05-11`
-- Sample window: first `3` rows returned by SQLite ordered by `provider_id ASC`
+- Snapshot source: `data/pyvalue.db` on `2026-06-01`
+- Sample window: first `1` rows returned by SQLite ordered by `provider_id ASC`
 
 ```json
 [
@@ -71,22 +71,6 @@ One row per provider.
     "provider_code": "EODHD",
     "display_name": "EOD Historical Data",
     "description": "Exchange, fundamentals, market-data, and FX provider.",
-    "created_at": "2026-04-23T16:33:15.427807+00:00",
-    "updated_at": "2026-04-23T16:33:15.427807+00:00"
-  },
-  {
-    "provider_id": 2,
-    "provider_code": "FRANKFURTER",
-    "display_name": "Frankfurter FX",
-    "description": "FX rates provider used for direct currency history refreshes.",
-    "created_at": "2026-04-23T16:33:15.427807+00:00",
-    "updated_at": "2026-04-23T16:33:15.427807+00:00"
-  },
-  {
-    "provider_id": 3,
-    "provider_code": "SEC",
-    "display_name": "US SEC Company Facts",
-    "description": "US issuer fundamentals provider backed by SEC company facts.",
     "created_at": "2026-04-23T16:33:15.427807+00:00",
     "updated_at": "2026-04-23T16:33:15.427807+00:00"
   }

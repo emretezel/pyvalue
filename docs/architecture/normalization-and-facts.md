@@ -32,7 +32,7 @@ Monetary and non-monetary facts are treated differently:
 Metrics read from `financial_facts`, not directly from raw provider payloads.
 
 That means:
-- raw SEC and EODHD payloads can differ significantly
+- raw EODHD payloads vary in shape across statements and concepts
 - normalization is where provider-specific mapping and fallback rules live
 - metrics can stay focused on financial logic rather than source payload shape
 
@@ -60,7 +60,7 @@ warning and skips only that fact or derived fact.
 Two symbols can have the same metric logic but different provider-specific normalization paths underneath.
 
 Examples:
-- SEC and EODHD may expose different raw field names for cash flow, debt, or share counts
+- EODHD exposes varied raw field names for cash flow, debt, or share counts
 - EODHD-oriented metrics may rely on concepts or fallback chains that are realistically only available from EODHD normalization
 
 Derived facts are also currency-aware:
@@ -107,4 +107,3 @@ Prefer metric-level composition when:
 
 - [Data Model and Storage](data-model-and-storage.md)
 - [EODHD Provider Guide](../providers/eodhd.md)
-- [SEC Provider Guide](../providers/sec.md)

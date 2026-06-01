@@ -12,10 +12,10 @@ One row per `(exchange_id, symbol)`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-05-11`
-- Row count: `77,224`
-- Table size: `2,416,640 bytes` (`2.3 MiB`)
-- Approximate bytes per row: `31.3`
+- Snapshot source: `data/pyvalue.db` on `2026-06-01`
+- Row count: `75,847`
+- Table size: `2,367,488 bytes` (`2.3 MiB`)
+- Approximate bytes per row: `31.2`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -69,7 +69,7 @@ One row per `(exchange_id, symbol)`.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-05-11`
+- Snapshot source: `data/pyvalue.db` on `2026-06-01`
 - Sample window: first `5` rows returned by SQLite ordered by `listing_id ASC`
 
 ```json

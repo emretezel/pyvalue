@@ -1,4 +1,4 @@
-"""CLI handlers for refreshing FX rates from Frankfurter and EODHD providers.
+"""CLI handlers for refreshing FX rates from the EODHD provider.
 
 Author: Emre Tezel
 """
@@ -7,19 +7,14 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from typing import (
-    List,
     Optional,
-    Tuple,
 )
 
-from pyvalue.config import Config
 from pyvalue.currency import (
     normalize_currency_code,
 )
 from pyvalue.money.fx import (
     EODHDFXProvider,
-    FXService,
-    FrankfurterProvider,
 )
 from pyvalue.persistence.storage import (
     FXRefreshStateRepository,
@@ -30,11 +25,7 @@ from pyvalue.persistence.storage import (
 
 from ._common import (
     FX_FULL_BACKFILL_START,
-    FX_REFRESH_MAX_DAYS_PER_REQUEST,
-    FX_REFRESH_MAX_QUOTES_PER_REQUEST,
     LOGGER,
-    _batch_values,
-    _reconcile_eodhd_listing_scope,
     _require_eodhd_key,
     _resolve_database_path,
 )
@@ -62,43 +53,17 @@ def _print_fx_progress_bar(
     )
 
 
-def _split_fx_refresh_ranges(
-    start_date: date,
-    end_date: date,
-    max_days_per_request: int = FX_REFRESH_MAX_DAYS_PER_REQUEST,
-) -> List[Tuple[date, date]]:
-    """Split one FX refresh date range into bounded inclusive windows."""
-
-    if max_days_per_request <= 0:
-        raise ValueError("max_days_per_request must be positive")
-    ranges: List[Tuple[date, date]] = []
-    current_start = start_date
-    window = timedelta(days=max_days_per_request - 1)
-    while current_start <= end_date:
-        current_end = min(current_start + window, end_date)
-        ranges.append((current_start, current_end))
-        current_start = current_end + timedelta(days=1)
-    return ranges
-
-
 def cmd_refresh_fx_rates(
     database: str,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
 ) -> int:
-    """Refresh and store direct FX rates for the configured FX provider."""
+    """Refresh and store direct FX rates from the EODHD provider."""
 
     resolved_start, resolved_end, explicit_start_date = _resolve_fx_refresh_dates(
         start_date,
         end_date,
     )
-    provider_name = Config().fx_provider
-    if provider_name == "FRANKFURTER":
-        return _cmd_refresh_fx_rates_frankfurter(
-            database=database,
-            start_date=resolved_start,
-            end_date=resolved_end,
-        )
     return _cmd_refresh_fx_rates_eodhd(
         database=database,
         start_date=resolved_start,
@@ -150,119 +115,6 @@ def _describe_eodhd_fx_refresh_scope(
         f"requested_end={end_date.isoformat()} "
         f"first_backfill_start={FX_FULL_BACKFILL_START.isoformat()}"
     )
-
-
-def _cmd_refresh_fx_rates_frankfurter(
-    *,
-    database: str,
-    start_date: date,
-    end_date: date,
-) -> int:
-    """Refresh direct FX rates using the legacy Frankfurter path."""
-
-    db_path = _resolve_database_path(database)
-    print(
-        "Preparing FX refresh schema and indexes (the first run after an upgrade may take a while on large databases)...",
-        flush=True,
-    )
-    repo = FXRatesRepository(db_path)
-    service = FXService(db_path, repository=repo, provider_name="FRANKFURTER")
-    provider = FrankfurterProvider()
-    print(
-        "Discovering FX currencies from provider_listing, financial_facts, and market_data...",
-        flush=True,
-    )
-    _reconcile_eodhd_listing_scope(database)
-    currencies = [
-        code for code in repo.discover_currencies() if code != service.pivot_currency
-    ]
-    if not currencies:
-        print("No non-pivot currencies found in the database.")
-        return 0
-
-    batch_plan: List[Tuple[date, date, List[str]]] = []
-    requested_windows = 0
-    fully_covered_currencies = set(currencies)
-    for window_start, window_end in _split_fx_refresh_ranges(
-        start_date,
-        end_date,
-        FX_REFRESH_MAX_DAYS_PER_REQUEST,
-    ):
-        covered_quotes = repo.fully_covered_quotes_for_window(
-            service.provider_name,
-            service.pivot_currency,
-            currencies,
-            window_start,
-            window_end,
-        )
-        uncovered_quotes = [
-            currency for currency in currencies if currency not in covered_quotes
-        ]
-        if not uncovered_quotes:
-            continue
-        requested_windows += 1
-        for currency in uncovered_quotes:
-            fully_covered_currencies.discard(currency)
-        for batch in _batch_values(
-            sorted(uncovered_quotes),
-            FX_REFRESH_MAX_QUOTES_PER_REQUEST,
-        ):
-            batch_plan.append((window_start, window_end, batch))
-
-    total_batches = len(batch_plan)
-    skipped_currencies = len(fully_covered_currencies)
-    print(
-        "Refreshing FX rates: "
-        f"provider={service.provider_name} "
-        f"base={service.pivot_currency} "
-        f"currencies={len(currencies)} "
-        f"skipped_currencies={skipped_currencies} "
-        f"date_windows={requested_windows} "
-        f"requests={total_batches} "
-        f"range={start_date.isoformat()}..{end_date.isoformat()}",
-        flush=True,
-    )
-    _print_fx_progress_bar(0, total_batches)
-
-    stored = 0
-    failed_batches = 0
-    completed_batches = 0
-    for window_start, window_end, batch in batch_plan:
-        try:
-            rows = provider.fetch_rates(
-                base_currency=service.pivot_currency,
-                quote_currencies=batch,
-                start_date=window_start,
-                end_date=window_end,
-            )
-        except Exception as exc:
-            LOGGER.warning(
-                "FX refresh batch failed | provider=%s base=%s quotes=%s range=%s..%s exception=%s",
-                service.provider_name,
-                service.pivot_currency,
-                ",".join(batch),
-                window_start.isoformat(),
-                window_end.isoformat(),
-                exc,
-            )
-            failed_batches += 1
-            completed_batches += 1
-            _print_fx_progress_bar(completed_batches, total_batches)
-            continue
-        stored += repo.upsert_many(rows)
-        completed_batches += 1
-        _print_fx_progress_bar(completed_batches, total_batches)
-
-    print(
-        "Stored FX rates: "
-        f"provider={service.provider_name} "
-        f"base={service.pivot_currency} "
-        f"currencies={len(currencies)} "
-        f"rows={stored} "
-        f"failed_batches={failed_batches} "
-        f"range={start_date.isoformat()}..{end_date.isoformat()}"
-    )
-    return 0
 
 
 def _plan_eodhd_fx_refresh_ranges(

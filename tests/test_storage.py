@@ -604,15 +604,11 @@ def test_financial_facts_repository_replace_fact_rows_matches_replace_facts(tmp_
         "AAA.US",
         [
             (
-                None,
                 "Liabilities",
                 "FY",
                 "2024-12-31",
                 "monetary",
                 40.0,
-                None,
-                None,
-                None,
                 None,
                 None,
                 "USD",
@@ -675,7 +671,6 @@ def test_financial_facts_repository_replace_fact_rows_persists_source_provider(
         "AAA.US",
         [
             (
-                None,
                 "Assets",
                 "FY",
                 "2024-12-31",
@@ -683,13 +678,10 @@ def test_financial_facts_repository_replace_fact_rows_persists_source_provider(
                 100.0,
                 None,
                 None,
-                None,
-                None,
-                None,
                 "USD",
             )
         ],
-        source_provider="SEC",
+        source_provider="EODHD",
     )
 
     assert inserted == 1
@@ -704,7 +696,7 @@ def test_financial_facts_repository_replace_fact_rows_persists_source_provider(
                 """
         ).fetchone()
 
-    assert row == ("SEC",)
+    assert row == ("EODHD",)
 
 
 def test_fundamentals_repository_normalization_candidates_match_state_and_facts(
@@ -849,7 +841,6 @@ def test_financial_facts_repository_replace_fact_rows_replaces_symbol_slice(tmp_
         "AAA.US",
         [
             (
-                None,
                 "Assets",
                 "FY",
                 "2024-12-31",
@@ -857,21 +848,14 @@ def test_financial_facts_repository_replace_fact_rows_replaces_symbol_slice(tmp_
                 100.0,
                 None,
                 None,
-                None,
-                None,
-                None,
                 "USD",
             ),
             (
-                None,
                 "Liabilities",
                 "FY",
                 "2024-12-31",
                 "monetary",
                 55.0,
-                None,
-                None,
-                None,
                 None,
                 None,
                 "USD",
@@ -883,15 +867,11 @@ def test_financial_facts_repository_replace_fact_rows_replaces_symbol_slice(tmp_
         "AAA.US",
         [
             (
-                None,
                 "StockholdersEquity",
                 "FY",
                 "2024-12-31",
                 "monetary",
                 45.0,
-                None,
-                None,
-                None,
                 None,
                 None,
                 "USD",
@@ -1828,32 +1808,24 @@ def test_latest_share_counts_many_prefers_best_same_date_share_fact(tmp_path):
         [
             FactRecord(
                 symbol="AAA.US",
-                cik=None,
                 concept="EntityCommonStockSharesOutstanding",
                 fiscal_period="FY",
                 end_date="2025-12-31",
                 unit_kind="monetary",
                 value=1_000_000.0,
-                accn=None,
                 filed="2026-03-27",
                 frame="CY2025",
-                start_date=None,
-                accounting_standard=None,
                 currency="USD",
             ),
             FactRecord(
                 symbol="AAA.US",
-                cik=None,
                 concept="CommonStockSharesOutstanding",
                 fiscal_period="FY",
                 end_date="2025-12-31",
                 unit_kind="count",
                 value=1_000.0,
-                accn=None,
                 filed=None,
                 frame="CY2025",
-                start_date=None,
-                accounting_standard=None,
                 currency=None,
             ),
         ],
@@ -2159,7 +2131,7 @@ def test_fx_rates_repository_latest_on_or_before_and_discover_currencies(tmp_pat
     repo.upsert_many(
         [
             FXRateRecord(
-                provider="FRANKFURTER",
+                provider="EODHD",
                 rate_date="2024-01-01",
                 base_currency="USD",
                 quote_currency="EUR",
@@ -2168,7 +2140,7 @@ def test_fx_rates_repository_latest_on_or_before_and_discover_currencies(tmp_pat
                 source_kind="provider",
             ),
             FXRateRecord(
-                provider="FRANKFURTER",
+                provider="EODHD",
                 rate_date="2024-01-10",
                 base_currency="USD",
                 quote_currency="EUR",
@@ -2179,14 +2151,14 @@ def test_fx_rates_repository_latest_on_or_before_and_discover_currencies(tmp_pat
         ]
     )
 
-    record = repo.latest_on_or_before("FRANKFURTER", "USD", "EUR", "2024-01-05")
+    record = repo.latest_on_or_before("EODHD", "USD", "EUR", "2024-01-05")
 
     assert record is not None
     assert record.rate_date == "2024-01-01"
     assert repo.discover_currencies() == ["GBP", "ILS", "ZAR"]
     assert (
         repo.fully_covered_quotes_for_window(
-            "FRANKFURTER",
+            "EODHD",
             "USD",
             ["EUR", "GBP"],
             date(2024, 1, 1),
@@ -2195,7 +2167,7 @@ def test_fx_rates_repository_latest_on_or_before_and_discover_currencies(tmp_pat
         == set()
     )
     assert repo.fully_covered_quotes_for_window(
-        "FRANKFURTER",
+        "EODHD",
         "USD",
         ["EUR", "GBP"],
         date(2024, 1, 1),

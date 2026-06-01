@@ -1,9 +1,8 @@
-"""Data ingestion helpers for various regulators.
+"""Data ingestion helpers for market data providers.
 
 Author: Emre Tezel
 """
 
-from .sec import SECCompanyFactsClient
 from .eodhd import EODHDFundamentalsClient
 
-__all__ = ["SECCompanyFactsClient", "EODHDFundamentalsClient"]
+__all__ = ["EODHDFundamentalsClient"]

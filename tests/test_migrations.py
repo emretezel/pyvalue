@@ -83,7 +83,9 @@ def test_migration_updates_listings_primary_key(tmp_path):
         conn.execute("CREATE TABLE schema_migrations (version INTEGER NOT NULL)")
         conn.execute("INSERT INTO schema_migrations (version) VALUES (20)")
 
-    applied = apply_migrations(db_path)
+    # Run to the last migration before the SEC-removal migration 073, which
+    # would otherwise delete the SEC provider_listing this test asserts on.
+    applied = apply_migrations(db_path, target_version=72)
     assert applied >= 1
 
     with sqlite3.connect(db_path) as conn:
@@ -106,7 +108,7 @@ def test_migration_updates_listings_primary_key(tmp_path):
 
         assert listings_exists is None
         assert rows == [("SEC", "US", "ABC", "US", "ABC Corp")]
-    assert version == len(MIGRATIONS)
+    assert version == 72
 
 
 def test_apply_migrations_is_idempotent(tmp_path):
@@ -302,9 +304,11 @@ def test_migration_splits_supported_exchanges_into_exchange_provider(tmp_path):
         conn.execute("CREATE TABLE schema_migrations (version INTEGER NOT NULL)")
         conn.execute("INSERT INTO schema_migrations (version) VALUES (32)")
 
-    applied = apply_migrations(db_path)
+    # Run to the last migration before the SEC-removal migration 073, which
+    # would otherwise delete the SEC-US provider_exchange this test asserts on.
+    applied = apply_migrations(db_path, target_version=72)
 
-    assert applied == len(MIGRATIONS) - 32
+    assert applied == 72 - 32
     with sqlite3.connect(db_path) as conn:
         supported_exchanges_exists = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='supported_exchanges'"
@@ -402,10 +406,10 @@ def test_migration_creates_and_seeds_providers_table(tmp_path):
         "updated_at",
     }
     assert pk_cols == ["provider_id"]
+    # Migration 032 seeds EODHD/SEC/FRANKFURTER; migration 073 then removes the
+    # two discontinued providers, leaving EODHD as the only registry row.
     assert rows == [
         ("EODHD", "EOD Historical Data"),
-        ("FRANKFURTER", "Frankfurter FX"),
-        ("SEC", "US SEC Company Facts"),
     ]
 
 
@@ -550,10 +554,12 @@ def test_migration_preserves_existing_provider_rows_when_adding_registry(tmp_pat
 
     assert provider_listing_count == 0
     assert fundamentals_raw_count == 0
-    assert fx_rates_count == 2
+    # Migration 073 deletes the seeded FRANKFURTER fx rate along with its
+    # provider, leaving only the EODHD rate.
+    assert fx_rates_count == 1
     assert supported_ticker_join_count == 0
     assert fundamentals_raw_join_count == 0
-    assert fx_rates_join_count == 2
+    assert fx_rates_join_count == 1
 
 
 def test_providers_table_rejects_invalid_provider_codes(tmp_path):
@@ -1533,9 +1539,11 @@ def test_migration_does_not_overwrite_existing_supported_tickers(tmp_path):
         conn.execute("CREATE TABLE schema_migrations (version INTEGER NOT NULL)")
         conn.execute("INSERT INTO schema_migrations (version) VALUES (20)")
 
-    applied = apply_migrations(db_path)
+    # Run to the last migration before the SEC-removal migration 073, which
+    # would otherwise delete the SEC provider_listing this test asserts on.
+    applied = apply_migrations(db_path, target_version=72)
 
-    assert applied == len(MIGRATIONS) - 20
+    assert applied == 72 - 20
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
             """
@@ -1593,6 +1601,10 @@ def _seed_listing(conn: sqlite3.Connection) -> int:
         ) VALUES (1, 'US', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')
         """
     )
+    # Migration 073 removed the SEC-US provider_exchange seed; provide an EODHD
+    # one at provider_exchange_id=1 so fixtures that hang a provider_listing off
+    # it keep their foreign keys satisfied.
+    _seed_eodhd_us_provider_exchange(conn)
     conn.execute(
         """
         INSERT OR IGNORE INTO issuer (issuer_id, name) VALUES (1, 'Test Issuer')
@@ -1882,7 +1894,12 @@ def test_migration_043_pk_rejects_duplicate_after_rebuild(tmp_path):
 
 
 def test_migration_043_pk_no_longer_includes_accn(tmp_path):
-    """accn must be a non-key, nullable column after the rebuild."""
+    """The financial_facts PK excludes accn.
+
+    Migration 043 first dropped accn from the primary key; migration 073 then
+    removed the column entirely (a dead SEC artifact). At head the PK is the
+    four canonical members and the accn column is gone.
+    """
 
     db_path = tmp_path / "fin-facts-accn-not-in-pk.sqlite"
     apply_migrations(db_path)
@@ -1892,7 +1909,7 @@ def test_migration_043_pk_no_longer_includes_accn(tmp_path):
         # In sqlite3.Row mode the 'pk' column index is 5 (cid, name, type,
         # notnull, dflt_value, pk).
         pk_columns = [row[1] for row in info if row[5]]
-        accn_row = next(row for row in info if row[1] == "accn")
+        column_names = {row[1] for row in info}
 
     assert pk_columns == [
         "listing_id",
@@ -1900,9 +1917,7 @@ def test_migration_043_pk_no_longer_includes_accn(tmp_path):
         "fiscal_period",
         "end_date",
     ]
-    # accn (notnull=False, pk=0).
-    assert accn_row[3] == 0
-    assert accn_row[5] == 0
+    assert "accn" not in column_names
 
 
 def test_migration_043_fk_rejects_unknown_listing_id(tmp_path):
@@ -2565,8 +2580,9 @@ def test_migration_053_drops_runtime_added_columns(tmp_path):
             "INSERT INTO schema_migrations (version) VALUES (?)",
             (target_version,),
         )
-        # apply_migrations already pre-seeds provider, provider_exchange,
-        # and exchange. Reuse those IDs to avoid UNIQUE collisions.
+        # Migration 073 removed the SEC-US provider_exchange seed; recreate an
+        # EODHD one at provider_exchange_id=1 for the provider_listing below.
+        _seed_eodhd_us_provider_exchange(conn)
         conn.execute("INSERT INTO issuer (issuer_id, name) VALUES (1, 'Issuer A')")
         # Migration 069 makes ``listing.currency`` NOT NULL and purges any
         # currency-less listing (and its provider_listing/fetch-state
@@ -2691,7 +2707,10 @@ def test_migration_054_view_resolves_provider_through_exchange(tmp_path):
     base table — it should join through provider_exchange instead."""
 
     db_path = tmp_path / "provider-listing-catalog-054.sqlite"
-    apply_migrations(db_path)
+    # Run to the last migration before the SEC-removal migration 073 so the
+    # seeded SEC-US provider_exchange (provider_exchange_id=1) the view resolves
+    # still exists.
+    apply_migrations(db_path, target_version=72)
 
     with sqlite3.connect(db_path) as conn:
         # apply_migrations seeds provider/provider_exchange/exchange.
@@ -3011,7 +3030,10 @@ def test_migration_057_provider_exchange_normalizes_unknown_currency(tmp_path):
     conn.commit()
     conn.close()
 
-    apply_migrations(db_path)
+    # Run only through migration 057. The migration-seeded SEC-US
+    # provider_exchange this fixture mutates is deleted by the later
+    # SEC-removal migration 073.
+    apply_migrations(db_path, target_version=57)
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
             "SELECT currency FROM provider_exchange WHERE provider_exchange_id = 1"
@@ -3468,6 +3490,9 @@ def test_migration_062_view_excludes_secondary_listings(tmp_path):
     apply_migrations(db_path)
 
     with sqlite3.connect(db_path) as conn:
+        # Migration 073 removed the SEC-US provider_exchange seed; recreate an
+        # EODHD one at provider_exchange_id=1 for the provider_listing rows.
+        _seed_eodhd_us_provider_exchange(conn)
         conn.execute("INSERT INTO issuer (issuer_id, name) VALUES (1, 'A')")
         # Migration 069 made ``listing.currency`` NOT NULL, so every fixture
         # listing must carry a currency.
@@ -4058,6 +4083,34 @@ def test_migration_068_check_rejects_empty_fiscal_period(tmp_path):
             )
 
 
+def _seed_eodhd_us_provider_exchange(
+    conn: sqlite3.Connection, *, provider_exchange_id: int = 1
+) -> int:
+    """Seed a minimal EODHD US ``provider_exchange`` row and return its id.
+
+    ``apply_migrations`` historically left a SEC-US provider_exchange seed that
+    fixtures pointed at via ``provider_exchange_id = 1``; migration 073 removed
+    it along with the SEC provider, so tests now seed an EODHD equivalent.
+    """
+
+    provider_id = conn.execute(
+        "SELECT provider_id FROM provider WHERE provider_code = 'EODHD'"
+    ).fetchone()[0]
+    exchange_id = conn.execute(
+        "SELECT exchange_id FROM exchange WHERE exchange_code = 'US'"
+    ).fetchone()[0]
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO provider_exchange (
+            provider_exchange_id, provider_id, provider_exchange_code,
+            exchange_id, name, country, updated_at
+        ) VALUES (?, ?, 'US', ?, 'United States', 'US', '2024-01-01T00:00:00+00:00')
+        """,
+        (provider_exchange_id, provider_id, exchange_id),
+    )
+    return provider_exchange_id
+
+
 def _seed_catalog_row(
     conn: sqlite3.Connection,
     *,
@@ -4066,16 +4119,32 @@ def _seed_catalog_row(
     provider_symbol: str,
 ) -> int:
     """Insert a minimal issuer/listing/provider_listing chain and return its
-    ``provider_listing_id``. ``apply_migrations`` pre-seeds the US exchange
-    and one provider_exchange row (SEC-US); we just point at that row since
-    the backfill SQL doesn't care which provider supplied the cached payload.
+    ``provider_listing_id``. ``apply_migrations`` pre-seeds the US exchange but
+    no longer seeds a provider_exchange row (the old SEC-US seed was removed
+    with the SEC provider in migration 073), so this helper creates an EODHD US
+    provider_exchange to hang the chain off of -- the backfill SQL under test
+    does not care which provider supplied the cached payload.
     """
 
     exchange_id = conn.execute(
         "SELECT exchange_id FROM exchange WHERE exchange_code = 'US'"
     ).fetchone()[0]
+    provider_id = conn.execute(
+        "SELECT provider_id FROM provider WHERE provider_code = 'EODHD'"
+    ).fetchone()[0]
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO provider_exchange (
+            provider_id, provider_exchange_code, exchange_id, name, country,
+            updated_at
+        ) VALUES (?, 'US', ?, 'United States', 'US', '2024-01-01T00:00:00+00:00')
+        """,
+        (provider_id, exchange_id),
+    )
     provider_exchange_id = conn.execute(
-        "SELECT provider_exchange_id FROM provider_exchange LIMIT 1"
+        "SELECT provider_exchange_id FROM provider_exchange "
+        "WHERE provider_id = ? AND provider_exchange_code = 'US'",
+        (provider_id,),
     ).fetchone()[0]
     conn.execute(
         "INSERT INTO issuer (issuer_id, name) VALUES (?, ?)",
@@ -4591,3 +4660,86 @@ def test_migration_072_drops_market_cap_and_preserves_rows(tmp_path):
     assert len(foreign_keys) == 1
     assert foreign_keys[0][2] == "listing"
     assert rerun_row_count == 1
+
+
+def test_migration_073_purges_sec_frankfurter_and_drops_dead_columns(tmp_path):
+    """Migration 073 removes the SEC/Frankfurter providers and their data and
+    drops the four dead SEC ``financial_facts`` columns while preserving rows."""
+
+    db_path = tmp_path / "cleanup-073.sqlite"
+    # Bring the DB to the state just before the cleanup migration.
+    assert apply_migrations(db_path, target_version=72) == 72
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        for provider, quote, rate in (
+            ("FRANKFURTER", "GBP", 0.8),
+            ("EODHD", "EUR", 0.9),
+        ):
+            conn.execute(
+                """
+                INSERT INTO fx_rates (
+                    provider, rate_date, base_currency, quote_currency, rate,
+                    fetched_at, source_kind, created_at, updated_at
+                ) VALUES (?, '2024-01-02', 'USD', ?, ?, '2024-01-02T00:00:00+00:00',
+                          'provider', '2024-01-02T00:00:00+00:00',
+                          '2024-01-02T00:00:00+00:00')
+                """,
+                (provider, quote, rate),
+            )
+        # Seed a fact carrying now-dead column values to prove the rebuild
+        # preserves rows while dropping the columns.
+        conn.execute("INSERT INTO issuer (issuer_id, name) VALUES (1, 'Acme')")
+        conn.execute(
+            """
+            INSERT INTO listing (listing_id, issuer_id, exchange_id, symbol, currency)
+            VALUES (1, 1, (SELECT exchange_id FROM exchange WHERE exchange_code = 'US'),
+                    'AAA', 'USD')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO financial_facts (
+                listing_id, cik, concept, fiscal_period, end_date, unit_kind,
+                value, accn, filed, frame, start_date, accounting_standard,
+                currency, source_provider
+            ) VALUES (1, 'CIK1', 'Assets', 'FY', '2024-12-31', 'monetary',
+                      100.0, 'ACC1', '2025-01-15', 'CY2024', NULL, 'US-GAAP',
+                      'USD', 'EODHD')
+            """
+        )
+        before_cols = {r[1] for r in conn.execute("PRAGMA table_info(financial_facts)")}
+        assert "cik" in before_cols
+        providers_before = {
+            r[0] for r in conn.execute("SELECT provider_code FROM provider")
+        }
+        assert {"SEC", "FRANKFURTER"} <= providers_before
+
+    # Apply the cleanup migration (and anything after it).
+    assert apply_migrations(db_path) == len(MIGRATIONS) - 72
+
+    with sqlite3.connect(db_path) as conn:
+        providers = [r[0] for r in conn.execute("SELECT provider_code FROM provider")]
+        assert providers == ["EODHD"]
+        fx_providers = {
+            r[0] for r in conn.execute("SELECT DISTINCT provider FROM fx_rates")
+        }
+        assert fx_providers == {"EODHD"}
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(financial_facts)")}
+        assert not ({"cik", "accn", "start_date", "accounting_standard"} & columns)
+        assert {"filed", "frame"} <= columns
+        # The kept fact survived the rebuild with filed/frame intact.
+        assert conn.execute(
+            "SELECT value, filed, frame, currency FROM financial_facts "
+            "WHERE listing_id = 1"
+        ).fetchone() == (100.0, "2025-01-15", "CY2024", "USD")
+        # filed is retained, so the latest-fact index is unchanged.
+        index_sql = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE name = 'idx_fin_facts_security_concept_latest'"
+        ).fetchone()[0]
+        assert "filed" in index_sql
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    # Idempotent: a second run is a no-op.
+    assert apply_migrations(db_path) == 0

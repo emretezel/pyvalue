@@ -112,18 +112,6 @@ class _TypedFact:
         return self.record.filed
 
     @property
-    def start_date(self) -> Optional[str]:
-        return self.record.start_date
-
-    @property
-    def accounting_standard(self) -> Optional[str]:
-        return self.record.accounting_standard
-
-    @property
-    def cik(self) -> Optional[str]:
-        return self.record.cik
-
-    @property
     def symbol(self) -> str:
         return self.record.symbol
 

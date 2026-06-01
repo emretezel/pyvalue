@@ -57,10 +57,6 @@ class Config:
         )
 
     @property
-    def sec_user_agent(self) -> Optional[str]:
-        return self._get_value("sec", "user_agent")
-
-    @property
     def fx_provider(self) -> str:
         return (self._get_value("fx", "provider") or "EODHD").strip().upper()
 

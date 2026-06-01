@@ -7783,6 +7783,143 @@ def _migration_072_drop_market_data_market_cap(conn: sqlite3.Connection) -> None
     conn.execute("ALTER TABLE market_data__new RENAME TO market_data")
 
 
+def _migration_073_drop_sec_columns_and_purge_providers(
+    conn: sqlite3.Connection,
+) -> None:
+    """Drop the SEC/Frankfurter providers and four dead ``financial_facts`` columns.
+
+    pyvalue now supports only the EODHD provider. This migration retires the two
+    discontinued providers (SEC fundamentals, Frankfurter FX) in two parts:
+
+    * Provider data is purged children-first so the provider FKs
+      (``fx_rates``/``fx_supported_pairs``/``fx_refresh_state.provider`` ->
+      ``provider.provider_code`` and ``provider_exchange.provider_id`` ->
+      ``provider.provider_id``) stay satisfied. The historical seed in
+      migration 032 (``_PROVIDER_REGISTRY_ROWS``) is left immutable; this
+      migration supersedes it by deletion, leaving only EODHD.
+    * ``financial_facts`` is rebuilt without the four SEC-only columns
+      ``cik``, ``accn``, ``start_date`` and ``accounting_standard`` -- every one
+      always NULL under EODHD and read by no metric. ``filed`` (EODHD's filing
+      date) and ``frame`` (the ``CY####`` FY tag consumed by the metric filters)
+      are KEPT, so ``idx_fin_facts_security_concept_latest`` and every
+      ``ORDER BY ... filed DESC`` are unchanged. Existing rows are COPIED into
+      the narrower shape -- nothing is re-normalized.
+
+    Storage reclamation: deleting the Frankfurter ``fx_rates`` rows and the
+    table rebuild leave free pages. ``VACUUM`` cannot run inside a migration
+    transaction, so reclaim space manually after upgrading with
+    ``sqlite3 data/pyvalue.db 'VACUUM;'``.
+
+    Idempotent: the provider deletes are no-ops once nothing matches, and the
+    ``financial_facts`` rebuild is skipped once the table no longer declares
+    ``cik``.
+    """
+
+    # --- 1. Purge SEC/Frankfurter provider data (children before parents) ---
+    _doomed = "('SEC', 'FRANKFURTER')"
+    if _table_exists(conn, "fx_rates"):
+        conn.execute(f"DELETE FROM fx_rates WHERE provider IN {_doomed}")
+    if _table_exists(conn, "fx_supported_pairs"):
+        conn.execute(f"DELETE FROM fx_supported_pairs WHERE provider IN {_doomed}")
+    if _table_exists(conn, "fx_refresh_state"):
+        conn.execute(f"DELETE FROM fx_refresh_state WHERE provider IN {_doomed}")
+    if _table_exists(conn, "provider") and _table_exists(conn, "provider_exchange"):
+        if _table_exists(conn, "provider_listing"):
+            conn.execute(
+                f"""
+                DELETE FROM provider_listing
+                WHERE provider_exchange_id IN (
+                    SELECT provider_exchange_id FROM provider_exchange
+                    WHERE provider_id IN (
+                        SELECT provider_id FROM provider
+                        WHERE provider_code IN {_doomed}
+                    )
+                )
+                """
+            )
+        conn.execute(
+            f"""
+            DELETE FROM provider_exchange
+            WHERE provider_id IN (
+                SELECT provider_id FROM provider WHERE provider_code IN {_doomed}
+            )
+            """
+        )
+    if _table_exists(conn, "provider"):
+        conn.execute(f"DELETE FROM provider WHERE provider_code IN {_doomed}")
+
+    # --- 2. Drop the four dead SEC columns from financial_facts ---
+    if not _table_exists(conn, "financial_facts"):
+        return
+    ddl_row = conn.execute(
+        "SELECT sql FROM sqlite_master "
+        "WHERE type = 'table' AND name = 'financial_facts'"
+    ).fetchone()
+    if ddl_row is None or "cik" not in ddl_row[0]:
+        return
+
+    conn.execute("DROP INDEX IF EXISTS idx_fin_facts_security_concept_latest")
+    conn.execute("DROP INDEX IF EXISTS idx_fin_facts_currency_nonnull")
+
+    major_currency_check = _MAJOR_CURRENCY_CHECK.format(col="currency")
+    conn.execute(
+        f"""
+        CREATE TABLE financial_facts__new (
+            listing_id INTEGER NOT NULL,
+            concept TEXT NOT NULL,
+            fiscal_period TEXT NOT NULL
+                CHECK (fiscal_period IN ('FY','Q1','Q2','Q3','Q4','TTM','INSTANT')),
+            end_date TEXT NOT NULL,
+            unit_kind TEXT NOT NULL
+                CHECK (unit_kind IN (
+                    'monetary','per_share','ratio','percent','multiple','count','other'
+                )),
+            value REAL NOT NULL,
+            filed TEXT,
+            frame TEXT,
+            currency TEXT
+                CHECK (
+                    (currency IS NULL OR ({major_currency_check}))
+                    AND (
+                        (unit_kind IN ('monetary','per_share') AND currency IS NOT NULL)
+                        OR (unit_kind NOT IN ('monetary','per_share') AND currency IS NULL)
+                    )
+                ),
+            source_provider TEXT,
+            PRIMARY KEY (listing_id, concept, fiscal_period, end_date),
+            FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO financial_facts__new (
+            listing_id, concept, fiscal_period, end_date, unit_kind,
+            value, filed, frame, currency, source_provider
+        )
+        SELECT
+            listing_id, concept, fiscal_period, end_date, unit_kind,
+            value, filed, frame, currency, source_provider
+        FROM financial_facts
+        """
+    )
+    conn.execute("DROP TABLE financial_facts")
+    conn.execute("ALTER TABLE financial_facts__new RENAME TO financial_facts")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fin_facts_security_concept_latest
+        ON financial_facts(listing_id, concept, end_date DESC, filed DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fin_facts_currency_nonnull
+        ON financial_facts(currency)
+        WHERE currency IS NOT NULL
+        """
+    )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -7856,6 +7993,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_070_market_data_price_major_currency,
     _migration_071_financial_facts_unit_kind,
     _migration_072_drop_market_data_market_cap,
+    _migration_073_drop_sec_columns_and_purge_providers,
 ]
 
 

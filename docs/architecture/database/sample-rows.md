@@ -9,7 +9,7 @@ the appendix stays readable.
 <!-- BEGIN generated_sample_rows_appendix -->
 ## `fundamentals_raw`
 
-- Snapshot source: `data/pyvalue.db` on `2026-05-11`
+- Snapshot source: `data/pyvalue.db` on `2026-06-01`
 - Sample window: first `5` rows returned by SQLite ordered by `provider_listing_id ASC`
 - Wide payload columns are omitted and replaced with payload size metadata.
 

@@ -55,7 +55,6 @@ from .maintenance import (
     cmd_clear_fundamentals_raw,
     cmd_clear_market_data,
     cmd_clear_metrics,
-    cmd_purge_us_nonfilers,
 )
 from .security import (
     cmd_refresh_security_metadata,
@@ -101,7 +100,7 @@ def build_parser() -> argparse.ArgumentParser:
     refresh_supported_exchanges.add_argument(
         "--provider",
         default="EODHD",
-        choices=["SEC", "EODHD"],
+        choices=["EODHD"],
         help="Supported exchange provider to refresh (default: %(default)s).",
     )
     refresh_supported_exchanges.add_argument(
@@ -117,7 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
     refresh_supported_tickers.add_argument(
         "--provider",
         default="EODHD",
-        choices=["SEC", "EODHD"],
+        choices=["EODHD"],
         help="Supported ticker provider to refresh (default: %(default)s).",
     )
     refresh_supported_tickers.add_argument(
@@ -130,11 +129,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--all-supported",
         action="store_true",
         help="Refresh every supported exchange for the provider.",
-    )
-    refresh_supported_tickers.add_argument(
-        "--include-etfs",
-        action="store_true",
-        help="SEC only: keep ETFs in the supported ticker catalog.",
     )
     refresh_supported_tickers.add_argument(
         "--database",
@@ -189,20 +183,10 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_fundamentals.add_argument(
         "--provider",
         default="EODHD",
-        choices=["SEC", "EODHD"],
+        choices=["EODHD"],
         help="Fundamentals provider to use (default: %(default)s).",
     )
     add_scope_args(ingest_fundamentals)
-    ingest_fundamentals.add_argument(
-        "--user-agent",
-        default=None,
-        help="Custom User-Agent for SEC (falls back to PYVALUE_SEC_USER_AGENT).",
-    )
-    ingest_fundamentals.add_argument(
-        "--cik",
-        default=None,
-        help="Optional SEC CIK override (10-digit).",
-    )
     ingest_fundamentals.add_argument(
         "--database",
         default="data/pyvalue.db",
@@ -212,7 +196,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--rate",
         type=float,
         default=None,
-        help="Throttle rate (SEC: req/sec, EODHD: symbols/min). Defaults depend on provider.",
+        help="Throttle rate in EODHD symbols/min (default: eodhd.fundamentals_requests_per_minute).",
     )
     ingest_fundamentals.add_argument(
         "--max-symbols",
@@ -370,7 +354,7 @@ def build_parser() -> argparse.ArgumentParser:
     normalize_fundamentals.add_argument(
         "--provider",
         default="EODHD",
-        choices=["SEC", "EODHD"],
+        choices=["EODHD"],
         help="Fundamentals provider to normalize (default: %(default)s).",
     )
     add_scope_args(normalize_fundamentals)
@@ -528,21 +512,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional CSV path for metric-level screen failure reasons.",
     )
 
-    purge_nonfilers = subparsers.add_parser(
-        "purge-us-nonfilers",
-        help="Remove SEC US supported tickers that have no 10-K/10-Q filings in stored SEC company facts.",
-    )
-    purge_nonfilers.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file used for storage (default: %(default)s)",
-    )
-    purge_nonfilers.add_argument(
-        "--apply",
-        action="store_true",
-        help="Apply deletions instead of just printing the symbols to be removed.",
-    )
-
     run_screen = subparsers.add_parser(
         "run-screen",
         help="Evaluate screening criteria for the requested canonical scope.",
@@ -602,7 +571,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 database=args.database,
                 exchange_codes=args.exchange_codes,
                 all_supported=args.all_supported,
-                include_etfs=args.include_etfs,
             )
         if args.command == "refresh-fx-rates":
             return cmd_refresh_fx_rates(
@@ -629,8 +597,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 max_symbols=args.max_symbols,
                 max_age_days=args.max_age_days,
                 respect_backoff=not args.retry_failed_now,
-                user_agent=args.user_agent,
-                cik=args.cik,
             )
         if args.command == "report-fundamentals-progress":
             return cmd_report_fundamentals_progress(
@@ -740,9 +706,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 exchange_codes=args.exchange_codes,
                 all_supported=args.all_supported,
             )
-        if args.command == "purge-us-nonfilers":
-            return cmd_purge_us_nonfilers(database=args.database, apply=args.apply)
-
         parser.error(f"Unknown command: {args.command}")
         return 2
     except KeyboardInterrupt:
