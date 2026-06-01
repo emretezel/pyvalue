@@ -9,6 +9,7 @@ from datetime import date
 import sqlite3
 
 import pyvalue.cli as cli
+from cli_test_helpers import patch_cli
 from pyvalue.money.fx import FXCatalogEntry
 from pyvalue.screening import RankingDefinition, RankingMetric, ScreenDefinition
 from pyvalue.persistence.storage import (
@@ -228,8 +229,8 @@ def test_cmd_refresh_fx_rates_eodhd_syncs_catalog_and_skips_aliases(
                 )
             ]
 
-    monkeypatch.setattr(cli, "EODHDFXProvider", FakeProvider)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "secret")
+    patch_cli(monkeypatch, "EODHDFXProvider", FakeProvider)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "secret")
 
     rc = cli.cmd_refresh_fx_rates(
         database=str(db_path),
@@ -326,8 +327,8 @@ def test_cmd_refresh_fx_rates_eodhd_fetches_only_incremental_newer_history(
                 )
             ]
 
-    monkeypatch.setattr(cli, "EODHDFXProvider", FakeProvider)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "secret")
+    patch_cli(monkeypatch, "EODHDFXProvider", FakeProvider)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "secret")
 
     rc = cli.cmd_refresh_fx_rates(
         database=str(db_path),
@@ -427,8 +428,8 @@ def test_cmd_refresh_fx_rates_eodhd_completes_old_history_after_bounded_backfill
                 ),
             ]
 
-    monkeypatch.setattr(cli, "EODHDFXProvider", FakeProvider)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "secret")
+    patch_cli(monkeypatch, "EODHDFXProvider", FakeProvider)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "secret")
 
     rc = cli.cmd_refresh_fx_rates(
         database=str(db_path),
@@ -458,8 +459,8 @@ def test_cmd_refresh_fx_rates_eodhd_marks_failure_when_initial_fetch_returns_no_
         def fetch_history(self, *, canonical_symbol, start_date, end_date):
             return []
 
-    monkeypatch.setattr(cli, "EODHDFXProvider", FakeProvider)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "secret")
+    patch_cli(monkeypatch, "EODHDFXProvider", FakeProvider)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "secret")
 
     rc = cli.cmd_refresh_fx_rates(
         database=str(db_path),

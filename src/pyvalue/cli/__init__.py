@@ -1,30 +1,21 @@
 """Public facade for the pyvalue CLI package.
 
-Re-exports the console entry point (:func:`main`) and every symbol the test
-suite reaches through ``import pyvalue.cli as cli``. The original ``cli.py`` was a
-single module, so tests both *read* internals as ``cli.<name>`` and *patch* them
-with ``monkeypatch.setattr(cli, "<name>", fake)`` expecting the handler code to
-observe the patch. After the split the handlers live in submodules and read their
-own module-level globals, so a plain re-export would let reads work but silently
-break patches.
-
-To preserve that contract exactly, this module installs a custom module subclass
-whose ``__setattr__`` forwards each assignment to every ``pyvalue.cli`` submodule
-that already binds that name as a global. ``monkeypatch.setattr(cli, name, value)``
-then updates the binding the handler actually reads, and monkeypatch teardown
-restores it through the same path. Reads continue to resolve against the facade.
-The forwarding is computed dynamically from the live submodules (no name->module
-table to keep in sync). Names re-exported only for patching/reading (absent from
-``__all__``) carry a per-line ``# noqa: F401`` marking them intentional.
+Re-exports the console entry point (:func:`main`) and the symbols the test suite
+reaches through ``import pyvalue.cli as cli`` — both the command handlers and the
+internals that tests fake. These are plain re-exports: attribute *reads* resolve
+here. Tests that *fake* an internal use ``cli_test_helpers.patch_cli``, which
+patches the owning sub-module(s) directly — necessary because a symbol such as
+``EODHDFundamentalsClient`` is imported independently by several command
+sub-modules, each holding its own binding. Names re-exported only so tests can
+read/patch them (absent from ``__all__``) carry a per-line ``# noqa: F401``
+marking them intentional.
 
 Author: Emre Tezel
 """
 
 from __future__ import annotations
 
-import sys
 import time  # noqa: F401  (re-exported as cli.time for tests that patch cli.time.*)
-from types import ModuleType
 
 from pyvalue.logging_utils import (
     current_logging_config,
@@ -219,33 +210,3 @@ __all__ = [
     "suppress_console_missing_fx_warnings",
     "time",
 ]
-
-_PACKAGE = "pyvalue.cli"
-
-
-class _CLIFacadeModule(ModuleType):
-    """Module type that forwards attribute writes to the owning submodules.
-
-    Preserves the pre-split contract where ``monkeypatch.setattr(cli, name,
-    value)`` updated the single binding every handler read. The value is also set
-    on the facade itself so subsequent reads stay consistent.
-    """
-
-    def __setattr__(self, name: str, value: object) -> None:
-        super().__setattr__(name, value)
-        # Propagate to every CLI submodule that already binds ``name`` as a
-        # global, reproducing the pre-split single-binding behaviour. Computed
-        # from the live module table so there is nothing to keep in sync.
-        prefix = _PACKAGE + "."
-        for mod_name, submodule in list(sys.modules.items()):
-            if (
-                submodule is not None
-                and mod_name.startswith(prefix)
-                and name in getattr(submodule, "__dict__", {})
-            ):
-                setattr(submodule, name, value)
-
-
-# Swap to the forwarding subclass once all imports above are bound, so facade
-# construction itself is not intercepted.
-sys.modules[__name__].__class__ = _CLIFacadeModule

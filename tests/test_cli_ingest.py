@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 from pyvalue import cli
+from cli_test_helpers import patch_cli
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics import REGISTRY
 from pyvalue.metrics.base import MetricCurrencyInvariantError, MetricResult
@@ -310,8 +311,8 @@ def test_main_dispatches_report_ingest_progress_with_default_max_age_days(
         calls["missing_only"] = missing_only
         return 0
 
-    monkeypatch.setattr(cli, "setup_logging", lambda: None)
-    monkeypatch.setattr(cli, "cmd_report_fundamentals_progress", fake_cmd)
+    patch_cli(monkeypatch, "setup_logging", lambda: None)
+    patch_cli(monkeypatch, "cmd_report_fundamentals_progress", fake_cmd)
 
     rc = cli.main(["report-fundamentals-progress"])
 
@@ -367,8 +368,8 @@ def test_main_dispatches_ingest_fundamentals_with_default_provider_and_max_age_d
         calls["cik"] = cik
         return 0
 
-    monkeypatch.setattr(cli, "setup_logging", lambda: None)
-    monkeypatch.setattr(cli, "cmd_ingest_fundamentals_stage", fake_cmd)
+    patch_cli(monkeypatch, "setup_logging", lambda: None)
+    patch_cli(monkeypatch, "cmd_ingest_fundamentals_stage", fake_cmd)
 
     rc = cli.main(["ingest-fundamentals", "--symbols", "AAPL.US"])
 
@@ -419,8 +420,8 @@ def test_main_dispatches_reconcile_listing_status(monkeypatch):
         calls["all_supported"] = all_supported
         return 0
 
-    monkeypatch.setattr(cli, "setup_logging", lambda: None)
-    monkeypatch.setattr(cli, "cmd_reconcile_listing_status", fake_cmd)
+    patch_cli(monkeypatch, "setup_logging", lambda: None)
+    patch_cli(monkeypatch, "cmd_reconcile_listing_status", fake_cmd)
 
     rc = cli.main(
         [
@@ -479,8 +480,8 @@ def test_main_dispatches_normalize_fundamentals_stage_with_force(monkeypatch):
         calls["force"] = force
         return 0
 
-    monkeypatch.setattr(cli, "setup_logging", lambda: None)
-    monkeypatch.setattr(cli, "cmd_normalize_fundamentals_stage", fake_cmd)
+    patch_cli(monkeypatch, "setup_logging", lambda: None)
+    patch_cli(monkeypatch, "cmd_normalize_fundamentals_stage", fake_cmd)
 
     rc = cli.main(["normalize-fundamentals", "--symbols", "AAPL.US", "--force"])
 
@@ -537,8 +538,8 @@ def test_main_dispatches_compute_metrics_stage_with_warning_flag(monkeypatch):
         calls["profile"] = profile
         return 0
 
-    monkeypatch.setattr(cli, "setup_logging", lambda: None)
-    monkeypatch.setattr(cli, "cmd_compute_metrics_stage", fake_cmd)
+    patch_cli(monkeypatch, "setup_logging", lambda: None)
+    patch_cli(monkeypatch, "cmd_compute_metrics_stage", fake_cmd)
 
     rc = cli.main(["compute-metrics", "--symbols", "AAPL.US", "--show-metric-warnings"])
 
@@ -604,8 +605,8 @@ def test_main_dispatches_run_screen_stage_with_warning_flag(monkeypatch):
         calls["show_metric_warnings"] = show_metric_warnings
         return 0
 
-    monkeypatch.setattr(cli, "setup_logging", lambda: None)
-    monkeypatch.setattr(cli, "cmd_run_screen_stage", fake_cmd)
+    patch_cli(monkeypatch, "setup_logging", lambda: None)
+    patch_cli(monkeypatch, "cmd_run_screen_stage", fake_cmd)
 
     rc = cli.main(
         [
@@ -652,8 +653,8 @@ def test_main_dispatches_refresh_security_metadata(monkeypatch):
         calls["all_supported"] = all_supported
         return 0
 
-    monkeypatch.setattr(cli, "setup_logging", lambda: None)
-    monkeypatch.setattr(cli, "cmd_refresh_security_metadata", fake_cmd)
+    patch_cli(monkeypatch, "setup_logging", lambda: None)
+    patch_cli(monkeypatch, "cmd_refresh_security_metadata", fake_cmd)
 
     rc = cli.main(
         [
@@ -714,8 +715,8 @@ def test_main_dispatches_report_screen_failures(monkeypatch):
         calls["output_csv"] = output_csv
         return 0
 
-    monkeypatch.setattr(cli, "setup_logging", lambda: None)
-    monkeypatch.setattr(cli, "cmd_report_screen_failures", fake_cmd)
+    patch_cli(monkeypatch, "setup_logging", lambda: None)
+    patch_cli(monkeypatch, "cmd_report_screen_failures", fake_cmd)
 
     rc = cli.main(
         [
@@ -767,8 +768,8 @@ def test_main_dispatches_update_market_data_global_with_default_max_age_days(
         calls["respect_backoff"] = respect_backoff
         return 0
 
-    monkeypatch.setattr(cli, "setup_logging", lambda: None)
-    monkeypatch.setattr(cli, "cmd_update_market_data_stage", fake_cmd)
+    patch_cli(monkeypatch, "setup_logging", lambda: None)
+    patch_cli(monkeypatch, "cmd_update_market_data_stage", fake_cmd)
 
     rc = cli.main(["update-market-data", "--all-supported"])
 
@@ -823,8 +824,8 @@ def test_main_dispatches_update_market_data_without_scope_as_default_universe(
         calls["respect_backoff"] = respect_backoff
         return 0
 
-    monkeypatch.setattr(cli, "setup_logging", lambda: None)
-    monkeypatch.setattr(cli, "cmd_update_market_data_stage", fake_cmd)
+    patch_cli(monkeypatch, "setup_logging", lambda: None)
+    patch_cli(monkeypatch, "cmd_update_market_data_stage", fake_cmd)
 
     rc = cli.main(["update-market-data"])
 
@@ -843,12 +844,12 @@ def test_main_dispatches_update_market_data_without_scope_as_default_universe(
 
 
 def test_main_returns_cleanly_on_uncaught_keyboard_interrupt(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "setup_logging", lambda: None)
+    patch_cli(monkeypatch, "setup_logging", lambda: None)
 
     def raising_cmd(provider, database):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli, "cmd_refresh_supported_exchanges", raising_cmd)
+    patch_cli(monkeypatch, "cmd_refresh_supported_exchanges", raising_cmd)
 
     rc = cli.main(["refresh-supported-exchanges"])
 
@@ -868,8 +869,8 @@ def test_main_dispatches_report_market_data_progress_with_default_max_age_days(
         calls["max_age_days"] = max_age_days
         return 0
 
-    monkeypatch.setattr(cli, "setup_logging", lambda: None)
-    monkeypatch.setattr(cli, "cmd_report_market_data_progress", fake_cmd)
+    patch_cli(monkeypatch, "setup_logging", lambda: None)
+    patch_cli(monkeypatch, "cmd_report_market_data_progress", fake_cmd)
 
     rc = cli.main(["report-market-data-progress"])
 
@@ -907,7 +908,7 @@ def test_cmd_ingest_fundamentals_sec(monkeypatch, tmp_path):
             calls["cik"] = cik
             return {"cik": cik, "data": []}
 
-    monkeypatch.setattr(cli, "SECCompanyFactsClient", FakeClient)
+    patch_cli(monkeypatch, "SECCompanyFactsClient", FakeClient)
 
     db_path = tmp_path / "facts.db"
     # SEC fundamentals attach to a SEC provider_listing; the listing must
@@ -950,8 +951,8 @@ def test_cmd_ingest_fundamentals_eodhd(monkeypatch, tmp_path):
         def exchange_metadata(self, exchange_code):
             return {"Name": "London", "Country": "UK", "Currency": "GBP"}
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
 
     # The EODHD ingest path resolves the listing currency from the catalog and
     # threads it onto the stored fundamentals. Seed the LSE listing in GBX so a
@@ -1019,8 +1020,8 @@ def test_cmd_ingest_fundamentals_bulk_eodhd_with_exchange(monkeypatch, tmp_path)
             calls["fetched"].append((symbol, exchange_code))
             return {"General": {"CurrencyCode": "USD", "Name": symbol}}
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
 
     rc = cli.cmd_ingest_fundamentals_bulk(
         provider="EODHD",
@@ -1076,8 +1077,8 @@ def test_cmd_ingest_fundamentals_bulk_eodhd_with_exchange_symbols(
             calls["fetched"].append((symbol, exchange_code))
             return {"General": {"CurrencyCode": "USD", "Name": symbol}}
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
 
     rc = cli.cmd_ingest_fundamentals_bulk(
         provider="EODHD",
@@ -1119,9 +1120,7 @@ def test_cmd_ingest_fundamentals_bulk_sec(monkeypatch, tmp_path):
             return {"cik": cik}
 
     fake_client = FakeClient()
-    monkeypatch.setattr(
-        cli, "SECCompanyFactsClient", lambda user_agent=None: fake_client
-    )
+    patch_cli(monkeypatch, "SECCompanyFactsClient", lambda user_agent=None: fake_client)
 
     rc = cli.cmd_ingest_fundamentals_bulk(
         provider="SEC",
@@ -1191,7 +1190,7 @@ def test_cmd_load_universe_sec_stores_supported_tickers(monkeypatch, tmp_path):
                 ),
             ]
 
-    monkeypatch.setattr(cli, "USUniverseLoader", lambda: FakeLoader())
+    patch_cli(monkeypatch, "USUniverseLoader", lambda: FakeLoader())
 
     db_path = tmp_path / "sec-universe.db"
     rc = cli.cmd_load_universe(
@@ -1240,8 +1239,8 @@ def test_cmd_refresh_supported_exchanges(monkeypatch, tmp_path):
                 },
             ]
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
 
     db_path = tmp_path / "supported-exchanges.db"
     rc = cli.cmd_refresh_supported_exchanges(
@@ -1359,8 +1358,8 @@ def test_cmd_refresh_supported_tickers_filters_types_and_cleans_catalog(
         def list_exchanges(self):
             raise AssertionError("Should not refresh supported exchanges on cache hit")
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
 
     rc = cli.cmd_refresh_supported_tickers(
         provider="EODHD",
@@ -1445,8 +1444,8 @@ def test_cmd_refresh_supported_tickers_all_exchanges_in_code_order(
         def list_exchanges(self):
             raise AssertionError("Should use cached supported exchanges")
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
 
     rc = cli.cmd_refresh_supported_tickers(
         provider="EODHD",
@@ -1510,8 +1509,8 @@ def test_cmd_refresh_supported_tickers_defaults_to_all_supported(monkeypatch, tm
         def list_exchanges(self):
             raise AssertionError("Should use cached supported exchanges")
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
 
     rc = cli.cmd_refresh_supported_tickers(
         provider="EODHD",
@@ -1570,10 +1569,10 @@ def test_cmd_ingest_fundamentals_global_respects_budget_from_user_metadata(
             calls["fetched"].append(symbol)
             return {"General": {"CurrencyCode": "USD", "Name": symbol}}
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_fundamentals_daily_buffer_calls=5,
@@ -1625,10 +1624,10 @@ def test_cmd_ingest_fundamentals_global_exits_cleanly_when_budget_exhausted(
         def fetch_fundamentals(self, symbol, exchange_code=None):
             raise AssertionError("No fetch should happen when the daily budget is 0.")
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_fundamentals_daily_buffer_calls=0,
@@ -1679,10 +1678,10 @@ def test_cmd_ingest_fundamentals_global_rerun_fetches_remaining_missing_symbols(
             calls["fetched"].append(symbol)
             return {"General": {"CurrencyCode": "USD", "Name": symbol}}
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_fundamentals_daily_buffer_calls=0,
@@ -1783,10 +1782,10 @@ def test_cmd_ingest_fundamentals_global_max_age_days_refreshes_only_stale_or_mis
             calls["fetched"].append(symbol)
             return {"General": {"CurrencyCode": "USD", "Name": symbol}}
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_fundamentals_daily_buffer_calls=0,
@@ -1840,10 +1839,10 @@ def test_cmd_ingest_fundamentals_global_respects_backoff_by_default(
             calls["fetched"].append(symbol)
             return {"General": {"CurrencyCode": "USD", "Name": symbol}}
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_fundamentals_daily_buffer_calls=0,
@@ -1914,10 +1913,10 @@ def test_cmd_ingest_fundamentals_global_default_mode_remains_missing_only(
             calls["fetched"].append(symbol)
             return {"General": {"CurrencyCode": "USD", "Name": symbol}}
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_fundamentals_daily_buffer_calls=0,
@@ -2000,10 +1999,10 @@ def test_cmd_ingest_fundamentals_global_uses_concurrent_workers(monkeypatch, tmp
                 with lock:
                     calls["in_flight"] -= 1
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_fundamentals_daily_buffer_calls=0,
@@ -2067,10 +2066,10 @@ def test_cmd_ingest_fundamentals_global_batches_raw_updates_and_clears_failures(
     ):
         raise AssertionError("multi-symbol ingestion should not call upsert")
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_fundamentals_daily_buffer_calls=0,
@@ -2137,20 +2136,20 @@ def test_cmd_ingest_fundamentals_global_flushes_batches_on_keyboard_interrupt(
                 yield future
                 raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_fundamentals_daily_buffer_calls=0,
             eodhd_fundamentals_requests_per_minute=950,
         ),
     )
-    monkeypatch.setattr(cli, "as_completed", interrupting_as_completed)
+    patch_cli(monkeypatch, "as_completed", interrupting_as_completed)
     shutdown_calls = []
-    monkeypatch.setattr(
-        cli,
+    patch_cli(
+        monkeypatch,
         "_shutdown_executor_now",
         lambda executor: shutdown_calls.append(executor),
     )
@@ -2225,9 +2224,9 @@ def test_cmd_report_ingest_progress_reports_complete_with_quota_snapshot(
                 "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
             }
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_api_key="TOKEN",
@@ -2264,8 +2263,8 @@ def test_cmd_report_ingest_progress_reports_missing_and_quota_unavailable(
         "US",
         rows=[{"Code": "AAA", "Exchange": "US", "Type": "Common Stock"}],
     )
-    monkeypatch.setattr(
-        cli,
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_api_key=None,
@@ -2318,8 +2317,8 @@ def test_cmd_report_ingest_progress_default_mode_treats_old_data_as_stale(
             """,
             (stale_at,),
         )
-    monkeypatch.setattr(
-        cli,
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_api_key=None,
@@ -2371,8 +2370,8 @@ def test_cmd_report_ingest_progress_missing_only_ignores_staleness(
             """,
             (stale_at,),
         )
-    monkeypatch.setattr(
-        cli,
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_api_key=None,
@@ -2413,8 +2412,8 @@ def test_cmd_report_ingest_progress_reports_blocked_by_backoff(
     state_repo = FundamentalsFetchStateRepository(db_path)
     state_repo.initialize_schema()
     state_repo.mark_failure("EODHD", "AAA.US", "boom", base_backoff_seconds=3600)
-    monkeypatch.setattr(
-        cli,
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_api_key=None,
@@ -2459,8 +2458,8 @@ def test_cmd_report_ingest_progress_filters_exchanges(monkeypatch, tmp_path, cap
     fund_repo.upsert(
         "EODHD", "BBB.LSE", {"General": {"CurrencyCode": "GBP"}}, exchange="LSE"
     )
-    monkeypatch.setattr(
-        cli,
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_api_key=None,
@@ -2502,9 +2501,9 @@ def test_cmd_report_ingest_progress_succeeds_when_user_api_fails(
         def user_metadata(self):
             raise RuntimeError("nope")
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_api_key="TOKEN",
@@ -2561,11 +2560,11 @@ def test_cmd_update_market_data_global_uses_supported_tickers(monkeypatch, tmp_p
             self.repo.upsert_price(symbol, today, 10.0)
             return SimpleNamespace(symbol=symbol, as_of=today, price=10.0)
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(cli, "MarketDataService", FakeService)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "MarketDataService", FakeService)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_api_key="TOKEN",
@@ -2684,11 +2683,11 @@ def test_cmd_update_market_data_stage_uses_bulk_for_large_exchange(
                 currency="GBP",
             )
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(cli, "EODHDProvider", FakeProvider)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "EODHDProvider", FakeProvider)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_api_key="TOKEN",
@@ -2780,11 +2779,11 @@ def test_cmd_update_market_data_stage_skips_secondary_listings(monkeypatch, tmp_
                 currency="USD" if symbol.endswith(".US") else "GBP",
             )
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(cli, "EODHDProvider", FakeProvider)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "EODHDProvider", FakeProvider)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_api_key="TOKEN",
@@ -3001,11 +3000,11 @@ def test_cmd_update_market_data_stage_retries_missing_bulk_symbol_individually(
                 currency="USD",
             )
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(cli, "EODHDProvider", FakeProvider)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "EODHDProvider", FakeProvider)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_api_key="TOKEN",
@@ -3090,12 +3089,12 @@ def test_cmd_update_market_data_stage_marks_bulk_validation_failure_per_symbol(
             source_provider="EODHD",
         )
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(cli, "EODHDProvider", FakeProvider)
-    monkeypatch.setattr(cli, "_build_market_data_update", fake_build_market_data_update)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "EODHDProvider", FakeProvider)
+    patch_cli(monkeypatch, "_build_market_data_update", fake_build_market_data_update)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_api_key="TOKEN",
@@ -3172,10 +3171,10 @@ def test_cmd_update_market_data_stage_interrupts_cleanly_in_symbol_phase(
                 raise KeyboardInterrupt
 
     executor = InlineExecutor()
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_api_key="TOKEN",
@@ -3183,13 +3182,13 @@ def test_cmd_update_market_data_stage_interrupts_cleanly_in_symbol_phase(
             eodhd_market_data_requests_per_minute=950,
         ),
     )
-    monkeypatch.setattr(
-        cli,
+    patch_cli(
+        monkeypatch,
         "_create_interruptible_thread_executor",
         lambda max_workers: executor,
     )
-    monkeypatch.setattr(
-        cli,
+    patch_cli(
+        monkeypatch,
         "_fetch_symbol_market_data",
         lambda api_key, limiter, symbol: PriceData(
             symbol=symbol,
@@ -3199,7 +3198,7 @@ def test_cmd_update_market_data_stage_interrupts_cleanly_in_symbol_phase(
             currency="USD",
         ),
     )
-    monkeypatch.setattr(cli, "as_completed", interrupting_as_completed)
+    patch_cli(monkeypatch, "as_completed", interrupting_as_completed)
 
     rc = cli.cmd_update_market_data_stage(
         provider="EODHD",
@@ -3275,11 +3274,11 @@ def test_cmd_update_market_data_global_prefers_missing_then_oldest_stale(
             self.repo.upsert_price(symbol, today, 10.0)
             return SimpleNamespace(symbol=symbol, as_of=today, price=10.0)
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(cli, "MarketDataService", FakeService)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "MarketDataService", FakeService)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_api_key="TOKEN",
@@ -3329,11 +3328,11 @@ def test_cmd_update_market_data_global_exits_cleanly_when_budget_exhausted(
                 "No service should be created when the daily budget is 0."
             )
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(cli, "MarketDataService", FakeService)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "MarketDataService", FakeService)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_api_key="TOKEN",
@@ -3392,11 +3391,11 @@ def test_cmd_update_market_data_global_rerun_fetches_remaining_missing_or_stale(
             self.repo.upsert_price(symbol, today, 10.0)
             return SimpleNamespace(symbol=symbol, as_of=today, price=10.0)
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(cli, "MarketDataService", FakeService)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "MarketDataService", FakeService)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_api_key="TOKEN",
@@ -3470,11 +3469,11 @@ def test_cmd_update_market_data_global_respects_backoff_by_default(
             self.repo.upsert_price(symbol, today, 10.0)
             return SimpleNamespace(symbol=symbol, as_of=today, price=10.0)
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(cli, "MarketDataService", FakeService)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "MarketDataService", FakeService)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_api_key="TOKEN",
@@ -3524,9 +3523,9 @@ def test_cmd_report_market_data_progress_reports_complete_with_quota_snapshot(
                 "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
             }
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_api_key="TOKEN",
@@ -3569,8 +3568,8 @@ def test_cmd_report_market_data_progress_reports_missing_and_stale(
         "AAA.US",
         (date.today() - timedelta(days=30)).isoformat(),
     )
-    monkeypatch.setattr(
-        cli,
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_api_key=None,
@@ -3607,8 +3606,8 @@ def test_cmd_report_market_data_progress_reports_blocked_by_backoff(
     state_repo = MarketDataFetchStateRepository(db_path)
     state_repo.initialize_schema()
     state_repo.mark_failure("EODHD", "AAA.US", "boom", base_backoff_seconds=3600)
-    monkeypatch.setattr(
-        cli,
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_api_key=None,
@@ -3649,8 +3648,8 @@ def test_cmd_report_market_data_progress_filters_exchanges(
         rows=[{"Code": "BBB", "Exchange": "LSE", "Type": "Common Stock"}],
     )
     store_market_data(db_path, "BBB.LSE", date.today().isoformat())
-    monkeypatch.setattr(
-        cli,
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_api_key=None,
@@ -3691,9 +3690,9 @@ def test_cmd_report_market_data_progress_succeeds_when_user_api_fails(
         def user_metadata(self):
             raise RuntimeError("nope")
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(
+        monkeypatch,
         "Config",
         lambda: SimpleNamespace(
             eodhd_api_key="TOKEN",
@@ -3732,8 +3731,8 @@ def test_cmd_ingest_fundamentals_bulk_skips_fresh_and_backoff(monkeypatch, tmp_p
             calls["fetched"].append((symbol, exchange_code))
             return {"General": {"CurrencyCode": "USD"}}
 
-    monkeypatch.setattr(cli, "EODHDFundamentalsClient", FakeClient)
-    monkeypatch.setattr(cli, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
 
     db_path = tmp_path / "eodhd-resume.db"
     store_supported_tickers(
@@ -3802,7 +3801,7 @@ def test_cmd_update_market_data_bulk(monkeypatch, tmp_path):
         def refresh_symbol(self, symbol, fetch_symbol=None):
             calls.append(symbol)
 
-    monkeypatch.setattr(cli, "MarketDataService", lambda db_path: DummyService(db_path))
+    patch_cli(monkeypatch, "MarketDataService", lambda db_path: DummyService(db_path))
 
     rc = cli.cmd_update_market_data_bulk(
         provider="SEC",
@@ -3838,7 +3837,7 @@ def test_cmd_update_market_data_bulk_with_exchange(monkeypatch, tmp_path):
         def refresh_symbol(self, symbol, fetch_symbol=None):
             calls.append((symbol, fetch_symbol))
 
-    monkeypatch.setattr(cli, "MarketDataService", lambda db_path: DummyService(db_path))
+    patch_cli(monkeypatch, "MarketDataService", lambda db_path: DummyService(db_path))
 
     rc = cli.cmd_update_market_data_bulk(
         provider="EODHD",
@@ -3934,15 +3933,15 @@ def test_cmd_compute_metrics_bulk_continues_and_summarizes_currency_invariant_fa
                 as_of="2024-01-01",
             )
 
-    monkeypatch.setattr(
-        cli,
+    patch_cli(
+        monkeypatch,
         "REGISTRY",
         {
             GoodMetric.id: GoodMetric,
             BadMetric.id: BadMetric,
         },
     )
-    monkeypatch.setattr(cli, "_metric_worker_count", lambda total_symbols: 1)
+    patch_cli(monkeypatch, "_metric_worker_count", lambda total_symbols: 1)
 
     rc = cli.cmd_compute_metrics_bulk(
         provider="SEC",
@@ -3987,7 +3986,7 @@ def test_cmd_compute_metrics_bulk_with_exchange(monkeypatch, tmp_path):
                 symbol=symbol, metric_id=self.id, value=1.0, as_of="2024-01-01"
             )
 
-    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
+    patch_cli(monkeypatch, "REGISTRY", {DummyMetric.id: DummyMetric})
 
     rc = cli.cmd_compute_metrics_bulk(
         provider="EODHD",
@@ -4051,7 +4050,7 @@ def test_cmd_compute_metrics_bulk_uses_minimal_provider_listing(monkeypatch, tmp
                 symbol=symbol, metric_id=self.id, value=len(symbol), as_of="2024-01-01"
             )
 
-    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
+    patch_cli(monkeypatch, "REGISTRY", {DummyMetric.id: DummyMetric})
 
     rc = cli.cmd_compute_metrics_bulk(
         provider="EODHD",
@@ -4158,8 +4157,8 @@ def test_compute_metrics_for_symbol_reuses_fact_and_market_cache(monkeypatch, tm
                 as_of=snapshot_a.as_of,
             )
 
-    monkeypatch.setattr(
-        cli,
+    patch_cli(
+        monkeypatch,
         "REGISTRY",
         {
             RepeatedFactsMetric.id: RepeatedFactsMetric,
@@ -4312,8 +4311,8 @@ def test_compute_metrics_for_symbol_collects_currency_invariant_failures(monkeyp
                 as_of="2024-01-01",
             )
 
-    monkeypatch.setattr(
-        cli,
+    patch_cli(
+        monkeypatch,
         "REGISTRY",
         {
             GoodMetric.id: GoodMetric,
@@ -4439,9 +4438,9 @@ def test_cmd_compute_metrics_stage_suppresses_metric_warnings_by_default(
         def compute(self, symbol, repo):
             return None
 
-    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
-    monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 1)
-    monkeypatch.setattr(cli, "METRICS_PROGRESS_INTERVAL_SECONDS", 0.0)
+    patch_cli(monkeypatch, "REGISTRY", {DummyMetric.id: DummyMetric})
+    patch_cli(monkeypatch, "_metric_worker_count", lambda total: 1)
+    patch_cli(monkeypatch, "METRICS_PROGRESS_INTERVAL_SECONDS", 0.0)
     clear_root_logging_handlers()
     cli.setup_logging(log_dir=log_dir)
     try:
@@ -4485,8 +4484,8 @@ def test_cmd_compute_metrics_stage_can_show_metric_warnings_on_console(
         def compute(self, symbol, repo):
             return None
 
-    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
-    monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 1)
+    patch_cli(monkeypatch, "REGISTRY", {DummyMetric.id: DummyMetric})
+    patch_cli(monkeypatch, "_metric_worker_count", lambda total: 1)
     clear_root_logging_handlers()
     cli.setup_logging(log_dir=log_dir)
     try:
@@ -4533,9 +4532,9 @@ def test_cmd_compute_metrics_stage_prints_currency_invariant_summary_when_warnin
                 reason_code="missing_trading_currency",
             )
 
-    monkeypatch.setattr(cli, "REGISTRY", {BadMetric.id: BadMetric})
-    monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 1)
-    monkeypatch.setattr(cli, "METRICS_PROGRESS_INTERVAL_SECONDS", 0.0)
+    patch_cli(monkeypatch, "REGISTRY", {BadMetric.id: BadMetric})
+    patch_cli(monkeypatch, "_metric_worker_count", lambda total: 1)
+    patch_cli(monkeypatch, "METRICS_PROGRESS_INTERVAL_SECONDS", 0.0)
     clear_root_logging_handlers()
     cli.setup_logging(log_dir=log_dir)
     try:
@@ -4582,7 +4581,7 @@ def test_compute_metrics_batch_worker_suppresses_metric_warnings_by_default(
         def compute(self, symbol, repo):
             return None
 
-    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
+    patch_cli(monkeypatch, "REGISTRY", {DummyMetric.id: DummyMetric})
     clear_root_logging_handlers()
     cli.setup_logging(log_dir=log_dir)
     try:
@@ -4925,7 +4924,7 @@ def test_cmd_compute_metrics_stage_symbol_scope(monkeypatch, tmp_path):
                 as_of="2024-01-01",
             )
 
-    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
+    patch_cli(monkeypatch, "REGISTRY", {DummyMetric.id: DummyMetric})
 
     rc = cli.cmd_compute_metrics_stage(
         database=str(db_path),
@@ -4967,7 +4966,7 @@ def test_cmd_compute_metrics_stage_exchange_scope(monkeypatch, tmp_path):
                 symbol=symbol, metric_id=self.id, value=1.0, as_of="2024-01-01"
             )
 
-    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
+    patch_cli(monkeypatch, "REGISTRY", {DummyMetric.id: DummyMetric})
 
     rc = cli.cmd_compute_metrics_stage(
         database=str(db_path),
@@ -5075,15 +5074,15 @@ def test_cmd_compute_metrics_stage_parallel_with_inline_executor(
             )
         ]
 
-    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
-    monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 2)
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "REGISTRY", {DummyMetric.id: DummyMetric})
+    patch_cli(monkeypatch, "_metric_worker_count", lambda total: 2)
+    patch_cli(
+        monkeypatch,
         "_create_process_pool_executor",
         lambda max_workers: InlineExecutor(),
     )
-    monkeypatch.setattr(cli, "as_completed", reverse_as_completed)
-    monkeypatch.setattr(cli, "METRICS_PROGRESS_INTERVAL_SECONDS", 0.0)
+    patch_cli(monkeypatch, "as_completed", reverse_as_completed)
+    patch_cli(monkeypatch, "METRICS_PROGRESS_INTERVAL_SECONDS", 0.0)
 
     rc = cli.cmd_compute_metrics_stage(
         database=str(db_path),
@@ -5141,15 +5140,15 @@ def test_cmd_compute_metrics_stage_parallel_partial_failure(
         id = "dummy_metric"
         uses_market_data = False
 
-    monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 2)
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "_metric_worker_count", lambda total: 2)
+    patch_cli(
+        monkeypatch,
         "_create_process_pool_executor",
         lambda max_workers: InlineExecutor(),
     )
-    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
-    monkeypatch.setattr(cli, "_compute_metrics_for_symbol_worker", fake_worker)
-    monkeypatch.setattr(cli, "METRICS_PROGRESS_INTERVAL_SECONDS", 0.0)
+    patch_cli(monkeypatch, "REGISTRY", {DummyMetric.id: DummyMetric})
+    patch_cli(monkeypatch, "_compute_metrics_for_symbol_worker", fake_worker)
+    patch_cli(monkeypatch, "METRICS_PROGRESS_INTERVAL_SECONDS", 0.0)
 
     rc = cli._run_metric_computation(
         database=str(db_path),
@@ -5212,17 +5211,17 @@ def test_run_metric_computation_interrupts_cleanly(monkeypatch, tmp_path, capsys
                 raise KeyboardInterrupt
 
     executor = InlineExecutor()
-    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
-    monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 2)
-    monkeypatch.setattr(cli, "_ensure_metrics_wal_mode", lambda repo: "wal")
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "REGISTRY", {DummyMetric.id: DummyMetric})
+    patch_cli(monkeypatch, "_metric_worker_count", lambda total: 2)
+    patch_cli(monkeypatch, "_ensure_metrics_wal_mode", lambda repo: "wal")
+    patch_cli(
+        monkeypatch,
         "_create_process_pool_executor",
         lambda max_workers: executor,
     )
-    monkeypatch.setattr(cli, "_compute_metrics_for_symbol_worker", fake_worker)
-    monkeypatch.setattr(cli, "as_completed", interrupting_as_completed)
-    monkeypatch.setattr(cli, "METRICS_PROGRESS_INTERVAL_SECONDS", 0.0)
+    patch_cli(monkeypatch, "_compute_metrics_for_symbol_worker", fake_worker)
+    patch_cli(monkeypatch, "as_completed", interrupting_as_completed)
+    patch_cli(monkeypatch, "METRICS_PROGRESS_INTERVAL_SECONDS", 0.0)
 
     rc = cli._run_metric_computation(
         database=str(db_path),
@@ -5298,14 +5297,14 @@ def test_cmd_compute_metrics_stage_falls_back_to_serial_without_wal(
     store_market_data(db_path, "AAA.US", recent_date, market_cap=120.0, currency="USD")
     store_market_data(db_path, "BBB.US", recent_date, market_cap=90.0, currency="USD")
 
-    monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 2)
-    monkeypatch.setattr(cli, "_ensure_metrics_wal_mode", lambda repo: "delete")
-    monkeypatch.setattr(cli, "METRICS_PROGRESS_INTERVAL_SECONDS", 0.0)
+    patch_cli(monkeypatch, "_metric_worker_count", lambda total: 2)
+    patch_cli(monkeypatch, "_ensure_metrics_wal_mode", lambda repo: "delete")
+    patch_cli(monkeypatch, "METRICS_PROGRESS_INTERVAL_SECONDS", 0.0)
 
     def fail_executor(max_workers):
         raise AssertionError("process executor should not be used without WAL")
 
-    monkeypatch.setattr(cli, "_create_process_pool_executor", fail_executor)
+    patch_cli(monkeypatch, "_create_process_pool_executor", fail_executor)
 
     rc = cli.cmd_compute_metrics_stage(
         database=str(db_path),
@@ -5380,17 +5379,17 @@ def test_run_metric_computation_batches_metric_writes(monkeypatch, tmp_path):
             commit=commit,
         )
 
-    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
-    monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 2)
-    monkeypatch.setattr(cli, "_ensure_metrics_wal_mode", lambda repo: "wal")
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "REGISTRY", {DummyMetric.id: DummyMetric})
+    patch_cli(monkeypatch, "_metric_worker_count", lambda total: 2)
+    patch_cli(monkeypatch, "_ensure_metrics_wal_mode", lambda repo: "wal")
+    patch_cli(
+        monkeypatch,
         "_create_process_pool_executor",
         lambda max_workers: InlineExecutor(),
     )
-    monkeypatch.setattr(cli, "_compute_metrics_for_symbol_worker", fake_worker)
-    monkeypatch.setattr(cli, "METRICS_WRITE_BATCH_SIZE", 2)
-    monkeypatch.setattr(cli, "METRICS_WRITE_BATCH_INTERVAL_SECONDS", 999.0)
+    patch_cli(monkeypatch, "_compute_metrics_for_symbol_worker", fake_worker)
+    patch_cli(monkeypatch, "METRICS_WRITE_BATCH_SIZE", 2)
+    patch_cli(monkeypatch, "METRICS_WRITE_BATCH_INTERVAL_SECONDS", 999.0)
     monkeypatch.setattr(MetricsRepository, "upsert_many", recording_upsert_many)
 
     rc = cli._run_metric_computation(
@@ -5528,21 +5527,21 @@ def test_run_metric_computation_parallel_profile_accumulates_worker_timings(
             compute_seconds=0.50 * len(symbols),
         )
 
-    monkeypatch.setattr(cli, "REGISTRY", {DummyMetric.id: DummyMetric})
-    monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 2)
-    monkeypatch.setattr(cli, "_ensure_metrics_wal_mode", lambda repo: "wal")
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "REGISTRY", {DummyMetric.id: DummyMetric})
+    patch_cli(monkeypatch, "_metric_worker_count", lambda total: 2)
+    patch_cli(monkeypatch, "_ensure_metrics_wal_mode", lambda repo: "wal")
+    patch_cli(
+        monkeypatch,
         "_create_process_pool_executor",
         lambda max_workers: InlineExecutor(),
     )
-    monkeypatch.setattr(
-        cli,
+    patch_cli(
+        monkeypatch,
         "_compute_metrics_for_symbol_batch_worker_profiled",
         fake_profiled_worker,
     )
-    monkeypatch.setattr(cli, "METRICS_COMPUTE_BATCH_SIZE", 2)
-    monkeypatch.setattr(cli, "METRICS_PROGRESS_INTERVAL_SECONDS", 0.0)
+    patch_cli(monkeypatch, "METRICS_COMPUTE_BATCH_SIZE", 2)
+    patch_cli(monkeypatch, "METRICS_PROGRESS_INTERVAL_SECONDS", 0.0)
 
     rc = cli._run_metric_computation(
         database=str(db_path),
@@ -5631,14 +5630,14 @@ def test_cmd_compute_metrics_stage_parallel_workers_skip_schema_init(
         def shutdown(self, wait=True, cancel_futures=False):
             return None
 
-    monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 2)
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "_metric_worker_count", lambda total: 2)
+    patch_cli(
+        monkeypatch,
         "_create_process_pool_executor",
         lambda max_workers: InlineExecutor(),
     )
-    monkeypatch.setattr(
-        cli, "_initialize_metric_read_schema", lambda *args, **kwargs: None
+    patch_cli(
+        monkeypatch, "_initialize_metric_read_schema", lambda *args, **kwargs: None
     )
 
     def locked_initialize_schema(self):
@@ -5683,9 +5682,9 @@ def test_cmd_compute_metrics_stage_process_pool_smoke(monkeypatch, tmp_path):
         provider="SEC",
     )
 
-    monkeypatch.setattr(cli, "_metric_worker_count", lambda total: 2)
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "_metric_worker_count", lambda total: 2)
+    patch_cli(
+        monkeypatch,
         "_create_process_pool_executor",
         _spawn_process_pool_executor,
     )
@@ -5893,9 +5892,9 @@ def test_cmd_normalize_fundamentals_sec(monkeypatch, tmp_path):
             fx_service_preload_all.append(preload_all)
 
     fake_normalizer = FakeNormalizer()
-    monkeypatch.setattr(cli, "FXService", FakeFXService)
-    monkeypatch.setattr(
-        cli, "SECFactsNormalizer", lambda fx_service=None: fake_normalizer
+    patch_cli(monkeypatch, "FXService", FakeFXService)
+    patch_cli(
+        monkeypatch, "SECFactsNormalizer", lambda fx_service=None: fake_normalizer
     )
 
     rc = cli.cmd_normalize_fundamentals(
@@ -5959,8 +5958,8 @@ def test_cmd_normalize_fundamentals_sec_skips_when_up_to_date(
                 )
             ]
 
-    monkeypatch.setattr(
-        cli, "SECFactsNormalizer", lambda fx_service=None: FakeNormalizer()
+    patch_cli(
+        monkeypatch, "SECFactsNormalizer", lambda fx_service=None: FakeNormalizer()
     )
 
     assert (
@@ -6009,8 +6008,8 @@ def test_cmd_normalize_fundamentals_sec_force_reprocesses_up_to_date_symbol(
                 )
             ]
 
-    monkeypatch.setattr(
-        cli, "SECFactsNormalizer", lambda fx_service=None: FakeNormalizer()
+    patch_cli(
+        monkeypatch, "SECFactsNormalizer", lambda fx_service=None: FakeNormalizer()
     )
 
     assert (
@@ -6076,13 +6075,13 @@ def test_cmd_normalize_fundamentals_bulk_sec(monkeypatch, tmp_path):
 
     normalization_repo = FinancialFactsRepository(db_path)
     normalization_repo.initialize_schema()
-    monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 1)
-    monkeypatch.setattr(cli, "_process_local_fx_service", None)
-    monkeypatch.setattr(cli, "_process_local_fx_service_db", None)
-    monkeypatch.setattr(cli, "FXService", FakeFXService)
+    patch_cli(monkeypatch, "_normalization_worker_count", lambda total: 1)
+    patch_cli(monkeypatch, "_process_local_fx_service", None)
+    patch_cli(monkeypatch, "_process_local_fx_service_db", None)
+    patch_cli(monkeypatch, "FXService", FakeFXService)
 
     normalizer = DummyNormalizer()
-    monkeypatch.setattr(cli, "SECFactsNormalizer", lambda fx_service=None: normalizer)
+    patch_cli(monkeypatch, "SECFactsNormalizer", lambda fx_service=None: normalizer)
 
     rc = cli.cmd_normalize_fundamentals_bulk(
         provider="SEC",
@@ -6141,9 +6140,9 @@ def test_cmd_normalize_fundamentals_bulk_sec_reprocesses_only_stale_symbols(
                 )
             ]
 
-    monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 1)
-    monkeypatch.setattr(
-        cli, "SECFactsNormalizer", lambda fx_service=None: DummyNormalizer()
+    patch_cli(monkeypatch, "_normalization_worker_count", lambda total: 1)
+    patch_cli(
+        monkeypatch, "SECFactsNormalizer", lambda fx_service=None: DummyNormalizer()
     )
 
     assert (
@@ -6322,9 +6321,9 @@ def test_cmd_normalize_fundamentals_eodhd(monkeypatch, tmp_path):
         ):
             fx_service_preload_all.append(preload_all)
 
-    monkeypatch.setattr(cli, "FXService", FakeFXService)
-    monkeypatch.setattr(
-        cli, "EODHDFactsNormalizer", lambda fx_service=None: FakeNormalizer()
+    patch_cli(monkeypatch, "FXService", FakeFXService)
+    patch_cli(
+        monkeypatch, "EODHDFactsNormalizer", lambda fx_service=None: FakeNormalizer()
     )
 
     rc = cli.cmd_normalize_fundamentals(
@@ -6459,8 +6458,8 @@ def test_cmd_normalize_fundamentals_eodhd_zero_row_normalization_records_state(
             calls.append(symbol)
             return []
 
-    monkeypatch.setattr(
-        cli, "EODHDFactsNormalizer", lambda fx_service=None: FakeNormalizer()
+    patch_cli(
+        monkeypatch, "EODHDFactsNormalizer", lambda fx_service=None: FakeNormalizer()
     )
 
     assert (
@@ -6577,11 +6576,13 @@ def test_cmd_normalize_fundamentals_cross_provider_reruns_when_facts_owned_by_ot
                 )
             ]
 
-    monkeypatch.setattr(
-        cli, "EODHDFactsNormalizer", lambda fx_service=None: FakeEODHDNormalizer()
+    patch_cli(
+        monkeypatch,
+        "EODHDFactsNormalizer",
+        lambda fx_service=None: FakeEODHDNormalizer(),
     )
-    monkeypatch.setattr(
-        cli, "SECFactsNormalizer", lambda fx_service=None: FakeSECNormalizer()
+    patch_cli(
+        monkeypatch, "SECFactsNormalizer", lambda fx_service=None: FakeSECNormalizer()
     )
 
     assert (
@@ -6672,7 +6673,7 @@ def test_cmd_normalize_fundamentals_stage_all_supported_filters_to_raw_symbols(
         captured["force"] = force
         return 0
 
-    monkeypatch.setattr(cli, "cmd_normalize_eodhd_fundamentals_bulk", fake_bulk)
+    patch_cli(monkeypatch, "cmd_normalize_eodhd_fundamentals_bulk", fake_bulk)
 
     rc = cli.cmd_normalize_fundamentals_stage(
         provider="EODHD",
@@ -6708,8 +6709,8 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_reports_freshness_scan(
         store_market_data(db_path, symbol, "2024-12-31", currency="USD")
         store_market_data(db_path, symbol, "2024-12-31", currency="USD")
 
-    monkeypatch.setattr(
-        cli,
+    patch_cli(
+        monkeypatch,
         "_plan_normalization_selection",
         lambda **kwargs: ([], {}, len(kwargs["symbols"])),
     )
@@ -6756,11 +6757,11 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_force_skips_freshness_scan(
                 )
             ]
 
-    monkeypatch.setattr(cli, "_plan_normalization_selection", fail_plan)
-    monkeypatch.setattr(
-        cli, "EODHDFactsNormalizer", lambda fx_service=None: FakeNormalizer()
+    patch_cli(monkeypatch, "_plan_normalization_selection", fail_plan)
+    patch_cli(
+        monkeypatch, "EODHDFactsNormalizer", lambda fx_service=None: FakeNormalizer()
     )
-    monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 1)
+    patch_cli(monkeypatch, "_normalization_worker_count", lambda total: 1)
 
     rc = cli.cmd_normalize_eodhd_fundamentals_bulk(
         database=str(db_path),
@@ -6819,13 +6820,13 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_suppresses_missing_fx_warnings_on
     )
     store_market_data(db_path, "AALB.AS", "2024-12-31", currency="EUR")
 
-    monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 2)
-    monkeypatch.setattr(cli, "_process_local_fx_service", None)
-    monkeypatch.setattr(cli, "_process_local_fx_service_db", None)
-    monkeypatch.setattr(cli, "_process_local_ticker_repo", None)
-    monkeypatch.setattr(cli, "_process_local_ticker_repo_db", None)
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "_normalization_worker_count", lambda total: 2)
+    patch_cli(monkeypatch, "_process_local_fx_service", None)
+    patch_cli(monkeypatch, "_process_local_fx_service_db", None)
+    patch_cli(monkeypatch, "_process_local_ticker_repo", None)
+    patch_cli(monkeypatch, "_process_local_ticker_repo_db", None)
+    patch_cli(
+        monkeypatch,
         "_create_process_pool_executor",
         _spawn_process_pool_executor,
     )
@@ -6884,8 +6885,8 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_continues_after_symbol_failure_wi
                 )
             ]
 
-    monkeypatch.setattr(cli, "EODHDFactsNormalizer", FakeNormalizer)
-    monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 3)
+    patch_cli(monkeypatch, "EODHDFactsNormalizer", FakeNormalizer)
+    patch_cli(monkeypatch, "_normalization_worker_count", lambda total: 3)
 
     class InlineExecutor:
         def submit(self, fn, *args, **kwargs):
@@ -6899,8 +6900,8 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_continues_after_symbol_failure_wi
         def shutdown(self, wait=True, cancel_futures=False):
             return None
 
-    monkeypatch.setattr(
-        cli,
+    patch_cli(
+        monkeypatch,
         "_create_process_pool_executor",
         lambda max_workers: InlineExecutor(),
     )
@@ -6985,14 +6986,14 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_interrupts_cleanly(
                 raise KeyboardInterrupt
 
     executor = InlineExecutor()
-    monkeypatch.setattr(cli, "EODHDFactsNormalizer", FakeNormalizer)
-    monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 2)
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "EODHDFactsNormalizer", FakeNormalizer)
+    patch_cli(monkeypatch, "_normalization_worker_count", lambda total: 2)
+    patch_cli(
+        monkeypatch,
         "_create_process_pool_executor",
         lambda max_workers: executor,
     )
-    monkeypatch.setattr(cli, "as_completed", interrupting_as_completed)
+    patch_cli(monkeypatch, "as_completed", interrupting_as_completed)
 
     rc = cli.cmd_normalize_eodhd_fundamentals_bulk(
         database=str(db_path),
@@ -7058,10 +7059,10 @@ def test_cmd_normalize_sec_facts_bulk_with_inline_executor(monkeypatch, tmp_path
         def shutdown(self, wait=True, cancel_futures=False):
             return None
 
-    monkeypatch.setattr(cli, "SECFactsNormalizer", FakeNormalizer)
-    monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 2)
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "SECFactsNormalizer", FakeNormalizer)
+    patch_cli(monkeypatch, "_normalization_worker_count", lambda total: 2)
+    patch_cli(
+        monkeypatch,
         "_create_process_pool_executor",
         lambda max_workers: InlineExecutor(),
     )
@@ -7116,11 +7117,11 @@ def test_cmd_normalize_us_facts_bulk_force_skips_freshness_scan(
                 )
             ]
 
-    monkeypatch.setattr(cli, "_plan_normalization_selection", fail_plan)
-    monkeypatch.setattr(
-        cli, "SECFactsNormalizer", lambda fx_service=None: FakeNormalizer()
+    patch_cli(monkeypatch, "_plan_normalization_selection", fail_plan)
+    patch_cli(
+        monkeypatch, "SECFactsNormalizer", lambda fx_service=None: FakeNormalizer()
     )
-    monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 1)
+    patch_cli(monkeypatch, "_normalization_worker_count", lambda total: 1)
 
     rc = cli.cmd_normalize_us_facts_bulk(
         database=str(db_path),
@@ -7169,9 +7170,9 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_process_pool_smoke(
         )
         store_market_data(db_path, symbol, "2024-12-31", currency="USD")
 
-    monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 2)
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "_normalization_worker_count", lambda total: 2)
+    patch_cli(
+        monkeypatch,
         "_create_process_pool_executor",
         _spawn_process_pool_executor,
     )
@@ -7232,9 +7233,9 @@ def test_cmd_normalize_sec_facts_bulk_process_pool_smoke(monkeypatch, tmp_path):
     for symbol in ("AAA.US", "BBB.US"):
         fund_repo.upsert("SEC", symbol, payload)
 
-    monkeypatch.setattr(cli, "_normalization_worker_count", lambda total: 2)
-    monkeypatch.setattr(
-        cli,
+    patch_cli(monkeypatch, "_normalization_worker_count", lambda total: 2)
+    patch_cli(
+        monkeypatch,
         "_create_process_pool_executor",
         _spawn_process_pool_executor,
     )
@@ -7486,7 +7487,7 @@ def test_cmd_refresh_security_metadata_reports_progress(tmp_path, capsys, monkey
         {"General": {"Sector": "Industrials", "Industry": "Machinery"}},
         exchange="US",
     )
-    monkeypatch.setattr(cli, "SECURITY_METADATA_PROGRESS_INTERVAL_SECONDS", 0.0)
+    patch_cli(monkeypatch, "SECURITY_METADATA_PROGRESS_INTERVAL_SECONDS", 0.0)
 
     rc = cli.cmd_refresh_security_metadata(
         database=str(db_path),
@@ -7553,8 +7554,8 @@ def test_cmd_refresh_security_metadata_cancels_cleanly(tmp_path, capsys, monkeyp
         "fetch_metadata_candidates",
         interrupting_fetch_metadata_candidates,
     )
-    monkeypatch.setattr(cli, "SECURITY_METADATA_PROGRESS_INTERVAL_SECONDS", 0.0)
-    monkeypatch.setattr(cli, "SECURITY_METADATA_CHUNK_SIZE", 1)
+    patch_cli(monkeypatch, "SECURITY_METADATA_PROGRESS_INTERVAL_SECONDS", 0.0)
+    patch_cli(monkeypatch, "SECURITY_METADATA_CHUNK_SIZE", 1)
 
     rc = cli.cmd_refresh_security_metadata(
         database=str(db_path),
@@ -7745,7 +7746,7 @@ criteria:
     def fail_full_reconcile(*args, **kwargs):
         pytest.fail("unexpected full reconcile in read-only bulk screening")
 
-    monkeypatch.setattr(cli, "_reconcile_eodhd_listing_scope", fail_full_reconcile)
+    patch_cli(monkeypatch, "_reconcile_eodhd_listing_scope", fail_full_reconcile)
 
     rc = cli.cmd_run_screen_bulk(
         config_path=str(screen_path),
@@ -7809,7 +7810,7 @@ criteria:
 """
     )
 
-    monkeypatch.setattr(cli, "SCREEN_PROGRESS_INTERVAL_SECONDS", 0.0)
+    patch_cli(monkeypatch, "SCREEN_PROGRESS_INTERVAL_SECONDS", 0.0)
 
     rc = cli.cmd_run_screen_stage(
         config_path=str(screen_path),
@@ -8122,8 +8123,8 @@ criteria:
 """
     )
 
-    monkeypatch.setattr(cli, "SCREEN_CONSOLE_PREVIEW_MAX_ROWS", 2)
-    monkeypatch.setattr(cli, "SCREEN_CONSOLE_MAX_DESCRIPTION_WIDTH", 36)
+    patch_cli(monkeypatch, "SCREEN_CONSOLE_PREVIEW_MAX_ROWS", 2)
+    patch_cli(monkeypatch, "SCREEN_CONSOLE_MAX_DESCRIPTION_WIDTH", 36)
 
     rc = cli.cmd_run_screen_stage(
         config_path=str(screen_path),
@@ -8174,7 +8175,7 @@ criteria:
 """
     )
 
-    monkeypatch.setattr(cli, "SCREEN_PROGRESS_INTERVAL_SECONDS", 0.0)
+    patch_cli(monkeypatch, "SCREEN_PROGRESS_INTERVAL_SECONDS", 0.0)
 
     rc = cli.cmd_run_screen_stage(
         config_path=str(screen_path),
@@ -8284,7 +8285,7 @@ criteria:
     def fail_full_reconcile(*args, **kwargs):
         pytest.fail("unexpected full reconcile in read-only canonical screening")
 
-    monkeypatch.setattr(cli, "_reconcile_eodhd_listing_scope", fail_full_reconcile)
+    patch_cli(monkeypatch, "_reconcile_eodhd_listing_scope", fail_full_reconcile)
 
     rc = cli.cmd_run_screen_stage(
         config_path=str(screen_path),
@@ -8712,7 +8713,7 @@ def test_cmd_report_metric_failures_reuses_persisted_failure_status_without_reco
         def compute(self, symbol, repo):
             raise AssertionError("expected persisted failure status to skip recompute")
 
-    monkeypatch.setattr(cli, "REGISTRY", {CachedMetric.id: CachedMetric})
+    patch_cli(monkeypatch, "REGISTRY", {CachedMetric.id: CachedMetric})
 
     rc = cli.cmd_report_metric_failures(
         database=str(db_path),
@@ -8859,7 +8860,7 @@ def test_cmd_report_screen_failures_reuses_persisted_failure_status_without_reco
         def compute(self, symbol, repo):
             raise AssertionError("expected persisted failure status to skip recompute")
 
-    monkeypatch.setattr(cli, "REGISTRY", {CachedMetric.id: CachedMetric})
+    patch_cli(monkeypatch, "REGISTRY", {CachedMetric.id: CachedMetric})
 
     screen_path = tmp_path / "screen.yml"
     screen_path.write_text(
@@ -8951,7 +8952,7 @@ criteria:
       value: 50
 """
     )
-    monkeypatch.setattr(cli, "SCREEN_PROGRESS_INTERVAL_SECONDS", 0.0)
+    patch_cli(monkeypatch, "SCREEN_PROGRESS_INTERVAL_SECONDS", 0.0)
 
     rc = cli.cmd_report_screen_failures(
         config_path=str(screen_path),
@@ -9193,8 +9194,8 @@ def test_cmd_report_screen_failures_recompute_uses_symbol_caches(
                 as_of=snapshot_a.as_of,
             )
 
-    monkeypatch.setattr(
-        cli,
+    patch_cli(
+        monkeypatch,
         "REGISTRY",
         {
             RepeatedFactsMetric.id: RepeatedFactsMetric,
@@ -9466,8 +9467,8 @@ def test_cmd_compute_metrics_prints_currency_invariant_summary(
                 as_of="2024-01-01",
             )
 
-    monkeypatch.setattr(
-        cli,
+    patch_cli(
+        monkeypatch,
         "REGISTRY",
         {
             GoodMetric.id: GoodMetric,
@@ -9520,8 +9521,8 @@ def test_cmd_compute_metrics_persists_metric_compute_status_success_and_failure(
         def compute(self, symbol, repo):
             raise RuntimeError("boom")
 
-    monkeypatch.setattr(
-        cli,
+    patch_cli(
+        monkeypatch,
         "REGISTRY",
         {
             GoodMetric.id: GoodMetric,
