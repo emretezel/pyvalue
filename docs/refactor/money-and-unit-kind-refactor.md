@@ -44,21 +44,32 @@ A single pre-refactor backup covers the whole effort:
 
 \* Phase 2 landed with the price migration numbered **069**; Phase 2.6 renumbers
 it to **070** so the currency-less-listing purge (**069**) runs *first* — price
-scaling must run after the purge. Migrations have not been applied to the
-production DB, so renumbering an as-yet-unapplied migration is safe.
+scaling must run after the purge. The renumber was made before the migrations were
+applied, so it was safe; the DB has since been migrated to the final numbering.
 
-**All code phases (0–5b) are landed on `main`.** The only remaining work is the
-author's one-time manual production rebuild (after the pre-refactor backup):
-1. apply migrations **069–072** to `data/pyvalue.db`;
-2. populate `fx_rates` (the FX refresh command) for the pairs/dates cross-currency
+**All code phases (0–5b) are landed on `main`, and migrations 069–072 have been
+applied** to `data/pyvalue.db` (`schema_migrations` is at **v72**, the head). The
+schema confirms it: `financial_facts.unit_kind` (no legacy `unit`),
+`market_data.market_cap` dropped, `listing.currency` NOT NULL. The DB is now in a
+**half-rebuilt** state:
+- `financial_facts` was rebuilt **empty** (migration 071) and
+  `fundamentals_normalization_state` cleared — it has **0 rows** and is not yet
+  re-normalised;
+- `metrics` (~2.4M rows) and `metric_compute_status` (~4.9M rows) were **not**
+  cleared by any migration, so they still hold **stale pre-refactor values**.
+
+Remaining work is the author's one-time data rebuild (the pre-refactor backup
+`data/backups/pyvalue-pre-refactor.db` is the safety net; `fundamentals_raw` — the
+re-normalise source — is intact):
+1. populate `fx_rates` (the FX refresh command) for the pairs/dates cross-currency
    listings need — otherwise those metrics skip with `missing_fx_rate`;
-3. **normalise** — rebuild `financial_facts` from `fundamentals_raw` (now `unit_kind`
-   + major currency, weighted-average shares as `count`);
-4. clear `metrics` / `metric_compute_status`, then **compute** — rebuild metrics with
+2. **normalise** — repopulate `financial_facts` from `fundamentals_raw` (now
+   `unit_kind` + major currency, weighted-average shares as `count`);
+3. clear `metrics` / `metric_compute_status`, then **compute** — rebuild metrics with
    `Money` + FX + on-demand market cap.
 
-Until then the schema and code carry the new design while the 42.5 GB DB still holds
-pre-refactor rows.
+Until the rebuild runs, `financial_facts` is empty and `metrics` holds values computed
+under the old logic.
 
 ## Notes & deviations
 - **Test layout:** the repo uses a *flat* `tests/` tree (no `tests/unit|regression|integration/`),
