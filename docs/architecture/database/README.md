@@ -25,7 +25,7 @@ Important structural notes:
 - **`provider_listing` is the operational root** for provider-scoped ingestion and market-data workflows. Migration 054 dropped the denormalised `provider_listing.provider_id`; the owning provider is reachable via `provider_exchange.provider_id` through `provider_exchange_id`.
 - **`fx_rates.rate` is `REAL`** under the project REAL-everywhere policy (migration 045 converted the legacy TEXT `rate_text` column).
 - `fundamentals_raw`, `metrics`, and `metric_compute_status` each store the latest row per logical key, not a full history.
-- **Migrations are the single source of truth for schema** (tables, indexes, and views). Migration 042 added `provider_listing_catalog` and `supported_tickers`, migration 044 added the `securities`, `providers`, and `exchange_provider` compat views, migration 062 added `primary_provider_listing_catalog`. Runtime code in `storage.py` does not issue `CREATE TABLE` / `CREATE VIEW` outside the migration framework.
+- **Migrations are the single source of truth for schema** (tables, indexes, and views). Migration 042 added `provider_listing_catalog` and `supported_tickers`, migration 044 added the `securities`, `providers`, and `exchange_provider` compat views, migration 062 added `primary_provider_listing_catalog`. Runtime code in the `persistence/storage/` package does not issue `CREATE TABLE` / `CREATE VIEW` outside the migration framework.
 - **`schema_migrations` is single-row by construction** (migration 063): the column shape is `(id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL)` so stray or duplicate version rows are impossible.
 
 Table groups:

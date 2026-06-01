@@ -28,8 +28,9 @@ Main application subsystems in `src/pyvalue/`:
 - `normalization/`
 - `marketdata/`
 - `metrics/`
-- `storage.py` and `migrations.py`
-- `cli.py`
+- `money/` and `screening/`
+- `persistence/` (`storage/`, `migrations.py`, `database_review_docs.py`)
+- `cli/`
 
 ## Common Development Workflows
 

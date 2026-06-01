@@ -113,18 +113,18 @@ author before implementation; it supersedes the original plan's "wrap each input
 > next `normalise`, which rebuilds `financial_facts` from raw — no migration; the
 > schema already permits `count` + NULL currency.)
 
-**Problem this closes.** `FactRecord` (`storage.py:319`) carries `value: float` next
+**Problem this closes.** `FactRecord` (`persistence/storage/records.py`) carries `value: float` next
 to `currency: Optional[str]` and `unit_kind`, and the DAO hands that out unchanged.
 Metrics read `record.value` directly as a float (~30 sites) with nothing coupling the
 amount to its currency — `a.value + b.value` across two currencies type-checks fine
 today. `Money` only buys safety if that float is *unreachable* for a monetary fact.
 
 **Enforcement = a typed read layer in `facts.py` (the metric-facing boundary).**
-The raw SQLite DAO (`FinancialFactsRepository`, `storage.py:4421`) is left
+The raw SQLite DAO (`FinancialFactsRepository`, `persistence/storage/financial_facts.py`) is left
 **unchanged** — it still returns `FactRecord` (bare `float` + `currency`). The
 `facts.py` access layer that metrics actually receive is where `Money` is minted, so
-`storage.py` stays a thin raw store and the cycle that would arise from a Money-bearing
-`storage` type (`money.py` already imports `storage`) is avoided.
+`persistence/storage/` stays a thin raw store and the cycle that would arise from a Money-bearing
+`storage` type (`money/conversion.py` already imports `persistence.storage`) is avoided.
 - **Kind-tagged read objects.** `MonetaryFact` carries a `Money` and has **no**
   `.value`; `ScalarFact` carries a bare `float`. The discriminant is the stored
   `unit_kind` (`monetary`/`per_share` → `MonetaryFact`; `count`/`ratio`/`percent`/
@@ -137,7 +137,7 @@ The raw SQLite DAO (`FinancialFactsRepository`, `storage.py:4421`) is left
   validates that against the stored `unit_kind` and **raises** on a real mismatch (a
   metric asking for money on a count concept). The accessors are defined over the raw
   `latest_fact` / `facts_for_concept`, so the batch-cache subclass
-  (`_CachedRegionFactsRepository`, `cli.py:3239`) — which overrides only the raw readers
+  (`_CachedRegionFactsRepository`, `cli/_repos.py`) — which overrides only the raw readers
   — inherits them for free.
 - **`FactReader` + `RawFactSource` protocols.** Metrics depend on `FactReader` (the four
   typed accessors), not a concrete repo, closing the duck-typed
@@ -339,7 +339,7 @@ listings are deleted (not backfilled), and the column is made NOT NULL.
 - Ingest (`marketdata/service.py`): `prepare_price_data` now collapses the
   quoted price to its major currency via `normalize_monetary_amount` and stores
   that; removed the inverse helper `_quote_unit_price`.
-- Read path (`storage.py`): `latest_snapshot_record` / `latest_snapshots_many`
+- Read path (`persistence/storage/`): `latest_snapshot_record` / `latest_snapshots_many`
   report `canonical_trading_currency(listing.currency)` so the (price, currency)
   pair is self-consistent and downstream normalization never divides twice.
 - Migration **070** divides existing `market_data.price` by 100 for listings

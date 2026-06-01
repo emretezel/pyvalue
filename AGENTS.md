@@ -76,7 +76,7 @@ When proposing schema changes, always include:
 - Re-evaluate the structure after significant changes. If a better layout has become clear, reorganise — a clean structure is worth the churn.
 
 ### Current Layout
-- `src/pyvalue/`: core package. `ingestion/`, `normalization/`, `marketdata/`, `metrics/`, and `universe/` hold domain logic; `cli.py` wires the CLI; the `persistence/` package (`storage.py`, `migrations.py`, `database_review_docs.py`) manages SQLite.
+- `src/pyvalue/`: core package. `ingestion/`, `normalization/`, `marketdata/`, `metrics/`, `money/`, `screening/`, and `universe/` hold domain logic; the `cli/` package wires the CLI; the `persistence/` package (`storage/`, `migrations.py`, `database_review_docs.py`) manages SQLite. Foundational modules (`currency.py`, `facts.py`, `config.py`, `logging_utils.py`, `reporting.py`) stay at the package root.
 - `tests/`: pytest suite, mirroring the source tree. Use `tests/unit/`, `tests/regression/`, and `tests/integration/` subdirectories; the canonical layout is documented in `docs/architecture.md`.
 - `screeners/`: YAML screen definitions (e.g., `screeners/value.yml`).
 - `data/`: local artifacts (`data/pyvalue.db`, logs, `data/screen_results_*.csv`).
