@@ -1,7 +1,10 @@
 """Tests for purge-us-nonfilers CLI."""
 
 from pyvalue.cli import cmd_purge_us_nonfilers
-from pyvalue.storage import FundamentalsRepository, SupportedTickerRepository
+from pyvalue.persistence.storage import (
+    FundamentalsRepository,
+    SupportedTickerRepository,
+)
 from pyvalue.universe import Listing
 
 

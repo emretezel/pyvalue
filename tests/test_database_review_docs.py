@@ -8,8 +8,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-import pyvalue.database_review_docs as database_review_docs
-from pyvalue.database_review_docs import (
+import pyvalue.persistence.database_review_docs as database_review_docs
+from pyvalue.persistence.database_review_docs import (
     TableInventoryEntry,
     TableSchema,
     TableStats,

@@ -85,7 +85,7 @@ from pyvalue.logging_utils import (
     suppress_console_missing_fx_warnings,
 )
 from pyvalue.facts import RegionFactsRepository
-from pyvalue.storage import (
+from pyvalue.persistence.storage import (
     EntityMetadataRepository,
     ExchangeProviderRepository,
     FXRefreshStateRepository,

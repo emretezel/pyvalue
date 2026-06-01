@@ -19,7 +19,7 @@ import requests  # type: ignore[import-untyped]
 
 from pyvalue.config import Config
 from pyvalue.currency import normalize_currency_code, normalize_monetary_amount
-from pyvalue.storage import FXRateRecord, FXRatesRepository
+from pyvalue.persistence.storage import FXRateRecord, FXRatesRepository
 
 
 LOGGER = logging.getLogger(__name__)

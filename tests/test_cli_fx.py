@@ -11,7 +11,7 @@ import sqlite3
 import pyvalue.cli as cli
 from pyvalue.fx import FXCatalogEntry
 from pyvalue.screening import RankingDefinition, RankingMetric, ScreenDefinition
-from pyvalue.storage import (
+from pyvalue.persistence.storage import (
     EntityMetadataRepository,
     FXRateRecord,
     FXRatesRepository,

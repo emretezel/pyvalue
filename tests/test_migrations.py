@@ -3,7 +3,11 @@ import sqlite3
 
 import pytest
 
-from pyvalue.migrations import MIGRATIONS, _ensure_migrations_table, apply_migrations
+from pyvalue.persistence.migrations import (
+    MIGRATIONS,
+    _ensure_migrations_table,
+    apply_migrations,
+)
 
 
 def _create_legacy_listings_table(conn: sqlite3.Connection) -> None:
@@ -4107,7 +4111,7 @@ def test_migration_068_backfills_from_updated_at(tmp_path):
     """Migration 068 maps empty-period rows to INSTANT/TTM and re-dates them
     from ``General.UpdatedAt`` in the cached fundamentals payload."""
 
-    from pyvalue.migrations import _migration_068_fiscal_period_check
+    from pyvalue.persistence.migrations import _migration_068_fiscal_period_check
 
     db_path = tmp_path / "fiscal-period-backfill.sqlite"
     applied = apply_migrations(db_path)
@@ -4186,7 +4190,7 @@ def test_migration_068_falls_back_to_last_fetched_at_when_updated_at_missing(
 ):
     """If General.UpdatedAt is absent we fall back to DATE(last_fetched_at)."""
 
-    from pyvalue.migrations import _migration_068_fiscal_period_check
+    from pyvalue.persistence.migrations import _migration_068_fiscal_period_check
 
     db_path = tmp_path / "fiscal-period-backfill-fallback.sqlite"
     apply_migrations(db_path)
@@ -4240,7 +4244,9 @@ def test_migration_070_divides_subunit_prices_to_major(tmp_path):
     ``listing.currency`` and rewrites ``market_data.price``.
     """
 
-    from pyvalue.migrations import _migration_070_market_data_price_major_currency
+    from pyvalue.persistence.migrations import (
+        _migration_070_market_data_price_major_currency,
+    )
 
     db_path = tmp_path / "subunit-price.sqlite"
     with sqlite3.connect(db_path) as conn:
@@ -4296,7 +4302,9 @@ def test_migration_069_purges_currencyless_listings_and_dependents(tmp_path):
     ``currency TEXT NOT NULL``.
     """
 
-    from pyvalue.migrations import _migration_069_purge_currencyless_listings
+    from pyvalue.persistence.migrations import (
+        _migration_069_purge_currencyless_listings,
+    )
 
     db_path = tmp_path / "purge-currencyless.sqlite"
     with sqlite3.connect(db_path) as conn:
@@ -4522,7 +4530,9 @@ def test_migration_072_drops_market_cap_and_preserves_rows(tmp_path):
     """Migration 072 drops derived ``market_data.market_cap`` while copying every
     other column and row (market_data is not regenerated from raw)."""
 
-    from pyvalue.migrations import _migration_072_drop_market_data_market_cap
+    from pyvalue.persistence.migrations import (
+        _migration_072_drop_market_data_market_cap,
+    )
 
     db_path = tmp_path / "market-cap-072.sqlite"
     with sqlite3.connect(db_path) as conn:

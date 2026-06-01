@@ -8,7 +8,7 @@ from datetime import date, timedelta
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics.long_term_debt import LongTermDebtMetric
 from pyvalue.normalization import SECFactsNormalizer
-from pyvalue.storage import (
+from pyvalue.persistence.storage import (
     FinancialFactsRepository,
     MarketDataRepository,
     SupportedTickerRepository,

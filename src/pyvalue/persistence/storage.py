@@ -34,7 +34,7 @@ from pyvalue.currency import (
     raw_currency_code,
 )
 from pyvalue.marketdata.base import MarketDataUpdate, PriceData
-from pyvalue.migrations import apply_migrations
+from .migrations import apply_migrations
 from pyvalue.universe import Listing
 
 

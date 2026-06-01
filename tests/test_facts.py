@@ -24,7 +24,7 @@ from pyvalue.facts import (
     to_scalar_fact,
 )
 from pyvalue.money import Money
-from pyvalue.storage import FactRecord
+from pyvalue.persistence.storage import FactRecord
 
 
 def _fact(

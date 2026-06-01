@@ -21,7 +21,7 @@ from pyvalue.marketdata import (
     PriceData,
 )
 from pyvalue.facts import RegionFactsRepository
-from pyvalue.storage import (
+from pyvalue.persistence.storage import (
     FinancialFactsRepository,
     MarketDataRepository,
     SupportedTickerRepository,

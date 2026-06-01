@@ -11,7 +11,7 @@ from pyvalue.metrics.eps_average import EPSAverageSixYearMetric
 from pyvalue.metrics.long_term_debt import LongTermDebtMetric
 from pyvalue.metrics.roc_greenblatt import ROCGreenblattMetric
 from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS
-from pyvalue.storage import (
+from pyvalue.persistence.storage import (
     FactRecord,
     FinancialFactsRepository,
     MarketDataRepository,

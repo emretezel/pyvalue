@@ -22,7 +22,7 @@ from pyvalue.metrics.utils import (
     sum_money,
 )
 from pyvalue.money import Money
-from pyvalue.storage import MarketDataRepository
+from pyvalue.persistence.storage import MarketDataRepository
 
 EPS_CONCEPTS = ["EarningsPerShare"]
 EQUITY_CONCEPTS = ["StockholdersEquity"]

@@ -23,7 +23,7 @@ from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics import REGISTRY
 from pyvalue.metrics.base import MetricCurrencyInvariantError, MetricResult
 from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS
-from pyvalue.storage import (
+from pyvalue.persistence.storage import (
     EntityMetadataRepository,
     ExchangeProviderRepository,
     FinancialFactsRefreshStateRepository,

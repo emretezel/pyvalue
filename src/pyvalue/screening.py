@@ -21,7 +21,7 @@ from pyvalue.currency import (
 )
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.fx import FXService
-from pyvalue.storage import (
+from pyvalue.persistence.storage import (
     FinancialFactsRepository,
     MarketDataRepository,
     MetricRecord,

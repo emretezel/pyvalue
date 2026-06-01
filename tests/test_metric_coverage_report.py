@@ -5,7 +5,7 @@ from datetime import date
 from pyvalue.cli import cmd_report_metric_coverage
 from pyvalue.metrics.working_capital import WorkingCapitalMetric
 from pyvalue.metrics.current_ratio import CurrentRatioMetric
-from pyvalue.storage import (
+from pyvalue.persistence.storage import (
     FactRecord,
     FinancialFactsRepository,
     MarketDataRepository,

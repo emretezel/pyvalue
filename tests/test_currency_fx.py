@@ -26,7 +26,7 @@ from pyvalue.fx import (
     MissingFXRateError,
     parse_eodhd_fx_catalog_entry,
 )
-from pyvalue.storage import FXRateRecord, FXRatesRepository
+from pyvalue.persistence.storage import FXRateRecord, FXRatesRepository
 
 
 class _ExplodingProvider:

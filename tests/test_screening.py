@@ -14,7 +14,7 @@ from pyvalue.screening import (
     ranking_metric_ids,
     screen_metric_ids,
 )
-from pyvalue.storage import (
+from pyvalue.persistence.storage import (
     FXRateRecord,
     FXRatesRepository,
     FinancialFactsRepository,

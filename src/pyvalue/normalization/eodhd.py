@@ -22,7 +22,7 @@ from pyvalue.currency import (
 )
 from pyvalue.fx import FXService
 from pyvalue.money import choose_target_currency, convert_money_value
-from pyvalue.storage import FactRecord
+from pyvalue.persistence.storage import FactRecord
 
 FactKey = tuple[str, str, str]
 FactIndex = Dict[str, Dict[FactKey, FactRecord]]

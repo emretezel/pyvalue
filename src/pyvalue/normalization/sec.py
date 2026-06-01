@@ -18,7 +18,7 @@ from pyvalue.currency import (
 from pyvalue.fx import FXService
 from pyvalue.money import choose_target_currency, convert_money_value
 from pyvalue.metrics.utils import is_recent_fact
-from pyvalue.storage import FactRecord
+from pyvalue.persistence.storage import FactRecord
 
 # Concepts needed to compute the initial set of metrics. Include the most common
 # GAAP tags plus frequent synonyms across industries so normalization yields data

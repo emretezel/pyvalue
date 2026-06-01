@@ -19,7 +19,7 @@ from pyvalue.currency import (
     normalize_monetary_amount,
 )
 from pyvalue.fx import FXService, MissingFXRateError
-from pyvalue.storage import FactRecord
+from pyvalue.persistence.storage import FactRecord
 
 
 _EPHEMERAL_FX_DATABASE = Path(tempfile.gettempdir()) / "pyvalue_ephemeral_fx.db"

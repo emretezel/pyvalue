@@ -16,7 +16,7 @@ if str(SRC_ROOT) not in sys.path:
 
 
 def _main() -> int:
-    from pyvalue.database_review_docs import main
+    from pyvalue.persistence.database_review_docs import main
 
     return main()
 

@@ -8,7 +8,7 @@ import pytest
 from pyvalue.marketdata.eodhd import EODHDProvider
 from pyvalue.marketdata.base import PriceData
 from pyvalue.marketdata.service import MarketDataService
-from pyvalue.storage import (
+from pyvalue.persistence.storage import (
     MarketDataRepository,
     SupportedTickerRepository,
 )

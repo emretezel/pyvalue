@@ -122,7 +122,7 @@ from pyvalue.metrics.utils import (
     metric_fx_service_context,
 )
 from pyvalue.metrics.working_capital import WorkingCapitalMetric
-from pyvalue.storage import FactRecord, FXRateRecord, FXRatesRepository
+from pyvalue.persistence.storage import FactRecord, FXRateRecord, FXRatesRepository
 
 
 class _TickerCurrencyRepo(TypedFactReaderMixin):
@@ -402,7 +402,7 @@ def test_market_cap_money_pairs_share_count_with_codated_price(tmp_path):
     # latest share-count fact by the price AS OF that fact's date, not by the
     # most recent price.
     from pyvalue.metrics.utils import market_cap_money
-    from pyvalue.storage import (
+    from pyvalue.persistence.storage import (
         FinancialFactsRepository,
         MarketDataRepository,
         SupportedTickerRepository,

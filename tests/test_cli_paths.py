@@ -11,7 +11,7 @@ from pyvalue.cli import (
     _resolve_provider_scope_rows,
     _validate_scope_selector,
 )
-from pyvalue.storage import SupportedTickerRepository
+from pyvalue.persistence.storage import SupportedTickerRepository
 from pyvalue.universe import Listing
 
 

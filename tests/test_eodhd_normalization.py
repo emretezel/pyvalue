@@ -1,6 +1,6 @@
 from pyvalue.fx import FXService
 from pyvalue.normalization.eodhd import EODHDFactsNormalizer
-from pyvalue.storage import FXRateRecord, FXRatesRepository
+from pyvalue.persistence.storage import FXRateRecord, FXRatesRepository
 
 
 def test_eodhd_normalizes_ppe_net():

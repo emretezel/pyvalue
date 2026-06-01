@@ -1,8 +1,8 @@
 import sqlite3
 from datetime import date, timedelta
 
-import pyvalue.storage as storage
-from pyvalue.storage import (
+import pyvalue.persistence.storage as storage
+from pyvalue.persistence.storage import (
     EntityMetadataRepository,
     ExchangeProviderRepository,
     ExchangeRepository,
@@ -1683,7 +1683,7 @@ def test_financial_facts_repository_facts_for_symbols_many_concept_filter(tmp_pa
 def test_metrics_repository_upsert_many_with_external_connection(monkeypatch, tmp_path):
     """When a connection is supplied the persistence path reuses it."""
 
-    from pyvalue.storage import StoredMetricRow
+    from pyvalue.persistence.storage import StoredMetricRow
 
     db_path = tmp_path / "metrics-external-conn.db"
     repo = MetricsRepository(db_path)
@@ -1778,7 +1778,7 @@ def test_sqlite_store_connect_applies_performance_pragmas(tmp_path):
 def test_migration_029_creates_fin_facts_security_concept_latest_index(tmp_path):
     """Migration 029 ensures the composite preload index exists on existing DBs."""
 
-    from pyvalue.migrations import apply_migrations
+    from pyvalue.persistence.migrations import apply_migrations
 
     db_path = tmp_path / "migration-029.db"
     repo = FinancialFactsRepository(db_path)

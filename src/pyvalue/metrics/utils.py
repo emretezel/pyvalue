@@ -26,7 +26,7 @@ from pyvalue.facts import FactView, RawFactSource
 from pyvalue.fx import FXService
 from pyvalue.metrics.base import MetricCurrencyInvariantError
 from pyvalue.money import CurrencyMismatchError, Money, fx_service_for_context
-from pyvalue.storage import FactRecord, MarketDataRepository
+from pyvalue.persistence.storage import FactRecord, MarketDataRepository
 
 # Default freshness windows (days)
 MAX_FACT_AGE_DAYS = 400

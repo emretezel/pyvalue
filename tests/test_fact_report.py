@@ -9,7 +9,7 @@ from pyvalue.cli import cmd_report_fact_freshness
 from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS
 from pyvalue.metrics.working_capital import WorkingCapitalMetric
 from pyvalue.reporting import compute_fact_coverage
-from pyvalue.storage import (
+from pyvalue.persistence.storage import (
     FactRecord,
     FinancialFactsRepository,
     SupportedTickerRepository,

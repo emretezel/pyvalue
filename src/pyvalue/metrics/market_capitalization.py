@@ -12,7 +12,7 @@ from typing import Optional
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import SHARE_COUNT_CONCEPTS, market_cap_money
-from pyvalue.storage import MarketDataRepository
+from pyvalue.persistence.storage import MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
 

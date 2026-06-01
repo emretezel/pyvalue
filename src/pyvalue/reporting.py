@@ -10,7 +10,7 @@ from typing import Dict, List, Sequence, Tuple, Type
 
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS, is_recent_fact
-from pyvalue.storage import FactRecord, FinancialFactsRepository
+from pyvalue.persistence.storage import FactRecord, FinancialFactsRepository
 
 
 @dataclass

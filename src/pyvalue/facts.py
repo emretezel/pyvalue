@@ -32,7 +32,7 @@ from typing import List, Optional, Protocol, runtime_checkable
 
 from pyvalue.currency import MetricUnitKind, is_monetary_unit_kind
 from pyvalue.money import Money
-from pyvalue.storage import FactRecord
+from pyvalue.persistence.storage import FactRecord
 
 LOGGER = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ class FactView(Protocol):
     The metric *metadata* helpers (recency, fiscal-year frame filtering,
     quarterly selection) only ever read these provenance fields -- never the
     amount -- so typing them against this protocol lets them accept both a raw
-    :class:`~pyvalue.storage.FactRecord` (plain attributes) and a kind-tagged
+    :class:`~pyvalue.persistence.storage.FactRecord` (plain attributes) and a kind-tagged
     :class:`MonetaryFact`/:class:`ScalarFact` (properties) interchangeably.
     Declared as read-only properties so a plain attribute *or* a ``@property``
     satisfies it structurally.

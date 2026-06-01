@@ -84,7 +84,7 @@ FX web fetches happen during normalization.
 
 - `src/pyvalue/normalization/`: provider-specific normalization logic
 - `src/pyvalue/facts.py`: shared fact abstractions
-- `src/pyvalue/storage.py`: persistence for normalized facts
+- `src/pyvalue/persistence/storage.py`: persistence for normalized facts
 
 ## When to Update Normalization
 

@@ -26,7 +26,7 @@ from pyvalue.metrics.owner_earnings_equity import (
 )
 from pyvalue.metrics.utils import SHARE_COUNT_CONCEPTS, market_cap_money
 from pyvalue.money import Money
-from pyvalue.storage import MarketDataRepository
+from pyvalue.persistence.storage import MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
 
