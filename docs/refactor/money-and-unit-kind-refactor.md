@@ -39,7 +39,8 @@ A single pre-refactor backup covers the whole effort:
 | 2.6 | Purge currency-less listings + `listing.currency` NOT NULL + migration 069 | Landed (`df117d4`) |
 | 3 | `unit` → `unit_kind` rebuild + migration 071 | Landed (`a1bf04d`) |
 | 4 | Remove `market_data.market_cap` + migration 072 | In review |
-| 5 | Full `Money` adoption across metrics + docs/rule update | Not started |
+| 5a | Typed fact read boundary (`MonetaryFact`/`ScalarFact` + `FactReader`) + metric sweep | In progress |
+| 5b | FX-convert inputs to listing currency + docs/rule update | Not started |
 
 \* Phase 2 landed with the price migration numbered **069**; Phase 2.6 renumbers
 it to **070** so the currency-less-listing purge (**069**) runs *first* — price
@@ -54,6 +55,106 @@ production DB, so renumbering an as-yet-unapplied migration is safe.
 - **Hypothesis** was installed in the env but undeclared; added to
   `pyproject.toml` `[project.optional-dependencies].dev` in Phase 1.
 - **Python** is `>=3.12` per `pyproject.toml` (CLAUDE.md's ">=3.9" is stale).
+
+### Phase 5 — full `Money` adoption + type-safe fact read boundary
+Phase 5 is where `Money` stops being a metrics-only helper and becomes the **only**
+way a monetary value reaches metric arithmetic. The design below was agreed with the
+author before implementation; it supersedes the original plan's "wrap each input in
+`Money` at the call site" sketch, which left the bare-float magnitude reachable.
+
+> **5a progress — foundation landed in the working tree (pending review).**
+> `src/pyvalue/facts.py` now defines `MonetaryFact` / `ScalarFact` (over a shared
+> `_TypedFact`), the `to_monetary_fact` / `to_scalar_fact` mappers, the `FactReader`
+> and `RawFactSource` protocols, and the four typed accessors on
+> `RegionFactsRepository`. `tests/test_facts.py` (12 tests) covers minting,
+> per-share-is-money, subunit collapse, wrong-kind raises, and the currency-less drop.
+> Gate green: ruff, mypy (93 files), 845 pytest. **Next:** sweep the 36 metric files
+> onto the typed accessors + `Money` arithmetic (task #8).
+
+**Problem this closes.** `FactRecord` (`storage.py:319`) carries `value: float` next
+to `currency: Optional[str]` and `unit_kind`, and the DAO hands that out unchanged.
+Metrics read `record.value` directly as a float (~30 sites) with nothing coupling the
+amount to its currency — `a.value + b.value` across two currencies type-checks fine
+today. `Money` only buys safety if that float is *unreachable* for a monetary fact.
+
+**Enforcement = a typed read layer in `facts.py` (the metric-facing boundary).**
+The raw SQLite DAO (`FinancialFactsRepository`, `storage.py:4421`) is left
+**unchanged** — it still returns `FactRecord` (bare `float` + `currency`). The
+`facts.py` access layer that metrics actually receive is where `Money` is minted, so
+`storage.py` stays a thin raw store and the cycle that would arise from a Money-bearing
+`storage` type (`money.py` already imports `storage`) is avoided.
+- **Kind-tagged read objects.** `MonetaryFact` carries a `Money` and has **no**
+  `.value`; `ScalarFact` carries a bare `float`. The discriminant is the stored
+  `unit_kind` (`monetary`/`per_share` → `MonetaryFact`; `count`/`ratio`/`percent`/
+  `multiple`/`other` → `ScalarFact`). The monetary magnitude is unreachable as a float,
+  so a metric cannot combine currencies without going through `Money` (which raises).
+- **Intent-revealing typed accessors, not call-site `isinstance`.**
+  `RegionFactsRepository` exposes `latest_monetary_fact` / `monetary_facts_for_concept`
+  (→ `MonetaryFact`) and `latest_scalar_fact` / `scalar_facts_for_concept` (→
+  `ScalarFact`). A metric picks the accessor for the kind it expects; the layer
+  validates that against the stored `unit_kind` and **raises** on a real mismatch (a
+  metric asking for money on a count concept). The accessors are defined over the raw
+  `latest_fact` / `facts_for_concept`, so the batch-cache subclass
+  (`_CachedRegionFactsRepository`, `cli.py:3239`) — which overrides only the raw readers
+  — inherits them for free.
+- **`FactReader` + `RawFactSource` protocols.** Metrics depend on `FactReader` (the four
+  typed accessors), not a concrete repo, closing the duck-typed
+  `hasattr(repo, "latest_fact")` hole (`metrics/utils.py:72`). `RegionFactsRepository`
+  now wraps a `RawFactSource` (structural `latest_fact` / `facts_for_concept`), so
+  in-memory fakes and the cache satisfy it without subclassing the SQLite DAO.
+- **Write DTO vs read object.** `FactRecord` stays the storage/write row (bare `float`,
+  built by the normalizer); the layer maps it to the kind-tagged read object, ending
+  `FactRecord`'s double-duty without touching the write path.
+
+**Where `Money` lives (and where it must not).**
+- Used at three layers: **metric arithmetic** (the consumer), the **`facts.py` read
+  layer** (where a stored float is minted into `Money` — the single conversion point),
+  and **market data + FX** (a price is money; `Money.convert` already delegates to
+  `FXService`).
+- *Not* used in **storage rows or normalization internals**: SQLite stores `REAL value`
+  + `currency` + `unit_kind` (a `Money` object cannot be stored), and normalization is
+  the *producer* of the major amount `Money` requires (subunit→major collapse happens
+  there). `Money` is a read-time, in-memory domain type and is never persisted.
+
+**Metric rework (the locked currency rule, applied).** Each metric resolves
+**target = listing currency** (`require_metric_ticker_currency`, `metrics/utils.py:162`),
+then converts every `Money` input via `Money.convert(target, fx, as_of)` — **logging each
+conversion** — before any arithmetic; a missing FX rate skips the metric with a
+structured reason (`MetricCurrencyInvariantError`; add a `missing_fx_rate` reason code
+alongside the existing `missing_input_currency` / `missing_trading_currency` /
+`currency_mismatch`). This replaces the assert-based `normalize_metric_amount`
+(`:273`) / `ensure_metric_currency` (`:221`) flow. Cross-currency mixing then becomes
+impossible *by construction* (`Money` raises) rather than by convention.
+
+**Share-count denominators.** Share *counts* are `ScalarFact` (`unit_kind = count`, no
+currency); `per_share` values (EPS, DPS) are `MonetaryFact` (they carry a currency).
+This fixes the Phase 3 known item — metrics that still currency-validate a share-count
+denominator (e.g. `fcf_per_share_cagr_10y`) — by making the count a scalar the type
+system will not let you treat as money.
+
+**Docs/rule.** Update CLAUDE.md + AGENTS.md (byte-identical): metrics convert all
+monetary inputs to the listing currency via `fx_rates`, logging each conversion; a
+missing rate skips the metric; subunits never enter the data boundary.
+
+**Suggested sub-phasing (each its own commit + break):**
+- **5a — type model:** introduce `MonetaryFact` / `ScalarFact` + the `FactReader`
+  protocol; the `facts.py` layer mints `Money` at the boundary; metrics use the typed
+  accessors and keep their current single-currency arithmetic (no FX yet). Mechanical
+  and mypy-driven.
+- **5b — FX conversion:** each metric converts inputs to the listing currency via
+  `Money.convert`, logging; missing-rate skip; remove the assert-based flow; update
+  CLAUDE.md / AGENTS.md; add the reproducibility CSV test.
+
+**Resolved decisions (author):**
+1. **Two frozen subclasses.** The DAO returns `MonetaryFact | ScalarFact` —
+   `MonetaryFact` carries a `Money`, `ScalarFact` carries a `float`. (Not a single record
+   with a `Money | float` payload: separate classes give each record exactly the right
+   fields and read cleaner when narrowing at the call site.)
+2. **`per_share` is money.** EPS and dividends-per-share are `MonetaryFact` — a per-share
+   amount is still money-with-a-currency — so the union stays **binary**. `MonetaryFact`
+   keeps the source `unit_kind` (`monetary` / `per_share`) as a provenance/formatting
+   field; the type system enforces *currency* safety but deliberately does **not** block
+   mixing a per-share rate with a total (that dimensional check is out of scope here).
 
 ### Phase 3 — `financial_facts.unit` → `unit_kind`
 The overloaded `unit` column (currency code *or* type token) is replaced by the
