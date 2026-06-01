@@ -32,7 +32,7 @@ from pyvalue.persistence.storage import FactRecord, MarketDataRepository
 MAX_FACT_AGE_DAYS = 400
 MAX_FY_FACT_AGE_DAYS = 400
 
-# Metric *metadata* helpers (recency, FY-frame filtering, quarterly selection)
+# Metric *metadata* helpers (recency, FY filtering, quarterly selection)
 # read only the provenance surface (:class:`~pyvalue.facts.FactView`), so they
 # are generic over the concrete fact type -- a raw ``FactRecord`` or a
 # kind-tagged ``MonetaryFact`` / ``ScalarFact`` -- and preserve it on return.
@@ -101,26 +101,23 @@ def has_recent_fact(
 
 
 def filter_unique_fy(records: Iterable[FactT]) -> Dict[str, FactT]:
-    """Return a dict of end_date -> fact for valid full-year entries."""
+    """Return a dict of end_date -> fact for full-year (``FY``) entries.
+
+    Annual facts are identified by ``fiscal_period == "FY"``. The EODHD normalizer
+    tags every full-year statement ``FY`` and reserves ``Q1``..``Q4`` for quarters
+    and ``INSTANT``/``TTM`` for snapshot facts, so this single test selects exactly
+    the annual rows the FY metrics (``eps_average``, ``eps_streak``,
+    ``graham_eps_cagr``) consume. (This replaced an equivalent check on the derived
+    ``CY####`` ``frame`` tag, which was dropped as redundant with ``fiscal_period``.)
+    """
 
     unique: Dict[str, FactT] = {}
     for record in records:
-        if not _is_valid_fy_frame(record.frame):
+        if record.fiscal_period != "FY":
             continue
         if record.end_date not in unique:
             unique[record.end_date] = record
     return unique
-
-
-def _is_valid_fy_frame(frame: str | None) -> bool:
-    if not frame:
-        return False
-    if not frame.startswith("CY"):
-        return False
-    if frame.endswith(("Q1", "Q2", "Q3", "Q4")):
-        return False
-    year_part = frame[2:]
-    return len(year_part) == 4 and year_part.isdigit()
 
 
 def ttm_sum(records: Sequence[FactRecord], periods: int = 4) -> float | None:

@@ -60,7 +60,7 @@ class RawFactSource(Protocol):
 class FactView(Protocol):
     """Read-only metadata surface shared by raw and kind-tagged facts.
 
-    The metric *metadata* helpers (recency, fiscal-year frame filtering,
+    The metric *metadata* helpers (recency, fiscal-year (FY) filtering,
     quarterly selection) only ever read these provenance fields -- never the
     amount -- so typing them against this protocol lets them accept both a raw
     :class:`~pyvalue.persistence.storage.FactRecord` (plain attributes) and a kind-tagged
@@ -75,16 +75,13 @@ class FactView(Protocol):
     @property
     def fiscal_period(self) -> str: ...
 
-    @property
-    def frame(self) -> Optional[str]: ...
-
 
 @dataclass(frozen=True)
 class _TypedFact:
     """Shared metadata for a kind-tagged fact.
 
     Wraps the originating :class:`FactRecord` and re-exposes the metadata fields
-    metrics actually read (dates, period, frame, provenance) as pass-throughs,
+    metrics actually read (dates, period, provenance) as pass-throughs,
     so call sites keep using ``fact.end_date`` etc. The *amount* is intentionally
     not exposed here -- the kind-specific subclass decides how it may be read.
     """
@@ -102,10 +99,6 @@ class _TypedFact:
     @property
     def fiscal_period(self) -> str:
         return self.record.fiscal_period
-
-    @property
-    def frame(self) -> Optional[str]:
-        return self.record.frame
 
     @property
     def filed(self) -> Optional[str]:

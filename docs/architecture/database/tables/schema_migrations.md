@@ -64,7 +64,7 @@ duplicate or stray-id rows impossible.
 [
   {
     "id": 1,
-    "version": 73
+    "version": 74
   }
 ]
 ```

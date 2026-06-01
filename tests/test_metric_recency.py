@@ -155,7 +155,6 @@ def test_fy_metric_accepts_when_recent_quarter_exists(tmp_path):
                 unit_kind="monetary",
                 currency="USD",
                 value=float(year),
-                frame=f"CY{year}",
             )
         )
     # Recent quarterly record to satisfy freshness requirement.

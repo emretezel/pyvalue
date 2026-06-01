@@ -610,7 +610,6 @@ def test_financial_facts_repository_replace_fact_rows_matches_replace_facts(tmp_
                 "monetary",
                 40.0,
                 None,
-                None,
                 "USD",
             )
         ],
@@ -621,14 +620,14 @@ def test_financial_facts_repository_replace_fact_rows_matches_replace_facts(tmp_
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute(
             """
-                SELECT s.canonical_symbol, ff.concept, ff.value, ff.source_provider
+                SELECT s.canonical_symbol, ff.concept, ff.value
                 FROM financial_facts ff
                 JOIN securities s ON s.security_id = ff.listing_id
                 ORDER BY ff.concept
                 """
         ).fetchall()
 
-    assert rows == [("AAA.US", "Liabilities", 40.0, None)]
+    assert rows == [("AAA.US", "Liabilities", 40.0)]
 
 
 def test_financial_facts_repository_replace_facts_updates_refresh_state(tmp_path):
@@ -657,46 +656,6 @@ def test_financial_facts_repository_replace_facts_updates_refresh_state(tmp_path
     assert refresh_record is not None
     assert refresh_record.symbol == "AAA.US"
     assert refresh_record.refreshed_at
-
-
-def test_financial_facts_repository_replace_fact_rows_persists_source_provider(
-    tmp_path,
-):
-    db_path = tmp_path / "financial-facts-source-provider.db"
-    repo = FinancialFactsRepository(db_path)
-    repo.initialize_schema()
-    _seed_listing(db_path, "AAA.US")
-
-    inserted = repo.replace_fact_rows(
-        "AAA.US",
-        [
-            (
-                "Assets",
-                "FY",
-                "2024-12-31",
-                "monetary",
-                100.0,
-                None,
-                None,
-                "USD",
-            )
-        ],
-        source_provider="EODHD",
-    )
-
-    assert inserted == 1
-
-    with sqlite3.connect(db_path) as conn:
-        row = conn.execute(
-            """
-                SELECT ff.source_provider
-                FROM financial_facts ff
-                JOIN securities s ON s.security_id = ff.listing_id
-                WHERE s.canonical_symbol = 'AAA.US'
-                """
-        ).fetchone()
-
-    assert row == ("EODHD",)
 
 
 def test_fundamentals_repository_normalization_candidates_match_state_and_facts(
@@ -746,7 +705,6 @@ def test_fundamentals_repository_normalization_candidates_match_state_and_facts(
                 value=100.0,
             )
         ],
-        source_provider="SEC",
     )
     fact_repo.replace_facts(
         "BBB.US",
@@ -761,7 +719,6 @@ def test_fundamentals_repository_normalization_candidates_match_state_and_facts(
                 value=200.0,
             )
         ],
-        source_provider="EODHD",
     )
 
     candidates = fund_repo.normalization_candidates(
@@ -775,9 +732,7 @@ def test_fundamentals_repository_normalization_candidates_match_state_and_facts(
         raw_payload_hash=aaa_payload_hash,
         normalized_payload_hash=aaa_payload_hash,
         normalized_at=candidates["AAA.US"].normalized_at,
-        current_source_provider="SEC",
     )
-    assert candidates["BBB.US"].current_source_provider == "EODHD"
     assert candidates["BBB.US"].normalized_payload_hash == bbb_payload_hash
     assert candidates["CCC.US"].normalized_payload_hash is None
 
@@ -847,7 +802,6 @@ def test_financial_facts_repository_replace_fact_rows_replaces_symbol_slice(tmp_
                 "monetary",
                 100.0,
                 None,
-                None,
                 "USD",
             ),
             (
@@ -856,7 +810,6 @@ def test_financial_facts_repository_replace_fact_rows_replaces_symbol_slice(tmp_
                 "2024-12-31",
                 "monetary",
                 55.0,
-                None,
                 None,
                 "USD",
             ),
@@ -872,7 +825,6 @@ def test_financial_facts_repository_replace_fact_rows_replaces_symbol_slice(tmp_
                 "2024-12-31",
                 "monetary",
                 45.0,
-                None,
                 None,
                 "USD",
             )
@@ -1814,7 +1766,6 @@ def test_latest_share_counts_many_prefers_best_same_date_share_fact(tmp_path):
                 unit_kind="monetary",
                 value=1_000_000.0,
                 filed="2026-03-27",
-                frame="CY2025",
                 currency="USD",
             ),
             FactRecord(
@@ -1825,7 +1776,6 @@ def test_latest_share_counts_many_prefers_best_same_date_share_fact(tmp_path):
                 unit_kind="count",
                 value=1_000.0,
                 filed=None,
-                frame="CY2025",
                 currency=None,
             ),
         ],

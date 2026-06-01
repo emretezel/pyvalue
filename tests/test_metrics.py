@@ -119,6 +119,7 @@ from pyvalue.metrics.short_term_debt_share import ShortTermDebtShareMetric
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     MAX_FY_FACT_AGE_DAYS,
+    filter_unique_fy,
     metric_fx_service_context,
 )
 from pyvalue.metrics.working_capital import WorkingCapitalMetric
@@ -199,11 +200,41 @@ def fact(**kwargs):
         "unit_kind": "count" if is_count else "monetary",
         "value": 0.0,
         "filed": None,
-        "frame": None,
         "currency": None if is_count else "USD",
     }
     base.update(kwargs)
     return FactRecord(**base)
+
+
+def test_filter_unique_fy_selects_annual_rows_by_fiscal_period():
+    # Regression: FY selection keys on ``fiscal_period == "FY"``. The derived
+    # ``frame`` tag it used to parse was dropped as redundant with
+    # ``(end_date, fiscal_period)``; annual rows are kept while quarterly / TTM /
+    # INSTANT rows are excluded.
+    records = [
+        fact(fiscal_period="FY", end_date="2023-12-31", value=2.0),
+        fact(fiscal_period="Q4", end_date="2022-12-31", value=1.5),
+        fact(fiscal_period="TTM", end_date="2021-12-31", value=1.0),
+        fact(fiscal_period="INSTANT", end_date="2020-12-31", value=0.5),
+        fact(fiscal_period="FY", end_date="2019-12-31", value=0.4),
+    ]
+
+    unique = filter_unique_fy(records)
+
+    assert set(unique) == {"2023-12-31", "2019-12-31"}
+    assert unique["2023-12-31"].value == 2.0
+
+
+def test_filter_unique_fy_keeps_first_row_per_end_date():
+    records = [
+        fact(fiscal_period="FY", end_date="2023-12-31", value=2.0),
+        fact(fiscal_period="FY", end_date="2023-12-31", value=9.9),
+    ]
+
+    unique = filter_unique_fy(records)
+
+    assert list(unique) == ["2023-12-31"]
+    assert unique["2023-12-31"].value == 2.0
 
 
 def test_metric_modules_do_not_use_metric_side_fx_helpers():
@@ -1188,28 +1219,24 @@ def test_eps_streak_counts_consecutive_positive_years():
                         concept=concept,
                         end_date=recent,
                         value=2.0,
-                        frame=f"CY{date.today().year}",
                     ),
                     fact(
                         symbol=symbol,
                         concept=concept,
                         end_date="2023-09-30",
                         value=2.1,
-                        frame="CY2023",
                     ),
                     fact(
                         symbol=symbol,
                         concept=concept,
                         end_date="2022-09-30",
                         value=1.5,
-                        frame="CY2022",
                     ),
                     fact(
                         symbol=symbol,
                         concept=concept,
                         end_date="2021-09-30",
                         value=-0.5,
-                        frame="CY2021",
                     ),
                 ]
             return []
@@ -1237,7 +1264,7 @@ def test_graham_eps_cagr_metric():
                         concept=concept,
                         end_date=recent,
                         value=2.0,
-                        frame="CYRECENT",
+                        fiscal_period="TTM",
                     ),
                 ]
                 for year in range(2000, 2015):
@@ -1248,7 +1275,6 @@ def test_graham_eps_cagr_metric():
                             concept=concept,
                             end_date=f"{year}-09-30",
                             value=value,
-                            frame=f"CY{year}",
                         )
                     )
                 return records
@@ -4639,7 +4665,6 @@ def test_eps_6y_avg_metric():
                         fiscal_period="FY",
                         end_date=recent_fy,
                         value=7.0,
-                        frame=f"CY{date.today().year}",
                     )
                 ]
                 for idx, year in enumerate(range(2018, 2025), start=1):
@@ -4650,7 +4675,6 @@ def test_eps_6y_avg_metric():
                             fiscal_period="FY",
                             end_date=f"{year}-09-30",
                             value=float(idx),
-                            frame=f"CY{year}",
                         )
                     )
                 return records

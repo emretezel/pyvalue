@@ -396,7 +396,6 @@ class FundamentalsRepository(SQLiteStore):
             return self._normalization_candidates_for_provider_scan(
                 provider_norm,
                 requested_symbols=set(normalized),
-                chunk_size=chunk_size,
             )
 
         candidates: Dict[str, FundamentalsNormalizationCandidate] = {}
@@ -404,7 +403,6 @@ class FundamentalsRepository(SQLiteStore):
             for chunk in _batched(normalized, chunk_size):
                 candidates.update(
                     self._build_normalization_candidates_for_rows(
-                        conn,
                         rows=self._normalization_candidate_rows_for_chunk(
                             conn, provider_norm, chunk
                         ),
@@ -440,51 +438,11 @@ class FundamentalsRepository(SQLiteStore):
 
     def _build_normalization_candidates_for_rows(
         self,
-        conn: sqlite3.Connection,
         rows: Sequence[sqlite3.Row],
-        chunk_size: int = 500,
     ) -> Dict[str, FundamentalsNormalizationCandidate]:
         rows_by_symbol: Dict[str, sqlite3.Row] = {}
-        security_ids_needing_provider: List[int] = []
         for row in rows:
-            symbol_key = str(row["provider_symbol"])
-            rows_by_symbol[symbol_key] = row
-            normalized_payload_hash = _normalize_optional_text(
-                row["normalized_payload_hash"]
-            )
-            raw_payload_hash = str(row["payload_hash"])
-            if (
-                normalized_payload_hash is not None
-                and raw_payload_hash == normalized_payload_hash
-            ):
-                security_ids_needing_provider.append(int(row["security_id"]))
-
-        source_provider_by_security: Dict[int, str] = {}
-        if security_ids_needing_provider:
-            for security_chunk in _batched(
-                sorted(set(security_ids_needing_provider)), chunk_size
-            ):
-                provider_placeholders = ", ".join("?" for _ in security_chunk)
-                provider_rows = conn.execute(
-                    f"""
-                    SELECT
-                        listing_id AS security_id,
-                        MAX(source_provider) AS current_source_provider
-                    FROM financial_facts
-                    WHERE listing_id IN ({provider_placeholders})
-                    GROUP BY listing_id
-                    """,
-                    list(security_chunk),
-                ).fetchall()
-                source_provider_by_security.update(
-                    {
-                        int(provider_row["security_id"]): str(
-                            provider_row["current_source_provider"]
-                        )
-                        for provider_row in provider_rows
-                        if provider_row["current_source_provider"] is not None
-                    }
-                )
+            rows_by_symbol[str(row["provider_symbol"])] = row
 
         return {
             symbol_key: FundamentalsNormalizationCandidate(
@@ -495,9 +453,6 @@ class FundamentalsRepository(SQLiteStore):
                     row["normalized_payload_hash"]
                 ),
                 normalized_at=_normalize_optional_text(row["normalized_at"]),
-                current_source_provider=source_provider_by_security.get(
-                    int(row["security_id"])
-                ),
             )
             for symbol_key, row in rows_by_symbol.items()
         }
@@ -506,7 +461,6 @@ class FundamentalsRepository(SQLiteStore):
         self,
         provider: str,
         requested_symbols: set[str],
-        chunk_size: int = 500,
     ) -> Dict[str, FundamentalsNormalizationCandidate]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -530,9 +484,7 @@ class FundamentalsRepository(SQLiteStore):
                 row for row in rows if str(row["provider_symbol"]) in requested_symbols
             ]
             return self._build_normalization_candidates_for_rows(
-                conn,
                 rows=filtered_rows,
-                chunk_size=chunk_size,
             )
 
     def _resolve_security(

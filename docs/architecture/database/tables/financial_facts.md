@@ -12,15 +12,17 @@ Migration 043 first set the PK to `(listing_id, concept, fiscal_period, end_date
 the key as well, because `unit` was replaced by the `unit_kind` enum and a single concept
 never carries more than one kind for a given period. Migration 073 then dropped the four
 dead SEC columns `cik`, `accn`, `start_date`, and `accounting_standard` (all always NULL
-under the EODHD-only provider model).
+under the EODHD-only provider model). Migration 074 dropped the redundant `frame` column
+(derivable from `end_date` + `fiscal_period`) and the dead `source_provider` column,
+leaving the eight columns below.
 
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
 - Snapshot source: `data/pyvalue.db` on `2026-06-01`
 - Row count: `6,987`
-- Table size: `638,976 bytes` (`624.0 KiB`)
-- Approximate bytes per row: `91.5`
+- Table size: `532,480 bytes` (`520.0 KiB`)
+- Approximate bytes per row: `76.2`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -29,14 +31,12 @@ under the EODHD-only provider model).
 | --- | --- | --- | --- | --- |
 | `listing_id` | `INTEGER` | no | PK, idx | canonical listing link |
 | `concept` | `TEXT` | no | PK, idx | normalized concept |
-| `fiscal_period` | `TEXT` | no | PK | One of `FY`, `Q1`, `Q2`, `Q3`, `Q4`, `TTM`, `INSTANT`. Migration 065 tightened to NOT NULL; migration 068 added a CHECK pinning the enum after backfilling the 77,209 empty-string rows that earlier EODHD code persisted for snapshot facts. Runtime `FactRecord` default is `'INSTANT'`. |
+| `fiscal_period` | `TEXT` | no | PK | One of `FY`, `Q1`, `Q2`, `Q3`, `Q4`, `TTM`, `INSTANT`. Migration 065 tightened to NOT NULL; migration 068 added a CHECK pinning the enum after backfilling the 77,209 empty-string rows that earlier EODHD code persisted for snapshot facts. Runtime `FactRecord` default is `'INSTANT'`. Load-bearing: `filter_unique_fy` (`metrics/utils.py`) selects annual rows by `fiscal_period == 'FY'`, driving the FY metrics `eps_average`, `eps_streak`, and `graham_eps_cagr` (migration 074 replaced the equivalent check on the dropped `frame` tag). |
 | `end_date` | `TEXT` | no | PK, idx | fact period end |
 | `unit_kind` | `TEXT` | no |  | Semantic kind (migration 071, renamed from `unit`). CHECK pins the enum `monetary` / `per_share` / `ratio` / `percent` / `multiple` / `count` / `other` (`MetricUnitKind`). No longer a currency code — the ISO code lives in `currency` alone. Dropped from the PK by 071. |
 | `value` | `REAL` | no |  | numeric fact value |
 | `filed` | `TEXT` | yes | idx | EODHD filing date. Backs `idx_fin_facts_security_concept_latest` and the latest-row `ORDER BY … end_date DESC, filed DESC`. Retained by migration 073 when the four dead SEC columns were dropped. |
-| `frame` | `TEXT` | yes |  | EODHD period frame, e.g. `CY1985` (full year) vs `CY1985Q3` (quarter). Load-bearing: `filter_unique_fy` (`metrics/utils.py`) keeps only valid annual `CY<year>` frames, driving the FY metrics `eps_average`, `eps_streak`, and `graham_eps_cagr`. Retained by migration 073 (which dropped the four dead SEC columns). |
 | `currency` | `TEXT` | yes | partial idx | ISO currency, *major-only* (migration 071 forbids subunit GBX/ZAC/ILA). CHECK couples it to `unit_kind`: non-NULL iff `unit_kind` is `monetary`/`per_share`, NULL otherwise. |
-| `source_provider` | `TEXT` | yes |  | provenance |
 
 ## Keys And Relationships
 
@@ -83,9 +83,7 @@ under the EODHD-only provider model).
     "unit_kind": "monetary",
     "value": 936200000.0,
     "filed": "1985-09-30",
-    "frame": "CY1985",
-    "currency": "USD",
-    "source_provider": "EODHD"
+    "currency": "USD"
   },
   {
     "listing_id": 53177,
@@ -95,9 +93,7 @@ under the EODHD-only provider model).
     "unit_kind": "monetary",
     "value": 1160100000.0,
     "filed": "1986-09-30",
-    "frame": "CY1986",
-    "currency": "USD",
-    "source_provider": "EODHD"
+    "currency": "USD"
   },
   {
     "listing_id": 53177,
@@ -107,9 +103,7 @@ under the EODHD-only provider model).
     "unit_kind": "monetary",
     "value": 1477900000.0,
     "filed": "1987-09-30",
-    "frame": "CY1987",
-    "currency": "USD",
-    "source_provider": "EODHD"
+    "currency": "USD"
   },
   {
     "listing_id": 53177,
@@ -119,9 +113,7 @@ under the EODHD-only provider model).
     "unit_kind": "monetary",
     "value": 2082100000.0,
     "filed": "1988-09-30",
-    "frame": "CY1988",
-    "currency": "USD",
-    "source_provider": "EODHD"
+    "currency": "USD"
   },
   {
     "listing_id": 53177,
@@ -131,9 +123,7 @@ under the EODHD-only provider model).
     "unit_kind": "monetary",
     "value": 2743900000.0,
     "filed": "1989-09-30",
-    "frame": "CY1989",
-    "currency": "USD",
-    "source_provider": "EODHD"
+    "currency": "USD"
   }
 ]
 ```
@@ -149,3 +139,4 @@ under the EODHD-only provider model).
 - Migration 068 added `CHECK (fiscal_period IN ('FY','Q1','Q2','Q3','Q4','TTM','INSTANT'))` and backfilled the ~77K legacy rows where earlier EODHD code persisted `fiscal_period=''` for snapshot facts (EnterpriseValue, CommonStockDividendsPerShareCashPaid, and a dormant SharesStats writer). Backfill mapping: `CommonStockDividendsPerShareCashPaid` → `'TTM'`, every other empty-period concept → `'INSTANT'`. For the backfilled rows the migration re-dates `end_date` to `General.UpdatedAt` from the cached fundamentals payload (falling back to `DATE(fundamentals_raw.last_fetched_at)`), because the legacy `end_date = Highlights.MostRecentQuarter` was the balance-sheet quarter rather than the price/Valuation snapshot date. The corresponding normalizer changes in `eodhd.py` make every fresh ingest emit the correct enum/date so the empty-period bug cannot recur.
 - Migration 071 renamed `unit` → `unit_kind` and dropped it from the PK (new PK `(listing_id, concept, fiscal_period, end_date)`). The legacy `unit` column conflated a currency code (`USD`, `GBX`, …) with a type token (`shares`, `EPS`, `USD/shares`); `unit_kind` now holds only the `MetricUnitKind` enum and the ISO code lives in `currency` alone. Two CHECKs encode the invariants: `currency` is **major-only** (no subunit GBX/ZAC/ILA — subunits are collapsed to the base currency before a fact is built), and `unit_kind` ⇄ `currency` are **coupled** (monetary/per_share ⇒ currency NOT NULL; every other kind ⇒ currency NULL). Because `financial_facts` is rebuilt from `fundamentals_raw` via the `normalise` CLI after the refactor, the migration rebuilds the table **empty** (no row copy) and clears `fundamentals_normalization_state` so every cached payload is re-normalized. The EODHD normalizer emits `unit_kind` directly (`count` for share concepts, `per_share` for EPS/DPS, `monetary` otherwise).
 - Migration 073 dropped the four dead SEC columns `cik`, `accn`, `start_date`, and `accounting_standard` — all always-NULL under the EODHD-only provider model (SEC was the only writer that ever populated them). Unlike the empty rebuild in 071, this is a **data-preserving** rebuild mirroring migration 072: create `financial_facts__new` with the ten surviving columns, `INSERT … SELECT` all 6,987 rows, `DROP`/`RENAME`, then recreate both indexes unchanged. `filed` and `frame` were deliberately **kept** — `frame` feeds `filter_unique_fy` (powering the `eps_average`, `eps_streak`, and `graham_eps_cagr` metrics) and `filed` backs `idx_fin_facts_security_concept_latest` and the latest-row `ORDER BY … filed DESC`. The same migration also retired the **SEC** and **Frankfurter** providers: it deletes their rows from the `provider` registry and the dependent `fx_rates` / `fx_supported_pairs` / `fx_refresh_state` / `provider_exchange` / `provider_listing` rows (children-first under `PRAGMA foreign_keys`), leaving EODHD as the only provider. The column-drop rebuild plus the ~513K deleted Frankfurter `fx_rates` rows leave free pages; reclaim them with a manual `VACUUM` (it cannot run inside the migration transaction).
+- Migration 074 dropped `frame` and `source_provider`. `frame` stored a derived `CY####` tag fully determined by `end_date[:4]` plus whether `fiscal_period` is a quarter, so it duplicated the `(end_date, fiscal_period)` PK prefix; its only consumer, `filter_unique_fy`, now selects annual rows by `fiscal_period == 'FY'` directly (exactly equivalent on the live data). `source_provider` was read only by the normalization freshness gate to detect a provider change, which can never fire under the EODHD-only model (migration 073), so it was dead. Like 072/073 this is a **data-preserving** rebuild: create `financial_facts__new` with the eight surviving columns, `INSERT … SELECT` all 6,987 rows, `DROP`/`RENAME`, then recreate both indexes unchanged (neither referenced the dropped columns). The rebuild leaves free pages; reclaim them with a manual `VACUUM`.

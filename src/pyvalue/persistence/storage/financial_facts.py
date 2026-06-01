@@ -158,7 +158,6 @@ class FinancialFactsRepository(SQLiteStore):
         self,
         symbol: str,
         records: Iterable[FactRecord],
-        source_provider: Optional[str] = None,
     ) -> int:
         rows = [
             (
@@ -168,7 +167,6 @@ class FinancialFactsRepository(SQLiteStore):
                 record.unit_kind,
                 record.value,
                 record.filed,
-                record.frame,
                 record.currency,
             )
             for record in records
@@ -176,18 +174,15 @@ class FinancialFactsRepository(SQLiteStore):
         return self.replace_fact_rows(
             symbol=symbol,
             rows=rows,
-            source_provider=source_provider,
         )
 
     def replace_fact_rows(
         self,
         symbol: str,
         rows: Iterable[StoredFactRow],
-        source_provider: Optional[str] = None,
     ) -> int:
         self.initialize_schema()
         security = self._security_repo().ensure_from_symbol(symbol)
-        provider = source_provider.strip().upper() if source_provider else None
         prepared_rows = [
             (
                 security.security_id,
@@ -197,9 +192,7 @@ class FinancialFactsRepository(SQLiteStore):
                 unit_kind,
                 value,
                 filed,
-                frame,
                 currency,
-                provider,
             )
             for (
                 concept,
@@ -208,7 +201,6 @@ class FinancialFactsRepository(SQLiteStore):
                 unit_kind,
                 value,
                 filed,
-                frame,
                 currency,
             ) in rows
         ]
@@ -222,8 +214,8 @@ class FinancialFactsRepository(SQLiteStore):
                     """
                     INSERT OR REPLACE INTO financial_facts (
                         listing_id, concept, fiscal_period, end_date, unit_kind,
-                        value, filed, frame, currency, source_provider
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        value, filed, currency
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     prepared_rows,
                 )
@@ -246,7 +238,7 @@ class FinancialFactsRepository(SQLiteStore):
             row = conn.execute(
                 """
                 SELECT s.canonical_symbol, ff.concept, ff.fiscal_period,
-                       ff.end_date, ff.unit_kind, ff.value, ff.filed, ff.frame,
+                       ff.end_date, ff.unit_kind, ff.value, ff.filed,
                        ff.currency
                 FROM financial_facts ff
                 JOIN securities s ON s.security_id = ff.listing_id
@@ -273,7 +265,7 @@ class FinancialFactsRepository(SQLiteStore):
             return []
         query = [
             "SELECT s.canonical_symbol, ff.concept, ff.fiscal_period, ff.end_date,",
-            "ff.unit_kind, ff.value, ff.filed, ff.frame, ff.currency",
+            "ff.unit_kind, ff.value, ff.filed, ff.currency",
             "FROM financial_facts ff",
             "JOIN securities s ON s.security_id = ff.listing_id",
             "WHERE ff.listing_id = ? AND ff.concept = ?",
@@ -299,7 +291,7 @@ class FinancialFactsRepository(SQLiteStore):
             rows = conn.execute(
                 """
                 SELECT s.canonical_symbol, ff.concept, ff.fiscal_period,
-                       ff.end_date, ff.unit_kind, ff.value, ff.filed, ff.frame,
+                       ff.end_date, ff.unit_kind, ff.value, ff.filed,
                        ff.currency
                 FROM financial_facts ff
                 JOIN securities s ON s.security_id = ff.listing_id
@@ -392,7 +384,6 @@ class FinancialFactsRepository(SQLiteStore):
                         ff.unit_kind,
                         ff.value,
                         ff.filed,
-                        ff.frame,
                         ff.currency
                     FROM financial_facts ff INDEXED BY idx_fin_facts_security_concept_latest
                     WHERE ff.listing_id IN ({placeholders}){concept_clause}
@@ -411,7 +402,6 @@ class FinancialFactsRepository(SQLiteStore):
                             unit_kind=row["unit_kind"],
                             value=row["value"],
                             filed=row["filed"],
-                            frame=row["frame"],
                             currency=row["currency"],
                         )
                     )

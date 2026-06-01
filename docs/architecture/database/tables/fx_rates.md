@@ -13,7 +13,7 @@ One row per `(provider, rate_date, base_currency, quote_currency)`.
 <!-- BEGIN generated_live_stats -->
 - Snapshot source: `data/pyvalue.db` on `2026-06-01`
 - Row count: `6,306,705`
-- Table size: `1,232,334,848 bytes` (`1.15 GiB`)
+- Table size: `1,232,326,656 bytes` (`1.15 GiB`)
 - Approximate bytes per row: `195.4`
 <!-- END generated_live_stats -->
 

@@ -108,16 +108,18 @@ def cmd_normalize_fundamentals_stage(
 
 def _normalization_required(
     candidate: FundamentalsNormalizationCandidate,
-    provider: str,
 ) -> bool:
-    provider_norm = provider.strip().upper()
+    """Return whether ``candidate`` needs (re-)normalization.
+
+    Re-normalize when nothing has been normalized yet, or when the cached raw
+    payload hash differs from the hash that produced the stored facts. A former
+    provider-change trigger was dropped together with
+    ``financial_facts.source_provider`` now that EODHD is the only provider.
+    """
+
     if candidate.normalized_payload_hash is None:
         return True
-    if candidate.raw_payload_hash != candidate.normalized_payload_hash:
-        return True
-    if candidate.current_source_provider is None:
-        return False
-    return candidate.current_source_provider != provider_norm
+    return candidate.raw_payload_hash != candidate.normalized_payload_hash
 
 
 def _plan_normalization_selection(
@@ -144,7 +146,7 @@ def _plan_normalization_selection(
         candidate = candidates.get(symbol)
         if candidate is None:
             continue
-        if _normalization_required(candidate, provider_norm):
+        if _normalization_required(candidate):
             to_normalize.append(symbol)
         else:
             skipped += 1
@@ -179,7 +181,6 @@ def _normalization_record_to_row(record: FactRecord) -> StoredFactRow:
         record.unit_kind,
         record.value,
         record.filed,
-        record.frame,
         record.currency,
     )
 
@@ -322,7 +323,6 @@ def _run_bulk_normalization(
                 stored = fact_repo.replace_fact_rows(
                     symbol,
                     result.rows,
-                    source_provider=provider,
                 )
                 candidate = (
                     candidate_map.get(symbol) if candidate_map is not None else None
@@ -389,7 +389,6 @@ def _run_bulk_normalization(
                     stored = fact_repo.replace_fact_rows(
                         symbol,
                         result.rows,
-                        source_provider=provider,
                     )
                     candidate = (
                         candidate_map.get(symbol) if candidate_map is not None else None

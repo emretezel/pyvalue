@@ -4715,8 +4715,10 @@ def test_migration_073_purges_sec_frankfurter_and_drops_dead_columns(tmp_path):
         }
         assert {"SEC", "FRANKFURTER"} <= providers_before
 
-    # Apply the cleanup migration (and anything after it).
-    assert apply_migrations(db_path) == len(MIGRATIONS) - 72
+    # Apply migration 073 in isolation. Migration 074 (which drops ``frame`` and
+    # ``source_provider``) is exercised by its own test, so pin the target here to
+    # keep this test's "frame/source_provider kept" assertions valid.
+    assert apply_migrations(db_path, target_version=73) == 1
 
     with sqlite3.connect(db_path) as conn:
         providers = [r[0] for r in conn.execute("SELECT provider_code FROM provider")]
@@ -4741,5 +4743,89 @@ def test_migration_073_purges_sec_frankfurter_and_drops_dead_columns(tmp_path):
         assert "filed" in index_sql
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
-    # Idempotent: a second run is a no-op.
+    # Idempotent: a second run through the same target is a no-op.
+    assert apply_migrations(db_path, target_version=73) == 0
+
+
+def test_migration_074_drops_frame_and_source_provider_preserving_rows(tmp_path):
+    """Migration 074 drops the redundant ``frame`` and dead ``source_provider``
+    columns from ``financial_facts`` while preserving every surviving row, the
+    primary key, the listing FK, and both indexes."""
+
+    db_path = tmp_path / "cleanup-074.sqlite"
+    # Bring the DB to the post-073 state, where ``frame`` and ``source_provider``
+    # still exist on ``financial_facts``.
+    assert apply_migrations(db_path, target_version=73) == 73
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("INSERT INTO issuer (issuer_id, name) VALUES (1, 'Acme')")
+        conn.execute(
+            """
+            INSERT INTO listing (listing_id, issuer_id, exchange_id, symbol, currency)
+            VALUES (1, 1, (SELECT exchange_id FROM exchange WHERE exchange_code = 'US'),
+                    'AAA', 'USD')
+            """
+        )
+        # Seed a fact carrying the doomed columns to prove the rebuild preserves
+        # rows while dropping ``frame``/``source_provider``.
+        conn.execute(
+            """
+            INSERT INTO financial_facts (
+                listing_id, concept, fiscal_period, end_date, unit_kind,
+                value, filed, frame, currency, source_provider
+            ) VALUES (1, 'Assets', 'FY', '2024-12-31', 'monetary',
+                      100.0, '2025-01-15', 'CY2024', 'USD', 'EODHD')
+            """
+        )
+        before_cols = {r[1] for r in conn.execute("PRAGMA table_info(financial_facts)")}
+        assert {"frame", "source_provider"} <= before_cols
+
+    # Apply migration 074 in isolation.
+    assert apply_migrations(db_path, target_version=74) == 1
+
+    with sqlite3.connect(db_path) as conn:
+        info = conn.execute("PRAGMA table_info(financial_facts)").fetchall()
+        column_order = [r[1] for r in info]
+        assert "frame" not in column_order
+        assert "source_provider" not in column_order
+        # The eight surviving columns remain, in their original order.
+        assert column_order == [
+            "listing_id",
+            "concept",
+            "fiscal_period",
+            "end_date",
+            "unit_kind",
+            "value",
+            "filed",
+            "currency",
+        ]
+        # The seeded row survived the rebuild with its non-dropped values intact.
+        assert conn.execute(
+            "SELECT value, filed, currency FROM financial_facts WHERE listing_id = 1"
+        ).fetchone() == (100.0, "2025-01-15", "USD")
+        # The primary key is unchanged (``pk`` ordinal is table_info column 5).
+        pk_cols = [r[1] for r in sorted(info, key=lambda row: row[5]) if r[5] > 0]
+        assert pk_cols == ["listing_id", "concept", "fiscal_period", "end_date"]
+        # Both indexes were recreated.
+        index_names = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'index' AND tbl_name = 'financial_facts'"
+            )
+        }
+        assert {
+            "idx_fin_facts_security_concept_latest",
+            "idx_fin_facts_currency_nonnull",
+        } <= index_names
+        # The listing FK survived the rebuild and is satisfied.
+        foreign_keys = conn.execute(
+            "PRAGMA foreign_key_list(financial_facts)"
+        ).fetchall()
+        assert len(foreign_keys) == 1
+        assert foreign_keys[0][2] == "listing"
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    # Idempotent: a second run is a no-op (074 is the latest migration).
     assert apply_migrations(db_path) == 0

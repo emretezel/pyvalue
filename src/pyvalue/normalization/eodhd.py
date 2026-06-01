@@ -387,7 +387,6 @@ class EODHDFactsNormalizer:
                     # unparseable, and we've already skipped those entries above.
                     # Keep the guard explicit so the schema CHECK never sees ''.
                     continue
-                frame = self._build_frame(end_date, period_code)
                 total_liab = self._extract_value(
                     entry, ["totalLiabilities", "totalLiab"], lowered
                 )
@@ -623,7 +622,6 @@ class EODHDFactsNormalizer:
                             unit_kind=unit_kind,
                             value=normalized_value,
                             filed=entry.get("filing_date"),
-                            frame=frame,
                             currency=normalized_currency,
                         )
                     )
@@ -689,7 +687,6 @@ class EODHDFactsNormalizer:
                 unit_kind="monetary",
                 value=normalized_value,
                 filed=None,
-                frame=None,
                 currency=normalized_currency,
             )
         ]
@@ -754,7 +751,6 @@ class EODHDFactsNormalizer:
                 unit_kind="count",
                 value=shares,
                 filed=None,
-                frame=None,
                 currency=None,
             )
         ]
@@ -799,7 +795,6 @@ class EODHDFactsNormalizer:
                     # month component. Skip rather than smuggle in '' (the CHECK on
                     # financial_facts.fiscal_period would reject it anyway).
                     continue
-                frame = self._build_frame(end_date, period)
                 records.append(
                     FactRecord(
                         symbol=symbol.upper(),
@@ -809,7 +804,6 @@ class EODHDFactsNormalizer:
                         unit_kind="count",
                         value=shares,
                         filed=None,
-                        frame=frame,
                         currency=None,
                     )
                 )
@@ -872,7 +866,6 @@ class EODHDFactsNormalizer:
                 unit_kind="per_share",
                 value=normalized_value,
                 filed=None,
-                frame=None,
                 currency=normalized_currency,
             )
         ]
@@ -1124,7 +1117,6 @@ class EODHDFactsNormalizer:
                     unit_kind="per_share",
                     value=normalized_value,
                     filed=None,
-                    frame=self._build_frame(date_str, period or "FY"),
                     currency=normalized_currency,
                 )
             )
@@ -1440,7 +1432,6 @@ class EODHDFactsNormalizer:
             unit_kind="monetary",
             value=value,
             filed=base.filed,
-            frame=base.frame,
             currency=currency,
         )
 
@@ -1937,7 +1928,6 @@ class EODHDFactsNormalizer:
             unit_kind=base.unit_kind,
             value=base.value,
             filed=base.filed,
-            frame=base.frame,
             currency=base.currency,
         )
 
@@ -1963,19 +1953,6 @@ class EODHDFactsNormalizer:
             if value is not None:
                 return value
         return None
-
-    def _build_frame(
-        self, end_date: Optional[str], period: Optional[str]
-    ) -> Optional[str]:
-        if not end_date:
-            return None
-        year = end_date[:4]
-        if not year.isdigit():
-            return None
-        period = (period or "").upper()
-        if period in {"Q1", "Q2", "Q3", "Q4"}:
-            return f"CY{year}{period}"
-        return f"CY{year}"
 
     def _extract_date(self, entry: Dict) -> Optional[str]:
         date = entry.get("date") or entry.get("Date") or entry.get("period")
@@ -2093,7 +2070,6 @@ class EODHDFactsNormalizer:
                     unit_kind=record.unit_kind,
                     value=new_value,
                     filed=record.filed,
-                    frame=record.frame,
                     currency=target_currency,
                 )
             )

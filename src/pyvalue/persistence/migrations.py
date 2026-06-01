@@ -7920,6 +7920,106 @@ def _migration_073_drop_sec_columns_and_purge_providers(
     )
 
 
+def _migration_074_drop_financial_facts_frame_and_source_provider(
+    conn: sqlite3.Connection,
+) -> None:
+    """Drop the redundant ``frame`` and the dead ``source_provider`` columns.
+
+    ``frame`` stored a derived ``CY####`` tag fully determined by two columns
+    already present in every row: the calendar year is ``end_date[:4]`` and the
+    only other signal -- whether the period is a quarter -- is exactly
+    ``fiscal_period`` (``FY`` -> ``CY<year>``; ``Q1``..``Q4`` -> ``CY<year>Q#``;
+    ``INSTANT``/``TTM`` -> NULL). Persisting it duplicated the
+    ``(end_date, fiscal_period)`` PK prefix, and its sole consumer
+    ``filter_unique_fy`` (``metrics/utils.py``) now selects annual rows by
+    ``fiscal_period == 'FY'`` directly -- exactly equivalent on the live data.
+
+    ``source_provider`` was only ever read by the normalization freshness gate to
+    detect a provider change; under the EODHD-only model (migration 073) that
+    comparison can never fire, so the column is dead.
+
+    This mirrors migration 073's data-preserving rebuild: create
+    ``financial_facts__new`` with the eight surviving columns, ``INSERT … SELECT``
+    every row, ``DROP``/``RENAME``, then recreate both indexes unchanged. Neither
+    ``idx_fin_facts_security_concept_latest`` nor ``idx_fin_facts_currency_nonnull``
+    referenced ``frame`` or ``source_provider``, so query plans are untouched.
+
+    Storage reclamation: the rebuild leaves free pages. ``VACUUM`` cannot run
+    inside a migration transaction, so reclaim space manually after upgrading with
+    ``sqlite3 data/pyvalue.db 'VACUUM;'``.
+
+    Idempotent: skipped once the table no longer declares ``frame``.
+    """
+
+    if not _table_exists(conn, "financial_facts"):
+        return
+    ddl_row = conn.execute(
+        "SELECT sql FROM sqlite_master "
+        "WHERE type = 'table' AND name = 'financial_facts'"
+    ).fetchone()
+    if ddl_row is None or "frame" not in ddl_row[0]:
+        return
+
+    conn.execute("DROP INDEX IF EXISTS idx_fin_facts_security_concept_latest")
+    conn.execute("DROP INDEX IF EXISTS idx_fin_facts_currency_nonnull")
+
+    major_currency_check = _MAJOR_CURRENCY_CHECK.format(col="currency")
+    conn.execute(
+        f"""
+        CREATE TABLE financial_facts__new (
+            listing_id INTEGER NOT NULL,
+            concept TEXT NOT NULL,
+            fiscal_period TEXT NOT NULL
+                CHECK (fiscal_period IN ('FY','Q1','Q2','Q3','Q4','TTM','INSTANT')),
+            end_date TEXT NOT NULL,
+            unit_kind TEXT NOT NULL
+                CHECK (unit_kind IN (
+                    'monetary','per_share','ratio','percent','multiple','count','other'
+                )),
+            value REAL NOT NULL,
+            filed TEXT,
+            currency TEXT
+                CHECK (
+                    (currency IS NULL OR ({major_currency_check}))
+                    AND (
+                        (unit_kind IN ('monetary','per_share') AND currency IS NOT NULL)
+                        OR (unit_kind NOT IN ('monetary','per_share') AND currency IS NULL)
+                    )
+                ),
+            PRIMARY KEY (listing_id, concept, fiscal_period, end_date),
+            FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO financial_facts__new (
+            listing_id, concept, fiscal_period, end_date, unit_kind,
+            value, filed, currency
+        )
+        SELECT
+            listing_id, concept, fiscal_period, end_date, unit_kind,
+            value, filed, currency
+        FROM financial_facts
+        """
+    )
+    conn.execute("DROP TABLE financial_facts")
+    conn.execute("ALTER TABLE financial_facts__new RENAME TO financial_facts")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fin_facts_security_concept_latest
+        ON financial_facts(listing_id, concept, end_date DESC, filed DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fin_facts_currency_nonnull
+        ON financial_facts(currency)
+        WHERE currency IS NOT NULL
+        """
+    )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -7994,6 +8094,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_071_financial_facts_unit_kind,
     _migration_072_drop_market_data_market_cap,
     _migration_073_drop_sec_columns_and_purge_providers,
+    _migration_074_drop_financial_facts_frame_and_source_provider,
 ]
 
 

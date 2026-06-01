@@ -170,10 +170,8 @@ class FactRecord:
     # a stored fact.
     unit_kind: MetricUnitKind = "other"
     value: float = 0.0
-    # ``filed`` is the EODHD filing date; ``frame`` is the derived ``CY####``
-    # period tag consumed by the FY-frame metric filters.
+    # ``filed`` is the EODHD filing date.
     filed: Optional[str] = None
-    frame: Optional[str] = None
     currency: Optional[str] = None
 
 
@@ -215,14 +213,13 @@ class MetricComputeStatusRecord:
 
 
 # Row shape consumed by ``FinancialFactsRepository.replace_fact_rows`` in column
-# order: concept, fiscal_period, end_date, unit_kind, value, filed, frame, currency.
+# order: concept, fiscal_period, end_date, unit_kind, value, filed, currency.
 StoredFactRow = Tuple[
     str,
     Optional[str],
     str,
     str,
     float,
-    Optional[str],
     Optional[str],
     Optional[str],
 ]
@@ -375,7 +372,6 @@ class FundamentalsNormalizationCandidate:
     raw_payload_hash: str
     normalized_payload_hash: Optional[str] = None
     normalized_at: Optional[str] = None
-    current_source_provider: Optional[str] = None
 
 
 @dataclass(frozen=True)

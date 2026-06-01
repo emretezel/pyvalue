@@ -19,7 +19,6 @@ CREATE TABLE "financial_facts" (
                 )),
             value REAL NOT NULL,
             filed TEXT,
-            frame TEXT,
             currency TEXT
                 CHECK (
                     (currency IS NULL OR (length(currency) = 3 AND currency = upper(currency) AND currency GLOB '[A-Z][A-Z][A-Z]' AND currency NOT IN ('GBX', 'GBP0.01', 'ZAC', 'ILA')))
@@ -28,7 +27,6 @@ CREATE TABLE "financial_facts" (
                         OR (unit_kind NOT IN ('monetary','per_share') AND currency IS NULL)
                     )
                 ),
-            source_provider TEXT,
             PRIMARY KEY (listing_id, concept, fiscal_period, end_date),
             FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
         );

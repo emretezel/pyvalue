@@ -13,8 +13,8 @@ One row per `(listing_id, metric_id)`.
 <!-- BEGIN generated_live_stats -->
 - Snapshot source: `data/pyvalue.db` on `2026-06-01`
 - Row count: `2,418,864`
-- Table size: `136,704,000 bytes` (`130.4 MiB`)
-- Approximate bytes per row: `56.5`
+- Table size: `136,495,104 bytes` (`130.2 MiB`)
+- Approximate bytes per row: `56.4`
 <!-- END generated_live_stats -->
 
 ## Columns

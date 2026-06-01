@@ -29,10 +29,10 @@ All row counts and table sizes below come from the live `data/pyvalue.db` snapsh
 
 | Table | Rows | Table size | Primary key | Main logical refs | Initial review focus |
 | --- | --- | --- | --- | --- | --- |
-| [financial_facts](tables/financial_facts.md) | `6,987` | `624.0 KiB` | `listing_id`, `concept`, `fiscal_period`, `end_date` | `listing_id` in `listing` | hottest fact table; check row width, nullable PK parts, and latest-fact indexes |
+| [financial_facts](tables/financial_facts.md) | `6,987` | `520.0 KiB` | `listing_id`, `concept`, `fiscal_period`, `end_date` | `listing_id` in `listing` | hottest fact table; check row width, nullable PK parts, and latest-fact indexes |
 | [financial_facts_refresh_state](tables/financial_facts_refresh_state.md) | `61,058` | `2.4 MiB` | `listing_id` | `listing_id` in `listing` | verify it still adds value beyond `fundamentals_normalization_state` |
 | [market_data](tables/market_data.md) | `221,186` | `15.3 MiB` | `listing_id`, `as_of` | `listing_id` in `listing` | latest-snapshot access and time-series retention |
-| [metrics](tables/metrics.md) | `2,418,864` | `130.4 MiB` | `listing_id`, `metric_id` | `listing_id` in `listing` | screen-read performance and lack of historical versions |
+| [metrics](tables/metrics.md) | `2,418,864` | `130.2 MiB` | `listing_id`, `metric_id` | `listing_id` in `listing` | screen-read performance and lack of historical versions |
 | [metric_compute_status](tables/metric_compute_status.md) | `4,887,280` | `881.7 MiB` | `listing_id`, `metric_id` | `listing_id` in `listing` | failure-report read shape and duplication with `metrics` freshness |
 
 ## FX

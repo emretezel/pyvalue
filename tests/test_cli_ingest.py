@@ -57,7 +57,6 @@ def make_fact(**kwargs):
         "unit_kind": "monetary",
         "value": 0.0,
         "filed": None,
-        "frame": None,
         "currency": "USD",
     }
     base.update(kwargs)
@@ -1844,7 +1843,6 @@ def test_cmd_reconcile_listing_status_backfills_from_raw_only(tmp_path, capsys):
                 currency="GBP",
             )
         ],
-        source_provider="EODHD",
     )
     store_market_data(db_path, "AAA.LSE", "2025-01-02", currency="GBP")
     metrics_repo = MetricsRepository(db_path)
@@ -2559,42 +2557,36 @@ def test_compute_metrics_for_symbol_matches_real_metrics(tmp_path):
                 fiscal_period="FY",
                 end_date=f"{current_year - 6}-12-31",
                 value=1.0,
-                frame=f"CY{current_year - 6}",
             ),
             make_fact(
                 concept="EarningsPerShare",
                 fiscal_period="FY",
                 end_date=f"{current_year - 5}-12-31",
                 value=1.1,
-                frame=f"CY{current_year - 5}",
             ),
             make_fact(
                 concept="EarningsPerShare",
                 fiscal_period="FY",
                 end_date=f"{current_year - 4}-12-31",
                 value=1.2,
-                frame=f"CY{current_year - 4}",
             ),
             make_fact(
                 concept="EarningsPerShare",
                 fiscal_period="FY",
                 end_date=f"{current_year - 3}-12-31",
                 value=1.3,
-                frame=f"CY{current_year - 3}",
             ),
             make_fact(
                 concept="EarningsPerShare",
                 fiscal_period="FY",
                 end_date=f"{current_year - 2}-12-31",
                 value=1.4,
-                frame=f"CY{current_year - 2}",
             ),
             make_fact(
                 concept="EarningsPerShare",
                 fiscal_period="FY",
                 end_date=f"{current_year - 1}-12-31",
                 value=1.5,
-                frame=f"CY{current_year - 1}",
             ),
         ],
     )
@@ -4122,7 +4114,6 @@ def test_cmd_clear_financial_facts_clears_normalization_state(tmp_path):
                 value=10.0,
             )
         ],
-        source_provider="SEC",
     )
     state_repo = FundamentalsNormalizationStateRepository(db_path)
     refresh_state_repo = FinancialFactsRefreshStateRepository(db_path)
@@ -4719,7 +4710,6 @@ def test_cmd_refresh_security_metadata_backfills_eodhd_fields_and_sec_name_fallb
                 symbol="AAA.US", concept="Assets", end_date="2024-12-31", value=1.0
             )
         ],
-        source_provider="EODHD",
     )
     fact_count_before = (
         fact_repo._connect()
