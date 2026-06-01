@@ -39,8 +39,8 @@ A single pre-refactor backup covers the whole effort:
 | 2.6 | Purge currency-less listings + `listing.currency` NOT NULL + migration 069 | Landed (`df117d4`) |
 | 3 | `unit` → `unit_kind` rebuild + migration 071 | Landed (`a1bf04d`) |
 | 4 | Remove `market_data.market_cap` + migration 072 | In review |
-| 5a | Typed fact read boundary (`MonetaryFact`/`ScalarFact` + `FactReader`) + metric sweep | In progress |
-| 5b | FX-convert inputs to listing currency + docs/rule update | Not started |
+| 5a | Typed fact read boundary (`MonetaryFact`/`ScalarFact` + `FactReader`) + metric sweep | Landed (`db4cacb`) |
+| 5b | FX-convert inputs to listing currency + docs/rule update | In review |
 
 \* Phase 2 landed with the price migration numbered **069**; Phase 2.6 renumbers
 it to **070** so the currency-less-listing purge (**069**) runs *first* — price
@@ -156,18 +156,28 @@ on-demand market cap, and `fcf_per_share_cagr_10y`'s diluted-share denominator);
 per-share metric divides money by a share quantity (`Money / float` → a per-share
 `Money`) — the type system will not let a share count be treated as money.
 
-**Docs/rule.** Update CLAUDE.md + AGENTS.md (byte-identical): metrics convert all
-monetary inputs to the listing currency via `fx_rates`, logging each conversion; a
-missing rate skips the metric; subunits never enter the data boundary.
+**Docs/rule (done in 5b).** CLAUDE.md + AGENTS.md (byte-identical) now state: metrics
+convert every monetary input to the listing currency via `fx_rates` through the single
+`require_metric_money` seam, logging each conversion; a missing rate makes the metric
+unavailable (`missing_fx_rate`); subunits never enter the data boundary.
 
-**Suggested sub-phasing (each its own commit + break):**
-- **5a — type model:** introduce `MonetaryFact` / `ScalarFact` + the `FactReader`
-  protocol; the `facts.py` layer mints `Money` at the boundary; metrics use the typed
-  accessors and keep their current single-currency arithmetic (no FX yet). Mechanical
-  and mypy-driven.
-- **5b — FX conversion:** each metric converts inputs to the listing currency via
-  `Money.convert`, logging; missing-rate skip; remove the assert-based flow; update
-  CLAUDE.md / AGENTS.md; add the reproducibility CSV test.
+**Sub-phasing (each its own commit + break):**
+- **5a — type model (landed):** `MonetaryFact` / `ScalarFact` + the `FactReader`
+  protocol; the `facts.py` layer mints `Money` at the boundary; all 36 metrics use the
+  typed accessors and `Money` arithmetic, aligning every input through the
+  `require_metric_money` seam (reject-on-mismatch).
+- **5b — FX conversion (in review):** the seam body now *converts* the input to the
+  listing currency via `Money.convert` instead of rejecting it, logging each conversion
+  and raising `missing_fx_rate` when no rate exists -- **call sites unchanged**, exactly
+  as the 5a seam docstring promised. The FX service is bound once per compute batch by
+  the driver via `metric_fx_service_context` (a `ContextVar`), which the seam reads;
+  when unbound (unit tests with no FX DB) it falls back to the no-fetch ephemeral
+  service, so a cross-currency input with no rate degrades to an unavailable metric --
+  the same observable outcome 5a produced, so the existing mismatch tests still pass.
+  New tests: `test_current_ratio_converts_cross_currency_input_via_fx` (EUR->USD via a
+  seeded rate), `test_current_ratio_skips_when_fx_rate_missing`, and
+  `test_metric_fx_conversion_is_byte_reproducible` (fixed inputs + rate -> byte-identical
+  CSV across runs). CLAUDE.md / AGENTS.md rule updated.
 
 **Resolved decisions (author):**
 1. **Two frozen subclasses.** The DAO returns `MonetaryFact | ScalarFact` —

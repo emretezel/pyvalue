@@ -5,15 +5,27 @@ Author: Emre Tezel
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, timedelta
 import logging
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, TypeVar
+from typing import (
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Sequence,
+    TypeVar,
+)
 
 from pyvalue.currency import normalize_currency_code
 from pyvalue.facts import FactView, RawFactSource
+from pyvalue.fx import FXService
 from pyvalue.metrics.base import MetricCurrencyInvariantError
-from pyvalue.money import CurrencyMismatchError, Money
+from pyvalue.money import CurrencyMismatchError, Money, fx_service_for_context
 from pyvalue.storage import FactRecord, MarketDataRepository
 
 # Default freshness windows (days)
@@ -225,6 +237,49 @@ def _raise_currency_invariant(
     raise error
 
 
+# -- listing-currency FX context (Phase 5b) ----------------------------------
+#
+# The seam below converts every cross-currency metric input to the listing
+# currency. It needs an :class:`~pyvalue.fx.FXService`, but the metric ``compute``
+# signatures (and the ~36 ``_money`` call sites) deliberately do not carry one --
+# the 5a seam promised "call sites do not change, only this body". So the compute
+# driver binds one FX service for the whole batch via
+# :func:`metric_fx_service_context`, and the seam reads it from this context var.
+# When unbound (e.g. a unit test that never opened an FX-backed DB) the seam falls
+# back to the no-fetch ephemeral service, so a cross-currency input with no
+# available rate degrades to an unavailable metric -- the same observable outcome
+# the 5a rejection produced.
+_ACTIVE_FX_SERVICE: ContextVar[Optional[FXService]] = ContextVar(
+    "_pyvalue_active_metric_fx_service", default=None
+)
+
+
+@contextmanager
+def metric_fx_service_context(*contexts: object) -> Iterator[FXService]:
+    """Bind one FX service (resolved from ``contexts``) for the duration of a batch.
+
+    ``contexts`` are objects that may expose a ``db_path`` (the fact / market
+    repos); the first match backs the FX service, so metric inputs convert against
+    the same ``fx_rates`` the rest of the pipeline uses, and the service's rate
+    cache is shared across every symbol and metric in the batch. The previous
+    binding is restored on exit so sequential batches do not leak state.
+    """
+
+    service = fx_service_for_context(*contexts)
+    token = _ACTIVE_FX_SERVICE.set(service)
+    try:
+        yield service
+    finally:
+        _ACTIVE_FX_SERVICE.reset(token)
+
+
+def _active_fx_service() -> FXService:
+    """Return the batch FX service, or a no-fetch ephemeral one when unbound."""
+
+    service = _ACTIVE_FX_SERVICE.get()
+    return service if service is not None else fx_service_for_context()
+
+
 def require_metric_money(
     money: Money,
     *,
@@ -234,30 +289,49 @@ def require_metric_money(
     input_name: str,
     as_of: Optional[str],
 ) -> Money:
-    """Return ``money`` guaranteed to be denominated in ``target_currency``.
+    """Return ``money`` converted into ``target_currency`` (the listing currency).
 
     This is the single seam where a metric input's currency meets the listing
-    (target) currency. In Phase 5a the listing-currency invariant is enforced by
-    *rejection*: a mismatched input raises a structured
-    :class:`MetricCurrencyInvariantError` (which
-    :func:`wrap_metric_currency_invariants` turns into an unavailable metric)
-    rather than letting downstream ``Money`` arithmetic raise an uncaught
-    ``CurrencyMismatchError`` and abort the whole compute batch. Phase 5b will
-    replace the raise with an FX conversion to ``target_currency`` -- call sites
-    do not change, only this body.
+    (target) currency. A same-currency input is returned unchanged; a
+    cross-currency input is converted via the active FX service
+    (:func:`metric_fx_service_context`), **logging each conversion**. If no rate is
+    available the conversion fails and a structured
+    :class:`MetricCurrencyInvariantError` (``missing_fx_rate``) is raised, which
+    :func:`wrap_metric_currency_invariants` turns into an unavailable metric rather
+    than aborting the batch. Converting here -- not at each call site -- keeps the
+    listing-currency invariant impossible to bypass: a metric cannot combine two
+    currencies without first passing each through this seam.
     """
 
-    if money.currency != target_currency:
+    if money.currency == target_currency:
+        return money
+
+    converted: Optional[Money] = None
+    if as_of:
+        converted = money.convert(
+            target_currency, fx_service=_active_fx_service(), as_of=as_of
+        )
+    if converted is None:
         _raise_currency_invariant(
             metric_id=metric_id,
             symbol=symbol,
             input_name=input_name,
-            reason_code="currency_mismatch",
+            reason_code="missing_fx_rate",
             expected_currency=target_currency,
             actual_currency=money.currency,
             as_of=as_of,
         )
-    return money
+    assert converted is not None
+    LOGGER.info(
+        "metric FX conversion | metric=%s symbol=%s input=%s %s->%s as_of=%s",
+        metric_id,
+        symbol,
+        input_name,
+        money.currency,
+        target_currency,
+        as_of,
+    )
+    return converted
 
 
 def require_metric_amount_money(
@@ -441,6 +515,7 @@ __all__ = [
     "has_recent_fact",
     "MarketCap",
     "market_cap_money",
+    "metric_fx_service_context",
     "require_metric_amount_money",
     "require_metric_money",
     "require_metric_ticker_currency",

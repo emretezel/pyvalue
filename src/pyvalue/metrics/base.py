@@ -212,6 +212,13 @@ class MetricCurrencyInvariantError(RuntimeError):
             expected = self.expected_currency or "<expected>"
             actual = self.actual_currency or "<missing>"
             return f"currency invariant: {self.input_name} expected {expected} got {actual}"
+        if self.reason_code == "missing_fx_rate":
+            target = self.expected_currency or "<target>"
+            source = self.actual_currency or "<source>"
+            return (
+                f"currency invariant: no FX rate to convert {self.input_name} "
+                f"{source}->{target}"
+            )
         return f"currency invariant: {self.reason_code}"
 
 

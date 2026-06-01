@@ -3,7 +3,9 @@
 Author: Emre Tezel
 """
 
+import csv
 from datetime import date, timedelta
+import io
 from pathlib import Path
 
 import pytest
@@ -114,9 +116,13 @@ from pyvalue.metrics.share_count_change import (
     Shares10YPctChangeMetric,
 )
 from pyvalue.metrics.short_term_debt_share import ShortTermDebtShareMetric
-from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS, MAX_FY_FACT_AGE_DAYS
+from pyvalue.metrics.utils import (
+    MAX_FACT_AGE_DAYS,
+    MAX_FY_FACT_AGE_DAYS,
+    metric_fx_service_context,
+)
 from pyvalue.metrics.working_capital import WorkingCapitalMetric
-from pyvalue.storage import FactRecord
+from pyvalue.storage import FactRecord, FXRateRecord, FXRatesRepository
 
 
 class _TickerCurrencyRepo(TypedFactReaderMixin):
@@ -258,6 +264,116 @@ def test_current_ratio_metric_returns_none_for_fact_currency_mismatch():
     )
 
     assert metric.compute(symbol, repo) is None
+
+
+class _FXDatabaseHandle:
+    """Minimal context object exposing ``db_path`` so the FX seam can resolve it.
+
+    ``metric_fx_service_context`` builds its FX service from the first context
+    object that has a ``db_path``; in production that is the fact/market repo, in
+    these tests it is this handle pointing at a temp DB with seeded ``fx_rates``.
+    """
+
+    def __init__(self, db_path: Path) -> None:
+        self.db_path = db_path
+
+
+def _seed_fx_rate(
+    db_path: Path,
+    *,
+    base: str,
+    quote: str,
+    rate: float,
+    rate_date: str,
+    provider: str = "EODHD",
+) -> None:
+    fx_repo = FXRatesRepository(db_path)
+    fx_repo.initialize_schema()
+    fx_repo.upsert(
+        FXRateRecord(
+            provider=provider,
+            rate_date=rate_date,
+            base_currency=base,
+            quote_currency=quote,
+            rate=rate,
+            fetched_at=f"{rate_date}T00:00:00+00:00",
+            source_kind="provider",
+        )
+    )
+
+
+def _current_ratio_fx_repo(today: str):
+    # AssetsCurrent in EUR, LiabilitiesCurrent in USD; the USD listing forces the
+    # EUR input to convert before the ratio is taken.
+    return _OwnerEarningsRepo(
+        {
+            "AssetsCurrent": [
+                fact(
+                    concept="AssetsCurrent",
+                    fiscal_period="Q4",
+                    end_date=today,
+                    value=150.0,
+                    currency="EUR",
+                )
+            ],
+            "LiabilitiesCurrent": [
+                fact(
+                    concept="LiabilitiesCurrent",
+                    fiscal_period="Q4",
+                    end_date=today,
+                    value=100.0,
+                    currency="USD",
+                )
+            ],
+        },
+        ticker_currency="USD",
+    )
+
+
+def test_current_ratio_converts_cross_currency_input_via_fx(tmp_path):
+    """Phase 5b: a non-listing-currency input is FX-converted, not rejected."""
+    db_path = tmp_path / "metric_fx.db"
+    today = date.today().isoformat()
+    # 1 EUR = 2 USD on the input's date.
+    _seed_fx_rate(db_path, base="EUR", quote="USD", rate=2.0, rate_date=today)
+
+    repo = _current_ratio_fx_repo(today)
+    with metric_fx_service_context(_FXDatabaseHandle(db_path)):
+        result = CurrentRatioMetric().compute("AAPL.US", repo)
+
+    assert result is not None
+    # AssetsCurrent 150 EUR -> 300 USD; current ratio = 300 / 100.
+    assert round(result.value, 6) == 3.0
+
+
+def test_current_ratio_skips_when_fx_rate_missing():
+    """Without an available rate the cross-currency input makes the metric unavailable."""
+    today = date.today().isoformat()
+    repo = _current_ratio_fx_repo(today)
+    # No FX context bound -> the no-fetch ephemeral service has no EUR->USD rate.
+    assert CurrentRatioMetric().compute("AAPL.US", repo) is None
+
+
+def test_metric_fx_conversion_is_byte_reproducible(tmp_path):
+    """Fixed inputs + a fixed FX rate yield byte-identical CSV output across runs."""
+    db_path = tmp_path / "repro_fx.db"
+    today = date.today().isoformat()
+    _seed_fx_rate(db_path, base="EUR", quote="USD", rate=1.3, rate_date=today)
+
+    def run_once() -> str:
+        repo = _current_ratio_fx_repo(today)
+        with metric_fx_service_context(_FXDatabaseHandle(db_path)):
+            result = CurrentRatioMetric().compute("AAPL.US", repo)
+        assert result is not None
+        buffer = io.StringIO()
+        # repr() round-trips the float exactly, so any nondeterminism in the
+        # FX/Money path would change the bytes.
+        csv.writer(buffer).writerow(
+            [result.symbol, result.metric_id, repr(result.value), result.as_of]
+        )
+        return buffer.getvalue()
+
+    assert run_once() == run_once()
 
 
 def test_market_capitalization_metric_uses_listing_currency_for_market_cap():

@@ -65,7 +65,7 @@ from pyvalue.metrics.base import (
     consume_metric_currency_invariant_error,
     metadata_for_metric,
 )
-from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS
+from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS, metric_fx_service_context
 from pyvalue.normalization import EODHDFactsNormalizer, SECFactsNormalizer
 from pyvalue.ranking import compute_screen_ranking
 from pyvalue.reporting import MetricCoverage, compute_fact_coverage
@@ -4168,6 +4168,42 @@ def _compute_metrics_for_symbol(
     facts_refreshed_at: Optional[str] = None,
     warning_collector: Optional["_MetricWarningCollector"] = None,
 ) -> _ComputedMetricsResult:
+    """Compute one symbol's metrics under a batch FX-conversion context.
+
+    Metric inputs are converted to the listing currency by the shared seam
+    (``metrics.utils.require_metric_money``), which reads the active FX service
+    bound here -- resolved from the fact/market repos' database. Binding around
+    each symbol (rather than once per run) keeps this correct under the
+    multiprocessing workers, which each invoke this function in their own process
+    where a parent-set context var would not be visible.
+    """
+
+    with metric_fx_service_context(fact_repo, market_repo):
+        return _compute_metrics_for_symbol_inner(
+            symbol,
+            metric_ids,
+            fact_repo,
+            market_repo,
+            preloaded_facts=preloaded_facts,
+            preloaded_market_snapshot=preloaded_market_snapshot,
+            preloaded_market_snapshot_record=preloaded_market_snapshot_record,
+            facts_refreshed_at=facts_refreshed_at,
+            warning_collector=warning_collector,
+        )
+
+
+def _compute_metrics_for_symbol_inner(
+    symbol: str,
+    metric_ids: Sequence[str],
+    fact_repo: FinancialFactsRepository,
+    market_repo: Optional[MarketDataRepository] = None,
+    *,
+    preloaded_facts: Optional[Sequence[FactRecord]] = None,
+    preloaded_market_snapshot: object = _PRELOADED_MARKET_SNAPSHOT_MISSING,
+    preloaded_market_snapshot_record: Optional[MarketSnapshotRecord] = None,
+    facts_refreshed_at: Optional[str] = None,
+    warning_collector: Optional["_MetricWarningCollector"] = None,
+) -> _ComputedMetricsResult:
     symbol_upper = symbol.strip().upper()
     records = (
         list(preloaded_facts)
@@ -6707,33 +6743,38 @@ def cmd_report_metric_coverage(
     }
     all_success = 0
 
-    for symbol in selected_symbols:
-        symbol_ok = True
-        for metric_cls in metric_classes:
-            metric = metric_cls()
-            try:
-                if getattr(metric, "uses_market_data", False):
-                    result = metric.compute(symbol, fact_repo, market_repo)
-                else:
-                    result = metric.compute(symbol, fact_repo)
-            except MetricCurrencyInvariantError:
-                result = None
-            except Exception as exc:  # pragma: no cover - defensive logging
-                LOGGER.error(
-                    "Metric %s failed for %s: %s",
-                    getattr(metric_cls, "id", metric_cls.__name__),
-                    symbol,
-                    exc,
-                )
-                result = None
-            if consume_metric_currency_invariant_error(metric) is not None:
-                result = None
-            if result is None:
-                symbol_ok = False
-                continue
-            per_metric_success[getattr(metric_cls, "id", metric_cls.__name__)] += 1
-        if symbol_ok and metric_classes:
-            all_success += 1
+    # Bind one FX service for the whole batch so cross-currency metric inputs
+    # convert to the listing currency against this database's fx_rates (the seam
+    # in metrics.utils reads it); the service's rate cache is shared across every
+    # symbol and metric here.
+    with metric_fx_service_context(fact_repo, market_repo):
+        for symbol in selected_symbols:
+            symbol_ok = True
+            for metric_cls in metric_classes:
+                metric = metric_cls()
+                try:
+                    if getattr(metric, "uses_market_data", False):
+                        result = metric.compute(symbol, fact_repo, market_repo)
+                    else:
+                        result = metric.compute(symbol, fact_repo)
+                except MetricCurrencyInvariantError:
+                    result = None
+                except Exception as exc:  # pragma: no cover - defensive logging
+                    LOGGER.error(
+                        "Metric %s failed for %s: %s",
+                        getattr(metric_cls, "id", metric_cls.__name__),
+                        symbol,
+                        exc,
+                    )
+                    result = None
+                if consume_metric_currency_invariant_error(metric) is not None:
+                    result = None
+                if result is None:
+                    symbol_ok = False
+                    continue
+                per_metric_success[getattr(metric_cls, "id", metric_cls.__name__)] += 1
+            if symbol_ok and metric_classes:
+                all_success += 1
 
     total_symbols = len(selected_symbols)
     scope_label = _scope_label(
