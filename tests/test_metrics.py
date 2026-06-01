@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-from pyvalue.currency import normalize_currency_code
 from pyvalue.metrics import REGISTRY
 from pyvalue.metrics.accruals_ratio import AccrualsRatioMetric
 from pyvalue.metrics.base import MetricCurrencyInvariantError, metadata_for_metric
@@ -130,24 +129,24 @@ class _GBPTickerCurrencyRepo:
 
 
 def fact(**kwargs):
+    # Facts default to a monetary USD value; callers override ``currency`` (and,
+    # for non-monetary facts, ``unit_kind`` + ``currency=None``) as needed. The
+    # schema couples monetary/per_share rows to a non-null currency.
     base = {
         "symbol": "AAPL.US",
         "cik": "CIK",
         "concept": "",
         "fiscal_period": "FY",
         "end_date": "",
-        "unit": "USD",
+        "unit_kind": "monetary",
         "value": 0.0,
         "accn": None,
         "filed": None,
         "frame": None,
         "start_date": None,
+        "currency": "USD",
     }
     base.update(kwargs)
-    if "currency" not in kwargs:
-        inferred_currency = normalize_currency_code(base.get("unit"))
-        if inferred_currency is not None:
-            base["currency"] = inferred_currency
     return FactRecord(**base)
 
 
@@ -12320,16 +12319,24 @@ def test_fcf_per_share_cagr_10y_metric_computes_happy_path():
                     concept="WeightedAverageNumberOfDilutedSharesOutstanding",
                     fiscal_period="FY",
                     end_date=f"{latest_year}-09-30",
+                    # Shares default to the monetary-USD fact shape: this metric
+                    # still currency-validates the per-share denominator against
+                    # the ticker currency (the share-as-count model lands in the
+                    # Phase 5 Money rework). Previously this currency was derived
+                    # from unit="USD"; it is now explicit via the fact() default.
                     value=10.0,
-                    currency=None,
                 ),
                 fact(
                     symbol=symbol,
                     concept="WeightedAverageNumberOfDilutedSharesOutstanding",
                     fiscal_period="FY",
                     end_date=f"{latest_year - 10}-09-30",
+                    # Shares default to the monetary-USD fact shape: this metric
+                    # still currency-validates the per-share denominator against
+                    # the ticker currency (the share-as-count model lands in the
+                    # Phase 5 Money rework). Previously this currency was derived
+                    # from unit="USD"; it is now explicit via the fact() default.
                     value=10.0,
-                    currency=None,
                 ),
             ],
         }

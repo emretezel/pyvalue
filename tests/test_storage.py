@@ -224,7 +224,7 @@ def test_fundamentals_repository_classifies_and_purges_secondary_listings(tmp_pa
                 concept="Assets",
                 fiscal_period="FY",
                 end_date="2024-12-31",
-                unit="GBP",
+                unit_kind="monetary",
                 value=100.0,
                 currency="GBP",
             )
@@ -591,7 +591,7 @@ def test_financial_facts_repository_replace_fact_rows_matches_replace_facts(tmp_
                 concept="Assets",
                 fiscal_period="FY",
                 end_date="2024-12-31",
-                unit="USD",
+                unit_kind="monetary",
                 value=100.0,
                 currency="USD",
             )
@@ -608,7 +608,7 @@ def test_financial_facts_repository_replace_fact_rows_matches_replace_facts(tmp_
                 "Liabilities",
                 "FY",
                 "2024-12-31",
-                "USD",
+                "monetary",
                 40.0,
                 None,
                 None,
@@ -648,7 +648,8 @@ def test_financial_facts_repository_replace_facts_updates_refresh_state(tmp_path
                 symbol="AAA.US",
                 concept="Assets",
                 end_date="2024-12-31",
-                unit="USD",
+                unit_kind="monetary",
+                currency="USD",
                 value=10.0,
             )
         ],
@@ -678,7 +679,7 @@ def test_financial_facts_repository_replace_fact_rows_persists_source_provider(
                 "Assets",
                 "FY",
                 "2024-12-31",
-                "USD",
+                "monetary",
                 100.0,
                 None,
                 None,
@@ -748,7 +749,8 @@ def test_fundamentals_repository_normalization_candidates_match_state_and_facts(
                 concept="Assets",
                 fiscal_period="FY",
                 end_date="2024-12-31",
-                unit="USD",
+                unit_kind="monetary",
+                currency="USD",
                 value=100.0,
             )
         ],
@@ -762,7 +764,8 @@ def test_fundamentals_repository_normalization_candidates_match_state_and_facts(
                 concept="Assets",
                 fiscal_period="FY",
                 end_date="2024-12-31",
-                unit="USD",
+                unit_kind="monetary",
+                currency="USD",
                 value=200.0,
             )
         ],
@@ -850,7 +853,7 @@ def test_financial_facts_repository_replace_fact_rows_replaces_symbol_slice(tmp_
                 "Assets",
                 "FY",
                 "2024-12-31",
-                "USD",
+                "monetary",
                 100.0,
                 None,
                 None,
@@ -864,7 +867,7 @@ def test_financial_facts_repository_replace_fact_rows_replaces_symbol_slice(tmp_
                 "Liabilities",
                 "FY",
                 "2024-12-31",
-                "USD",
+                "monetary",
                 55.0,
                 None,
                 None,
@@ -884,7 +887,7 @@ def test_financial_facts_repository_replace_fact_rows_replaces_symbol_slice(tmp_
                 "StockholdersEquity",
                 "FY",
                 "2024-12-31",
-                "USD",
+                "monetary",
                 45.0,
                 None,
                 None,
@@ -1475,7 +1478,7 @@ def test_financial_facts_repository_latest_share_counts_many_matches_single_look
                 concept="EntityCommonStockSharesOutstanding",
                 fiscal_period="FY",
                 end_date="2024-12-31",
-                unit="shares",
+                unit_kind="count",
                 value=111.0,
             ),
             FactRecord(
@@ -1483,7 +1486,7 @@ def test_financial_facts_repository_latest_share_counts_many_matches_single_look
                 concept="CommonStockSharesOutstanding",
                 fiscal_period="FY",
                 end_date="2024-12-31",
-                unit="shares",
+                unit_kind="count",
                 value=222.0,
             ),
         ],
@@ -1496,7 +1499,7 @@ def test_financial_facts_repository_latest_share_counts_many_matches_single_look
                 concept="CommonStockSharesOutstanding",
                 fiscal_period="FY",
                 end_date="2023-12-31",
-                unit="shares",
+                unit_kind="count",
                 value=300.0,
             ),
             FactRecord(
@@ -1504,7 +1507,7 @@ def test_financial_facts_repository_latest_share_counts_many_matches_single_look
                 concept="CommonStockSharesOutstanding",
                 fiscal_period="FY",
                 end_date="2024-12-31",
-                unit="shares",
+                unit_kind="count",
                 value=333.0,
             ),
         ],
@@ -1543,7 +1546,8 @@ def test_financial_facts_repository_facts_for_symbols_many_matches_single_lookup
                 concept="AssetsCurrent",
                 fiscal_period="FY",
                 end_date="2024-12-31",
-                unit="USD",
+                unit_kind="monetary",
+                currency="USD",
                 value=111.0,
             ),
             FactRecord(
@@ -1551,7 +1555,8 @@ def test_financial_facts_repository_facts_for_symbols_many_matches_single_lookup
                 concept="AssetsCurrent",
                 fiscal_period="FY",
                 end_date="2023-12-31",
-                unit="USD",
+                unit_kind="monetary",
+                currency="USD",
                 value=101.0,
             ),
             FactRecord(
@@ -1559,7 +1564,8 @@ def test_financial_facts_repository_facts_for_symbols_many_matches_single_lookup
                 concept="LiabilitiesCurrent",
                 fiscal_period="FY",
                 end_date="2024-12-31",
-                unit="USD",
+                unit_kind="monetary",
+                currency="USD",
                 value=11.0,
             ),
         ],
@@ -1572,7 +1578,8 @@ def test_financial_facts_repository_facts_for_symbols_many_matches_single_lookup
                 concept="AssetsCurrent",
                 fiscal_period="FY",
                 end_date="2024-12-31",
-                unit="USD",
+                unit_kind="monetary",
+                currency="USD",
                 value=222.0,
             ),
             FactRecord(
@@ -1580,7 +1587,8 @@ def test_financial_facts_repository_facts_for_symbols_many_matches_single_lookup
                 concept="Revenue",
                 fiscal_period="FY",
                 end_date="2024-12-31",
-                unit="USD",
+                unit_kind="monetary",
+                currency="USD",
                 value=333.0,
             ),
         ],
@@ -1608,7 +1616,8 @@ def test_financial_facts_repository_facts_for_symbols_many_concept_filter(tmp_pa
                 concept="AssetsCurrent",
                 fiscal_period="FY",
                 end_date="2024-12-31",
-                unit="USD",
+                unit_kind="monetary",
+                currency="USD",
                 value=111.0,
             ),
             FactRecord(
@@ -1616,7 +1625,8 @@ def test_financial_facts_repository_facts_for_symbols_many_concept_filter(tmp_pa
                 concept="LiabilitiesCurrent",
                 fiscal_period="FY",
                 end_date="2024-12-31",
-                unit="USD",
+                unit_kind="monetary",
+                currency="USD",
                 value=11.0,
             ),
             FactRecord(
@@ -1624,7 +1634,8 @@ def test_financial_facts_repository_facts_for_symbols_many_concept_filter(tmp_pa
                 concept="Revenues",
                 fiscal_period="FY",
                 end_date="2024-12-31",
-                unit="USD",
+                unit_kind="monetary",
+                currency="USD",
                 value=999.0,
             ),
         ],
@@ -1763,7 +1774,10 @@ def test_migration_029_creates_fin_facts_security_concept_latest_index(tmp_path)
     with sqlite3.connect(db_path) as conn:
         conn.execute("UPDATE schema_migrations SET version = 28")
 
-    apply_migrations(db_path)
+    # Apply only THROUGH migration 029. Replaying the whole chain would re-run
+    # migration 043, whose dedupe SQL references the legacy ``unit`` column that
+    # migration 071 has already renamed to ``unit_kind`` on this head schema.
+    apply_migrations(db_path, target_version=29)
 
     with sqlite3.connect(db_path) as conn:
         after = conn.execute(
@@ -1871,7 +1885,7 @@ def test_latest_share_counts_many_prefers_best_same_date_share_fact(tmp_path):
                 concept="EntityCommonStockSharesOutstanding",
                 fiscal_period="FY",
                 end_date="2025-12-31",
-                unit="USD",
+                unit_kind="monetary",
                 value=1_000_000.0,
                 accn=None,
                 filed="2026-03-27",
@@ -1886,7 +1900,7 @@ def test_latest_share_counts_many_prefers_best_same_date_share_fact(tmp_path):
                 concept="CommonStockSharesOutstanding",
                 fiscal_period="FY",
                 end_date="2025-12-31",
-                unit="shares",
+                unit_kind="count",
                 value=1_000.0,
                 accn=None,
                 filed=None,
@@ -2145,6 +2159,12 @@ def test_fx_rates_repository_latest_on_or_before_and_discover_currencies(tmp_pat
     _seed_listing(db_path, "AAA.LSE", currency="GBX")
     _seed_listing(db_path, "BBB.JSE", currency="ZAC")
     _seed_listing(db_path, "CCC.TA", currency="ILA")
+    # One fact per listing, each in that listing's *major* currency. Subunit
+    # codes (GBX/ZAC/ILA) can never enter financial_facts post-migration-071, so
+    # the GBX/ZAC/ILA listings store GBP/ZAR/ILS facts. Each fact lives under its
+    # own listing because the PK (listing_id, concept, fiscal_period, end_date)
+    # no longer includes the unit, so three facts under one listing would
+    # collapse to a single row.
     fact_repo.replace_facts(
         "AAA.LSE",
         [
@@ -2153,28 +2173,38 @@ def test_fx_rates_repository_latest_on_or_before_and_discover_currencies(tmp_pat
                 concept="Assets",
                 fiscal_period="FY",
                 end_date="2024-01-01",
-                unit="GBX",
+                unit_kind="monetary",
                 value=1000.0,
-                currency="GBX",
-            ),
+                currency="GBP",
+            )
+        ],
+    )
+    fact_repo.replace_facts(
+        "BBB.JSE",
+        [
             FactRecord(
                 symbol="BBB.JSE",
                 concept="Assets",
                 fiscal_period="FY",
                 end_date="2024-01-01",
-                unit="ZAC",
+                unit_kind="monetary",
                 value=1000.0,
-                currency="ZAC",
-            ),
+                currency="ZAR",
+            )
+        ],
+    )
+    fact_repo.replace_facts(
+        "CCC.TA",
+        [
             FactRecord(
                 symbol="CCC.TA",
                 concept="Assets",
                 fiscal_period="FY",
                 end_date="2024-01-01",
-                unit="ILA",
+                unit_kind="monetary",
                 value=1000.0,
-                currency="ILA",
-            ),
+                currency="ILS",
+            )
         ],
     )
     repo = FXRatesRepository(db_path)

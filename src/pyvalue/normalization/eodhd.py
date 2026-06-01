@@ -10,7 +10,8 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 import logging
 
 from pyvalue.currency import (
-    SHARES_UNIT,
+    MetricUnitKind,
+    is_monetary_unit_kind,
     is_subunit_base_currency,
     normalize_currency_code as shared_normalize_currency_code,
     normalize_monetary_amount,
@@ -359,7 +360,7 @@ class EODHDFactsNormalizer:
 
     def _share_record_priority(self, record: FactRecord) -> tuple[int, int, float]:
         return (
-            0 if record.unit == SHARES_UNIT else 1,
+            0 if record.unit_kind == "count" else 1,
             0 if record.currency is None else 1,
             abs(record.value),
         )
@@ -597,10 +598,11 @@ class EODHDFactsNormalizer:
                         continue
                     normalized_value: Optional[float]
                     normalized_currency: Optional[str]
+                    unit_kind: MetricUnitKind
                     if concept in SHARE_FACT_CONCEPTS:
                         normalized_value = float(value)
                         normalized_currency = None
-                        unit = SHARES_UNIT
+                        unit_kind = "count"
                     else:
                         normalized_value, normalized_currency = (
                             self._normalize_value_currency(value, currency)
@@ -618,14 +620,14 @@ class EODHDFactsNormalizer:
                                 logger=LOGGER,
                             )
                             continue
-                        unit = normalized_currency
+                        unit_kind = "monetary"
                     records.append(
                         FactRecord(
                             symbol=symbol.upper(),
                             concept=concept,
                             fiscal_period=period_code,
                             end_date=end_date,
-                            unit=unit,
+                            unit_kind=unit_kind,
                             value=normalized_value,
                             accn=None,
                             filed=entry.get("filing_date"),
@@ -679,6 +681,15 @@ class EODHDFactsNormalizer:
         )
         if normalized_value is None:
             return []
+        if normalized_currency is None:
+            # EnterpriseValue is monetary; the schema couples monetary facts to a
+            # non-null currency. Without a resolvable currency we drop the snapshot
+            # rather than persist a currency-less monetary row.
+            LOGGER.warning(
+                "EnterpriseValue: missing currency for %s; skipping snapshot",
+                symbol,
+            )
+            return []
 
         return [
             FactRecord(
@@ -686,7 +697,7 @@ class EODHDFactsNormalizer:
                 concept="EnterpriseValue",
                 fiscal_period="INSTANT",
                 end_date=end_date,
-                unit=normalized_currency or "",
+                unit_kind="monetary",
                 value=normalized_value,
                 accn=None,
                 filed=None,
@@ -755,7 +766,7 @@ class EODHDFactsNormalizer:
                 concept="CommonStockSharesOutstanding",
                 fiscal_period="INSTANT",
                 end_date=end_date,
-                unit=SHARES_UNIT,
+                unit_kind="count",
                 value=shares,
                 accn=None,
                 filed=None,
@@ -814,7 +825,7 @@ class EODHDFactsNormalizer:
                         concept="CommonStockSharesOutstanding",
                         fiscal_period=period,
                         end_date=end_date,
-                        unit=SHARES_UNIT,
+                        unit_kind="count",
                         value=shares,
                         accn=None,
                         filed=None,
@@ -865,6 +876,15 @@ class EODHDFactsNormalizer:
         )
         if normalized_value is None:
             return []
+        if normalized_currency is None:
+            # Dividends-per-share is a per_share monetary fact; it must carry a
+            # currency (schema coupling). Drop the snapshot when none resolves.
+            LOGGER.warning(
+                "CommonStockDividendsPerShareCashPaid: missing currency for %s;"
+                " skipping snapshot",
+                symbol,
+            )
+            return []
 
         return [
             FactRecord(
@@ -872,7 +892,7 @@ class EODHDFactsNormalizer:
                 concept="CommonStockDividendsPerShareCashPaid",
                 fiscal_period="TTM",
                 end_date=end_date,
-                unit=normalized_currency or "",
+                unit_kind="per_share",
                 value=normalized_value,
                 accn=None,
                 filed=None,
@@ -1118,13 +1138,17 @@ class EODHDFactsNormalizer:
             )
             if normalized_value is None:
                 return
+            if normalized_currency is None:
+                # EPS is a per_share monetary fact and must carry a currency
+                # (schema coupling); skip the period when none resolves.
+                return
             records.append(
                 FactRecord(
                     symbol=symbol.upper(),
                     concept="EarningsPerShareDiluted",
                     fiscal_period=period,
                     end_date=date_str,
-                    unit="EPS",
+                    unit_kind="per_share",
                     value=normalized_value,
                     accn=None,
                     filed=None,
@@ -1359,7 +1383,7 @@ class EODHDFactsNormalizer:
         return None
 
     def _record_key(self, record: FactRecord) -> FactKey:
-        return (record.end_date, record.fiscal_period or "", record.unit)
+        return (record.end_date, record.fiscal_period or "", record.unit_kind)
 
     def _period_key(self, record: FactRecord) -> FactPeriodKey:
         return (record.end_date, record.fiscal_period or "")
@@ -1444,7 +1468,7 @@ class EODHDFactsNormalizer:
             concept=concept,
             fiscal_period=base.fiscal_period,
             end_date=base.end_date,
-            unit=currency,
+            unit_kind="monetary",
             value=value,
             accn=base.accn,
             filed=base.filed,
@@ -1945,7 +1969,7 @@ class EODHDFactsNormalizer:
             concept=concept,
             fiscal_period=base.fiscal_period,
             end_date=base.end_date,
-            unit=base.unit,
+            unit_kind=base.unit_kind,
             value=base.value,
             accn=base.accn,
             filed=base.filed,
@@ -2103,7 +2127,9 @@ class EODHDFactsNormalizer:
                     concept=record.concept,
                     fiscal_period=record.fiscal_period,
                     end_date=record.end_date,
-                    unit=target_currency,
+                    # Conversion only changes the currency/amount; the kind
+                    # (monetary vs per_share) is preserved.
+                    unit_kind=record.unit_kind,
                     value=new_value,
                     accn=record.accn,
                     filed=record.filed,
@@ -2117,13 +2143,14 @@ class EODHDFactsNormalizer:
 
     @staticmethod
     def _is_monetary_fact(record: FactRecord) -> bool:
-        """Return True when the fact carries a monetary value needing currency alignment."""
+        """Return True when the fact carries a monetary value needing currency alignment.
 
-        if record.currency is None:
-            return False
-        if record.unit == SHARES_UNIT:
-            return False
-        return True
+        Monetary and per_share facts (e.g. EPS, dividends-per-share) both carry a
+        currency and must be FX-aligned to the listing currency; counts/ratios do
+        not. ``unit_kind`` is authoritative — see ``is_monetary_unit_kind``.
+        """
+
+        return is_monetary_unit_kind(record.unit_kind)
 
     def _normalize_statement_currency(self, statement_payload: Dict) -> Optional[str]:
         """Return direct statement-level currency metadata when present."""

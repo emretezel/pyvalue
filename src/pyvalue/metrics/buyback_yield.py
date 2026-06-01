@@ -233,7 +233,7 @@ class NetBuybackYieldMetric:
                     concept=record.concept,
                     fiscal_period=record.fiscal_period,
                     end_date=record.end_date,
-                    unit=record.unit,
+                    unit_kind=record.unit_kind,
                     value=value,
                     accn=record.accn,
                     filed=record.filed,

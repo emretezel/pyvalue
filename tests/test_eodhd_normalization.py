@@ -137,9 +137,9 @@ def test_eodhd_normalizes_statement_share_fields_as_shares():
 
     assert shares
     assert entity
-    assert shares[0].unit == "shares"
+    assert shares[0].unit_kind == "count"
     assert shares[0].currency is None
-    assert entity[0].unit == "shares"
+    assert entity[0].unit_kind == "count"
     assert entity[0].currency is None
 
 
@@ -179,7 +179,7 @@ def test_eodhd_prefers_dedicated_outstanding_shares_over_scaled_statement_duplic
     ]
 
     assert len(common_fy) == 1
-    assert common_fy[0].unit == "shares"
+    assert common_fy[0].unit_kind == "count"
     assert common_fy[0].value == 384_512_500.0
 
 
@@ -1056,7 +1056,10 @@ def test_eodhd_normalizes_eps_for_configured_subunit_family():
         "2024-03-31": 2.5,
         "2024-06-30": 3.0,
     }
+    # Subunit (ZAC) collapses to the major currency (ZAR), and EPS is a per_share
+    # monetary fact — never a bare currency code in unit_kind.
     assert {record.currency for record in eps_records} == {"ZAR"}
+    assert {record.unit_kind for record in eps_records} == {"per_share"}
 
 
 # ---------------------------------------------------------------------------
@@ -1184,7 +1187,7 @@ def test_eodhd_normalize_converts_monetary_facts_to_target_currency(tmp_path):
     assets = [r for r in records if r.concept == "Assets"]
     assert assets
     assert assets[0].currency == "USD"
-    assert assets[0].unit == "USD"
+    assert assets[0].unit_kind == "monetary"
     assert abs(assets[0].value - 1100.0) < 0.01
 
 
@@ -1385,6 +1388,8 @@ def test_eodhd_normalize_gbx_subunit_with_gbp_target_no_double_conversion():
     # GBX code normalized to GBP; value NOT divided (statement amounts are main-unit)
     assert assets[0].currency == "GBP"
     assert assets[0].value == 10000.0
+    # The subunit-quoted monetary fact lands as a major-currency monetary fact.
+    assert assets[0].unit_kind == "monetary"
 
 
 def test_eodhd_normalize_mixed_currencies_aligned_to_target(tmp_path):

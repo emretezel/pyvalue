@@ -12,15 +12,20 @@ A normalized fact typically includes:
 - fiscal period
 - end date
 - value
-- currency or unit metadata
+- `unit_kind` (the kind enum) and, for monetary/per_share facts, a `currency`
 - optional source metadata
 
 Monetary and non-monetary facts are treated differently:
 
-- monetary facts must resolve to a real currency code
-- non-monetary facts keep a unit such as `shares`
-- configured subunit currencies are converted to their base currencies before
-  downstream arithmetic: `GBX`/`GBP0.01` -> `GBP`, `ZAC` -> `ZAR`, `ILA` -> `ILS`
+- `unit_kind` classifies every fact: `monetary` / `per_share` / `ratio` / `percent`
+  / `multiple` / `count` / `other` (`MetricUnitKind`). It is never a currency code.
+- monetary and per_share facts must resolve to a real currency code (carried in the
+  separate `currency` column); every other kind carries no currency. The schema
+  couples the two (migration 071).
+- non-monetary counts such as shares are `unit_kind = 'count'` (currency `NULL`)
+- configured subunit currencies are converted to their base currencies before a fact
+  is built, so a stored fact never holds a subunit code: `GBX`/`GBP0.01` -> `GBP`,
+  `ZAC` -> `ZAR`, `ILA` -> `ILS`
 
 ## Provider-Agnostic Design
 
@@ -37,8 +42,10 @@ For EODHD monetary fields, currency resolution follows one shared precedence:
    `currency`, `currency_symbol`, or `CurrencyCode`
 2. direct statement-level keys on the statement payload
 3. payload-level `General.CurrencyCode`
-4. a narrow documented legacy fallback only when the fact `unit` already stores
-   the ISO currency code
+
+(The former "infer the currency from the `unit` column" legacy fallback was removed
+with migration 071: `currency` is now authoritative and `unit_kind` carries no ISO
+code.)
 
 The target currency for EODHD normalization is base(`listing.currency`).
 `listing.currency` preserves the catalog quote unit, including subunits such as

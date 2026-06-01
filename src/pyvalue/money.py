@@ -13,7 +13,7 @@ from typing import Callable, Iterable, Optional
 
 from pyvalue.config import Config
 from pyvalue.currency import (
-    fact_currency_or_none,
+    is_monetary_unit_kind,
     merge_currency_codes,
     normalize_currency_code,
     normalize_monetary_amount,
@@ -275,15 +275,18 @@ def normalize_money_value(
 
 
 def normalize_fact_value(record: FactRecord) -> tuple[Optional[float], Optional[str]]:
-    """Return a normalized numeric value and currency for one stored fact."""
+    """Return a normalized numeric value and currency for one stored fact.
 
-    return normalize_money_value(
-        record.value,
-        fact_currency_or_none(
-            getattr(record, "currency", None),
-            getattr(record, "unit", None),
-        ),
-    )
+    ``unit_kind`` is authoritative: only monetary / per_share facts carry a
+    currency (the schema couples the two), so a non-monetary fact returns its
+    raw value with no currency. Monetary facts already hold a *major* currency
+    and a major amount, so ``normalize_money_value`` is effectively a no-op kept
+    for defensiveness against any subunit code that predates migration 071.
+    """
+
+    if not is_monetary_unit_kind(record.unit_kind):
+        return record.value, None
+    return normalize_money_value(record.value, record.currency)
 
 
 def fx_service_for_context(

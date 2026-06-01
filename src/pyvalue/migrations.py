@@ -151,12 +151,23 @@ def _infer_canonical_exchange(symbol: str) -> Optional[str]:
     return suffix
 
 
-def apply_migrations(db_path: Union[str, Path]) -> int:
-    """Apply all pending migrations in order.
+def apply_migrations(
+    db_path: Union[str, Path], *, target_version: Optional[int] = None
+) -> int:
+    """Apply pending migrations in order.
 
     Returns the number of migrations applied. Safe to call repeatedly;
     no-op when already up-to-date. Each migration runs inside its own
     transaction and rolls back on error.
+
+    ``target_version`` caps the highest migration applied (default: the
+    latest, ``len(MIGRATIONS)``). It exists so a single migration can be
+    exercised in isolation — applying *through* version N without later
+    migrations running. This matters because some later migrations are
+    destructive to earlier state (e.g. migration 071 rebuilds
+    ``financial_facts`` empty), which would otherwise erase the very rows a
+    migration-N regression test asserts on. Production callers omit it and
+    always migrate to head. Values are clamped to ``[0, len(MIGRATIONS)]``.
 
     Foreign-key enforcement is disabled for the duration of the
     migration session and re-enabled afterwards. The SQLite manual
@@ -192,7 +203,8 @@ def apply_migrations(db_path: Union[str, Path]) -> int:
         # Off for the duration of migrations; re-enabled before close.
         conn.execute("PRAGMA foreign_keys = OFF")
         current = _current_version(conn)
-        target = len(MIGRATIONS)
+        target = len(MIGRATIONS) if target_version is None else target_version
+        target = max(0, min(target, len(MIGRATIONS)))
         conn.commit()
 
         for version in range(current + 1, target + 1):
@@ -5932,6 +5944,19 @@ _CURRENCY_FORMAT_CHECK = (
 )
 
 
+# Major-currency predicate for ``financial_facts.currency`` (migration 071+).
+# Subunit codes (GBX pence, ZAC cent, ILA agora — and the 7-char GBP0.01
+# alias) must never enter the data boundary: the EODHD normalizer collapses
+# every subunit amount to its base currency before a fact is built (see
+# ``currency.normalize_monetary_amount``). This extends the ISO-shape check
+# with an explicit subunit exclusion so the schema itself rejects any subunit
+# code that slips through. GBP0.01 is already excluded by the length=3 clause;
+# it is listed for parity with the migration-070 price-scaling registry.
+_MAJOR_CURRENCY_CHECK = (
+    _CURRENCY_FORMAT_CHECK + " AND {col} NOT IN ('GBX', 'GBP0.01', 'ZAC', 'ILA')"
+)
+
+
 def _migration_056_listing_format_checks(conn: sqlite3.Connection) -> None:
     """Add format CHECKs to ``listing.symbol`` and ``listing.currency``.
 
@@ -7594,6 +7619,111 @@ def _migration_070_market_data_price_major_currency(
     )
 
 
+def _migration_071_financial_facts_unit_kind(conn: sqlite3.Connection) -> None:
+    """Rename ``financial_facts.unit`` to ``unit_kind`` and drop it from the PK.
+
+    The legacy ``unit`` column conflated two ideas: it held a *currency code*
+    (USD, EUR, GBX...) for monetary rows and a *type token* (``shares``,
+    ``EPS``, ``USD/shares``) for the rest -- even though a separate
+    ``currency`` column already existed. ``unit_kind`` now holds ONLY the
+    documented enum (monetary / per_share / ratio / percent / multiple /
+    count / other -- ``MetricUnitKind`` in currency.py); the ISO code lives in
+    ``currency`` alone; and the primary key drops the old ``unit`` member (new
+    PK ``(listing_id, concept, fiscal_period, end_date)``).
+
+    Two CHECKs encode the refactor's invariants at the schema level:
+
+    * ``currency`` is *major-only* (no subunit GBX/ZAC/ILA) -- subunits are
+      collapsed to their base currency before a fact is ever built.
+    * ``unit_kind`` and ``currency`` are *coupled*: monetary / per_share rows
+      MUST carry a currency, and every other kind MUST NOT.
+
+    The table is rebuilt EMPTY rather than copied row-by-row. The author
+    rebuilds ``financial_facts`` from ``fundamentals_raw`` via the CLI
+    ``normalise`` command after this lands (a decision recorded in the refactor
+    plan), so copying ~100M legacy rows -- whose ``unit`` would need per-row
+    reclassification into the enum anyway -- would be wasted work. Dropping the
+    table also frees its storage immediately, reused by the rebuild.
+    ``fundamentals_normalization_state`` is cleared so ``normalise`` re-processes
+    every cached payload instead of treating them as already-normalized.
+
+    ``financial_facts`` is a leaf table (only ``listing`` references it, via its
+    own outgoing FK); nothing references it and no view selects from it, so the
+    drop/recreate disturbs nothing else.
+
+    Idempotent: a table that already declares ``unit_kind`` is left untouched.
+    """
+
+    if not _table_exists(conn, "financial_facts"):
+        return
+    ddl_row = conn.execute(
+        "SELECT sql FROM sqlite_master "
+        "WHERE type = 'table' AND name = 'financial_facts'"
+    ).fetchone()
+    if ddl_row is None:
+        return
+    if "unit_kind" in ddl_row[0]:
+        return
+
+    conn.execute("DROP INDEX IF EXISTS idx_fin_facts_security_concept_latest")
+    conn.execute("DROP INDEX IF EXISTS idx_fin_facts_currency_nonnull")
+    conn.execute("DROP TABLE financial_facts")
+
+    major_currency_check = _MAJOR_CURRENCY_CHECK.format(col="currency")
+    conn.execute(
+        f"""
+        CREATE TABLE financial_facts (
+            listing_id INTEGER NOT NULL,
+            cik TEXT,
+            concept TEXT NOT NULL,
+            fiscal_period TEXT NOT NULL
+                CHECK (fiscal_period IN ('FY','Q1','Q2','Q3','Q4','TTM','INSTANT')),
+            end_date TEXT NOT NULL,
+            unit_kind TEXT NOT NULL
+                CHECK (unit_kind IN (
+                    'monetary','per_share','ratio','percent','multiple','count','other'
+                )),
+            value REAL NOT NULL,
+            accn TEXT,
+            filed TEXT,
+            frame TEXT,
+            start_date TEXT,
+            accounting_standard TEXT,
+            currency TEXT
+                CHECK (
+                    (currency IS NULL OR ({major_currency_check}))
+                    AND (
+                        (unit_kind IN ('monetary','per_share') AND currency IS NOT NULL)
+                        OR (unit_kind NOT IN ('monetary','per_share') AND currency IS NULL)
+                    )
+                ),
+            source_provider TEXT,
+            PRIMARY KEY (listing_id, concept, fiscal_period, end_date),
+            FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fin_facts_security_concept_latest
+        ON financial_facts(listing_id, concept, end_date DESC, filed DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fin_facts_currency_nonnull
+        ON financial_facts(currency)
+        WHERE currency IS NOT NULL
+        """
+    )
+
+    # Force ``normalise`` to re-build every fact from the cached raw payloads:
+    # the normalization gate compares the payload hash stored here, so an empty
+    # table means "nothing has been normalized yet".
+    if _table_exists(conn, "fundamentals_normalization_state"):
+        conn.execute("DELETE FROM fundamentals_normalization_state")
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -7665,6 +7795,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_068_fiscal_period_check,
     _migration_069_purge_currencyless_listings,
     _migration_070_market_data_price_major_currency,
+    _migration_071_financial_facts_unit_kind,
 ]
 
 

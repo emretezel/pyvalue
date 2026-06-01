@@ -144,7 +144,7 @@ class ROCGreenblattMetric:
                     concept="TangibleCapital",
                     fiscal_period=ppe.fiscal_period,
                     end_date=ppe.end_date,
-                    unit=ppe.unit,
+                    unit_kind=ppe.unit_kind,
                     value=value,
                     accn=ppe.accn,
                     filed=ppe.filed,

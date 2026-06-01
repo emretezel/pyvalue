@@ -29,7 +29,7 @@ All row counts and table sizes below come from the live `data/pyvalue.db` snapsh
 
 | Table | Rows | Table size | Primary key | Main logical refs | Initial review focus |
 | --- | --- | --- | --- | --- | --- |
-| [financial_facts](tables/financial_facts.md) | `103,163,449` | `8.55 GiB` | `listing_id`, `concept`, `fiscal_period`, `end_date`, `unit` | `listing_id` in `listing` | hottest fact table; check row width, nullable PK parts, and latest-fact indexes |
+| [financial_facts](tables/financial_facts.md) | `103,163,449` | `8.55 GiB` | `listing_id`, `concept`, `fiscal_period`, `end_date` | `listing_id` in `listing` | hottest fact table; `unit`→`unit_kind` enum + dropped from PK (migration 071); check row width and latest-fact indexes |
 | [financial_facts_refresh_state](tables/financial_facts_refresh_state.md) | `61,987` | `2.4 MiB` | `listing_id` | `listing_id` in `listing` | verify it still adds value beyond `fundamentals_normalization_state` |
 | [market_data](tables/market_data.md) | `222,774` | `16.9 MiB` | `listing_id`, `as_of` | `listing_id` in `listing` | latest-snapshot access and time-series retention |
 | [metrics](tables/metrics.md) | `2,422,916` | `130.4 MiB` | `listing_id`, `metric_id` | `listing_id` in `listing` | screen-read performance and lack of historical versions |

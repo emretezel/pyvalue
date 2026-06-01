@@ -5764,7 +5764,7 @@ def _normalization_record_to_row(record: FactRecord) -> StoredFactRow:
         record.concept,
         record.fiscal_period,
         record.end_date,
-        record.unit,
+        record.unit_kind,
         record.value,
         record.accn,
         record.filed,

@@ -46,7 +46,6 @@ MetricUnitKind = Literal[
     "other",
 ]
 MONETARY_UNIT_KINDS = frozenset({"monetary", "per_share"})
-SHARES_UNIT = "shares"
 
 
 @dataclass(frozen=True)
@@ -85,35 +84,6 @@ def normalize_currency_code(value: object) -> Optional[str]:
     if subunit is not None:
         return subunit.base_currency
     return code
-
-
-def legacy_currency_from_unit(unit: object) -> Optional[str]:
-    """Return a documented legacy currency fallback inferred from ``unit``."""
-
-    raw_unit = raw_currency_code(unit)
-    if raw_unit is None:
-        return None
-    if raw_unit == SHARES_UNIT.upper():
-        return None
-    if "/" in raw_unit:
-        return None
-    if is_subunit_currency(raw_unit):
-        return normalize_currency_code(raw_unit)
-    if len(raw_unit) == 3 and raw_unit.isalpha():
-        return normalize_currency_code(raw_unit)
-    return None
-
-
-def fact_currency_or_none(
-    currency_code: object,
-    unit: object,
-) -> Optional[str]:
-    """Return a normalized fact currency using the documented legacy fallback."""
-
-    explicit = raw_currency_code(currency_code)
-    if explicit is not None:
-        return explicit
-    return legacy_currency_from_unit(unit)
 
 
 def raw_currency_code(value: object) -> Optional[str]:
@@ -308,16 +278,13 @@ __all__ = [
     "GBX_TO_GBP_RATIO",
     "MONETARY_UNIT_KINDS",
     "MetricUnitKind",
-    "SHARES_UNIT",
     "SUBUNIT_BASE_CURRENCIES",
     "SUBUNIT_CURRENCY_REGISTRY",
     "currency_subunit",
-    "fact_currency_or_none",
     "is_gbx_subunit_currency",
     "is_subunit_base_currency",
     "is_subunit_currency",
     "is_monetary_unit_kind",
-    "legacy_currency_from_unit",
     "merge_currency_codes",
     "metric_currency_or_none",
     "normalize_currency_code",

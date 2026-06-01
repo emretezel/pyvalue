@@ -19,7 +19,6 @@ from types import SimpleNamespace
 import pytest
 
 from pyvalue import cli
-from pyvalue.currency import normalize_currency_code
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics import REGISTRY
 from pyvalue.metrics.base import MetricCurrencyInvariantError, MetricResult
@@ -48,24 +47,23 @@ from pyvalue.marketdata import MarketDataUpdate, PriceData
 
 
 def make_fact(**kwargs):
+    # Facts default to a monetary USD value; callers override ``currency`` (and,
+    # for non-monetary facts, ``unit_kind`` + ``currency=None``) as needed.
     base = {
         "symbol": "AAPL.US",
         "cik": "CIK",
         "concept": "",
         "fiscal_period": "FY",
         "end_date": "",
-        "unit": "USD",
+        "unit_kind": "monetary",
         "value": 0.0,
         "accn": None,
         "filed": None,
         "frame": None,
         "start_date": None,
+        "currency": "USD",
     }
     base.update(kwargs)
-    if "currency" not in kwargs:
-        inferred_currency = normalize_currency_code(base.get("unit"))
-        if inferred_currency is not None:
-            base["currency"] = inferred_currency
     return FactRecord(**base)
 
 
@@ -2829,7 +2827,6 @@ def test_cmd_reconcile_listing_status_backfills_from_raw_only(tmp_path, capsys):
                 concept="Assets",
                 end_date="2024-12-31",
                 value=100.0,
-                unit="GBP",
                 currency="GBP",
             )
         ],
@@ -5772,7 +5769,6 @@ def test_cmd_clear_financial_facts_clears_normalization_state(tmp_path):
                 symbol="AAA.US",
                 concept="Assets",
                 end_date="2024-12-31",
-                unit="USD",
                 value=10.0,
             )
         ],
@@ -6419,7 +6415,7 @@ def test_cmd_normalize_fundamentals_eodhd_drops_old_missing_fx_periods(tmp_path)
         fact_repo._connect()
         .execute(
             """
-            SELECT ff.end_date, ff.value, ff.currency, ff.unit
+            SELECT ff.end_date, ff.value, ff.currency, ff.unit_kind
             FROM financial_facts ff
             JOIN securities s ON s.security_id = ff.listing_id
             WHERE s.canonical_symbol = 'AALB.AS' AND ff.concept = 'Assets'
@@ -6429,7 +6425,7 @@ def test_cmd_normalize_fundamentals_eodhd_drops_old_missing_fx_periods(tmp_path)
         .fetchall()
     )
     assert [(row[0], row[1], row[2], row[3]) for row in rows] == [
-        ("2001-12-31", 1200.0, "EUR", "EUR")
+        ("2001-12-31", 1200.0, "EUR", "monetary")
     ]
 
 

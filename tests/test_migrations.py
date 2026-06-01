@@ -1846,7 +1846,11 @@ def _seed_two_listings(conn: sqlite3.Connection) -> tuple[int, int]:
 
 
 def test_migration_043_pk_rejects_duplicate_after_rebuild(tmp_path):
-    """The new PK enforces uniqueness on (listing_id, concept, fiscal_period, end_date, unit)."""
+    """The PK enforces uniqueness on (listing_id, concept, fiscal_period, end_date).
+
+    Migration 071 dropped ``unit`` from the key, so two rows that share those
+    four columns collide regardless of their (now enum) ``unit_kind``.
+    """
 
     db_path = tmp_path / "fin-facts-pk-uniqueness.sqlite"
     apply_migrations(db_path)
@@ -1856,8 +1860,8 @@ def test_migration_043_pk_rejects_duplicate_after_rebuild(tmp_path):
         conn.execute(
             """
             INSERT INTO financial_facts (
-                listing_id, concept, fiscal_period, end_date, unit, value
-            ) VALUES (?, 'Revenue', 'FY', '2024-12-31', 'USD', 100.0)
+                listing_id, concept, fiscal_period, end_date, unit_kind, value, currency
+            ) VALUES (?, 'Revenue', 'FY', '2024-12-31', 'monetary', 100.0, 'USD')
             """,
             (listing_id,),
         )
@@ -1865,8 +1869,9 @@ def test_migration_043_pk_rejects_duplicate_after_rebuild(tmp_path):
             conn.execute(
                 """
                 INSERT INTO financial_facts (
-                    listing_id, concept, fiscal_period, end_date, unit, value
-                ) VALUES (?, 'Revenue', 'FY', '2024-12-31', 'USD', 999.0)
+                    listing_id, concept, fiscal_period, end_date, unit_kind, value,
+                    currency
+                ) VALUES (?, 'Revenue', 'FY', '2024-12-31', 'monetary', 999.0, 'USD')
                 """,
                 (listing_id,),
             )
@@ -1890,7 +1895,6 @@ def test_migration_043_pk_no_longer_includes_accn(tmp_path):
         "concept",
         "fiscal_period",
         "end_date",
-        "unit",
     ]
     # accn (notnull=False, pk=0).
     assert accn_row[3] == 0
@@ -1908,8 +1912,9 @@ def test_migration_043_fk_rejects_unknown_listing_id(tmp_path):
             conn.execute(
                 """
                 INSERT INTO financial_facts (
-                    listing_id, concept, fiscal_period, end_date, unit, value
-                ) VALUES (999999, 'Revenue', 'FY', '2024-12-31', 'USD', 100.0)
+                    listing_id, concept, fiscal_period, end_date, unit_kind, value,
+                    currency
+                ) VALUES (999999, 'Revenue', 'FY', '2024-12-31', 'monetary', 100.0, 'USD')
                 """
             )
 
@@ -1972,15 +1977,16 @@ def test_migration_043_dedupe_keeps_filed_winner(tmp_path):
             """,
             (listing_id, listing_id, listing_id),
         )
-        # Rewind so 043 will be re-run. Anything beyond 042 (043, 044, ...)
-        # will replay; assert exactly that delta so this test stays accurate
-        # as later migrations are appended.
-        target_version = 42
-        conn.execute("UPDATE schema_migrations SET version = ?", (target_version,))
+        # Rewind so 043 will be re-run.
+        rewind_to = 42
+        conn.execute("UPDATE schema_migrations SET version = ?", (rewind_to,))
         conn.commit()
 
-    second = apply_migrations(db_path)
-    assert second == len(MIGRATIONS) - target_version
+    # Apply only THROUGH migration 043: the later migration 071 rebuilds
+    # financial_facts empty, which would wipe the rows this dedupe regression
+    # asserts on. ``target_version`` isolates 043 so its behaviour stays testable.
+    second = apply_migrations(db_path, target_version=43)
+    assert second == 43 - rewind_to
 
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute(
@@ -2057,11 +2063,12 @@ def test_migration_043_preserves_unique_rows(tmp_path):
         conn.execute(
             """
             INSERT INTO financial_facts (
-                listing_id, concept, fiscal_period, end_date, unit, value, filed
+                listing_id, concept, fiscal_period, end_date, unit_kind, value,
+                filed, currency
             ) VALUES
-                (?, 'Revenue', 'FY', '2024-12-31', 'USD', 100.0, '2025-01-01'),
-                (?, 'Revenue', 'Q1', '2025-03-31', 'USD', 25.0, '2025-04-15'),
-                (?, 'NetIncome', 'FY', '2024-12-31', 'USD', 10.0, '2025-01-01')
+                (?, 'Revenue', 'FY', '2024-12-31', 'monetary', 100.0, '2025-01-01', 'USD'),
+                (?, 'Revenue', 'Q1', '2025-03-31', 'monetary', 25.0, '2025-04-15', 'USD'),
+                (?, 'NetIncome', 'FY', '2024-12-31', 'monetary', 10.0, '2025-01-01', 'USD')
             """,
             (listing_a, listing_a, listing_b),
         )
@@ -2073,16 +2080,16 @@ def test_migration_043_preserves_unique_rows(tmp_path):
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute(
             """
-            SELECT listing_id, concept, fiscal_period, end_date, unit, value
+            SELECT listing_id, concept, fiscal_period, end_date, unit_kind, value
             FROM financial_facts
             ORDER BY listing_id, concept, fiscal_period
             """
         ).fetchall()
 
     assert rows == [
-        (listing_a, "Revenue", "FY", "2024-12-31", "USD", 100.0),
-        (listing_a, "Revenue", "Q1", "2025-03-31", "USD", 25.0),
-        (listing_b, "NetIncome", "FY", "2024-12-31", "USD", 10.0),
+        (listing_a, "Revenue", "FY", "2024-12-31", "monetary", 100.0),
+        (listing_a, "Revenue", "Q1", "2025-03-31", "monetary", 25.0),
+        (listing_b, "NetIncome", "FY", "2024-12-31", "monetary", 10.0),
     ]
 
 
@@ -2204,7 +2211,11 @@ def test_migration_045_casts_existing_text_to_real(tmp_path):
         conn.execute("UPDATE schema_migrations SET version = 44")
         conn.commit()
 
-    apply_migrations(db_path)
+    # Apply only THROUGH migration 045. Re-running the whole chain would replay
+    # migration 059, whose pre-flight queries the legacy ``financial_facts.unit``
+    # column that migration 071 has already renamed to ``unit_kind`` on this
+    # head-shaped schema.
+    apply_migrations(db_path, target_version=45)
 
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute(
@@ -2592,8 +2603,12 @@ def test_migration_053_drops_runtime_added_columns(tmp_path):
             """
         )
 
-    applied = apply_migrations(db_path)
-    assert applied == len(MIGRATIONS) - target_version
+    # Apply only THROUGH migration 053. Re-running the whole chain would replay
+    # migration 059, whose pre-flight queries the legacy ``financial_facts.unit``
+    # column that migration 071 has already renamed to ``unit_kind`` on this
+    # head-shaped schema.
+    applied = apply_migrations(db_path, target_version=53)
+    assert applied == 53 - target_version
 
     with sqlite3.connect(db_path) as conn:
         info = conn.execute("PRAGMA table_info(market_data_fetch_state)").fetchall()
@@ -3089,7 +3104,9 @@ def test_migration_058_idempotent(tmp_path):
 
 def test_migration_059_financial_facts_rejects_lowercase_currency(tmp_path):
     db_path = tmp_path / "fin-facts-currency-059.sqlite"
-    apply_migrations(db_path)
+    # Pin to v59: migration 059's financial_facts CHECKs operate on the legacy
+    # ``unit`` column, which migration 071 later replaces with ``unit_kind``.
+    apply_migrations(db_path, target_version=59)
 
     with _open_with_fk(db_path) as conn:
         listing_id = _seed_listing(conn)
@@ -3108,7 +3125,9 @@ def test_migration_059_financial_facts_rejects_lowercase_currency(tmp_path):
 
 def test_migration_059_financial_facts_rejects_empty_unit(tmp_path):
     db_path = tmp_path / "fin-facts-unit-059.sqlite"
-    apply_migrations(db_path)
+    # Pin to v59: this asserts migration 059's ``unit`` format CHECK, which
+    # migration 071 supersedes with the ``unit_kind`` enum CHECK.
+    apply_migrations(db_path, target_version=59)
 
     with _open_with_fk(db_path) as conn:
         listing_id = _seed_listing(conn)
@@ -3136,7 +3155,9 @@ def test_migration_059_financial_facts_accepts_composite_unit(tmp_path):
     """``USD/shares`` is a valid SEC fact unit and must pass the CHECK."""
 
     db_path = tmp_path / "fin-facts-composite-unit-059.sqlite"
-    apply_migrations(db_path)
+    # Pin to v59: ``USD/shares`` is a valid value only for the legacy ``unit``
+    # column (migration 059). Migration 071 replaces it with ``unit_kind``.
+    apply_migrations(db_path, target_version=59)
 
     with _open_with_fk(db_path) as conn:
         listing_id = _seed_listing(conn)
@@ -3721,8 +3742,9 @@ def test_migration_065_rejects_null_fiscal_period(tmp_path):
             conn.execute(
                 """
                 INSERT INTO financial_facts (
-                    listing_id, concept, fiscal_period, end_date, unit, value
-                ) VALUES (?, 'Revenue', NULL, '2025-12-31', 'USD', 1.0)
+                    listing_id, concept, fiscal_period, end_date, unit_kind, value,
+                    currency
+                ) VALUES (?, 'Revenue', NULL, '2025-12-31', 'monetary', 1.0, 'USD')
                 """,
                 (listing_id,),
             )
@@ -4014,8 +4036,9 @@ def test_migration_068_check_rejects_empty_fiscal_period(tmp_path):
             conn.execute(
                 """
                 INSERT INTO financial_facts (
-                    listing_id, concept, fiscal_period, end_date, unit, value
-                ) VALUES (1, 'EnterpriseValue', '', '2025-12-31', 'USD', 1.0)
+                    listing_id, concept, fiscal_period, end_date, unit_kind, value,
+                    currency
+                ) VALUES (1, 'EnterpriseValue', '', '2025-12-31', 'monetary', 1.0, 'USD')
                 """
             )
         # And it must accept every value in the allow-list.
@@ -4023,8 +4046,9 @@ def test_migration_068_check_rejects_empty_fiscal_period(tmp_path):
             conn.execute(
                 """
                 INSERT INTO financial_facts (
-                    listing_id, concept, fiscal_period, end_date, unit, value
-                ) VALUES (1, 'Revenues', ?, '2025-12-31', 'USD', 1.0)
+                    listing_id, concept, fiscal_period, end_date, unit_kind, value,
+                    currency
+                ) VALUES (1, 'Revenues', ?, '2025-12-31', 'monetary', 1.0, 'USD')
                 """,
                 (period,),
             )
@@ -4363,3 +4387,132 @@ def test_migration_069_purges_currencyless_listings_and_dependents(tmp_path):
     assert md_listings == [2]
     # The rebuilt table enforces a non-null currency.
     assert "currency TEXT NOT NULL" in ddl
+
+
+# ---------------------------------------------------------------------------
+# Migration 071: financial_facts.unit -> unit_kind enum.
+# ---------------------------------------------------------------------------
+
+
+def test_migration_071_unit_kind_replaces_unit_with_coupled_checks(tmp_path):
+    """Migration 071 swaps ``financial_facts.unit`` for the ``unit_kind`` enum.
+
+    The rebuilt table holds ``unit_kind`` (not ``unit``), drops it from the PK,
+    couples monetary/per_share rows to a non-null *major* currency, and forces
+    every other kind to a NULL currency.
+    """
+
+    db_path = tmp_path / "fin-facts-071-shape.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        info = conn.execute("PRAGMA table_info(financial_facts)").fetchall()
+        columns = {row[1] for row in info}
+        pk_columns = [row[1] for row in info if row[5]]
+
+        assert "unit_kind" in columns
+        assert "unit" not in columns
+        assert pk_columns == ["listing_id", "concept", "fiscal_period", "end_date"]
+
+        listing_id = _seed_listing(conn)
+
+        # Accepted: monetary + major currency; count + NULL; per_share + currency.
+        for concept, kind, value, currency in (
+            ("Assets", "monetary", 10.0, "USD"),
+            ("CommonStockSharesOutstanding", "count", 5.0, None),
+            ("EarningsPerShareDiluted", "per_share", 1.5, "EUR"),
+        ):
+            conn.execute(
+                """
+                INSERT INTO financial_facts (
+                    listing_id, concept, fiscal_period, end_date, unit_kind, value,
+                    currency
+                ) VALUES (?, ?, 'FY', '2024-12-31', ?, ?, ?)
+                """,
+                (listing_id, concept, kind, value, currency),
+            )
+        conn.commit()
+
+        # Rejected combinations — each violates exactly one CHECK clause.
+        rejected = [
+            # monetary without a currency (coupling).
+            ("Liabilities", "monetary", 3.0, None),
+            # count carrying a currency (coupling).
+            ("ShareCountB", "count", 7.0, "USD"),
+            # subunit currency on a monetary fact (major-only).
+            ("Sales", "monetary", 9.0, "GBX"),
+            # unit_kind outside the enum.
+            ("Mystery", "bogus", 1.0, None),
+        ]
+        for concept, kind, value, currency in rejected:
+            with pytest.raises(sqlite3.IntegrityError):
+                conn.execute(
+                    """
+                    INSERT INTO financial_facts (
+                        listing_id, concept, fiscal_period, end_date, unit_kind,
+                        value, currency
+                    ) VALUES (?, ?, 'FY', '2024-12-31', ?, ?, ?)
+                    """,
+                    (listing_id, concept, kind, value, currency),
+                )
+
+
+def test_migration_071_rebuilds_empty_and_clears_normalization_state(tmp_path):
+    """Migration 071 drops legacy ``financial_facts`` rows and clears the
+    normalization state so ``normalise`` rebuilds every fact from raw."""
+
+    db_path = tmp_path / "fin-facts-071-rebuild.sqlite"
+    apply_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys=OFF")
+        provider_listing_id = _seed_catalog_row(
+            conn, listing_id=7, name="Acme", provider_symbol="ACME"
+        )
+        # Recreate the pre-071 ``unit``-column shape and seed a fact, a cached
+        # payload, and a normalization-state row, then rewind so 071 replays.
+        _drop_fiscal_period_check(conn)
+        conn.execute(
+            """
+            INSERT INTO financial_facts (
+                listing_id, concept, fiscal_period, end_date, unit, value, currency
+            ) VALUES (7, 'Assets', 'FY', '2024-12-31', 'USD', 10.0, 'USD')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO fundamentals_raw (
+                provider_listing_id, data, payload_hash, last_fetched_at
+            ) VALUES (?, '{}', ?, '2026-01-01T00:00:00+00:00')
+            """,
+            (provider_listing_id, "0" * 64),
+        )
+        conn.execute(
+            """
+            INSERT INTO fundamentals_normalization_state (
+                provider_listing_id, normalized_payload_hash, normalized_at
+            ) VALUES (?, ?, '2026-01-02T00:00:00+00:00')
+            """,
+            (provider_listing_id, "0" * 64),
+        )
+        conn.execute("UPDATE schema_migrations SET version = 70")
+        conn.commit()
+
+    applied = apply_migrations(db_path, target_version=71)
+    assert applied == 1
+
+    with _open_with_fk(db_path) as conn:
+        fact_count = conn.execute("SELECT COUNT(*) FROM financial_facts").fetchone()[0]
+        state_count = conn.execute(
+            "SELECT COUNT(*) FROM fundamentals_normalization_state"
+        ).fetchone()[0]
+        columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(financial_facts)").fetchall()
+        }
+
+    # Legacy rows are dropped (rebuilt empty) and the normalization state is
+    # cleared so every cached payload is re-normalized.
+    assert fact_count == 0
+    assert state_count == 0
+    assert "unit_kind" in columns

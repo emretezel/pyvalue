@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional
 import logging
 
 from pyvalue.currency import (
+    MetricUnitKind,
     is_subunit_currency,
     normalize_currency_code,
     raw_currency_code,
@@ -642,8 +643,9 @@ class SECFactsNormalizer:
             else:
                 q4_value = fy_record.value
                 start = None
+            fy_unit_token = self._sec_unit_token(fy_record)
             new_entry = {
-                "__unit": fy_record.unit,
+                "__unit": fy_unit_token,
                 "val": q4_value,
                 "end": fy_record.end_date,
                 "fp": "Q4",
@@ -653,7 +655,7 @@ class SECFactsNormalizer:
                 "start": start,
             }
             record = self._entry_to_record(
-                new_entry, symbol, cik, concept, fy_record.unit
+                new_entry, symbol, cik, concept, fy_unit_token
             )
             if record:
                 records.append(record)
@@ -666,7 +668,11 @@ class SECFactsNormalizer:
     ) -> Dict[str, Dict[tuple[str, str, str], FactRecord]]:
         indexed: Dict[str, Dict[tuple[str, str, str], FactRecord]] = {}
         for record in records:
-            key = (record.end_date, record.fiscal_period or "", record.unit)
+            key = (
+                record.end_date,
+                record.fiscal_period or "",
+                self._sec_unit_token(record),
+            )
             bucket = indexed.setdefault(record.concept, {})
             if key not in bucket:
                 bucket[key] = record
@@ -1795,13 +1801,18 @@ class SECFactsNormalizer:
         currency: Optional[str] = None,
     ) -> FactRecord:
         normalized_currency = normalize_currency_code(currency) or base.currency
+        # Derived records are monetary aggregates; couple the kind to currency
+        # presence so the schema invariant (monetary ⇔ currency) always holds.
+        unit_kind: MetricUnitKind = (
+            "monetary" if normalized_currency is not None else "other"
+        )
         return FactRecord(
             symbol=symbol.upper(),
             cik=base.cik or cik,
             concept=concept,
             fiscal_period=base.fiscal_period,
             end_date=base.end_date,
-            unit=normalized_currency or base.unit,
+            unit_kind=unit_kind,
             value=value,
             accn=None,
             filed=None,
@@ -1895,6 +1906,7 @@ class SECFactsNormalizer:
             return None
 
         currency = self._currency_from_unit(unit)
+        unit_kind = self._unit_kind_for(unit, currency)
 
         return FactRecord(
             symbol=symbol,
@@ -1902,7 +1914,7 @@ class SECFactsNormalizer:
             concept=concept,
             fiscal_period=fiscal_period,
             end_date=end_date,
-            unit=unit,
+            unit_kind=unit_kind,
             value=numeric_value,
             accn=entry.get("accn"),
             filed=entry.get("filed"),
@@ -2021,6 +2033,47 @@ class SECFactsNormalizer:
             ):
                 return normalize_currency_code(candidate)
         return None
+
+    @staticmethod
+    def _unit_kind_for(unit: str, currency: Optional[str]) -> MetricUnitKind:
+        """Map a raw SEC unit token + resolved currency to the stored ``unit_kind``.
+
+        SEC's ``unit`` token is a us-gaap unit string (``USD``, ``shares``,
+        ``USD/shares``, ``pure`` ...). The data boundary stores the documented
+        ``MetricUnitKind`` enum, with the ISO code carried in ``currency``. The
+        classification is coupled to ``currency`` so the schema invariant always
+        holds: a fact with a currency is monetary (or per_share when the token is
+        an explicit ``.../shares`` ratio); a currency-less share count is
+        ``count``; anything else (``pure`` ratios, etc.) is ``other``.
+        """
+
+        if currency is not None:
+            return "per_share" if "/" in (unit or "") else "monetary"
+        if unit and "share" in unit.lower():
+            return "count"
+        return "other"
+
+    @staticmethod
+    def _sec_unit_token(record: FactRecord) -> str:
+        """Reconstruct the us-gaap unit token from a stored fact for internal re-keying.
+
+        SEC historically carried the raw unit token on ``FactRecord.unit``; the
+        data boundary now stores ``unit_kind`` + ``currency`` instead. The token
+        is rebuilt only for SEC-internal grouping and FY→Q4 synthesis (which
+        re-enters ``_entry_to_record`` and must re-derive the same currency and
+        kind): a per_share fact maps back to ``"<ccy>/shares"``, a monetary fact
+        to ``"<ccy>"``, a count to ``"shares"``, otherwise the empty token. This
+        is the exact inverse of ``_currency_from_unit`` / ``_unit_kind_for`` for
+        the tokens SEC produces, so keys and re-derivations are unchanged.
+        """
+
+        if record.unit_kind == "per_share" and record.currency:
+            return f"{record.currency}/shares"
+        if record.unit_kind == "monetary" and record.currency:
+            return record.currency
+        if record.unit_kind == "count":
+            return "shares"
+        return ""
 
 
 __all__ = ["SECFactsNormalizer", "TARGET_CONCEPTS"]

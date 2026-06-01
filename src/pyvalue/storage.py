@@ -28,9 +28,7 @@ from typing import (
 
 from pyvalue.currency import (
     MetricUnitKind,
-    SHARES_UNIT,
     canonical_trading_currency,
-    fact_currency_or_none,
     metric_currency_or_none,
     normalize_currency_code,
     raw_currency_code,
@@ -330,7 +328,13 @@ class FactRecord:
     # the column can be NOT NULL at the schema level (migration 065).
     fiscal_period: str = "INSTANT"
     end_date: str = ""
-    unit: str = ""
+    # ``unit_kind`` classifies the fact (monetary / per_share / count / ...);
+    # the ISO currency lives in ``currency`` alone. The two are coupled at the
+    # schema level (migration 071): monetary/per_share rows carry a currency,
+    # every other kind carries NULL. ``currency`` is always a *major* code —
+    # subunits (GBX/ZAC/ILA) are collapsed during normalization and never reach
+    # a stored fact.
+    unit_kind: MetricUnitKind = "other"
     value: float = 0.0
     accn: Optional[str] = None
     filed: Optional[str] = None
@@ -338,13 +342,6 @@ class FactRecord:
     start_date: Optional[str] = None
     accounting_standard: Optional[str] = None
     currency: Optional[str] = None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "currency",
-            fact_currency_or_none(self.currency, self.unit),
-        )
 
 
 @dataclass(frozen=True)
@@ -4447,7 +4444,7 @@ class FinancialFactsRepository(SQLiteStore):
                 record.concept,
                 record.fiscal_period,
                 record.end_date,
-                record.unit,
+                record.unit_kind,
                 record.value,
                 record.accn,
                 record.filed,
@@ -4480,7 +4477,7 @@ class FinancialFactsRepository(SQLiteStore):
                 concept,
                 fiscal_period,
                 end_date,
-                unit,
+                unit_kind,
                 value,
                 accn,
                 filed,
@@ -4495,7 +4492,7 @@ class FinancialFactsRepository(SQLiteStore):
                 concept,
                 fiscal_period,
                 end_date,
-                unit,
+                unit_kind,
                 value,
                 accn,
                 filed,
@@ -4514,7 +4511,7 @@ class FinancialFactsRepository(SQLiteStore):
                 conn.executemany(
                     """
                     INSERT OR REPLACE INTO financial_facts (
-                        listing_id, cik, concept, fiscal_period, end_date, unit,
+                        listing_id, cik, concept, fiscal_period, end_date, unit_kind,
                         value, accn, filed, frame, start_date, accounting_standard,
                         currency, source_provider
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -4540,7 +4537,7 @@ class FinancialFactsRepository(SQLiteStore):
             row = conn.execute(
                 """
                 SELECT s.canonical_symbol, ff.cik, ff.concept, ff.fiscal_period,
-                       ff.end_date, ff.unit, ff.value, ff.accn, ff.filed, ff.frame,
+                       ff.end_date, ff.unit_kind, ff.value, ff.accn, ff.filed, ff.frame,
                        ff.start_date, ff.accounting_standard, ff.currency
                 FROM financial_facts ff
                 JOIN securities s ON s.security_id = ff.listing_id
@@ -4567,7 +4564,7 @@ class FinancialFactsRepository(SQLiteStore):
             return []
         query = [
             "SELECT s.canonical_symbol, ff.cik, ff.concept, ff.fiscal_period, ff.end_date,",
-            "ff.unit, ff.value, ff.accn, ff.filed, ff.frame, ff.start_date, ff.accounting_standard, ff.currency",
+            "ff.unit_kind, ff.value, ff.accn, ff.filed, ff.frame, ff.start_date, ff.accounting_standard, ff.currency",
             "FROM financial_facts ff",
             "JOIN securities s ON s.security_id = ff.listing_id",
             "WHERE ff.listing_id = ? AND ff.concept = ?",
@@ -4593,7 +4590,7 @@ class FinancialFactsRepository(SQLiteStore):
             rows = conn.execute(
                 """
                 SELECT s.canonical_symbol, ff.cik, ff.concept, ff.fiscal_period,
-                       ff.end_date, ff.unit, ff.value, ff.accn, ff.filed, ff.frame,
+                       ff.end_date, ff.unit_kind, ff.value, ff.accn, ff.filed, ff.frame,
                        ff.start_date, ff.accounting_standard, ff.currency
                 FROM financial_facts ff
                 JOIN securities s ON s.security_id = ff.listing_id
@@ -4684,7 +4681,7 @@ class FinancialFactsRepository(SQLiteStore):
                         ff.concept,
                         ff.fiscal_period,
                         ff.end_date,
-                        ff.unit,
+                        ff.unit_kind,
                         ff.value,
                         ff.accn,
                         ff.filed,
@@ -4707,7 +4704,7 @@ class FinancialFactsRepository(SQLiteStore):
                             concept=row["concept"],
                             fiscal_period=row["fiscal_period"],
                             end_date=row["end_date"],
-                            unit=row["unit"],
+                            unit_kind=row["unit_kind"],
                             value=row["value"],
                             accn=row["accn"],
                             filed=row["filed"],
@@ -4831,8 +4828,8 @@ class FinancialFactsRepository(SQLiteStore):
                                  WHEN 'CommonStockSharesOutstanding' THEN 0
                                  ELSE 1
                              END,
-                             CASE ff.unit
-                                 WHEN ? THEN 0
+                             CASE ff.unit_kind
+                                 WHEN 'count' THEN 0
                                  ELSE 1
                              END,
                              CASE
@@ -4853,7 +4850,7 @@ class FinancialFactsRepository(SQLiteStore):
                 ) AS value
             FROM temp_selected_securities selected
             """,
-            (primary_concept, fallback_concept, SHARES_UNIT),
+            (primary_concept, fallback_concept),
         ).fetchall()
         for row in rows:
             try:

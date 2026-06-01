@@ -36,8 +36,8 @@ A single pre-refactor backup covers the whole effort:
 | 0 | Tracking doc | Landed |
 | 1 | `Money` value type (additive) | Landed (`9f6b98c`) |
 | 2 | `market_data.price` → major currency + migration 070 | Landed (`5cdfeeb`)\* |
-| 2.6 | Purge currency-less listings + `listing.currency` NOT NULL + migration 069 | In review |
-| 3 | `unit` → `unit_kind` rebuild + migration 071 | Not started |
+| 2.6 | Purge currency-less listings + `listing.currency` NOT NULL + migration 069 | Landed (`df117d4`) |
+| 3 | `unit` → `unit_kind` rebuild + migration 071 | In review |
 | 4 | Remove `market_data.market_cap` + migration 072 | Not started |
 | 5 | Full `Money` adoption across metrics + docs/rule update | Not started |
 
@@ -54,6 +54,48 @@ production DB, so renumbering an as-yet-unapplied migration is safe.
 - **Hypothesis** was installed in the env but undeclared; added to
   `pyproject.toml` `[project.optional-dependencies].dev` in Phase 1.
 - **Python** is `>=3.12` per `pyproject.toml` (CLAUDE.md's ">=3.9" is stale).
+
+### Phase 3 — `financial_facts.unit` → `unit_kind`
+The overloaded `unit` column (currency code *or* type token) is replaced by the
+`unit_kind` enum; the ISO code lives in `currency` alone. This unifies the fact
+vocabulary with the existing `metrics.unit_kind` enum (`MetricUnitKind`).
+- Migration **071** (`_migration_071_financial_facts_unit_kind`): rebuilds
+  `financial_facts` **empty** (data is regenerated from `fundamentals_raw` by the
+  `normalise` CLI, per author decision), renames `unit`→`unit_kind` with an enum
+  CHECK, drops `unit` from the PK (new PK `(listing_id, concept, fiscal_period,
+  end_date)`), adds a **major-only** currency CHECK and a **coupled**
+  `unit_kind ⇄ currency` CHECK, and clears `fundamentals_normalization_state` so
+  every cached payload re-normalizes. `financial_facts` is a leaf table (nothing
+  references it, no view selects from it), so the drop/recreate is self-contained.
+  Promoted `_MAJOR_CURRENCY_CHECK` next to `_CURRENCY_FORMAT_CHECK`.
+- `apply_migrations` gained a keyword-only `target_version` (default = head) so a
+  single migration can be exercised in isolation — needed because migration 071 is
+  destructive to legacy `financial_facts` rows that earlier migration regression
+  tests assert on. Production callers omit it.
+- `FactRecord.unit: str` → `unit_kind: MetricUnitKind`; the legacy `__post_init__`
+  that derived `currency` from `unit` is removed (currency is now authoritative).
+  All storage read/write SQL renamed `unit`→`unit_kind`; the share-count picker's
+  `CASE` keys on `unit_kind = 'count'`.
+- EODHD normalizer emits `unit_kind` directly: `count` for share concepts (currency
+  `NULL`), `per_share` for EPS / dividends-per-share, `monetary` otherwise; monetary
+  and per_share facts that cannot resolve a currency are now skipped (a latent
+  currency-less-monetary row could previously be emitted). SEC normalizer classifies
+  its us-gaap unit token into the enum via a local helper and reconstructs the token
+  for its internal FY→Q4 / dedup keys.
+- `money.normalize_fact_value` gates on `is_monetary_unit_kind(record.unit_kind)`
+  and drops the `unit`-string currency fallback. The now-dead
+  `currency.fact_currency_or_none` / `legacy_currency_from_unit` / `SHARES_UNIT`
+  were removed.
+- Test fallout: every fact fixture moved from `unit=` to `unit_kind=` + explicit
+  `currency`; the FX-discovery test now stores one major-currency fact per listing
+  (the new PK collapses three subunit facts under one listing into one row); five
+  legacy-data migration tests were pinned to their own version via `target_version`
+  so migration 071 no longer wipes their subjects; added migration-071 schema/CHECK
+  and empty-rebuild regression tests. Quality gate green (ruff, mypy, 844 tests).
+- **Known Phase 5 item:** several metrics still currency-validate share-count
+  denominators (e.g. `fcf_per_share_cagr_10y`). That was masked before by the
+  `unit`→currency derivation; the proper share-as-count handling lands with the
+  Money rework in Phase 5.
 
 ### Phase 2.6 — purge currency-less listings + `listing.currency` NOT NULL
 Author decision: a listing's currency comes **only** from the

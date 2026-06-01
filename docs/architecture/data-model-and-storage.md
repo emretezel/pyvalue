@@ -108,14 +108,18 @@ Normalized provider-agnostic facts live here, keyed by canonical `listing_id`.
 
 Currency and unit semantics:
 
-- monetary facts store a real ISO `currency`
-- non-monetary facts keep meaningful `unit` values such as `shares`
+- `unit_kind` (migration 071, renamed from `unit`) classifies every fact with the
+  `MetricUnitKind` enum (`monetary` / `per_share` / `ratio` / `percent` / `multiple`
+  / `count` / `other`); it is never a currency code
+- monetary and per_share facts store a real ISO `currency`; the schema couples the
+  two (currency non-NULL iff `unit_kind` is monetary/per_share, NULL otherwise)
+- non-monetary counts such as shares are `unit_kind = 'count'` with a NULL `currency`
+- `currency` is major-only: subunit codes never reach a stored fact
 - `listing.currency` is the only persisted listing-currency truth and preserves
-  the quote unit from catalog metadata
+  the quote unit from catalog metadata (and may itself be a subunit)
 - raw fundamentals and market-data rows are not listing-currency sources
-- configured subunit currencies are normalized before monetary arithmetic and
-  persistence of monetary facts: `GBX`/`GBP0.01` -> `GBP`, `ZAC` -> `ZAR`,
-  `ILA` -> `ILS`
+- configured subunit currencies are normalized to their base before a monetary fact
+  is built: `GBX`/`GBP0.01` -> `GBP`, `ZAC` -> `ZAR`, `ILA` -> `ILS`
 
 ### `market_data`
 

@@ -55,7 +55,8 @@ def test_metric_skips_when_latest_fact_is_stale(tmp_path):
                 concept="LongTermDebt",
                 fiscal_period="FY",
                 end_date=stale_date,
-                unit="USD",
+                unit_kind="monetary",
+                currency="USD",
                 value=150.0,
             )
         ],
@@ -78,7 +79,8 @@ def test_ttm_metric_requires_recent_quarters(tmp_path):
                 concept="EarningsPerShare",
                 fiscal_period=f"Q{idx}",
                 end_date=(today - timedelta(days=months_ago * 30)).isoformat(),
-                unit="USD",
+                unit_kind="monetary",
+                currency="USD",
                 value=float(idx),
             )
         )
@@ -118,7 +120,8 @@ def test_ttm_metric_skips_when_latest_quarter_is_stale(tmp_path):
                 concept="EarningsPerShare",
                 fiscal_period=f"Q{idx}",
                 end_date=(today - timedelta(days=days_ago)).isoformat(),
-                unit="USD",
+                unit_kind="monetary",
+                currency="USD",
                 value=float(idx),
             )
         )
@@ -148,7 +151,8 @@ def test_fy_metric_accepts_when_recent_quarter_exists(tmp_path):
                 concept="EarningsPerShare",
                 fiscal_period="FY",
                 end_date=f"{year}-12-31",
-                unit="USD",
+                unit_kind="monetary",
+                currency="USD",
                 value=float(year),
                 frame=f"CY{year}",
             )
@@ -160,7 +164,8 @@ def test_fy_metric_accepts_when_recent_quarter_exists(tmp_path):
             concept="EarningsPerShare",
             fiscal_period="Q3",
             end_date=(date.today() - timedelta(days=60)).isoformat(),
-            unit="USD",
+            unit_kind="monetary",
+            currency="USD",
             value=1.0,
         )
     )
@@ -200,7 +205,8 @@ def test_roc_metric_uses_recent_concept_even_if_fy_old(tmp_path):
                 concept="OperatingIncomeLoss",
                 fiscal_period="FY",
                 end_date=fy_old,
-                unit="USD",
+                unit_kind="monetary",
+                currency="USD",
                 value=200.0,
             ),
             FactRecord(
@@ -208,7 +214,8 @@ def test_roc_metric_uses_recent_concept_even_if_fy_old(tmp_path):
                 concept="PropertyPlantAndEquipmentNet",
                 fiscal_period="FY",
                 end_date=fy_old,
-                unit="USD",
+                unit_kind="monetary",
+                currency="USD",
                 value=100.0,
             ),
             FactRecord(
@@ -216,7 +223,8 @@ def test_roc_metric_uses_recent_concept_even_if_fy_old(tmp_path):
                 concept="AssetsCurrent",
                 fiscal_period="FY",
                 end_date=fy_old,
-                unit="USD",
+                unit_kind="monetary",
+                currency="USD",
                 value=50.0,
             ),
             FactRecord(
@@ -224,7 +232,8 @@ def test_roc_metric_uses_recent_concept_even_if_fy_old(tmp_path):
                 concept="LiabilitiesCurrent",
                 fiscal_period="FY",
                 end_date=fy_old,
-                unit="USD",
+                unit_kind="monetary",
+                currency="USD",
                 value=25.0,
             ),
             FactRecord(
@@ -232,7 +241,8 @@ def test_roc_metric_uses_recent_concept_even_if_fy_old(tmp_path):
                 concept="OperatingIncomeLoss",
                 fiscal_period="Q3",
                 end_date=(date.today() - timedelta(days=45)).isoformat(),
-                unit="USD",
+                unit_kind="monetary",
+                currency="USD",
                 value=180.0,
             ),
             FactRecord(
@@ -240,7 +250,8 @@ def test_roc_metric_uses_recent_concept_even_if_fy_old(tmp_path):
                 concept="PropertyPlantAndEquipmentNet",
                 fiscal_period="Q3",
                 end_date=(date.today() - timedelta(days=45)).isoformat(),
-                unit="USD",
+                unit_kind="monetary",
+                currency="USD",
                 value=90.0,
             ),
             FactRecord(
@@ -248,7 +259,8 @@ def test_roc_metric_uses_recent_concept_even_if_fy_old(tmp_path):
                 concept="AssetsCurrent",
                 fiscal_period="Q3",
                 end_date=(date.today() - timedelta(days=45)).isoformat(),
-                unit="USD",
+                unit_kind="monetary",
+                currency="USD",
                 value=40.0,
             ),
             FactRecord(
@@ -256,7 +268,8 @@ def test_roc_metric_uses_recent_concept_even_if_fy_old(tmp_path):
                 concept="LiabilitiesCurrent",
                 fiscal_period="Q3",
                 end_date=(date.today() - timedelta(days=45)).isoformat(),
-                unit="USD",
+                unit_kind="monetary",
+                currency="USD",
                 value=20.0,
             ),
         ],
