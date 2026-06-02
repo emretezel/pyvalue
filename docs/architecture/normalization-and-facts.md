@@ -106,4 +106,5 @@ Prefer metric-level composition when:
 ## Related Docs
 
 - [Data Model and Storage](data-model-and-storage.md)
+- [EODHD Concept Normalization](../reference/eodhd-concept-normalization.md): per-concept JSON-to-fact mapping, fallbacks, and worked payload examples.
 - [EODHD Provider Guide](../providers/eodhd.md)

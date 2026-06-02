@@ -12,6 +12,9 @@ It covers:
 - global fundamentals
 - all market data used by the project
 
+For exactly how EODHD fundamentals payloads are mapped into `financial_facts` concepts, see
+[EODHD Concept Normalization](../reference/eodhd-concept-normalization.md).
+
 ## Subscription Requirements
 
 You need an active EODHD subscription for:

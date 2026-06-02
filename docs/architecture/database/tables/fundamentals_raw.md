@@ -2,7 +2,9 @@
 
 ## Purpose
 
-Stores the latest raw fundamentals payload for each provider listing.
+Stores the latest raw fundamentals payload for each provider listing. For how this payload is
+normalized into `financial_facts` concepts (which sections/fields are read and how each fact is
+built), see [EODHD Concept Normalization](../../../reference/eodhd-concept-normalization.md).
 
 ## Grain
 

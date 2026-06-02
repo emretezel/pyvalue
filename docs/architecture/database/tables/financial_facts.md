@@ -2,7 +2,10 @@
 
 ## Purpose
 
-Stores provider-agnostic normalized financial facts for metrics.
+Stores provider-agnostic normalized financial facts for metrics. For the per-concept mapping
+from raw EODHD payloads into these rows (value/currency JSON paths, fallbacks, and how
+`fiscal_period`/`end_date`/`unit_kind` are decided), see
+[EODHD Concept Normalization](../../../reference/eodhd-concept-normalization.md).
 
 ## Grain
 
