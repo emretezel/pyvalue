@@ -76,11 +76,19 @@ EODHD_STATEMENT_FIELDS = {
         "Liabilities": ["totalLiabilities", "totalLiab"],
         "StockholdersEquity": ["totalStockholderEquity", "totalShareholderEquity"],
         "CommonStockholdersEquity": ["commonStockTotalEquity"],
+        # Only genuine preferred-equity fields belong here. EODHD's ``capitalStock``
+        # is a generic "capital stock" figure: for issuers with no preferred shares it
+        # is common stock + additional paid-in capital, not preferred equity. Using it
+        # as a fallback mislabels common capital as preferred, which then drives the
+        # derived CommonStockholdersEquity (= StockholdersEquity - PreferredStock - NCI)
+        # negative -- observed on AAPL, where ``capitalStock`` ~93.6B produced a
+        # PreferredStock fact and a -19.8B common equity for a company that has never
+        # issued preferred stock. When no real preferred field is present the correct
+        # outcome is no PreferredStock fact at all.
         "PreferredStock": [
             "preferredStockTotalEquity",
             "preferredStockRedeemable",
             "preferredStock",
-            "capitalStock",
         ],
         "Goodwill": ["goodWill", "goodwill"],
         "IntangibleAssetsNet": ["intangibleAssets"],

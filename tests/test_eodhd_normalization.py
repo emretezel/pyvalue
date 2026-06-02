@@ -1522,3 +1522,97 @@ def test_eodhd_normalize_no_fx_service_returns_unconverted():
     assert assets
     assert assets[0].currency == "EUR"
     assert assets[0].value == 1000.0
+
+
+def test_eodhd_preferred_stock_ignores_capital_stock():
+    """capitalStock must not be read as PreferredStock.
+
+    Regression: EODHD's ``capitalStock`` is common stock + additional paid-in
+    capital for issuers without preferred shares, so it must never populate the
+    PreferredStock concept. With no genuine preferred field present, no
+    PreferredStock fact should be emitted.
+    """
+
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Balance_Sheet": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "capitalStock": 200.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+    preferred = [r for r in records if r.concept == "PreferredStock"]
+    assert not preferred, "capitalStock must not be normalized as PreferredStock"
+
+
+def test_eodhd_common_equity_nonnegative_without_preferred_stock():
+    """Common equity must not be reduced by mislabeled capitalStock.
+
+    Regression for the AAPL bug: with only ``capitalStock`` present and no real
+    preferred stock, the derived CommonStockholdersEquity (StockholdersEquity -
+    PreferredStock - NCI) must equal StockholdersEquity and stay non-negative.
+    On the buggy code, capitalStock became a 200 PreferredStock fact and pushed
+    CommonStockholdersEquity to 150 - 200 = -50.
+    """
+
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Balance_Sheet": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "totalAssets": 250.0,
+                        "totalLiab": 100.0,
+                        "capitalStock": 200.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+    equity = [r for r in records if r.concept == "StockholdersEquity"]
+    common_equity = [r for r in records if r.concept == "CommonStockholdersEquity"]
+    assert equity and equity[0].value == 150.0  # 250 assets - 100 liabilities
+    assert common_equity, "CommonStockholdersEquity should be derived"
+    assert common_equity[0].value == 150.0  # not reduced by common capitalStock
+    assert common_equity[0].value >= 0
+    assert not [r for r in records if r.concept == "PreferredStock"]
+
+
+def test_eodhd_preferred_stock_read_from_genuine_field():
+    """A real preferred-stock field still populates PreferredStock."""
+
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Balance_Sheet": {
+                "yearly": [
+                    {
+                        "date": "2024-12-31",
+                        "preferredStock": 40.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+    preferred = [r for r in records if r.concept == "PreferredStock"]
+    assert preferred, "PreferredStock should be read from a genuine preferred field"
+    assert preferred[0].value == 40.0
+    assert preferred[0].currency == "USD"
