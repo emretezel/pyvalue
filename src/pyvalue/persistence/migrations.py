@@ -8036,6 +8036,43 @@ def _migration_075_purge_enterprise_value_facts(conn: sqlite3.Connection) -> Non
         conn.execute("DELETE FROM financial_facts WHERE concept = 'EnterpriseValue'")
 
 
+def _migration_076_drop_provider_exchange_exchange_index(
+    conn: sqlite3.Connection,
+) -> None:
+    """Drop ``idx_provider_exchange_exchange`` — an unused foreign-key index.
+
+    ``idx_provider_exchange_exchange (exchange_id)`` was created reflexively
+    under the "index your foreign keys" heuristic, but nothing in the codebase
+    exercises it:
+
+    * No read query filters or searches ``provider_exchange`` by
+      ``exchange_id``. The column appears only in UPSERT ``excluded.exchange_id``
+      clauses (writes, not lookups).
+    * Every join is ``provider_exchange ep JOIN "exchange" e
+      ON e.exchange_id = ep.exchange_id``. That drives from
+      ``provider_exchange`` (a full SCAN) and probes ``exchange`` by its INTEGER
+      PRIMARY KEY, so the planner never touches this index.
+    * The one scenario a child-FK index helps — SQLite scanning the child to
+      enforce referential integrity when a parent row is deleted or its key
+      updated — never occurs: there is no ``DELETE FROM "exchange"`` or
+      ``UPDATE "exchange"`` at runtime (only table-rebuild migrations, which
+      defer FK checks).
+
+    Scale makes it moot regardless: ``provider_exchange`` holds ~73 rows
+    (effectively 1:1 with ``exchange``), so even a hypothetical future
+    ``WHERE exchange_id = ?`` or an FK-enforcement scan would be a full scan in
+    microseconds. The index only added write amplification on every exchange
+    refresh. Migrations 057 and 066 each recreated it while rebuilding the
+    table; this migration is the final word and retires it.
+
+    ``DROP INDEX IF EXISTS`` keeps the migration re-runnable against databases
+    that never created the index (e.g. fresh test DBs that took different paths
+    through earlier migrations).
+    """
+
+    conn.execute("DROP INDEX IF EXISTS idx_provider_exchange_exchange")
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -8112,6 +8149,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_073_drop_sec_columns_and_purge_providers,
     _migration_074_drop_financial_facts_frame_and_source_provider,
     _migration_075_purge_enterprise_value_facts,
+    _migration_076_drop_provider_exchange_exchange_index,
 ]
 
 

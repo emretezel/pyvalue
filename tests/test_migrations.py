@@ -185,7 +185,11 @@ def test_migration_creates_exchange_catalog_tables(tmp_path):
         "updated_at",
     }
     assert provider_exchange_pk_cols == ["provider_exchange_id"]
-    assert "idx_provider_exchange_exchange" in provider_exchange_index_names
+    # Migration 076 retired ``idx_provider_exchange_exchange`` as an unused
+    # foreign-key index (no query searches provider_exchange by exchange_id;
+    # joins drive from provider_exchange and probe ``exchange`` by PK). After
+    # the full chain it must be gone.
+    assert "idx_provider_exchange_exchange" not in provider_exchange_index_names
     assert fk_targets == {"exchange", "provider"}
 
 
@@ -3936,6 +3940,9 @@ _MIGRATION_067_DROPPED_INDEXES = frozenset(
 # Indexes that must survive the full migration chain — every other
 # secondary index the schema declares at head. Asserting on this set
 # catches the copy-paste mistake of accidentally dropping the wrong index.
+# ``idx_provider_exchange_exchange`` was retained by 067 but later retired by
+# migration 076 (unused FK index), so it is no longer part of the head set;
+# see ``test_migration_076_drops_provider_exchange_exchange_index``.
 _MIGRATION_067_RETAINED_INDEXES = frozenset(
     {
         "idx_fin_facts_security_concept_latest",
@@ -3944,7 +3951,6 @@ _MIGRATION_067_RETAINED_INDEXES = frozenset(
         "idx_fx_supported_pairs_refreshable",
         "idx_issuer_name_country",
         "idx_listing_currency_nonnull",
-        "idx_provider_exchange_exchange",
         "idx_provider_listing_listing",
     }
 )
@@ -3979,6 +3985,53 @@ def test_migration_067_drops_unused_indexes(tmp_path):
 
 def test_migration_067_idempotent(tmp_path):
     db_path = tmp_path / "drop-unused-indexes-067-idempotent.sqlite"
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0
+
+
+# ---------------------------------------------------------------------------
+# Migration 076 — drop the unused idx_provider_exchange_exchange FK index
+# ---------------------------------------------------------------------------
+
+
+def test_migration_076_drops_provider_exchange_exchange_index(tmp_path):
+    """The unused FK index is gone after a full apply; constraints survive.
+
+    Fails on the pre-076 schema (where migrations 057/066 recreate the index)
+    and passes once migration 076 retires it. The UNIQUE auto-indexes that back
+    ``(provider_id, provider_exchange_code)`` and ``(provider_exchange_id,
+    provider_id)`` — the latter being the target of ``provider_listing``'s
+    composite FK — must be untouched.
+    """
+
+    db_path = tmp_path / "drop-provider-exchange-index-076.sqlite"
+    applied = apply_migrations(db_path)
+
+    assert applied == len(MIGRATIONS)
+
+    with sqlite3.connect(db_path) as conn:
+        index_rows = conn.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type = 'index' AND tbl_name = 'provider_exchange'
+            """
+        ).fetchall()
+    index_names = {row[0] for row in index_rows}
+
+    # The secondary FK index must be gone …
+    assert "idx_provider_exchange_exchange" not in index_names
+    # … while the two UNIQUE constraints' auto-indexes remain intact.
+    assert {
+        "sqlite_autoindex_provider_exchange_1",
+        "sqlite_autoindex_provider_exchange_2",
+    } <= index_names
+
+
+def test_migration_076_idempotent(tmp_path):
+    db_path = tmp_path / "drop-provider-exchange-index-076-idempotent.sqlite"
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
 
@@ -4878,5 +4931,7 @@ def test_migration_075_purges_enterprise_value_facts(tmp_path):
             == 100.0
         )
 
-    # Idempotent: a second run is a no-op (075 is the latest migration).
-    assert apply_migrations(db_path) == 0
+    # Idempotent: re-running through 075 is a no-op. Pin the target so the
+    # assertion stays scoped to migration 075 and is not perturbed by later
+    # migrations (e.g. 076) that an unpinned full apply would pick up.
+    assert apply_migrations(db_path, target_version=75) == 0
