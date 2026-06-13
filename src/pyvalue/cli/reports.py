@@ -16,7 +16,6 @@ from typing import (
     Optional,
     Sequence,
     Tuple,
-    cast,
 )
 
 from pyvalue.metrics import REGISTRY
@@ -42,7 +41,6 @@ from pyvalue.persistence.storage import (
     MarketSnapshotRecord,
     MetricComputeStatusRepository,
     MetricsRepository,
-    StoredMetricRow,
 )
 
 from ._common import (
@@ -113,9 +111,7 @@ def _persist_metric_attempts(
     attempts: Sequence[_MetricAttemptResult],
 ) -> None:
     metric_rows = [
-        cast(StoredMetricRow, attempt.stored_row)
-        for attempt in attempts
-        if attempt.stored_row is not None
+        attempt.stored_row for attempt in attempts if attempt.stored_row is not None
     ]
     if metric_rows:
         metrics_repo.upsert_many(metric_rows)

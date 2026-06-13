@@ -27,6 +27,7 @@ from pyvalue.money.fx import (
 from pyvalue.metrics import REGISTRY
 from pyvalue.screening import (
     Criterion,
+    ScreenDefinition,
     compute_screen_ranking,
     evaluate_criterion_verbose,
     load_screen,
@@ -88,11 +89,11 @@ def _ordered_unique_metric_ids(*metric_id_lists: Sequence[str]) -> List[str]:
     return ordered
 
 
-def _screen_filter_metric_ids(definition) -> List[str]:
+def _screen_filter_metric_ids(definition: ScreenDefinition) -> List[str]:
     return screen_metric_ids(definition)
 
 
-def _screen_ranking_extra_metric_ids(definition) -> List[str]:
+def _screen_ranking_extra_metric_ids(definition: ScreenDefinition) -> List[str]:
     ranking = getattr(definition, "ranking", None)
     if ranking is None:
         return []
@@ -109,7 +110,7 @@ def _screen_ranking_extra_metric_ids(definition) -> List[str]:
     return [metric_id for metric_id in metric_ids if metric_id not in filter_metric_ids]
 
 
-def _screen_requested_metric_ids(definition) -> List[str]:
+def _screen_requested_metric_ids(definition: ScreenDefinition) -> List[str]:
     return _ordered_unique_metric_ids(
         _screen_filter_metric_ids(definition),
         _screen_ranking_extra_metric_ids(definition),
@@ -125,7 +126,7 @@ def _merge_metric_rows_by_symbol(
 
 
 def _evaluate_screen_scope(
-    definition,
+    definition: ScreenDefinition,
     symbols: Sequence[str],
     metrics_repo: MetricsRepository,
     fact_repo: RegionFactsRepository,
@@ -185,7 +186,7 @@ def _evaluate_screen_scope(
 
 
 def _rank_screen_passers(
-    definition,
+    definition: ScreenDefinition,
     passed_symbols: Sequence[str],
     metrics_repo: MetricsRepository,
     entity_repo: EntityMetadataRepository,

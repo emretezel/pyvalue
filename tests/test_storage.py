@@ -1,5 +1,8 @@
 import sqlite3
 from datetime import date, timedelta
+from pathlib import Path
+
+import pytest
 
 import pyvalue.persistence.storage as storage
 from pyvalue.persistence.storage import (
@@ -24,11 +27,15 @@ from pyvalue.persistence.storage import (
     SecurityRepository,
     SecurityListingStatusRecord,
     SecurityListingStatusRepository,
+    StoredMetricRow,
     SupportedTickerRepository,
 )
 from pyvalue.marketdata import MarketDataUpdate
 from pyvalue.marketdata.service import latest_share_count
 from pyvalue.universe import Listing
+from collections.abc import Sequence
+from types import TracebackType
+from typing import Literal, Optional, Tuple, Type
 
 
 def _listing(symbol: str, is_etf: bool = False, currency: str = "USD") -> Listing:
@@ -58,7 +65,7 @@ def _listing(symbol: str, is_etf: bool = False, currency: str = "USD") -> Listin
 
 
 def _seed_listing(
-    db_path,
+    db_path: Path,
     symbol: str,
     *,
     currency: str = "USD",
@@ -90,7 +97,9 @@ def _seed_listing(
     repo.replace_for_exchange(provider, exchange, list(rows.values()))
 
 
-def test_supported_ticker_repository_replace_from_listings_persists_rows(tmp_path):
+def test_supported_ticker_repository_replace_from_listings_persists_rows(
+    tmp_path: Path,
+) -> None:
     repo = SupportedTickerRepository(tmp_path / "universe.db")
     repo.initialize_schema()
 
@@ -130,8 +139,8 @@ def test_supported_ticker_repository_replace_from_listings_persists_rows(tmp_pat
 
 
 def test_supported_ticker_repository_replace_from_listings_overwrites_exchange_slice(
-    tmp_path,
-):
+    tmp_path: Path,
+) -> None:
     repo = SupportedTickerRepository(tmp_path / "universe.db")
     repo.initialize_schema()
 
@@ -146,13 +155,17 @@ def test_supported_ticker_repository_replace_from_listings_overwrites_exchange_s
     assert rows == [("CCC.US",)]
 
 
-def test_supported_ticker_repository_list_symbols_initializes_schema(tmp_path):
+def test_supported_ticker_repository_list_symbols_initializes_schema(
+    tmp_path: Path,
+) -> None:
     repo = SupportedTickerRepository(tmp_path / "universe.db")
 
     assert repo.list_symbols_by_exchange("SEC", "US") == []
 
 
-def test_supported_ticker_repository_normalizes_exchange_and_fetches_currency(tmp_path):
+def test_supported_ticker_repository_normalizes_exchange_and_fetches_currency(
+    tmp_path: Path,
+) -> None:
     repo = SupportedTickerRepository(tmp_path / "universe.db")
     repo.initialize_schema()
     listing = Listing(
@@ -174,7 +187,7 @@ def test_supported_ticker_repository_normalizes_exchange_and_fetches_currency(tm
     assert repo.fetch_currency("FOO.LSE", provider="EODHD") == "GBP"
 
 
-def test_fundamentals_repository_normalizes_provider(tmp_path):
+def test_fundamentals_repository_normalizes_provider(tmp_path: Path) -> None:
     db_path = tmp_path / "funds.db"
     repo = FundamentalsRepository(db_path)
     repo.initialize_schema()
@@ -185,7 +198,9 @@ def test_fundamentals_repository_normalizes_provider(tmp_path):
     assert repo.symbols("eodhd") == ["FOO.LSE"]
 
 
-def test_fundamentals_repository_classifies_and_purges_secondary_listings(tmp_path):
+def test_fundamentals_repository_classifies_and_purges_secondary_listings(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "listing-status.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
@@ -371,7 +386,9 @@ def test_fundamentals_repository_classifies_and_purges_secondary_listings(tmp_pa
     assert market_state_rows == 0
 
 
-def test_exchange_provider_repository_replaces_rows_per_provider(tmp_path):
+def test_exchange_provider_repository_replaces_rows_per_provider(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "exchange-provider.db"
     repo = ExchangeProviderRepository(db_path)
     repo.initialize_schema()
@@ -405,7 +422,7 @@ def test_exchange_provider_repository_replaces_rows_per_provider(tmp_path):
     assert [row.code for row in exchange_rows] == ["LSE", "US"]
 
 
-def test_exchange_provider_repository_fetch_normalizes_code(tmp_path):
+def test_exchange_provider_repository_fetch_normalizes_code(tmp_path: Path) -> None:
     repo = ExchangeProviderRepository(tmp_path / "exchange-provider.db")
     repo.initialize_schema()
     repo.replace_for_provider(
@@ -437,7 +454,7 @@ def test_exchange_provider_repository_fetch_normalizes_code(tmp_path):
     assert record.country_iso3 == "GBR"
 
 
-def test_supported_ticker_repository_replaces_rows_per_exchange(tmp_path):
+def test_supported_ticker_repository_replaces_rows_per_exchange(tmp_path: Path) -> None:
     repo = SupportedTickerRepository(tmp_path / "supported-tickers.db")
     repo.initialize_schema()
     repo.replace_for_exchange(
@@ -503,7 +520,9 @@ def test_supported_ticker_repository_replaces_rows_per_exchange(tmp_path):
     assert [(row.symbol, row.code) for row in us] == [("BRK.B.US", "BRK.B")]
 
 
-def test_supported_ticker_repository_reports_skipped_no_currency(tmp_path):
+def test_supported_ticker_repository_reports_skipped_no_currency(
+    tmp_path: Path,
+) -> None:
     """Catalog entries with no currency are skipped (not stored) and reported.
 
     listing.currency is NOT NULL with no fallback, so a payload row whose
@@ -540,7 +559,7 @@ def test_supported_ticker_repository_reports_skipped_no_currency(tmp_path):
     assert [row.symbol for row in repo.list_for_exchange("EODHD", "LSE")] == ["AAA.LSE"]
 
 
-def test_supported_ticker_repository_lists_eligible_symbols(tmp_path):
+def test_supported_ticker_repository_lists_eligible_symbols(tmp_path: Path) -> None:
     db_path = tmp_path / "supported-tickers.db"
     repo = SupportedTickerRepository(db_path)
     repo.initialize_schema()
@@ -577,7 +596,9 @@ def test_supported_ticker_repository_lists_eligible_symbols(tmp_path):
     assert [row.symbol for row in rows] == ["BBB.LSE"]
 
 
-def test_financial_facts_repository_replace_fact_rows_matches_replace_facts(tmp_path):
+def test_financial_facts_repository_replace_fact_rows_matches_replace_facts(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "financial-facts.db"
     repo = FinancialFactsRepository(db_path)
     repo.initialize_schema()
@@ -630,7 +651,9 @@ def test_financial_facts_repository_replace_fact_rows_matches_replace_facts(tmp_
     assert rows == [("AAA.US", "Liabilities", 40.0)]
 
 
-def test_financial_facts_repository_replace_facts_updates_refresh_state(tmp_path):
+def test_financial_facts_repository_replace_facts_updates_refresh_state(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "facts-refresh-state.db"
     repo = FinancialFactsRepository(db_path)
     repo.initialize_schema()
@@ -659,8 +682,8 @@ def test_financial_facts_repository_replace_facts_updates_refresh_state(tmp_path
 
 
 def test_fundamentals_repository_normalization_candidates_match_state_and_facts(
-    tmp_path,
-):
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "normalization-candidates.db"
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
@@ -738,44 +761,59 @@ def test_fundamentals_repository_normalization_candidates_match_state_and_facts(
 
 
 def test_fundamentals_repository_normalization_candidates_skip_facts_scan_without_state(
-    tmp_path,
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     db_path = tmp_path / "normalization-candidates-no-state.db"
+    seen_sql: list[str] = []
 
     class _LoggingConnection:
-        def __init__(self, conn, seen_sql):
-            self._conn = conn
-            self._seen_sql = seen_sql
+        """Context-manager proxy that records each executed SQL statement.
 
-        def __enter__(self):
+        It wraps the repository's real connection and is installed via
+        ``monkeypatch.setattr`` (not a method override) so there is no static
+        return-type contract to satisfy. The repository's
+        ``normalization_candidates`` path only uses the connection as a context
+        manager and calls ``execute`` on it, so those are the only members the
+        proxy needs to expose. The recorded statements back the assertion that
+        the no-state path never scans ``financial_facts``.
+        """
+
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self._conn = conn
+
+        def __enter__(self) -> "_LoggingConnection":
             self._conn.__enter__()
             return self
 
-        def __exit__(self, exc_type, exc_value, traceback):
-            return self._conn.__exit__(exc_type, exc_value, traceback)
+        def __exit__(
+            self,
+            exc_type: Optional[Type[BaseException]],
+            exc_value: Optional[BaseException],
+            traceback: Optional[TracebackType],
+        ) -> bool:
+            return bool(self._conn.__exit__(exc_type, exc_value, traceback))
 
-        def execute(self, sql, parameters=()):
-            self._seen_sql.append(" ".join(str(sql).split()))
+        def execute(
+            self, sql: str, parameters: Sequence[object] = ()
+        ) -> sqlite3.Cursor:
+            seen_sql.append(" ".join(sql.split()))
             return self._conn.execute(sql, parameters)
 
-        def __getattr__(self, name):
-            return getattr(self._conn, name)
-
-    class LoggingFundamentalsRepository(FundamentalsRepository):
-        def __init__(self, db_path, seen_sql):
-            super().__init__(db_path)
-            self._seen_sql = seen_sql
-
-        def _connect(self):
-            return _LoggingConnection(super()._connect(), self._seen_sql)
-
-    seen_sql = []
-    fund_repo = LoggingFundamentalsRepository(db_path, seen_sql)
+    fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
     _seed_listing(db_path, "BBB.US")
     fund_repo.upsert("EODHD", "AAA.US", {"General": {"Name": "AAA"}}, exchange="US")
     fund_repo.upsert("EODHD", "BBB.US", {"General": {"Name": "BBB"}}, exchange="US")
+
+    # Only the candidate query's SQL is under test, so install the logging
+    # proxy after setup. That keeps the proxy's surface minimal (just the
+    # context-manager protocol and ``execute``) -- the write-heavy setup above
+    # still runs on the unwrapped connection.
+    real_connect = fund_repo._connect
+    monkeypatch.setattr(
+        fund_repo, "_connect", lambda: _LoggingConnection(real_connect())
+    )
 
     candidates = fund_repo.normalization_candidates("EODHD", ["AAA.US", "BBB.US"])
 
@@ -786,7 +824,9 @@ def test_fundamentals_repository_normalization_candidates_skip_facts_scan_withou
     assert not any("FROM financial_facts" in sql for sql in seen_sql)
 
 
-def test_financial_facts_repository_replace_fact_rows_replaces_symbol_slice(tmp_path):
+def test_financial_facts_repository_replace_fact_rows_replaces_symbol_slice(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "financial-facts-replace.db"
     repo = FinancialFactsRepository(db_path)
     repo.initialize_schema()
@@ -846,8 +886,8 @@ def test_financial_facts_repository_replace_fact_rows_replaces_symbol_slice(tmp_
 
 
 def test_financial_facts_repository_initialize_schema_ignores_locked_perf_index(
-    monkeypatch, tmp_path
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     repo = FinancialFactsRepository(tmp_path / "locked-index.db")
     # ``initialize_schema`` calls ``apply_migrations`` bound in the
     # ``financial_facts`` submodule (storage was split into a package), so patch
@@ -858,13 +898,25 @@ def test_financial_facts_repository_initialize_schema_ignores_locked_perf_index(
     monkeypatch.setattr(repo._security_repo(), "initialize_schema", lambda: None)
 
     class FakeConn:
-        def __enter__(self):
+        """Connection stub whose perf-index DDL always reports a locked DB.
+
+        Installed through ``monkeypatch.setattr`` so it need not be a real
+        ``sqlite3.Connection``; ``initialize_schema`` only context-manages it
+        and calls ``execute``, which is all this stub implements.
+        """
+
+        def __enter__(self) -> "FakeConn":
             return self
 
-        def __exit__(self, exc_type, exc_value, traceback):
+        def __exit__(
+            self,
+            exc_type: Optional[Type[BaseException]],
+            exc_value: Optional[BaseException],
+            traceback: Optional[TracebackType],
+        ) -> Literal[False]:
             return False
 
-        def execute(self, sql, params=()):
+        def execute(self, sql: str, params: Sequence[object] = ()) -> None:
             if "idx_fin_facts_security_concept_latest" in sql:
                 raise sqlite3.OperationalError("database is locked")
             return None
@@ -874,7 +926,9 @@ def test_financial_facts_repository_initialize_schema_ignores_locked_perf_index(
     repo.initialize_schema()
 
 
-def test_fundamentals_repository_upsert_clears_active_fetch_failure(tmp_path):
+def test_fundamentals_repository_upsert_clears_active_fetch_failure(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "fundamentals-fetch-state.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
@@ -895,8 +949,9 @@ def test_fundamentals_repository_upsert_clears_active_fetch_failure(tmp_path):
 
 
 def test_fundamentals_repository_upsert_many_uses_resolved_metadata_and_overwrites(
-    tmp_path,
-):
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "fundamentals-batch.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
@@ -922,10 +977,20 @@ def test_fundamentals_repository_upsert_many_uses_resolved_metadata_and_overwrit
 
     repo = FundamentalsRepository(db_path)
     repo.initialize_schema()
-    original_resolve_security = repo._resolve_security
-    repo._resolve_security = lambda *args, **kwargs: (_ for _ in ()).throw(
-        AssertionError("upsert_many should not resolve securities per symbol")
-    )
+
+    # ``upsert_many`` must resolve metadata in bulk, never per symbol. Patch
+    # ``_resolve_security`` (via monkeypatch, which auto-restores after the
+    # test) to explode if the per-symbol slow path is ever taken. The stub
+    # mirrors the real signature so the substitution stays type-correct.
+    def _fail_resolve(
+        provider: str,
+        symbol: str,
+        exchange: Optional[str],
+        create: bool = True,
+    ) -> Tuple[Optional[str], Optional[str], Optional[int]]:
+        raise AssertionError("upsert_many should not resolve securities per symbol")
+
+    monkeypatch.setattr(repo, "_resolve_security", _fail_resolve)
     aaa_data = '{"General":{"CurrencyCode":"USD","Name":"AAA"}}'
     bbb_data = '{"General":{"CurrencyCode":"USD","Name":"BBB"}}'
     aaa_updated_data = '{"General":{"CurrencyCode":"USD","Name":"AAA Updated"}}'
@@ -1010,14 +1075,20 @@ def test_fundamentals_repository_upsert_many_uses_resolved_metadata_and_overwrit
             "2026-03-30T00:00:00+00:00",
         ),
     ]
-    repo._resolve_security = original_resolve_security
-    assert repo.fetch("EODHD", "AAA.US")["General"]["Name"] == "AAA Updated"
-    assert repo.fetch("EODHD", "BBB.US")["General"]["Name"] == "BBB"
+    # Reads go through a fresh resolution path, so undo the failing stub before
+    # asserting the persisted payloads round-trip.
+    monkeypatch.undo()
+    aaa_payload = repo.fetch("EODHD", "AAA.US")
+    bbb_payload = repo.fetch("EODHD", "BBB.US")
+    assert aaa_payload is not None
+    assert bbb_payload is not None
+    assert aaa_payload["General"]["Name"] == "AAA Updated"
+    assert bbb_payload["General"]["Name"] == "BBB"
 
 
 def test_supported_ticker_repository_lists_market_data_symbols_missing_then_oldest(
-    tmp_path,
-):
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "supported-market-data.db"
     repo = SupportedTickerRepository(db_path)
     repo.initialize_schema()
@@ -1074,8 +1145,8 @@ def test_supported_ticker_repository_lists_market_data_symbols_missing_then_olde
 
 
 def test_supported_ticker_repository_primary_only_filters_secondary_listings(
-    tmp_path,
-):
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "supported-primary-only.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
@@ -1139,7 +1210,9 @@ def test_supported_ticker_repository_primary_only_filters_secondary_listings(
     ]
 
 
-def test_listing_status_repository_lists_unknown_provider_symbols(tmp_path):
+def test_listing_status_repository_lists_unknown_provider_symbols(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "missing-listing-status.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
@@ -1208,7 +1281,9 @@ def test_listing_status_repository_lists_unknown_provider_symbols(tmp_path):
     ) == ["AAA.LSE"]
 
 
-def test_market_data_fetch_state_repository_tracks_success_and_failure(tmp_path):
+def test_market_data_fetch_state_repository_tracks_success_and_failure(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "market-state.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
@@ -1239,7 +1314,7 @@ def test_market_data_fetch_state_repository_tracks_success_and_failure(tmp_path)
     assert success["attempts"] == 0
 
 
-def test_market_data_repository_upsert_prices_batches_rows(tmp_path):
+def test_market_data_repository_upsert_prices_batches_rows(tmp_path: Path) -> None:
     db_path = tmp_path / "market-data-batch.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
@@ -1287,11 +1362,15 @@ def test_market_data_repository_upsert_prices_batches_rows(tmp_path):
         ]
     )
 
-    assert repo.latest_snapshot("AAA.US").price == 10.0
-    assert repo.latest_snapshot("BBB.US").price == 20.0
+    aaa_snapshot = repo.latest_snapshot("AAA.US")
+    bbb_snapshot = repo.latest_snapshot("BBB.US")
+    assert aaa_snapshot is not None
+    assert bbb_snapshot is not None
+    assert aaa_snapshot.price == 10.0
+    assert bbb_snapshot.price == 20.0
 
 
-def test_market_data_fetch_state_repository_batch_methods(tmp_path):
+def test_market_data_fetch_state_repository_batch_methods(tmp_path: Path) -> None:
     db_path = tmp_path / "market-state-batch.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
@@ -1321,15 +1400,25 @@ def test_market_data_fetch_state_repository_batch_methods(tmp_path):
         [("AAA.US", "boom"), ("BBB.US", "bang")],
         base_backoff_seconds=60,
     )
-    assert repo.fetch("EODHD", "AAA.US")["last_status"] == "error"
-    assert repo.fetch("EODHD", "BBB.US")["attempts"] == 1
+    aaa_failed = repo.fetch("EODHD", "AAA.US")
+    bbb_failed = repo.fetch("EODHD", "BBB.US")
+    assert aaa_failed is not None
+    assert bbb_failed is not None
+    assert aaa_failed["last_status"] == "error"
+    assert bbb_failed["attempts"] == 1
 
     repo.mark_success_many("EODHD", ["AAA.US", "BBB.US"])
-    assert repo.fetch("EODHD", "AAA.US")["last_status"] == "ok"
-    assert repo.fetch("EODHD", "BBB.US")["attempts"] == 0
+    aaa_ok = repo.fetch("EODHD", "AAA.US")
+    bbb_ok = repo.fetch("EODHD", "BBB.US")
+    assert aaa_ok is not None
+    assert bbb_ok is not None
+    assert aaa_ok["last_status"] == "ok"
+    assert bbb_ok["attempts"] == 0
 
 
-def test_market_data_repository_latest_snapshots_many_matches_single_lookup(tmp_path):
+def test_market_data_repository_latest_snapshots_many_matches_single_lookup(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "market-snapshots-many.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
@@ -1387,17 +1476,21 @@ def test_market_data_repository_latest_snapshots_many_matches_single_lookup(tmp_
 
     snapshots = repo.latest_snapshots_many(["AAA.US", "BBB.US", "CCC.US"])
 
+    aaa_single = repo.latest_snapshot("AAA.US")
+    bbb_single = repo.latest_snapshot("BBB.US")
+    assert aaa_single is not None
+    assert bbb_single is not None
     assert set(snapshots) == {"AAA.US", "BBB.US"}
     assert snapshots["AAA.US"].security_id == by_symbol["AAA.US"].security_id
-    assert snapshots["AAA.US"].as_of == repo.latest_snapshot("AAA.US").as_of
-    assert snapshots["AAA.US"].price == repo.latest_snapshot("AAA.US").price
-    assert snapshots["BBB.US"].as_of == repo.latest_snapshot("BBB.US").as_of
-    assert snapshots["BBB.US"].price == repo.latest_snapshot("BBB.US").price
+    assert snapshots["AAA.US"].as_of == aaa_single.as_of
+    assert snapshots["AAA.US"].price == aaa_single.price
+    assert snapshots["BBB.US"].as_of == bbb_single.as_of
+    assert snapshots["BBB.US"].price == bbb_single.price
 
 
 def test_financial_facts_repository_latest_share_counts_many_matches_single_lookup(
-    tmp_path,
-):
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "share-counts-many.db"
     repo = FinancialFactsRepository(db_path)
     repo.initialize_schema()
@@ -1464,8 +1557,8 @@ def test_financial_facts_repository_latest_share_counts_many_matches_single_look
 
 
 def test_financial_facts_repository_facts_for_symbols_many_matches_single_lookup(
-    tmp_path,
-):
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "facts-many.db"
     repo = FinancialFactsRepository(db_path)
     repo.initialize_schema()
@@ -1534,7 +1627,9 @@ def test_financial_facts_repository_facts_for_symbols_many_matches_single_lookup
     assert "CCC.US" not in facts
 
 
-def test_financial_facts_repository_facts_for_symbols_many_concept_filter(tmp_path):
+def test_financial_facts_repository_facts_for_symbols_many_concept_filter(
+    tmp_path: Path,
+) -> None:
     """A non-empty ``concepts`` argument restricts the preload to that subset."""
 
     db_path = tmp_path / "facts-many-concepts.db"
@@ -1590,7 +1685,9 @@ def test_financial_facts_repository_facts_for_symbols_many_concept_filter(tmp_pa
     }
 
 
-def test_metrics_repository_upsert_many_with_external_connection(monkeypatch, tmp_path):
+def test_metrics_repository_upsert_many_with_external_connection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """When a connection is supplied the persistence path reuses it."""
 
     from pyvalue.persistence.storage import StoredMetricRow
@@ -1624,16 +1721,16 @@ def test_metrics_repository_upsert_many_with_external_connection(monkeypatch, tm
         opened: list[int] = []
         original_connect = repo._connect
 
-        def tracking_connect(*args, **kwargs):
+        def tracking_connect() -> sqlite3.Connection:
             opened.append(1)
-            return original_connect(*args, **kwargs)
+            return original_connect()
 
         original_sec_connect = sec_repo._connect
         sec_opened: list[int] = []
 
-        def tracking_sec_connect(*args, **kwargs):
+        def tracking_sec_connect() -> sqlite3.Connection:
             sec_opened.append(1)
-            return original_sec_connect(*args, **kwargs)
+            return original_sec_connect()
 
         monkeypatch.setattr(repo, "_connect", tracking_connect)
         monkeypatch.setattr(sec_repo, "_connect", tracking_sec_connect)
@@ -1659,7 +1756,7 @@ def test_metrics_repository_upsert_many_with_external_connection(monkeypatch, tm
     ]
 
 
-def test_sqlite_store_connect_applies_performance_pragmas(tmp_path):
+def test_sqlite_store_connect_applies_performance_pragmas(tmp_path: Path) -> None:
     """Centralised pragma setup configures cache, sync, mmap, and temp store."""
 
     db_path = tmp_path / "pragma-check.db"
@@ -1685,7 +1782,9 @@ def test_sqlite_store_connect_applies_performance_pragmas(tmp_path):
     assert journal_mode.lower() == "wal"
 
 
-def test_migration_029_creates_fin_facts_security_concept_latest_index(tmp_path):
+def test_migration_029_creates_fin_facts_security_concept_latest_index(
+    tmp_path: Path,
+) -> None:
     """Migration 029 ensures the composite preload index exists on existing DBs."""
 
     from pyvalue.persistence.migrations import apply_migrations
@@ -1720,7 +1819,9 @@ def test_migration_029_creates_fin_facts_security_concept_latest_index(tmp_path)
     assert after is not None
 
 
-def test_latest_share_counts_many_prefers_best_same_date_share_fact(tmp_path):
+def test_latest_share_counts_many_prefers_best_same_date_share_fact(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "share-count-selection.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
@@ -1760,7 +1861,7 @@ def test_latest_share_counts_many_prefers_best_same_date_share_fact(tmp_path):
     assert latest_share_count("AAA.US", repo) == 1000.0
 
 
-def test_sqlite_store_connect_context_closes_connection(tmp_path):
+def test_sqlite_store_connect_context_closes_connection(tmp_path: Path) -> None:
     repo = MarketDataRepository(tmp_path / "connect-close.db")
 
     with repo._connect() as conn:
@@ -1776,7 +1877,7 @@ def test_sqlite_store_connect_context_closes_connection(tmp_path):
         )
 
 
-def test_sqlite_store_enable_wal_mode(tmp_path):
+def test_sqlite_store_enable_wal_mode(tmp_path: Path) -> None:
     repo = MarketDataRepository(tmp_path / "wal-mode.db")
     repo.initialize_schema()
 
@@ -1786,7 +1887,7 @@ def test_sqlite_store_enable_wal_mode(tmp_path):
     assert repo.current_journal_mode() == "wal"
 
 
-def test_metrics_repository_upsert_many_matches_single_upsert(tmp_path):
+def test_metrics_repository_upsert_many_matches_single_upsert(tmp_path: Path) -> None:
     db_path = tmp_path / "metrics-upsert-many.db"
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
@@ -1794,13 +1895,15 @@ def test_metrics_repository_upsert_many_matches_single_upsert(tmp_path):
     _seed_listing(db_path, "BBB.US")
 
     repo.upsert("AAA.US", "metric_one", 1.0, "2024-01-01")
-    updated = repo.upsert_many(
-        [
-            ("AAA.US", "metric_one", 2.0, "2024-02-01"),
-            ("AAA.US", "metric_two", 3.0, "2024-02-01"),
-            ("BBB.US", "metric_one", 4.0, "2024-02-01"),
-        ]
-    )
+    # ``upsert_many`` is typed to accept full ``StoredMetricRow`` tuples; spell
+    # out the unit-kind/currency/unit-label tail (the same defaults the compact
+    # four-tuple form would expand to) so the literals match that type exactly.
+    rows: list[StoredMetricRow] = [
+        ("AAA.US", "metric_one", 2.0, "2024-02-01", "other", None, None),
+        ("AAA.US", "metric_two", 3.0, "2024-02-01", "other", None, None),
+        ("BBB.US", "metric_one", 4.0, "2024-02-01", "other", None, None),
+    ]
+    updated = repo.upsert_many(rows)
 
     assert updated == 3
     assert repo.fetch("AAA.US", "metric_one") == (2.0, "2024-02-01")
@@ -1809,8 +1912,8 @@ def test_metrics_repository_upsert_many_matches_single_upsert(tmp_path):
 
 
 def test_metrics_repository_upsert_many_retries_transient_locked_error(
-    monkeypatch, tmp_path
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     db_path = tmp_path / "metrics-upsert-retry.db"
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
@@ -1824,19 +1927,35 @@ def test_metrics_repository_upsert_many_retries_transient_locked_error(
     attempts = {"count": 0}
 
     class LockedOnceConnection:
-        def __enter__(self):
+        """Connection stub that raises ``database is locked`` on first entry.
+
+        Installed via ``monkeypatch.setattr`` to drive the retry path of
+        ``upsert_many``; the second entry delegates to a real connection.
+        """
+
+        _conn: sqlite3.Connection
+
+        def __enter__(self) -> sqlite3.Connection:
             attempts["count"] += 1
             if attempts["count"] == 1:
                 raise sqlite3.OperationalError("database is locked")
             self._conn = original_connect()
             return self._conn.__enter__()
 
-        def __exit__(self, exc_type, exc_value, traceback):
-            return self._conn.__exit__(exc_type, exc_value, traceback)
+        def __exit__(
+            self,
+            exc_type: Optional[Type[BaseException]],
+            exc_value: Optional[BaseException],
+            traceback: Optional[TracebackType],
+        ) -> bool:
+            return bool(self._conn.__exit__(exc_type, exc_value, traceback))
 
     monkeypatch.setattr(repo, "_connect", lambda: LockedOnceConnection())
 
-    updated = repo.upsert_many([("AAA.US", "metric_one", 2.0, "2024-02-01")])
+    retry_rows: list[StoredMetricRow] = [
+        ("AAA.US", "metric_one", 2.0, "2024-02-01", "other", None, None),
+    ]
+    updated = repo.upsert_many(retry_rows)
 
     assert attempts["count"] == 2
     assert updated == 1
@@ -1844,22 +1963,21 @@ def test_metrics_repository_upsert_many_retries_transient_locked_error(
 
 
 def test_metrics_repository_fetch_many_for_symbols_returns_requested_metrics(
-    tmp_path,
-):
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "metrics-fetch-many.db"
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
     _seed_listing(db_path, "BBB.US")
     _seed_listing(db_path, "CCC.US")
-    repo.upsert_many(
-        [
-            ("AAA.US", "metric_one", 1.0, "2024-01-01"),
-            ("AAA.US", "metric_two", 2.0, "2024-01-02"),
-            ("BBB.US", "metric_one", 3.0, "2024-01-03"),
-            ("CCC.US", "metric_three", 4.0, "2024-01-04"),
-        ]
-    )
+    rows: list[StoredMetricRow] = [
+        ("AAA.US", "metric_one", 1.0, "2024-01-01", "other", None, None),
+        ("AAA.US", "metric_two", 2.0, "2024-01-02", "other", None, None),
+        ("BBB.US", "metric_one", 3.0, "2024-01-03", "other", None, None),
+        ("CCC.US", "metric_three", 4.0, "2024-01-04", "other", None, None),
+    ]
+    repo.upsert_many(rows)
 
     fetched = repo.fetch_many_for_symbols(
         ["AAA.US", "BBB.US", "CCC.US", "DDD.US"],
@@ -1878,7 +1996,7 @@ def test_metrics_repository_fetch_many_for_symbols_returns_requested_metrics(
     }
 
 
-def test_metric_compute_status_repository_upsert_and_fetch_many(tmp_path):
+def test_metric_compute_status_repository_upsert_and_fetch_many(tmp_path: Path) -> None:
     db_path = tmp_path / "metric-status.db"
     repo = MetricComputeStatusRepository(db_path)
     repo.initialize_schema()
@@ -1923,7 +2041,7 @@ def test_metric_compute_status_repository_upsert_and_fetch_many(tmp_path):
     assert fetched["BBB.US"]["metric_one"].reason_detail == "Need more facts"
 
 
-def test_metrics_repository_persists_unit_metadata(tmp_path):
+def test_metrics_repository_persists_unit_metadata(tmp_path: Path) -> None:
     db_path = tmp_path / "metrics-metadata.db"
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
@@ -1961,7 +2079,9 @@ def test_metrics_repository_persists_unit_metadata(tmp_path):
     assert earnings_yield.unit_label == "pct"
 
 
-def test_metrics_repository_normalizes_configured_subunit_currencies(tmp_path):
+def test_metrics_repository_normalizes_configured_subunit_currencies(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "metrics-subunits.db"
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
@@ -1994,7 +2114,9 @@ def test_metrics_repository_normalizes_configured_subunit_currencies(tmp_path):
     assert eps_ttm.currency == "ILS"
 
 
-def test_fx_rates_repository_latest_on_or_before_and_discover_currencies(tmp_path):
+def test_fx_rates_repository_latest_on_or_before_and_discover_currencies(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "fx-repo.db"
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
@@ -2099,8 +2221,8 @@ def test_fx_rates_repository_latest_on_or_before_and_discover_currencies(tmp_pat
 
 
 def test_fx_rates_repository_discover_currencies_excludes_secondary_supported_tickers(
-    tmp_path,
-):
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "fx-secondary-supported.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
@@ -2150,7 +2272,9 @@ def test_fx_rates_repository_discover_currencies_excludes_secondary_supported_ti
     assert repo.discover_currencies() == ["USD", "ZAR"]
 
 
-def test_security_repository_upserts_sector_and_industry_metadata(tmp_path):
+def test_security_repository_upserts_sector_and_industry_metadata(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "security-metadata.db"
     repo = SecurityRepository(db_path)
     repo.initialize_schema()
@@ -2173,7 +2297,9 @@ def test_security_repository_upserts_sector_and_industry_metadata(tmp_path):
     assert security.industry == "Software"
 
 
-def test_entity_metadata_repository_fetch_many_returns_security_records(tmp_path):
+def test_entity_metadata_repository_fetch_many_returns_security_records(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "entity-metadata.db"
     repo = EntityMetadataRepository(db_path)
     repo.initialize_schema()
@@ -2190,7 +2316,9 @@ def test_entity_metadata_repository_fetch_many_returns_security_records(tmp_path
     assert rows["BBB.US"].industry == "Machinery"
 
 
-def test_security_repository_upsert_metadata_many_updates_existing_rows(tmp_path):
+def test_security_repository_upsert_metadata_many_updates_existing_rows(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "security-metadata-batch.db"
     repo = SecurityRepository(db_path)
     repo.initialize_schema()
@@ -2231,7 +2359,9 @@ def test_security_repository_upsert_metadata_many_updates_existing_rows(tmp_path
     assert bbb_row.sector == "Industrials"
 
 
-def test_fundamentals_repository_fetch_metadata_candidates_extracts_fields(tmp_path):
+def test_fundamentals_repository_fetch_metadata_candidates_extracts_fields(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "fundamentals-metadata-candidates.db"
     repo = FundamentalsRepository(db_path)
     repo.initialize_schema()
@@ -2271,7 +2401,9 @@ def test_fundamentals_repository_fetch_metadata_candidates_extracts_fields(tmp_p
     assert security_ids["CCC.US"] not in rows
 
 
-def test_fundamentals_repository_fetch_many_returns_payloads_by_symbol(tmp_path):
+def test_fundamentals_repository_fetch_many_returns_payloads_by_symbol(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "fundamentals-fetch-many.db"
     repo = FundamentalsRepository(db_path)
     repo.initialize_schema()

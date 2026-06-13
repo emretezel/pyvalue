@@ -152,7 +152,7 @@ def _plan_market_data_stage_run(
 def _build_market_data_update(
     service: MarketDataService,
     ticker: SupportedTicker,
-    data,
+    data: PriceData,
 ) -> MarketDataUpdate:
     prepared = service.prepare_price_data(
         ticker.symbol,

@@ -5,11 +5,12 @@ Author: Emre Tezel
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date, timedelta
 import logging
 from typing import Dict, Optional
 
-import requests  # type: ignore[import-untyped]
+import requests
 
 from pyvalue.currency import raw_currency_code
 from pyvalue.marketdata.base import MarketDataProvider, PriceData
@@ -111,7 +112,7 @@ class EODHDProvider(MarketDataProvider):
     def _price_data_from_entry(
         self,
         symbol: str,
-        entry,
+        entry: Mapping[str, object],
         exchange_hint: Optional[str] = None,
     ) -> PriceData:
         price = None
@@ -145,11 +146,14 @@ class EODHDProvider(MarketDataProvider):
             currency=currency,
         )
 
-    def _extract_float(self, entry, key: str) -> Optional[float]:
+    def _extract_float(self, entry: Mapping[str, object], key: str) -> Optional[float]:
         value = entry.get(key)
         if value is None and key.lower() != key:
             value = entry.get(key.lower())
-        if value is None:
+        # EODHD JSON values are arbitrary objects; only a number or a numeric
+        # string can become a float -- anything else (including None) is a
+        # missing value here.
+        if not isinstance(value, (int, float, str)):
             return None
         try:
             return float(value)
@@ -157,11 +161,13 @@ class EODHDProvider(MarketDataProvider):
             LOGGER.warning("Invalid float value for %s: %s", key, value)
             return None
 
-    def _extract_int(self, entry, key: str) -> Optional[int]:
+    def _extract_int(self, entry: Mapping[str, object], key: str) -> Optional[int]:
         value = entry.get(key)
         if value is None and key.lower() != key:
             value = entry.get(key.lower())
-        if value is None:
+        # See _extract_float: narrow the arbitrary JSON value to the numeric and
+        # string forms int(float(...)) can actually parse.
+        if not isinstance(value, (int, float, str)):
             return None
         try:
             return int(float(value))
@@ -169,7 +175,7 @@ class EODHDProvider(MarketDataProvider):
             LOGGER.warning("Invalid integer value for %s: %s", key, value)
             return None
 
-    def _extract_text(self, entry, *keys: str) -> Optional[str]:
+    def _extract_text(self, entry: Mapping[str, object], *keys: str) -> Optional[str]:
         for key in keys:
             value = entry.get(key)
             if value is None and key.lower() != key:

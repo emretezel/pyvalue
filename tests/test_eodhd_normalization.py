@@ -1,9 +1,11 @@
+from pathlib import Path
+
 from pyvalue.money.fx import FXService
 from pyvalue.normalization.eodhd import EODHDFactsNormalizer
 from pyvalue.persistence.storage import FXRateRecord, FXRatesRepository
 
 
-def test_eodhd_normalizes_ppe_net():
+def test_eodhd_normalizes_ppe_net() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -29,7 +31,7 @@ def test_eodhd_normalizes_ppe_net():
     assert rec.fiscal_period == "FY"
 
 
-def test_eodhd_normalizes_assets_from_total_assets():
+def test_eodhd_normalizes_assets_from_total_assets() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -52,7 +54,7 @@ def test_eodhd_normalizes_assets_from_total_assets():
     assert assets_records[0].value == 250.0
 
 
-def test_eodhd_derives_intangibles_excluding_goodwill_from_net():
+def test_eodhd_derives_intangibles_excluding_goodwill_from_net() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -79,7 +81,7 @@ def test_eodhd_derives_intangibles_excluding_goodwill_from_net():
     assert derived[0].value == 80.0
 
 
-def test_eodhd_derives_common_shares_from_entity_shares():
+def test_eodhd_derives_common_shares_from_entity_shares() -> None:
     normalizer = EODHDFactsNormalizer(concepts=["EntityCommonStockSharesOutstanding"])
     payload = {
         "Financials": {
@@ -104,7 +106,7 @@ def test_eodhd_derives_common_shares_from_entity_shares():
     assert derived[0].value == 1500.0
 
 
-def test_eodhd_normalizes_statement_share_fields_as_shares():
+def test_eodhd_normalizes_statement_share_fields_as_shares() -> None:
     normalizer = EODHDFactsNormalizer(
         concepts=["EntityCommonStockSharesOutstanding", "CommonStockSharesOutstanding"]
     )
@@ -143,7 +145,7 @@ def test_eodhd_normalizes_statement_share_fields_as_shares():
     assert entity[0].currency is None
 
 
-def test_eodhd_normalizes_weighted_average_shares_as_count():
+def test_eodhd_normalizes_weighted_average_shares_as_count() -> None:
     """Weighted-average share counts are ``count`` facts, not monetary (regression).
 
     EODHD reports ``weightedAverageShsOutDil`` / ``weightedAverageShsOut`` on the
@@ -199,7 +201,9 @@ def test_eodhd_normalizes_weighted_average_shares_as_count():
     assert basic[0].value == 1000.0
 
 
-def test_eodhd_prefers_dedicated_outstanding_shares_over_scaled_statement_duplicate():
+def test_eodhd_prefers_dedicated_outstanding_shares_over_scaled_statement_duplicate() -> (
+    None
+):
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -239,7 +243,7 @@ def test_eodhd_prefers_dedicated_outstanding_shares_over_scaled_statement_duplic
     assert common_fy[0].value == 384_512_500.0
 
 
-def test_eodhd_derives_common_equity_from_stockholders_equity():
+def test_eodhd_derives_common_equity_from_stockholders_equity() -> None:
     normalizer = EODHDFactsNormalizer(concepts=["StockholdersEquity"])
     payload = {
         "Financials": {
@@ -262,7 +266,7 @@ def test_eodhd_derives_common_equity_from_stockholders_equity():
     assert derived[0].value == 900.0
 
 
-def test_eodhd_normalizes_net_income_to_common_from_applicable_shares():
+def test_eodhd_normalizes_net_income_to_common_from_applicable_shares() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -291,7 +295,7 @@ def test_eodhd_normalizes_net_income_to_common_from_applicable_shares():
     assert derived[0].value == 120.0
 
 
-def test_eodhd_normalizes_operating_income_from_ebit():
+def test_eodhd_normalizes_operating_income_from_ebit() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -316,7 +320,7 @@ def test_eodhd_normalizes_operating_income_from_ebit():
     assert derived[0].value == 55.0
 
 
-def test_eodhd_normalizes_common_equity_from_common_stock_total_equity():
+def test_eodhd_normalizes_common_equity_from_common_stock_total_equity() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -342,7 +346,7 @@ def test_eodhd_normalizes_common_equity_from_common_stock_total_equity():
     assert equity[0].value == 500.0
 
 
-def test_eodhd_normalizes_ebitda():
+def test_eodhd_normalizes_ebitda() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -365,7 +369,7 @@ def test_eodhd_normalizes_ebitda():
     assert derived[0].value == 42.0
 
 
-def test_eodhd_normalizes_gross_profit():
+def test_eodhd_normalizes_gross_profit() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -388,7 +392,7 @@ def test_eodhd_normalizes_gross_profit():
     assert derived[0].value == 420.0
 
 
-def test_eodhd_normalizes_cost_of_revenue():
+def test_eodhd_normalizes_cost_of_revenue() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -411,7 +415,7 @@ def test_eodhd_normalizes_cost_of_revenue():
     assert derived[0].value == 580.0
 
 
-def test_eodhd_normalizes_common_stock_dividends_paid():
+def test_eodhd_normalizes_common_stock_dividends_paid() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -434,7 +438,7 @@ def test_eodhd_normalizes_common_stock_dividends_paid():
     assert derived[0].value == -25.0
 
 
-def test_eodhd_normalizes_dividend_share_from_highlights():
+def test_eodhd_normalizes_dividend_share_from_highlights() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Highlights": {
@@ -458,7 +462,7 @@ def test_eodhd_normalizes_dividend_share_from_highlights():
     assert derived[0].end_date == "2024-11-05"
 
 
-def test_eodhd_dividend_share_skipped_when_updated_at_missing():
+def test_eodhd_dividend_share_skipped_when_updated_at_missing() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Highlights": {
@@ -477,7 +481,7 @@ def test_eodhd_dividend_share_skipped_when_updated_at_missing():
     )
 
 
-def test_eodhd_normalizes_short_term_debt_and_cash_investments():
+def test_eodhd_normalizes_short_term_debt_and_cash_investments() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -506,7 +510,7 @@ def test_eodhd_normalizes_short_term_debt_and_cash_investments():
     assert cash[0].value == 60.0
 
 
-def test_eodhd_normalizes_interest_expense():
+def test_eodhd_normalizes_interest_expense() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -529,7 +533,7 @@ def test_eodhd_normalizes_interest_expense():
     assert derived[0].value == 12.5
 
 
-def test_eodhd_derives_interest_expense_from_net_interest_income():
+def test_eodhd_derives_interest_expense_from_net_interest_income() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -555,7 +559,7 @@ def test_eodhd_derives_interest_expense_from_net_interest_income():
     assert derived[0].value == 25.0
 
 
-def test_eodhd_skips_non_positive_derived_interest_expense():
+def test_eodhd_skips_non_positive_derived_interest_expense() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -586,7 +590,7 @@ def test_eodhd_skips_non_positive_derived_interest_expense():
     assert not derived
 
 
-def test_eodhd_normalizes_income_tax_expense():
+def test_eodhd_normalizes_income_tax_expense() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -609,7 +613,7 @@ def test_eodhd_normalizes_income_tax_expense():
     assert derived[0].value == 18.5
 
 
-def test_eodhd_normalizes_income_tax_expense_from_tax_provision():
+def test_eodhd_normalizes_income_tax_expense_from_tax_provision() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -632,7 +636,9 @@ def test_eodhd_normalizes_income_tax_expense_from_tax_provision():
     assert derived[0].value == 22.0
 
 
-def test_eodhd_does_not_normalize_long_term_debt_from_short_long_term_debt_total():
+def test_eodhd_does_not_normalize_long_term_debt_from_short_long_term_debt_total() -> (
+    None
+):
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -654,7 +660,7 @@ def test_eodhd_does_not_normalize_long_term_debt_from_short_long_term_debt_total
     assert not derived, "LongTermDebt should not map from shortLongTermDebtTotal"
 
 
-def test_eodhd_normalizes_total_debt_from_short_long_term_debt_total():
+def test_eodhd_normalizes_total_debt_from_short_long_term_debt_total() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -677,7 +683,7 @@ def test_eodhd_normalizes_total_debt_from_short_long_term_debt_total():
     assert derived[0].value == 250.0
 
 
-def test_eodhd_skips_non_numeric_total_debt_from_short_long_term_debt_total():
+def test_eodhd_skips_non_numeric_total_debt_from_short_long_term_debt_total() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -699,7 +705,7 @@ def test_eodhd_skips_non_numeric_total_debt_from_short_long_term_debt_total():
     assert not derived
 
 
-def test_eodhd_normalizes_da_from_income_statement():
+def test_eodhd_normalizes_da_from_income_statement() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -726,7 +732,7 @@ def test_eodhd_normalizes_da_from_income_statement():
     assert derived[0].value == 34.0
 
 
-def test_eodhd_normalizes_da_from_reconciled_depreciation_fallback():
+def test_eodhd_normalizes_da_from_reconciled_depreciation_fallback() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -753,7 +759,7 @@ def test_eodhd_normalizes_da_from_reconciled_depreciation_fallback():
     assert derived[0].value == 21.0
 
 
-def test_eodhd_normalizes_depreciation_from_cash_flow():
+def test_eodhd_normalizes_depreciation_from_cash_flow() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -776,7 +782,7 @@ def test_eodhd_normalizes_depreciation_from_cash_flow():
     assert derived[0].value == 18.0
 
 
-def test_eodhd_normalizes_cash_and_cash_equivalents():
+def test_eodhd_normalizes_cash_and_cash_equivalents() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -799,7 +805,7 @@ def test_eodhd_normalizes_cash_and_cash_equivalents():
     assert derived[0].value == 44.0
 
 
-def test_eodhd_normalizes_cash_and_cash_equivalents_fallback_from_cash():
+def test_eodhd_normalizes_cash_and_cash_equivalents_fallback_from_cash() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -822,7 +828,7 @@ def test_eodhd_normalizes_cash_and_cash_equivalents_fallback_from_cash():
     assert derived[0].value == 33.0
 
 
-def test_eodhd_normalizes_short_term_investments():
+def test_eodhd_normalizes_short_term_investments() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -845,7 +851,7 @@ def test_eodhd_normalizes_short_term_investments():
     assert derived[0].value == 19.0
 
 
-def test_eodhd_normalizes_sale_purchase_of_stock():
+def test_eodhd_normalizes_sale_purchase_of_stock() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -869,7 +875,7 @@ def test_eodhd_normalizes_sale_purchase_of_stock():
     assert derived[0].fiscal_period == "Q4"
 
 
-def test_eodhd_normalizes_issuance_of_capital_stock():
+def test_eodhd_normalizes_issuance_of_capital_stock() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -893,7 +899,7 @@ def test_eodhd_normalizes_issuance_of_capital_stock():
     assert derived[0].fiscal_period == "FY"
 
 
-def test_eodhd_normalizes_stock_based_compensation():
+def test_eodhd_normalizes_stock_based_compensation() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -917,7 +923,7 @@ def test_eodhd_normalizes_stock_based_compensation():
     assert derived[0].fiscal_period == "Q4"
 
 
-def test_eodhd_extract_value_reuses_case_insensitive_lookup():
+def test_eodhd_extract_value_reuses_case_insensitive_lookup() -> None:
     normalizer = EODHDFactsNormalizer()
     entry = {
         "totalAssets": "10.0",
@@ -929,7 +935,7 @@ def test_eodhd_extract_value_reuses_case_insensitive_lookup():
     assert normalizer._extract_value(entry, ["totalLiabilities"], lowered) == 7.0
 
 
-def test_eodhd_normalizes_mixed_case_statement_keys():
+def test_eodhd_normalizes_mixed_case_statement_keys() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -956,7 +962,7 @@ def test_eodhd_normalizes_mixed_case_statement_keys():
     assert concepts["LiabilitiesCurrent"] == 80.0
 
 
-def test_eodhd_common_stockholders_equity_override_replaces_base_record():
+def test_eodhd_common_stockholders_equity_override_replaces_base_record() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "Financials": {
@@ -982,7 +988,7 @@ def test_eodhd_common_stockholders_equity_override_replaces_base_record():
     assert derived[0].value == 90.0
 
 
-def test_eodhd_normalizes_eps_for_configured_subunit_family():
+def test_eodhd_normalizes_eps_for_configured_subunit_family() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {
         "General": {"CurrencyCode": "ZAC"},
@@ -1013,7 +1019,7 @@ def test_eodhd_normalizes_eps_for_configured_subunit_family():
 # ---------------------------------------------------------------------------
 
 
-def _fx_service_with_rates(tmp_path, *records):
+def _fx_service_with_rates(tmp_path: Path, *records: FXRateRecord) -> FXService:
     db_path = tmp_path / "fx.db"
     repo = FXRatesRepository(db_path)
     repo.initialize_schema()
@@ -1021,7 +1027,7 @@ def _fx_service_with_rates(tmp_path, *records):
     return FXService(db_path, repository=repo, provider_name="EODHD", preload_all=True)
 
 
-def test_eodhd_normalize_target_currency_identity():
+def test_eodhd_normalize_target_currency_identity() -> None:
     """When all facts are already in the target currency, values stay unchanged."""
 
     normalizer = EODHDFactsNormalizer()
@@ -1047,7 +1053,7 @@ def test_eodhd_normalize_target_currency_identity():
     assert assets[0].currency == "USD"
 
 
-def test_eodhd_normalize_uses_entry_currency_before_statement_and_payload():
+def test_eodhd_normalize_uses_entry_currency_before_statement_and_payload() -> None:
     """Entry-level currency wins over statement and payload defaults."""
 
     normalizer = EODHDFactsNormalizer()
@@ -1073,7 +1079,7 @@ def test_eodhd_normalize_uses_entry_currency_before_statement_and_payload():
     assert assets[0].currency == "USD"
 
 
-def test_eodhd_normalize_uses_statement_currency_before_payload():
+def test_eodhd_normalize_uses_statement_currency_before_payload() -> None:
     """Direct statement-level currency is used when the entry has no currency."""
 
     normalizer = EODHDFactsNormalizer()
@@ -1098,7 +1104,9 @@ def test_eodhd_normalize_uses_statement_currency_before_payload():
     assert assets[0].currency == "EUR"
 
 
-def test_eodhd_normalize_converts_monetary_facts_to_target_currency(tmp_path):
+def test_eodhd_normalize_converts_monetary_facts_to_target_currency(
+    tmp_path: Path,
+) -> None:
     """EUR-denominated facts are converted to USD using the FX rate."""
 
     fx = _fx_service_with_rates(
@@ -1137,7 +1145,9 @@ def test_eodhd_normalize_converts_monetary_facts_to_target_currency(tmp_path):
     assert abs(assets[0].value - 1100.0) < 0.01
 
 
-def test_eodhd_normalize_shares_not_converted_to_target_currency(tmp_path):
+def test_eodhd_normalize_shares_not_converted_to_target_currency(
+    tmp_path: Path,
+) -> None:
     """Share count facts pass through unchanged regardless of target_currency."""
 
     fx = _fx_service_with_rates(
@@ -1171,7 +1181,7 @@ def test_eodhd_normalize_shares_not_converted_to_target_currency(tmp_path):
     assert shares[0].end_date == "2024-12-31"
 
 
-def test_eodhd_normalize_no_target_currency_preserves_source():
+def test_eodhd_normalize_no_target_currency_preserves_source() -> None:
     """When target_currency is None, facts retain their source currency."""
 
     normalizer = EODHDFactsNormalizer()
@@ -1198,8 +1208,8 @@ def test_eodhd_normalize_no_target_currency_preserves_source():
 
 
 def test_eodhd_normalize_missing_fx_rate_drops_old_period_but_keeps_newer_converted_period(
-    tmp_path,
-):
+    tmp_path: Path,
+) -> None:
     """Old periods without FX are skipped while newer convertible periods survive."""
 
     fx = _fx_service_with_rates(
@@ -1247,8 +1257,8 @@ def test_eodhd_normalize_missing_fx_rate_drops_old_period_but_keeps_newer_conver
 
 
 def test_eodhd_normalize_missing_fx_rate_skips_old_derived_period_during_target_alignment(
-    tmp_path,
-):
+    tmp_path: Path,
+) -> None:
     """Derived periods still drop individually when target-currency FX is missing."""
 
     fx = _fx_service_with_rates(
@@ -1303,7 +1313,7 @@ def test_eodhd_normalize_missing_fx_rate_skips_old_derived_period_during_target_
     ]
 
 
-def test_eodhd_normalize_gbx_subunit_with_gbp_target_no_double_conversion():
+def test_eodhd_normalize_gbx_subunit_with_gbp_target_no_double_conversion() -> None:
     """GBX currency code is normalized to GBP; values pass through without division.
 
     EODHD reports statement-level monetary values in the main currency even when
@@ -1338,7 +1348,7 @@ def test_eodhd_normalize_gbx_subunit_with_gbp_target_no_double_conversion():
     assert assets[0].unit_kind == "monetary"
 
 
-def test_eodhd_normalize_mixed_currencies_aligned_to_target(tmp_path):
+def test_eodhd_normalize_mixed_currencies_aligned_to_target(tmp_path: Path) -> None:
     """Facts with different source currencies are all aligned to the target."""
 
     fx = _fx_service_with_rates(
@@ -1387,7 +1397,7 @@ def test_eodhd_normalize_mixed_currencies_aligned_to_target(tmp_path):
     assert abs(revenue[0].value - 550.0) < 0.01  # 500 EUR * 1.1
 
 
-def test_eodhd_normalize_no_fx_service_returns_unconverted():
+def test_eodhd_normalize_no_fx_service_returns_unconverted() -> None:
     """When no FX service is available, facts pass through in source currency."""
 
     normalizer = EODHDFactsNormalizer(fx_service=None)
@@ -1414,7 +1424,7 @@ def test_eodhd_normalize_no_fx_service_returns_unconverted():
     assert assets[0].value == 1000.0
 
 
-def test_eodhd_preferred_stock_ignores_capital_stock():
+def test_eodhd_preferred_stock_ignores_capital_stock() -> None:
     """capitalStock must not be read as PreferredStock.
 
     Regression: EODHD's ``capitalStock`` is common stock + additional paid-in
@@ -1444,7 +1454,7 @@ def test_eodhd_preferred_stock_ignores_capital_stock():
     assert not preferred, "capitalStock must not be normalized as PreferredStock"
 
 
-def test_eodhd_common_equity_nonnegative_without_preferred_stock():
+def test_eodhd_common_equity_nonnegative_without_preferred_stock() -> None:
     """Common equity must not be reduced by mislabeled capitalStock.
 
     Regression for the AAPL bug: with only ``capitalStock`` present and no real
@@ -1482,7 +1492,7 @@ def test_eodhd_common_equity_nonnegative_without_preferred_stock():
     assert not [r for r in records if r.concept == "PreferredStock"]
 
 
-def test_eodhd_preferred_stock_read_from_genuine_field():
+def test_eodhd_preferred_stock_read_from_genuine_field() -> None:
     """A real preferred-stock field still populates PreferredStock."""
 
     normalizer = EODHDFactsNormalizer()

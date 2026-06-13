@@ -82,7 +82,10 @@ def is_recent_fact(
 
 
 def has_recent_fact(
-    repo, symbol: str, concepts: Sequence[str], max_age_days: int = MAX_FACT_AGE_DAYS
+    repo: RawFactSource,
+    symbol: str,
+    concepts: Sequence[str],
+    max_age_days: int = MAX_FACT_AGE_DAYS,
 ) -> bool:
     """Return True if any concept has a recent fact regardless of fiscal period."""
 
@@ -93,7 +96,7 @@ def has_recent_fact(
             if is_recent_fact(record, max_age_days=max_age_days):
                 return True
         if hasattr(repo, "facts_for_concept"):
-            records = repo.facts_for_concept(symbol, concept)  # type: ignore[arg-type]
+            records = repo.facts_for_concept(symbol, concept)
             for rec in records:
                 if is_recent_fact(rec, max_age_days=max_age_days):
                     return True

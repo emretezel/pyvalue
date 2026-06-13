@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import (
+    Any,
     Dict,
     List,
     Mapping,
@@ -483,7 +484,7 @@ class _CachedMarketDataRepository:
         self._snapshot = self._repo.latest_snapshot(self._symbol)
         self._snapshot_loaded = True
 
-    def latest_snapshot(self, symbol: str):
+    def latest_snapshot(self, symbol: str) -> Optional[PriceData]:
         if symbol.strip().upper() != self._symbol:
             return self._repo.latest_snapshot(symbol)
         self._load_snapshot()
@@ -508,5 +509,7 @@ class _CachedMarketDataRepository:
             self._ticker_currency_loaded = True
         return self._ticker_currency
 
-    def __getattr__(self, name: str):
+    def __getattr__(self, name: str) -> Any:
+        # Transparent proxy to the wrapped repo for anything not overridden
+        # above; ``Any`` is the right type for a dynamic forwarder.
         return getattr(self._repo, name)

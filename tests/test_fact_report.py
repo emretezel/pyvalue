@@ -4,6 +4,9 @@ Author: Emre Tezel
 """
 
 from datetime import date, timedelta
+from pathlib import Path
+
+import pytest
 
 from pyvalue.cli import cmd_report_fact_freshness
 from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS
@@ -17,7 +20,7 @@ from pyvalue.persistence.storage import (
 from pyvalue.universe import Listing
 
 
-def _seed_universe(db_path):
+def _seed_universe(db_path: Path) -> None:
     universe = SupportedTickerRepository(db_path)
     universe.initialize_schema()
     # Listings are non-nullable on currency and have no fallback; a Listing
@@ -44,7 +47,7 @@ def _seed_universe(db_path):
     )
 
 
-def _seed_facts(repo: FinancialFactsRepository):
+def _seed_facts(repo: FinancialFactsRepository) -> None:
     today = date.today()
     fresh_date = today.isoformat()
     stale_date = (today - timedelta(days=MAX_FACT_AGE_DAYS + 1)).isoformat()
@@ -87,7 +90,7 @@ def _seed_facts(repo: FinancialFactsRepository):
     )
 
 
-def test_compute_fact_coverage_counts_missing_and_stale(tmp_path):
+def test_compute_fact_coverage_counts_missing_and_stale(tmp_path: Path) -> None:
     db_path = tmp_path / "facts.db"
     _seed_universe(db_path)
     fact_repo = FinancialFactsRepository(db_path)
@@ -112,7 +115,9 @@ def test_compute_fact_coverage_counts_missing_and_stale(tmp_path):
     assert coverage["LiabilitiesCurrent"].stale == 0
 
 
-def test_cmd_report_fact_freshness_outputs_counts(tmp_path, capsys):
+def test_cmd_report_fact_freshness_outputs_counts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "report.db"
     _seed_universe(db_path)
     fact_repo = FinancialFactsRepository(db_path)
@@ -138,7 +143,7 @@ def test_cmd_report_fact_freshness_outputs_counts(tmp_path, capsys):
     assert "missing=1" in output
 
 
-def test_fact_report_counts_assets_current_from_components(tmp_path):
+def test_fact_report_counts_assets_current_from_components(tmp_path: Path) -> None:
     db_path = tmp_path / "components.db"
     _seed_universe(db_path)
     fact_repo = FinancialFactsRepository(db_path)
@@ -176,7 +181,7 @@ def test_fact_report_counts_assets_current_from_components(tmp_path):
     assert entry.fully_covered == 0
 
 
-def test_fact_report_counts_liabilities_current_from_components(tmp_path):
+def test_fact_report_counts_liabilities_current_from_components(tmp_path: Path) -> None:
     db_path = tmp_path / "components2.db"
     _seed_universe(db_path)
     fact_repo = FinancialFactsRepository(db_path)

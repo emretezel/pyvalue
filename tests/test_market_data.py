@@ -3,8 +3,13 @@
 Author: Emre Tezel
 """
 
-import pytest
+from pathlib import Path
+import json as json_lib
 
+import pytest
+import requests
+
+from pyvalue.config import Config
 from pyvalue.marketdata.eodhd import EODHDProvider
 from pyvalue.marketdata.base import PriceData
 from pyvalue.marketdata.service import MarketDataService
@@ -14,28 +19,68 @@ from pyvalue.persistence.storage import (
 )
 
 
-class DummyEODSession:
-    def __init__(self, payload):
+class DummyEODSession(requests.Session):
+    """A stand-in ``requests.Session`` that returns a canned EODHD payload.
+
+    Subclasses the real ``requests.Session`` so it satisfies the provider's
+    ``Session`` parameter type. ``__init__`` skips the real HTTP machinery, and
+    every outgoing request is intercepted at ``request`` -- the single funnel
+    that ``get``/``post``/... delegate to -- so we return a genuine
+    ``requests.Response`` carrying the canned JSON body. Returning a real
+    ``Response`` keeps the override Liskov-compatible (so no ``type: ignore``)
+    while ``raise_for_status``/``json`` behave exactly as in production.
+    """
+
+    def __init__(self, payload: object) -> None:
+        # Deliberately do NOT call super().__init__(): we never make a real
+        # network request, so building the underlying adapters/pools is waste.
+        # The recorded calls keep ``(url, params)`` so assertions can inspect
+        # the query the provider issued.
         self.payload = payload
-        self.calls = []
+        # Each recorded call keeps the request URL and the query parameters the
+        # provider attached, so tests can assert on the issued query.
+        self.calls: list[tuple[str, dict[str, object] | None]] = []
 
-    def get(self, url, params=None, timeout=30):
-        self.calls.append((url, params, timeout))
+    def request(
+        self,
+        method: str | bytes,
+        url: str | bytes,
+        *args: object,
+        **kwargs: object,
+    ) -> requests.Response:
+        raw_params = kwargs.get("params")
+        # The provider only ever passes a ``dict`` (or nothing) for ``params``;
+        # narrow explicitly so the recorded type stays precise rather than
+        # widening the tuple to ``object``.
+        params = raw_params if isinstance(raw_params, dict) else None
+        self.calls.append((str(url), params))
+        response = requests.Response()
+        response.status_code = 200
+        response._content = json_lib.dumps(self.payload).encode("utf-8")
+        return response
 
-        class DummyResponse:
-            def __init__(self, data):
-                self.data = data
 
-            def raise_for_status(self):
-                return None
+class DummyConfig(Config):
+    """A ``Config`` with no backing file so ``eodhd_api_key`` resolves to None.
 
-            def json(self):
-                return self.data
+    Subclasses the real ``Config`` to satisfy the service's ``Config``
+    parameter type while overriding ``__init__`` to avoid reading any file;
+    the empty parser makes every ``_get_value`` lookup (including
+    ``eodhd_api_key``) return ``None``, which is what these tests rely on.
+    """
 
-        return DummyResponse(self.payload)
+    def __init__(self) -> None:
+        # Skip Config.__init__ (which reads private/config.toml); set up an
+        # empty parser so property accessors return their None/default values.
+        import configparser
+
+        self.path = Path("private/config.toml")
+        self._parser = configparser.ConfigParser()
 
 
-def _seed_listing(db_path, symbol: str, currency: str = "USD"):
+def _seed_listing(
+    db_path: Path, symbol: str, currency: str = "USD"
+) -> SupportedTickerRepository:
     """Seed a cataloged EODHD listing carrying ``currency`` for ``symbol``.
 
     ``listing.currency`` is NOT NULL with no fallback, so every listing must be
@@ -55,13 +100,13 @@ def _seed_listing(db_path, symbol: str, currency: str = "USD"):
     return repo
 
 
-def test_eodhd_provider_parses_response():
+def test_eodhd_provider_parses_response() -> None:
     payload = [
         {"date": "2024-03-01", "Close": "200.50", "Volume": "12345"},
         {"date": "2024-03-04", "Close": "205.75", "Volume": "9000"},
     ]
     session = DummyEODSession(payload)
-    provider = EODHDProvider(api_key="demo", session=session)  # type: ignore[arg-type]
+    provider = EODHDProvider(api_key="demo", session=session)
 
     data = provider.latest_price("mcd.us")
 
@@ -69,12 +114,14 @@ def test_eodhd_provider_parses_response():
     assert data.as_of == "2024-03-04"
     assert data.volume == 9000
     assert data.symbol == "MCD.US"
-    assert "from" in session.calls[0][1]
+    first_params = session.calls[0][1]
+    assert first_params is not None
+    assert "from" in first_params
 
 
-def test_market_data_service_persists_prices(tmp_path):
+def test_market_data_service_persists_prices(tmp_path: Path) -> None:
     class DummyProvider:
-        def latest_price(self, symbol):
+        def latest_price(self, symbol: str) -> PriceData:
             return PriceData(
                 symbol=symbol,
                 price=150.0,
@@ -96,6 +143,7 @@ def test_market_data_service_persists_prices(tmp_path):
     assert latest_snapshot.as_of == "2024-03-02"
     assert latest_snapshot.price == 150.0
     latest = repo.latest_price("AAPL.US")
+    assert latest is not None
     assert latest[0] == "2024-03-02"
     assert latest[1] == 150.0
 
@@ -109,19 +157,19 @@ def test_market_data_service_persists_prices(tmp_path):
     ],
 )
 def test_market_data_service_stores_major_price_for_subunit_quote(
-    tmp_path,
-    symbol,
-    exchange,
-    quote_currency,
-    base_currency,
-    price,
-    major_price,
-):
+    tmp_path: Path,
+    symbol: str,
+    exchange: str,
+    quote_currency: str,
+    base_currency: str,
+    price: float,
+    major_price: float,
+) -> None:
     # A subunit-quoted listing (GBX/ZAC/ILA) must be stored in its MAJOR
     # currency: the raw quote price is divided by 100 and the snapshot reports
     # the base currency, so subunits never cross the data boundary.
     class DummyProvider:
-        def latest_price(self, requested_symbol):
+        def latest_price(self, requested_symbol: str) -> PriceData:
             return PriceData(
                 symbol=requested_symbol,
                 price=price,
@@ -129,9 +177,6 @@ def test_market_data_service_stores_major_price_for_subunit_quote(
                 volume=100,
                 currency=None,
             )
-
-    class DummyConfig:
-        eodhd_api_key = None
 
     db_path = tmp_path / f"{quote_currency.lower()}-market-data.db"
     catalog_repo = SupportedTickerRepository(db_path)
@@ -163,12 +208,12 @@ def test_market_data_service_stores_major_price_for_subunit_quote(
     assert snapshot.currency == base_currency
 
 
-def test_eodhd_provider_preserves_gbx_quote_price():
+def test_eodhd_provider_preserves_gbx_quote_price() -> None:
     payload = [
         {"date": "2024-03-01", "Close": "99.0", "Volume": "1000", "currency": "GBX"},
     ]
     session = DummyEODSession(payload)
-    provider = EODHDProvider(api_key="demo", session=session)  # type: ignore[arg-type]
+    provider = EODHDProvider(api_key="demo", session=session)
 
     data = provider.latest_price("SHEL.LSE")
 
@@ -176,12 +221,12 @@ def test_eodhd_provider_preserves_gbx_quote_price():
     assert data.currency == "GBX"
 
 
-def test_eodhd_provider_preserves_zac_quote_price():
+def test_eodhd_provider_preserves_zac_quote_price() -> None:
     payload = [
         {"date": "2024-03-01", "Close": "23750.0", "Volume": "1000", "currency": "ZAC"},
     ]
     session = DummyEODSession(payload)
-    provider = EODHDProvider(api_key="demo", session=session)  # type: ignore[arg-type]
+    provider = EODHDProvider(api_key="demo", session=session)
 
     data = provider.latest_price("ABG.JSE")
 
@@ -189,12 +234,12 @@ def test_eodhd_provider_preserves_zac_quote_price():
     assert data.currency == "ZAC"
 
 
-def test_eodhd_provider_infers_gbx_by_suffix_when_currency_missing():
+def test_eodhd_provider_infers_gbx_by_suffix_when_currency_missing() -> None:
     payload = [
         {"date": "2024-03-01", "Close": "2783.5", "Volume": "1000"},
     ]
     session = DummyEODSession(payload)
-    provider = EODHDProvider(api_key="demo", session=session)  # type: ignore[arg-type]
+    provider = EODHDProvider(api_key="demo", session=session)
 
     data = provider.latest_price("SHEL.LSE")
 
@@ -202,14 +247,16 @@ def test_eodhd_provider_infers_gbx_by_suffix_when_currency_missing():
     assert data.currency == "GBX"
 
 
-def test_market_data_service_stores_large_price_change_without_guard(tmp_path):
+def test_market_data_service_stores_large_price_change_without_guard(
+    tmp_path: Path,
+) -> None:
     # The suspicious-price-jump guard was removed with the market_cap column:
     # market value is derived by pairing a share-count fact with the price as of
     # that fact's date, so there is no cross-snapshot value jump to police. A
     # large price move between refreshes is therefore stored without error
     # (previously this raised SuspiciousMarketPriceChangeError).
     class DummyProvider:
-        def latest_price(self, symbol):
+        def latest_price(self, symbol: str) -> PriceData:
             return PriceData(
                 symbol=symbol,
                 price=5298.0,
@@ -217,9 +264,6 @@ def test_market_data_service_stores_large_price_change_without_guard(tmp_path):
                 volume=0,
                 currency="USD",
             )
-
-    class DummyConfig:
-        eodhd_api_key = None
 
     db_path = tmp_path / "no-guard.db"
     _seed_listing(db_path, "ATXS.US", currency="USD")
@@ -239,7 +283,7 @@ def test_market_data_service_stores_large_price_change_without_guard(tmp_path):
     assert latest_snapshot.price == 5298.0
 
 
-def test_eodhd_provider_parses_bulk_exchange_response():
+def test_eodhd_provider_parses_bulk_exchange_response() -> None:
     payload = [
         {"code": "AAA", "close": "10.5", "date": "2024-03-04", "volume": "100"},
         {
@@ -250,7 +294,7 @@ def test_eodhd_provider_parses_bulk_exchange_response():
         },
     ]
     session = DummyEODSession(payload)
-    provider = EODHDProvider(api_key="demo", session=session)  # type: ignore[arg-type]
+    provider = EODHDProvider(api_key="demo", session=session)
 
     data = provider.latest_prices_for_exchange("LSE")
 
@@ -261,9 +305,11 @@ def test_eodhd_provider_parses_bulk_exchange_response():
     assert session.calls[0][0].endswith("/api/eod-bulk-last-day/LSE")
 
 
-def test_market_data_service_prepare_price_data_uses_currency_hint(tmp_path):
+def test_market_data_service_prepare_price_data_uses_currency_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     class DummyProvider:
-        def latest_price(self, symbol):
+        def latest_price(self, symbol: str) -> PriceData:
             return PriceData(
                 symbol=symbol,
                 price=2783.5,
@@ -272,9 +318,6 @@ def test_market_data_service_prepare_price_data_uses_currency_hint(tmp_path):
                 currency=None,
             )
 
-    class DummyConfig:
-        eodhd_api_key = None
-
     db_path = tmp_path / "hint.db"
     _seed_listing(db_path, "SHEL.LSE", currency="GBX")
     service = MarketDataService(
@@ -282,8 +325,16 @@ def test_market_data_service_prepare_price_data_uses_currency_hint(tmp_path):
         provider=DummyProvider(),
         config=DummyConfig(),
     )
-    service.supported_ticker_repo.fetch_currency = lambda symbol: (_ for _ in ()).throw(
-        AssertionError("fetch_currency should not be used when a currency hint exists")
+
+    def _fail_fetch_currency(symbol: str, provider: str | None = None) -> str | None:
+        raise AssertionError(
+            "fetch_currency should not be used when a currency hint exists"
+        )
+
+    # Replace the bound method so any accidental currency lookup fails loudly;
+    # monkeypatch keeps the override typed (no method-assign) and auto-reverts.
+    monkeypatch.setattr(
+        service.supported_ticker_repo, "fetch_currency", _fail_fetch_currency
     )
 
     prepared = service.prepare_price_data(
@@ -303,9 +354,11 @@ def test_market_data_service_prepare_price_data_uses_currency_hint(tmp_path):
     assert prepared.currency == "GBP"
 
 
-def test_market_data_service_prepare_price_data_uses_ila_currency_hint(tmp_path):
+def test_market_data_service_prepare_price_data_uses_ila_currency_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     class DummyProvider:
-        def latest_price(self, symbol):
+        def latest_price(self, symbol: str) -> PriceData:
             return PriceData(
                 symbol=symbol,
                 price=1234.0,
@@ -314,16 +367,20 @@ def test_market_data_service_prepare_price_data_uses_ila_currency_hint(tmp_path)
                 currency=None,
             )
 
-    class DummyConfig:
-        eodhd_api_key = None
-
     service = MarketDataService(
         db_path=tmp_path / "ila-hint.db",
         provider=DummyProvider(),
         config=DummyConfig(),
     )
-    service.supported_ticker_repo.fetch_currency = lambda symbol: (_ for _ in ()).throw(
-        AssertionError("fetch_currency should not be used when a currency hint exists")
+
+    def _fail_fetch_currency(symbol: str, provider: str | None = None) -> str | None:
+        raise AssertionError(
+            "fetch_currency should not be used when a currency hint exists"
+        )
+
+    # See the GBX variant: monkeypatch keeps the stubbed method properly typed.
+    monkeypatch.setattr(
+        service.supported_ticker_repo, "fetch_currency", _fail_fetch_currency
     )
 
     prepared = service.prepare_price_data(

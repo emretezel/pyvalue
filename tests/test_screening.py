@@ -23,7 +23,7 @@ from pyvalue.persistence.storage import (
 )
 
 
-def _seed_listing(db_path, symbol, *, currency="USD"):
+def _seed_listing(db_path: Path, symbol: str, *, currency: str = "USD") -> None:
     """Catalog ``symbol`` carrying a quote ``currency`` before metrics land.
 
     ``listing.currency`` is NOT NULL with no fallback, so writing a metric for
@@ -43,7 +43,7 @@ def _seed_listing(db_path, symbol, *, currency="USD"):
     )
 
 
-def test_evaluate_criterion_uses_metrics_repo(tmp_path):
+def test_evaluate_criterion_uses_metrics_repo(tmp_path: Path) -> None:
     db = tmp_path / "test.db"
     fact_repo = FinancialFactsRepository(db)
     fact_repo.initialize_schema()
@@ -63,7 +63,7 @@ def test_evaluate_criterion_uses_metrics_repo(tmp_path):
     assert evaluate_criterion(criterion, "AAPL.US", metrics_repo, fact_repo) is True
 
 
-def test_evaluate_criterion_filters_when_metric_missing(tmp_path):
+def test_evaluate_criterion_filters_when_metric_missing(tmp_path: Path) -> None:
     db = tmp_path / "missing_metric.db"
     fact_repo = FinancialFactsRepository(db)
     fact_repo.initialize_schema()
@@ -80,7 +80,7 @@ def test_evaluate_criterion_filters_when_metric_missing(tmp_path):
     assert evaluate_criterion(criterion, "AAPL.US", metrics_repo, fact_repo) is False
 
 
-def test_evaluate_criterion_supports_constant_terms(tmp_path):
+def test_evaluate_criterion_supports_constant_terms(tmp_path: Path) -> None:
     db = tmp_path / "test2.db"
     fact_repo = FinancialFactsRepository(db)
     fact_repo.initialize_schema()
@@ -99,7 +99,7 @@ def test_evaluate_criterion_supports_constant_terms(tmp_path):
     assert evaluate_criterion(criterion, "AAPL.US", metrics_repo, fact_repo) is True
 
 
-def test_evaluate_criterion_converts_monetary_constant_currency(tmp_path):
+def test_evaluate_criterion_converts_monetary_constant_currency(tmp_path: Path) -> None:
     db = tmp_path / "screen_fx_constant.db"
     fact_repo = FinancialFactsRepository(db)
     fact_repo.initialize_schema()
@@ -138,7 +138,7 @@ def test_evaluate_criterion_converts_monetary_constant_currency(tmp_path):
     assert evaluate_criterion(criterion, "AAPL.US", metrics_repo, fact_repo) is True
 
 
-def test_evaluate_criterion_converts_mixed_currency_metrics(tmp_path):
+def test_evaluate_criterion_converts_mixed_currency_metrics(tmp_path: Path) -> None:
     db = tmp_path / "screen_fx_metric.db"
     fact_repo = FinancialFactsRepository(db)
     fact_repo.initialize_schema()
@@ -185,7 +185,9 @@ def test_evaluate_criterion_converts_mixed_currency_metrics(tmp_path):
     assert evaluate_criterion(criterion, "AAPL.US", metrics_repo, fact_repo) is True
 
 
-def test_evaluate_criterion_normalizes_configured_subunit_metric_currencies(tmp_path):
+def test_evaluate_criterion_normalizes_configured_subunit_metric_currencies(
+    tmp_path: Path,
+) -> None:
     db = tmp_path / "screen_subunit_metric.db"
     fact_repo = FinancialFactsRepository(db)
     fact_repo.initialize_schema()
@@ -232,7 +234,7 @@ def test_evaluate_criterion_normalizes_configured_subunit_metric_currencies(tmp_
     assert evaluate_criterion(criterion, "AAPL.US", metrics_repo, fact_repo) is True
 
 
-def test_evaluate_criterion_detail_reports_missing_metric_ids(tmp_path):
+def test_evaluate_criterion_detail_reports_missing_metric_ids(tmp_path: Path) -> None:
     db = tmp_path / "detail_missing.db"
     fact_repo = FinancialFactsRepository(db)
     fact_repo.initialize_schema()
@@ -259,7 +261,7 @@ def test_evaluate_criterion_detail_reports_missing_metric_ids(tmp_path):
     assert result.missing_metric_ids == ("working_capital", "current_ratio")
 
 
-def test_screen_metric_ids_dedupes_metrics_in_first_seen_order():
+def test_screen_metric_ids_dedupes_metrics_in_first_seen_order() -> None:
     definition = load_screen(
         Path(__file__).resolve().parents[1] / "screeners" / "value.yml"
     )
@@ -280,7 +282,7 @@ def test_screen_metric_ids_dedupes_metrics_in_first_seen_order():
     ]
 
 
-def test_load_screen_parses_basic_value_example():
+def test_load_screen_parses_basic_value_example() -> None:
     screen_path = Path(__file__).resolve().parents[1] / "screeners" / "basic_value.yml"
 
     definition = load_screen(screen_path)
@@ -298,7 +300,7 @@ def test_load_screen_parses_basic_value_example():
     assert definition.criteria[2].right.multiplier == 1.75
 
 
-def test_load_screen_parses_value_normalized_example():
+def test_load_screen_parses_value_normalized_example() -> None:
     screen_path = (
         Path(__file__).resolve().parents[1] / "screeners" / "value_normalized.yml"
     )
@@ -315,7 +317,7 @@ def test_load_screen_parses_value_normalized_example():
     assert definition.criteria[2].left.metric == "graham_multiplier"
 
 
-def test_load_screen_parses_quality_reasonable_price_example():
+def test_load_screen_parses_quality_reasonable_price_example() -> None:
     screen_path = (
         Path(__file__).resolve().parents[1]
         / "screeners"
@@ -350,7 +352,7 @@ def test_load_screen_parses_quality_reasonable_price_example():
     assert definition.ranking.tie_breakers[2].metric_id == "canonical_symbol"
 
 
-def test_ranking_metric_ids_preserve_first_seen_order():
+def test_ranking_metric_ids_preserve_first_seen_order() -> None:
     definition = load_screen(
         Path(__file__).resolve().parents[1]
         / "screeners"

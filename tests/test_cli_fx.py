@@ -6,7 +6,10 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 import sqlite3
+
+import pytest
 
 import pyvalue.cli as cli
 from cli_test_helpers import patch_cli
@@ -37,7 +40,7 @@ def _ranking_definition(metric: RankingMetric) -> ScreenDefinition:
     )
 
 
-def _seed_listing(db_path, symbol: str, *, currency: str = "USD") -> None:
+def _seed_listing(db_path: Path, symbol: str, *, currency: str = "USD") -> None:
     """Catalog a listing carrying a currency so metric/entity upserts (which
     materialize the listing) satisfy the NOT NULL listing.currency invariant.
     The metric's own currency is independent of the listing's quote currency.
@@ -54,8 +57,8 @@ def _seed_listing(db_path, symbol: str, *, currency: str = "USD") -> None:
 
 
 def test_rank_screen_passers_skips_mixed_currency_metric_without_ranking_currency(
-    tmp_path, caplog
-):
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     db_path = tmp_path / "ranking_skip.db"
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
@@ -99,8 +102,8 @@ def test_rank_screen_passers_skips_mixed_currency_metric_without_ranking_currenc
 
 
 def test_rank_screen_passers_normalizes_mixed_currency_metric_with_ranking_currency(
-    tmp_path,
-):
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "ranking_convert.db"
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
@@ -160,13 +163,22 @@ def test_rank_screen_passers_normalizes_mixed_currency_metric_with_ranking_curre
 
 
 class _BaseFakeEODHDFXProvider:
+    """Base FX refresh provider fake.
+
+    Mirrors the ``FXRefreshProvider`` protocol that ``cmd_refresh_fx_rates``
+    drives. Concrete tests subclass it to record which history windows the CLI
+    requested (``calls``) and to return canned rows from ``fetch_history``.
+    """
+
     provider_name = "EODHD"
 
-    def __init__(self, api_key):
+    def __init__(self, api_key: str) -> None:
         self.api_key = api_key
-        self.calls = []
+        # Each entry is ``(canonical_symbol, start_iso, end_iso)`` for one
+        # history request, so tests can assert the exact windows fetched.
+        self.calls: list[tuple[str, str, str]] = []
 
-    def list_catalog(self):
+    def list_catalog(self) -> list[FXCatalogEntry]:
         return [
             FXCatalogEntry(
                 symbol="EURUSD",
@@ -197,23 +209,29 @@ class _BaseFakeEODHDFXProvider:
             ),
         ]
 
-    def fetch_history(self, *, canonical_symbol, start_date, end_date):
+    def fetch_history(
+        self, *, canonical_symbol: str, start_date: date, end_date: date
+    ) -> list[FXRateRecord]:
         raise NotImplementedError
 
 
 def test_cmd_refresh_fx_rates_eodhd_syncs_catalog_and_skips_aliases(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     db_path = tmp_path / "refresh_fx_eodhd.db"
 
     class FakeProvider(_BaseFakeEODHDFXProvider):
-        last_instance = None
+        last_instance: FakeProvider | None = None
 
-        def __init__(self, api_key):
+        def __init__(self, api_key: str) -> None:
             super().__init__(api_key)
             FakeProvider.last_instance = self
 
-        def fetch_history(self, *, canonical_symbol, start_date, end_date):
+        def fetch_history(
+            self, *, canonical_symbol: str, start_date: date, end_date: date
+        ) -> list[FXRateRecord]:
             self.calls.append(
                 (canonical_symbol, start_date.isoformat(), end_date.isoformat())
             )
@@ -269,8 +287,10 @@ def test_cmd_refresh_fx_rates_eodhd_syncs_catalog_and_skips_aliases(
 
 
 def test_cmd_refresh_fx_rates_eodhd_fetches_only_incremental_newer_history(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     db_path = tmp_path / "refresh_fx_incremental.db"
     fx_repo = FXRatesRepository(db_path)
     fx_repo.initialize_schema()
@@ -305,13 +325,15 @@ def test_cmd_refresh_fx_rates_eodhd_fetches_only_incremental_newer_history(
     )
 
     class FakeProvider(_BaseFakeEODHDFXProvider):
-        last_instance = None
+        last_instance: FakeProvider | None = None
 
-        def __init__(self, api_key):
+        def __init__(self, api_key: str) -> None:
             super().__init__(api_key)
             FakeProvider.last_instance = self
 
-        def fetch_history(self, *, canonical_symbol, start_date, end_date):
+        def fetch_history(
+            self, *, canonical_symbol: str, start_date: date, end_date: date
+        ) -> list[FXRateRecord]:
             self.calls.append(
                 (canonical_symbol, start_date.isoformat(), end_date.isoformat())
             )
@@ -349,8 +371,8 @@ def test_cmd_refresh_fx_rates_eodhd_fetches_only_incremental_newer_history(
 
 
 def test_cmd_refresh_fx_rates_eodhd_completes_old_history_after_bounded_backfill(
-    monkeypatch, tmp_path
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     db_path = tmp_path / "refresh_fx_complete_old.db"
     fx_repo = FXRatesRepository(db_path)
     fx_repo.initialize_schema()
@@ -385,13 +407,15 @@ def test_cmd_refresh_fx_rates_eodhd_completes_old_history_after_bounded_backfill
     )
 
     class FakeProvider(_BaseFakeEODHDFXProvider):
-        last_instance = None
+        last_instance: FakeProvider | None = None
 
-        def __init__(self, api_key):
+        def __init__(self, api_key: str) -> None:
             super().__init__(api_key)
             FakeProvider.last_instance = self
 
-        def fetch_history(self, *, canonical_symbol, start_date, end_date):
+        def fetch_history(
+            self, *, canonical_symbol: str, start_date: date, end_date: date
+        ) -> list[FXRateRecord]:
             self.calls.append(
                 (canonical_symbol, start_date.isoformat(), end_date.isoformat())
             )
@@ -451,12 +475,16 @@ def test_cmd_refresh_fx_rates_eodhd_completes_old_history_after_bounded_backfill
 
 
 def test_cmd_refresh_fx_rates_eodhd_marks_failure_when_initial_fetch_returns_no_rows(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     db_path = tmp_path / "refresh_fx_failure.db"
 
     class FakeProvider(_BaseFakeEODHDFXProvider):
-        def fetch_history(self, *, canonical_symbol, start_date, end_date):
+        def fetch_history(
+            self, *, canonical_symbol: str, start_date: date, end_date: date
+        ) -> list[FXRateRecord]:
             return []
 
     patch_cli(monkeypatch, "EODHDFXProvider", FakeProvider)

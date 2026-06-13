@@ -7,9 +7,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import wraps
-from typing import Optional, Protocol, Sequence
+from typing import TYPE_CHECKING, Optional, Protocol, Sequence, TypeVar
 
 from pyvalue.currency import MetricUnitKind, metric_currency_or_none
+
+if TYPE_CHECKING:
+    # Imported only for annotations to avoid a runtime import cycle: the metrics
+    # package already depends on pyvalue.facts at runtime, so importing it back
+    # here eagerly would be circular.
+    from pyvalue.facts import RegionFactsRepository
+
+# wrap_metric_currency_invariants() takes a metric *class* and returns the same
+# class with its ``compute`` wrapped, so this TypeVar preserves the caller's
+# concrete class type instead of widening it to ``type``.
+_MetricClassT = TypeVar("_MetricClassT", bound=type)
 
 
 @dataclass(frozen=True)
@@ -230,10 +241,12 @@ class Metric(Protocol):
     unit_kind: MetricUnitKind
     unit_label: Optional[str]
 
-    def compute(self, symbol: str, repo) -> Optional[MetricResult]: ...
+    def compute(
+        self, symbol: str, repo: RegionFactsRepository
+    ) -> Optional[MetricResult]: ...
 
 
-def wrap_metric_currency_invariants(metric_cls):
+def wrap_metric_currency_invariants(metric_cls: _MetricClassT) -> _MetricClassT:
     """Return ``metric_cls`` with ``compute`` guarded against invariant exceptions.
 
     Direct metric callers historically treat currency conflicts as an unavailable
@@ -250,7 +263,9 @@ def wrap_metric_currency_invariants(metric_cls):
         return metric_cls
 
     @wraps(original_compute)
-    def guarded_compute(self, *args, **kwargs):
+    def guarded_compute(
+        self: Metric, *args: object, **kwargs: object
+    ) -> Optional[MetricResult]:
         setattr(self, "_last_currency_invariant_error", None)
         try:
             return original_compute(self, *args, **kwargs)

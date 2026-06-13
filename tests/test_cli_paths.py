@@ -5,6 +5,8 @@ Author: Emre Tezel
 
 from pathlib import Path
 
+import pytest
+
 from pyvalue.cli import (
     _resolve_canonical_scope_symbols,
     _resolve_database_path,
@@ -15,7 +17,9 @@ from pyvalue.persistence.storage import SupportedTickerRepository
 from pyvalue.universe import Listing
 
 
-def test_resolve_database_path_falls_back_to_repo_data(monkeypatch, tmp_path):
+def test_resolve_database_path_falls_back_to_repo_data(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.chdir(tmp_path)
 
     resolved = _resolve_database_path("data/pyvalue.db")
@@ -25,14 +29,14 @@ def test_resolve_database_path_falls_back_to_repo_data(monkeypatch, tmp_path):
     assert Path("data/pyvalue.db").resolve() != resolved
 
 
-def test_validate_scope_selector_defaults_to_full_universe():
+def test_validate_scope_selector_defaults_to_full_universe() -> None:
     symbol_filters, exchange_filters = _validate_scope_selector(None, None, False)
 
     assert symbol_filters is None
     assert exchange_filters is None
 
 
-def test_validate_scope_selector_rejects_multiple_explicit_selectors():
+def test_validate_scope_selector_rejects_multiple_explicit_selectors() -> None:
     try:
         _validate_scope_selector(["AAPL.US"], ["US"], False)
     except SystemExit as exc:
@@ -41,7 +45,9 @@ def test_validate_scope_selector_rejects_multiple_explicit_selectors():
         raise AssertionError("Expected SystemExit for conflicting selectors")
 
 
-def test_resolve_canonical_scope_symbols_defaults_to_all_supported(tmp_path):
+def test_resolve_canonical_scope_symbols_defaults_to_all_supported(
+    tmp_path: Path,
+) -> None:
     repo = SupportedTickerRepository(tmp_path / "scope.db")
     repo.initialize_schema()
     repo.replace_from_listings(
@@ -89,7 +95,7 @@ def test_resolve_canonical_scope_symbols_defaults_to_all_supported(tmp_path):
     assert exchanges is None
 
 
-def test_resolve_provider_scope_rows_defaults_to_all_supported(tmp_path):
+def test_resolve_provider_scope_rows_defaults_to_all_supported(tmp_path: Path) -> None:
     repo = SupportedTickerRepository(tmp_path / "provider-scope.db")
     repo.initialize_schema()
     repo.replace_from_listings(

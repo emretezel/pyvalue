@@ -7,7 +7,7 @@ Run these in the `pyvalue` conda environment:
 ```bash
 conda run -n pyvalue ruff format .
 conda run -n pyvalue ruff check .
-conda run -n pyvalue mypy src/pyvalue
+conda run -n pyvalue mypy src/ tests/
 conda run -n pyvalue pytest
 ```
 
@@ -15,7 +15,13 @@ conda run -n pyvalue pytest
 
 - `ruff format`: code formatting
 - `ruff check`: linting and style problems
-- `mypy`: static typing on `src/pyvalue`
+- `mypy`: strict static typing on **both** `src/` and `tests/` — `[tool.mypy]` in
+  `pyproject.toml` enables `disallow_untyped_defs` and `check_untyped_defs`, so every
+  function (tests included) must be fully annotated and have its body type-checked.
+  Third-party stubs (`types-requests`, `types-PyYAML`) are dev dependencies, and the
+  package ships a PEP 561 `py.typed` marker, so no `# type: ignore[import-untyped]` is
+  needed. Do not silence errors with `# type: ignore` or `Any`/`object` widening — fix
+  the types.
 - `pytest`: unit and integration coverage
 
 ## Testing Expectations

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import logging
 from typing import Dict, List, Optional
 
-import requests  # type: ignore[import-untyped]
+import requests
 
 LOGGER = logging.getLogger(__name__)
 

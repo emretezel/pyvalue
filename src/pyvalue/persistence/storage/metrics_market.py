@@ -76,23 +76,9 @@ class MetricsRepository(SQLiteStore):
         commit: bool = True,
     ) -> int:
         self.initialize_schema()
-        metric_rows: List[StoredMetricRow] = []
-        for row in rows:
-            if len(row) == 4:
-                symbol, metric_id, value, as_of = row
-                metric_rows.append(
-                    (
-                        symbol,
-                        metric_id,
-                        value,
-                        as_of,
-                        "other",
-                        None,
-                        None,
-                    )
-                )
-                continue
-            metric_rows.append(row)
+        # Materialise the iterable once; it is scanned several times below
+        # (unique-symbol collection, security-id resolution, the executemany).
+        metric_rows: List[StoredMetricRow] = list(rows)
         if not metric_rows:
             return 0
 

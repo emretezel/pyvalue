@@ -849,7 +849,7 @@ class EODHDFactsNormalizer:
             target.setdefault(date_str, value)
         return target
 
-    def _build_net_income_map(self, entries) -> Dict[str, float]:
+    def _build_net_income_map(self, entries: object) -> Dict[str, float]:
         net_income: Dict[str, float] = {}
         for key, entry in self._iter_entries_with_keys(entries):
             lowered = self._build_case_insensitive_entry(entry)
@@ -862,7 +862,7 @@ class EODHDFactsNormalizer:
             net_income[date_str] = value
         return net_income
 
-    def _build_income_statement_shares_map(self, entries) -> Dict[str, float]:
+    def _build_income_statement_shares_map(self, entries: object) -> Dict[str, float]:
         shares: Dict[str, float] = {}
         for key, entry in self._iter_entries_with_keys(entries):
             lowered = self._build_case_insensitive_entry(entry)
@@ -875,7 +875,7 @@ class EODHDFactsNormalizer:
             shares[date_str] = value
         return shares
 
-    def _collect_statement_eps_dates(self, entries) -> set[str]:
+    def _collect_statement_eps_dates(self, entries: object) -> set[str]:
         dates: set[str] = set()
         for key, entry in self._iter_entries_with_keys(entries):
             lowered = self._build_case_insensitive_entry(entry)
@@ -888,7 +888,7 @@ class EODHDFactsNormalizer:
             dates.add(date_str)
         return dates
 
-    def _build_balance_sheet_shares_map(self, entries) -> Dict[str, float]:
+    def _build_balance_sheet_shares_map(self, entries: object) -> Dict[str, float]:
         shares: Dict[str, float] = {}
         for key, entry in self._iter_entries_with_keys(entries):
             lowered = self._build_case_insensitive_entry(entry)
@@ -2038,7 +2038,7 @@ class EODHDFactsNormalizer:
         candidates.sort(key=lambda item: item[0], reverse=True)
         return candidates[0][1]
 
-    def _iter_entries(self, container) -> List[Dict]:
+    def _iter_entries(self, container: object) -> List[Dict]:
         if container is None:
             return []
         if isinstance(container, dict):
@@ -2049,7 +2049,9 @@ class EODHDFactsNormalizer:
             return []
         return [entry for entry in values if isinstance(entry, dict)]
 
-    def _iter_entries_with_keys(self, container) -> List[tuple[Optional[str], Dict]]:
+    def _iter_entries_with_keys(
+        self, container: object
+    ) -> List[tuple[Optional[str], Dict]]:
         if container is None:
             return []
         if isinstance(container, dict):

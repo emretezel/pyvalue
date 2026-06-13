@@ -4,6 +4,7 @@ Author: Emre Tezel
 """
 
 from datetime import date, timedelta
+from pathlib import Path
 
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics.eps_quarterly import EarningsPerShareTTM
@@ -20,7 +21,9 @@ from pyvalue.persistence.storage import (
 from pyvalue.universe import Listing
 
 
-def _store_market_currency(db_path, symbol: str, as_of: str, currency: str = "USD"):
+def _store_market_currency(
+    db_path: Path, symbol: str, as_of: str, currency: str = "USD"
+) -> None:
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
     ticker_repo.replace_from_listings(
@@ -40,7 +43,7 @@ def _store_market_currency(db_path, symbol: str, as_of: str, currency: str = "US
     market_repo.upsert_price(symbol, as_of, 10.0, currency=currency)
 
 
-def test_metric_skips_when_latest_fact_is_stale(tmp_path):
+def test_metric_skips_when_latest_fact_is_stale(tmp_path: Path) -> None:
     repo = FinancialFactsRepository(tmp_path / "facts.db")
     repo.initialize_schema()
     stale_date = (date.today() - timedelta(days=MAX_FACT_AGE_DAYS + 1)).isoformat()
@@ -68,7 +71,7 @@ def test_metric_skips_when_latest_fact_is_stale(tmp_path):
     assert metric.compute("AAPL.US", RegionFactsRepository(repo)) is None
 
 
-def test_ttm_metric_requires_recent_quarters(tmp_path):
+def test_ttm_metric_requires_recent_quarters(tmp_path: Path) -> None:
     repo = FinancialFactsRepository(tmp_path / "quarters.db")
     repo.initialize_schema()
     today = date.today()
@@ -101,7 +104,7 @@ def test_ttm_metric_requires_recent_quarters(tmp_path):
     assert result.value == sum(float(idx) for idx in range(1, 5))
 
 
-def test_ttm_metric_skips_when_latest_quarter_is_stale(tmp_path):
+def test_ttm_metric_skips_when_latest_quarter_is_stale(tmp_path: Path) -> None:
     repo = FinancialFactsRepository(tmp_path / "stale_quarters.db")
     repo.initialize_schema()
     today = date.today()
@@ -140,7 +143,7 @@ def test_ttm_metric_skips_when_latest_quarter_is_stale(tmp_path):
     assert metric.compute("AAPL.US", RegionFactsRepository(repo)) is None
 
 
-def test_fy_metric_accepts_when_recent_quarter_exists(tmp_path):
+def test_fy_metric_accepts_when_recent_quarter_exists(tmp_path: Path) -> None:
     repo = FinancialFactsRepository(tmp_path / "epsavg.db")
     repo.initialize_schema()
     # Six FY records older than a year.
@@ -184,7 +187,7 @@ def test_fy_metric_accepts_when_recent_quarter_exists(tmp_path):
     assert result is not None
 
 
-def test_roc_metric_uses_recent_concept_even_if_fy_old(tmp_path):
+def test_roc_metric_uses_recent_concept_even_if_fy_old(tmp_path: Path) -> None:
     repo = FinancialFactsRepository(tmp_path / "roc.db")
     repo.initialize_schema()
     # FY data older than a year.

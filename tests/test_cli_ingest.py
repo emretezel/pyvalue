@@ -9,24 +9,29 @@ import sqlite3
 import threading
 import time
 import concurrent.futures.thread as thread_futures
-from collections.abc import Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import Future, ProcessPoolExecutor
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import requests
 
 from pyvalue import cli
 from cli_test_helpers import patch_cli
+from pyvalue.currency import MetricUnitKind
 from pyvalue.facts import RegionFactsRepository
+from pyvalue.marketdata.service import MarketDataService
 from pyvalue.metrics import REGISTRY
 from pyvalue.metrics.base import MetricCurrencyInvariantError, MetricResult
 from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS
+from pyvalue.persistence.storage.base import SQLiteStore
 from pyvalue.persistence.storage import (
     EntityMetadataRepository,
     ExchangeProviderRepository,
+    FinancialFactsRefreshStateRecord,
     FinancialFactsRefreshStateRepository,
     FundamentalsNormalizationStateRepository,
     FundamentalsRepository,
@@ -35,10 +40,14 @@ from pyvalue.persistence.storage import (
     FactRecord,
     MarketDataFetchStateRepository,
     MarketDataRepository,
+    MarketSnapshotRecord,
     MetricComputeStatusRecord,
     MetricComputeStatusRepository,
+    MetricRecord,
     MetricsRepository,
+    SecurityMetadataCandidate,
     SecurityRepository,
+    StoredMetricRow,
     SupportedTicker,
     SupportedTickerRepository,
 )
@@ -46,24 +55,66 @@ from pyvalue.universe import Listing
 from pyvalue.marketdata import MarketDataUpdate, PriceData
 
 
-def make_fact(**kwargs):
+@dataclass
+class SymbolListingClientCalls:
+    """Records construction + ``list_symbols`` calls made against a fake client.
+
+    Several ``refresh-supported-tickers`` tests assert which exchange codes the
+    fake EODHD client was asked to list. A plain ``{"listed": [], "api_key": ...}``
+    dict literal infers ``dict[str, object]``, which then rejects
+    ``listed.append(...)`` (``object`` has no ``append``); a typed record keeps
+    the accumulator precise.
+    """
+
+    api_key: str | None = None
+    listed: list[str] = field(default_factory=list)
+
+
+def make_fact(
+    *,
+    symbol: str = "AAPL.US",
+    concept: str = "",
+    fiscal_period: str = "FY",
+    end_date: str = "",
+    unit_kind: MetricUnitKind = "monetary",
+    value: float = 0.0,
+    filed: str | None = None,
+    currency: str | None = "USD",
+) -> FactRecord:
     # Facts default to a monetary USD value; callers override ``currency`` (and,
-    # for non-monetary facts, ``unit_kind`` + ``currency=None``) as needed.
-    base = {
-        "symbol": "AAPL.US",
-        "concept": "",
-        "fiscal_period": "FY",
-        "end_date": "",
-        "unit_kind": "monetary",
-        "value": 0.0,
-        "filed": None,
-        "currency": "USD",
-    }
-    base.update(kwargs)
-    return FactRecord(**base)
+    # for non-monetary facts, ``unit_kind`` + ``currency=None``) as needed. The
+    # parameters mirror ``FactRecord`` exactly so the record is built directly,
+    # rather than unpacking a ``dict[str, object]`` literal (which mypy cannot
+    # reconcile with ``FactRecord``'s precisely typed fields).
+    return FactRecord(
+        symbol=symbol,
+        concept=concept,
+        fiscal_period=fiscal_period,
+        end_date=end_date,
+        unit_kind=unit_kind,
+        value=value,
+        filed=filed,
+        currency=currency,
+    )
 
 
-def clear_root_logging_handlers():
+def fetch_state_row(
+    repo: MarketDataFetchStateRepository, provider: str, symbol: str
+) -> dict[str, str | int | None]:
+    """Return the persisted fetch-state row for ``(provider, symbol)``.
+
+    ``MarketDataFetchStateRepository.fetch`` returns ``None`` for an unknown
+    symbol, so callers that expect a recorded row (the common case in these
+    tests) would otherwise have to narrow the optional before indexing it. This
+    helper asserts the row exists and hands back the non-optional mapping.
+    """
+
+    row = repo.fetch(provider, symbol)
+    assert row is not None, f"no fetch-state row for {provider}/{symbol}"
+    return row
+
+
+def clear_root_logging_handlers() -> None:
     root = logging.getLogger()
     for handler in list(root.handlers):
         root.removeHandler(handler)
@@ -71,10 +122,10 @@ def clear_root_logging_handlers():
 
 
 def store_supported_exchanges(
-    db_path,
-    rows=None,
+    db_path: Path,
+    rows: list[dict[str, object]] | None = None,
     provider: str = "EODHD",
-):
+) -> ExchangeProviderRepository:
     repo = ExchangeProviderRepository(db_path)
     repo.initialize_schema()
     repo.replace_for_provider(
@@ -111,11 +162,11 @@ def default_listing_currency(
 
 
 def store_supported_tickers(
-    db_path,
+    db_path: Path,
     exchange_code: str,
-    rows=None,
+    rows: list[dict[str, object]] | None = None,
     provider: str = "EODHD",
-):
+) -> SupportedTickerRepository:
     repo = SupportedTickerRepository(db_path)
     repo.initialize_schema()
     normalized_rows = []
@@ -144,11 +195,11 @@ def store_supported_tickers(
 
 
 def store_catalog_listings(
-    db_path,
+    db_path: Path,
     exchange_code: str,
-    listings,
+    listings: Sequence[Listing],
     provider: str = "SEC",
-):
+) -> SupportedTickerRepository:
     repo = SupportedTickerRepository(db_path)
     repo.initialize_schema()
     listings_with_currency = [
@@ -165,11 +216,11 @@ def store_catalog_listings(
 
 
 def _seed_listing(
-    db_path,
+    db_path: Path,
     symbol: str | Sequence[str],
     currency: str = "USD",
     provider: str = "EODHD",
-):
+) -> SupportedTickerRepository:
     """Seed cataloged listing(s) carrying ``currency`` for ``symbol``.
 
     ``listing.currency`` is NOT NULL with no fallback, so every listing must be
@@ -199,7 +250,7 @@ def _seed_listing(
     return repo
 
 
-def _seed_share_count(db_path, symbol: str, as_of: str, shares: float) -> None:
+def _seed_share_count(db_path: Path, symbol: str, as_of: str, shares: float) -> None:
     """Add a co-dated shares-outstanding fact without wiping existing facts.
 
     Market cap is computed on demand as a share-count fact x the price as of that
@@ -232,13 +283,13 @@ def _seed_share_count(db_path, symbol: str, as_of: str, shares: float) -> None:
 
 
 def store_market_data(
-    db_path,
+    db_path: Path,
     symbol: str,
     as_of: str,
     price: float = 10.0,
     market_cap: float | None = None,
     currency: str | None = "USD",
-):
+) -> MarketDataRepository:
     repo = MarketDataRepository(db_path)
     repo.initialize_schema()
     repo.upsert_price(
@@ -274,7 +325,7 @@ def make_supported_ticker(
     exchange_code: str,
     security_id: int,
     currency: str = "USD",
-):
+) -> SupportedTicker:
     ticker, _ = symbol.split(".")
     return SupportedTicker(
         provider="EODHD",
@@ -293,11 +344,17 @@ def make_supported_ticker(
 
 
 def test_main_dispatches_report_ingest_progress_with_default_max_age_days(
-    monkeypatch,
-):
-    calls = {}
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
 
-    def fake_cmd(provider, database, exchange_codes, max_age_days, missing_only):
+    def fake_cmd(
+        provider: str,
+        database: str,
+        exchange_codes: Sequence[str] | None,
+        max_age_days: int | None,
+        missing_only: bool,
+    ) -> int:
         calls["provider"] = provider
         calls["database"] = database
         calls["exchange_codes"] = exchange_codes
@@ -320,7 +377,7 @@ def test_main_dispatches_report_ingest_progress_with_default_max_age_days(
     }
 
 
-def test_build_parser_report_ingest_progress_missing_only():
+def test_build_parser_report_ingest_progress_missing_only() -> None:
     args = cli.build_parser().parse_args(
         ["report-fundamentals-progress", "--exchange-codes", "US,LSE", "--missing-only"]
     )
@@ -332,21 +389,21 @@ def test_build_parser_report_ingest_progress_missing_only():
 
 
 def test_main_dispatches_ingest_fundamentals_with_default_provider_and_max_age_days(
-    monkeypatch,
-):
-    calls = {}
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
 
     def fake_cmd(
-        provider,
-        database,
-        symbols,
-        exchange_codes,
-        all_supported,
-        rate,
-        max_symbols,
-        max_age_days,
-        respect_backoff,
-    ):
+        provider: str,
+        database: str,
+        symbols: Sequence[str] | None,
+        exchange_codes: Sequence[str] | None,
+        all_supported: bool,
+        rate: float | None,
+        max_symbols: int | None,
+        max_age_days: int | None,
+        respect_backoff: bool,
+    ) -> int:
         calls["provider"] = provider
         calls["database"] = database
         calls["symbols"] = symbols
@@ -387,7 +444,7 @@ def test_main_dispatches_ingest_fundamentals_with_default_provider_and_max_age_d
         )
 
 
-def test_build_parser_reconcile_listing_status_defaults_provider():
+def test_build_parser_reconcile_listing_status_defaults_provider() -> None:
     args = cli.build_parser().parse_args(["reconcile-listing-status"])
 
     assert args.command == "reconcile-listing-status"
@@ -397,10 +454,18 @@ def test_build_parser_reconcile_listing_status_defaults_provider():
     assert args.all_supported is False
 
 
-def test_main_dispatches_reconcile_listing_status(monkeypatch):
-    calls = {}
+def test_main_dispatches_reconcile_listing_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
 
-    def fake_cmd(provider, database, symbols, exchange_codes, all_supported):
+    def fake_cmd(
+        provider: str,
+        database: str,
+        symbols: Sequence[str] | None,
+        exchange_codes: Sequence[str] | None,
+        all_supported: bool,
+    ) -> int:
         calls["provider"] = provider
         calls["database"] = database
         calls["symbols"] = symbols
@@ -431,7 +496,7 @@ def test_main_dispatches_reconcile_listing_status(monkeypatch):
     }
 
 
-def test_build_parser_normalize_fundamentals_defaults_provider():
+def test_build_parser_normalize_fundamentals_defaults_provider() -> None:
     args = cli.build_parser().parse_args(["normalize-fundamentals"])
 
     assert args.command == "normalize-fundamentals"
@@ -456,10 +521,19 @@ def test_build_parser_normalize_fundamentals_defaults_provider():
     assert forced.force is True
 
 
-def test_main_dispatches_normalize_fundamentals_stage_with_force(monkeypatch):
-    calls = {}
+def test_main_dispatches_normalize_fundamentals_stage_with_force(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
 
-    def fake_cmd(provider, database, symbols, exchange_codes, all_supported, force):
+    def fake_cmd(
+        provider: str,
+        database: str,
+        symbols: Sequence[str] | None,
+        exchange_codes: Sequence[str] | None,
+        all_supported: bool,
+        force: bool,
+    ) -> int:
         calls["provider"] = provider
         calls["database"] = database
         calls["symbols"] = symbols
@@ -484,7 +558,7 @@ def test_main_dispatches_normalize_fundamentals_stage_with_force(monkeypatch):
     }
 
 
-def test_build_parser_compute_metrics_warning_flag_defaults_to_suppressed():
+def test_build_parser_compute_metrics_warning_flag_defaults_to_suppressed() -> None:
     args = cli.build_parser().parse_args(["compute-metrics"])
 
     assert args.command == "compute-metrics"
@@ -505,18 +579,20 @@ def test_build_parser_compute_metrics_warning_flag_defaults_to_suppressed():
     assert args.show_metric_warnings is True
 
 
-def test_main_dispatches_compute_metrics_stage_with_warning_flag(monkeypatch):
-    calls = {}
+def test_main_dispatches_compute_metrics_stage_with_warning_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
 
     def fake_cmd(
-        database,
-        symbols,
-        exchange_codes,
-        all_supported,
-        metric_ids,
-        show_metric_warnings,
-        profile,
-    ):
+        database: str,
+        symbols: Sequence[str] | None,
+        exchange_codes: Sequence[str] | None,
+        all_supported: bool,
+        metric_ids: Sequence[str],
+        show_metric_warnings: bool,
+        profile: bool,
+    ) -> int:
         calls["database"] = database
         calls["symbols"] = symbols
         calls["exchange_codes"] = exchange_codes
@@ -543,7 +619,7 @@ def test_main_dispatches_compute_metrics_stage_with_warning_flag(monkeypatch):
     }
 
 
-def test_build_parser_run_screen_requires_config_and_defaults_warning_flag():
+def test_build_parser_run_screen_requires_config_and_defaults_warning_flag() -> None:
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args(["run-screen", "--symbols", "AAPL.US"])
 
@@ -572,18 +648,20 @@ def test_build_parser_run_screen_requires_config_and_defaults_warning_flag():
     assert args.show_metric_warnings is True
 
 
-def test_main_dispatches_run_screen_stage_with_warning_flag(monkeypatch):
-    calls = {}
+def test_main_dispatches_run_screen_stage_with_warning_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
 
     def fake_cmd(
-        config_path,
-        database,
-        symbols,
-        exchange_codes,
-        all_supported,
-        output_csv,
-        show_metric_warnings,
-    ):
+        config_path: str,
+        database: str,
+        symbols: Sequence[str] | None,
+        exchange_codes: Sequence[str] | None,
+        all_supported: bool,
+        output_csv: str | None,
+        show_metric_warnings: bool,
+    ) -> int:
         calls["config_path"] = config_path
         calls["database"] = database
         calls["symbols"] = symbols
@@ -621,7 +699,7 @@ def test_main_dispatches_run_screen_stage_with_warning_flag(monkeypatch):
     }
 
 
-def test_build_parser_refresh_security_metadata_uses_scope_selectors():
+def test_build_parser_refresh_security_metadata_uses_scope_selectors() -> None:
     args = cli.build_parser().parse_args(
         ["refresh-security-metadata", "--exchange-codes", "US"]
     )
@@ -631,10 +709,17 @@ def test_build_parser_refresh_security_metadata_uses_scope_selectors():
     assert args.database == "data/pyvalue.db"
 
 
-def test_main_dispatches_refresh_security_metadata(monkeypatch):
-    calls = {}
+def test_main_dispatches_refresh_security_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
 
-    def fake_cmd(database, symbols, exchange_codes, all_supported):
+    def fake_cmd(
+        database: str,
+        symbols: Sequence[str] | None,
+        exchange_codes: Sequence[str] | None,
+        all_supported: bool,
+    ) -> int:
         calls["database"] = database
         calls["symbols"] = symbols
         calls["exchange_codes"] = exchange_codes
@@ -663,7 +748,7 @@ def test_main_dispatches_refresh_security_metadata(monkeypatch):
     }
 
 
-def test_build_parser_report_screen_failures_requires_config():
+def test_build_parser_report_screen_failures_requires_config() -> None:
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args(
             ["report-screen-failures", "--symbols", "AAPL.US"]
@@ -684,17 +769,19 @@ def test_build_parser_report_screen_failures_requires_config():
     assert args.output_csv is None
 
 
-def test_main_dispatches_report_screen_failures(monkeypatch):
-    calls = {}
+def test_main_dispatches_report_screen_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
 
     def fake_cmd(
-        config_path,
-        database,
-        symbols,
-        exchange_codes,
-        all_supported,
-        output_csv,
-    ):
+        config_path: str,
+        database: str,
+        symbols: Sequence[str] | None,
+        exchange_codes: Sequence[str] | None,
+        all_supported: bool,
+        output_csv: str | None,
+    ) -> int:
         calls["config_path"] = config_path
         calls["database"] = database
         calls["symbols"] = symbols
@@ -730,21 +817,21 @@ def test_main_dispatches_report_screen_failures(monkeypatch):
 
 
 def test_main_dispatches_update_market_data_global_with_default_max_age_days(
-    monkeypatch,
-):
-    calls = {}
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
 
     def fake_cmd(
-        provider,
-        database,
-        symbols,
-        exchange_codes,
-        all_supported,
-        rate,
-        max_symbols,
-        max_age_days,
-        respect_backoff,
-    ):
+        provider: str,
+        database: str,
+        symbols: Sequence[str] | None,
+        exchange_codes: Sequence[str] | None,
+        all_supported: bool,
+        rate: float | None,
+        max_symbols: int | None,
+        max_age_days: int | None,
+        respect_backoff: bool,
+    ) -> int:
         calls["provider"] = provider
         calls["database"] = database
         calls["symbols"] = symbols
@@ -786,21 +873,21 @@ def test_main_dispatches_update_market_data_global_with_default_max_age_days(
 
 
 def test_main_dispatches_update_market_data_without_scope_as_default_universe(
-    monkeypatch,
-):
-    calls = {}
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
 
     def fake_cmd(
-        provider,
-        database,
-        symbols,
-        exchange_codes,
-        all_supported,
-        rate,
-        max_symbols,
-        max_age_days,
-        respect_backoff,
-    ):
+        provider: str,
+        database: str,
+        symbols: Sequence[str] | None,
+        exchange_codes: Sequence[str] | None,
+        all_supported: bool,
+        rate: float | None,
+        max_symbols: int | None,
+        max_age_days: int | None,
+        respect_backoff: bool,
+    ) -> int:
         calls["provider"] = provider
         calls["database"] = database
         calls["symbols"] = symbols
@@ -831,10 +918,12 @@ def test_main_dispatches_update_market_data_without_scope_as_default_universe(
     }
 
 
-def test_main_returns_cleanly_on_uncaught_keyboard_interrupt(monkeypatch, capsys):
+def test_main_returns_cleanly_on_uncaught_keyboard_interrupt(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     patch_cli(monkeypatch, "setup_logging", lambda: None)
 
-    def raising_cmd(provider, database):
+    def raising_cmd(provider: str, database: str) -> None:
         raise KeyboardInterrupt
 
     patch_cli(monkeypatch, "cmd_refresh_supported_exchanges", raising_cmd)
@@ -846,11 +935,16 @@ def test_main_returns_cleanly_on_uncaught_keyboard_interrupt(monkeypatch, capsys
 
 
 def test_main_dispatches_report_market_data_progress_with_default_max_age_days(
-    monkeypatch,
-):
-    calls = {}
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
 
-    def fake_cmd(provider, database, exchange_codes, max_age_days):
+    def fake_cmd(
+        provider: str,
+        database: str,
+        exchange_codes: Sequence[str] | None,
+        max_age_days: int | None,
+    ) -> int:
         calls["provider"] = provider
         calls["database"] = database
         calls["exchange_codes"] = exchange_codes
@@ -871,7 +965,7 @@ def test_main_dispatches_report_market_data_progress_with_default_max_age_days(
     }
 
 
-def test_build_parser_report_fact_freshness_defaults_max_age_days():
+def test_build_parser_report_fact_freshness_defaults_max_age_days() -> None:
     args = cli.build_parser().parse_args(
         ["report-fact-freshness", "--symbols", "AAPL.US"]
     )
@@ -880,15 +974,25 @@ def test_build_parser_report_fact_freshness_defaults_max_age_days():
     assert args.max_age_days == MAX_FACT_AGE_DAYS
 
 
-def test_cmd_refresh_supported_exchanges(monkeypatch, tmp_path):
-    calls = {}
+def test_cmd_refresh_supported_exchanges(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    @dataclass
+    class ExchangeClientCalls:
+        # Records the API key the client was constructed with and how many times
+        # ``list_exchanges`` was invoked. A dict literal would infer
+        # ``dict[str, object]`` and break the ``+ 1`` counter increment.
+        api_key: str | None = None
+        list_exchanges: int = 0
+
+    calls = ExchangeClientCalls()
 
     class FakeClient:
-        def __init__(self, api_key):
-            calls["api_key"] = api_key
+        def __init__(self, api_key: str) -> None:
+            calls.api_key = api_key
 
-        def list_exchanges(self):
-            calls["list_exchanges"] = calls.get("list_exchanges", 0) + 1
+        def list_exchanges(self) -> list[dict[str, object]]:
+            calls.list_exchanges += 1
             return [
                 {
                     "Code": " lse ",
@@ -920,7 +1024,7 @@ def test_cmd_refresh_supported_exchanges(monkeypatch, tmp_path):
     )
 
     assert rc == 0
-    assert calls == {"api_key": "TOKEN", "list_exchanges": 1}
+    assert calls == ExchangeClientCalls(api_key="TOKEN", list_exchanges=1)
 
     repo = ExchangeProviderRepository(db_path)
     repo.initialize_schema()
@@ -937,8 +1041,8 @@ def test_cmd_refresh_supported_exchanges(monkeypatch, tmp_path):
 
 
 def test_cmd_refresh_supported_tickers_filters_types_and_cleans_catalog(
-    monkeypatch, tmp_path
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     db_path = tmp_path / "refresh-supported-tickers.db"
     store_supported_exchanges(
         db_path,
@@ -991,14 +1095,14 @@ def test_cmd_refresh_supported_tickers_filters_types_and_cleans_catalog(
         exchange="LSE",
     )
 
-    calls = {"listed": []}
+    calls = SymbolListingClientCalls()
 
     class FakeClient:
-        def __init__(self, api_key):
-            calls["api_key"] = api_key
+        def __init__(self, api_key: str) -> None:
+            calls.api_key = api_key
 
-        def list_symbols(self, exchange_code):
-            calls["listed"].append(exchange_code)
+        def list_symbols(self, exchange_code: str) -> list[dict[str, object]]:
+            calls.listed.append(exchange_code)
             return [
                 {
                     "Code": "KEEP",
@@ -1026,7 +1130,7 @@ def test_cmd_refresh_supported_tickers_filters_types_and_cleans_catalog(
                 },
             ]
 
-        def list_exchanges(self):
+        def list_exchanges(self) -> list[dict[str, object]]:
             raise AssertionError("Should not refresh supported exchanges on cache hit")
 
     patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
@@ -1040,7 +1144,7 @@ def test_cmd_refresh_supported_tickers_filters_types_and_cleans_catalog(
     )
 
     assert rc == 0
-    assert calls == {"api_key": "TOKEN", "listed": ["LSE"]}
+    assert calls == SymbolListingClientCalls(api_key="TOKEN", listed=["LSE"])
 
     ticker_repo = SupportedTickerRepository(db_path)
     rows = ticker_repo.list_for_exchange("EODHD", "LSE")
@@ -1058,8 +1162,8 @@ def test_cmd_refresh_supported_tickers_filters_types_and_cleans_catalog(
 
 
 def test_cmd_refresh_supported_tickers_all_exchanges_in_code_order(
-    monkeypatch, tmp_path
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     db_path = tmp_path / "refresh-supported-tickers-all.db"
     store_supported_exchanges(
         db_path,
@@ -1093,14 +1197,14 @@ def test_cmd_refresh_supported_tickers_all_exchanges_in_code_order(
             },
         ],
     )
-    calls = {"listed": []}
+    calls = SymbolListingClientCalls()
 
     class FakeClient:
-        def __init__(self, api_key):
-            calls["api_key"] = api_key
+        def __init__(self, api_key: str) -> None:
+            calls.api_key = api_key
 
-        def list_symbols(self, exchange_code):
-            calls["listed"].append(exchange_code)
+        def list_symbols(self, exchange_code: str) -> list[dict[str, object]]:
+            calls.listed.append(exchange_code)
             return [
                 {
                     "Code": f"{exchange_code}1",
@@ -1111,7 +1215,7 @@ def test_cmd_refresh_supported_tickers_all_exchanges_in_code_order(
                 }
             ]
 
-        def list_exchanges(self):
+        def list_exchanges(self) -> list[dict[str, object]]:
             raise AssertionError("Should use cached supported exchanges")
 
     patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
@@ -1125,14 +1229,16 @@ def test_cmd_refresh_supported_tickers_all_exchanges_in_code_order(
     )
 
     assert rc == 0
-    assert calls["api_key"] == "TOKEN"
-    assert calls["listed"] == ["LSE", "TSX", "US"]
+    assert calls.api_key == "TOKEN"
+    assert calls.listed == ["LSE", "TSX", "US"]
 
     repo = SupportedTickerRepository(db_path)
     assert repo.list_all_exchanges("EODHD") == ["LSE", "TSX", "US"]
 
 
-def test_cmd_refresh_supported_tickers_defaults_to_all_supported(monkeypatch, tmp_path):
+def test_cmd_refresh_supported_tickers_defaults_to_all_supported(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     db_path = tmp_path / "refresh-supported-tickers-default-all.db"
     store_supported_exchanges(
         db_path,
@@ -1157,14 +1263,14 @@ def test_cmd_refresh_supported_tickers_defaults_to_all_supported(monkeypatch, tm
             },
         ],
     )
-    calls = {"listed": []}
+    calls = SymbolListingClientCalls()
 
     class FakeClient:
-        def __init__(self, api_key):
-            calls["api_key"] = api_key
+        def __init__(self, api_key: str) -> None:
+            calls.api_key = api_key
 
-        def list_symbols(self, exchange_code):
-            calls["listed"].append(exchange_code)
+        def list_symbols(self, exchange_code: str) -> list[dict[str, object]]:
+            calls.listed.append(exchange_code)
             return [
                 {
                     "Code": f"{exchange_code}1",
@@ -1175,7 +1281,7 @@ def test_cmd_refresh_supported_tickers_defaults_to_all_supported(monkeypatch, tm
                 }
             ]
 
-        def list_exchanges(self):
+        def list_exchanges(self) -> list[dict[str, object]]:
             raise AssertionError("Should use cached supported exchanges")
 
     patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
@@ -1189,18 +1295,18 @@ def test_cmd_refresh_supported_tickers_defaults_to_all_supported(monkeypatch, tm
     )
 
     assert rc == 0
-    assert calls["api_key"] == "TOKEN"
-    assert calls["listed"] == ["LSE", "US"]
+    assert calls.api_key == "TOKEN"
+    assert calls.listed == ["LSE", "US"]
 
 
-def test_rate_limiter_respects_burst_and_waits(monkeypatch):
-    now = {"value": 0.0}
+def test_rate_limiter_respects_burst_and_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    now: dict[str, float] = {"value": 0.0}
     sleeps = []
 
-    def fake_monotonic():
+    def fake_monotonic() -> float:
         return now["value"]
 
-    def fake_sleep(seconds):
+    def fake_sleep(seconds: float) -> None:
         sleeps.append(seconds)
         now["value"] += seconds
 
@@ -1216,11 +1322,11 @@ def test_rate_limiter_respects_burst_and_waits(monkeypatch):
     assert sleeps == [1.0, 1.0]
 
 
-def test_interruptible_thread_executor_workers_skip_python_exit_registry():
+def test_interruptible_thread_executor_workers_skip_python_exit_registry() -> None:
     started = threading.Event()
     release = threading.Event()
 
-    def blocking_task():
+    def blocking_task() -> None:
         started.set()
         release.wait(timeout=1.0)
 
@@ -1238,8 +1344,8 @@ def test_interruptible_thread_executor_workers_skip_python_exit_registry():
 
 
 def test_cmd_report_ingest_progress_reports_complete_with_quota_snapshot(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "report-complete.db"
     store_supported_tickers(
         db_path,
@@ -1257,10 +1363,10 @@ def test_cmd_report_ingest_progress_reports_complete_with_quota_snapshot(
         )
 
     class FakeClient:
-        def __init__(self, api_key):
+        def __init__(self, api_key: str) -> None:
             assert api_key == "TOKEN"
 
-        def user_metadata(self):
+        def user_metadata(self) -> dict[str, object]:
             return {
                 "dailyRateLimit": "100000",
                 "apiRequests": "5000",
@@ -1298,8 +1404,8 @@ def test_cmd_report_ingest_progress_reports_complete_with_quota_snapshot(
 
 
 def test_cmd_report_ingest_progress_reports_missing_and_quota_unavailable(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "report-missing.db"
     store_supported_tickers(
         db_path,
@@ -1333,8 +1439,8 @@ def test_cmd_report_ingest_progress_reports_missing_and_quota_unavailable(
 
 
 def test_cmd_report_ingest_progress_default_mode_treats_old_data_as_stale(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "report-stale.db"
     store_supported_tickers(
         db_path,
@@ -1386,8 +1492,8 @@ def test_cmd_report_ingest_progress_default_mode_treats_old_data_as_stale(
 
 
 def test_cmd_report_ingest_progress_missing_only_ignores_staleness(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "report-missing-only.db"
     store_supported_tickers(
         db_path,
@@ -1439,8 +1545,8 @@ def test_cmd_report_ingest_progress_missing_only_ignores_staleness(
 
 
 def test_cmd_report_ingest_progress_reports_blocked_by_backoff(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "report-blocked.db"
     store_supported_tickers(
         db_path,
@@ -1484,7 +1590,9 @@ def test_cmd_report_ingest_progress_reports_blocked_by_backoff(
     )
 
 
-def test_cmd_report_ingest_progress_filters_exchanges(monkeypatch, tmp_path, capsys):
+def test_cmd_report_ingest_progress_filters_exchanges(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "report-filtered.db"
     store_supported_tickers(
         db_path,
@@ -1528,8 +1636,8 @@ def test_cmd_report_ingest_progress_filters_exchanges(monkeypatch, tmp_path, cap
 
 
 def test_cmd_report_ingest_progress_succeeds_when_user_api_fails(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "report-user-api-fails.db"
     store_supported_tickers(
         db_path,
@@ -1538,10 +1646,10 @@ def test_cmd_report_ingest_progress_succeeds_when_user_api_fails(
     )
 
     class FakeClient:
-        def __init__(self, api_key):
+        def __init__(self, api_key: str) -> None:
             assert api_key == "TOKEN"
 
-        def user_metadata(self):
+        def user_metadata(self) -> dict[str, object]:
             raise RuntimeError("nope")
 
     patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
@@ -1568,7 +1676,7 @@ def test_cmd_report_ingest_progress_succeeds_when_user_api_fails(
     assert "- quota unavailable" in output
 
 
-def test_plan_market_data_stage_run_uses_bulk_for_large_exchange():
+def test_plan_market_data_stage_run_uses_bulk_for_large_exchange() -> None:
     eligible = [
         *(make_supported_ticker(f"U{i:03d}.US", "US", i) for i in range(100)),
         make_supported_ticker("AAA.LSE", "LSE", 1001, currency="GBP"),
@@ -1583,7 +1691,9 @@ def test_plan_market_data_stage_run_uses_bulk_for_large_exchange():
     assert plan.http_requests == 3
 
 
-def test_plan_market_data_stage_run_falls_back_to_symbols_when_bulk_does_not_fit_budget():
+def test_plan_market_data_stage_run_falls_back_to_symbols_when_bulk_does_not_fit_budget() -> (
+    None
+):
     eligible = [
         *(make_supported_ticker(f"U{i:03d}.US", "US", i) for i in range(100)),
         make_supported_ticker("AAA.LSE", "LSE", 1001, currency="GBP"),
@@ -1603,8 +1713,8 @@ def test_plan_market_data_stage_run_falls_back_to_symbols_when_bulk_does_not_fit
 
 
 def test_cmd_update_market_data_stage_uses_bulk_for_large_exchange(
-    monkeypatch, tmp_path
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     db_path = tmp_path / "stage-market-data-bulk.db"
     store_supported_tickers(
         db_path,
@@ -1619,14 +1729,14 @@ def test_cmd_update_market_data_stage_uses_bulk_for_large_exchange(
         "LSE",
         rows=[{"Code": "SMALL", "Exchange": "LSE", "Type": "Common Stock"}],
     )
-    calls = {"bulk": [], "symbols": []}
+    calls: dict[str, list[str]] = {"bulk": [], "symbols": []}
     today = date.today().isoformat()
 
     class FakeClient:
-        def __init__(self, api_key):
+        def __init__(self, api_key: str) -> None:
             self.api_key = api_key
 
-        def user_metadata(self):
+        def user_metadata(self) -> dict[str, object]:
             return {
                 "dailyRateLimit": "1000",
                 "apiRequests": "0",
@@ -1634,10 +1744,14 @@ def test_cmd_update_market_data_stage_uses_bulk_for_large_exchange(
             }
 
     class FakeProvider:
-        def __init__(self, api_key: str, session=None):
+        def __init__(
+            self, api_key: str, session: requests.Session | None = None
+        ) -> None:
             assert api_key == "TOKEN"
 
-        def latest_prices_for_exchange(self, exchange_code: str):
+        def latest_prices_for_exchange(
+            self, exchange_code: str
+        ) -> dict[str, PriceData]:
             calls["bulk"].append(exchange_code)
             return {
                 f"U{i:03d}.US": PriceData(
@@ -1650,7 +1764,7 @@ def test_cmd_update_market_data_stage_uses_bulk_for_large_exchange(
                 for i in range(100)
             }
 
-        def latest_price(self, symbol: str):
+        def latest_price(self, symbol: str) -> PriceData | None:
             calls["symbols"].append(symbol)
             return PriceData(
                 symbol=symbol,
@@ -1689,11 +1803,13 @@ def test_cmd_update_market_data_stage_uses_bulk_for_large_exchange(
     assert calls["bulk"] == ["US"]
     assert calls["symbols"] == ["SMALL.LSE"]
     state_repo = MarketDataFetchStateRepository(db_path)
-    assert state_repo.fetch("EODHD", "U000.US")["last_status"] == "ok"
-    assert state_repo.fetch("EODHD", "SMALL.LSE")["last_status"] == "ok"
+    assert fetch_state_row(state_repo, "EODHD", "U000.US")["last_status"] == "ok"
+    assert fetch_state_row(state_repo, "EODHD", "SMALL.LSE")["last_status"] == "ok"
 
 
-def test_cmd_update_market_data_stage_skips_secondary_listings(monkeypatch, tmp_path):
+def test_cmd_update_market_data_stage_skips_secondary_listings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     db_path = tmp_path / "stage-market-data-primary-only.db"
     store_supported_tickers(
         db_path,
@@ -1732,10 +1848,10 @@ def test_cmd_update_market_data_stage_skips_secondary_listings(monkeypatch, tmp_
     today = date.today().isoformat()
 
     class FakeClient:
-        def __init__(self, api_key):
+        def __init__(self, api_key: str) -> None:
             self.api_key = api_key
 
-        def user_metadata(self):
+        def user_metadata(self) -> dict[str, object]:
             return {
                 "dailyRateLimit": "1000",
                 "apiRequests": "0",
@@ -1743,10 +1859,12 @@ def test_cmd_update_market_data_stage_skips_secondary_listings(monkeypatch, tmp_
             }
 
     class FakeProvider:
-        def __init__(self, api_key: str, session=None):
+        def __init__(
+            self, api_key: str, session: requests.Session | None = None
+        ) -> None:
             assert api_key == "TOKEN"
 
-        def latest_price(self, symbol: str):
+        def latest_price(self, symbol: str) -> PriceData | None:
             calls.append(symbol)
             return PriceData(
                 symbol=symbol,
@@ -1784,8 +1902,8 @@ def test_cmd_update_market_data_stage_skips_secondary_listings(monkeypatch, tmp_
     assert rc == 0
     assert sorted(calls) == ["AAA.US", "BBB.LSE"]
     state_repo = MarketDataFetchStateRepository(db_path)
-    assert state_repo.fetch("EODHD", "AAA.US")["last_status"] == "ok"
-    assert state_repo.fetch("EODHD", "BBB.LSE")["last_status"] == "ok"
+    assert fetch_state_row(state_repo, "EODHD", "AAA.US")["last_status"] == "ok"
+    assert fetch_state_row(state_repo, "EODHD", "BBB.LSE")["last_status"] == "ok"
     assert state_repo.fetch("EODHD", "AAA.LSE") is None
     market_repo = MarketDataRepository(db_path)
     assert market_repo.latest_snapshot("AAA.US") is not None
@@ -1793,7 +1911,9 @@ def test_cmd_update_market_data_stage_skips_secondary_listings(monkeypatch, tmp_
     assert market_repo.latest_snapshot("AAA.LSE") is None
 
 
-def test_cmd_reconcile_listing_status_backfills_from_raw_only(tmp_path, capsys):
+def test_cmd_reconcile_listing_status_backfills_from_raw_only(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "reconcile-listing-status.db"
     store_supported_tickers(
         db_path,
@@ -1924,8 +2044,8 @@ def test_cmd_reconcile_listing_status_backfills_from_raw_only(tmp_path, capsys):
 
 
 def test_cmd_update_market_data_stage_retries_missing_bulk_symbol_individually(
-    monkeypatch, tmp_path
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     db_path = tmp_path / "stage-market-data-fallback.db"
     store_supported_tickers(
         db_path,
@@ -1935,14 +2055,14 @@ def test_cmd_update_market_data_stage_retries_missing_bulk_symbol_individually(
             for i in range(100)
         ],
     )
-    calls = {"bulk": [], "symbols": []}
+    calls: dict[str, list[str]] = {"bulk": [], "symbols": []}
     today = date.today().isoformat()
 
     class FakeClient:
-        def __init__(self, api_key):
+        def __init__(self, api_key: str) -> None:
             self.api_key = api_key
 
-        def user_metadata(self):
+        def user_metadata(self) -> dict[str, object]:
             return {
                 "dailyRateLimit": "1000",
                 "apiRequests": "0",
@@ -1950,10 +2070,14 @@ def test_cmd_update_market_data_stage_retries_missing_bulk_symbol_individually(
             }
 
     class FakeProvider:
-        def __init__(self, api_key: str, session=None):
+        def __init__(
+            self, api_key: str, session: requests.Session | None = None
+        ) -> None:
             assert api_key == "TOKEN"
 
-        def latest_prices_for_exchange(self, exchange_code: str):
+        def latest_prices_for_exchange(
+            self, exchange_code: str
+        ) -> dict[str, PriceData]:
             calls["bulk"].append(exchange_code)
             return {
                 f"U{i:03d}.US": PriceData(
@@ -1966,7 +2090,7 @@ def test_cmd_update_market_data_stage_retries_missing_bulk_symbol_individually(
                 for i in range(99)
             }
 
-        def latest_price(self, symbol: str):
+        def latest_price(self, symbol: str) -> PriceData | None:
             calls["symbols"].append(symbol)
             return PriceData(
                 symbol=symbol,
@@ -2005,12 +2129,12 @@ def test_cmd_update_market_data_stage_retries_missing_bulk_symbol_individually(
     assert calls["bulk"] == ["US"]
     assert calls["symbols"] == ["U099.US"]
     state_repo = MarketDataFetchStateRepository(db_path)
-    assert state_repo.fetch("EODHD", "U099.US")["last_status"] == "ok"
+    assert fetch_state_row(state_repo, "EODHD", "U099.US")["last_status"] == "ok"
 
 
 def test_cmd_update_market_data_stage_marks_bulk_validation_failure_per_symbol(
-    monkeypatch, tmp_path
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     db_path = tmp_path / "stage-market-data-bulk-validation.db"
     store_supported_tickers(
         db_path,
@@ -2023,10 +2147,10 @@ def test_cmd_update_market_data_stage_marks_bulk_validation_failure_per_symbol(
     today = date.today().isoformat()
 
     class FakeClient:
-        def __init__(self, api_key):
+        def __init__(self, api_key: str) -> None:
             self.api_key = api_key
 
-        def user_metadata(self):
+        def user_metadata(self) -> dict[str, object]:
             return {
                 "dailyRateLimit": "1000",
                 "apiRequests": "0",
@@ -2034,10 +2158,14 @@ def test_cmd_update_market_data_stage_marks_bulk_validation_failure_per_symbol(
             }
 
     class FakeProvider:
-        def __init__(self, api_key: str, session=None):
+        def __init__(
+            self, api_key: str, session: requests.Session | None = None
+        ) -> None:
             assert api_key == "TOKEN"
 
-        def latest_prices_for_exchange(self, exchange_code: str):
+        def latest_prices_for_exchange(
+            self, exchange_code: str
+        ) -> dict[str, PriceData]:
             return {
                 f"U{i:03d}.US": PriceData(
                     symbol=f"U{i:03d}.US",
@@ -2049,10 +2177,12 @@ def test_cmd_update_market_data_stage_marks_bulk_validation_failure_per_symbol(
                 for i in range(100)
             }
 
-        def latest_price(self, symbol: str):
+        def latest_price(self, symbol: str) -> PriceData | None:
             raise AssertionError("symbol fallback should not run in this test")
 
-    def fake_build_market_data_update(service, ticker, data):
+    def fake_build_market_data_update(
+        service: MarketDataService, ticker: SupportedTicker, data: PriceData
+    ) -> MarketDataUpdate:
         if ticker.symbol == "U099.US":
             raise ValueError("suspicious market data for U099.US")
         return MarketDataUpdate(
@@ -2093,15 +2223,16 @@ def test_cmd_update_market_data_stage_marks_bulk_validation_failure_per_symbol(
 
     assert rc == 0
     state_repo = MarketDataFetchStateRepository(db_path)
-    assert state_repo.fetch("EODHD", "U098.US")["last_status"] == "ok"
+    assert fetch_state_row(state_repo, "EODHD", "U098.US")["last_status"] == "ok"
     failed = state_repo.fetch("EODHD", "U099.US")
+    assert failed is not None
     assert failed["last_status"] == "error"
     assert failed["last_error"] == "suspicious market data for U099.US"
 
 
 def test_cmd_update_market_data_stage_interrupts_cleanly_in_symbol_phase(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "stage-market-data-interrupt.db"
     store_supported_tickers(
         db_path,
@@ -2113,10 +2244,10 @@ def test_cmd_update_market_data_stage_interrupts_cleanly_in_symbol_phase(
     )
 
     class FakeClient:
-        def __init__(self, api_key):
+        def __init__(self, api_key: str) -> None:
             self.api_key = api_key
 
-        def user_metadata(self):
+        def user_metadata(self) -> dict[str, object]:
             return {
                 "dailyRateLimit": "1000",
                 "apiRequests": "0",
@@ -2124,21 +2255,25 @@ def test_cmd_update_market_data_stage_interrupts_cleanly_in_symbol_phase(
             }
 
     class InlineExecutor:
-        def __init__(self):
-            self.shutdown_calls = []
+        def __init__(self) -> None:
+            self.shutdown_calls: list[tuple[bool, bool]] = []
 
-        def submit(self, fn, *args, **kwargs):
-            future = Future()
+        def submit(
+            self, fn: Callable[..., object], *args: object, **kwargs: object
+        ) -> Future[object]:
+            future: Future[object] = Future()
             try:
                 future.set_result(fn(*args, **kwargs))
             except Exception as exc:
                 future.set_exception(exc)
             return future
 
-        def shutdown(self, wait=True, cancel_futures=False):
+        def shutdown(self, wait: bool = True, cancel_futures: bool = False) -> None:
             self.shutdown_calls.append((wait, cancel_futures))
 
-    def interrupting_as_completed(futures):
+    def interrupting_as_completed(
+        futures: Iterable[Future[object]],
+    ) -> Iterator[Future[object]]:
         yielded = False
         for future in futures:
             if not yielded:
@@ -2194,12 +2329,12 @@ def test_cmd_update_market_data_stage_interrupts_cleanly_in_symbol_phase(
     assert "Stored market data for" not in output
     assert executor.shutdown_calls == [(False, True)]
     state_repo = MarketDataFetchStateRepository(db_path)
-    assert state_repo.fetch("EODHD", "AAA.US")["last_status"] == "ok"
+    assert fetch_state_row(state_repo, "EODHD", "AAA.US")["last_status"] == "ok"
 
 
 def test_cmd_report_market_data_progress_reports_complete_with_quota_snapshot(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "report-market-data-complete.db"
     store_supported_tickers(
         db_path,
@@ -2214,10 +2349,10 @@ def test_cmd_report_market_data_progress_reports_complete_with_quota_snapshot(
     store_market_data(db_path, "BBB.US", today)
 
     class FakeClient:
-        def __init__(self, api_key):
+        def __init__(self, api_key: str) -> None:
             assert api_key == "TOKEN"
 
-        def user_metadata(self):
+        def user_metadata(self) -> dict[str, object]:
             return {
                 "dailyRateLimit": "100000",
                 "apiRequests": "5000",
@@ -2253,8 +2388,8 @@ def test_cmd_report_market_data_progress_reports_complete_with_quota_snapshot(
 
 
 def test_cmd_report_market_data_progress_reports_missing_and_stale(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "report-market-data-incomplete.db"
     store_supported_tickers(
         db_path,
@@ -2295,8 +2430,8 @@ def test_cmd_report_market_data_progress_reports_missing_and_stale(
 
 
 def test_cmd_report_market_data_progress_reports_blocked_by_backoff(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "report-market-data-blocked.db"
     store_supported_tickers(
         db_path,
@@ -2335,8 +2470,8 @@ def test_cmd_report_market_data_progress_reports_blocked_by_backoff(
 
 
 def test_cmd_report_market_data_progress_filters_exchanges(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "report-market-data-filtered.db"
     store_supported_tickers(
         db_path,
@@ -2375,8 +2510,8 @@ def test_cmd_report_market_data_progress_filters_exchanges(
 
 
 def test_cmd_report_market_data_progress_succeeds_when_user_api_fails(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "report-market-data-user-api-fails.db"
     store_supported_tickers(
         db_path,
@@ -2385,10 +2520,10 @@ def test_cmd_report_market_data_progress_succeeds_when_user_api_fails(
     )
 
     class FakeClient:
-        def __init__(self, api_key):
+        def __init__(self, api_key: str) -> None:
             assert api_key == "TOKEN"
 
-        def user_metadata(self):
+        def user_metadata(self) -> dict[str, object]:
             raise RuntimeError("nope")
 
     patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
@@ -2414,7 +2549,9 @@ def test_cmd_report_market_data_progress_succeeds_when_user_api_fails(
     assert "- quota unavailable" in output
 
 
-def test_compute_metrics_for_symbol_reuses_fact_and_market_cache(monkeypatch, tmp_path):
+def test_compute_metrics_for_symbol_reuses_fact_and_market_cache(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     db_path = tmp_path / "metric-cache.db"
     _seed_listing(db_path, "AAA.US", currency="USD")
     fact_repo = FinancialFactsRepository(db_path)
@@ -2446,16 +2583,20 @@ def test_compute_metrics_for_symbol_reuses_fact_and_market_cache(monkeypatch, tm
     market_repo.initialize_schema()
     market_repo.upsert_price("AAA.US", "2024-12-31", price=25.0)
 
-    fact_calls = {"count": 0}
-    market_calls = {"count": 0}
+    fact_calls: dict[str, int] = {"count": 0}
+    market_calls: dict[str, int] = {"count": 0}
     original_facts_for_symbol = FinancialFactsRepository.facts_for_symbol
     original_latest_snapshot = MarketDataRepository.latest_snapshot
 
-    def counting_facts_for_symbol(self, symbol):
+    def counting_facts_for_symbol(
+        self: FinancialFactsRepository, symbol: str
+    ) -> list[FactRecord]:
         fact_calls["count"] += 1
         return original_facts_for_symbol(self, symbol)
 
-    def counting_latest_snapshot(self, symbol):
+    def counting_latest_snapshot(
+        self: MarketDataRepository, symbol: str
+    ) -> PriceData | None:
         market_calls["count"] += 1
         return original_latest_snapshot(self, symbol)
 
@@ -2475,11 +2616,16 @@ def test_compute_metrics_for_symbol_reuses_fact_and_market_cache(monkeypatch, tm
         required_concepts = ("AssetsCurrent",)
         uses_market_data = False
 
-        def compute(self, symbol, repo):
+        def compute(
+            self, symbol: str, repo: RegionFactsRepository
+        ) -> MetricResult | None:
             latest_a = repo.latest_fact(symbol, "AssetsCurrent")
             latest_b = repo.latest_fact(symbol, "AssetsCurrent")
             series_a = repo.facts_for_concept(symbol, "EarningsPerShare", "FY")
             series_b = repo.facts_for_concept(symbol, "EarningsPerShare", "FY")
+            # The test seeds the required facts, so both reads resolve; assert to
+            # narrow the optional for the type checker.
+            assert latest_a is not None and latest_b is not None
             return MetricResult(
                 symbol=symbol,
                 metric_id=self.id,
@@ -2492,10 +2638,19 @@ def test_compute_metrics_for_symbol_reuses_fact_and_market_cache(monkeypatch, tm
         required_concepts = ()
         uses_market_data = True
 
-        def compute(self, symbol, repo, market_repo):
+        def compute(
+            self,
+            symbol: str,
+            repo: RegionFactsRepository,
+            market_repo: MarketDataRepository,
+        ) -> MetricResult | None:
             snapshot_a = market_repo.latest_snapshot(symbol)
             snapshot_b = market_repo.latest_snapshot(symbol)
             price = market_repo.latest_price(symbol)
+            # The test seeds a price, so every read resolves; assert to narrow the
+            # optionals (snapshots and the (currency, price) tuple) for mypy.
+            assert snapshot_a is not None and snapshot_b is not None
+            assert price is not None
             return MetricResult(
                 symbol=symbol,
                 metric_id=self.id,
@@ -2524,7 +2679,7 @@ def test_compute_metrics_for_symbol_reuses_fact_and_market_cache(monkeypatch, tm
     assert market_calls["count"] == 1
 
 
-def test_compute_metrics_for_symbol_matches_real_metrics(tmp_path):
+def test_compute_metrics_for_symbol_matches_real_metrics(tmp_path: Path) -> None:
     db_path = tmp_path / "metric-correctness.db"
     store_catalog_listings(
         db_path,
@@ -2596,7 +2751,7 @@ def test_compute_metrics_for_symbol_matches_real_metrics(tmp_path):
     _seed_share_count(db_path, "AAA.US", recent, 2500.0 / 25.0)
 
     metric_ids = ["working_capital", "market_cap", "eps_6y_avg"]
-    expected = {}
+    expected: dict[str, tuple[float, str]] = {}
     plain_fact_repo = RegionFactsRepository(FinancialFactsRepository(db_path))
     plain_market_repo = MarketDataRepository(db_path)
     for metric_id in metric_ids:
@@ -2621,13 +2776,17 @@ def test_compute_metrics_for_symbol_matches_real_metrics(tmp_path):
     } == expected
 
 
-def test_compute_metrics_for_symbol_collects_currency_invariant_failures(monkeypatch):
+def test_compute_metrics_for_symbol_collects_currency_invariant_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class GoodMetric:
         id = "good_metric"
         required_concepts = ()
         uses_market_data = False
 
-        def compute(self, symbol, repo):
+        def compute(
+            self, symbol: str, repo: RegionFactsRepository
+        ) -> MetricResult | None:
             return MetricResult(
                 symbol=symbol,
                 metric_id=self.id,
@@ -2640,7 +2799,9 @@ def test_compute_metrics_for_symbol_collects_currency_invariant_failures(monkeyp
         required_concepts = ()
         uses_market_data = False
 
-        def compute(self, symbol, repo):
+        def compute(
+            self, symbol: str, repo: RegionFactsRepository
+        ) -> MetricResult | None:
             raise MetricCurrencyInvariantError(
                 metric_id=self.id,
                 symbol=symbol,
@@ -2660,15 +2821,36 @@ def test_compute_metrics_for_symbol_collects_currency_invariant_failures(monkeyp
         },
     )
 
+    # A fact repository that returns no facts but resolves a listing currency,
+    # so the invariant-raising metric is the only failure. Subclassing the real
+    # repository (with a no-op ``__init__``) keeps the type contract intact
+    # without opening a database.
+    class _FakeFactsRepository(FinancialFactsRepository):
+        def __init__(self) -> None:
+            pass
+
+        def facts_for_symbol(self, symbol: str) -> list[FactRecord]:
+            return []
+
+        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
+            return None
+
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
+            return []
+
+        def ticker_currency(self, symbol: str) -> str | None:
+            return "USD"
+
     result = cli._compute_metrics_for_symbol(
         "AAA.US",
         [GoodMetric.id, BadMetric.id],
-        SimpleNamespace(
-            facts_for_symbol=lambda symbol: [],
-            latest_fact=lambda symbol, concept: None,
-            facts_for_concept=lambda symbol, concept, fiscal_period=None, limit=None: [],
-            ticker_currency=lambda symbol: "USD",
-        ),
+        _FakeFactsRepository(),
     )
 
     assert result.computed_count == 1
@@ -2678,7 +2860,9 @@ def test_compute_metrics_for_symbol_collects_currency_invariant_failures(monkeyp
     assert result.failures[0].reason.startswith("currency invariant:")
 
 
-def test_suppress_console_metric_warnings_filters_only_metric_noise(tmp_path, capsys):
+def test_suppress_console_metric_warnings_filters_only_metric_noise(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     log_dir = tmp_path / "logs"
     clear_root_logging_handlers()
     cli.setup_logging(log_dir=log_dir)
@@ -2708,8 +2892,8 @@ def test_suppress_console_metric_warnings_filters_only_metric_noise(tmp_path, ca
 
 
 def test_suppress_console_missing_fx_warnings_filters_only_missing_fx_noise(
-    tmp_path, capsys
-):
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     log_dir = tmp_path / "logs"
     clear_root_logging_handlers()
     cli.setup_logging(log_dir=log_dir)
@@ -2759,8 +2943,8 @@ def test_suppress_console_missing_fx_warnings_filters_only_missing_fx_noise(
 
 
 def test_cmd_compute_metrics_stage_suppresses_metric_warnings_by_default(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "metric-stage-suppressed.db"
     log_dir = tmp_path / "logs"
     store_catalog_listings(
@@ -2775,7 +2959,9 @@ def test_cmd_compute_metrics_stage_suppresses_metric_warnings_by_default(
         required_concepts = ()
         uses_market_data = False
 
-        def compute(self, symbol, repo):
+        def compute(
+            self, symbol: str, repo: RegionFactsRepository
+        ) -> MetricResult | None:
             return None
 
     patch_cli(monkeypatch, "REGISTRY", {DummyMetric.id: DummyMetric})
@@ -2805,8 +2991,8 @@ def test_cmd_compute_metrics_stage_suppresses_metric_warnings_by_default(
 
 
 def test_cmd_compute_metrics_stage_can_show_metric_warnings_on_console(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "metric-stage-show-warnings.db"
     log_dir = tmp_path / "logs"
     store_catalog_listings(
@@ -2821,7 +3007,9 @@ def test_cmd_compute_metrics_stage_can_show_metric_warnings_on_console(
         required_concepts = ()
         uses_market_data = False
 
-        def compute(self, symbol, repo):
+        def compute(
+            self, symbol: str, repo: RegionFactsRepository
+        ) -> MetricResult | None:
             return None
 
     patch_cli(monkeypatch, "REGISTRY", {DummyMetric.id: DummyMetric})
@@ -2848,8 +3036,8 @@ def test_cmd_compute_metrics_stage_can_show_metric_warnings_on_console(
 
 
 def test_cmd_compute_metrics_stage_prints_currency_invariant_summary_when_warnings_suppressed(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "metric-stage-currency-summary.db"
     log_dir = tmp_path / "logs"
     store_catalog_listings(
@@ -2864,7 +3052,9 @@ def test_cmd_compute_metrics_stage_prints_currency_invariant_summary_when_warnin
         required_concepts = ()
         uses_market_data = False
 
-        def compute(self, symbol, repo):
+        def compute(
+            self, symbol: str, repo: RegionFactsRepository
+        ) -> MetricResult | None:
             raise MetricCurrencyInvariantError(
                 metric_id=self.id,
                 symbol=symbol,
@@ -2899,8 +3089,8 @@ def test_cmd_compute_metrics_stage_prints_currency_invariant_summary_when_warnin
 
 
 def test_compute_metrics_batch_worker_suppresses_metric_warnings_by_default(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "metric-batch-worker-suppressed.db"
     log_dir = tmp_path / "logs"
     store_catalog_listings(
@@ -2918,7 +3108,9 @@ def test_compute_metrics_batch_worker_suppresses_metric_warnings_by_default(
         required_concepts = ()
         uses_market_data = False
 
-        def compute(self, symbol, repo):
+        def compute(
+            self, symbol: str, repo: RegionFactsRepository
+        ) -> MetricResult | None:
             return None
 
     patch_cli(monkeypatch, "REGISTRY", {DummyMetric.id: DummyMetric})
@@ -2941,7 +3133,9 @@ def test_compute_metrics_batch_worker_suppresses_metric_warnings_by_default(
     assert "Metric dummy_metric could not be computed for BBB.US" in log_text
 
 
-def test_compute_metric_batch_results_uses_share_facts_for_market_cap(tmp_path):
+def test_compute_metric_batch_results_uses_share_facts_for_market_cap(
+    tmp_path: Path,
+) -> None:
     # Market cap is derived (a share-count fact x the price as of that fact's
     # date), so the batch path preloads the share-count concepts and the metric
     # computes from them rather than from a removed stored column.
@@ -2977,8 +3171,8 @@ def test_compute_metric_batch_results_uses_share_facts_for_market_cap(tmp_path):
 
 
 def test_compute_metric_batch_results_reuses_shared_read_connection_per_batch(
-    monkeypatch, tmp_path
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     db_path = tmp_path / "metric-batch-shared-read.db"
     recent_date = (date.today() - timedelta(days=1)).isoformat()
     store_catalog_listings(
@@ -3033,7 +3227,7 @@ def test_compute_metric_batch_results_reuses_shared_read_connection_per_batch(
     _seed_share_count(db_path, "AAA.US", recent_date, 10.0)
     _seed_share_count(db_path, "BBB.US", recent_date, 10.0)
 
-    calls = {"resolve_ids_many": 0}
+    calls: dict[str, int] = {"resolve_ids_many": 0}
     observed_connection_ids = []
     observed_security_map_ids = []
     original_resolve_ids_many = SecurityRepository.resolve_ids_many
@@ -3043,7 +3237,13 @@ def test_compute_metric_batch_results_reuses_shared_read_connection_per_batch(
     )
     original_latest_snapshots_many = MarketDataRepository.latest_snapshots_many
 
-    def counting_resolve_ids_many(self, symbols, chunk_size=500, *, connection=None):
+    def counting_resolve_ids_many(
+        self: SecurityRepository,
+        symbols: Sequence[str],
+        chunk_size: int = 500,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, int]:
         calls["resolve_ids_many"] += 1
         return original_resolve_ids_many(
             self,
@@ -3053,14 +3253,14 @@ def test_compute_metric_batch_results_reuses_shared_read_connection_per_batch(
         )
 
     def tracking_facts_for_symbols_many(
-        self,
-        symbols,
-        chunk_size=25,
+        self: FinancialFactsRepository,
+        symbols: Sequence[str],
+        chunk_size: int = 25,
         *,
-        concepts=None,
-        security_ids_by_symbol=None,
-        connection=None,
-    ):
+        concepts: Sequence[str] | None = None,
+        security_ids_by_symbol: Mapping[str, int] | None = None,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, list[FactRecord]]:
         observed_connection_ids.append(id(connection))
         observed_security_map_ids.append(id(security_ids_by_symbol))
         return original_facts_for_symbols_many(
@@ -3073,13 +3273,13 @@ def test_compute_metric_batch_results_reuses_shared_read_connection_per_batch(
         )
 
     def tracking_fetch_many_for_symbols(
-        self,
-        symbols,
-        chunk_size=500,
+        self: FinancialFactsRefreshStateRepository,
+        symbols: Sequence[str],
+        chunk_size: int = 500,
         *,
-        security_ids_by_symbol=None,
-        connection=None,
-    ):
+        security_ids_by_symbol: Mapping[str, int] | None = None,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, FinancialFactsRefreshStateRecord]:
         observed_connection_ids.append(id(connection))
         observed_security_map_ids.append(id(security_ids_by_symbol))
         return original_fetch_many_for_symbols(
@@ -3091,13 +3291,13 @@ def test_compute_metric_batch_results_reuses_shared_read_connection_per_batch(
         )
 
     def tracking_latest_snapshots_many(
-        self,
-        symbols,
-        chunk_size=500,
+        self: MarketDataRepository,
+        symbols: Sequence[str],
+        chunk_size: int = 500,
         *,
-        security_ids_by_symbol=None,
-        connection=None,
-    ):
+        security_ids_by_symbol: Mapping[str, int] | None = None,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, MarketSnapshotRecord]:
         observed_connection_ids.append(id(connection))
         observed_security_map_ids.append(id(security_ids_by_symbol))
         return original_latest_snapshots_many(
@@ -3146,8 +3346,8 @@ def test_compute_metric_batch_results_reuses_shared_read_connection_per_batch(
 
 
 def test_cmd_run_screen_stage_suppresses_metric_warnings_on_console_by_default(
-    tmp_path, capsys
-):
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "screen-stage-suppressed.db"
     log_dir = tmp_path / "logs"
     store_catalog_listings(
@@ -3195,7 +3395,9 @@ criteria:
     )
 
 
-def test_cmd_run_screen_stage_can_show_metric_warnings_on_console(tmp_path, capsys):
+def test_cmd_run_screen_stage_can_show_metric_warnings_on_console(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "screen-stage-show-warnings.db"
     log_dir = tmp_path / "logs"
     store_catalog_listings(
@@ -3239,7 +3441,9 @@ criteria:
     )
 
 
-def test_cmd_compute_metrics_stage_symbol_scope(monkeypatch, tmp_path):
+def test_cmd_compute_metrics_stage_symbol_scope(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     db_path = tmp_path / "metric-stage-symbol.db"
     store_catalog_listings(
         db_path,
@@ -3256,7 +3460,9 @@ def test_cmd_compute_metrics_stage_symbol_scope(monkeypatch, tmp_path):
         required_concepts = ()
         uses_market_data = False
 
-        def compute(self, symbol, repo):
+        def compute(
+            self, symbol: str, repo: RegionFactsRepository
+        ) -> MetricResult | None:
             return MetricResult(
                 symbol=symbol,
                 metric_id=self.id,
@@ -3281,7 +3487,9 @@ def test_cmd_compute_metrics_stage_symbol_scope(monkeypatch, tmp_path):
     assert repo.fetch("BBB.US", "dummy_metric") == (6.0, "2024-01-01")
 
 
-def test_cmd_compute_metrics_stage_exchange_scope(monkeypatch, tmp_path):
+def test_cmd_compute_metrics_stage_exchange_scope(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     db_path = tmp_path / "metric-stage-exchange.db"
     store_catalog_listings(
         db_path,
@@ -3301,7 +3509,9 @@ def test_cmd_compute_metrics_stage_exchange_scope(monkeypatch, tmp_path):
         required_concepts = ()
         uses_market_data = False
 
-        def compute(self, symbol, repo):
+        def compute(
+            self, symbol: str, repo: RegionFactsRepository
+        ) -> MetricResult | None:
             return MetricResult(
                 symbol=symbol, metric_id=self.id, value=1.0, as_of="2024-01-01"
             )
@@ -3323,7 +3533,9 @@ def test_cmd_compute_metrics_stage_exchange_scope(monkeypatch, tmp_path):
     assert repo.fetch("BBB.LSE", "dummy_metric") == (1.0, "2024-01-01")
 
 
-def test_cmd_compute_metrics_stage_all_supported_scope(monkeypatch, tmp_path):
+def test_cmd_compute_metrics_stage_all_supported_scope(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     db_path = tmp_path / "metric-stage-all-supported.db"
     store_catalog_listings(
         db_path,
@@ -3371,8 +3583,8 @@ def test_cmd_compute_metrics_stage_all_supported_scope(monkeypatch, tmp_path):
 
 
 def test_cmd_compute_metrics_stage_parallel_with_inline_executor(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "metric-stage-inline.db"
     store_catalog_listings(
         db_path,
@@ -3389,24 +3601,32 @@ def test_cmd_compute_metrics_stage_parallel_with_inline_executor(
         required_concepts = ()
         uses_market_data = False
 
-        def compute(self, symbol, repo):
+        def compute(
+            self, symbol: str, repo: RegionFactsRepository
+        ) -> MetricResult | None:
             return MetricResult(
                 symbol=symbol, metric_id=self.id, value=1.0, as_of="2024-01-01"
             )
 
     class InlineExecutor:
-        def submit(self, fn, *args, **kwargs):
-            future = Future()
+        def submit(
+            self, fn: Callable[..., object], *args: object, **kwargs: object
+        ) -> Future[object]:
+            future: Future[object] = Future()
             try:
                 future.set_result(fn(*args, **kwargs))
             except Exception as exc:
                 future.set_exception(exc)
             return future
 
-        def shutdown(self, wait=True, cancel_futures=False):
+        def shutdown(self, wait: bool = True, cancel_futures: bool = False) -> None:
             return None
 
-    def reverse_as_completed(futures):
+    def reverse_as_completed(
+        futures: dict[Future[object], str],
+    ) -> list[Future[object]]:
+        # The CLI maps each submitted future to its symbol; yielding them in
+        # reverse symbol order forces out-of-submission-order completion.
         return [
             future
             for future, _ in sorted(
@@ -3442,8 +3662,8 @@ def test_cmd_compute_metrics_stage_parallel_with_inline_executor(
 
 
 def test_cmd_compute_metrics_stage_parallel_partial_failure(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "metric-stage-inline-failure.db"
     store_catalog_listings(
         db_path,
@@ -3456,23 +3676,30 @@ def test_cmd_compute_metrics_stage_parallel_partial_failure(
     )
 
     class InlineExecutor:
-        def submit(self, fn, *args, **kwargs):
-            future = Future()
+        def submit(
+            self, fn: Callable[..., object], *args: object, **kwargs: object
+        ) -> Future[object]:
+            future: Future[object] = Future()
             try:
                 future.set_result(fn(*args, **kwargs))
             except Exception as exc:
                 future.set_exception(exc)
             return future
 
-        def shutdown(self, wait=True, cancel_futures=False):
+        def shutdown(self, wait: bool = True, cancel_futures: bool = False) -> None:
             return None
 
-    def fake_worker(database, symbol, metric_ids, suppress_metric_warnings=True):
+    def fake_worker(
+        database: str,
+        symbol: str,
+        metric_ids: Sequence[str],
+        suppress_metric_warnings: bool = True,
+    ) -> cli._ComputedMetricsResult:
         if symbol == "BBB.US":
             raise ValueError("boom")
         return cli._ComputedMetricsResult(
             symbol=symbol,
-            rows=((symbol, "dummy_metric", 1.0, "2024-01-01"),),
+            rows=((symbol, "dummy_metric", 1.0, "2024-01-01", "ratio", None, None),),
             computed_count=1,
         )
 
@@ -3509,7 +3736,9 @@ def test_cmd_compute_metrics_stage_parallel_partial_failure(
     assert repo.fetch("BBB.US", "dummy_metric") is None
 
 
-def test_run_metric_computation_interrupts_cleanly(monkeypatch, tmp_path, capsys):
+def test_run_metric_computation_interrupts_cleanly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "metric-stage-interrupt.db"
     # Persisting a metric row resolves the listing; seed both symbols so the
     # listing exists (listing.currency is NOT NULL, no fallback).
@@ -3521,28 +3750,37 @@ def test_run_metric_computation_interrupts_cleanly(monkeypatch, tmp_path, capsys
         uses_market_data = False
 
     class InlineExecutor:
-        def __init__(self):
-            self.shutdown_calls = []
+        def __init__(self) -> None:
+            self.shutdown_calls: list[tuple[bool, bool]] = []
 
-        def submit(self, fn, *args, **kwargs):
-            future = Future()
+        def submit(
+            self, fn: Callable[..., object], *args: object, **kwargs: object
+        ) -> Future[object]:
+            future: Future[object] = Future()
             try:
                 future.set_result(fn(*args, **kwargs))
             except Exception as exc:
                 future.set_exception(exc)
             return future
 
-        def shutdown(self, wait=True, cancel_futures=False):
+        def shutdown(self, wait: bool = True, cancel_futures: bool = False) -> None:
             self.shutdown_calls.append((wait, cancel_futures))
 
-    def fake_worker(database, symbol, metric_ids, suppress_metric_warnings=True):
+    def fake_worker(
+        database: str,
+        symbol: str,
+        metric_ids: Sequence[str],
+        suppress_metric_warnings: bool = True,
+    ) -> cli._ComputedMetricsResult:
         return cli._ComputedMetricsResult(
             symbol=symbol,
-            rows=((symbol, "dummy_metric", 1.0, "2024-01-01"),),
+            rows=((symbol, "dummy_metric", 1.0, "2024-01-01", "ratio", None, None),),
             computed_count=1,
         )
 
-    def interrupting_as_completed(futures):
+    def interrupting_as_completed(
+        futures: Iterable[Future[object]],
+    ) -> Iterator[Future[object]]:
         yielded = False
         for future in futures:
             if not yielded:
@@ -3585,8 +3823,8 @@ def test_run_metric_computation_interrupts_cleanly(monkeypatch, tmp_path, capsys
 
 
 def test_cmd_compute_metrics_stage_falls_back_to_serial_without_wal(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "metric-stage-no-wal.db"
     recent_date = (date.today() - timedelta(days=1)).isoformat()
     store_catalog_listings(
@@ -3641,7 +3879,7 @@ def test_cmd_compute_metrics_stage_falls_back_to_serial_without_wal(
     patch_cli(monkeypatch, "_ensure_metrics_wal_mode", lambda repo: "delete")
     patch_cli(monkeypatch, "METRICS_PROGRESS_INTERVAL_SECONDS", 0.0)
 
-    def fail_executor(max_workers):
+    def fail_executor(max_workers: int) -> None:
         raise AssertionError("process executor should not be used without WAL")
 
     patch_cli(monkeypatch, "_create_process_pool_executor", fail_executor)
@@ -3670,7 +3908,9 @@ def test_cmd_compute_metrics_stage_falls_back_to_serial_without_wal(
     assert repo.fetch("BBB.US", "working_capital") == (6.0, recent_date)
 
 
-def test_run_metric_computation_batches_metric_writes(monkeypatch, tmp_path):
+def test_run_metric_computation_batches_metric_writes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     db_path = tmp_path / "metric-stage-batched.db"
     store_catalog_listings(
         db_path,
@@ -3688,28 +3928,51 @@ def test_run_metric_computation_batches_metric_writes(monkeypatch, tmp_path):
         uses_market_data = False
 
     class InlineExecutor:
-        def submit(self, fn, *args, **kwargs):
-            future = Future()
+        def submit(
+            self, fn: Callable[..., object], *args: object, **kwargs: object
+        ) -> Future[object]:
+            future: Future[object] = Future()
             try:
                 future.set_result(fn(*args, **kwargs))
             except Exception as exc:
                 future.set_exception(exc)
             return future
 
-        def shutdown(self, wait=True, cancel_futures=False):
+        def shutdown(self, wait: bool = True, cancel_futures: bool = False) -> None:
             return None
 
-    def fake_worker(database, symbol, metric_ids, suppress_metric_warnings=True):
+    def fake_worker(
+        database: str,
+        symbol: str,
+        metric_ids: Sequence[str],
+        suppress_metric_warnings: bool = True,
+    ) -> cli._ComputedMetricsResult:
         return cli._ComputedMetricsResult(
             symbol=symbol,
-            rows=((symbol, "dummy_metric", float(len(symbol)), "2024-01-01"),),
+            rows=(
+                (
+                    symbol,
+                    "dummy_metric",
+                    float(len(symbol)),
+                    "2024-01-01",
+                    "ratio",
+                    None,
+                    None,
+                ),
+            ),
             computed_count=1,
         )
 
     batch_sizes = []
     original_upsert_many = MetricsRepository.upsert_many
 
-    def recording_upsert_many(self, rows, *, connection=None, commit=True):
+    def recording_upsert_many(
+        self: MetricsRepository,
+        rows: Iterable[StoredMetricRow],
+        *,
+        connection: sqlite3.Connection | None = None,
+        commit: bool = True,
+    ) -> int:
         materialized = list(rows)
         batch_sizes.append(len(materialized))
         return original_upsert_many(
@@ -3743,7 +4006,9 @@ def test_run_metric_computation_batches_metric_writes(monkeypatch, tmp_path):
     assert batch_sizes == [2, 1]
 
 
-def test_flush_metric_write_batch_commits_external_connection_once(tmp_path):
+def test_flush_metric_write_batch_commits_external_connection_once(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "metric-flush-single-commit.db"
     store_catalog_listings(
         db_path,
@@ -3756,25 +4021,36 @@ def test_flush_metric_write_batch_commits_external_connection_once(tmp_path):
     metrics_repo.initialize_schema()
     status_repo.initialize_schema()
 
-    class ConnectionSpy:
-        def __init__(self, connection):
-            self._connection = connection
-            self.commit_calls = 0
-            self.rollback_calls = 0
+    # A real connection (via the sqlite3 ``factory`` hook) that counts how many
+    # times ``_flush_metric_write_batch`` commits or rolls back. Subclassing
+    # ``sqlite3.Connection`` keeps it a genuine connection -- it can be passed as
+    # ``write_connection`` and used for the batch's writes -- while letting the
+    # test assert the single-commit contract.
+    class ConnectionSpy(sqlite3.Connection):
+        # Counters are initialised on the instance right after construction
+        # (below) rather than in ``__init__`` so we do not have to restate
+        # ``sqlite3.Connection``'s constructor signature just to forward it.
+        commit_calls: int
+        rollback_calls: int
 
-        def __getattr__(self, name):
-            return getattr(self._connection, name)
-
-        def commit(self):
+        def commit(self) -> None:
             self.commit_calls += 1
-            return self._connection.commit()
+            super().commit()
 
-        def rollback(self):
+        def rollback(self) -> None:
             self.rollback_calls += 1
-            return self._connection.rollback()
+            super().rollback()
 
-    real_connection = metrics_repo.open_persistent_connection()
-    write_connection = ConnectionSpy(real_connection)
+    write_connection = sqlite3.connect(
+        db_path,
+        timeout=5.0,
+        factory=ConnectionSpy,
+    )
+    write_connection.commit_calls = 0
+    write_connection.rollback_calls = 0
+    # Match the persistent-connection configuration the production path uses so
+    # the foreign-key checks behave identically for the batch's writes.
+    MetricsRepository._configure_connection(write_connection)
     try:
         cli._flush_metric_write_batch(
             metrics_repo,
@@ -3802,7 +4078,7 @@ def test_flush_metric_write_batch_commits_external_connection_once(tmp_path):
             write_connection=write_connection,
         )
     finally:
-        real_connection.close()
+        write_connection.close()
 
     assert write_connection.commit_calls == 1
     assert write_connection.rollback_calls == 0
@@ -3813,8 +4089,8 @@ def test_flush_metric_write_batch_commits_external_connection_once(tmp_path):
 
 
 def test_run_metric_computation_parallel_profile_accumulates_worker_timings(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "metric-stage-profiled-parallel.db"
     store_catalog_listings(
         db_path,
@@ -3832,20 +4108,25 @@ def test_run_metric_computation_parallel_profile_accumulates_worker_timings(
         uses_market_data = False
 
     class InlineExecutor:
-        def submit(self, fn, *args, **kwargs):
-            future = Future()
+        def submit(
+            self, fn: Callable[..., object], *args: object, **kwargs: object
+        ) -> Future[object]:
+            future: Future[object] = Future()
             try:
                 future.set_result(fn(*args, **kwargs))
             except Exception as exc:
                 future.set_exception(exc)
             return future
 
-        def shutdown(self, wait=True, cancel_futures=False):
+        def shutdown(self, wait: bool = True, cancel_futures: bool = False) -> None:
             return None
 
     def fake_profiled_worker(
-        database, symbols, metric_ids, suppress_metric_warnings=True
-    ):
+        database: str,
+        symbols: Sequence[str],
+        metric_ids: Sequence[str],
+        suppress_metric_warnings: bool = True,
+    ) -> cli._ProfiledComputedMetricsBatchResult:
         assert suppress_metric_warnings is True
         return cli._ProfiledComputedMetricsBatchResult(
             results=tuple(
@@ -3857,6 +4138,9 @@ def test_run_metric_computation_parallel_profile_accumulates_worker_timings(
                             "dummy_metric",
                             float(len(symbol)),
                             "2024-01-01",
+                            "ratio",
+                            None,
+                            None,
                         ),
                     ),
                     computed_count=1,
@@ -3902,8 +4186,8 @@ def test_run_metric_computation_parallel_profile_accumulates_worker_timings(
 
 
 def test_cmd_compute_metrics_stage_parallel_workers_skip_schema_init(
-    monkeypatch, tmp_path
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     db_path = tmp_path / "metric-stage-worker-schema.db"
     recent_date = (date.today() - timedelta(days=1)).isoformat()
     store_catalog_listings(
@@ -3959,15 +4243,17 @@ def test_cmd_compute_metrics_stage_parallel_workers_skip_schema_init(
     _seed_share_count(db_path, "BBB.US", recent_date, 10.0)
 
     class InlineExecutor:
-        def submit(self, fn, *args, **kwargs):
-            future = Future()
+        def submit(
+            self, fn: Callable[..., object], *args: object, **kwargs: object
+        ) -> Future[object]:
+            future: Future[object] = Future()
             try:
                 future.set_result(fn(*args, **kwargs))
             except Exception as exc:
                 future.set_exception(exc)
             return future
 
-        def shutdown(self, wait=True, cancel_futures=False):
+        def shutdown(self, wait: bool = True, cancel_futures: bool = False) -> None:
             return None
 
     patch_cli(monkeypatch, "_metric_worker_count", lambda total: 2)
@@ -3980,7 +4266,7 @@ def test_cmd_compute_metrics_stage_parallel_workers_skip_schema_init(
         monkeypatch, "_initialize_metric_read_schema", lambda *args, **kwargs: None
     )
 
-    def locked_initialize_schema(self):
+    def locked_initialize_schema(self: SQLiteStore) -> None:
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(
@@ -4010,7 +4296,9 @@ def test_cmd_compute_metrics_stage_parallel_workers_skip_schema_init(
     assert repo.fetch("BBB.US", "market_cap") == (90.0, recent_date)
 
 
-def test_cmd_compute_metrics_stage_process_pool_smoke(monkeypatch, tmp_path):
+def test_cmd_compute_metrics_stage_process_pool_smoke(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     db_path = tmp_path / "metric-stage-process.db"
     store_catalog_listings(
         db_path,
@@ -4060,7 +4348,7 @@ def test_cmd_compute_metrics_stage_process_pool_smoke(monkeypatch, tmp_path):
     assert repo.fetch("BBB.US", "market_cap") == (90.0, "2024-01-01")
 
 
-def test_cmd_clear_fundamentals_raw(tmp_path):
+def test_cmd_clear_fundamentals_raw(tmp_path: Path) -> None:
     db_path = tmp_path / "clearfunds.db"
     _seed_listing(db_path, "AAA.US", currency="USD", provider="SEC")
     repo = FundamentalsRepository(db_path)
@@ -4099,7 +4387,7 @@ def test_cmd_clear_fundamentals_raw(tmp_path):
         )
 
 
-def test_cmd_clear_financial_facts_clears_normalization_state(tmp_path):
+def test_cmd_clear_financial_facts_clears_normalization_state(tmp_path: Path) -> None:
     db_path = tmp_path / "clearfacts.db"
     _seed_listing(db_path, "AAA.US", currency="USD", provider="SEC")
     fact_repo = FinancialFactsRepository(db_path)
@@ -4166,7 +4454,7 @@ def test_cmd_clear_financial_facts_clears_normalization_state(tmp_path):
         )
 
 
-def test_cmd_clear_metrics_clears_metric_compute_status(tmp_path):
+def test_cmd_clear_metrics_clears_metric_compute_status(tmp_path: Path) -> None:
     db_path = tmp_path / "clearmetrics.db"
     _seed_listing(db_path, "AAA.US", currency="USD")
     metrics_repo = MetricsRepository(db_path)
@@ -4198,8 +4486,8 @@ def test_cmd_clear_metrics_clears_metric_compute_status(tmp_path):
 
 
 def test_cmd_normalize_fundamentals_stage_all_supported_filters_to_raw_symbols(
-    monkeypatch, tmp_path
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     db_path = tmp_path / "normalize-stage-all.db"
     store_supported_tickers(
         db_path,
@@ -4245,9 +4533,11 @@ def test_cmd_normalize_fundamentals_stage_all_supported_filters_to_raw_symbols(
         {"General": {"Name": "DDD"}, "Financials": {}},
         exchange="LSE",
     )
-    captured = {}
+    captured: dict[str, object] = {}
 
-    def fake_bulk(database, symbols=None, force=False):
+    def fake_bulk(
+        database: str, symbols: Sequence[str] | None = None, force: bool = False
+    ) -> int:
         captured["database"] = database
         captured["symbols"] = list(symbols or [])
         captured["force"] = force
@@ -4265,13 +4555,15 @@ def test_cmd_normalize_fundamentals_stage_all_supported_filters_to_raw_symbols(
 
     assert rc == 0
     assert captured["database"] == str(db_path)
-    assert sorted(captured["symbols"]) == ["AAA.US", "DDD.LSE"]
+    captured_symbols = captured["symbols"]
+    assert isinstance(captured_symbols, list)
+    assert sorted(captured_symbols) == ["AAA.US", "DDD.LSE"]
     assert captured["force"] is False
 
 
 def test_cmd_normalize_eodhd_fundamentals_bulk_reports_freshness_scan(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "normalize-eodhd-status.db"
     # Seed both US (USD) listings up front so the payload upserts can resolve
     # them (listing.currency is NOT NULL, no fallback).
@@ -4307,8 +4599,8 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_reports_freshness_scan(
 
 
 def test_cmd_normalize_eodhd_fundamentals_bulk_force_skips_freshness_scan(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "normalize-eodhd-force.db"
     _seed_listing(db_path, ("AAA.US", "BBB.US"), currency="USD", provider="EODHD")
     fund_repo = FundamentalsRepository(db_path)
@@ -4323,11 +4615,17 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_force_skips_freshness_scan(
         )
         store_market_data(db_path, symbol, "2024-12-31", currency="USD")
 
-    def fail_plan(**kwargs):
+    def fail_plan(**kwargs: object) -> None:
         raise AssertionError("freshness planning should be skipped for --force")
 
     class FakeNormalizer:
-        def normalize(self, payload, symbol, accounting_standard=None, **kwargs):
+        def normalize(
+            self,
+            payload: dict[str, object],
+            symbol: str,
+            accounting_standard: str | None = None,
+            **kwargs: object,
+        ) -> list[FactRecord]:
             return [
                 make_fact(
                     symbol=symbol,
@@ -4361,8 +4659,8 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_force_skips_freshness_scan(
 
 
 def test_cmd_normalize_eodhd_fundamentals_bulk_suppresses_missing_fx_warnings_on_console(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "normalize-eodhd-missing-fx.db"
     log_dir = tmp_path / "logs"
     # AALB.AS (Amsterdam) quotes in EUR; seed the listing so the payload upsert
@@ -4431,8 +4729,8 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_suppresses_missing_fx_warnings_on
 
 
 def test_cmd_normalize_eodhd_fundamentals_bulk_continues_after_symbol_failure_with_inline_executor(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "normalize-eodhd-failure.db"
     _seed_listing(
         db_path, ("AAA.US", "BBB.US", "CCC.US"), currency="USD", provider="EODHD"
@@ -4450,10 +4748,16 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_continues_after_symbol_failure_wi
         store_market_data(db_path, symbol, "2024-12-31", currency="USD")
 
     class FakeNormalizer:
-        def __init__(self, **kwargs):
+        def __init__(self, **kwargs: object) -> None:
             pass
 
-        def normalize(self, payload, symbol, accounting_standard=None, **kwargs):
+        def normalize(
+            self,
+            payload: dict[str, object],
+            symbol: str,
+            accounting_standard: str | None = None,
+            **kwargs: object,
+        ) -> list[FactRecord]:
             if symbol == "BBB.US":
                 raise ValueError("boom")
             return [
@@ -4469,15 +4773,17 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_continues_after_symbol_failure_wi
     patch_cli(monkeypatch, "_normalization_worker_count", lambda total: 3)
 
     class InlineExecutor:
-        def submit(self, fn, *args, **kwargs):
-            future = Future()
+        def submit(
+            self, fn: Callable[..., object], *args: object, **kwargs: object
+        ) -> Future[object]:
+            future: Future[object] = Future()
             try:
                 future.set_result(fn(*args, **kwargs))
             except Exception as exc:
                 future.set_exception(exc)
             return future
 
-        def shutdown(self, wait=True, cancel_futures=False):
+        def shutdown(self, wait: bool = True, cancel_futures: bool = False) -> None:
             return None
 
     patch_cli(
@@ -4512,8 +4818,8 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_continues_after_symbol_failure_wi
 
 
 def test_cmd_normalize_eodhd_fundamentals_bulk_interrupts_cleanly(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "normalize-eodhd-interrupt.db"
     _seed_listing(db_path, ("AAA.US", "BBB.US"), currency="USD", provider="EODHD")
     fund_repo = FundamentalsRepository(db_path)
@@ -4529,10 +4835,16 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_interrupts_cleanly(
         store_market_data(db_path, symbol, "2024-12-31", currency="USD")
 
     class FakeNormalizer:
-        def __init__(self, **kwargs):
+        def __init__(self, **kwargs: object) -> None:
             pass
 
-        def normalize(self, payload, symbol, accounting_standard=None, **kwargs):
+        def normalize(
+            self,
+            payload: dict[str, object],
+            symbol: str,
+            accounting_standard: str | None = None,
+            **kwargs: object,
+        ) -> list[FactRecord]:
             return [
                 make_fact(
                     symbol=symbol,
@@ -4543,21 +4855,25 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_interrupts_cleanly(
             ]
 
     class InlineExecutor:
-        def __init__(self):
-            self.shutdown_calls = []
+        def __init__(self) -> None:
+            self.shutdown_calls: list[tuple[bool, bool]] = []
 
-        def submit(self, fn, *args, **kwargs):
-            future = Future()
+        def submit(
+            self, fn: Callable[..., object], *args: object, **kwargs: object
+        ) -> Future[object]:
+            future: Future[object] = Future()
             try:
                 future.set_result(fn(*args, **kwargs))
             except Exception as exc:
                 future.set_exception(exc)
             return future
 
-        def shutdown(self, wait=True, cancel_futures=False):
+        def shutdown(self, wait: bool = True, cancel_futures: bool = False) -> None:
             self.shutdown_calls.append((wait, cancel_futures))
 
-    def interrupting_as_completed(futures):
+    def interrupting_as_completed(
+        futures: Iterable[Future[object]],
+    ) -> Iterator[Future[object]]:
         yielded = False
         for future in futures:
             if not yielded:
@@ -4603,8 +4919,8 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_interrupts_cleanly(
 
 
 def test_cmd_normalize_eodhd_fundamentals_bulk_process_pool_smoke(
-    monkeypatch, tmp_path
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     db_path = tmp_path / "normalize-eodhd-process.db"
     _seed_listing(db_path, ("AAA.US", "BBB.US"), currency="USD", provider="EODHD")
     fund_repo = FundamentalsRepository(db_path)
@@ -4667,8 +4983,8 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_process_pool_smoke(
 
 
 def test_cmd_refresh_security_metadata_backfills_eodhd_fields_and_sec_name_fallback(
-    tmp_path, capsys
-):
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "refresh-security-metadata.db"
     store_catalog_listings(
         db_path,
@@ -4769,7 +5085,9 @@ def test_cmd_refresh_security_metadata_backfills_eodhd_fields_and_sec_name_fallb
     ]
 
 
-def test_cmd_refresh_security_metadata_respects_symbol_scope(tmp_path, capsys):
+def test_cmd_refresh_security_metadata_respects_symbol_scope(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "refresh-security-metadata-scope.db"
     store_catalog_listings(
         db_path,
@@ -4821,8 +5139,8 @@ def test_cmd_refresh_security_metadata_respects_symbol_scope(tmp_path, capsys):
 
 
 def test_cmd_refresh_security_metadata_does_not_use_full_payload_fetch(
-    tmp_path, capsys, monkeypatch
-):
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     db_path = tmp_path / "refresh-security-metadata-no-fetch-many.db"
     store_catalog_listings(
         db_path,
@@ -4859,7 +5177,9 @@ def test_cmd_refresh_security_metadata_does_not_use_full_payload_fetch(
     assert "Updated metadata for 1 symbols." in capsys.readouterr().out
 
 
-def test_cmd_refresh_security_metadata_reports_progress(tmp_path, capsys, monkeypatch):
+def test_cmd_refresh_security_metadata_reports_progress(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     db_path = tmp_path / "refresh-security-metadata-progress.db"
     store_catalog_listings(
         db_path,
@@ -4909,7 +5229,9 @@ def test_cmd_refresh_security_metadata_reports_progress(tmp_path, capsys, monkey
     ]
 
 
-def test_cmd_refresh_security_metadata_cancels_cleanly(tmp_path, capsys, monkeypatch):
+def test_cmd_refresh_security_metadata_cancels_cleanly(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     db_path = tmp_path / "refresh-security-metadata-cancel.db"
     store_catalog_listings(
         db_path,
@@ -4940,7 +5262,9 @@ def test_cmd_refresh_security_metadata_cancels_cleanly(tmp_path, capsys, monkeyp
 
     real_fetch_metadata_candidates = FundamentalsRepository.fetch_metadata_candidates
 
-    def interrupting_fetch_metadata_candidates(self, security_ids, chunk_size=500):
+    def interrupting_fetch_metadata_candidates(
+        self: FundamentalsRepository, security_ids: Sequence[int], chunk_size: int = 500
+    ) -> dict[int, SecurityMetadataCandidate]:
         nonlocal call_count
         call_count += 1
         if call_count == 2:
@@ -4979,8 +5303,8 @@ def test_cmd_refresh_security_metadata_cancels_cleanly(tmp_path, capsys, monkeyp
 
 
 def test_cmd_run_screen_stage_reports_progress_for_multi_symbol_scope(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "screen-stage-progress.db"
     store_catalog_listings(
         db_path,
@@ -5033,8 +5357,8 @@ criteria:
 
 
 def test_cmd_run_screen_stage_creates_output_csv_parent_dirs_for_passing_results(
-    tmp_path, capsys
-):
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "screen-stage-output-pass.db"
     store_catalog_listings(
         db_path,
@@ -5093,8 +5417,8 @@ criteria:
 
 
 def test_cmd_run_screen_stage_adds_ranked_output_rows_and_sorts_passers(
-    tmp_path, capsys
-):
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "screen-stage-ranked.db"
     store_catalog_listings(
         db_path,
@@ -5189,8 +5513,8 @@ ranking:
 
 
 def test_cmd_run_screen_stage_defers_ranking_metric_loads_until_after_filtering(
-    monkeypatch, tmp_path
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     db_path = tmp_path / "screen-stage-ranked-loads.db"
     store_catalog_listings(
         db_path,
@@ -5250,7 +5574,12 @@ ranking:
     calls = []
     original_fetch_many = cli._StatusAwareMetricsRepository.fetch_many_for_symbols
 
-    def wrapped_fetch_many(self, symbols, metric_ids, chunk_size=500):
+    def wrapped_fetch_many(
+        self: cli._StatusAwareMetricsRepository,
+        symbols: Sequence[str],
+        metric_ids: Sequence[str],
+        chunk_size: int = 500,
+    ) -> dict[str, dict[str, MetricRecord]]:
         calls.append((tuple(symbols), tuple(metric_ids)))
         return original_fetch_many(
             self,
@@ -5285,8 +5614,8 @@ ranking:
 
 
 def test_cmd_run_screen_stage_limits_console_preview_and_truncates_description(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "screen-stage-preview.db"
     listings = [
         Listing(symbol=f"{symbol}.US", security_name=f"{symbol} Inc", exchange="NYSE")
@@ -5347,8 +5676,8 @@ criteria:
 
 
 def test_cmd_run_screen_stage_reports_progress_when_no_symbols_pass(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "screen-stage-no-pass.db"
     store_catalog_listings(
         db_path,
@@ -5398,8 +5727,8 @@ criteria:
 
 
 def test_cmd_run_screen_stage_missing_status_falls_back_to_raw_metric_value(
-    tmp_path,
-):
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "screen-stage-missing-status.db"
     store_catalog_listings(
         db_path,
@@ -5437,8 +5766,8 @@ criteria:
 
 
 def test_cmd_run_screen_stage_backfills_missing_listing_status_without_full_reconcile(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "screen-stage-missing-listing-status.db"
     store_catalog_listings(
         db_path,
@@ -5484,7 +5813,7 @@ criteria:
 """
     )
 
-    def fail_full_reconcile(*args, **kwargs):
+    def fail_full_reconcile(*args: object, **kwargs: object) -> None:
         pytest.fail("unexpected full reconcile in read-only canonical screening")
 
     patch_cli(monkeypatch, "_reconcile_eodhd_listing_scope", fail_full_reconcile)
@@ -5518,7 +5847,9 @@ criteria:
     assert "AAA.LSE" not in output
 
 
-def test_cmd_run_screen_stage_failure_status_shadows_stored_metric_value(tmp_path):
+def test_cmd_run_screen_stage_failure_status_shadows_stored_metric_value(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "screen-stage-failed-status.db"
     store_catalog_listings(
         db_path,
@@ -5568,7 +5899,9 @@ criteria:
     assert rc == 1
 
 
-def test_cmd_run_screen_stage_stale_success_status_hides_stored_metric_value(tmp_path):
+def test_cmd_run_screen_stage_stale_success_status_hides_stored_metric_value(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "screen-stage-stale-status.db"
     store_catalog_listings(
         db_path,
@@ -5650,8 +5983,8 @@ criteria:
 
 
 def test_cmd_run_screen_stage_creates_output_csv_parent_dirs_when_no_symbols_pass(
-    tmp_path, capsys
-):
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "screen-stage-output-empty.db"
     store_catalog_listings(
         db_path,
@@ -5702,7 +6035,9 @@ criteria:
     assert "No symbols satisfied all criteria." in capsys.readouterr().out
 
 
-def test_cmd_report_metric_failures_uses_highest_market_cap_example(tmp_path, capsys):
+def test_cmd_report_metric_failures_uses_highest_market_cap_example(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "failures.db"
     store_catalog_listings(
         db_path,
@@ -5736,7 +6071,9 @@ def test_cmd_report_metric_failures_uses_highest_market_cap_example(tmp_path, ca
     assert "example=BBB.US" in output
 
 
-def test_cmd_report_metric_failures_with_exchange(tmp_path, capsys):
+def test_cmd_report_metric_failures_with_exchange(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "failures_exchange.db"
     store_catalog_listings(
         db_path,
@@ -5766,7 +6103,9 @@ def test_cmd_report_metric_failures_with_exchange(tmp_path, capsys):
     assert "BBB.US" not in output
 
 
-def test_cmd_report_metric_failures_surfaces_roic_specific_reason(tmp_path, capsys):
+def test_cmd_report_metric_failures_surfaces_roic_specific_reason(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "roic_failures.db"
     symbol = "AAA.US"
     latest_year = date.today().year - 1
@@ -5883,8 +6222,8 @@ def test_cmd_report_metric_failures_surfaces_roic_specific_reason(tmp_path, caps
 
 
 def test_cmd_report_metric_failures_reuses_persisted_failure_status_without_recompute(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "metric-failure-status.db"
     store_catalog_listings(
         db_path,
@@ -5912,7 +6251,9 @@ def test_cmd_report_metric_failures_reuses_persisted_failure_status_without_reco
         uses_market_data = False
         uses_financial_facts = False
 
-        def compute(self, symbol, repo):
+        def compute(
+            self, symbol: str, repo: RegionFactsRepository
+        ) -> MetricResult | None:
             raise AssertionError("expected persisted failure status to skip recompute")
 
     patch_cli(monkeypatch, "REGISTRY", {CachedMetric.id: CachedMetric})
@@ -5932,7 +6273,9 @@ def test_cmd_report_metric_failures_reuses_persisted_failure_status_without_reco
     assert "cached_failure: 1" in output
 
 
-def test_cmd_report_screen_failures_dedupes_metric_na_counts(tmp_path, capsys):
+def test_cmd_report_screen_failures_dedupes_metric_na_counts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "screen_failures.db"
     store_catalog_listings(
         db_path,
@@ -6030,8 +6373,8 @@ criteria:
 
 
 def test_cmd_report_screen_failures_reuses_persisted_failure_status_without_recompute(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "screen-failure-status.db"
     store_catalog_listings(
         db_path,
@@ -6059,7 +6402,9 @@ def test_cmd_report_screen_failures_reuses_persisted_failure_status_without_reco
         uses_market_data = False
         uses_financial_facts = False
 
-        def compute(self, symbol, repo):
+        def compute(
+            self, symbol: str, repo: RegionFactsRepository
+        ) -> MetricResult | None:
             raise AssertionError("expected persisted failure status to skip recompute")
 
     patch_cli(monkeypatch, "REGISTRY", {CachedMetric.id: CachedMetric})
@@ -6093,10 +6438,10 @@ criteria:
 
 
 def test_cmd_report_screen_failures_reports_progress_by_phase(
-    tmp_path,
-    monkeypatch,
-    capsys,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     db_path = tmp_path / "screen_failures_progress.db"
     store_catalog_listings(
         db_path,
@@ -6187,10 +6532,10 @@ criteria:
 
 
 def test_cmd_report_screen_failures_avoids_point_metric_fetches(
-    tmp_path,
-    monkeypatch,
-    capsys,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     db_path = tmp_path / "screen_failures_preloaded_metrics.db"
     store_catalog_listings(
         db_path,
@@ -6237,7 +6582,7 @@ criteria:
 """
     )
 
-    def fail_point_fetch(self, symbol, metric_id):
+    def fail_point_fetch(self: MetricsRepository, symbol: str, metric_id: str) -> None:
         raise AssertionError("point metric fetch should not be used")
 
     monkeypatch.setattr(MetricsRepository, "fetch", fail_point_fetch)
@@ -6257,10 +6602,10 @@ criteria:
 
 
 def test_cmd_report_screen_failures_recompute_uses_symbol_caches(
-    tmp_path,
-    monkeypatch,
-    capsys,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     db_path = tmp_path / "screen_failures_symbol_cache.db"
     store_catalog_listings(
         db_path,
@@ -6293,29 +6638,43 @@ def test_cmd_report_screen_failures_recompute_uses_symbol_caches(
     market_repo.upsert_price("AAA.US", "2024-12-31", price=25.0)
     _seed_share_count(db_path, "AAA.US", "2024-12-31", 40.0)
 
-    fact_calls = {"count": 0}
-    facts_many_calls = {"count": 0, "symbols": [], "concepts": None}
-    snapshot_batch_calls = {"count": 0}
+    fact_calls: dict[str, int] = {"count": 0}
+
+    @dataclass
+    class FactsManyCalls:
+        # The bulk-fact reader is invoked once per recompute batch; we record how
+        # many times and with which symbol tuples / concept filter so the test can
+        # assert the symbol-cache path issued a single bulk call. A plain dict
+        # literal would infer ``dict[str, object]`` and break ``count += 1`` and
+        # ``symbols.append(...)``, so the accumulator is a typed record instead.
+        count: int = 0
+        symbols: list[tuple[str, ...]] = field(default_factory=list)
+        concepts: tuple[str, ...] | None = None
+
+    facts_many_calls = FactsManyCalls()
+    snapshot_batch_calls: dict[str, int] = {"count": 0}
     original_facts_for_symbol = FinancialFactsRepository.facts_for_symbol
     original_facts_for_symbols_many = FinancialFactsRepository.facts_for_symbols_many
     original_latest_snapshots_many = MarketDataRepository.latest_snapshots_many
 
-    def counting_facts_for_symbol(self, symbol):
+    def counting_facts_for_symbol(
+        self: FinancialFactsRepository, symbol: str
+    ) -> list[FactRecord]:
         fact_calls["count"] += 1
         return original_facts_for_symbol(self, symbol)
 
     def counting_facts_for_symbols_many(
-        self,
-        symbols,
-        chunk_size=25,
+        self: FinancialFactsRepository,
+        symbols: Sequence[str],
+        chunk_size: int = 25,
         *,
-        concepts=None,
-        security_ids_by_symbol=None,
-        connection=None,
-    ):
-        facts_many_calls["count"] += 1
-        facts_many_calls["symbols"].append(tuple(symbols))
-        facts_many_calls["concepts"] = tuple(concepts) if concepts is not None else None
+        concepts: Sequence[str] | None = None,
+        security_ids_by_symbol: Mapping[str, int] | None = None,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, list[FactRecord]]:
+        facts_many_calls.count += 1
+        facts_many_calls.symbols.append(tuple(symbols))
+        facts_many_calls.concepts = tuple(concepts) if concepts is not None else None
         return original_facts_for_symbols_many(
             self,
             symbols,
@@ -6326,13 +6685,13 @@ def test_cmd_report_screen_failures_recompute_uses_symbol_caches(
         )
 
     def counting_latest_snapshots_many(
-        self,
-        symbols,
-        chunk_size=500,
+        self: MarketDataRepository,
+        symbols: Sequence[str],
+        chunk_size: int = 500,
         *,
-        security_ids_by_symbol=None,
-        connection=None,
-    ):
+        security_ids_by_symbol: Mapping[str, int] | None = None,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, MarketSnapshotRecord]:
         snapshot_batch_calls["count"] += 1
         return original_latest_snapshots_many(
             self,
@@ -6342,7 +6701,7 @@ def test_cmd_report_screen_failures_recompute_uses_symbol_caches(
             connection=connection,
         )
 
-    def fail_latest_snapshot(self, symbol):
+    def fail_latest_snapshot(self: MarketDataRepository, symbol: str) -> None:
         raise AssertionError("expected report-screen-failures to use bulk snapshots")
 
     monkeypatch.setattr(
@@ -6367,11 +6726,16 @@ def test_cmd_report_screen_failures_recompute_uses_symbol_caches(
         required_concepts = ("AssetsCurrent",)
         uses_market_data = False
 
-        def compute(self, symbol, repo):
+        def compute(
+            self, symbol: str, repo: RegionFactsRepository
+        ) -> MetricResult | None:
             latest_a = repo.latest_fact(symbol, "AssetsCurrent")
             latest_b = repo.latest_fact(symbol, "AssetsCurrent")
             series_a = repo.facts_for_concept(symbol, "EarningsPerShare", "FY")
             series_b = repo.facts_for_concept(symbol, "EarningsPerShare", "FY")
+            # The test seeds the required facts, so both reads resolve; assert to
+            # narrow the optional for the type checker.
+            assert latest_a is not None and latest_b is not None
             return MetricResult(
                 symbol=symbol,
                 metric_id=self.id,
@@ -6385,10 +6749,19 @@ def test_cmd_report_screen_failures_recompute_uses_symbol_caches(
         uses_market_data = True
         uses_financial_facts = False
 
-        def compute(self, symbol, repo, market_repo):
+        def compute(
+            self,
+            symbol: str,
+            repo: RegionFactsRepository,
+            market_repo: MarketDataRepository,
+        ) -> MetricResult | None:
             snapshot_a = market_repo.latest_snapshot(symbol)
             snapshot_b = market_repo.latest_snapshot(symbol)
             latest_price = market_repo.latest_price(symbol)
+            # The test seeds a price, so every read resolves; assert to narrow the
+            # optionals (snapshots and the (currency, price) tuple) for mypy.
+            assert snapshot_a is not None and snapshot_b is not None
+            assert latest_price is not None
             return MetricResult(
                 symbol=symbol,
                 metric_id=self.id,
@@ -6440,17 +6813,17 @@ criteria:
     assert "- repeat_market: missing=1 symbols, affects=1 criteria" in output
     assert "stored_missing_but_computable_now: 1 (example=AAA.US" in output
     assert fact_calls["count"] == 0
-    assert facts_many_calls["count"] == 1
-    assert facts_many_calls["symbols"] == [("AAA.US",)]
-    assert facts_many_calls["concepts"] == ("AssetsCurrent",)
+    assert facts_many_calls.count == 1
+    assert facts_many_calls.symbols == [("AAA.US",)]
+    assert facts_many_calls.concepts == ("AssetsCurrent",)
     assert snapshot_batch_calls["count"] == 1
 
 
 def test_cmd_report_screen_failures_suppresses_console_metric_warnings(
-    tmp_path,
-    monkeypatch,
-    capsys,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     clear_root_logging_handlers()
     cli.setup_logging(log_dir=tmp_path / "logs")
     try:
@@ -6478,7 +6851,9 @@ criteria:
             id = "noisy_metric"
             required_concepts = ()
 
-            def compute(self, symbol, repo):
+            def compute(
+                self, symbol: str, repo: RegionFactsRepository
+            ) -> MetricResult | None:
                 logging.getLogger("pyvalue.metrics.noisy").warning(
                     "Console-only warning for %s", symbol
                 )
@@ -6506,10 +6881,10 @@ criteria:
 
 
 def test_cmd_report_screen_failures_reports_metric_exceptions(
-    tmp_path,
-    monkeypatch,
-    capsys,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     db_path = tmp_path / "screen_failure_exception.db"
     store_catalog_listings(
         db_path,
@@ -6534,7 +6909,9 @@ criteria:
         id = "exploding_metric"
         required_concepts = ()
 
-        def compute(self, symbol, repo):
+        def compute(
+            self, symbol: str, repo: RegionFactsRepository
+        ) -> MetricResult | None:
             raise RuntimeError("boom")
 
     monkeypatch.setitem(cli.REGISTRY, "exploding_metric", ExplodingMetric)
@@ -6559,7 +6936,7 @@ criteria:
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_ticker_target_currency_from_supported_tickers(tmp_path):
+def test_resolve_ticker_target_currency_from_supported_tickers(tmp_path: Path) -> None:
     """Listing currency resolves from provider-listing catalog metadata."""
 
     db_path = tmp_path / "resolve.db"
@@ -6590,17 +6967,21 @@ def test_resolve_ticker_target_currency_from_supported_tickers(tmp_path):
     assert result == "GBP"
 
 
-def test_resolve_ticker_target_currency_does_not_fall_back_to_payload(tmp_path):
+def test_resolve_ticker_target_currency_does_not_fall_back_to_payload(
+    tmp_path: Path,
+) -> None:
     """Payload currency must not act as listing-currency fallback."""
 
     db_path = tmp_path / "resolve.db"
 
-    payload = {"General": {"CurrencyCode": "ZAC"}}
+    payload: dict[str, object] = {"General": {"CurrencyCode": "ZAC"}}
     result = cli._resolve_ticker_target_currency(str(db_path), "UNKNOWN.JSE", payload)
     assert result is None
 
 
-def test_resolve_ticker_target_currency_returns_none_when_unresolvable(tmp_path):
+def test_resolve_ticker_target_currency_returns_none_when_unresolvable(
+    tmp_path: Path,
+) -> None:
     """Returns None when no listing/provider-listing currency exists."""
 
     db_path = tmp_path / "resolve.db"
@@ -6611,7 +6992,9 @@ def test_resolve_ticker_target_currency_returns_none_when_unresolvable(tmp_path)
     assert result is None
 
 
-def test_report_skipped_no_currency_prints_count_and_preview(capsys):
+def test_report_skipped_no_currency_prints_count_and_preview(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     """refresh-supported-tickers surfaces skipped (no-currency) tickers on screen."""
 
     # Nothing is printed when no tickers were skipped.

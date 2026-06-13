@@ -1,5 +1,6 @@
 import hashlib
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -36,7 +37,7 @@ def _create_legacy_listings_table(conn: sqlite3.Connection) -> None:
     )
 
 
-def test_migration_updates_listings_primary_key(tmp_path):
+def test_migration_updates_listings_primary_key(tmp_path: Path) -> None:
     db_path = tmp_path / "db.sqlite"
     with sqlite3.connect(db_path) as conn:
         _create_legacy_listings_table(conn)
@@ -111,7 +112,7 @@ def test_migration_updates_listings_primary_key(tmp_path):
     assert version == 72
 
 
-def test_apply_migrations_is_idempotent(tmp_path):
+def test_apply_migrations_is_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "db.sqlite"
     with sqlite3.connect(db_path) as conn:
         _create_legacy_listings_table(conn)
@@ -123,7 +124,7 @@ def test_apply_migrations_is_idempotent(tmp_path):
     assert second == 0
 
 
-def test_migration_creates_exchange_catalog_tables(tmp_path):
+def test_migration_creates_exchange_catalog_tables(tmp_path: Path) -> None:
     db_path = tmp_path / "exchange-catalog.sqlite"
 
     first = apply_migrations(db_path)
@@ -193,7 +194,9 @@ def test_migration_creates_exchange_catalog_tables(tmp_path):
     assert fk_targets == {"exchange", "provider"}
 
 
-def test_migration_splits_supported_exchanges_into_exchange_provider(tmp_path):
+def test_migration_splits_supported_exchanges_into_exchange_provider(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "exchange-provider-backfill.sqlite"
     with sqlite3.connect(db_path) as conn:
         conn.execute(
@@ -345,7 +348,7 @@ def test_migration_splits_supported_exchanges_into_exchange_provider(tmp_path):
     ]
 
 
-def test_exchange_provider_foreign_keys_are_enforced(tmp_path):
+def test_exchange_provider_foreign_keys_are_enforced(tmp_path: Path) -> None:
     db_path = tmp_path / "exchange-provider-fk.sqlite"
     apply_migrations(db_path)
 
@@ -380,7 +383,7 @@ def test_exchange_provider_foreign_keys_are_enforced(tmp_path):
             )
 
 
-def test_migration_creates_and_seeds_providers_table(tmp_path):
+def test_migration_creates_and_seeds_providers_table(tmp_path: Path) -> None:
     db_path = tmp_path / "providers.sqlite"
 
     first = apply_migrations(db_path)
@@ -417,7 +420,9 @@ def test_migration_creates_and_seeds_providers_table(tmp_path):
     ]
 
 
-def test_migration_preserves_existing_provider_rows_when_adding_registry(tmp_path):
+def test_migration_preserves_existing_provider_rows_when_adding_registry(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "providers-backfill.sqlite"
     with sqlite3.connect(db_path) as conn:
         conn.execute(
@@ -566,7 +571,7 @@ def test_migration_preserves_existing_provider_rows_when_adding_registry(tmp_pat
     assert fx_rates_join_count == 1
 
 
-def test_providers_table_rejects_invalid_provider_codes(tmp_path):
+def test_providers_table_rejects_invalid_provider_codes(tmp_path: Path) -> None:
     db_path = tmp_path / "providers-invalid.sqlite"
     apply_migrations(db_path)
 
@@ -611,7 +616,7 @@ def test_providers_table_rejects_invalid_provider_codes(tmp_path):
             )
 
 
-def test_migration_drops_provider_status_from_version_34_db(tmp_path):
+def test_migration_drops_provider_status_from_version_34_db(tmp_path: Path) -> None:
     db_path = tmp_path / "provider-status-drop.sqlite"
     with sqlite3.connect(db_path) as conn:
         conn.execute("CREATE TABLE schema_migrations (version INTEGER NOT NULL)")
@@ -681,7 +686,7 @@ def test_migration_drops_provider_status_from_version_34_db(tmp_path):
     )
 
 
-def test_migration_creates_provider_listing_table(tmp_path):
+def test_migration_creates_provider_listing_table(tmp_path: Path) -> None:
     db_path = tmp_path / "supported-tickers.sqlite"
 
     first = apply_migrations(db_path)
@@ -715,7 +720,7 @@ def test_migration_creates_provider_listing_table(tmp_path):
     assert supported_tickers_table is None
 
 
-def test_migration_moves_primary_listing_status_to_listing(tmp_path):
+def test_migration_moves_primary_listing_status_to_listing(tmp_path: Path) -> None:
     db_path = tmp_path / "primary-listing-status.sqlite"
 
     first = apply_migrations(db_path)
@@ -738,7 +743,9 @@ def test_migration_moves_primary_listing_status_to_listing(tmp_path):
     assert status_table is None
 
 
-def test_migration_backfills_listing_primary_status_and_drops_legacy_table(tmp_path):
+def test_migration_backfills_listing_primary_status_and_drops_legacy_table(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "primary-listing-status-backfill.sqlite"
     prior_version = 37
     with sqlite3.connect(db_path) as conn:
@@ -794,7 +801,9 @@ def test_migration_backfills_listing_primary_status_and_drops_legacy_table(tmp_p
     assert status_table is None
 
 
-def test_migration_canonicalizes_listing_quote_currency_and_market_data(tmp_path):
+def test_migration_canonicalizes_listing_quote_currency_and_market_data(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "canonical-listing-currency.sqlite"
     prior_version = 38
     with sqlite3.connect(db_path) as conn:
@@ -949,7 +958,7 @@ def test_migration_canonicalizes_listing_quote_currency_and_market_data(tmp_path
     ]
 
 
-def test_migration_adds_sector_and_industry_to_securities(tmp_path):
+def test_migration_adds_sector_and_industry_to_securities(tmp_path: Path) -> None:
     db_path = tmp_path / "securities-sector-industry.sqlite"
     with sqlite3.connect(db_path) as conn:
         conn.execute(
@@ -1101,7 +1110,7 @@ def test_migration_adds_sector_and_industry_to_securities(tmp_path):
     assert row == ("AAA Corp", "AAA description", None, None, "AAA", "US")
 
 
-def test_migration_creates_market_data_fetch_state_table(tmp_path):
+def test_migration_creates_market_data_fetch_state_table(tmp_path: Path) -> None:
     db_path = tmp_path / "market-data-fetch-state.sqlite"
 
     first = apply_migrations(db_path)
@@ -1131,7 +1140,7 @@ def test_migration_creates_market_data_fetch_state_table(tmp_path):
     assert "idx_market_data_fetch_next" not in index_names
 
 
-def test_migration_creates_fundamentals_hot_path_indexes(tmp_path):
+def test_migration_creates_fundamentals_hot_path_indexes(tmp_path: Path) -> None:
     db_path = tmp_path / "fundamentals-hot-path-indexes.sqlite"
 
     apply_migrations(db_path)
@@ -1166,7 +1175,9 @@ def test_migration_creates_fundamentals_hot_path_indexes(tmp_path):
     assert raw_fk_targets == {"provider_listing"}
 
 
-def test_migration_drops_fundamentals_raw_listing_identity_columns(tmp_path):
+def test_migration_drops_fundamentals_raw_listing_identity_columns(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "fundamentals-raw-drop-listing.sqlite"
     previous_version = 36
     with sqlite3.connect(db_path) as conn:
@@ -1275,7 +1286,9 @@ def test_migration_drops_fundamentals_raw_listing_identity_columns(tmp_path):
     )
 
 
-def test_migration_drops_fundamentals_raw_currency_from_current_schema(tmp_path):
+def test_migration_drops_fundamentals_raw_currency_from_current_schema(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "fundamentals-raw-drop-currency.sqlite"
     previous_version = 36
     with sqlite3.connect(db_path) as conn:
@@ -1353,7 +1366,7 @@ def test_migration_drops_fundamentals_raw_currency_from_current_schema(tmp_path)
     )
 
 
-def test_migration_adds_metric_status_and_facts_refresh_tables(tmp_path):
+def test_migration_adds_metric_status_and_facts_refresh_tables(tmp_path: Path) -> None:
     db_path = tmp_path / "metric-status-migration.sqlite"
     with sqlite3.connect(db_path) as conn:
         # Migration 043 adds a FK from financial_facts.listing_id to
@@ -1510,7 +1523,9 @@ def test_migration_adds_metric_status_and_facts_refresh_tables(tmp_path):
     assert "idx_metric_compute_status_metric_status" not in status_index_names
 
 
-def test_migration_does_not_overwrite_existing_supported_tickers(tmp_path):
+def test_migration_does_not_overwrite_existing_supported_tickers(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "supported-tickers-backfill.sqlite"
     with sqlite3.connect(db_path) as conn:
         _create_legacy_listings_table(conn)
@@ -1628,13 +1643,13 @@ def _seed_listing(conn: sqlite3.Connection) -> int:
     return 1
 
 
-def _open_with_fk(db_path) -> sqlite3.Connection:
+def _open_with_fk(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 
-def test_migration_041_metrics_check_rejects_currency_on_ratio(tmp_path):
+def test_migration_041_metrics_check_rejects_currency_on_ratio(tmp_path: Path) -> None:
     db_path = tmp_path / "metrics-check-ratio.sqlite"
     apply_migrations(db_path)
 
@@ -1651,7 +1666,9 @@ def test_migration_041_metrics_check_rejects_currency_on_ratio(tmp_path):
             )
 
 
-def test_migration_041_metrics_check_accepts_null_currency_on_monetary(tmp_path):
+def test_migration_041_metrics_check_accepts_null_currency_on_monetary(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "metrics-check-monetary-null.sqlite"
     apply_migrations(db_path)
 
@@ -1672,7 +1689,7 @@ def test_migration_041_metrics_check_accepts_null_currency_on_monetary(tmp_path)
         assert row == ("monetary", None)
 
 
-def test_migration_041_metrics_check_rejects_unknown_unit_kind(tmp_path):
+def test_migration_041_metrics_check_rejects_unknown_unit_kind(tmp_path: Path) -> None:
     db_path = tmp_path / "metrics-check-unknown.sqlite"
     apply_migrations(db_path)
 
@@ -1689,7 +1706,7 @@ def test_migration_041_metrics_check_rejects_unknown_unit_kind(tmp_path):
             )
 
 
-def test_migration_041_metrics_fk_rejects_unknown_listing_id(tmp_path):
+def test_migration_041_metrics_fk_rejects_unknown_listing_id(tmp_path: Path) -> None:
     db_path = tmp_path / "metrics-fk-orphan.sqlite"
     apply_migrations(db_path)
 
@@ -1704,7 +1721,9 @@ def test_migration_041_metrics_fk_rejects_unknown_listing_id(tmp_path):
             )
 
 
-def test_migration_041_compute_status_fk_rejects_unknown_listing_id(tmp_path):
+def test_migration_041_compute_status_fk_rejects_unknown_listing_id(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "compute-status-fk-orphan.sqlite"
     apply_migrations(db_path)
 
@@ -1719,7 +1738,7 @@ def test_migration_041_compute_status_fk_rejects_unknown_listing_id(tmp_path):
             )
 
 
-def test_migration_041_idempotent(tmp_path):
+def test_migration_041_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "metrics-041-idempotent.sqlite"
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
@@ -1728,7 +1747,7 @@ def test_migration_041_idempotent(tmp_path):
     assert second == 0
 
 
-def test_migration_041_preserves_existing_rows(tmp_path):
+def test_migration_041_preserves_existing_rows(tmp_path: Path) -> None:
     """Seed valid rows under the pre-041 schema and confirm 041 carries them through."""
 
     db_path = tmp_path / "metrics-041-preserve.sqlite"
@@ -1783,7 +1802,7 @@ def test_migration_041_preserves_existing_rows(tmp_path):
     assert compute_rows == [("eps_ttm", "success")]
 
 
-def test_migration_041_pre_flight_orphan_aborts(tmp_path):
+def test_migration_041_pre_flight_orphan_aborts(tmp_path: Path) -> None:
     """An orphan metrics row should abort migration 041 rather than silently drop it."""
 
     db_path = tmp_path / "metrics-041-orphan-abort.sqlite"
@@ -1869,7 +1888,7 @@ def _seed_two_listings(conn: sqlite3.Connection) -> tuple[int, int]:
     return 1, 2
 
 
-def test_migration_043_pk_rejects_duplicate_after_rebuild(tmp_path):
+def test_migration_043_pk_rejects_duplicate_after_rebuild(tmp_path: Path) -> None:
     """The PK enforces uniqueness on (listing_id, concept, fiscal_period, end_date).
 
     Migration 071 dropped ``unit`` from the key, so two rows that share those
@@ -1901,7 +1920,7 @@ def test_migration_043_pk_rejects_duplicate_after_rebuild(tmp_path):
             )
 
 
-def test_migration_043_pk_no_longer_includes_accn(tmp_path):
+def test_migration_043_pk_no_longer_includes_accn(tmp_path: Path) -> None:
     """The financial_facts PK excludes accn.
 
     Migration 043 first dropped accn from the primary key; migration 073 then
@@ -1928,7 +1947,7 @@ def test_migration_043_pk_no_longer_includes_accn(tmp_path):
     assert "accn" not in column_names
 
 
-def test_migration_043_fk_rejects_unknown_listing_id(tmp_path):
+def test_migration_043_fk_rejects_unknown_listing_id(tmp_path: Path) -> None:
     """The new FK to listing(listing_id) rejects orphan rows."""
 
     db_path = tmp_path / "fin-facts-fk-orphan.sqlite"
@@ -1946,7 +1965,7 @@ def test_migration_043_fk_rejects_unknown_listing_id(tmp_path):
             )
 
 
-def test_migration_043_idempotent(tmp_path):
+def test_migration_043_idempotent(tmp_path: Path) -> None:
     """Running apply_migrations twice on a fresh DB applies once, then no-op."""
 
     db_path = tmp_path / "fin-facts-idempotent.sqlite"
@@ -1957,7 +1976,7 @@ def test_migration_043_idempotent(tmp_path):
     assert second == 0
 
 
-def test_migration_043_dedupe_keeps_filed_winner(tmp_path):
+def test_migration_043_dedupe_keeps_filed_winner(tmp_path: Path) -> None:
     """Two NULL-accn rows with the same key collapse to the row with non-NULL filed."""
 
     # Build a DB that's at version 42 (just before 043) with two duplicate
@@ -2025,7 +2044,7 @@ def test_migration_043_dedupe_keeps_filed_winner(tmp_path):
     assert rows == [(200.0, "2025-03-15")]
 
 
-def test_migration_043_pre_flight_orphan_aborts(tmp_path):
+def test_migration_043_pre_flight_orphan_aborts(tmp_path: Path) -> None:
     """An orphan financial_facts row must abort migration 043 rather than be dropped."""
 
     db_path = tmp_path / "fin-facts-043-orphan.sqlite"
@@ -2079,7 +2098,7 @@ def test_migration_043_pre_flight_orphan_aborts(tmp_path):
     assert orphan_count == 1
 
 
-def test_migration_043_preserves_unique_rows(tmp_path):
+def test_migration_043_preserves_unique_rows(tmp_path: Path) -> None:
     """Rows that don't collide must round-trip through the rebuild unchanged."""
 
     db_path = tmp_path / "fin-facts-043-preserve.sqlite"
@@ -2125,7 +2144,7 @@ def test_migration_043_preserves_unique_rows(tmp_path):
 # ----------------------------------------------------------------------
 
 
-def test_migration_044_persists_compat_views(tmp_path):
+def test_migration_044_persists_compat_views(tmp_path: Path) -> None:
     """Three legacy compat views must be in sqlite_master after apply_migrations."""
 
     db_path = tmp_path / "compat-views.sqlite"
@@ -2142,7 +2161,7 @@ def test_migration_044_persists_compat_views(tmp_path):
     assert {"providers", "securities", "exchange_provider"} <= view_names
 
 
-def test_migration_044_securities_view_returns_canonical_join(tmp_path):
+def test_migration_044_securities_view_returns_canonical_join(tmp_path: Path) -> None:
     """The securities view should expose listing+issuer+exchange in the legacy shape."""
 
     db_path = tmp_path / "compat-securities.sqlite"
@@ -2163,7 +2182,7 @@ def test_migration_044_securities_view_returns_canonical_join(tmp_path):
     assert row == (listing_id, "TEST", "US", "TEST.US", "Test Issuer")
 
 
-def test_migration_044_idempotent(tmp_path):
+def test_migration_044_idempotent(tmp_path: Path) -> None:
     """Running apply_migrations twice on a fresh DB is a no-op the second time."""
 
     db_path = tmp_path / "compat-views-idempotent.sqlite"
@@ -2179,7 +2198,7 @@ def test_migration_044_idempotent(tmp_path):
 # ----------------------------------------------------------------------
 
 
-def test_migration_045_renames_rate_text_to_rate_real(tmp_path):
+def test_migration_045_renames_rate_text_to_rate_real(tmp_path: Path) -> None:
     """After apply_migrations the fx_rates table has REAL rate, no rate_text."""
 
     db_path = tmp_path / "fx-rate-real.sqlite"
@@ -2194,7 +2213,7 @@ def test_migration_045_renames_rate_text_to_rate_real(tmp_path):
     assert "rate_text" not in column_types
 
 
-def test_migration_045_casts_existing_text_to_real(tmp_path):
+def test_migration_045_casts_existing_text_to_real(tmp_path: Path) -> None:
     """Pre-045 fx_rates rows with TEXT rate values are cast to REAL during the rebuild."""
 
     db_path = tmp_path / "fx-rate-cast.sqlite"
@@ -2255,7 +2274,7 @@ def test_migration_045_casts_existing_text_to_real(tmp_path):
     assert rows == [("2025-01-01", 1.0951), ("2025-01-02", 1.0832)]
 
 
-def test_migration_045_idempotent_on_already_renamed_schema(tmp_path):
+def test_migration_045_idempotent_on_already_renamed_schema(tmp_path: Path) -> None:
     """Running 045 twice (fresh-DB path) is a no-op the second time."""
 
     db_path = tmp_path / "fx-rate-idempotent.sqlite"
@@ -2271,7 +2290,7 @@ def test_migration_045_idempotent_on_already_renamed_schema(tmp_path):
 # ----------------------------------------------------------------------
 
 
-def test_migration_046_fk_rejects_unknown_listing_id(tmp_path):
+def test_migration_046_fk_rejects_unknown_listing_id(tmp_path: Path) -> None:
     db_path = tmp_path / "ffrs-fk-orphan.sqlite"
     apply_migrations(db_path)
 
@@ -2285,7 +2304,7 @@ def test_migration_046_fk_rejects_unknown_listing_id(tmp_path):
             )
 
 
-def test_migration_046_pre_flight_orphan_aborts(tmp_path):
+def test_migration_046_pre_flight_orphan_aborts(tmp_path: Path) -> None:
     """Existing orphan rows must abort migration 046, not be silently dropped."""
 
     db_path = tmp_path / "ffrs-046-orphan.sqlite"
@@ -2315,7 +2334,7 @@ def test_migration_046_pre_flight_orphan_aborts(tmp_path):
         apply_migrations(db_path)
 
 
-def test_migration_046_preserves_valid_rows(tmp_path):
+def test_migration_046_preserves_valid_rows(tmp_path: Path) -> None:
     db_path = tmp_path / "ffrs-046-preserve.sqlite"
     apply_migrations(db_path)
 
@@ -2346,7 +2365,7 @@ def test_migration_046_preserves_valid_rows(tmp_path):
 # ----------------------------------------------------------------------
 
 
-def test_migration_047_fk_rejects_unknown_listing_id(tmp_path):
+def test_migration_047_fk_rejects_unknown_listing_id(tmp_path: Path) -> None:
     db_path = tmp_path / "md-047-orphan.sqlite"
     apply_migrations(db_path)
 
@@ -2364,7 +2383,7 @@ def test_migration_047_fk_rejects_unknown_listing_id(tmp_path):
             )
 
 
-def test_migration_047_preserves_valid_rows(tmp_path):
+def test_migration_047_preserves_valid_rows(tmp_path: Path) -> None:
     db_path = tmp_path / "md-047-preserve.sqlite"
     apply_migrations(db_path)
 
@@ -2401,7 +2420,7 @@ def test_migration_047_preserves_valid_rows(tmp_path):
 # ----------------------------------------------------------------------
 
 
-def test_migration_048_fx_rates_fk_rejects_unknown_provider(tmp_path):
+def test_migration_048_fx_rates_fk_rejects_unknown_provider(tmp_path: Path) -> None:
     db_path = tmp_path / "fx-rates-048.sqlite"
     apply_migrations(db_path)
 
@@ -2421,7 +2440,9 @@ def test_migration_048_fx_rates_fk_rejects_unknown_provider(tmp_path):
             )
 
 
-def test_migration_049_fx_supported_pairs_fk_rejects_unknown_provider(tmp_path):
+def test_migration_049_fx_supported_pairs_fk_rejects_unknown_provider(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "fx-supported-049.sqlite"
     apply_migrations(db_path)
 
@@ -2439,7 +2460,9 @@ def test_migration_049_fx_supported_pairs_fk_rejects_unknown_provider(tmp_path):
             )
 
 
-def test_migration_050_fx_refresh_state_fk_rejects_unknown_provider(tmp_path):
+def test_migration_050_fx_refresh_state_fk_rejects_unknown_provider(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "fx-refresh-050.sqlite"
     apply_migrations(db_path)
 
@@ -2459,7 +2482,9 @@ def test_migration_050_fx_refresh_state_fk_rejects_unknown_provider(tmp_path):
 # ----------------------------------------------------------------------
 
 
-def test_migration_051_fx_supported_pairs_rejects_non_bool_is_alias(tmp_path):
+def test_migration_051_fx_supported_pairs_rejects_non_bool_is_alias(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "fx-pairs-bool-051.sqlite"
     apply_migrations(db_path)
 
@@ -2478,7 +2503,9 @@ def test_migration_051_fx_supported_pairs_rejects_non_bool_is_alias(tmp_path):
             )
 
 
-def test_migration_051_fx_supported_pairs_rejects_non_bool_is_refreshable(tmp_path):
+def test_migration_051_fx_supported_pairs_rejects_non_bool_is_refreshable(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "fx-pairs-bool2-051.sqlite"
     apply_migrations(db_path)
 
@@ -2497,7 +2524,9 @@ def test_migration_051_fx_supported_pairs_rejects_non_bool_is_refreshable(tmp_pa
             )
 
 
-def test_migration_051_fx_refresh_state_rejects_non_bool_full_history(tmp_path):
+def test_migration_051_fx_refresh_state_rejects_non_bool_full_history(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "fx-refresh-bool-051.sqlite"
     apply_migrations(db_path)
 
@@ -2512,7 +2541,9 @@ def test_migration_051_fx_refresh_state_rejects_non_bool_full_history(tmp_path):
             )
 
 
-def test_migration_051_fx_refresh_state_rejects_negative_attempts(tmp_path):
+def test_migration_051_fx_refresh_state_rejects_negative_attempts(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "fx-refresh-attempts-051.sqlite"
     apply_migrations(db_path)
 
@@ -2527,7 +2558,7 @@ def test_migration_051_fx_refresh_state_rejects_negative_attempts(tmp_path):
             )
 
 
-def test_migration_051_idempotent(tmp_path):
+def test_migration_051_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "fx-bool-checks-051.sqlite"
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
@@ -2542,7 +2573,9 @@ def test_migration_051_idempotent(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_migration_053_market_data_fetch_state_columns_are_canonical(tmp_path):
+def test_migration_053_market_data_fetch_state_columns_are_canonical(
+    tmp_path: Path,
+) -> None:
     """Fresh DBs end with the canonical fetch-state shape — no provider cols."""
 
     db_path = tmp_path / "fetch-state-053.sqlite"
@@ -2571,7 +2604,7 @@ def test_migration_053_market_data_fetch_state_columns_are_canonical(tmp_path):
     assert "idx_market_data_fetch_state_provider_symbol" not in index_names
 
 
-def test_migration_053_drops_runtime_added_columns(tmp_path):
+def test_migration_053_drops_runtime_added_columns(tmp_path: Path) -> None:
     """Simulate a DB whose runtime path re-added provider/provider_symbol;
     migration 053 must drop them back out without losing other rows."""
 
@@ -2660,7 +2693,7 @@ def test_migration_053_drops_runtime_added_columns(tmp_path):
     assert row == (1, "2026-04-01T00:00:00+00:00", "ok", 0)
 
 
-def test_migration_053_idempotent(tmp_path):
+def test_migration_053_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "fetch-state-053-idempotent.sqlite"
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
@@ -2675,7 +2708,7 @@ def test_migration_053_idempotent(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_migration_054_provider_listing_drops_provider_id(tmp_path):
+def test_migration_054_provider_listing_drops_provider_id(tmp_path: Path) -> None:
     """Fresh DB ends without provider_id on provider_listing."""
 
     db_path = tmp_path / "provider-listing-054.sqlite"
@@ -2709,7 +2742,7 @@ def test_migration_054_provider_listing_drops_provider_id(tmp_path):
     assert fk_targets == {"provider_exchange", "listing"}
 
 
-def test_migration_054_view_resolves_provider_through_exchange(tmp_path):
+def test_migration_054_view_resolves_provider_through_exchange(tmp_path: Path) -> None:
     """The rebuilt provider_listing_catalog view must still surface
     ``provider`` correctly even though provider_id was dropped from the
     base table — it should join through provider_exchange instead."""
@@ -2758,8 +2791,8 @@ def test_migration_054_view_resolves_provider_through_exchange(tmp_path):
 
 
 def test_migration_054_blocks_on_drift_between_provider_listing_and_exchange(
-    tmp_path,
-):
+    tmp_path: Path,
+) -> None:
     """If provider_listing.provider_id disagrees with
     provider_exchange.provider_id, the migration must abort to avoid
     silently losing information."""
@@ -2820,7 +2853,7 @@ def test_migration_054_blocks_on_drift_between_provider_listing_and_exchange(
         apply_migrations(db_path)
 
 
-def test_migration_054_idempotent(tmp_path):
+def test_migration_054_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "provider-listing-054-idempotent.sqlite"
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
@@ -2835,7 +2868,9 @@ def test_migration_054_idempotent(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_migration_055_metric_compute_status_rejects_unknown_status(tmp_path):
+def test_migration_055_metric_compute_status_rejects_unknown_status(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "metric-status-055.sqlite"
     apply_migrations(db_path)
 
@@ -2852,7 +2887,9 @@ def test_migration_055_metric_compute_status_rejects_unknown_status(tmp_path):
             )
 
 
-def test_migration_055_market_data_fetch_state_rejects_unknown_status(tmp_path):
+def test_migration_055_market_data_fetch_state_rejects_unknown_status(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "fetch-status-055.sqlite"
     apply_migrations(db_path)
 
@@ -2876,7 +2913,7 @@ def test_migration_055_market_data_fetch_state_rejects_unknown_status(tmp_path):
             )
 
 
-def test_migration_055_fx_refresh_state_rejects_unknown_status(tmp_path):
+def test_migration_055_fx_refresh_state_rejects_unknown_status(tmp_path: Path) -> None:
     db_path = tmp_path / "fx-refresh-status-055.sqlite"
     apply_migrations(db_path)
 
@@ -2891,7 +2928,7 @@ def test_migration_055_fx_refresh_state_rejects_unknown_status(tmp_path):
             )
 
 
-def test_migration_055_idempotent(tmp_path):
+def test_migration_055_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "status-checks-055-idempotent.sqlite"
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
@@ -2905,7 +2942,7 @@ def test_migration_055_idempotent(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_migration_056_listing_rejects_lowercase_symbol(tmp_path):
+def test_migration_056_listing_rejects_lowercase_symbol(tmp_path: Path) -> None:
     db_path = tmp_path / "listing-symbol-056.sqlite"
     apply_migrations(db_path)
 
@@ -2930,7 +2967,7 @@ def test_migration_056_listing_rejects_lowercase_symbol(tmp_path):
             )
 
 
-def test_migration_056_listing_rejects_bad_currency_form(tmp_path):
+def test_migration_056_listing_rejects_bad_currency_form(tmp_path: Path) -> None:
     db_path = tmp_path / "listing-currency-056.sqlite"
     apply_migrations(db_path)
 
@@ -2963,7 +3000,7 @@ def test_migration_056_listing_rejects_bad_currency_form(tmp_path):
             )
 
 
-def test_migration_056_listing_accepts_subunit_currencies(tmp_path):
+def test_migration_056_listing_accepts_subunit_currencies(tmp_path: Path) -> None:
     """Subunit codes (GBX, ZAC, ILA) are 3-char uppercase and must pass."""
 
     db_path = tmp_path / "listing-subunit-056.sqlite"
@@ -2994,7 +3031,7 @@ def test_migration_056_listing_accepts_subunit_currencies(tmp_path):
         assert row[0] == "GBX"
 
 
-def test_migration_056_idempotent(tmp_path):
+def test_migration_056_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "listing-checks-056-idempotent.sqlite"
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
@@ -3008,7 +3045,9 @@ def test_migration_056_idempotent(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_migration_057_provider_exchange_normalizes_unknown_currency(tmp_path):
+def test_migration_057_provider_exchange_normalizes_unknown_currency(
+    tmp_path: Path,
+) -> None:
     """A pre-057 row with currency='UNKNOWN' is rewritten to NULL."""
 
     db_path = tmp_path / "provider-exchange-unknown-057.sqlite"
@@ -3049,7 +3088,7 @@ def test_migration_057_provider_exchange_normalizes_unknown_currency(tmp_path):
     assert row[0] is None
 
 
-def test_migration_057_provider_exchange_rejects_bad_currency(tmp_path):
+def test_migration_057_provider_exchange_rejects_bad_currency(tmp_path: Path) -> None:
     db_path = tmp_path / "provider-exchange-currency-057.sqlite"
     apply_migrations(db_path)
 
@@ -3066,7 +3105,7 @@ def test_migration_057_provider_exchange_rejects_bad_currency(tmp_path):
             )
 
 
-def test_migration_057_idempotent(tmp_path):
+def test_migration_057_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "provider-exchange-057-idempotent.sqlite"
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
@@ -3080,7 +3119,7 @@ def test_migration_057_idempotent(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_migration_058_fx_rates_rejects_lowercase_currency(tmp_path):
+def test_migration_058_fx_rates_rejects_lowercase_currency(tmp_path: Path) -> None:
     db_path = tmp_path / "fx-rates-currency-058.sqlite"
     apply_migrations(db_path)
 
@@ -3100,7 +3139,7 @@ def test_migration_058_fx_rates_rejects_lowercase_currency(tmp_path):
             )
 
 
-def test_migration_058_fx_rates_rejects_unknown_source_kind(tmp_path):
+def test_migration_058_fx_rates_rejects_unknown_source_kind(tmp_path: Path) -> None:
     db_path = tmp_path / "fx-rates-source-058.sqlite"
     apply_migrations(db_path)
 
@@ -3120,7 +3159,7 @@ def test_migration_058_fx_rates_rejects_unknown_source_kind(tmp_path):
             )
 
 
-def test_migration_058_idempotent(tmp_path):
+def test_migration_058_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "fx-rates-058-idempotent.sqlite"
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
@@ -3136,7 +3175,9 @@ def test_migration_058_idempotent(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_migration_059_financial_facts_rejects_lowercase_currency(tmp_path):
+def test_migration_059_financial_facts_rejects_lowercase_currency(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "fin-facts-currency-059.sqlite"
     # Pin to v59: migration 059's financial_facts CHECKs operate on the legacy
     # ``unit`` column, which migration 071 later replaces with ``unit_kind``.
@@ -3157,7 +3198,7 @@ def test_migration_059_financial_facts_rejects_lowercase_currency(tmp_path):
             )
 
 
-def test_migration_059_financial_facts_rejects_empty_unit(tmp_path):
+def test_migration_059_financial_facts_rejects_empty_unit(tmp_path: Path) -> None:
     db_path = tmp_path / "fin-facts-unit-059.sqlite"
     # Pin to v59: this asserts migration 059's ``unit`` format CHECK, which
     # migration 071 supersedes with the ``unit_kind`` enum CHECK.
@@ -3185,7 +3226,7 @@ def test_migration_059_financial_facts_rejects_empty_unit(tmp_path):
             )
 
 
-def test_migration_059_financial_facts_accepts_composite_unit(tmp_path):
+def test_migration_059_financial_facts_accepts_composite_unit(tmp_path: Path) -> None:
     """``USD/shares`` is a valid SEC fact unit and must pass the CHECK."""
 
     db_path = tmp_path / "fin-facts-composite-unit-059.sqlite"
@@ -3211,7 +3252,7 @@ def test_migration_059_financial_facts_accepts_composite_unit(tmp_path):
     assert row == ("USD/shares", 1.5)
 
 
-def test_migration_059_idempotent(tmp_path):
+def test_migration_059_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "fin-facts-059-idempotent.sqlite"
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
@@ -3225,7 +3266,7 @@ def test_migration_059_idempotent(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_migration_060_issuer_rejects_duplicate_name_country(tmp_path):
+def test_migration_060_issuer_rejects_duplicate_name_country(tmp_path: Path) -> None:
     db_path = tmp_path / "issuer-uniq-060.sqlite"
     apply_migrations(db_path)
 
@@ -3245,7 +3286,9 @@ def test_migration_060_issuer_rejects_duplicate_name_country(tmp_path):
             )
 
 
-def test_migration_060_issuer_allows_duplicate_with_null_country(tmp_path):
+def test_migration_060_issuer_allows_duplicate_with_null_country(
+    tmp_path: Path,
+) -> None:
     """SQLite UNIQUE INDEX treats NULLs as distinct, so a name with a
     NULL country can coexist with the same name + non-NULL country."""
 
@@ -3279,7 +3322,7 @@ def test_migration_060_issuer_allows_duplicate_with_null_country(tmp_path):
     assert rows == 3
 
 
-def test_migration_060_dedups_existing_duplicates(tmp_path):
+def test_migration_060_dedups_existing_duplicates(tmp_path: Path) -> None:
     """Pre-existing (name, country) duplicates collapse to one canonical
     issuer (lowest issuer_id) with the UNIQUE index in place."""
 
@@ -3304,7 +3347,7 @@ def test_migration_060_dedups_existing_duplicates(tmp_path):
     assert rows == [(1, "Acme", "US")]
 
 
-def test_migration_060_dedup_remaps_listings(tmp_path):
+def test_migration_060_dedup_remaps_listings(tmp_path: Path) -> None:
     """Dedup must reassign listing.issuer_id from non-canonical rows to
     the canonical row before deleting the losers."""
 
@@ -3355,7 +3398,7 @@ def test_migration_060_dedup_remaps_listings(tmp_path):
     assert listing_rows == [(100, 10), (101, 10)]
 
 
-def test_migration_060_dedup_backfills_metadata(tmp_path):
+def test_migration_060_dedup_backfills_metadata(tmp_path: Path) -> None:
     """Canonical row's nullable columns (description/sector/industry) get
     filled from the first non-NULL value found in non-canonical rows.
     Existing non-NULL values on the canonical row are never overwritten.
@@ -3401,7 +3444,7 @@ def test_migration_060_dedup_backfills_metadata(tmp_path):
     )
 
 
-def test_migration_060_idempotent(tmp_path):
+def test_migration_060_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "issuer-uniq-060-idempotent.sqlite"
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
@@ -3415,7 +3458,9 @@ def test_migration_060_idempotent(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_migration_061_rejects_error_status_with_null_last_error(tmp_path):
+def test_migration_061_rejects_error_status_with_null_last_error(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "fetch-state-error-061.sqlite"
     apply_migrations(db_path)
 
@@ -3439,7 +3484,7 @@ def test_migration_061_rejects_error_status_with_null_last_error(tmp_path):
             )
 
 
-def test_migration_061_accepts_error_status_with_error_text(tmp_path):
+def test_migration_061_accepts_error_status_with_error_text(tmp_path: Path) -> None:
     db_path = tmp_path / "fetch-state-error-ok-061.sqlite"
     apply_migrations(db_path)
 
@@ -3466,7 +3511,7 @@ def test_migration_061_accepts_error_status_with_error_text(tmp_path):
     assert row == ("error", "rate limit")
 
 
-def test_migration_061_idempotent(tmp_path):
+def test_migration_061_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "fetch-state-061-idempotent.sqlite"
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
@@ -3480,7 +3525,7 @@ def test_migration_061_idempotent(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_migration_062_creates_primary_view(tmp_path):
+def test_migration_062_creates_primary_view(tmp_path: Path) -> None:
     db_path = tmp_path / "primary-view-062.sqlite"
     apply_migrations(db_path)
 
@@ -3493,7 +3538,7 @@ def test_migration_062_creates_primary_view(tmp_path):
     assert "primary_listing_status != 'secondary'" in view_def[0]
 
 
-def test_migration_062_view_excludes_secondary_listings(tmp_path):
+def test_migration_062_view_excludes_secondary_listings(tmp_path: Path) -> None:
     db_path = tmp_path / "primary-view-content-062.sqlite"
     apply_migrations(db_path)
 
@@ -3544,7 +3589,7 @@ def test_migration_062_view_excludes_secondary_listings(tmp_path):
     assert full == [10, 20, 30]
 
 
-def test_migration_062_idempotent(tmp_path):
+def test_migration_062_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "primary-view-062-idempotent.sqlite"
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
@@ -3558,7 +3603,7 @@ def test_migration_062_idempotent(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_migration_063_schema_migrations_has_pk_and_check(tmp_path):
+def test_migration_063_schema_migrations_has_pk_and_check(tmp_path: Path) -> None:
     db_path = tmp_path / "schema-mig-pk-063.sqlite"
     apply_migrations(db_path)
 
@@ -3574,7 +3619,7 @@ def test_migration_063_schema_migrations_has_pk_and_check(tmp_path):
     assert "CHECK (id = 1)" in sql
 
 
-def test_migration_063_rejects_second_row(tmp_path):
+def test_migration_063_rejects_second_row(tmp_path: Path) -> None:
     db_path = tmp_path / "schema-mig-second-row-063.sqlite"
     apply_migrations(db_path)
 
@@ -3583,7 +3628,7 @@ def test_migration_063_rejects_second_row(tmp_path):
             conn.execute("INSERT INTO schema_migrations (id, version) VALUES (2, 999)")
 
 
-def test_migration_063_rejects_id_other_than_one(tmp_path):
+def test_migration_063_rejects_id_other_than_one(tmp_path: Path) -> None:
     db_path = tmp_path / "schema-mig-bad-id-063.sqlite"
     apply_migrations(db_path)
 
@@ -3592,7 +3637,7 @@ def test_migration_063_rejects_id_other_than_one(tmp_path):
             conn.execute("UPDATE schema_migrations SET id = 99")
 
 
-def test_migration_063_preserves_version_through_rebuild(tmp_path):
+def test_migration_063_preserves_version_through_rebuild(tmp_path: Path) -> None:
     """An existing pre-063 DB at version N should land at version N
     (well, len(MIGRATIONS)) without losing the marker mid-migration."""
 
@@ -3626,7 +3671,7 @@ def test_migration_063_preserves_version_through_rebuild(tmp_path):
     assert rows == [(1, len(MIGRATIONS))]
 
 
-def test_migration_063_idempotent(tmp_path):
+def test_migration_063_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "schema-mig-063-idempotent.sqlite"
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
@@ -3640,7 +3685,7 @@ def test_migration_063_idempotent(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_migration_064_tightens_issuer_name_not_null(tmp_path):
+def test_migration_064_tightens_issuer_name_not_null(tmp_path: Path) -> None:
     db_path = tmp_path / "issuer-name-064.sqlite"
     apply_migrations(db_path)
 
@@ -3649,7 +3694,7 @@ def test_migration_064_tightens_issuer_name_not_null(tmp_path):
             conn.execute("INSERT INTO issuer (issuer_id, name) VALUES (99, NULL)")
 
 
-def test_migration_064_drops_orphan_null_name_issuers(tmp_path):
+def test_migration_064_drops_orphan_null_name_issuers(tmp_path: Path) -> None:
     """Pre-064 fixtures with NULL-name issuers + matching listings +
     stale market_data are scrubbed by the migration."""
 
@@ -3717,7 +3762,7 @@ def test_migration_064_drops_orphan_null_name_issuers(tmp_path):
     assert 1 in market_rows
 
 
-def test_migration_064_aborts_when_orphan_has_facts(tmp_path):
+def test_migration_064_aborts_when_orphan_has_facts(tmp_path: Path) -> None:
     """If an orphan listing surprisingly carries financial_facts, the
     migration should abort so the operator can investigate."""
 
@@ -3755,7 +3800,7 @@ def test_migration_064_aborts_when_orphan_has_facts(tmp_path):
         apply_migrations(db_path)
 
 
-def test_migration_064_idempotent(tmp_path):
+def test_migration_064_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "issuer-064-idempotent.sqlite"
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
@@ -3769,7 +3814,7 @@ def test_migration_064_idempotent(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_migration_065_rejects_null_fiscal_period(tmp_path):
+def test_migration_065_rejects_null_fiscal_period(tmp_path: Path) -> None:
     db_path = tmp_path / "fin-facts-fiscal-065.sqlite"
     apply_migrations(db_path)
 
@@ -3787,7 +3832,9 @@ def test_migration_065_rejects_null_fiscal_period(tmp_path):
             )
 
 
-def test_migration_065_aborts_on_pre_existing_null_fiscal_period(tmp_path):
+def test_migration_065_aborts_on_pre_existing_null_fiscal_period(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "fin-facts-null-fp-065.sqlite"
 
     conn = sqlite3.connect(db_path)
@@ -3822,7 +3869,7 @@ def test_migration_065_aborts_on_pre_existing_null_fiscal_period(tmp_path):
         apply_migrations(db_path)
 
 
-def test_migration_065_idempotent(tmp_path):
+def test_migration_065_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "fin-facts-065-idempotent.sqlite"
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
@@ -3836,7 +3883,7 @@ def test_migration_065_idempotent(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_migration_066_rejects_null_name(tmp_path):
+def test_migration_066_rejects_null_name(tmp_path: Path) -> None:
     db_path = tmp_path / "provider-exchange-null-name-066.sqlite"
     apply_migrations(db_path)
 
@@ -3853,7 +3900,7 @@ def test_migration_066_rejects_null_name(tmp_path):
             )
 
 
-def test_migration_066_rejects_null_country(tmp_path):
+def test_migration_066_rejects_null_country(tmp_path: Path) -> None:
     db_path = tmp_path / "provider-exchange-null-country-066.sqlite"
     apply_migrations(db_path)
 
@@ -3870,7 +3917,7 @@ def test_migration_066_rejects_null_country(tmp_path):
             )
 
 
-def test_migration_066_backfills_legacy_nulls(tmp_path):
+def test_migration_066_backfills_legacy_nulls(tmp_path: Path) -> None:
     """A pre-066 DB with NULL name/country rows must come out clean
     after the migration backfills sensible placeholders."""
 
@@ -3916,7 +3963,7 @@ def test_migration_066_backfills_legacy_nulls(tmp_path):
     ]
 
 
-def test_migration_066_idempotent(tmp_path):
+def test_migration_066_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "provider-exchange-066-idempotent.sqlite"
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
@@ -3961,7 +4008,7 @@ _MIGRATION_067_RETAINED_INDEXES = frozenset(
 )
 
 
-def test_migration_067_drops_unused_indexes(tmp_path):
+def test_migration_067_drops_unused_indexes(tmp_path: Path) -> None:
     db_path = tmp_path / "drop-unused-indexes-067.sqlite"
     applied = apply_migrations(db_path)
 
@@ -3988,7 +4035,7 @@ def test_migration_067_drops_unused_indexes(tmp_path):
     )
 
 
-def test_migration_067_idempotent(tmp_path):
+def test_migration_067_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "drop-unused-indexes-067-idempotent.sqlite"
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
@@ -4002,7 +4049,7 @@ def test_migration_067_idempotent(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_migration_076_drops_provider_exchange_exchange_index(tmp_path):
+def test_migration_076_drops_provider_exchange_exchange_index(tmp_path: Path) -> None:
     """The unused FK index is gone after a full apply; constraints survive.
 
     Fails on the pre-076 schema (where migrations 057/066 recreate the index)
@@ -4035,7 +4082,7 @@ def test_migration_076_drops_provider_exchange_exchange_index(tmp_path):
     } <= index_names
 
 
-def test_migration_076_idempotent(tmp_path):
+def test_migration_076_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "drop-provider-exchange-index-076-idempotent.sqlite"
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
@@ -4049,7 +4096,7 @@ def test_migration_076_idempotent(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_migration_077_drops_listing_currency_index(tmp_path):
+def test_migration_077_drops_listing_currency_index(tmp_path: Path) -> None:
     """The degenerate partial index is gone after a full apply; the UNIQUE survives.
 
     Migration 069 made ``listing.currency`` NOT NULL, so the partial predicate
@@ -4080,7 +4127,7 @@ def test_migration_077_drops_listing_currency_index(tmp_path):
     assert "sqlite_autoindex_listing_1" in index_names
 
 
-def test_migration_077_idempotent(tmp_path):
+def test_migration_077_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "drop-listing-currency-index-077-idempotent.sqlite"
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
@@ -4154,7 +4201,7 @@ def _drop_fiscal_period_check(conn: sqlite3.Connection) -> None:
     )
 
 
-def test_migration_068_check_rejects_empty_fiscal_period(tmp_path):
+def test_migration_068_check_rejects_empty_fiscal_period(tmp_path: Path) -> None:
     """Post-migration the CHECK must reject any fiscal_period='' insert."""
 
     db_path = tmp_path / "fiscal-period-check.sqlite"
@@ -4279,7 +4326,7 @@ def _seed_catalog_row(
     )
 
 
-def test_migration_068_backfills_from_updated_at(tmp_path):
+def test_migration_068_backfills_from_updated_at(tmp_path: Path) -> None:
     """Migration 068 maps empty-period rows to INSTANT/TTM and re-dates them
     from ``General.UpdatedAt`` in the cached fundamentals payload."""
 
@@ -4358,8 +4405,8 @@ def test_migration_068_backfills_from_updated_at(tmp_path):
 
 
 def test_migration_068_falls_back_to_last_fetched_at_when_updated_at_missing(
-    tmp_path,
-):
+    tmp_path: Path,
+) -> None:
     """If General.UpdatedAt is absent we fall back to DATE(last_fetched_at)."""
 
     from pyvalue.persistence.migrations import _migration_068_fiscal_period_check
@@ -4407,7 +4454,7 @@ def test_migration_068_falls_back_to_last_fetched_at_when_updated_at_missing(
         assert end_date == "2026-02-14"
 
 
-def test_migration_070_divides_subunit_prices_to_major(tmp_path):
+def test_migration_070_divides_subunit_prices_to_major(tmp_path: Path) -> None:
     """Migration 070 converts ``market_data.price`` to the major currency.
 
     Prices for listings quoted in a subunit (GBX/GBP0.01/ZAC/ILA) are divided
@@ -4463,7 +4510,9 @@ def test_migration_070_divides_subunit_prices_to_major(tmp_path):
     assert prices[5] == 22.04
 
 
-def test_migration_069_purges_currencyless_listings_and_dependents(tmp_path):
+def test_migration_069_purges_currencyless_listings_and_dependents(
+    tmp_path: Path,
+) -> None:
     """Migration 069 deletes NULL-currency listings + every dependent row, then
     makes ``listing.currency`` NOT NULL.
 
@@ -4574,7 +4623,9 @@ def test_migration_069_purges_currencyless_listings_and_dependents(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_migration_071_unit_kind_replaces_unit_with_coupled_checks(tmp_path):
+def test_migration_071_unit_kind_replaces_unit_with_coupled_checks(
+    tmp_path: Path,
+) -> None:
     """Migration 071 swaps ``financial_facts.unit`` for the ``unit_kind`` enum.
 
     The rebuilt table holds ``unit_kind`` (not ``unit``), drops it from the PK,
@@ -4637,7 +4688,9 @@ def test_migration_071_unit_kind_replaces_unit_with_coupled_checks(tmp_path):
                 )
 
 
-def test_migration_071_rebuilds_empty_and_clears_normalization_state(tmp_path):
+def test_migration_071_rebuilds_empty_and_clears_normalization_state(
+    tmp_path: Path,
+) -> None:
     """Migration 071 drops legacy ``financial_facts`` rows and clears the
     normalization state so ``normalise`` rebuilds every fact from raw."""
 
@@ -4698,7 +4751,7 @@ def test_migration_071_rebuilds_empty_and_clears_normalization_state(tmp_path):
     assert "unit_kind" in columns
 
 
-def test_migration_072_drops_market_cap_and_preserves_rows(tmp_path):
+def test_migration_072_drops_market_cap_and_preserves_rows(tmp_path: Path) -> None:
     """Migration 072 drops derived ``market_data.market_cap`` while copying every
     other column and row (market_data is not regenerated from raw)."""
 
@@ -4765,7 +4818,9 @@ def test_migration_072_drops_market_cap_and_preserves_rows(tmp_path):
     assert rerun_row_count == 1
 
 
-def test_migration_073_purges_sec_frankfurter_and_drops_dead_columns(tmp_path):
+def test_migration_073_purges_sec_frankfurter_and_drops_dead_columns(
+    tmp_path: Path,
+) -> None:
     """Migration 073 removes the SEC/Frankfurter providers and their data and
     drops the four dead SEC ``financial_facts`` columns while preserving rows."""
 
@@ -4850,7 +4905,9 @@ def test_migration_073_purges_sec_frankfurter_and_drops_dead_columns(tmp_path):
     assert apply_migrations(db_path, target_version=73) == 0
 
 
-def test_migration_074_drops_frame_and_source_provider_preserving_rows(tmp_path):
+def test_migration_074_drops_frame_and_source_provider_preserving_rows(
+    tmp_path: Path,
+) -> None:
     """Migration 074 drops the redundant ``frame`` and dead ``source_provider``
     columns from ``financial_facts`` while preserving every surviving row, the
     primary key, the listing FK, and both indexes."""
@@ -4934,7 +4991,7 @@ def test_migration_074_drops_frame_and_source_provider_preserving_rows(tmp_path)
     assert apply_migrations(db_path, target_version=74) == 0
 
 
-def test_migration_075_purges_enterprise_value_facts(tmp_path):
+def test_migration_075_purges_enterprise_value_facts(tmp_path: Path) -> None:
     """Migration 075 deletes every ``EnterpriseValue`` row from ``financial_facts``
     (EV is now always computed, never ingested) and leaves other facts intact."""
 

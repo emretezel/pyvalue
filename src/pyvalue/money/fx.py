@@ -15,7 +15,7 @@ from typing import Optional, Protocol, Sequence
 import json
 import logging
 
-import requests  # type: ignore[import-untyped]
+import requests
 
 from pyvalue.config import Config
 from pyvalue.currency import normalize_currency_code, normalize_monetary_amount

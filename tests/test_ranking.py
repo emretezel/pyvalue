@@ -3,13 +3,15 @@
 Author: Emre Tezel
 """
 
+from collections.abc import Sequence
+
 from pyvalue.screening import compute_screen_ranking
 from pyvalue.screening import RankingDefinition, RankingMetric, RankingTieBreaker
 
 
 def _ranking_definition(
-    metrics,
-    tie_breakers=(),
+    metrics: Sequence[RankingMetric],
+    tie_breakers: Sequence[RankingTieBreaker] = (),
     min_sector_peers: int = 10,
 ) -> RankingDefinition:
     return RankingDefinition(
@@ -22,7 +24,7 @@ def _ranking_definition(
     )
 
 
-def test_compute_screen_ranking_single_passer_is_neutral():
+def test_compute_screen_ranking_single_passer_is_neutral() -> None:
     ranking = _ranking_definition(
         [RankingMetric(metric_id="oey_ev_norm", weight=1.0, direction="higher")]
     )
@@ -39,7 +41,7 @@ def test_compute_screen_ranking_single_passer_is_neutral():
     assert result.scores["AAA.US"] == 50.0
 
 
-def test_compute_screen_ranking_caps_metric_before_winsorization():
+def test_compute_screen_ranking_caps_metric_before_winsorization() -> None:
     ranking = _ranking_definition(
         [
             RankingMetric(
@@ -70,7 +72,7 @@ def test_compute_screen_ranking_caps_metric_before_winsorization():
     assert result.scores["DDD.US"] == 12.5
 
 
-def test_compute_screen_ranking_uses_sector_peers_when_group_is_large_enough():
+def test_compute_screen_ranking_uses_sector_peers_when_group_is_large_enough() -> None:
     ranking = _ranking_definition(
         [RankingMetric(metric_id="roic_10y_median", weight=1.0, direction="higher")]
     )
@@ -94,7 +96,9 @@ def test_compute_screen_ranking_uses_sector_peers_when_group_is_large_enough():
     assert result.scores["T09.US"] == 95.0
 
 
-def test_compute_screen_ranking_falls_back_to_full_universe_when_sector_too_small():
+def test_compute_screen_ranking_falls_back_to_full_universe_when_sector_too_small() -> (
+    None
+):
     ranking = _ranking_definition(
         [RankingMetric(metric_id="roic_10y_median", weight=1.0, direction="higher")],
         min_sector_peers=10,
@@ -118,7 +122,7 @@ def test_compute_screen_ranking_falls_back_to_full_universe_when_sector_too_smal
     assert result.scores["T08.US"] == 77.27272727272727
 
 
-def test_compute_screen_ranking_normalizes_by_available_weight():
+def test_compute_screen_ranking_normalizes_by_available_weight() -> None:
     ranking = _ranking_definition(
         [
             RankingMetric(metric_id="metric_a", weight=0.7, direction="higher"),
@@ -140,7 +144,7 @@ def test_compute_screen_ranking_normalizes_by_available_weight():
     assert result.scores["BBB.US"] == 32.5
 
 
-def test_compute_screen_ranking_uses_configured_tie_breakers():
+def test_compute_screen_ranking_uses_configured_tie_breakers() -> None:
     ranking = _ranking_definition(
         [RankingMetric(metric_id="primary", weight=1.0, direction="higher")],
         tie_breakers=(

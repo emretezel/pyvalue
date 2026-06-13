@@ -3,6 +3,7 @@
 Author: Emre Tezel
 """
 
+from collections.abc import Sequence
 import csv
 from datetime import date, timedelta
 import io
@@ -10,7 +11,9 @@ from pathlib import Path
 
 import pytest
 
-from pyvalue.facts import TypedFactReaderMixin
+from pyvalue.currency import MetricUnitKind
+from pyvalue.facts import RegionFactsRepository
+from pyvalue.marketdata.base import PriceData
 from pyvalue.metrics import REGISTRY
 from pyvalue.metrics.accruals_ratio import AccrualsRatioMetric
 from pyvalue.metrics.base import MetricCurrencyInvariantError, metadata_for_metric
@@ -123,16 +126,25 @@ from pyvalue.metrics.utils import (
     metric_fx_service_context,
 )
 from pyvalue.metrics.working_capital import WorkingCapitalMetric
-from pyvalue.persistence.storage import FactRecord, FXRateRecord, FXRatesRepository
+from pyvalue.persistence.storage import (
+    FactRecord,
+    FXRateRecord,
+    FXRatesRepository,
+    MarketDataRepository,
+)
 
 
-class _TickerCurrencyRepo(TypedFactReaderMixin):
+class _TickerCurrencyRepo(RegionFactsRepository):
     """Base fake facts repo exposing a fixed ticker currency and share count.
 
     It plays the role the SQLite DAO plays in production -- a raw fact source --
     and inherits the kind-tagged accessors (``latest_monetary_fact`` etc.) from
-    :class:`~pyvalue.facts.TypedFactReaderMixin`, so migrated metrics read
-    ``Money`` from these fakes without any call-site wrapping.
+    :class:`~pyvalue.facts.RegionFactsRepository`, so migrated metrics read
+    ``Money`` from these fakes without any call-site wrapping. Subclassing the
+    concrete repository (rather than the sibling ``TypedFactReaderMixin``) makes
+    the fakes nominal subtypes accepted wherever ``RegionFactsRepository`` is
+    required; ``super().__init__(self)`` wires the wrapper to read its raw facts
+    back through this same object.
 
     Market cap is derived from a share-count fact x price, so this base supplies
     an ``EntityCommonStockSharesOutstanding`` count of 1.0 (a concept no other
@@ -142,16 +154,25 @@ class _TickerCurrencyRepo(TypedFactReaderMixin):
 
     _ticker_currency = "USD"
 
-    def ticker_currency(self, symbol):
+    def __init__(self) -> None:
+        super().__init__(self)
+
+    def ticker_currency(self, symbol: str) -> str | None:
         return self._ticker_currency
 
-    def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+    def facts_for_concept(
+        self,
+        symbol: str,
+        concept: str,
+        fiscal_period: str | None = None,
+        limit: int | None = None,
+    ) -> list[FactRecord]:
         # Default to no history; subclasses override to supply concept records.
         # Both latest_fact (below) and the inherited typed accessors read through
         # this single hook, mirroring the production read path.
         return []
 
-    def latest_fact(self, symbol, concept):
+    def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
         if concept == "EntityCommonStockSharesOutstanding":
             return fact(
                 symbol=symbol,
@@ -186,27 +207,45 @@ _COUNT_CONCEPTS = {
 }
 
 
-def fact(**kwargs):
+def fact(
+    *,
+    symbol: str = "AAPL.US",
+    concept: str = "",
+    fiscal_period: str = "FY",
+    end_date: str = "",
+    unit_kind: MetricUnitKind | None = None,
+    value: float = 0.0,
+    filed: str | None = None,
+    currency: str | None = None,
+) -> FactRecord:
     # Facts default to a monetary USD value; the known share-count concepts
     # default to a dimensionless ``count`` (currency=None), mirroring the real
     # schema where the scalar read boundary rejects a currency-bearing count
     # fact. Callers may still override ``unit_kind`` / ``currency`` explicitly.
-    is_count = kwargs.get("concept", "") in _COUNT_CONCEPTS
-    base = {
-        "symbol": "AAPL.US",
-        "concept": "",
-        "fiscal_period": "FY",
-        "end_date": "",
-        "unit_kind": "count" if is_count else "monetary",
-        "value": 0.0,
-        "filed": None,
-        "currency": None if is_count else "USD",
-    }
-    base.update(kwargs)
-    return FactRecord(**base)
+    #
+    # ``unit_kind`` defaults to None ("caller stayed silent") so the count-vs-
+    # monetary choice can fall back to the concept. For ``currency`` no sentinel
+    # is needed: every call that passes ``currency=None`` is a count fact (where
+    # None is already the default), so "no currency on a monetary concept" simply
+    # means "USD".
+    is_count = concept in _COUNT_CONCEPTS
+    resolved_unit_kind: MetricUnitKind = unit_kind or (
+        "count" if is_count else "monetary"
+    )
+    resolved_currency = currency if (is_count or currency is not None) else "USD"
+    return FactRecord(
+        symbol=symbol,
+        concept=concept,
+        fiscal_period=fiscal_period,
+        end_date=end_date,
+        unit_kind=resolved_unit_kind,
+        value=value,
+        filed=filed,
+        currency=resolved_currency,
+    )
 
 
-def test_filter_unique_fy_selects_annual_rows_by_fiscal_period():
+def test_filter_unique_fy_selects_annual_rows_by_fiscal_period() -> None:
     # Regression: FY selection keys on ``fiscal_period == "FY"``. The derived
     # ``frame`` tag it used to parse was dropped as redundant with
     # ``(end_date, fiscal_period)``; annual rows are kept while quarterly / TTM /
@@ -225,7 +264,7 @@ def test_filter_unique_fy_selects_annual_rows_by_fiscal_period():
     assert unique["2023-12-31"].value == 2.0
 
 
-def test_filter_unique_fy_keeps_first_row_per_end_date():
+def test_filter_unique_fy_keeps_first_row_per_end_date() -> None:
     records = [
         fact(fiscal_period="FY", end_date="2023-12-31", value=2.0),
         fact(fiscal_period="FY", end_date="2023-12-31", value=9.9),
@@ -237,7 +276,7 @@ def test_filter_unique_fy_keeps_first_row_per_end_date():
     assert unique["2023-12-31"].value == 2.0
 
 
-def test_metric_modules_do_not_use_metric_side_fx_helpers():
+def test_metric_modules_do_not_use_metric_side_fx_helpers() -> None:
     metrics_dir = Path("src/pyvalue/metrics")
     banned_tokens = (
         "fx_service_for_context",
@@ -261,7 +300,7 @@ def test_metric_modules_do_not_use_metric_side_fx_helpers():
     assert offending == []
 
 
-def test_current_ratio_metric_returns_none_for_fact_currency_mismatch():
+def test_current_ratio_metric_returns_none_for_fact_currency_mismatch() -> None:
     metric = CurrentRatioMetric()
     symbol = "AAPL.US"
     today = date.today().isoformat()
@@ -330,7 +369,7 @@ def _seed_fx_rate(
     )
 
 
-def _current_ratio_fx_repo(today: str):
+def _current_ratio_fx_repo(today: str) -> RegionFactsRepository:
     # AssetsCurrent in EUR, LiabilitiesCurrent in USD; the USD listing forces the
     # EUR input to convert before the ratio is taken.
     return _OwnerEarningsRepo(
@@ -358,7 +397,7 @@ def _current_ratio_fx_repo(today: str):
     )
 
 
-def test_current_ratio_converts_cross_currency_input_via_fx(tmp_path):
+def test_current_ratio_converts_cross_currency_input_via_fx(tmp_path: Path) -> None:
     """Phase 5b: a non-listing-currency input is FX-converted, not rejected."""
     db_path = tmp_path / "metric_fx.db"
     today = date.today().isoformat()
@@ -374,7 +413,7 @@ def test_current_ratio_converts_cross_currency_input_via_fx(tmp_path):
     assert round(result.value, 6) == 3.0
 
 
-def test_current_ratio_skips_when_fx_rate_missing():
+def test_current_ratio_skips_when_fx_rate_missing() -> None:
     """Without an available rate the cross-currency input makes the metric unavailable."""
     today = date.today().isoformat()
     repo = _current_ratio_fx_repo(today)
@@ -382,7 +421,7 @@ def test_current_ratio_skips_when_fx_rate_missing():
     assert CurrentRatioMetric().compute("AAPL.US", repo) is None
 
 
-def test_metric_fx_conversion_is_byte_reproducible(tmp_path):
+def test_metric_fx_conversion_is_byte_reproducible(tmp_path: Path) -> None:
     """Fixed inputs + a fixed FX rate yield byte-identical CSV output across runs."""
     db_path = tmp_path / "repro_fx.db"
     today = date.today().isoformat()
@@ -404,7 +443,7 @@ def test_metric_fx_conversion_is_byte_reproducible(tmp_path):
     assert run_once() == run_once()
 
 
-def test_market_capitalization_metric_uses_listing_currency_for_market_cap():
+def test_market_capitalization_metric_uses_listing_currency_for_market_cap() -> None:
     metric = MarketCapitalizationMetric()
     symbol = "AAPL.US"
 
@@ -425,14 +464,13 @@ def test_market_capitalization_metric_uses_listing_currency_for_market_cap():
     assert result.currency == "USD"
 
 
-def test_market_cap_money_uses_latest_price(tmp_path):
+def test_market_cap_money_uses_latest_price(tmp_path: Path) -> None:
     # The defining behaviour of the on-demand market cap: it multiplies the
     # latest share-count fact by the LATEST price, so the value floats with every
     # price refresh -- not the price as of the share-count date.
     from pyvalue.metrics.utils import market_cap_money
     from pyvalue.persistence.storage import (
         FinancialFactsRepository,
-        MarketDataRepository,
         SupportedTickerRepository,
     )
 
@@ -509,13 +547,13 @@ def test_market_cap_money_uses_latest_price(tmp_path):
     )
 
 
-def test_fx_rate_store_removed_from_public_api():
+def test_fx_rate_store_removed_from_public_api() -> None:
     import pyvalue.money.fx as fx
 
     assert not hasattr(fx, "FXRateStore")
 
 
-def _net_debt_quarter_dates():
+def _net_debt_quarter_dates() -> tuple[str, str, str, str]:
     today = date.today()
     return (
         (today - timedelta(days=30)).isoformat(),
@@ -526,25 +564,40 @@ def _net_debt_quarter_dates():
 
 
 def _build_net_debt_repo(
-    *, concept_records=None, latest_records=None, ticker_currency="USD"
-):
-    concept_records = concept_records or {}
-    latest_records = latest_records or {}
+    *,
+    concept_records: dict[str, list[FactRecord]] | None = None,
+    latest_records: dict[str, FactRecord] | None = None,
+    ticker_currency: str = "USD",
+) -> RegionFactsRepository:
+    resolved_concept_records = concept_records or {}
+    resolved_latest_records = latest_records or {}
 
     class DummyRepo(_GBPTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
-            return concept_records.get(concept, [])
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
+            return resolved_concept_records.get(concept, [])
 
-        def latest_fact(self, symbol, concept):
-            return latest_records.get(concept)
+        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
+            return resolved_latest_records.get(concept)
 
-        def ticker_currency(self, symbol):
+        def ticker_currency(self, symbol: str) -> str | None:
             return ticker_currency
 
     return DummyRepo()
 
 
-def _quarterly_records(concept, quarter_dates, values, *, currency="USD"):
+def _quarterly_records(
+    concept: str,
+    quarter_dates: Sequence[str],
+    values: Sequence[float],
+    *,
+    currency: str = "USD",
+) -> list[FactRecord]:
     periods = ("Q4", "Q3", "Q2", "Q1")[: len(quarter_dates)]
     return [
         fact(
@@ -559,14 +612,14 @@ def _quarterly_records(concept, quarter_dates, values, *, currency="USD"):
 
 
 def _base_ebit_da_concepts(
-    quarter_dates,
+    quarter_dates: Sequence[str],
     *,
-    ebit_values=(20.0, 20.0, 20.0, 20.0),
-    ebit_currency="USD",
-    da_values=(5.0, 5.0, 5.0, 5.0),
-    da_currency="USD",
-    da_concept="DepreciationDepletionAndAmortization",
-):
+    ebit_values: Sequence[float] = (20.0, 20.0, 20.0, 20.0),
+    ebit_currency: str = "USD",
+    da_values: Sequence[float] = (5.0, 5.0, 5.0, 5.0),
+    da_currency: str = "USD",
+    da_concept: str = "DepreciationDepletionAndAmortization",
+) -> dict[str, list[FactRecord]]:
     return {
         "OperatingIncomeLoss": _quarterly_records(
             "OperatingIncomeLoss",
@@ -583,7 +636,7 @@ def _base_ebit_da_concepts(
     }
 
 
-def _default_net_debt_latest_records(q4):
+def _default_net_debt_latest_records(q4: str) -> dict[str, FactRecord]:
     return {
         "ShortTermDebt": fact(
             concept="ShortTermDebt",
@@ -606,7 +659,9 @@ def _default_net_debt_latest_records(q4):
     }
 
 
-def _base_debt_paydown_concepts(quarter_dates):
+def _base_debt_paydown_concepts(
+    quarter_dates: Sequence[str],
+) -> dict[str, list[FactRecord]]:
     return {
         "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
             "NetCashProvidedByUsedInOperatingActivities",
@@ -621,7 +676,7 @@ def _base_debt_paydown_concepts(quarter_dates):
     }
 
 
-def _default_debt_paydown_latest_records(q4):
+def _default_debt_paydown_latest_records(q4: str) -> dict[str, FactRecord]:
     return {
         "ShortTermDebt": fact(
             concept="ShortTermDebt",
@@ -639,46 +694,74 @@ def _default_debt_paydown_latest_records(q4):
 
 
 def _build_fcf_debt_repo(
-    *, concept_records=None, latest_records=None, ticker_currency="USD"
-):
-    concept_records = concept_records or {}
-    latest_records = latest_records or {}
+    *,
+    concept_records: dict[str, list[FactRecord]] | None = None,
+    latest_records: dict[str, FactRecord] | None = None,
+    ticker_currency: str = "USD",
+) -> RegionFactsRepository:
+    resolved_concept_records = concept_records or {}
+    resolved_latest_records = latest_records or {}
 
     class DummyRepo(_GBPTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
-            return concept_records.get(concept, [])
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
+            return resolved_concept_records.get(concept, [])
 
-        def latest_fact(self, symbol, concept):
-            return latest_records.get(concept)
+        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
+            return resolved_latest_records.get(concept)
 
-        def ticker_currency(self, symbol):
+        def ticker_currency(self, symbol: str) -> str | None:
             return ticker_currency
 
     return DummyRepo()
 
 
-def _build_ic_repo(*, concept_records=None, ticker_currency="USD"):
-    concept_records = concept_records or {}
+def _build_ic_repo(
+    *,
+    concept_records: dict[str, list[FactRecord]] | None = None,
+    ticker_currency: str = "USD",
+) -> RegionFactsRepository:
+    resolved_concept_records = concept_records or {}
 
     class DummyRepo(_GBPTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
-            return concept_records.get(concept, [])
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
+            return resolved_concept_records.get(concept, [])
 
-        def ticker_currency(self, symbol):
+        def ticker_currency(self, symbol: str) -> str | None:
             return ticker_currency
 
     return DummyRepo()
 
 
 def _build_metric_repo(
-    *, concept_records=None, latest_records=None, ticker_currency="USD"
-):
-    concept_records = concept_records or {}
-    latest_records = latest_records or {}
+    *,
+    concept_records: dict[str, list[FactRecord]] | None = None,
+    latest_records: dict[str, FactRecord] | None = None,
+    ticker_currency: str = "USD",
+) -> RegionFactsRepository:
+    resolved_concept_records = concept_records or {}
+    resolved_latest_records = latest_records or {}
 
     class DummyRepo(_GBPTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
-            records = concept_records.get(concept, [])
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
+            records = resolved_concept_records.get(concept, [])
             if fiscal_period is None:
                 return records
             return [
@@ -687,23 +770,23 @@ def _build_metric_repo(
                 if (record.fiscal_period or "").upper() == fiscal_period.upper()
             ]
 
-        def latest_fact(self, symbol, concept):
-            if concept in latest_records:
-                return latest_records[concept]
-            records = concept_records.get(concept, [])
+        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
+            if concept in resolved_latest_records:
+                return resolved_latest_records[concept]
+            records = resolved_concept_records.get(concept, [])
             if records:
                 return records[0]
             # Defer to the base for the Entity-shares count that market_cap_money
             # reads (so market-cap-backed metrics resolve a share count here too).
             return super().latest_fact(symbol, concept)
 
-        def ticker_currency(self, symbol):
+        def ticker_currency(self, symbol: str) -> str | None:
             return ticker_currency
 
     return DummyRepo()
 
 
-def _roic_dates():
+def _roic_dates() -> dict[str, str]:
     today = date.today()
     return {
         "q4": (today - timedelta(days=20)).isoformat(),
@@ -718,20 +801,20 @@ def _roic_dates():
 
 def _base_roic_concepts(
     *,
-    ebit_currency="USD",
-    tax_currency="USD",
-    pretax_currency="USD",
-    avg_currency="USD",
-    include_ttm_tax=True,
-    include_ttm_pretax=True,
-    include_fy_tax_proxy=True,
-    include_avg_ic=True,
-    quarterly_ebit_values=(100.0, 100.0, 100.0, 100.0),
-    quarterly_tax_values=(25.0, 25.0, 25.0, 25.0),
-    quarterly_pretax_values=(125.0, 125.0, 125.0, 125.0),
-    avg_latest=(60.0, 140.0, 500.0, 100.0),
-    avg_prior=(50.0, 100.0, 450.0, 90.0),
-):
+    ebit_currency: str = "USD",
+    tax_currency: str = "USD",
+    pretax_currency: str = "USD",
+    avg_currency: str = "USD",
+    include_ttm_tax: bool = True,
+    include_ttm_pretax: bool = True,
+    include_fy_tax_proxy: bool = True,
+    include_avg_ic: bool = True,
+    quarterly_ebit_values: Sequence[float] = (100.0, 100.0, 100.0, 100.0),
+    quarterly_tax_values: Sequence[float] = (25.0, 25.0, 25.0, 25.0),
+    quarterly_pretax_values: Sequence[float] = (125.0, 125.0, 125.0, 125.0),
+    avg_latest: tuple[float, float, float, float] = (60.0, 140.0, 500.0, 100.0),
+    avg_prior: tuple[float, float, float, float] = (50.0, 100.0, 450.0, 90.0),
+) -> dict[str, list[FactRecord]]:
     dates = _roic_dates()
     q_dates = [dates["q4"], dates["q3"], dates["q2"], dates["q1"]]
     concepts = {
@@ -890,16 +973,16 @@ def _base_roic_concepts(
 
 def _base_roic_10y_concepts(
     *,
-    latest_year=None,
-    ebit_by_year=None,
-    tax_by_year=None,
-    pretax_by_year=None,
-    ic_short_by_year=None,
-    ic_long_by_year=None,
-    ic_equity_by_year=None,
-    ic_cash_by_year=None,
-    currency_by_year=None,
-):
+    latest_year: int | None = None,
+    ebit_by_year: dict[int, float] | None = None,
+    tax_by_year: dict[int, float] | None = None,
+    pretax_by_year: dict[int, float] | None = None,
+    ic_short_by_year: dict[int, float] | None = None,
+    ic_long_by_year: dict[int, float] | None = None,
+    ic_equity_by_year: dict[int, float] | None = None,
+    ic_cash_by_year: dict[int, float] | None = None,
+    currency_by_year: dict[int, str] | None = None,
+) -> dict[str, list[FactRecord]]:
     if latest_year is None:
         latest_year = date.today().year - 1
 
@@ -939,7 +1022,7 @@ def _base_roic_10y_concepts(
     if currency_by_year is None:
         currency_by_year = {}
 
-    concept_records = {
+    concept_records: dict[str, list[FactRecord]] = {
         "OperatingIncomeLoss": [],
         "IncomeTaxExpense": [],
         "IncomeBeforeIncomeTaxes": [],
@@ -1030,7 +1113,9 @@ def _base_roic_10y_concepts(
     return concept_records
 
 
-def _iroic_short_debt_ramp(latest_year, *, base=100.0, step=10.0):
+def _iroic_short_debt_ramp(
+    latest_year: int, *, base: float = 100.0, step: float = 10.0
+) -> dict[int, float]:
     return {
         year: base + (year - (latest_year - 10)) * step
         for year in range(latest_year - 10, latest_year + 1)
@@ -1039,12 +1124,12 @@ def _iroic_short_debt_ramp(latest_year, *, base=100.0, step=10.0):
 
 def _base_gm_10y_concepts(
     *,
-    latest_year=None,
-    revenue_by_year=None,
-    gross_profit_by_year=None,
-    cost_of_revenue_by_year=None,
-    currency_by_year=None,
-):
+    latest_year: int | None = None,
+    revenue_by_year: dict[int, float] | None = None,
+    gross_profit_by_year: dict[int, float] | None = None,
+    cost_of_revenue_by_year: dict[int, float] | None = None,
+    currency_by_year: dict[int, str] | None = None,
+) -> dict[str, list[FactRecord]]:
     if latest_year is None:
         latest_year = date.today().year - 1
     years = list(range(latest_year - 9, latest_year + 1))
@@ -1066,7 +1151,7 @@ def _base_gm_10y_concepts(
     if currency_by_year is None:
         currency_by_year = {}
 
-    concepts = {
+    concepts: dict[str, list[FactRecord]] = {
         "Revenues": [],
         "GrossProfit": [],
         "CostOfRevenue": [],
@@ -1112,11 +1197,11 @@ def _base_gm_10y_concepts(
 
 def _base_opm_10y_concepts(
     *,
-    latest_year=None,
-    revenue_by_year=None,
-    operating_income_by_year=None,
-    currency_by_year=None,
-):
+    latest_year: int | None = None,
+    revenue_by_year: dict[int, float] | None = None,
+    operating_income_by_year: dict[int, float] | None = None,
+    currency_by_year: dict[int, str] | None = None,
+) -> dict[str, list[FactRecord]]:
     if latest_year is None:
         latest_year = date.today().year - 1
     years = list(range(latest_year - 9, latest_year + 1))
@@ -1132,7 +1217,7 @@ def _base_opm_10y_concepts(
     if currency_by_year is None:
         currency_by_year = {}
 
-    concepts = {
+    concepts: dict[str, list[FactRecord]] = {
         "Revenues": [],
         "OperatingIncomeLoss": [],
     }
@@ -1164,12 +1249,12 @@ def _base_opm_10y_concepts(
     return concepts
 
 
-def test_working_capital_metric_computes_difference():
+def test_working_capital_metric_computes_difference() -> None:
     metric = WorkingCapitalMetric()
     recent = (date.today() - timedelta(days=10)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def latest_fact(self, symbol, concept):
+        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
             if concept == "AssetsCurrent":
                 return fact(
                     symbol=symbol, concept=concept, end_date=recent, value=200.0
@@ -1184,12 +1269,12 @@ def test_working_capital_metric_computes_difference():
     assert result.value == 150.0
 
 
-def test_current_ratio_metric():
+def test_current_ratio_metric() -> None:
     metric = CurrentRatioMetric()
     recent = (date.today() - timedelta(days=10)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def latest_fact(self, symbol, concept):
+        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
             if concept == "AssetsCurrent":
                 return fact(
                     symbol=symbol, concept=concept, end_date=recent, value=400.0
@@ -1206,12 +1291,18 @@ def test_current_ratio_metric():
     assert result.value == 2.0
 
 
-def test_eps_streak_counts_consecutive_positive_years():
+def test_eps_streak_counts_consecutive_positive_years() -> None:
     metric = EPSStreakMetric()
     recent = (date.today() - timedelta(days=30)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "EarningsPerShare":
                 return [
                     fact(
@@ -1241,7 +1332,7 @@ def test_eps_streak_counts_consecutive_positive_years():
                 ]
             return []
 
-        def latest_fact(self, symbol, concept):
+        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
             return fact(symbol=symbol, concept=concept, end_date=recent, value=2.0)
 
     repo = DummyRepo()
@@ -1251,12 +1342,18 @@ def test_eps_streak_counts_consecutive_positive_years():
     assert result.as_of == recent
 
 
-def test_graham_eps_cagr_metric():
+def test_graham_eps_cagr_metric() -> None:
     metric = GrahamEPSCAGRMetric()
     recent = (date.today() - timedelta(days=15)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "EarningsPerShare":
                 records = [
                     fact(
@@ -1280,7 +1377,7 @@ def test_graham_eps_cagr_metric():
                 return records
             return []
 
-        def latest_fact(self, symbol, concept):
+        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
             return fact(symbol=symbol, concept=concept, end_date=recent, value=2.0)
 
     repo = DummyRepo()
@@ -1288,12 +1385,12 @@ def test_graham_eps_cagr_metric():
     assert result is not None
 
 
-def test_graham_multiplier_metric():
+def test_graham_multiplier_metric() -> None:
     metric = GrahamMultiplierMetric()
     recent = (date.today() - timedelta(days=20)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def __init__(self):
+        def __init__(self) -> None:
             self.values = {
                 "StockholdersEquity": 1000,
                 "CommonStockSharesOutstanding": 100,
@@ -1301,7 +1398,13 @@ def test_graham_multiplier_metric():
                 "IntangibleAssetsNetExcludingGoodwill": 25,
             }
 
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "EarningsPerShare":
                 return [
                     fact(
@@ -1335,25 +1438,26 @@ def test_graham_multiplier_metric():
                 ]
             return []
 
-        def latest_fact(self, symbol, concept):
+        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
             value = self.values.get(concept)
             if value is None:
                 return None
             return fact(symbol=symbol, concept=concept, end_date=recent, value=value)
 
-        def ticker_currency(self, symbol):
+        def ticker_currency(self, symbol: str) -> str | None:
             return "USD"
 
-    class DummyMarketRepo:
-        def latest_snapshot(self, symbol):
-            class Snapshot:
-                price = 150.0
-                as_of = recent
-                currency = "USD"
+    class DummyMarketRepo(MarketDataRepository):
+        # Fake market repo: a valid nominal MarketDataRepository subtype whose
+        # __init__ deliberately skips super().__init__ so no SQLite DB is opened;
+        # it only ever serves a fixed in-memory snapshot.
+        def __init__(self) -> None:
+            pass
 
-            return Snapshot()
+        def latest_snapshot(self, symbol: str) -> PriceData | None:
+            return PriceData(symbol=symbol, price=150.0, as_of=recent, currency="USD")
 
-        def ticker_currency(self, symbol):
+        def ticker_currency(self, symbol: str) -> str | None:
             return "USD"
 
     repo = DummyRepo()
@@ -1363,12 +1467,12 @@ def test_graham_multiplier_metric():
     assert result.value > 0
 
 
-def test_graham_multiplier_falls_back_to_fy_eps():
+def test_graham_multiplier_falls_back_to_fy_eps() -> None:
     metric = GrahamMultiplierMetric()
     recent = (date.today() - timedelta(days=20)).isoformat()
 
     class DummyRepo(_GBPTickerCurrencyRepo):
-        def __init__(self):
+        def __init__(self) -> None:
             self.values = {
                 "StockholdersEquity": 1000,
                 "CommonStockSharesOutstanding": 100,
@@ -1376,7 +1480,13 @@ def test_graham_multiplier_falls_back_to_fy_eps():
                 "IntangibleAssetsNetExcludingGoodwill": 25,
             }
 
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "EarningsPerShare" and fiscal_period == "FY":
                 return [
                     fact(
@@ -1389,25 +1499,26 @@ def test_graham_multiplier_falls_back_to_fy_eps():
                 ]
             return []
 
-        def latest_fact(self, symbol, concept):
+        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
             value = self.values.get(concept)
             if value is None:
                 return None
             return fact(symbol=symbol, concept=concept, end_date=recent, value=value)
 
-        def ticker_currency(self, symbol):
+        def ticker_currency(self, symbol: str) -> str | None:
             return "USD"
 
-    class DummyMarketRepo:
-        def latest_snapshot(self, symbol):
-            class Snapshot:
-                price = 150.0
-                as_of = recent
-                currency = "USD"
+    class DummyMarketRepo(MarketDataRepository):
+        # Fake market repo: a valid nominal MarketDataRepository subtype whose
+        # __init__ deliberately skips super().__init__ so no SQLite DB is opened;
+        # it only ever serves a fixed in-memory snapshot.
+        def __init__(self) -> None:
+            pass
 
-            return Snapshot()
+        def latest_snapshot(self, symbol: str) -> PriceData | None:
+            return PriceData(symbol=symbol, price=150.0, as_of=recent, currency="USD")
 
-        def ticker_currency(self, symbol):
+        def ticker_currency(self, symbol: str) -> str | None:
             return "USD"
 
     repo = DummyRepo()
@@ -1416,7 +1527,7 @@ def test_graham_multiplier_falls_back_to_fy_eps():
     assert result is not None
 
 
-def test_net_debt_to_ebitda_metric():
+def test_net_debt_to_ebitda_metric() -> None:
     metric = NetDebtToEBITDAMetric()
     quarter_dates = _net_debt_quarter_dates()
     q4 = quarter_dates[0]
@@ -1429,7 +1540,7 @@ def test_net_debt_to_ebitda_metric():
     assert result.value == 0.8
 
 
-def test_net_debt_to_ebitda_uses_da_fallback_per_quarter():
+def test_net_debt_to_ebitda_uses_da_fallback_per_quarter() -> None:
     metric = NetDebtToEBITDAMetric()
     quarter_dates = _net_debt_quarter_dates()
     q4 = quarter_dates[0]
@@ -1449,7 +1560,7 @@ def test_net_debt_to_ebitda_uses_da_fallback_per_quarter():
     assert result.value == 0.8
 
 
-def test_net_debt_to_ebitda_requires_four_quarters_of_ebit():
+def test_net_debt_to_ebitda_requires_four_quarters_of_ebit() -> None:
     metric = NetDebtToEBITDAMetric()
     quarter_dates = _net_debt_quarter_dates()
     concept_records = _base_ebit_da_concepts(quarter_dates)
@@ -1462,7 +1573,7 @@ def test_net_debt_to_ebitda_requires_four_quarters_of_ebit():
     assert result is None
 
 
-def test_debt_paydown_years_metric():
+def test_debt_paydown_years_metric() -> None:
     metric = DebtPaydownYearsMetric()
     quarter_dates = _net_debt_quarter_dates()
     q4 = quarter_dates[0]
@@ -1475,7 +1586,7 @@ def test_debt_paydown_years_metric():
     assert result.value == 1.0
 
 
-def test_fcf_to_debt_metric():
+def test_fcf_to_debt_metric() -> None:
     metric = FCFToDebtMetric()
     quarter_dates = _net_debt_quarter_dates()
     q4 = quarter_dates[0]
@@ -1488,7 +1599,7 @@ def test_fcf_to_debt_metric():
     assert result.value == 1.0
 
 
-def test_debt_paydown_years_uses_total_debt_fallback():
+def test_debt_paydown_years_uses_total_debt_fallback() -> None:
     metric = DebtPaydownYearsMetric()
     quarter_dates = _net_debt_quarter_dates()
     q4 = quarter_dates[0]
@@ -1515,7 +1626,7 @@ def test_debt_paydown_years_uses_total_debt_fallback():
     assert result.value == 1.0
 
 
-def test_debt_paydown_years_uses_one_side_debt_fallback():
+def test_debt_paydown_years_uses_one_side_debt_fallback() -> None:
     metric = DebtPaydownYearsMetric()
     quarter_dates = _net_debt_quarter_dates()
     q4 = quarter_dates[0]
@@ -1536,12 +1647,12 @@ def test_debt_paydown_years_uses_one_side_debt_fallback():
     assert result.value == 0.75
 
 
-def test_short_term_debt_share_metric():
+def test_short_term_debt_share_metric() -> None:
     metric = ShortTermDebtShareMetric()
     recent = (date.today() - timedelta(days=10)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def latest_fact(self, symbol, concept):
+        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
             if concept == "ShortTermDebt":
                 return fact(
                     symbol=symbol,
@@ -1564,12 +1675,12 @@ def test_short_term_debt_share_metric():
     assert result.value == 0.25
 
 
-def test_short_term_debt_share_uses_total_debt_fallback_when_long_missing():
+def test_short_term_debt_share_uses_total_debt_fallback_when_long_missing() -> None:
     metric = ShortTermDebtShareMetric()
     recent = (date.today() - timedelta(days=10)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def latest_fact(self, symbol, concept):
+        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
             if concept == "ShortTermDebt":
                 return fact(
                     symbol=symbol,
@@ -1596,12 +1707,12 @@ def test_short_term_debt_share_uses_total_debt_fallback_when_long_missing():
     assert result.value == 0.25
 
 
-def test_short_term_debt_share_requires_short_term_debt():
+def test_short_term_debt_share_requires_short_term_debt() -> None:
     metric = ShortTermDebtShareMetric()
     recent = (date.today() - timedelta(days=10)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def latest_fact(self, symbol, concept):
+        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
             if concept == "LongTermDebt":
                 return fact(
                     symbol=symbol,
@@ -1625,12 +1736,12 @@ def test_short_term_debt_share_requires_short_term_debt():
     assert result is None
 
 
-def test_short_term_debt_share_skips_non_positive_total():
+def test_short_term_debt_share_skips_non_positive_total() -> None:
     metric = ShortTermDebtShareMetric()
     recent = (date.today() - timedelta(days=10)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def latest_fact(self, symbol, concept):
+        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
             if concept == "ShortTermDebt":
                 return fact(
                     symbol=symbol,
@@ -1652,12 +1763,12 @@ def test_short_term_debt_share_skips_non_positive_total():
     assert result is None
 
 
-def test_short_term_debt_share_skips_ratio_out_of_bounds():
+def test_short_term_debt_share_skips_ratio_out_of_bounds() -> None:
     metric = ShortTermDebtShareMetric()
     recent = (date.today() - timedelta(days=10)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def latest_fact(self, symbol, concept):
+        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
             if concept == "ShortTermDebt":
                 return fact(
                     symbol=symbol,
@@ -1681,12 +1792,12 @@ def test_short_term_debt_share_skips_ratio_out_of_bounds():
     assert result is None
 
 
-def test_short_term_debt_share_skips_currency_mismatch():
+def test_short_term_debt_share_skips_currency_mismatch() -> None:
     metric = ShortTermDebtShareMetric()
     recent = (date.today() - timedelta(days=10)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def latest_fact(self, symbol, concept):
+        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
             if concept == "ShortTermDebt":
                 return fact(
                     symbol=symbol,
@@ -1712,7 +1823,7 @@ def test_short_term_debt_share_skips_currency_mismatch():
     assert result is None
 
 
-def test_ic_mqr_metric():
+def test_ic_mqr_metric() -> None:
     metric = ICMostRecentQuarterMetric()
     q4 = (date.today() - timedelta(days=20)).isoformat()
     concept_records = {
@@ -1759,7 +1870,7 @@ def test_ic_mqr_metric():
     assert result.value == 600.0
 
 
-def test_ic_mqr_uses_total_debt_fallback_when_long_missing():
+def test_ic_mqr_uses_total_debt_fallback_when_long_missing() -> None:
     metric = ICMostRecentQuarterMetric()
     q4 = (date.today() - timedelta(days=20)).isoformat()
     concept_records = {
@@ -1806,7 +1917,7 @@ def test_ic_mqr_uses_total_debt_fallback_when_long_missing():
     assert result.value == 660.0
 
 
-def test_ic_mqr_uses_one_side_debt_fallback():
+def test_ic_mqr_uses_one_side_debt_fallback() -> None:
     metric = ICMostRecentQuarterMetric()
     q4 = (date.today() - timedelta(days=20)).isoformat()
     concept_records = {
@@ -1844,7 +1955,7 @@ def test_ic_mqr_uses_one_side_debt_fallback():
     assert result.value == 580.0
 
 
-def test_ic_mqr_uses_cash_fallback_when_primary_missing():
+def test_ic_mqr_uses_cash_fallback_when_primary_missing() -> None:
     metric = ICMostRecentQuarterMetric()
     q4 = (date.today() - timedelta(days=20)).isoformat()
     concept_records = {
@@ -1891,7 +2002,7 @@ def test_ic_mqr_uses_cash_fallback_when_primary_missing():
     assert result.value == 580.0
 
 
-def test_ic_mqr_returns_none_when_missing_required_inputs():
+def test_ic_mqr_returns_none_when_missing_required_inputs() -> None:
     metric = ICMostRecentQuarterMetric()
     q4 = (date.today() - timedelta(days=20)).isoformat()
     concept_records = {
@@ -1928,7 +2039,7 @@ def test_ic_mqr_returns_none_when_missing_required_inputs():
     assert result is None
 
 
-def test_ic_mqr_returns_none_on_currency_mismatch():
+def test_ic_mqr_returns_none_on_currency_mismatch() -> None:
     metric = ICMostRecentQuarterMetric()
     q4 = (date.today() - timedelta(days=20)).isoformat()
     concept_records = {
@@ -1974,7 +2085,7 @@ def test_ic_mqr_returns_none_on_currency_mismatch():
     assert result is None
 
 
-def test_ic_mqr_emits_signed_negative_value():
+def test_ic_mqr_emits_signed_negative_value() -> None:
     metric = ICMostRecentQuarterMetric()
     q4 = (date.today() - timedelta(days=20)).isoformat()
     concept_records = {
@@ -2021,7 +2132,7 @@ def test_ic_mqr_emits_signed_negative_value():
     assert result.value == -100.0
 
 
-def test_ic_mqr_returns_none_when_latest_quarter_is_stale():
+def test_ic_mqr_returns_none_when_latest_quarter_is_stale() -> None:
     metric = ICMostRecentQuarterMetric()
     stale_q4 = (date.today() - timedelta(days=500)).isoformat()
     concept_records = {
@@ -2067,7 +2178,7 @@ def test_ic_mqr_returns_none_when_latest_quarter_is_stale():
     assert result is None
 
 
-def test_ic_fy_metric():
+def test_ic_fy_metric() -> None:
     metric = ICFYMetric()
     fy = (date.today() - timedelta(days=30)).isoformat()
     concept_records = {
@@ -2114,7 +2225,7 @@ def test_ic_fy_metric():
     assert result.value == 1100.0
 
 
-def test_ic_fy_returns_none_when_latest_fy_is_stale():
+def test_ic_fy_returns_none_when_latest_fy_is_stale() -> None:
     metric = ICFYMetric()
     stale_fy = (date.today() - timedelta(days=500)).isoformat()
     concept_records = {
@@ -2160,7 +2271,7 @@ def test_ic_fy_returns_none_when_latest_fy_is_stale():
     assert result is None
 
 
-def test_avg_ic_uses_same_quarter_yoy_when_available():
+def test_avg_ic_uses_same_quarter_yoy_when_available() -> None:
     metric = AvgICMetric()
     q4 = (date.today() - timedelta(days=20)).isoformat()
     q4_prev = (date.today() - timedelta(days=380)).isoformat()
@@ -2237,7 +2348,7 @@ def test_avg_ic_uses_same_quarter_yoy_when_available():
     assert result.as_of == q4
 
 
-def test_avg_ic_falls_back_to_fy_when_quarterly_pair_missing():
+def test_avg_ic_falls_back_to_fy_when_quarterly_pair_missing() -> None:
     metric = AvgICMetric()
     q4 = (date.today() - timedelta(days=20)).isoformat()
     fy_latest = (date.today() - timedelta(days=45)).isoformat()
@@ -2336,7 +2447,7 @@ def test_avg_ic_falls_back_to_fy_when_quarterly_pair_missing():
     assert result.as_of == fy_latest
 
 
-def test_avg_ic_requires_strict_prior_year_for_fy_fallback():
+def test_avg_ic_requires_strict_prior_year_for_fy_fallback() -> None:
     metric = AvgICMetric()
     q4 = (date.today() - timedelta(days=20)).isoformat()
     fy_latest = (date.today() - timedelta(days=45)).isoformat()
@@ -2433,7 +2544,7 @@ def test_avg_ic_requires_strict_prior_year_for_fy_fallback():
     assert result is None
 
 
-def test_avg_ic_returns_none_when_no_quarterly_or_fy_pairs():
+def test_avg_ic_returns_none_when_no_quarterly_or_fy_pairs() -> None:
     metric = AvgICMetric()
     q4 = (date.today() - timedelta(days=20)).isoformat()
     concept_records = {
@@ -2470,7 +2581,7 @@ def test_avg_ic_returns_none_when_no_quarterly_or_fy_pairs():
     assert result is None
 
 
-def test_avg_ic_returns_none_on_cross_point_currency_mismatch():
+def test_avg_ic_returns_none_on_cross_point_currency_mismatch() -> None:
     metric = AvgICMetric()
     q4 = (date.today() - timedelta(days=20)).isoformat()
     q4_prev = (date.today() - timedelta(days=380)).isoformat()
@@ -2545,7 +2656,7 @@ def test_avg_ic_returns_none_on_cross_point_currency_mismatch():
     assert result is None
 
 
-def test_return_on_invested_capital_metric():
+def test_return_on_invested_capital_metric() -> None:
     metric = ReturnOnInvestedCapitalMetric()
     today = date.today()
     q4 = (today - timedelta(days=30)).isoformat()
@@ -2554,7 +2665,13 @@ def test_return_on_invested_capital_metric():
     q1 = (today - timedelta(days=300)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "OperatingIncomeLoss":
                 return [
                     fact(
@@ -2724,7 +2841,7 @@ def test_return_on_invested_capital_metric():
     assert result.value == 0.5
 
 
-def test_return_on_invested_capital_uses_fallback_tax_rate():
+def test_return_on_invested_capital_uses_fallback_tax_rate() -> None:
     metric = ReturnOnInvestedCapitalMetric()
     today = date.today()
     q4 = (today - timedelta(days=30)).isoformat()
@@ -2733,7 +2850,13 @@ def test_return_on_invested_capital_uses_fallback_tax_rate():
     q1 = (today - timedelta(days=300)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "OperatingIncomeLoss":
                 return [
                     fact(
@@ -2841,7 +2964,7 @@ def test_return_on_invested_capital_uses_fallback_tax_rate():
     assert round(result.value, 4) == round(316.0 / 640.0, 4)
 
 
-def test_roic_ttm_metric():
+def test_roic_ttm_metric() -> None:
     metric = RoicTTMMetric()
     repo = _build_ic_repo(concept_records=_base_roic_concepts())
     result = metric.compute("AAPL.US", repo)
@@ -2849,7 +2972,7 @@ def test_roic_ttm_metric():
     assert round(result.value, 6) == round(320.0 / 555.0, 6)
 
 
-def test_roic_ttm_uses_fy_tax_proxy_when_ttm_rate_invalid():
+def test_roic_ttm_uses_fy_tax_proxy_when_ttm_rate_invalid() -> None:
     metric = RoicTTMMetric()
     repo = _build_ic_repo(
         concept_records=_base_roic_concepts(
@@ -2861,7 +2984,7 @@ def test_roic_ttm_uses_fy_tax_proxy_when_ttm_rate_invalid():
     assert round(result.value, 6) == round(280.0 / 555.0, 6)
 
 
-def test_roic_ttm_uses_default_tax_rate_when_no_valid_tax_inputs():
+def test_roic_ttm_uses_default_tax_rate_when_no_valid_tax_inputs() -> None:
     metric = RoicTTMMetric()
     repo = _build_ic_repo(
         concept_records=_base_roic_concepts(
@@ -2875,7 +2998,7 @@ def test_roic_ttm_uses_default_tax_rate_when_no_valid_tax_inputs():
     assert round(result.value, 6) == round(316.0 / 555.0, 6)
 
 
-def test_roic_ttm_returns_none_when_ebit_missing():
+def test_roic_ttm_returns_none_when_ebit_missing() -> None:
     metric = RoicTTMMetric()
     concepts = _base_roic_concepts()
     concepts["OperatingIncomeLoss"] = concepts["OperatingIncomeLoss"][:3]
@@ -2884,7 +3007,7 @@ def test_roic_ttm_returns_none_when_ebit_missing():
     assert result is None
 
 
-def test_roic_ttm_returns_none_when_ebit_stale():
+def test_roic_ttm_returns_none_when_ebit_stale() -> None:
     metric = RoicTTMMetric()
     stale_dates = [
         (date.today() - timedelta(days=500)).isoformat(),
@@ -2908,7 +3031,7 @@ def test_roic_ttm_returns_none_when_ebit_stale():
     assert result is None
 
 
-def test_roic_ttm_returns_none_when_avg_ic_missing():
+def test_roic_ttm_returns_none_when_avg_ic_missing() -> None:
     metric = RoicTTMMetric()
     repo = _build_ic_repo(
         concept_records=_base_roic_concepts(
@@ -2919,7 +3042,7 @@ def test_roic_ttm_returns_none_when_avg_ic_missing():
     assert result is None
 
 
-def test_roic_ttm_returns_none_when_nopat_non_positive():
+def test_roic_ttm_returns_none_when_nopat_non_positive() -> None:
     metric = RoicTTMMetric()
     repo = _build_ic_repo(
         concept_records=_base_roic_concepts(
@@ -2933,7 +3056,7 @@ def test_roic_ttm_returns_none_when_nopat_non_positive():
     assert result is None
 
 
-def test_roic_ttm_returns_none_when_avg_ic_non_positive():
+def test_roic_ttm_returns_none_when_avg_ic_non_positive() -> None:
     metric = RoicTTMMetric()
     repo = _build_ic_repo(
         concept_records=_base_roic_concepts(
@@ -2945,7 +3068,7 @@ def test_roic_ttm_returns_none_when_avg_ic_non_positive():
     assert result is None
 
 
-def test_roic_ttm_returns_none_on_numerator_currency_mismatch():
+def test_roic_ttm_returns_none_on_numerator_currency_mismatch() -> None:
     metric = RoicTTMMetric()
     concepts = _base_roic_concepts()
     concepts["OperatingIncomeLoss"][1] = fact(
@@ -2960,7 +3083,7 @@ def test_roic_ttm_returns_none_on_numerator_currency_mismatch():
     assert result is None
 
 
-def test_roic_ttm_returns_none_on_numerator_vs_avg_ic_currency_mismatch():
+def test_roic_ttm_returns_none_on_numerator_vs_avg_ic_currency_mismatch() -> None:
     metric = RoicTTMMetric()
     repo = _build_ic_repo(
         concept_records=_base_roic_concepts(
@@ -2971,7 +3094,7 @@ def test_roic_ttm_returns_none_on_numerator_vs_avg_ic_currency_mismatch():
     assert result is None
 
 
-def test_roic_10y_metrics_happy_path():
+def test_roic_10y_metrics_happy_path() -> None:
     median_metric = ROIC10YMedianMetric()
     count_metric = ROICYearsAbove12PctMetric()
     min_metric = ROIC10YMinMetric()
@@ -2989,7 +3112,7 @@ def test_roic_10y_metrics_happy_path():
     assert round(min_result.value, 6) == 0.06
 
 
-def test_roic_10y_returns_none_when_strict_window_missing_year():
+def test_roic_10y_returns_none_when_strict_window_missing_year() -> None:
     metric = ROIC10YMedianMetric()
     latest_year = date.today().year - 1
     concepts = _base_roic_10y_concepts()
@@ -3003,7 +3126,7 @@ def test_roic_10y_returns_none_when_strict_window_missing_year():
     assert result is None
 
 
-def test_roic_10y_tax_fallback_uses_latest_valid_fy_proxy():
+def test_roic_10y_tax_fallback_uses_latest_valid_fy_proxy() -> None:
     metric = ROICYearsAbove12PctMetric()
     latest_year = date.today().year - 1
     roic_years = range(latest_year - 9, latest_year + 1)
@@ -3024,7 +3147,7 @@ def test_roic_10y_tax_fallback_uses_latest_valid_fy_proxy():
     assert result.value == 0.0
 
 
-def test_roic_10y_tax_fallback_uses_default_when_no_valid_proxy():
+def test_roic_10y_tax_fallback_uses_default_when_no_valid_proxy() -> None:
     metric = ROIC10YMedianMetric()
     latest_year = date.today().year - 1
     roic_years = range(latest_year - 9, latest_year + 1)
@@ -3044,7 +3167,7 @@ def test_roic_10y_tax_fallback_uses_default_when_no_valid_proxy():
     assert round(result.value, 6) == round(0.158, 6)
 
 
-def test_roic_10y_min_keeps_signed_negative_year():
+def test_roic_10y_min_keeps_signed_negative_year() -> None:
     metric = ROIC10YMinMetric()
     latest_year = date.today().year - 1
     concepts = _base_roic_10y_concepts()
@@ -3064,7 +3187,7 @@ def test_roic_10y_min_keeps_signed_negative_year():
     assert round(result.value, 6) == -0.04
 
 
-def test_roic_10y_returns_none_when_avg_ic_year_pair_is_zero():
+def test_roic_10y_returns_none_when_avg_ic_year_pair_is_zero() -> None:
     metric = ROIC10YMedianMetric()
     latest_year = date.today().year - 1
     concepts = _base_roic_10y_concepts(
@@ -3078,7 +3201,7 @@ def test_roic_10y_returns_none_when_avg_ic_year_pair_is_zero():
     assert result is None
 
 
-def test_roic_10y_returns_none_on_series_currency_conflict():
+def test_roic_10y_returns_none_on_series_currency_conflict() -> None:
     metric = ROIC10YMedianMetric()
     latest_year = date.today().year - 1
     concepts = _base_roic_10y_concepts(
@@ -3089,7 +3212,7 @@ def test_roic_10y_returns_none_on_series_currency_conflict():
     assert result is None
 
 
-def test_roic_10y_returns_none_when_latest_fy_stale():
+def test_roic_10y_returns_none_when_latest_fy_stale() -> None:
     metric = ROIC10YMedianMetric()
     stale_latest_year = date.today().year - 3
     repo = _build_ic_repo(
@@ -3099,7 +3222,7 @@ def test_roic_10y_returns_none_when_latest_fy_stale():
     assert result is None
 
 
-def test_roic_10y_diagnostics_reports_missing_prior_ic_year():
+def test_roic_10y_diagnostics_reports_missing_prior_ic_year() -> None:
     calculator = ROICFYSeriesCalculator()
     metric = ROIC10YMedianMetric()
     latest_year = date.today().year - 1
@@ -3127,7 +3250,7 @@ def test_roic_10y_diagnostics_reports_missing_prior_ic_year():
     assert metric.compute("AAPL.US", repo) is None
 
 
-def test_roic_10y_diagnostics_reports_missing_debt_input_on_latest_year():
+def test_roic_10y_diagnostics_reports_missing_debt_input_on_latest_year() -> None:
     calculator = ROICFYSeriesCalculator()
     latest_year = date.today().year - 1
     concepts = _base_roic_10y_concepts(latest_year=latest_year)
@@ -3156,7 +3279,7 @@ def test_roic_10y_diagnostics_reports_missing_debt_input_on_latest_year():
     assert latest.roic_failure_reason == "missing current FY invested capital"
 
 
-def test_roic_10y_diagnostics_raises_for_currency_conflict_on_latest_year():
+def test_roic_10y_diagnostics_raises_for_currency_conflict_on_latest_year() -> None:
     calculator = ROICFYSeriesCalculator()
     latest_year = date.today().year - 1
     repo = _build_ic_repo(
@@ -3170,7 +3293,7 @@ def test_roic_10y_diagnostics_raises_for_currency_conflict_on_latest_year():
         calculator.diagnose_series("AAPL.US", repo)
 
 
-def test_roic_10y_diagnostics_records_tax_fallback_without_failing():
+def test_roic_10y_diagnostics_records_tax_fallback_without_failing() -> None:
     calculator = ROICFYSeriesCalculator()
     latest_year = date.today().year - 1
     roic_years = range(latest_year - 9, latest_year + 1)
@@ -3194,7 +3317,7 @@ def test_roic_10y_diagnostics_records_tax_fallback_without_failing():
     assert latest.roic_available is True
 
 
-def test_roic_7y_metrics_pass_when_10y_fails_on_missing_eleventh_ic_year():
+def test_roic_7y_metrics_pass_when_10y_fails_on_missing_eleventh_ic_year() -> None:
     latest_year = date.today().year - 1
     ic_years = range(latest_year - 9, latest_year + 1)
     repo = _build_ic_repo(
@@ -3218,7 +3341,7 @@ def test_roic_7y_metrics_pass_when_10y_fails_on_missing_eleventh_ic_year():
     assert round(min_result.value, 6) == 0.12
 
 
-def test_iroic_5y_metric_happy_path():
+def test_iroic_5y_metric_happy_path() -> None:
     metric = IncrementalROICFiveYearMetric()
     latest_year = date.today().year - 1
     concepts = _base_roic_10y_concepts(
@@ -3231,7 +3354,7 @@ def test_iroic_5y_metric_happy_path():
     assert round(result.value, 6) == 2.0
 
 
-def test_iroic_5y_returns_none_when_strict_t_minus_5_missing():
+def test_iroic_5y_returns_none_when_strict_t_minus_5_missing() -> None:
     metric = IncrementalROICFiveYearMetric()
     latest_year = date.today().year - 1
     concepts = _base_roic_10y_concepts(
@@ -3248,7 +3371,7 @@ def test_iroic_5y_returns_none_when_strict_t_minus_5_missing():
     assert result is None
 
 
-def test_iroic_5y_tax_fallback_uses_latest_valid_fy_proxy():
+def test_iroic_5y_tax_fallback_uses_latest_valid_fy_proxy() -> None:
     metric = IncrementalROICFiveYearMetric()
     latest_year = date.today().year - 1
     roic_years = range(latest_year - 9, latest_year + 1)
@@ -3268,7 +3391,7 @@ def test_iroic_5y_tax_fallback_uses_latest_valid_fy_proxy():
     assert round(result.value, 6) == 1.4
 
 
-def test_iroic_5y_tax_fallback_uses_default_when_no_valid_proxy():
+def test_iroic_5y_tax_fallback_uses_default_when_no_valid_proxy() -> None:
     metric = IncrementalROICFiveYearMetric()
     latest_year = date.today().year - 1
     roic_years = range(latest_year - 9, latest_year + 1)
@@ -3286,14 +3409,14 @@ def test_iroic_5y_tax_fallback_uses_default_when_no_valid_proxy():
     assert round(result.value, 6) == 1.975
 
 
-def test_iroic_5y_returns_none_when_delta_ic_non_positive():
+def test_iroic_5y_returns_none_when_delta_ic_non_positive() -> None:
     metric = IncrementalROICFiveYearMetric()
     repo = _build_ic_repo(concept_records=_base_roic_10y_concepts())
     result = metric.compute("AAPL.US", repo)
     assert result is None
 
 
-def test_iroic_5y_returns_none_when_relative_delta_ic_is_tiny():
+def test_iroic_5y_returns_none_when_relative_delta_ic_is_tiny() -> None:
     metric = IncrementalROICFiveYearMetric()
     latest_year = date.today().year - 1
     concepts = _base_roic_10y_concepts(
@@ -3308,7 +3431,7 @@ def test_iroic_5y_returns_none_when_relative_delta_ic_is_tiny():
     assert result is None
 
 
-def test_iroic_5y_returns_none_on_currency_conflict():
+def test_iroic_5y_returns_none_on_currency_conflict() -> None:
     metric = IncrementalROICFiveYearMetric()
     latest_year = date.today().year - 1
     concepts = _base_roic_10y_concepts(
@@ -3321,7 +3444,7 @@ def test_iroic_5y_returns_none_on_currency_conflict():
     assert result is None
 
 
-def test_iroic_5y_returns_none_when_latest_fy_stale():
+def test_iroic_5y_returns_none_when_latest_fy_stale() -> None:
     metric = IncrementalROICFiveYearMetric()
     stale_latest_year = date.today().year - 3
     concepts = _base_roic_10y_concepts(
@@ -3333,7 +3456,7 @@ def test_iroic_5y_returns_none_when_latest_fy_stale():
     assert result is None
 
 
-def test_iroic_5y_keeps_signed_negative_delta_nopat():
+def test_iroic_5y_keeps_signed_negative_delta_nopat() -> None:
     metric = IncrementalROICFiveYearMetric()
     latest_year = date.today().year - 1
     concepts = _base_roic_10y_concepts(
@@ -3356,7 +3479,7 @@ def test_iroic_5y_keeps_signed_negative_delta_nopat():
     assert round(result.value, 6) == -1.52
 
 
-def test_gm_10y_std_metric_happy_path():
+def test_gm_10y_std_metric_happy_path() -> None:
     metric = GrossMarginTenYearStdMetric()
     repo = _build_ic_repo(concept_records=_base_gm_10y_concepts())
     result = metric.compute("AAPL.US", repo)
@@ -3368,7 +3491,7 @@ def test_gm_10y_std_metric_happy_path():
     assert round(result.value, 12) == round(expected, 12)
 
 
-def test_gm_10y_std_uses_revenue_minus_cost_fallback_when_gross_missing():
+def test_gm_10y_std_uses_revenue_minus_cost_fallback_when_gross_missing() -> None:
     metric = GrossMarginTenYearStdMetric()
     latest_year = date.today().year - 1
     concepts = _base_gm_10y_concepts(latest_year=latest_year)
@@ -3382,7 +3505,7 @@ def test_gm_10y_std_uses_revenue_minus_cost_fallback_when_gross_missing():
     assert result is not None
 
 
-def test_gm_10y_std_returns_none_when_strict_window_missing_year():
+def test_gm_10y_std_returns_none_when_strict_window_missing_year() -> None:
     metric = GrossMarginTenYearStdMetric()
     latest_year = date.today().year - 1
     concepts = _base_gm_10y_concepts(latest_year=latest_year)
@@ -3396,7 +3519,7 @@ def test_gm_10y_std_returns_none_when_strict_window_missing_year():
     assert result is None
 
 
-def test_gm_10y_std_returns_none_when_revenue_non_positive():
+def test_gm_10y_std_returns_none_when_revenue_non_positive() -> None:
     metric = GrossMarginTenYearStdMetric()
     latest_year = date.today().year - 1
     concepts = _base_gm_10y_concepts(
@@ -3411,7 +3534,7 @@ def test_gm_10y_std_returns_none_when_revenue_non_positive():
     assert result is None
 
 
-def test_gm_10y_std_allows_mixed_series_currencies_when_yearly_margins_align():
+def test_gm_10y_std_allows_mixed_series_currencies_when_yearly_margins_align() -> None:
     metric = GrossMarginTenYearStdMetric()
     latest_year = date.today().year - 1
     concepts = _base_gm_10y_concepts(
@@ -3423,7 +3546,7 @@ def test_gm_10y_std_allows_mixed_series_currencies_when_yearly_margins_align():
     assert result is None
 
 
-def test_gm_10y_std_returns_none_when_latest_fy_stale():
+def test_gm_10y_std_returns_none_when_latest_fy_stale() -> None:
     metric = GrossMarginTenYearStdMetric()
     stale_latest_year = date.today().year - 3
     repo = _build_ic_repo(
@@ -3433,7 +3556,7 @@ def test_gm_10y_std_returns_none_when_latest_fy_stale():
     assert result is None
 
 
-def test_opm_10y_metrics_happy_path():
+def test_opm_10y_metrics_happy_path() -> None:
     std_metric = OperatingMarginTenYearStdMetric()
     min_metric = OperatingMarginTenYearMinMetric()
     repo = _build_ic_repo(concept_records=_base_opm_10y_concepts())
@@ -3451,7 +3574,7 @@ def test_opm_10y_metrics_happy_path():
     assert round(min_result.value, 12) == round(min(margins), 12)
 
 
-def test_opm_10y_returns_none_when_strict_window_missing_year():
+def test_opm_10y_returns_none_when_strict_window_missing_year() -> None:
     metric = OperatingMarginTenYearStdMetric()
     latest_year = date.today().year - 1
     concepts = _base_opm_10y_concepts(latest_year=latest_year)
@@ -3465,7 +3588,7 @@ def test_opm_10y_returns_none_when_strict_window_missing_year():
     assert result is None
 
 
-def test_opm_10y_returns_none_when_revenue_non_positive():
+def test_opm_10y_returns_none_when_revenue_non_positive() -> None:
     metric = OperatingMarginTenYearStdMetric()
     latest_year = date.today().year - 1
     concepts = _base_opm_10y_concepts(
@@ -3480,7 +3603,7 @@ def test_opm_10y_returns_none_when_revenue_non_positive():
     assert result is None
 
 
-def test_opm_10y_allows_mixed_series_currencies_when_yearly_margins_align():
+def test_opm_10y_allows_mixed_series_currencies_when_yearly_margins_align() -> None:
     metric = OperatingMarginTenYearStdMetric()
     latest_year = date.today().year - 1
     concepts = _base_opm_10y_concepts(
@@ -3492,7 +3615,7 @@ def test_opm_10y_allows_mixed_series_currencies_when_yearly_margins_align():
     assert result is None
 
 
-def test_opm_10y_returns_none_when_latest_fy_stale():
+def test_opm_10y_returns_none_when_latest_fy_stale() -> None:
     metric = OperatingMarginTenYearStdMetric()
     stale_latest_year = date.today().year - 3
     repo = _build_ic_repo(
@@ -3502,7 +3625,7 @@ def test_opm_10y_returns_none_when_latest_fy_stale():
     assert result is None
 
 
-def test_opm_10y_min_keeps_signed_negative_margin():
+def test_opm_10y_min_keeps_signed_negative_margin() -> None:
     metric = OperatingMarginTenYearMinMetric()
     latest_year = date.today().year - 1
     concepts = _base_opm_10y_concepts(
@@ -3522,7 +3645,7 @@ def test_opm_10y_min_keeps_signed_negative_margin():
     assert round(result.value, 12) == round(-20.0 / (1000.0 + 10.0 * 5), 12)
 
 
-def test_opm_7y_min_happy_path():
+def test_opm_7y_min_happy_path() -> None:
     metric = OperatingMarginSevenYearMinMetric()
     latest_year = date.today().year - 1
     repo = _build_ic_repo(
@@ -3536,7 +3659,7 @@ def test_opm_7y_min_happy_path():
     assert round(result.value, 12) == round(min(margins), 12)
 
 
-def test_opm_7y_min_returns_none_when_strict_window_missing_year():
+def test_opm_7y_min_returns_none_when_strict_window_missing_year() -> None:
     metric = OperatingMarginSevenYearMinMetric()
     latest_year = date.today().year - 1
     concepts = _base_opm_10y_concepts(latest_year=latest_year)
@@ -3552,7 +3675,7 @@ def test_opm_7y_min_returns_none_when_strict_window_missing_year():
     assert result is None
 
 
-def test_opm_7y_min_returns_none_when_revenue_non_positive():
+def test_opm_7y_min_returns_none_when_revenue_non_positive() -> None:
     metric = OperatingMarginSevenYearMinMetric()
     latest_year = date.today().year - 1
     concepts = _base_opm_10y_concepts(
@@ -3569,7 +3692,7 @@ def test_opm_7y_min_returns_none_when_revenue_non_positive():
     assert result is None
 
 
-def test_opm_7y_min_keeps_signed_negative_margin():
+def test_opm_7y_min_keeps_signed_negative_margin() -> None:
     metric = OperatingMarginSevenYearMinMetric()
     latest_year = date.today().year - 1
     concepts = _base_opm_10y_concepts(
@@ -3592,7 +3715,7 @@ def test_opm_7y_min_keeps_signed_negative_margin():
     assert round(result.value, 12) == round(-20.0 / expected_revenue, 12)
 
 
-def test_debt_paydown_years_skips_non_positive_fcf():
+def test_debt_paydown_years_skips_non_positive_fcf() -> None:
     metric = DebtPaydownYearsMetric()
     today = date.today()
     q4 = (today - timedelta(days=30)).isoformat()
@@ -3601,7 +3724,13 @@ def test_debt_paydown_years_skips_non_positive_fcf():
     q1 = (today - timedelta(days=300)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "NetCashProvidedByUsedInOperatingActivities":
                 return [
                     fact(
@@ -3674,7 +3803,7 @@ def test_debt_paydown_years_skips_non_positive_fcf():
                 ]
             return []
 
-        def latest_fact(self, symbol, concept):
+        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
             if concept == "ShortTermDebt":
                 return fact(
                     symbol=symbol,
@@ -3698,7 +3827,7 @@ def test_debt_paydown_years_skips_non_positive_fcf():
     assert result is None
 
 
-def test_fcf_to_debt_skips_non_positive_fcf():
+def test_fcf_to_debt_skips_non_positive_fcf() -> None:
     metric = FCFToDebtMetric()
     quarter_dates = _net_debt_quarter_dates()
     q4 = quarter_dates[0]
@@ -3722,7 +3851,7 @@ def test_fcf_to_debt_skips_non_positive_fcf():
     assert result is None
 
 
-def test_fcf_and_debt_paydown_skip_non_positive_debt():
+def test_fcf_and_debt_paydown_skip_non_positive_debt() -> None:
     quarter_dates = _net_debt_quarter_dates()
     q4 = quarter_dates[0]
     latest = _default_debt_paydown_latest_records(q4)
@@ -3747,7 +3876,7 @@ def test_fcf_and_debt_paydown_skip_non_positive_debt():
     assert FCFToDebtMetric().compute("AAPL.US", repo) is None
 
 
-def test_fcf_to_debt_uses_capex_zero_when_missing():
+def test_fcf_to_debt_uses_capex_zero_when_missing() -> None:
     metric = FCFToDebtMetric()
     quarter_dates = _net_debt_quarter_dates()
     q4 = quarter_dates[0]
@@ -3767,7 +3896,7 @@ def test_fcf_to_debt_uses_capex_zero_when_missing():
     assert result.value == 2.0
 
 
-def test_fcf_and_debt_paydown_return_none_on_currency_mismatch():
+def test_fcf_and_debt_paydown_return_none_on_currency_mismatch() -> None:
     quarter_dates = _net_debt_quarter_dates()
     q4 = quarter_dates[0]
     concept_records = {
@@ -3793,11 +3922,11 @@ def test_fcf_and_debt_paydown_return_none_on_currency_mismatch():
     assert FCFToDebtMetric().compute("AAPL.US", repo) is None
 
 
-def test_registry_includes_fcf_to_debt_metric():
+def test_registry_includes_fcf_to_debt_metric() -> None:
     assert "fcf_to_debt" in REGISTRY
 
 
-def test_interest_coverage_metric():
+def test_interest_coverage_metric() -> None:
     metric = InterestCoverageMetric()
     today = date.today()
     q4 = (today - timedelta(days=30)).isoformat()
@@ -3806,7 +3935,13 @@ def test_interest_coverage_metric():
     q1 = (today - timedelta(days=300)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "OperatingIncomeLoss":
                 return [
                     fact(
@@ -3885,7 +4020,7 @@ def test_interest_coverage_metric():
     assert result.value == 10.0
 
 
-def test_interest_coverage_skips_non_positive_interest():
+def test_interest_coverage_skips_non_positive_interest() -> None:
     metric = InterestCoverageMetric()
     today = date.today()
     q4 = (today - timedelta(days=30)).isoformat()
@@ -3894,7 +4029,13 @@ def test_interest_coverage_skips_non_positive_interest():
     q1 = (today - timedelta(days=300)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "OperatingIncomeLoss":
                 return [
                     fact(
@@ -3972,12 +4113,18 @@ def test_interest_coverage_skips_non_positive_interest():
     assert result is None
 
 
-def test_interest_coverage_uses_derived_interest_fallback():
+def test_interest_coverage_uses_derived_interest_fallback() -> None:
     metric = InterestCoverageMetric()
     q4, q3, q2, q1 = _net_debt_quarter_dates()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "OperatingIncomeLoss":
                 return _quarterly_records(
                     concept, (q4, q3, q2, q1), (40.0, 30.0, 20.0, 10.0)
@@ -3994,12 +4141,18 @@ def test_interest_coverage_uses_derived_interest_fallback():
     assert result.value == 10.0
 
 
-def test_interest_coverage_keeps_direct_path_when_valid():
+def test_interest_coverage_keeps_direct_path_when_valid() -> None:
     metric = InterestCoverageMetric()
     q4, q3, q2, q1 = _net_debt_quarter_dates()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "OperatingIncomeLoss":
                 return _quarterly_records(
                     concept, (q4, q3, q2, q1), (40.0, 30.0, 20.0, 10.0)
@@ -4020,12 +4173,18 @@ def test_interest_coverage_keeps_direct_path_when_valid():
     assert result.value == 10.0
 
 
-def test_interest_coverage_returns_none_when_fallback_insufficient():
+def test_interest_coverage_returns_none_when_fallback_insufficient() -> None:
     metric = InterestCoverageMetric()
     q4, q3, q2, q1 = _net_debt_quarter_dates()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "OperatingIncomeLoss":
                 return _quarterly_records(
                     concept, (q4, q3, q2, q1), (40.0, 30.0, 20.0, 10.0)
@@ -4041,12 +4200,18 @@ def test_interest_coverage_returns_none_when_fallback_insufficient():
     assert result is None
 
 
-def test_interest_coverage_returns_none_on_fallback_currency_mismatch():
+def test_interest_coverage_returns_none_on_fallback_currency_mismatch() -> None:
     metric = InterestCoverageMetric()
     q4, q3, q2, q1 = _net_debt_quarter_dates()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "OperatingIncomeLoss":
                 return _quarterly_records(
                     concept, (q4, q3, q2, q1), (40.0, 30.0, 20.0, 10.0)
@@ -4062,12 +4227,18 @@ def test_interest_coverage_returns_none_on_fallback_currency_mismatch():
     assert result is None
 
 
-def test_interest_coverage_normalizes_gbx_to_gbp():
+def test_interest_coverage_normalizes_gbx_to_gbp() -> None:
     metric = InterestCoverageMetric()
     q4, q3, q2, q1 = _net_debt_quarter_dates()
 
     class DummyRepo(_GBPTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "OperatingIncomeLoss":
                 return _quarterly_records(
                     concept, (q4, q3, q2, q1), (4.0, 3.0, 2.0, 1.0), currency="GBP"
@@ -4087,7 +4258,7 @@ def test_interest_coverage_normalizes_gbx_to_gbp():
     assert result.value == 10.0
 
 
-def test_net_debt_to_ebitda_skips_non_positive_ebitda():
+def test_net_debt_to_ebitda_skips_non_positive_ebitda() -> None:
     metric = NetDebtToEBITDAMetric()
     quarter_dates = _net_debt_quarter_dates()
     q4 = quarter_dates[0]
@@ -4103,7 +4274,7 @@ def test_net_debt_to_ebitda_skips_non_positive_ebitda():
     assert result is None
 
 
-def test_net_debt_to_ebitda_allows_single_debt_side():
+def test_net_debt_to_ebitda_allows_single_debt_side() -> None:
     metric = NetDebtToEBITDAMetric()
     quarter_dates = _net_debt_quarter_dates()
     q4 = quarter_dates[0]
@@ -4118,7 +4289,7 @@ def test_net_debt_to_ebitda_allows_single_debt_side():
     assert result.value == 0.7
 
 
-def test_net_debt_to_ebitda_requires_at_least_one_debt_component():
+def test_net_debt_to_ebitda_requires_at_least_one_debt_component() -> None:
     metric = NetDebtToEBITDAMetric()
     quarter_dates = _net_debt_quarter_dates()
     q4 = quarter_dates[0]
@@ -4137,7 +4308,7 @@ def test_net_debt_to_ebitda_requires_at_least_one_debt_component():
     assert result is None
 
 
-def test_net_debt_to_ebitda_uses_cash_component_fallback():
+def test_net_debt_to_ebitda_uses_cash_component_fallback() -> None:
     metric = NetDebtToEBITDAMetric()
     quarter_dates = _net_debt_quarter_dates()
     q4 = quarter_dates[0]
@@ -4164,7 +4335,7 @@ def test_net_debt_to_ebitda_uses_cash_component_fallback():
     assert result.value == 0.8
 
 
-def test_net_debt_to_ebitda_cash_component_fallback_allows_missing_sti():
+def test_net_debt_to_ebitda_cash_component_fallback_allows_missing_sti() -> None:
     metric = NetDebtToEBITDAMetric()
     quarter_dates = _net_debt_quarter_dates()
     q4 = quarter_dates[0]
@@ -4185,7 +4356,7 @@ def test_net_debt_to_ebitda_cash_component_fallback_allows_missing_sti():
     assert result.value == 0.8
 
 
-def test_net_debt_to_ebitda_requires_cash_source():
+def test_net_debt_to_ebitda_requires_cash_source() -> None:
     metric = NetDebtToEBITDAMetric()
     quarter_dates = _net_debt_quarter_dates()
     q4 = quarter_dates[0]
@@ -4199,7 +4370,7 @@ def test_net_debt_to_ebitda_requires_cash_source():
     assert result is None
 
 
-def test_net_debt_to_ebitda_returns_none_on_denominator_currency_mismatch():
+def test_net_debt_to_ebitda_returns_none_on_denominator_currency_mismatch() -> None:
     metric = NetDebtToEBITDAMetric()
     quarter_dates = _net_debt_quarter_dates()
     q4 = quarter_dates[0]
@@ -4211,7 +4382,7 @@ def test_net_debt_to_ebitda_returns_none_on_denominator_currency_mismatch():
     assert result is None
 
 
-def test_net_debt_to_ebitda_returns_none_on_net_debt_currency_mismatch():
+def test_net_debt_to_ebitda_returns_none_on_net_debt_currency_mismatch() -> None:
     metric = NetDebtToEBITDAMetric()
     quarter_dates = _net_debt_quarter_dates()
     q4 = quarter_dates[0]
@@ -4230,18 +4401,24 @@ def test_net_debt_to_ebitda_returns_none_on_net_debt_currency_mismatch():
     assert result is None
 
 
-def test_graham_multiplier_uses_zero_when_optional_values_missing():
+def test_graham_multiplier_uses_zero_when_optional_values_missing() -> None:
     metric = GrahamMultiplierMetric()
     recent = (date.today() - timedelta(days=20)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def __init__(self):
+        def __init__(self) -> None:
             self.values = {
                 "StockholdersEquity": 1000,
                 "CommonStockSharesOutstanding": 100,
             }
 
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "EarningsPerShare":
                 return [
                     fact(
@@ -4275,25 +4452,26 @@ def test_graham_multiplier_uses_zero_when_optional_values_missing():
                 ]
             return []
 
-        def latest_fact(self, symbol, concept):
+        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
             value = self.values.get(concept)
             if value is None:
                 return None
             return fact(symbol=symbol, concept=concept, end_date=recent, value=value)
 
-        def ticker_currency(self, symbol):
+        def ticker_currency(self, symbol: str) -> str | None:
             return "USD"
 
-    class DummyMarketRepo:
-        def latest_snapshot(self, symbol):
-            class Snapshot:
-                price = 150.0
-                as_of = recent
-                currency = "USD"
+    class DummyMarketRepo(MarketDataRepository):
+        # Fake market repo: a valid nominal MarketDataRepository subtype whose
+        # __init__ deliberately skips super().__init__ so no SQLite DB is opened;
+        # it only ever serves a fixed in-memory snapshot.
+        def __init__(self) -> None:
+            pass
 
-            return Snapshot()
+        def latest_snapshot(self, symbol: str) -> PriceData | None:
+            return PriceData(symbol=symbol, price=150.0, as_of=recent, currency="USD")
 
-        def ticker_currency(self, symbol):
+        def ticker_currency(self, symbol: str) -> str | None:
             return "USD"
 
     repo = DummyRepo()
@@ -4303,13 +4481,19 @@ def test_graham_multiplier_uses_zero_when_optional_values_missing():
     assert result.value > 0
 
 
-def test_earnings_yield_metric():
+def test_earnings_yield_metric() -> None:
     metric = EarningsYieldMetric()
     recent = (date.today() - timedelta(days=30)).isoformat()
     older = (date.today() - timedelta(days=120)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "EarningsPerShare":
                 return [
                     fact(
@@ -4343,19 +4527,20 @@ def test_earnings_yield_metric():
                 ]
             return []
 
-        def ticker_currency(self, symbol):
+        def ticker_currency(self, symbol: str) -> str | None:
             return "USD"
 
-    class DummyMarketRepo:
-        def latest_snapshot(self, symbol):
-            class Snapshot:
-                price = 50.0
-                as_of = recent
-                currency = "USD"
+    class DummyMarketRepo(MarketDataRepository):
+        # Fake market repo: a valid nominal MarketDataRepository subtype whose
+        # __init__ deliberately skips super().__init__ so no SQLite DB is opened;
+        # it only ever serves a fixed in-memory snapshot.
+        def __init__(self) -> None:
+            pass
 
-            return Snapshot()
+        def latest_snapshot(self, symbol: str) -> PriceData | None:
+            return PriceData(symbol=symbol, price=50.0, as_of=recent, currency="USD")
 
-        def ticker_currency(self, symbol):
+        def ticker_currency(self, symbol: str) -> str | None:
             return "USD"
 
     repo = DummyRepo()
@@ -4365,12 +4550,18 @@ def test_earnings_yield_metric():
     assert result.value == (2.5 + 2.0 + 1.5 + 1.0) / 50.0
 
 
-def test_earnings_yield_metric_falls_back_to_fy():
+def test_earnings_yield_metric_falls_back_to_fy() -> None:
     metric = EarningsYieldMetric()
     recent_fy = (date.today() - timedelta(days=20)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "EarningsPerShare" and fiscal_period == "FY":
                 return [
                     fact(
@@ -4383,19 +4574,20 @@ def test_earnings_yield_metric_falls_back_to_fy():
                 ]
             return []
 
-        def ticker_currency(self, symbol):
+        def ticker_currency(self, symbol: str) -> str | None:
             return "USD"
 
-    class DummyMarketRepo:
-        def latest_snapshot(self, symbol):
-            class Snapshot:
-                price = 40.0
-                as_of = recent_fy
-                currency = "USD"
+    class DummyMarketRepo(MarketDataRepository):
+        # Fake market repo: a valid nominal MarketDataRepository subtype whose
+        # __init__ deliberately skips super().__init__ so no SQLite DB is opened;
+        # it only ever serves a fixed in-memory snapshot.
+        def __init__(self) -> None:
+            pass
 
-            return Snapshot()
+        def latest_snapshot(self, symbol: str) -> PriceData | None:
+            return PriceData(symbol=symbol, price=40.0, as_of=recent_fy, currency="USD")
 
-        def ticker_currency(self, symbol):
+        def ticker_currency(self, symbol: str) -> str | None:
             return "USD"
 
     repo = DummyRepo()
@@ -4405,13 +4597,19 @@ def test_earnings_yield_metric_falls_back_to_fy():
     assert result.value == 4.0 / 40.0
 
 
-def test_price_to_fcf_metric():
+def test_price_to_fcf_metric() -> None:
     metric = PriceToFCFMetric()
     recent = (date.today() - timedelta(days=15)).isoformat()
     older = (date.today() - timedelta(days=90)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "NetCashProvidedByUsedInOperatingActivities":
                 return [
                     fact(
@@ -4476,19 +4674,25 @@ def test_price_to_fcf_metric():
                 ]
             return []
 
-        def ticker_currency(self, symbol):
+        def ticker_currency(self, symbol: str) -> str | None:
             return "USD"
 
-    class DummyMarketRepo:
-        def latest_snapshot(self, symbol):
-            class Snapshot:
-                price = 6400.0
-                as_of = (date.today() - timedelta(days=10)).isoformat()
-                currency = "USD"
+    class DummyMarketRepo(MarketDataRepository):
+        # Fake market repo: a valid nominal MarketDataRepository subtype whose
+        # __init__ deliberately skips super().__init__ so no SQLite DB is opened;
+        # it only ever serves a fixed in-memory snapshot.
+        def __init__(self) -> None:
+            pass
 
-            return Snapshot()
+        def latest_snapshot(self, symbol: str) -> PriceData | None:
+            return PriceData(
+                symbol=symbol,
+                price=6400.0,
+                as_of=(date.today() - timedelta(days=10)).isoformat(),
+                currency="USD",
+            )
 
-        def ticker_currency(self, symbol):
+        def ticker_currency(self, symbol: str) -> str | None:
             return "USD"
 
     repo = DummyRepo()
@@ -4498,13 +4702,19 @@ def test_price_to_fcf_metric():
     assert result.value == 10.0
 
 
-def test_price_to_fcf_metric_uses_zero_capex_when_missing():
+def test_price_to_fcf_metric_uses_zero_capex_when_missing() -> None:
     metric = PriceToFCFMetric()
     recent = (date.today() - timedelta(days=15)).isoformat()
     older = (date.today() - timedelta(days=90)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "NetCashProvidedByUsedInOperatingActivities":
                 return [
                     fact(
@@ -4538,19 +4748,25 @@ def test_price_to_fcf_metric_uses_zero_capex_when_missing():
                 ]
             return []
 
-        def ticker_currency(self, symbol):
+        def ticker_currency(self, symbol: str) -> str | None:
             return "USD"
 
-    class DummyMarketRepo:
-        def latest_snapshot(self, symbol):
-            class Snapshot:
-                price = 6400.0
-                as_of = (date.today() - timedelta(days=10)).isoformat()
-                currency = "USD"
+    class DummyMarketRepo(MarketDataRepository):
+        # Fake market repo: a valid nominal MarketDataRepository subtype whose
+        # __init__ deliberately skips super().__init__ so no SQLite DB is opened;
+        # it only ever serves a fixed in-memory snapshot.
+        def __init__(self) -> None:
+            pass
 
-            return Snapshot()
+        def latest_snapshot(self, symbol: str) -> PriceData | None:
+            return PriceData(
+                symbol=symbol,
+                price=6400.0,
+                as_of=(date.today() - timedelta(days=10)).isoformat(),
+                currency="USD",
+            )
 
-        def ticker_currency(self, symbol):
+        def ticker_currency(self, symbol: str) -> str | None:
             return "USD"
 
     repo = DummyRepo()
@@ -4560,13 +4776,19 @@ def test_price_to_fcf_metric_uses_zero_capex_when_missing():
     assert result.value == 6400.0 / 460.0
 
 
-def test_eps_ttm_metric():
+def test_eps_ttm_metric() -> None:
     metric = EarningsPerShareTTM()
     recent = (date.today() - timedelta(days=30)).isoformat()
     older = (date.today() - timedelta(days=120)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "EarningsPerShare":
                 return [
                     fact(
@@ -4614,12 +4836,18 @@ def test_eps_ttm_metric():
     assert result.as_of == recent
 
 
-def test_eps_ttm_metric_falls_back_to_fy():
+def test_eps_ttm_metric_falls_back_to_fy() -> None:
     metric = EarningsPerShareTTM()
     recent_fy = (date.today() - timedelta(days=30)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "EarningsPerShare" and fiscal_period == "FY":
                 return [
                     fact(
@@ -4639,12 +4867,18 @@ def test_eps_ttm_metric_falls_back_to_fy():
     assert result.as_of == recent_fy
 
 
-def test_eps_6y_avg_metric():
+def test_eps_6y_avg_metric() -> None:
     metric = EPSAverageSixYearMetric()
     recent_fy = (date.today() - timedelta(days=20)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "EarningsPerShare":
                 records = [
                     fact(
@@ -4668,7 +4902,7 @@ def test_eps_6y_avg_metric():
                 return records
             return []
 
-        def latest_fact(self, symbol, concept):
+        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
             return fact(symbol=symbol, concept=concept, end_date=recent_fy, value=7.0)
 
     repo = DummyRepo()
@@ -4677,22 +4911,25 @@ def test_eps_6y_avg_metric():
     assert result.as_of == recent_fy
 
 
-def test_market_capitalization_metric():
+def test_market_capitalization_metric() -> None:
     metric = MarketCapitalizationMetric()
 
     class DummyRepo(_USDTickerCurrencyRepo):
         pass
 
-    class DummyMarketRepo:
-        def latest_snapshot(self, symbol):
-            class Snapshot:
-                price = 123456789.0
-                as_of = "2024-05-01"
-                currency = "USD"
+    class DummyMarketRepo(MarketDataRepository):
+        # Fake market repo: a valid nominal MarketDataRepository subtype whose
+        # __init__ deliberately skips super().__init__ so no SQLite DB is opened;
+        # it only ever serves a fixed in-memory snapshot.
+        def __init__(self) -> None:
+            pass
 
-            return Snapshot()
+        def latest_snapshot(self, symbol: str) -> PriceData | None:
+            return PriceData(
+                symbol=symbol, price=123456789.0, as_of="2024-05-01", currency="USD"
+            )
 
-        def ticker_currency(self, symbol):
+        def ticker_currency(self, symbol: str) -> str | None:
             return "USD"
 
     repo = DummyRepo()
@@ -4704,13 +4941,19 @@ def test_market_capitalization_metric():
     assert result.as_of == "2024-05-01"
 
 
-def test_roc_greenblatt_metric():
+def test_roc_greenblatt_metric() -> None:
     metric = ROCGreenblattMetric()
     recent_quarter = (date.today() - timedelta(days=20)).isoformat()
     recent_fy = (date.today() - timedelta(days=200)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             records = []
             if concept == "OperatingIncomeLoss":
                 records = [
@@ -4844,7 +5087,7 @@ def test_roc_greenblatt_metric():
                 ]
             return records
 
-        def latest_fact(self, symbol, concept):
+        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
             return fact(
                 symbol=symbol,
                 concept=concept,
@@ -4859,12 +5102,18 @@ def test_roc_greenblatt_metric():
     assert result.as_of == recent_fy
 
 
-def test_roe_greenblatt_metric():
+def test_roe_greenblatt_metric() -> None:
     metric = ROEGreenblattMetric()
     recent = (date.today() - timedelta(days=25)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "NetIncomeLossAvailableToCommonStockholdersBasic":
                 return [
                     fact(symbol=symbol, concept=concept, end_date=recent, value=220),
@@ -4890,7 +5139,7 @@ def test_roe_greenblatt_metric():
                 ]
             return []
 
-        def latest_fact(self, symbol, concept):
+        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
             return None
 
     repo = DummyRepo()
@@ -4899,12 +5148,18 @@ def test_roe_greenblatt_metric():
     assert result.value > 0
 
 
-def test_mcapex_fy_metric_uses_min_formula():
+def test_mcapex_fy_metric_uses_min_formula() -> None:
     metric = MCapexFYMetric()
     recent = (date.today() - timedelta(days=20)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "CapitalExpenditures":
                 return [
                     fact(
@@ -4934,12 +5189,18 @@ def test_mcapex_fy_metric_uses_min_formula():
     assert result.value == 88.0
 
 
-def test_mcapex_fy_metric_falls_back_to_capex_when_da_missing():
+def test_mcapex_fy_metric_falls_back_to_capex_when_da_missing() -> None:
     metric = MCapexFYMetric()
     recent = (date.today() - timedelta(days=20)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "CapitalExpenditures":
                 return [
                     fact(
@@ -4958,12 +5219,18 @@ def test_mcapex_fy_metric_falls_back_to_capex_when_da_missing():
     assert result.value == 120.0
 
 
-def test_mcapex_fy_metric_falls_back_to_da_when_capex_missing():
+def test_mcapex_fy_metric_falls_back_to_da_when_capex_missing() -> None:
     metric = MCapexFYMetric()
     recent = (date.today() - timedelta(days=20)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "DepreciationDepletionAndAmortization":
                 return [
                     fact(
@@ -4982,12 +5249,18 @@ def test_mcapex_fy_metric_falls_back_to_da_when_capex_missing():
     assert round(result.value, 6) == 55.0
 
 
-def test_mcapex_fy_metric_uses_absolute_values():
+def test_mcapex_fy_metric_uses_absolute_values() -> None:
     metric = MCapexFYMetric()
     recent = (date.today() - timedelta(days=20)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "CapitalExpenditures":
                 return [
                     fact(
@@ -5017,7 +5290,7 @@ def test_mcapex_fy_metric_uses_absolute_values():
     assert result.value == 88.0
 
 
-def test_mcapex_ttm_metric_uses_quarterly_formula():
+def test_mcapex_ttm_metric_uses_quarterly_formula() -> None:
     metric = MCapexTTMMetric()
     today = date.today()
     q4 = (today - timedelta(days=20)).isoformat()
@@ -5026,7 +5299,13 @@ def test_mcapex_ttm_metric_uses_quarterly_formula():
     q1 = (today - timedelta(days=290)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "CapitalExpenditures":
                 return [
                     fact(
@@ -5104,7 +5383,7 @@ def test_mcapex_ttm_metric_uses_quarterly_formula():
     assert result.value == 352.0
 
 
-def test_mcapex_ttm_metric_falls_back_to_cash_flow_da():
+def test_mcapex_ttm_metric_falls_back_to_cash_flow_da() -> None:
     metric = MCapexTTMMetric()
     today = date.today()
     q4 = (today - timedelta(days=20)).isoformat()
@@ -5113,7 +5392,13 @@ def test_mcapex_ttm_metric_falls_back_to_cash_flow_da():
     q1 = (today - timedelta(days=290)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "CapitalExpenditures":
                 return [
                     fact(
@@ -5191,7 +5476,7 @@ def test_mcapex_ttm_metric_falls_back_to_cash_flow_da():
     assert result.value == 308.0
 
 
-def test_mcapex_5y_metric_requires_exactly_five_values():
+def test_mcapex_5y_metric_requires_exactly_five_values() -> None:
     metric = MCapexFiveYearMetric()
     d0 = (date.today() - timedelta(days=20)).isoformat()
     d1 = (date.today() - timedelta(days=390)).isoformat()
@@ -5199,7 +5484,13 @@ def test_mcapex_5y_metric_requires_exactly_five_values():
     d3 = (date.today() - timedelta(days=1130)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept in {
                 "CapitalExpenditures",
                 "DepreciationDepletionAndAmortization",
@@ -5244,7 +5535,7 @@ def test_mcapex_5y_metric_requires_exactly_five_values():
     assert result is None
 
 
-def test_mcapex_5y_metric_allows_year_gaps():
+def test_mcapex_5y_metric_allows_year_gaps() -> None:
     metric = MCapexFiveYearMetric()
     d0 = (date.today() - timedelta(days=20)).isoformat()
     d1 = (date.today() - timedelta(days=760)).isoformat()
@@ -5253,7 +5544,13 @@ def test_mcapex_5y_metric_allows_year_gaps():
     d4 = (date.today() - timedelta(days=2230)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "CapitalExpenditures":
                 return [
                     fact(
@@ -5347,12 +5644,18 @@ def test_mcapex_5y_metric_allows_year_gaps():
     assert result.value == 100.0
 
 
-def test_nwc_mqr_metric_base_formula():
+def test_nwc_mqr_metric_base_formula() -> None:
     metric = NWCMostRecentQuarterMetric()
     q4 = (date.today() - timedelta(days=20)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "AssetsCurrent":
                 return [
                     fact(
@@ -5404,12 +5707,18 @@ def test_nwc_mqr_metric_base_formula():
     assert result.value == 150.0
 
 
-def test_nwc_mqr_metric_short_term_debt_fallback():
+def test_nwc_mqr_metric_short_term_debt_fallback() -> None:
     metric = NWCMostRecentQuarterMetric()
     q4 = (date.today() - timedelta(days=20)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "AssetsCurrent":
                 return [
                     fact(
@@ -5450,12 +5759,18 @@ def test_nwc_mqr_metric_short_term_debt_fallback():
     assert result.value == 100.0
 
 
-def test_nwc_mqr_metric_cash_fallback_uses_components():
+def test_nwc_mqr_metric_cash_fallback_uses_components() -> None:
     metric = NWCMostRecentQuarterMetric()
     q4 = (date.today() - timedelta(days=20)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "AssetsCurrent":
                 return [
                     fact(
@@ -5518,12 +5833,18 @@ def test_nwc_mqr_metric_cash_fallback_uses_components():
     assert result.value == 150.0
 
 
-def test_nwc_mqr_metric_returns_none_without_cash_source():
+def test_nwc_mqr_metric_returns_none_without_cash_source() -> None:
     metric = NWCMostRecentQuarterMetric()
     q4 = (date.today() - timedelta(days=20)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "AssetsCurrent":
                 return [
                     fact(
@@ -5552,12 +5873,18 @@ def test_nwc_mqr_metric_returns_none_without_cash_source():
     assert result is None
 
 
-def test_nwc_mqr_metric_floors_adjusted_liabilities():
+def test_nwc_mqr_metric_floors_adjusted_liabilities() -> None:
     metric = NWCMostRecentQuarterMetric()
     q4 = (date.today() - timedelta(days=20)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "AssetsCurrent":
                 return [
                     fact(
@@ -5609,12 +5936,18 @@ def test_nwc_mqr_metric_floors_adjusted_liabilities():
     assert result.value == 250.0
 
 
-def test_nwc_fy_metric():
+def test_nwc_fy_metric() -> None:
     metric = NWCFYMetric()
     fy = (date.today() - timedelta(days=100)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "AssetsCurrent":
                 return [
                     fact(
@@ -5666,14 +5999,20 @@ def test_nwc_fy_metric():
     assert result.value == 150.0
 
 
-def test_delta_nwc_ttm_metric():
+def test_delta_nwc_ttm_metric() -> None:
     metric = DeltaNWCTTMMetric()
     today = date.today()
     q4 = (today - timedelta(days=20)).isoformat()
     q4_prev = (today - timedelta(days=380)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "AssetsCurrent":
                 return [
                     fact(
@@ -5757,14 +6096,20 @@ def test_delta_nwc_ttm_metric():
     assert result.value == 70.0
 
 
-def test_delta_nwc_ttm_metric_requires_same_quarter_last_year():
+def test_delta_nwc_ttm_metric_requires_same_quarter_last_year() -> None:
     metric = DeltaNWCTTMMetric()
     today = date.today()
     q4 = (today - timedelta(days=20)).isoformat()
     q3_prev = (today - timedelta(days=470)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "AssetsCurrent":
                 return [
                     fact(
@@ -5847,13 +6192,19 @@ def test_delta_nwc_ttm_metric_requires_same_quarter_last_year():
     assert result is None
 
 
-def test_delta_nwc_fy_metric():
+def test_delta_nwc_fy_metric() -> None:
     metric = DeltaNWCFYMetric()
     y0 = f"{date.today().year - 1}-09-30"
     y1 = f"{date.today().year - 2}-09-30"
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "AssetsCurrent":
                 return [
                     fact(
@@ -5937,7 +6288,7 @@ def test_delta_nwc_fy_metric():
     assert result.value == 70.0
 
 
-def test_delta_nwc_maint_metric():
+def test_delta_nwc_maint_metric() -> None:
     metric = DeltaNWCMaintMetric()
     current_year = date.today().year
     y0 = f"{current_year - 1}-09-30"
@@ -5946,7 +6297,13 @@ def test_delta_nwc_maint_metric():
     y3 = f"{current_year - 4}-09-30"
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "AssetsCurrent":
                 return [
                     fact(
@@ -6094,7 +6451,7 @@ def test_delta_nwc_maint_metric():
     assert round(result.value, 4) == round((35.0 - 15.0 + 35.0) / 3.0, 4)
 
 
-def test_delta_nwc_maint_metric_floors_negative_average_to_zero():
+def test_delta_nwc_maint_metric_floors_negative_average_to_zero() -> None:
     metric = DeltaNWCMaintMetric()
     current_year = date.today().year
     y0 = f"{current_year - 1}-09-30"
@@ -6103,7 +6460,13 @@ def test_delta_nwc_maint_metric_floors_negative_average_to_zero():
     y3 = f"{current_year - 4}-09-30"
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "AssetsCurrent":
                 return [
                     fact(
@@ -6251,15 +6614,21 @@ def test_delta_nwc_maint_metric_floors_negative_average_to_zero():
     assert result.value == 0.0
 
 
-def test_delta_nwc_maint_metric_requires_consecutive_deltas():
+def test_delta_nwc_maint_metric_requires_consecutive_deltas() -> None:
     metric = DeltaNWCMaintMetric()
     current_year = date.today().year
     y0 = f"{current_year - 1}-09-30"
     y1 = f"{current_year - 2}-09-30"
     y3 = f"{current_year - 4}-09-30"
 
-    class DummyRepo:
-        def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+    class DummyRepo(_USDTickerCurrencyRepo):
+        def facts_for_concept(
+            self,
+            symbol: str,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
             if concept == "AssetsCurrent":
                 return [
                     fact(
@@ -6626,7 +6995,9 @@ def _build_share_count_records(
     }
 
 
-def _share_count_records(symbol, as_of, shares=1.0):
+def _share_count_records(
+    symbol: str, as_of: str, shares: float = 1.0
+) -> list[FactRecord]:
     """An Entity-shares count fact that market_cap_money pairs with the price.
 
     Market cap is now derived as a share-count fact x the price as of that fact's
@@ -6651,31 +7022,39 @@ def _share_count_records(symbol, as_of, shares=1.0):
 
 def _build_market_repo(
     *,
-    market_cap,
-    as_of,
-    currency="USD",
-    ticker_currency="USD",
-):
+    market_cap: float | None,
+    as_of: str,
+    currency: str = "USD",
+    ticker_currency: str = "USD",
+) -> MarketDataRepository:
     # Market cap is derived as the latest share-count fact x the latest price, so
     # these tests pin it directly: latest_snapshot returns a price equal to
     # ``market_cap`` paired with a shares=1.0 fact (see _share_count_records). A
     # None market_cap means "no latest price", i.e. the metric sees a missing
     # market cap.
-    class Snapshot:
-        def __init__(self, snapshot_price):
-            self.security_id = 1
-            self.price = snapshot_price
-            self.as_of = as_of
-            self.currency = currency
+    captured_market_cap = market_cap
+    captured_as_of = as_of
+    captured_currency = currency
+    captured_ticker_currency = ticker_currency
 
-    class DummyMarketRepo:
-        def latest_snapshot(self, symbol):
-            if market_cap is None:
+    class DummyMarketRepo(MarketDataRepository):
+        # Valid nominal MarketDataRepository subtype; __init__ skips
+        # super().__init__ so no SQLite DB is opened.
+        def __init__(self) -> None:
+            pass
+
+        def latest_snapshot(self, symbol: str) -> PriceData | None:
+            if captured_market_cap is None:
                 return None
-            return Snapshot(market_cap)
+            return PriceData(
+                symbol=symbol,
+                price=captured_market_cap,
+                as_of=captured_as_of,
+                currency=captured_currency,
+            )
 
-        def ticker_currency(self, symbol):
-            return ticker_currency
+        def ticker_currency(self, symbol: str) -> str | None:
+            return captured_ticker_currency
 
     return DummyMarketRepo()
 
@@ -6785,8 +7164,16 @@ def _build_ev_ratio_records(
     return records
 
 
-class _OwnerEarningsRepo(TypedFactReaderMixin):
-    def __init__(self, records_by_concept, *, ticker_currency="USD"):
+class _OwnerEarningsRepo(RegionFactsRepository):
+    def __init__(
+        self,
+        records_by_concept: dict[str, list[FactRecord]],
+        *,
+        ticker_currency: str = "USD",
+    ) -> None:
+        # Wire the RegionFactsRepository wrapper to read its raw facts back
+        # through this same object before populating the fake's own state.
+        super().__init__(self)
         self.records_by_concept = dict(records_by_concept)
         # Market cap is derived from a share-count fact x price. Inject the
         # Entity-shares concept (read only by market_cap_money) so market-cap-backed
@@ -6799,7 +7186,13 @@ class _OwnerEarningsRepo(TypedFactReaderMixin):
         )
         self._ticker_currency = ticker_currency
 
-    def facts_for_concept(self, symbol, concept, fiscal_period=None, limit=None):
+    def facts_for_concept(
+        self,
+        symbol: str,
+        concept: str,
+        fiscal_period: str | None = None,
+        limit: int | None = None,
+    ) -> list[FactRecord]:
         records = list(self.records_by_concept.get(concept, []))
         if fiscal_period:
             period = fiscal_period.upper()
@@ -6812,13 +7205,13 @@ class _OwnerEarningsRepo(TypedFactReaderMixin):
             return records[:limit]
         return records
 
-    def latest_fact(self, symbol, concept):
+    def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
         records = self.facts_for_concept(symbol, concept)
         if not records:
             return None
         return max(records, key=lambda record: record.end_date)
 
-    def ticker_currency(self, symbol):
+    def ticker_currency(self, symbol: str) -> str | None:
         return self._ticker_currency
 
 
@@ -6994,7 +7387,7 @@ def _build_oe_ev_fy_input_records(
     return records_by_concept
 
 
-def test_oe_equity_ttm_metric_computes_formula():
+def test_oe_equity_ttm_metric_computes_formula() -> None:
     metric = OwnerEarningsEquityTTMMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -7120,7 +7513,7 @@ def test_oe_equity_ttm_metric_computes_formula():
     assert result.value == 744.0
 
 
-def test_oe_equity_ttm_metric_net_income_fallback():
+def test_oe_equity_ttm_metric_net_income_fallback() -> None:
     metric = OwnerEarningsEquityTTMMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -7245,7 +7638,7 @@ def test_oe_equity_ttm_metric_net_income_fallback():
     assert result.value == 620.0
 
 
-def test_oe_equity_ttm_metric_da_fallback_to_cash_flow():
+def test_oe_equity_ttm_metric_da_fallback_to_cash_flow() -> None:
     metric = OwnerEarningsEquityTTMMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -7370,7 +7763,7 @@ def test_oe_equity_ttm_metric_da_fallback_to_cash_flow():
     assert result.value == 368.0
 
 
-def test_oe_equity_ttm_metric_treats_missing_da_as_zero():
+def test_oe_equity_ttm_metric_treats_missing_da_as_zero() -> None:
     metric = OwnerEarningsEquityTTMMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -7461,7 +7854,7 @@ def test_oe_equity_ttm_metric_treats_missing_da_as_zero():
     assert result.value == 300.0
 
 
-def test_oe_equity_ttm_metric_requires_delta_nwc_maint():
+def test_oe_equity_ttm_metric_requires_delta_nwc_maint() -> None:
     metric = OwnerEarningsEquityTTMMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -7551,7 +7944,7 @@ def test_oe_equity_ttm_metric_requires_delta_nwc_maint():
     assert result is None
 
 
-def test_oe_equity_ttm_metric_currency_mismatch_returns_none():
+def test_oe_equity_ttm_metric_currency_mismatch_returns_none() -> None:
     metric = OwnerEarningsEquityTTMMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -7675,7 +8068,7 @@ def test_oe_equity_ttm_metric_currency_mismatch_returns_none():
     assert result is None
 
 
-def test_oe_equity_5y_avg_metric_computes_expected_average():
+def test_oe_equity_5y_avg_metric_computes_expected_average() -> None:
     metric = OwnerEarningsEquityFiveYearAverageMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -7759,7 +8152,7 @@ def test_oe_equity_5y_avg_metric_computes_expected_average():
     assert result.as_of == f"{years[0]}-09-30"
 
 
-def test_oe_equity_5y_avg_metric_requires_five_points():
+def test_oe_equity_5y_avg_metric_requires_five_points() -> None:
     metric = OwnerEarningsEquityFiveYearAverageMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -7799,7 +8192,7 @@ def test_oe_equity_5y_avg_metric_requires_five_points():
     assert result is None
 
 
-def test_oe_equity_5y_avg_metric_allows_year_gaps():
+def test_oe_equity_5y_avg_metric_allows_year_gaps() -> None:
     metric = OwnerEarningsEquityFiveYearAverageMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -7857,7 +8250,7 @@ def test_oe_equity_5y_avg_metric_allows_year_gaps():
     assert result.value == 330.0
 
 
-def test_oe_equity_5y_avg_metric_uses_latest_delta_nwc_maint_for_all_years():
+def test_oe_equity_5y_avg_metric_uses_latest_delta_nwc_maint_for_all_years() -> None:
     metric = OwnerEarningsEquityFiveYearAverageMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -7910,7 +8303,7 @@ def test_oe_equity_5y_avg_metric_uses_latest_delta_nwc_maint_for_all_years():
     assert result.value == 280.0
 
 
-def test_oe_equity_5y_avg_metric_requires_consistent_currency_across_years():
+def test_oe_equity_5y_avg_metric_requires_consistent_currency_across_years() -> None:
     metric = OwnerEarningsEquityFiveYearAverageMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -7962,7 +8355,7 @@ def test_oe_equity_5y_avg_metric_requires_consistent_currency_across_years():
     assert result is None
 
 
-def test_oe_ev_ttm_metric_computes_formula():
+def test_oe_ev_ttm_metric_computes_formula() -> None:
     metric = OwnerEarningsEnterpriseTTMMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -8041,7 +8434,7 @@ def test_oe_ev_ttm_metric_computes_formula():
     assert result.value == 584.0
 
 
-def test_oe_ev_ttm_metric_uses_fy_tax_rate_fallback():
+def test_oe_ev_ttm_metric_uses_fy_tax_rate_fallback() -> None:
     metric = OwnerEarningsEnterpriseTTMMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -8181,7 +8574,7 @@ def test_oe_ev_ttm_metric_uses_fy_tax_rate_fallback():
     assert result.value == 280.0
 
 
-def test_oe_ev_ttm_metric_uses_default_tax_rate_when_no_valid_proxy():
+def test_oe_ev_ttm_metric_uses_default_tax_rate_when_no_valid_proxy() -> None:
     metric = OwnerEarningsEnterpriseTTMMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -8248,7 +8641,7 @@ def test_oe_ev_ttm_metric_uses_default_tax_rate_when_no_valid_proxy():
     assert result.value == 176.0
 
 
-def test_oe_ev_ttm_metric_treats_missing_da_as_zero():
+def test_oe_ev_ttm_metric_treats_missing_da_as_zero() -> None:
     metric = OwnerEarningsEnterpriseTTMMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -8315,7 +8708,7 @@ def test_oe_ev_ttm_metric_treats_missing_da_as_zero():
     assert result.value == 156.0
 
 
-def test_oe_ev_ttm_metric_requires_delta_nwc_maint():
+def test_oe_ev_ttm_metric_requires_delta_nwc_maint() -> None:
     metric = OwnerEarningsEnterpriseTTMMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -8381,7 +8774,7 @@ def test_oe_ev_ttm_metric_requires_delta_nwc_maint():
     assert result is None
 
 
-def test_oe_ev_ttm_metric_currency_mismatch_returns_none():
+def test_oe_ev_ttm_metric_currency_mismatch_returns_none() -> None:
     metric = OwnerEarningsEnterpriseTTMMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -8458,7 +8851,7 @@ def test_oe_ev_ttm_metric_currency_mismatch_returns_none():
     assert result is None
 
 
-def test_oe_ev_ttm_metric_allows_negative_values():
+def test_oe_ev_ttm_metric_allows_negative_values() -> None:
     metric = OwnerEarningsEnterpriseTTMMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -8525,7 +8918,7 @@ def test_oe_ev_ttm_metric_allows_negative_values():
     assert result.value == -108.0
 
 
-def test_oe_ev_5y_avg_metric_computes_expected_average():
+def test_oe_ev_5y_avg_metric_computes_expected_average() -> None:
     metric = OwnerEarningsEnterpriseFiveYearAverageMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -8600,7 +8993,7 @@ def test_oe_ev_5y_avg_metric_computes_expected_average():
     assert result.value == 300.0
 
 
-def test_oe_ev_5y_avg_metric_requires_five_points():
+def test_oe_ev_5y_avg_metric_requires_five_points() -> None:
     metric = OwnerEarningsEnterpriseFiveYearAverageMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -8640,7 +9033,7 @@ def test_oe_ev_5y_avg_metric_requires_five_points():
     assert result is None
 
 
-def test_oe_ev_5y_avg_metric_allows_year_gaps():
+def test_oe_ev_5y_avg_metric_allows_year_gaps() -> None:
     metric = OwnerEarningsEnterpriseFiveYearAverageMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -8720,7 +9113,7 @@ def test_oe_ev_5y_avg_metric_allows_year_gaps():
     assert result.value == 284.0
 
 
-def test_oe_ev_5y_avg_metric_uses_latest_delta_nwc_maint_for_all_years():
+def test_oe_ev_5y_avg_metric_uses_latest_delta_nwc_maint_for_all_years() -> None:
     metric = OwnerEarningsEnterpriseFiveYearAverageMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -8794,7 +9187,7 @@ def test_oe_ev_5y_avg_metric_uses_latest_delta_nwc_maint_for_all_years():
     assert result.value == 140.0
 
 
-def test_oe_ev_5y_avg_metric_requires_consistent_currency_across_years():
+def test_oe_ev_5y_avg_metric_requires_consistent_currency_across_years() -> None:
     metric = OwnerEarningsEnterpriseFiveYearAverageMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -8868,7 +9261,7 @@ def test_oe_ev_5y_avg_metric_requires_consistent_currency_across_years():
     assert result is None
 
 
-def test_oey_equity_metric_computes_ratio_from_ttm_numerator():
+def test_oey_equity_metric_computes_ratio_from_ttm_numerator() -> None:
     metric = OwnerEarningsYieldEquityMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -8988,14 +9381,15 @@ def test_oey_equity_metric_computes_ratio_from_ttm_numerator():
         }
     )
 
-    class DummyMarketRepo:
-        def latest_snapshot(self, symbol):
-            class Snapshot:
-                price = 7440.0
-                as_of = q3
-                currency = "USD"
+    class DummyMarketRepo(MarketDataRepository):
+        # Fake market repo: a valid nominal MarketDataRepository subtype whose
+        # __init__ deliberately skips super().__init__ so no SQLite DB is opened;
+        # it only ever serves a fixed in-memory snapshot.
+        def __init__(self) -> None:
+            pass
 
-            return Snapshot()
+        def latest_snapshot(self, symbol: str) -> PriceData | None:
+            return PriceData(symbol=symbol, price=7440.0, as_of=q3, currency="USD")
 
     result = metric.compute(
         symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
@@ -9005,7 +9399,7 @@ def test_oey_equity_metric_computes_ratio_from_ttm_numerator():
     assert result.value == 0.1
 
 
-def test_oey_equity_5y_metric_computes_ratio_from_5y_numerator():
+def test_oey_equity_5y_metric_computes_ratio_from_5y_numerator() -> None:
     metric = OwnerEarningsYieldEquityFiveYearMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -9083,14 +9477,17 @@ def test_oey_equity_5y_metric_computes_ratio_from_5y_numerator():
         }
     )
 
-    class DummyMarketRepo:
-        def latest_snapshot(self, symbol):
-            class Snapshot:
-                price = 3900.0
-                as_of = "2026-01-01"
-                currency = "USD"
+    class DummyMarketRepo(MarketDataRepository):
+        # Fake market repo: a valid nominal MarketDataRepository subtype whose
+        # __init__ deliberately skips super().__init__ so no SQLite DB is opened;
+        # it only ever serves a fixed in-memory snapshot.
+        def __init__(self) -> None:
+            pass
 
-            return Snapshot()
+        def latest_snapshot(self, symbol: str) -> PriceData | None:
+            return PriceData(
+                symbol=symbol, price=3900.0, as_of="2026-01-01", currency="USD"
+            )
 
     result = metric.compute(
         symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
@@ -9100,7 +9497,7 @@ def test_oey_equity_5y_metric_computes_ratio_from_5y_numerator():
     assert result.as_of == f"{years[0]}-09-30"
 
 
-def test_oey_equity_metric_returns_none_when_market_cap_missing():
+def test_oey_equity_metric_returns_none_when_market_cap_missing() -> None:
     metric = OwnerEarningsYieldEquityMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -9186,14 +9583,17 @@ def test_oey_equity_metric_returns_none_when_market_cap_missing():
         }
     )
 
-    class DummyMarketRepo:
-        def latest_snapshot(self, symbol):
-            class Snapshot:
-                price = None
-                as_of = q3
-                currency = "USD"
+    class DummyMarketRepo(MarketDataRepository):
+        # Fake market repo: a valid nominal MarketDataRepository subtype whose
+        # __init__ deliberately skips super().__init__ so no SQLite DB is opened;
+        # it only ever serves a fixed in-memory snapshot.
+        def __init__(self) -> None:
+            pass
 
-            return Snapshot()
+        def latest_snapshot(self, symbol: str) -> PriceData | None:
+            # No usable latest price -> no snapshot at all (the production
+            # MarketDataRepository returns None when there is no price row).
+            return None
 
     result = metric.compute(
         symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
@@ -9201,7 +9601,7 @@ def test_oey_equity_metric_returns_none_when_market_cap_missing():
     assert result is None
 
 
-def test_oey_equity_metric_returns_none_when_market_cap_non_positive():
+def test_oey_equity_metric_returns_none_when_market_cap_non_positive() -> None:
     metric = OwnerEarningsYieldEquityMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -9287,14 +9687,15 @@ def test_oey_equity_metric_returns_none_when_market_cap_non_positive():
         }
     )
 
-    class DummyMarketRepo:
-        def latest_snapshot(self, symbol):
-            class Snapshot:
-                price = 0.0
-                as_of = q3
-                currency = "USD"
+    class DummyMarketRepo(MarketDataRepository):
+        # Fake market repo: a valid nominal MarketDataRepository subtype whose
+        # __init__ deliberately skips super().__init__ so no SQLite DB is opened;
+        # it only ever serves a fixed in-memory snapshot.
+        def __init__(self) -> None:
+            pass
 
-            return Snapshot()
+        def latest_snapshot(self, symbol: str) -> PriceData | None:
+            return PriceData(symbol=symbol, price=0.0, as_of=q3, currency="USD")
 
     result = metric.compute(
         symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
@@ -9302,7 +9703,7 @@ def test_oey_equity_metric_returns_none_when_market_cap_non_positive():
     assert result is None
 
 
-def test_oey_equity_metric_returns_none_when_numerator_missing():
+def test_oey_equity_metric_returns_none_when_numerator_missing() -> None:
     metric = OwnerEarningsYieldEquityMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -9311,14 +9712,17 @@ def test_oey_equity_metric_returns_none_when_numerator_missing():
         symbol, latest_year, [150.0, 130.0, 110.0, 90.0]
     )
 
-    class DummyMarketRepo:
-        def latest_snapshot(self, symbol):
-            class Snapshot:
-                price = 1000.0
-                as_of = "2026-01-01"
-                currency = "USD"
+    class DummyMarketRepo(MarketDataRepository):
+        # Fake market repo: a valid nominal MarketDataRepository subtype whose
+        # __init__ deliberately skips super().__init__ so no SQLite DB is opened;
+        # it only ever serves a fixed in-memory snapshot.
+        def __init__(self) -> None:
+            pass
 
-            return Snapshot()
+        def latest_snapshot(self, symbol: str) -> PriceData | None:
+            return PriceData(
+                symbol=symbol, price=1000.0, as_of="2026-01-01", currency="USD"
+            )
 
     result = metric.compute(
         symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
@@ -9326,7 +9730,7 @@ def test_oey_equity_metric_returns_none_when_numerator_missing():
     assert result is None
 
 
-def test_oey_equity_metric_uses_listing_currency_for_market_cap():
+def test_oey_equity_metric_uses_listing_currency_for_market_cap() -> None:
     metric = OwnerEarningsYieldEquityMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -9448,16 +9852,17 @@ def test_oey_equity_metric_uses_listing_currency_for_market_cap():
 
     # The stored price is in the listing's (major) currency, so the snapshot
     # currency matches the ticker currency.
-    class DummyMarketRepo:
-        def latest_snapshot(self, symbol):
-            class Snapshot:
-                price = 100.0
-                as_of = q3
-                currency = "USD"
+    class DummyMarketRepo(MarketDataRepository):
+        # Fake market repo: a valid nominal MarketDataRepository subtype whose
+        # __init__ deliberately skips super().__init__ so no SQLite DB is opened;
+        # it only ever serves a fixed in-memory snapshot.
+        def __init__(self) -> None:
+            pass
 
-            return Snapshot()
+        def latest_snapshot(self, symbol: str) -> PriceData | None:
+            return PriceData(symbol=symbol, price=100.0, as_of=q3, currency="USD")
 
-        def ticker_currency(self, symbol):
+        def ticker_currency(self, symbol: str) -> str | None:
             return "USD"
 
     result = metric.compute(
@@ -9467,7 +9872,7 @@ def test_oey_equity_metric_uses_listing_currency_for_market_cap():
     assert result.value == 7.44
 
 
-def test_oey_equity_metric_allows_negative_values():
+def test_oey_equity_metric_allows_negative_values() -> None:
     metric = OwnerEarningsYieldEquityMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -9553,14 +9958,15 @@ def test_oey_equity_metric_allows_negative_values():
         }
     )
 
-    class DummyMarketRepo:
-        def latest_snapshot(self, symbol):
-            class Snapshot:
-                price = 4920.0
-                as_of = q3
-                currency = "USD"
+    class DummyMarketRepo(MarketDataRepository):
+        # Fake market repo: a valid nominal MarketDataRepository subtype whose
+        # __init__ deliberately skips super().__init__ so no SQLite DB is opened;
+        # it only ever serves a fixed in-memory snapshot.
+        def __init__(self) -> None:
+            pass
 
-            return Snapshot()
+        def latest_snapshot(self, symbol: str) -> PriceData | None:
+            return PriceData(symbol=symbol, price=4920.0, as_of=q3, currency="USD")
 
     result = metric.compute(
         symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
@@ -9569,7 +9975,7 @@ def test_oey_equity_metric_allows_negative_values():
     assert result.value == -500.0 / 4920.0
 
 
-def test_oey_ev_metric_computes_ev_from_components():
+def test_oey_ev_metric_computes_ev_from_components() -> None:
     metric = OwnerEarningsYieldEVMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -9598,14 +10004,15 @@ def test_oey_ev_metric_computes_ev_from_components():
         )
     ]
 
-    class DummyMarketRepo:
-        def latest_snapshot(self, symbol):
-            class Snapshot:
-                price = 1000.0
-                as_of = q4
-                currency = "USD"
+    class DummyMarketRepo(MarketDataRepository):
+        # Fake market repo: a valid nominal MarketDataRepository subtype whose
+        # __init__ deliberately skips super().__init__ so no SQLite DB is opened;
+        # it only ever serves a fixed in-memory snapshot.
+        def __init__(self) -> None:
+            pass
 
-            return Snapshot()
+        def latest_snapshot(self, symbol: str) -> PriceData | None:
+            return PriceData(symbol=symbol, price=1000.0, as_of=q4, currency="USD")
 
     # EV is derived (no fact): market cap 1000 + debt/cash components = 1250.
     result = metric.compute(
@@ -9615,7 +10022,7 @@ def test_oey_ev_metric_computes_ev_from_components():
     assert result.value == 584.0 / 1250.0
 
 
-def test_oey_ev_metric_returns_none_when_market_cap_unavailable():
+def test_oey_ev_metric_returns_none_when_market_cap_unavailable() -> None:
     metric = OwnerEarningsYieldEVMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -9635,14 +10042,17 @@ def test_oey_ev_metric_returns_none_when_market_cap_unavailable():
     )
 
     # No latest price -> market cap is unavailable -> EV cannot be derived.
-    class DummyMarketRepo:
-        def latest_snapshot(self, symbol):
-            class Snapshot:
-                price = None
-                as_of = q4
-                currency = "USD"
+    class DummyMarketRepo(MarketDataRepository):
+        # Fake market repo: a valid nominal MarketDataRepository subtype whose
+        # __init__ deliberately skips super().__init__ so no SQLite DB is opened;
+        # it only ever serves a fixed in-memory snapshot.
+        def __init__(self) -> None:
+            pass
 
-            return Snapshot()
+        def latest_snapshot(self, symbol: str) -> PriceData | None:
+            # No usable latest price -> no snapshot at all (the production
+            # MarketDataRepository returns None when there is no price row).
+            return None
 
     result = metric.compute(
         symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
@@ -9650,7 +10060,7 @@ def test_oey_ev_metric_returns_none_when_market_cap_unavailable():
     assert result is None
 
 
-def test_oey_ev_metric_allows_negative_values():
+def test_oey_ev_metric_allows_negative_values() -> None:
     metric = OwnerEarningsYieldEVMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -9684,14 +10094,15 @@ def test_oey_ev_metric_allows_negative_values():
         )
     ]
 
-    class DummyMarketRepo:
-        def latest_snapshot(self, symbol):
-            class Snapshot:
-                price = 1000.0
-                as_of = q4
-                currency = "USD"
+    class DummyMarketRepo(MarketDataRepository):
+        # Fake market repo: a valid nominal MarketDataRepository subtype whose
+        # __init__ deliberately skips super().__init__ so no SQLite DB is opened;
+        # it only ever serves a fixed in-memory snapshot.
+        def __init__(self) -> None:
+            pass
 
-            return Snapshot()
+        def latest_snapshot(self, symbol: str) -> PriceData | None:
+            return PriceData(symbol=symbol, price=1000.0, as_of=q4, currency="USD")
 
     # OE TTM is negative; EV is derived as market cap 1000 + long 130 + (short -
     # cash) = 1080, so the yield is -108 / 1080.
@@ -9702,7 +10113,7 @@ def test_oey_ev_metric_allows_negative_values():
     assert result.value == -0.1
 
 
-def test_ebit_yield_ev_metric_computes_ev_from_components():
+def test_ebit_yield_ev_metric_computes_ev_from_components() -> None:
     metric = EBITYieldEVMetric()
     symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
@@ -9720,7 +10131,7 @@ def test_ebit_yield_ev_metric_computes_ev_from_components():
     assert result.value == 0.4
 
 
-def test_ebit_yield_ev_metric_allows_negative_values():
+def test_ebit_yield_ev_metric_allows_negative_values() -> None:
     metric = EBITYieldEVMetric()
     symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
@@ -9743,7 +10154,7 @@ def test_ebit_yield_ev_metric_allows_negative_values():
     assert result.value == -0.2
 
 
-def test_ev_resolver_ignores_enterprise_value_fact():
+def test_ev_resolver_ignores_enterprise_value_fact() -> None:
     # Regression: even when an EnterpriseValue fact is present (e.g. left over in
     # a pre-migration DB), the resolver ignores it and always computes EV from
     # market cap + debt - cash. A bogus fact value must not change the result.
@@ -9771,7 +10182,7 @@ def test_ev_resolver_ignores_enterprise_value_fact():
     assert result.value == 0.4
 
 
-def test_fcf_yield_ev_metric_uses_existing_fcf_policy():
+def test_fcf_yield_ev_metric_uses_existing_fcf_policy() -> None:
     metric = FCFYieldEVMetric()
     symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
@@ -9787,7 +10198,7 @@ def test_fcf_yield_ev_metric_uses_existing_fcf_policy():
     assert result.value == 0.4
 
 
-def test_fcf_yield_ev_metric_uses_zero_capex_when_missing():
+def test_fcf_yield_ev_metric_uses_zero_capex_when_missing() -> None:
     metric = FCFYieldEVMetric()
     symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
@@ -9810,7 +10221,7 @@ def test_fcf_yield_ev_metric_uses_zero_capex_when_missing():
     assert result.value == 0.5
 
 
-def test_fcf_yield_ev_metric_allows_negative_values():
+def test_fcf_yield_ev_metric_allows_negative_values() -> None:
     metric = FCFYieldEVMetric()
     symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
@@ -9834,7 +10245,7 @@ def test_fcf_yield_ev_metric_allows_negative_values():
     assert result.value == -0.04
 
 
-def test_ev_to_ebit_metric_computes_with_positive_ebit():
+def test_ev_to_ebit_metric_computes_with_positive_ebit() -> None:
     metric = EVToEBITMetric()
     symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
@@ -9850,7 +10261,7 @@ def test_ev_to_ebit_metric_computes_with_positive_ebit():
     assert result.value == 2.5
 
 
-def test_ev_to_ebit_metric_returns_none_when_ebit_non_positive():
+def test_ev_to_ebit_metric_returns_none_when_ebit_non_positive() -> None:
     metric = EVToEBITMetric()
     symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
@@ -9871,7 +10282,7 @@ def test_ev_to_ebit_metric_returns_none_when_ebit_non_positive():
     )
 
 
-def test_ev_to_ebitda_metric_uses_component_ebitda_and_da_fallback():
+def test_ev_to_ebitda_metric_uses_component_ebitda_and_da_fallback() -> None:
     metric = EVToEBITDAMetric()
     symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
@@ -9895,7 +10306,7 @@ def test_ev_to_ebitda_metric_uses_component_ebitda_and_da_fallback():
     assert result.value == 2.0
 
 
-def test_ev_to_ebitda_metric_returns_none_when_ebitda_non_positive():
+def test_ev_to_ebitda_metric_returns_none_when_ebitda_non_positive() -> None:
     metric = EVToEBITDAMetric()
     symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
@@ -9917,7 +10328,7 @@ def test_ev_to_ebitda_metric_returns_none_when_ebitda_non_positive():
     )
 
 
-def test_cfo_to_ni_ttm_metric():
+def test_cfo_to_ni_ttm_metric() -> None:
     metric = CFOToNITTMMetric()
     quarter_dates = _net_debt_quarter_dates()
     repo = _OwnerEarningsRepo(
@@ -9941,7 +10352,7 @@ def test_cfo_to_ni_ttm_metric():
     assert result.value == 2.0
 
 
-def test_cfo_to_ni_ttm_metric_net_income_fallback():
+def test_cfo_to_ni_ttm_metric_net_income_fallback() -> None:
     metric = CFOToNITTMMetric()
     quarter_dates = _net_debt_quarter_dates()
     repo = _OwnerEarningsRepo(
@@ -9964,7 +10375,7 @@ def test_cfo_to_ni_ttm_metric_net_income_fallback():
     assert result.value == 2.0
 
 
-def test_cfo_to_ni_ttm_metric_requires_four_quarters():
+def test_cfo_to_ni_ttm_metric_requires_four_quarters() -> None:
     metric = CFOToNITTMMetric()
     quarter_dates = _net_debt_quarter_dates()[:3]
     repo = _OwnerEarningsRepo(
@@ -9985,7 +10396,7 @@ def test_cfo_to_ni_ttm_metric_requires_four_quarters():
     assert metric.compute("AAPL.US", repo) is None
 
 
-def test_cfo_to_ni_ttm_metric_rejects_stale_latest_quarter():
+def test_cfo_to_ni_ttm_metric_rejects_stale_latest_quarter() -> None:
     metric = CFOToNITTMMetric()
     today = date.today()
     quarter_dates = (
@@ -10012,7 +10423,7 @@ def test_cfo_to_ni_ttm_metric_rejects_stale_latest_quarter():
     assert metric.compute("AAPL.US", repo) is None
 
 
-def test_cfo_to_ni_ttm_metric_rejects_non_positive_net_income():
+def test_cfo_to_ni_ttm_metric_rejects_non_positive_net_income() -> None:
     metric = CFOToNITTMMetric()
     quarter_dates = _net_debt_quarter_dates()
     repo = _OwnerEarningsRepo(
@@ -10033,7 +10444,7 @@ def test_cfo_to_ni_ttm_metric_rejects_non_positive_net_income():
     assert metric.compute("AAPL.US", repo) is None
 
 
-def test_cfo_to_ni_ttm_metric_rejects_currency_mismatch():
+def test_cfo_to_ni_ttm_metric_rejects_currency_mismatch() -> None:
     metric = CFOToNITTMMetric()
     quarter_dates = _net_debt_quarter_dates()
     repo = _OwnerEarningsRepo(
@@ -10056,7 +10467,7 @@ def test_cfo_to_ni_ttm_metric_rejects_currency_mismatch():
     assert metric.compute("AAPL.US", repo) is None
 
 
-def test_cfo_to_ni_10y_median_metric():
+def test_cfo_to_ni_10y_median_metric() -> None:
     metric = CFOToNITenYearMedianMetric()
     latest_year = date.today().year - 1
     repo = _OwnerEarningsRepo(
@@ -10074,7 +10485,7 @@ def test_cfo_to_ni_10y_median_metric():
     assert result.value == 5.5
 
 
-def test_cfo_to_ni_10y_median_metric_requires_strict_consecutive_years():
+def test_cfo_to_ni_10y_median_metric_requires_strict_consecutive_years() -> None:
     metric = CFOToNITenYearMedianMetric()
     latest_year = date.today().year - 1
     records_by_concept = _build_cash_conversion_fy_records(
@@ -10092,7 +10503,7 @@ def test_cfo_to_ni_10y_median_metric_requires_strict_consecutive_years():
     assert metric.compute("AAPL.US", _OwnerEarningsRepo(records_by_concept)) is None
 
 
-def test_cfo_to_ni_10y_median_metric_rejects_non_positive_net_income_year():
+def test_cfo_to_ni_10y_median_metric_rejects_non_positive_net_income_year() -> None:
     metric = CFOToNITenYearMedianMetric()
     latest_year = date.today().year - 1
     ni_values = [100.0] * 10
@@ -10109,7 +10520,7 @@ def test_cfo_to_ni_10y_median_metric_rejects_non_positive_net_income_year():
     assert metric.compute("AAPL.US", repo) is None
 
 
-def test_cfo_to_ni_10y_median_metric_rejects_stale_latest_fy():
+def test_cfo_to_ni_10y_median_metric_rejects_stale_latest_fy() -> None:
     metric = CFOToNITenYearMedianMetric()
     latest_year = date.today().year - 2
     repo = _OwnerEarningsRepo(
@@ -10124,7 +10535,7 @@ def test_cfo_to_ni_10y_median_metric_rejects_stale_latest_fy():
     assert metric.compute("AAPL.US", repo) is None
 
 
-def test_cfo_to_ni_10y_median_metric_rejects_currency_conflict():
+def test_cfo_to_ni_10y_median_metric_rejects_currency_conflict() -> None:
     metric = CFOToNITenYearMedianMetric()
     latest_year = date.today().year - 1
     records_by_concept = _build_cash_conversion_fy_records(
@@ -10145,7 +10556,7 @@ def test_cfo_to_ni_10y_median_metric_rejects_currency_conflict():
     assert metric.compute("AAPL.US", _OwnerEarningsRepo(records_by_concept)) is None
 
 
-def test_accruals_ratio_metric():
+def test_accruals_ratio_metric() -> None:
     metric = AccrualsRatioMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -10185,7 +10596,7 @@ def test_accruals_ratio_metric():
     assert result.value == 120.0 / 900.0
 
 
-def test_accruals_ratio_metric_net_income_fallback():
+def test_accruals_ratio_metric_net_income_fallback() -> None:
     metric = AccrualsRatioMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -10223,7 +10634,7 @@ def test_accruals_ratio_metric_net_income_fallback():
     assert result.value == 200.0 / 900.0
 
 
-def test_accruals_ratio_metric_allows_negative_values():
+def test_accruals_ratio_metric_allows_negative_values() -> None:
     metric = AccrualsRatioMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -10261,7 +10672,7 @@ def test_accruals_ratio_metric_allows_negative_values():
     assert result.value == -200.0 / 900.0
 
 
-def test_accruals_ratio_metric_requires_four_quarters():
+def test_accruals_ratio_metric_requires_four_quarters() -> None:
     metric = AccrualsRatioMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -10306,7 +10717,7 @@ def test_accruals_ratio_metric_requires_four_quarters():
     assert metric.compute(symbol, repo) is None
 
 
-def test_accruals_ratio_metric_rejects_stale_numerator_quarter():
+def test_accruals_ratio_metric_rejects_stale_numerator_quarter() -> None:
     metric = AccrualsRatioMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -10342,7 +10753,7 @@ def test_accruals_ratio_metric_rejects_stale_numerator_quarter():
     assert metric.compute(symbol, repo) is None
 
 
-def test_accruals_ratio_metric_rejects_stale_latest_assets_quarter():
+def test_accruals_ratio_metric_rejects_stale_latest_assets_quarter() -> None:
     metric = AccrualsRatioMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -10379,7 +10790,7 @@ def test_accruals_ratio_metric_rejects_stale_latest_assets_quarter():
     assert metric.compute(symbol, repo) is None
 
 
-def test_accruals_ratio_metric_requires_same_quarter_last_year_assets():
+def test_accruals_ratio_metric_requires_same_quarter_last_year_assets() -> None:
     metric = AccrualsRatioMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -10440,7 +10851,7 @@ def test_accruals_ratio_metric_requires_same_quarter_last_year_assets():
     assert metric.compute(symbol, repo) is None
 
 
-def test_accruals_ratio_metric_rejects_non_positive_avg_assets():
+def test_accruals_ratio_metric_rejects_non_positive_avg_assets() -> None:
     metric = AccrualsRatioMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -10477,7 +10888,7 @@ def test_accruals_ratio_metric_rejects_non_positive_avg_assets():
     assert metric.compute(symbol, repo) is None
 
 
-def test_accruals_ratio_metric_rejects_numerator_currency_mismatch():
+def test_accruals_ratio_metric_rejects_numerator_currency_mismatch() -> None:
     metric = AccrualsRatioMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -10515,7 +10926,7 @@ def test_accruals_ratio_metric_rejects_numerator_currency_mismatch():
     assert metric.compute(symbol, repo) is None
 
 
-def test_accruals_ratio_metric_rejects_assets_currency_mismatch():
+def test_accruals_ratio_metric_rejects_assets_currency_mismatch() -> None:
     metric = AccrualsRatioMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -10561,7 +10972,9 @@ def test_accruals_ratio_metric_rejects_assets_currency_mismatch():
     assert metric.compute(symbol, repo) is None
 
 
-def test_accruals_ratio_metric_rejects_numerator_denominator_currency_mismatch():
+def test_accruals_ratio_metric_rejects_numerator_denominator_currency_mismatch() -> (
+    None
+):
     metric = AccrualsRatioMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -10600,7 +11013,7 @@ def test_accruals_ratio_metric_rejects_numerator_denominator_currency_mismatch()
     assert metric.compute(symbol, repo) is None
 
 
-def test_share_count_change_metrics_prefer_quarterly_path():
+def test_share_count_change_metrics_prefer_quarterly_path() -> None:
     symbol = "AAPL.US"
     today = date.today()
     q_latest = (today - timedelta(days=20)).isoformat()
@@ -10632,7 +11045,7 @@ def test_share_count_change_metrics_prefer_quarterly_path():
     assert round(pct_change.value, 10) == -0.2
 
 
-def test_share_count_cagr_5y_metric_prefers_quarterly_path():
+def test_share_count_cagr_5y_metric_prefers_quarterly_path() -> None:
     symbol = "AAPL.US"
     today = date.today()
     q_latest = (today - timedelta(days=20)).isoformat()
@@ -10660,7 +11073,7 @@ def test_share_count_cagr_5y_metric_prefers_quarterly_path():
     assert round(result.value, 10) == round((80.0 / 100.0) ** 0.2 - 1.0, 10)
 
 
-def test_share_count_change_metrics_fallback_to_fy_path():
+def test_share_count_change_metrics_fallback_to_fy_path() -> None:
     symbol = "AAPL.US"
     today = date.today()
     q_latest = (today - timedelta(days=20)).isoformat()
@@ -10690,7 +11103,7 @@ def test_share_count_change_metrics_fallback_to_fy_path():
     assert round(pct_change.value, 10) == 0.5
 
 
-def test_share_count_cagr_5y_metric_fallbacks_to_fy_path():
+def test_share_count_cagr_5y_metric_fallbacks_to_fy_path() -> None:
     symbol = "AAPL.US"
     today = date.today()
     q_latest = (today - timedelta(days=20)).isoformat()
@@ -10716,7 +11129,7 @@ def test_share_count_cagr_5y_metric_fallbacks_to_fy_path():
     assert round(result.value, 10) == round((150.0 / 100.0) ** 0.2 - 1.0, 10)
 
 
-def test_share_count_change_metrics_require_exact_10_year_match():
+def test_share_count_change_metrics_require_exact_10_year_match() -> None:
     symbol = "AAPL.US"
     today = date.today()
     q_latest = (today - timedelta(days=20)).isoformat()
@@ -10737,7 +11150,7 @@ def test_share_count_change_metrics_require_exact_10_year_match():
     assert Shares10YPctChangeMetric().compute(symbol, repo) is None
 
 
-def test_share_count_cagr_5y_metric_requires_exact_5_year_match():
+def test_share_count_cagr_5y_metric_requires_exact_5_year_match() -> None:
     symbol = "AAPL.US"
     today = date.today()
     q_latest = (today - timedelta(days=20)).isoformat()
@@ -10757,7 +11170,7 @@ def test_share_count_cagr_5y_metric_requires_exact_5_year_match():
     assert ShareCountCAGR5YMetric().compute(symbol, repo) is None
 
 
-def test_share_count_change_metrics_require_positive_share_counts():
+def test_share_count_change_metrics_require_positive_share_counts() -> None:
     symbol = "AAPL.US"
     today = date.today()
     q_latest = (today - timedelta(days=20)).isoformat()
@@ -10778,7 +11191,7 @@ def test_share_count_change_metrics_require_positive_share_counts():
     assert Shares10YPctChangeMetric().compute(symbol, repo) is None
 
 
-def test_share_count_cagr_5y_metric_requires_positive_share_counts():
+def test_share_count_cagr_5y_metric_requires_positive_share_counts() -> None:
     symbol = "AAPL.US"
     today = date.today()
     q_latest = (today - timedelta(days=20)).isoformat()
@@ -10798,7 +11211,9 @@ def test_share_count_cagr_5y_metric_requires_positive_share_counts():
     assert ShareCountCAGR5YMetric().compute(symbol, repo) is None
 
 
-def test_share_count_change_metrics_reject_stale_latest_quarter_without_fallback():
+def test_share_count_change_metrics_reject_stale_latest_quarter_without_fallback() -> (
+    None
+):
     symbol = "AAPL.US"
     stale_latest = (date.today() - timedelta(days=MAX_FACT_AGE_DAYS + 10)).isoformat()
     latest_year = int(stale_latest[:4])
@@ -10817,7 +11232,9 @@ def test_share_count_change_metrics_reject_stale_latest_quarter_without_fallback
     assert Shares10YPctChangeMetric().compute(symbol, repo) is None
 
 
-def test_share_count_cagr_5y_metric_rejects_stale_latest_quarter_without_fallback():
+def test_share_count_cagr_5y_metric_rejects_stale_latest_quarter_without_fallback() -> (
+    None
+):
     symbol = "AAPL.US"
     stale_latest = (date.today() - timedelta(days=MAX_FACT_AGE_DAYS + 10)).isoformat()
     latest_year = int(stale_latest[:4])
@@ -10835,7 +11252,7 @@ def test_share_count_cagr_5y_metric_rejects_stale_latest_quarter_without_fallbac
     assert ShareCountCAGR5YMetric().compute(symbol, repo) is None
 
 
-def test_share_count_change_metrics_reject_stale_latest_fy_fallback():
+def test_share_count_change_metrics_reject_stale_latest_fy_fallback() -> None:
     symbol = "AAPL.US"
     latest_fy = (date.today() - timedelta(days=MAX_FY_FACT_AGE_DAYS + 10)).isoformat()
     latest_year = int(latest_fy[:4])
@@ -10855,7 +11272,7 @@ def test_share_count_change_metrics_reject_stale_latest_fy_fallback():
     assert Shares10YPctChangeMetric().compute(symbol, repo) is None
 
 
-def test_share_count_cagr_5y_metric_rejects_stale_latest_fy_fallback():
+def test_share_count_cagr_5y_metric_rejects_stale_latest_fy_fallback() -> None:
     symbol = "AAPL.US"
     latest_fy = (date.today() - timedelta(days=MAX_FY_FACT_AGE_DAYS + 10)).isoformat()
     latest_year = int(latest_fy[:4])
@@ -10874,7 +11291,7 @@ def test_share_count_cagr_5y_metric_rejects_stale_latest_fy_fallback():
     assert ShareCountCAGR5YMetric().compute(symbol, repo) is None
 
 
-def test_share_count_change_metrics_ignore_weighted_average_share_concepts():
+def test_share_count_change_metrics_ignore_weighted_average_share_concepts() -> None:
     symbol = "AAPL.US"
     today = date.today()
     latest_fy = f"{today.year}-09-30"
@@ -10894,11 +11311,11 @@ def test_share_count_change_metrics_ignore_weighted_average_share_concepts():
     assert ShareCountCAGR5YMetric().compute(symbol, repo) is None
 
 
-def test_share_count_cagr_5y_metric_declares_percent_metadata():
+def test_share_count_cagr_5y_metric_declares_percent_metadata() -> None:
     assert metadata_for_metric("share_count_cagr_5y").unit_kind == "percent"
 
 
-def test_net_buyback_yield_metric_computes_from_sale_purchase_ttm():
+def test_net_buyback_yield_metric_computes_from_sale_purchase_ttm() -> None:
     metric = NetBuybackYieldMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -10929,7 +11346,7 @@ def test_net_buyback_yield_metric_computes_from_sale_purchase_ttm():
     assert result.value == 0.1
 
 
-def test_net_buyback_yield_metric_allows_negative_values_for_net_issuance():
+def test_net_buyback_yield_metric_allows_negative_values_for_net_issuance() -> None:
     metric = NetBuybackYieldMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -10959,7 +11376,7 @@ def test_net_buyback_yield_metric_allows_negative_values_for_net_issuance():
     assert result.value == -0.1
 
 
-def test_net_buyback_yield_metric_falls_back_to_issuance_cash_flow():
+def test_net_buyback_yield_metric_falls_back_to_issuance_cash_flow() -> None:
     metric = NetBuybackYieldMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -10989,7 +11406,9 @@ def test_net_buyback_yield_metric_falls_back_to_issuance_cash_flow():
     assert result.value == -0.2
 
 
-def test_net_buyback_yield_metric_falls_back_to_share_count_when_market_cap_missing():
+def test_net_buyback_yield_metric_falls_back_to_share_count_when_market_cap_missing() -> (
+    None
+):
     metric = NetBuybackYieldMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -11017,7 +11436,9 @@ def test_net_buyback_yield_metric_falls_back_to_share_count_when_market_cap_miss
     assert round(result.value, 10) == 0.1
 
 
-def test_net_buyback_yield_metric_returns_none_when_market_cap_missing_and_no_share_fallback():
+def test_net_buyback_yield_metric_returns_none_when_market_cap_missing_and_no_share_fallback() -> (
+    None
+):
     metric = NetBuybackYieldMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -11043,7 +11464,7 @@ def test_net_buyback_yield_metric_returns_none_when_market_cap_missing_and_no_sh
     )
 
 
-def test_net_buyback_yield_metric_uses_listing_currency_for_market_cap():
+def test_net_buyback_yield_metric_uses_listing_currency_for_market_cap() -> None:
     metric = NetBuybackYieldMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -11077,7 +11498,9 @@ def test_net_buyback_yield_metric_uses_listing_currency_for_market_cap():
     assert result.value == 0.2
 
 
-def test_net_buyback_yield_metric_uses_share_count_fallback_when_market_cap_missing():
+def test_net_buyback_yield_metric_uses_share_count_fallback_when_market_cap_missing() -> (
+    None
+):
     metric = NetBuybackYieldMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -11117,7 +11540,7 @@ def test_net_buyback_yield_metric_uses_share_count_fallback_when_market_cap_miss
     assert result.as_of == q4
 
 
-def test_net_buyback_yield_metric_falls_back_to_fy_share_change():
+def test_net_buyback_yield_metric_falls_back_to_fy_share_change() -> None:
     metric = NetBuybackYieldMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -11141,7 +11564,7 @@ def test_net_buyback_yield_metric_falls_back_to_fy_share_change():
     assert round(result.value, 10) == -0.2
 
 
-def test_net_buyback_yield_metric_ignores_weighted_average_shares_in_fallback():
+def test_net_buyback_yield_metric_ignores_weighted_average_shares_in_fallback() -> None:
     metric = NetBuybackYieldMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -11166,7 +11589,7 @@ def test_net_buyback_yield_metric_ignores_weighted_average_shares_in_fallback():
     )
 
 
-def test_net_buyback_yield_metric_requires_strict_prior_year_share_pair():
+def test_net_buyback_yield_metric_requires_strict_prior_year_share_pair() -> None:
     metric = NetBuybackYieldMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -11190,7 +11613,7 @@ def test_net_buyback_yield_metric_requires_strict_prior_year_share_pair():
     )
 
 
-def test_net_buyback_yield_metric_requires_positive_share_counts_in_fallback():
+def test_net_buyback_yield_metric_requires_positive_share_counts_in_fallback() -> None:
     metric = NetBuybackYieldMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -11214,7 +11637,7 @@ def test_net_buyback_yield_metric_requires_positive_share_counts_in_fallback():
     )
 
 
-def test_sbc_to_revenue_metric_computes_ttm_ratio():
+def test_sbc_to_revenue_metric_computes_ttm_ratio() -> None:
     metric = SBCToRevenueMetric()
     symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
@@ -11243,7 +11666,7 @@ def test_sbc_to_revenue_metric_computes_ttm_ratio():
     assert round(result.value, 10) == round(34.0 / 460.0, 10)
 
 
-def test_sbc_to_fcf_metric_computes_ttm_ratio():
+def test_sbc_to_fcf_metric_computes_ttm_ratio() -> None:
     metric = SBCToFCFMetric()
     symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
@@ -11278,7 +11701,7 @@ def test_sbc_to_fcf_metric_computes_ttm_ratio():
     assert result.value == 0.125
 
 
-def test_sbc_to_fcf_metric_uses_zero_capex_when_capex_missing():
+def test_sbc_to_fcf_metric_uses_zero_capex_when_capex_missing() -> None:
     metric = SBCToFCFMetric()
     symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
@@ -11306,7 +11729,7 @@ def test_sbc_to_fcf_metric_uses_zero_capex_when_capex_missing():
     assert result.value == 0.1
 
 
-def test_sbc_load_metrics_return_none_when_sbc_missing():
+def test_sbc_load_metrics_return_none_when_sbc_missing() -> None:
     symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
     repo = _OwnerEarningsRepo(
@@ -11328,7 +11751,7 @@ def test_sbc_load_metrics_return_none_when_sbc_missing():
     assert SBCToFCFMetric().compute(symbol, repo) is None
 
 
-def test_sbc_load_metrics_require_four_quarters_of_sbc():
+def test_sbc_load_metrics_require_four_quarters_of_sbc() -> None:
     symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
     repo = _OwnerEarningsRepo(
@@ -11355,7 +11778,7 @@ def test_sbc_load_metrics_require_four_quarters_of_sbc():
     assert SBCToFCFMetric().compute(symbol, repo) is None
 
 
-def test_sbc_load_metrics_reject_stale_latest_quarter():
+def test_sbc_load_metrics_reject_stale_latest_quarter() -> None:
     symbol = "AAPL.US"
     q4 = (date.today() - timedelta(days=MAX_FACT_AGE_DAYS + 10)).isoformat()
     q3 = (date.today() - timedelta(days=MAX_FACT_AGE_DAYS + 100)).isoformat()
@@ -11386,7 +11809,7 @@ def test_sbc_load_metrics_reject_stale_latest_quarter():
     assert SBCToFCFMetric().compute(symbol, repo) is None
 
 
-def test_sbc_to_revenue_metric_requires_positive_revenue():
+def test_sbc_to_revenue_metric_requires_positive_revenue() -> None:
     metric = SBCToRevenueMetric()
     symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
@@ -11409,7 +11832,7 @@ def test_sbc_to_revenue_metric_requires_positive_revenue():
     assert metric.compute(symbol, repo) is None
 
 
-def test_sbc_to_fcf_metric_requires_positive_fcf():
+def test_sbc_to_fcf_metric_requires_positive_fcf() -> None:
     metric = SBCToFCFMetric()
     symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
@@ -11437,7 +11860,7 @@ def test_sbc_to_fcf_metric_requires_positive_fcf():
     assert metric.compute(symbol, repo) is None
 
 
-def test_sbc_load_metrics_reject_currency_mismatch():
+def test_sbc_load_metrics_reject_currency_mismatch() -> None:
     symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
     sbc_repo = _OwnerEarningsRepo(
@@ -11477,7 +11900,7 @@ def test_sbc_load_metrics_reject_currency_mismatch():
     assert SBCToFCFMetric().compute(symbol, fcf_repo) is None
 
 
-def test_sbc_load_metrics_reject_currency_conflict_within_sbc():
+def test_sbc_load_metrics_reject_currency_conflict_within_sbc() -> None:
     symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
     repo = _OwnerEarningsRepo(
@@ -11507,7 +11930,7 @@ def test_sbc_load_metrics_reject_currency_conflict_within_sbc():
     assert SBCToRevenueMetric().compute(symbol, repo) is None
 
 
-def test_oe_ev_fy_median_5y_metric_computes_expected_median():
+def test_oe_ev_fy_median_5y_metric_computes_expected_median() -> None:
     metric = OwnerEarningsEnterpriseFiveYearMedianMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -11530,7 +11953,7 @@ def test_oe_ev_fy_median_5y_metric_computes_expected_median():
     assert result.value == 300.0
 
 
-def test_oe_ev_fy_median_5y_metric_requires_five_points():
+def test_oe_ev_fy_median_5y_metric_requires_five_points() -> None:
     metric = OwnerEarningsEnterpriseFiveYearMedianMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -11547,7 +11970,7 @@ def test_oe_ev_fy_median_5y_metric_requires_five_points():
     assert metric.compute(symbol, _OwnerEarningsRepo(records_by_concept)) is None
 
 
-def test_oe_ev_fy_median_5y_metric_allows_year_gaps():
+def test_oe_ev_fy_median_5y_metric_allows_year_gaps() -> None:
     metric = OwnerEarningsEnterpriseFiveYearMedianMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -11575,7 +11998,7 @@ def test_oe_ev_fy_median_5y_metric_allows_year_gaps():
     assert result.value == 284.0
 
 
-def test_oe_ev_fy_median_5y_metric_returns_none_when_delta_nwc_maint_missing():
+def test_oe_ev_fy_median_5y_metric_returns_none_when_delta_nwc_maint_missing() -> None:
     metric = OwnerEarningsEnterpriseFiveYearMedianMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -11596,7 +12019,7 @@ def test_oe_ev_fy_median_5y_metric_returns_none_when_delta_nwc_maint_missing():
     assert metric.compute(symbol, _OwnerEarningsRepo(records_by_concept)) is None
 
 
-def test_worst_oe_ev_fy_10y_metric_preserves_negative_worst_year():
+def test_worst_oe_ev_fy_10y_metric_preserves_negative_worst_year() -> None:
     metric = WorstOwnerEarningsEnterpriseTenYearMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -11653,7 +12076,7 @@ def test_worst_oe_ev_fy_10y_metric_preserves_negative_worst_year():
     assert result.value == -20.0
 
 
-def test_worst_oe_ev_fy_10y_metric_requires_strict_consecutive_years():
+def test_worst_oe_ev_fy_10y_metric_requires_strict_consecutive_years() -> None:
     metric = WorstOwnerEarningsEnterpriseTenYearMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -11719,7 +12142,7 @@ def test_worst_oe_ev_fy_10y_metric_requires_strict_consecutive_years():
     assert metric.compute(symbol, _OwnerEarningsRepo(records_by_concept)) is None
 
 
-def test_fcf_fy_median_5y_metric_computes_expected_median():
+def test_fcf_fy_median_5y_metric_computes_expected_median() -> None:
     metric = FCFFiveYearMedianMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -11736,7 +12159,7 @@ def test_fcf_fy_median_5y_metric_computes_expected_median():
     assert result.value == 110.0
 
 
-def test_fcf_fy_median_5y_metric_uses_zero_capex_when_missing():
+def test_fcf_fy_median_5y_metric_uses_zero_capex_when_missing() -> None:
     metric = FCFFiveYearMedianMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -11752,7 +12175,7 @@ def test_fcf_fy_median_5y_metric_uses_zero_capex_when_missing():
     assert result.value == 130.0
 
 
-def test_fcf_fy_median_5y_metric_allows_year_gaps():
+def test_fcf_fy_median_5y_metric_allows_year_gaps() -> None:
     metric = FCFFiveYearMedianMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -11796,7 +12219,7 @@ def test_fcf_fy_median_5y_metric_allows_year_gaps():
     assert result.value == 110.0
 
 
-def test_fcf_fy_median_5y_metric_requires_five_points():
+def test_fcf_fy_median_5y_metric_requires_five_points() -> None:
     metric = FCFFiveYearMedianMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -11811,7 +12234,7 @@ def test_fcf_fy_median_5y_metric_requires_five_points():
     assert metric.compute(symbol, _OwnerEarningsRepo(records_by_concept)) is None
 
 
-def test_fcf_neg_years_10y_metric_counts_negative_values():
+def test_fcf_neg_years_10y_metric_counts_negative_values() -> None:
     metric = FCFNegativeYearsTenYearMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -11828,7 +12251,7 @@ def test_fcf_neg_years_10y_metric_counts_negative_values():
     assert result.value == 5.0
 
 
-def test_fcf_neg_years_10y_metric_requires_strict_consecutive_years():
+def test_fcf_neg_years_10y_metric_requires_strict_consecutive_years() -> None:
     metric = FCFNegativeYearsTenYearMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -11843,7 +12266,7 @@ def test_fcf_neg_years_10y_metric_requires_strict_consecutive_years():
     assert metric.compute(symbol, _OwnerEarningsRepo(records_by_concept)) is None
 
 
-def test_ni_loss_years_10y_metric_uses_fallback_and_counts_negative_values():
+def test_ni_loss_years_10y_metric_uses_fallback_and_counts_negative_values() -> None:
     metric = NetIncomeLossYearsTenYearMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -11860,7 +12283,7 @@ def test_ni_loss_years_10y_metric_uses_fallback_and_counts_negative_values():
     assert result.value == 4.0
 
 
-def test_ni_loss_years_10y_metric_requires_strict_consecutive_years():
+def test_ni_loss_years_10y_metric_requires_strict_consecutive_years() -> None:
     metric = NetIncomeLossYearsTenYearMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -11874,7 +12297,7 @@ def test_ni_loss_years_10y_metric_requires_strict_consecutive_years():
     assert metric.compute(symbol, _OwnerEarningsRepo(records_by_concept)) is None
 
 
-def test_oey_ev_norm_metric_computes_ev_from_components():
+def test_oey_ev_norm_metric_computes_ev_from_components() -> None:
     metric = OwnerEarningsYieldEVNormalizedMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -11914,7 +12337,7 @@ def test_oey_ev_norm_metric_computes_ev_from_components():
     assert result.value == 300.0 / 3250.0
 
 
-def _new_metric_quarter_dates():
+def _new_metric_quarter_dates() -> tuple[str, str, str, str, str]:
     today = date.today()
     return (
         (today - timedelta(days=20)).isoformat(),
@@ -11925,7 +12348,7 @@ def _new_metric_quarter_dates():
     )
 
 
-def test_gross_margin_ttm_metric_clamps_and_uses_gross_profit_fallback():
+def test_gross_margin_ttm_metric_clamps_and_uses_gross_profit_fallback() -> None:
     metric = GrossMarginTTMMetric()
     symbol = "AAPL.US"
     q4, q3, q2, q1, _ = _new_metric_quarter_dates()
@@ -11945,7 +12368,7 @@ def test_gross_margin_ttm_metric_clamps_and_uses_gross_profit_fallback():
     assert result.value == 1.0
 
 
-def test_gross_margin_ttm_metric_returns_none_when_revenue_non_positive():
+def test_gross_margin_ttm_metric_returns_none_when_revenue_non_positive() -> None:
     metric = GrossMarginTTMMetric()
     symbol = "AAPL.US"
     q4, q3, q2, q1, _ = _new_metric_quarter_dates()
@@ -11963,7 +12386,7 @@ def test_gross_margin_ttm_metric_returns_none_when_revenue_non_positive():
     assert metric.compute(symbol, repo) is None
 
 
-def test_operating_margin_ttm_metric_allows_negative_values():
+def test_operating_margin_ttm_metric_allows_negative_values() -> None:
     metric = OperatingMarginTTMMetric()
     symbol = "AAPL.US"
     q4, q3, q2, q1, _ = _new_metric_quarter_dates()
@@ -11983,7 +12406,7 @@ def test_operating_margin_ttm_metric_allows_negative_values():
     assert result.value == -0.1
 
 
-def test_fcf_margin_ttm_metric_allows_negative_values():
+def test_fcf_margin_ttm_metric_allows_negative_values() -> None:
     metric = FCFMarginTTMMetric()
     symbol = "AAPL.US"
     q4, q3, q2, q1, _ = _new_metric_quarter_dates()
@@ -12008,7 +12431,7 @@ def test_fcf_margin_ttm_metric_allows_negative_values():
     assert result.value == -0.05
 
 
-def test_gross_profit_to_assets_ttm_metric_uses_avg_assets():
+def test_gross_profit_to_assets_ttm_metric_uses_avg_assets() -> None:
     metric = GrossProfitToAssetsTTMMetric()
     symbol = "AAPL.US"
     q4, q3, q2, q1, q4_prev = _new_metric_quarter_dates()
@@ -12046,7 +12469,7 @@ def test_gross_profit_to_assets_ttm_metric_uses_avg_assets():
     assert result.value == 240.0 / 150.0
 
 
-def test_roe_ttm_metric_falls_back_to_fy_average():
+def test_roe_ttm_metric_falls_back_to_fy_average() -> None:
     metric = ROETTMMetric()
     symbol = "AAPL.US"
     q4, q3, q2, q1, _ = _new_metric_quarter_dates()
@@ -12092,7 +12515,7 @@ def test_roe_ttm_metric_falls_back_to_fy_average():
     assert result.value == 100.0 / 150.0
 
 
-def test_roa_ttm_metric_uses_same_quarter_average_assets():
+def test_roa_ttm_metric_uses_same_quarter_average_assets() -> None:
     metric = ROATTMMetric()
     symbol = "AAPL.US"
     q4, q3, q2, q1, q4_prev = _new_metric_quarter_dates()
@@ -12127,7 +12550,7 @@ def test_roa_ttm_metric_uses_same_quarter_average_assets():
     assert result.value == 40.0 / 200.0
 
 
-def test_roetce_ttm_metric_treats_missing_goodwill_and_intangibles_as_zero():
+def test_roetce_ttm_metric_treats_missing_goodwill_and_intangibles_as_zero() -> None:
     metric = ROETangibleCommonEquityTTMMetric()
     symbol = "AAPL.US"
     q4, q3, q2, q1, q4_prev = _new_metric_quarter_dates()
@@ -12164,7 +12587,7 @@ def test_roetce_ttm_metric_treats_missing_goodwill_and_intangibles_as_zero():
     assert result.value == 40.0 / 150.0
 
 
-def test_dividend_yield_ttm_metric_uses_cash_dividends_and_abs_sign():
+def test_dividend_yield_ttm_metric_uses_cash_dividends_and_abs_sign() -> None:
     metric = DividendYieldTTMMetric()
     symbol = "AAPL.US"
     q4, q3, q2, q1, _ = _new_metric_quarter_dates()
@@ -12185,7 +12608,7 @@ def test_dividend_yield_ttm_metric_uses_cash_dividends_and_abs_sign():
     assert result.value == 20.0 / 200.0
 
 
-def test_dividend_yield_ttm_metric_falls_back_to_dps_and_price():
+def test_dividend_yield_ttm_metric_falls_back_to_dps_and_price() -> None:
     metric = DividendYieldTTMMetric()
     symbol = "AAPL.US"
     q4, _, _, _, _ = _new_metric_quarter_dates()
@@ -12209,7 +12632,7 @@ def test_dividend_yield_ttm_metric_falls_back_to_dps_and_price():
     assert result.value == 2.5 / 50.0
 
 
-def test_shareholder_yield_ttm_metric_sums_dividend_and_buyback_yields():
+def test_shareholder_yield_ttm_metric_sums_dividend_and_buyback_yields() -> None:
     metric = ShareholderYieldTTMMetric()
     symbol = "AAPL.US"
     q4, q3, q2, q1, _ = _new_metric_quarter_dates()
@@ -12235,7 +12658,7 @@ def test_shareholder_yield_ttm_metric_sums_dividend_and_buyback_yields():
     assert result.value == (20.0 / 200.0) + (40.0 / 200.0)
 
 
-def test_dividend_payout_ratio_ttm_metric_requires_positive_net_income():
+def test_dividend_payout_ratio_ttm_metric_requires_positive_net_income() -> None:
     metric = DividendPayoutRatioTTMMetric()
     symbol = "AAPL.US"
     q4, q3, q2, q1, _ = _new_metric_quarter_dates()
@@ -12257,7 +12680,7 @@ def test_dividend_payout_ratio_ttm_metric_requires_positive_net_income():
     assert metric.compute(symbol, repo) is None
 
 
-def test_revenue_cagr_10y_metric_uses_strict_fy_pair():
+def test_revenue_cagr_10y_metric_uses_strict_fy_pair() -> None:
     metric = RevenueCAGR10YMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -12289,7 +12712,7 @@ def test_revenue_cagr_10y_metric_uses_strict_fy_pair():
     assert round(result.value, 8) == round((2.0**0.1) - 1.0, 8)
 
 
-def test_fcf_per_share_cagr_10y_metric_computes_happy_path():
+def test_fcf_per_share_cagr_10y_metric_computes_happy_path() -> None:
     metric = FCFPerShareCAGR10YMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -12361,7 +12784,7 @@ def test_fcf_per_share_cagr_10y_metric_computes_happy_path():
     assert round(result.value, 8) == round((2.0**0.1) - 1.0, 8)
 
 
-def test_fcf_per_share_cagr_10y_metric_requires_diluted_shares():
+def test_fcf_per_share_cagr_10y_metric_requires_diluted_shares() -> None:
     metric = FCFPerShareCAGR10YMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -12391,7 +12814,7 @@ def test_fcf_per_share_cagr_10y_metric_requires_diluted_shares():
     assert metric.compute(symbol, repo) is None
 
 
-def test_owner_earnings_cagr_10y_metric_uses_three_year_endpoint_averages():
+def test_owner_earnings_cagr_10y_metric_uses_three_year_endpoint_averages() -> None:
     metric = OwnerEarningsCAGR10YMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -12451,7 +12874,7 @@ def test_owner_earnings_cagr_10y_metric_uses_three_year_endpoint_averages():
     )
 
 
-def test_registry_contains_all_ids():
+def test_registry_contains_all_ids() -> None:
     # Ensure the registry still exposes all metric identifiers
     assert len(REGISTRY) >= 1
     assert "mcapex_fy" in REGISTRY

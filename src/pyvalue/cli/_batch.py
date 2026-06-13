@@ -10,6 +10,7 @@ from concurrent.futures import (
     ProcessPoolExecutor,
     ThreadPoolExecutor,
 )
+import queue
 from threading import Lock, Thread
 import time
 from typing import (
@@ -70,8 +71,18 @@ class _InterruptibleThreadPoolExecutor(ThreadPoolExecutor):
         if self._idle_semaphore.acquire(timeout=0):
             return
 
-        def weakref_cb(_, q=self._work_queue):
-            q.put(None)
+        # Bind the work queue to a local (never ``self``) so this weakref
+        # callback cannot keep the executor alive -- mirrors CPython's
+        # ThreadPoolExecutor._adjust_thread_count idiom. ``None`` is the worker
+        # shutdown sentinel; the typeshed stub types the queue element without
+        # it, so we widen at the boundary (the _threads access below is cast for
+        # the same stub-vs-reality reason).
+        work_queue: queue.SimpleQueue[object] = cast(
+            "queue.SimpleQueue[object]", self._work_queue
+        )
+
+        def weakref_cb(_: object) -> None:
+            work_queue.put(None)
 
         num_threads = len(self._threads)
         if num_threads < self._max_workers:

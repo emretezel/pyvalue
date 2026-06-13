@@ -22,6 +22,10 @@ dev = [
     "ruff>=0.15",
     "mypy>=1.19",
     "hypothesis>=6.0",
+    # Type stubs for third-party runtime deps so mypy needs no per-import
+    # `# type: ignore[import-untyped]`. Keep in lockstep with the runtime deps above.
+    "types-requests>=2.31",
+    "types-PyYAML>=6.0",
 ]
 
 [project.scripts]
@@ -33,6 +37,26 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# Ship the PEP 561 marker so downstream consumers (and our own test tree, when
+# type-checked standalone) see pyvalue as a typed package rather than an
+# untyped third-party import.
+[tool.setuptools.package-data]
+pyvalue = ["py.typed"]
+
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]
+
+[tool.mypy]
+# Strict type coverage is the project standard (see CLAUDE.md): every function
+# carries annotations and every body is checked, across src/ AND tests/. These
+# flags make `mypy` enforce that rather than silently skipping untyped code.
+python_version = "3.12"
+files = ["src", "tests"]
+disallow_untyped_defs = true   # every function must be annotated
+disallow_incomplete_defs = true  # ...fully, not just some params
+check_untyped_defs = true      # type-check the bodies too
+no_implicit_optional = true    # an implicit None default does not widen to Optional
+warn_unused_ignores = true     # a stale `# type: ignore` is itself an error
+warn_redundant_casts = true    # a cast() that does nothing is an error
+warn_unused_configs = true

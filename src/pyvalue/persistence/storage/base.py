@@ -11,6 +11,7 @@ from pathlib import Path
 import json
 import sqlite3
 import time
+from types import TracebackType
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -186,7 +187,12 @@ def _provider_listing_catalog_view(*, primary_only: bool) -> str:
 class _ManagedSQLiteConnection(sqlite3.Connection):
     """SQLite connection that closes the file handle when the context exits."""
 
-    def __exit__(self, exc_type, exc_value, traceback) -> Literal[False]:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> Literal[False]:
         try:
             super().__exit__(exc_type, exc_value, traceback)
         finally:

@@ -8,10 +8,14 @@ from __future__ import annotations
 from concurrent.futures import ProcessPoolExecutor
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
+from typing import TypeVar, overload
+import json
 import multiprocessing as mp
 import pickle
 
 import pytest
+import requests
 
 from pyvalue.currency import (
     canonical_trading_currency,
@@ -27,53 +31,100 @@ from pyvalue.money.fx import (
 )
 from pyvalue.persistence.storage import FXRateRecord, FXRatesRepository
 
+# A repository subclass that the typed factory can return concretely; bound so
+# ``_service_with_rates`` preserves the exact class passed via ``repository_cls``.
+RepoT = TypeVar("RepoT", bound=FXRatesRepository)
+
 
 class _ExplodingProvider:
+    """FX provider stand-in whose history fetch must never be reached.
+
+    ``FXService`` accepts ``provider: object`` and only reads ``provider_name``
+    off it, so this plain class satisfies the parameter without subclassing.
+    """
+
     provider_name = "EODHD"
 
-    def fetch_history(self, **kwargs):  # pragma: no cover - defensive fallback
+    def fetch_history(self, **kwargs: object) -> list[FXRateRecord]:
+        # pragma: no cover - defensive fallback
         raise AssertionError("FXService must never fetch from the network at runtime")
 
 
 class _FakeResponse:
-    def __init__(self, status_code, payload, headers=None):
+    """Declarative spec for a canned HTTP response (status, body, headers).
+
+    ``_FakeSession`` converts each spec into a genuine ``requests.Response`` so
+    the provider's real ``json``/``raise_for_status``/``headers`` access works.
+    """
+
+    def __init__(
+        self,
+        status_code: int,
+        payload: object,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.status_code = status_code
-        self._payload = payload
+        self.payload = payload
         self.headers = headers or {}
-        self.text = (
-            payload if isinstance(payload, str) else __import__("json").dumps(payload)
-        )
-
-    def json(self):
-        return self._payload
-
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            raise RuntimeError(f"http {self.status_code}")
 
 
-class _FakeSession:
-    def __init__(self, responses):
+class _FakeSession(requests.Session):
+    """A ``requests.Session`` returning queued canned responses in order.
+
+    Subclasses the real session to satisfy ``EODHDFXProvider``'s ``Session``
+    parameter type. ``request`` -- the funnel every verb delegates to -- pops
+    the next spec and materialises a real ``requests.Response`` so downstream
+    parsing is exercised unchanged. ``__init__`` skips ``super().__init__`` so
+    no real adapters/pools are built.
+    """
+
+    def __init__(self, responses: list[_FakeResponse]) -> None:
         self.responses = list(responses)
-        self.calls = []
+        # Records ``(url, params)`` per call so tests can assert on the query.
+        self.calls: list[tuple[str, dict[str, object]]] = []
 
-    def get(self, url, params=None, timeout=None):
-        self.calls.append((url, dict(params or {}), timeout))
-        return self.responses.pop(0)
+    def request(
+        self,
+        method: str | bytes,
+        url: str | bytes,
+        *args: object,
+        **kwargs: object,
+    ) -> requests.Response:
+        raw_params = kwargs.get("params")
+        params: dict[str, object] = (
+            dict(raw_params) if isinstance(raw_params, dict) else {}
+        )
+        self.calls.append((str(url), params))
+        spec = self.responses.pop(0)
+        response = requests.Response()
+        response.status_code = spec.status_code
+        response._content = json.dumps(spec.payload).encode("utf-8")
+        response.headers.update(spec.headers)
+        return response
 
 
 class _CountingFXRatesRepository(FXRatesRepository):
-    def __init__(self, db_path):
+    """Repository that counts how the FX service hits the database.
+
+    Used to assert the service's caching: how many times it loads the whole
+    provider table versus individual direct pairs, and which pairs it asked for.
+    """
+
+    def __init__(self, db_path: str | Path) -> None:
         super().__init__(db_path)
         self.fetch_all_calls = 0
         self.fetch_pair_history_calls = 0
-        self.fetch_pair_history_pairs = []
+        self.fetch_pair_history_pairs: list[tuple[str, str, str]] = []
 
-    def fetch_all_for_provider(self, provider):
+    def fetch_all_for_provider(
+        self, provider: str
+    ) -> list[tuple[str, str, str, float]]:
         self.fetch_all_calls += 1
         return super().fetch_all_for_provider(provider)
 
-    def fetch_pair_history(self, provider, base_currency, quote_currency):
+    def fetch_pair_history(
+        self, provider: str, base_currency: str, quote_currency: str
+    ) -> list[tuple[str, float]]:
         self.fetch_pair_history_calls += 1
         self.fetch_pair_history_pairs.append(
             (str(provider), str(base_currency), str(quote_currency))
@@ -90,13 +141,35 @@ def _raise_missing_fx_rate_error() -> None:
     )
 
 
+@overload
 def _service_with_rates(
-    tmp_path,
+    tmp_path: Path,
+    *records: FXRateRecord,
+    provider_name: str = ...,
+    preload_all: bool = ...,
+) -> tuple[FXService, FXRatesRepository]: ...
+
+
+@overload
+def _service_with_rates(
+    tmp_path: Path,
+    *records: FXRateRecord,
+    provider_name: str = ...,
+    preload_all: bool = ...,
+    repository_cls: type[RepoT],
+) -> tuple[FXService, RepoT]: ...
+
+
+def _service_with_rates(
+    tmp_path: Path,
     *records: FXRateRecord,
     provider_name: str = "EODHD",
     preload_all: bool = False,
-    repository_cls=FXRatesRepository,
+    repository_cls: type[FXRatesRepository] = FXRatesRepository,
 ) -> tuple[FXService, FXRatesRepository]:
+    # Overloaded so callers passing ``_CountingFXRatesRepository`` get that exact
+    # type back (and can read its call counters) without a downcast, while the
+    # default-arg path stays plain ``FXRatesRepository``.
     db_path = tmp_path / "fx.db"
     repo = repository_cls(db_path)
     repo.initialize_schema()
@@ -110,7 +183,7 @@ def _service_with_rates(
     return service, repo
 
 
-def test_resolve_eodhd_currency_uses_explicit_precedence():
+def test_resolve_eodhd_currency_uses_explicit_precedence() -> None:
     resolution = resolve_eodhd_currency(
         {"currency_symbol": "EUR", "currency": "USD"},
         statement_currency="GBP",
@@ -131,7 +204,7 @@ def test_resolve_eodhd_currency_uses_explicit_precedence():
     assert statement_resolution.source == "statement"
 
 
-def test_normalize_monetary_amount_converts_gbx_to_gbp():
+def test_normalize_monetary_amount_converts_gbx_to_gbp() -> None:
     amount, currency = normalize_monetary_amount(Decimal("1250"), "GBX")
     zac_amount, zac_currency = normalize_monetary_amount(Decimal("250"), "ZAC")
     ila_amount, ila_currency = normalize_monetary_amount(Decimal("250"), "ILA")
@@ -146,7 +219,7 @@ def test_normalize_monetary_amount_converts_gbx_to_gbp():
     assert ila_currency == "ILS"
 
 
-def test_fx_service_same_currency_returns_identity(tmp_path):
+def test_fx_service_same_currency_returns_identity(tmp_path: Path) -> None:
     service, _ = _service_with_rates(tmp_path)
 
     quote = service.get_fx_rate("GBP0.01", "GBP", "2024-01-10")
@@ -162,7 +235,7 @@ def test_fx_service_same_currency_returns_identity(tmp_path):
     assert zac_converted == Decimal("2.5")
 
 
-def test_fx_service_direct_inverse_and_on_or_before_lookup(tmp_path):
+def test_fx_service_direct_inverse_and_on_or_before_lookup(tmp_path: Path) -> None:
     service, _ = _service_with_rates(
         tmp_path,
         FXRateRecord(
@@ -195,7 +268,7 @@ def test_fx_service_direct_inverse_and_on_or_before_lookup(tmp_path):
     assert inverse.rate == Decimal("1.25")
 
 
-def test_fx_service_triangulates_through_pivot_currency(tmp_path):
+def test_fx_service_triangulates_through_pivot_currency(tmp_path: Path) -> None:
     service, _ = _service_with_rates(
         tmp_path,
         FXRateRecord(
@@ -225,7 +298,7 @@ def test_fx_service_triangulates_through_pivot_currency(tmp_path):
     assert quote.rate == pytest.approx(Decimal("0.6153846153846153846153846154"))
 
 
-def test_fx_service_prefers_fresher_inverse_over_older_direct(tmp_path):
+def test_fx_service_prefers_fresher_inverse_over_older_direct(tmp_path: Path) -> None:
     service, _ = _service_with_rates(
         tmp_path,
         FXRateRecord(
@@ -256,7 +329,9 @@ def test_fx_service_prefers_fresher_inverse_over_older_direct(tmp_path):
     assert quote.rate == pytest.approx(Decimal("0.8463817177316970038087177317"))
 
 
-def test_fx_service_prefers_fresher_triangulation_over_older_direct(tmp_path):
+def test_fx_service_prefers_fresher_triangulation_over_older_direct(
+    tmp_path: Path,
+) -> None:
     service, _ = _service_with_rates(
         tmp_path,
         FXRateRecord(
@@ -298,8 +373,8 @@ def test_fx_service_prefers_fresher_triangulation_over_older_direct(tmp_path):
 
 
 def test_fx_service_missing_rate_warns_and_returns_none_without_network_fetch(
-    tmp_path, caplog
-):
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     db_path = tmp_path / "fx.db"
     repo = FXRatesRepository(db_path)
     repo.initialize_schema()
@@ -312,7 +387,7 @@ def test_fx_service_missing_rate_warns_and_returns_none_without_network_fetch(
     assert "Missing FX rate" in caplog.text
 
 
-def test_fx_service_preload_all_loads_provider_table_once(tmp_path):
+def test_fx_service_preload_all_loads_provider_table_once(tmp_path: Path) -> None:
     service, repo = _service_with_rates(
         tmp_path,
         FXRateRecord(
@@ -348,7 +423,7 @@ def test_fx_service_preload_all_loads_provider_table_once(tmp_path):
     assert repo.fetch_pair_history_calls == 0
 
 
-def test_fx_service_lazy_pair_cache_loads_each_direct_leg_once(tmp_path):
+def test_fx_service_lazy_pair_cache_loads_each_direct_leg_once(tmp_path: Path) -> None:
     service, repo = _service_with_rates(
         tmp_path,
         FXRateRecord(
@@ -380,7 +455,9 @@ def test_fx_service_lazy_pair_cache_loads_each_direct_leg_once(tmp_path):
     ]
 
 
-def test_fx_service_stale_rate_logs_warning_but_returns_quote(tmp_path, caplog):
+def test_fx_service_stale_rate_logs_warning_but_returns_quote(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     service, _ = _service_with_rates(
         tmp_path,
         FXRateRecord(
@@ -403,7 +480,7 @@ def test_fx_service_stale_rate_logs_warning_but_returns_quote(tmp_path, caplog):
     assert "Stale FX rate used" in caplog.text
 
 
-def test_missing_fx_rate_error_roundtrips_via_pickle():
+def test_missing_fx_rate_error_roundtrips_via_pickle() -> None:
     exc = MissingFXRateError(
         provider="EODHD",
         base_currency="NLG",
@@ -420,7 +497,7 @@ def test_missing_fx_rate_error_roundtrips_via_pickle():
     assert restored.as_of == "2000-06-30"
 
 
-def test_missing_fx_rate_error_crosses_spawn_process_pool():
+def test_missing_fx_rate_error_crosses_spawn_process_pool() -> None:
     ctx = mp.get_context("spawn")
 
     with ProcessPoolExecutor(max_workers=1, mp_context=ctx) as executor:
@@ -435,7 +512,7 @@ def test_missing_fx_rate_error_crosses_spawn_process_pool():
     assert exc.as_of == "2000-06-30"
 
 
-def test_parse_eodhd_fx_catalog_entry_parses_canonical_alias_and_odd_symbols():
+def test_parse_eodhd_fx_catalog_entry_parses_canonical_alias_and_odd_symbols() -> None:
     canonical = parse_eodhd_fx_catalog_entry({"Code": "EURUSD", "Name": "EUR/USD"})
     alias = parse_eodhd_fx_catalog_entry({"Code": "EUR", "Name": "USD/EUR"})
     odd = parse_eodhd_fx_catalog_entry({"Code": "USDARSB", "Name": "odd"})
@@ -460,7 +537,7 @@ def test_parse_eodhd_fx_catalog_entry_parses_canonical_alias_and_odd_symbols():
     assert odd.is_refreshable is False
 
 
-def test_eodhd_provider_lists_catalog_entries():
+def test_eodhd_provider_lists_catalog_entries() -> None:
     session = _FakeSession(
         [
             _FakeResponse(
@@ -482,7 +559,7 @@ def test_eodhd_provider_lists_catalog_entries():
     assert session.calls[0][1] == {"api_token": "secret", "fmt": "json"}
 
 
-def test_eodhd_provider_fetch_history_uses_close_rate():
+def test_eodhd_provider_fetch_history_uses_close_rate() -> None:
     session = _FakeSession(
         [
             _FakeResponse(
@@ -524,14 +601,14 @@ def test_eodhd_provider_fetch_history_uses_close_rate():
     }
 
 
-def test_canonical_trading_currency_normalizes_subunits():
+def test_canonical_trading_currency_normalizes_subunits() -> None:
     assert canonical_trading_currency("GBX") == "GBP"
     assert canonical_trading_currency("ZAC") == "ZAR"
     assert canonical_trading_currency("ILA") == "ILS"
     assert canonical_trading_currency("GBP0.01") == "GBP"
 
 
-def test_canonical_trading_currency_passes_through_normal_codes():
+def test_canonical_trading_currency_passes_through_normal_codes() -> None:
     assert canonical_trading_currency("USD") == "USD"
     assert canonical_trading_currency("EUR") == "EUR"
     assert canonical_trading_currency("GBP") == "GBP"
@@ -539,6 +616,6 @@ def test_canonical_trading_currency_passes_through_normal_codes():
     assert canonical_trading_currency("ILS") == "ILS"
 
 
-def test_canonical_trading_currency_returns_none_for_missing():
+def test_canonical_trading_currency_returns_none_for_missing() -> None:
     assert canonical_trading_currency(None) is None
     assert canonical_trading_currency("") is None

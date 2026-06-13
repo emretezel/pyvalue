@@ -45,7 +45,7 @@ Run formatting and checks:
 ```bash
 conda run -n pyvalue ruff format .
 conda run -n pyvalue ruff check .
-conda run -n pyvalue mypy src/pyvalue
+conda run -n pyvalue mypy src/ tests/
 ```
 
 ## Adding New Metrics

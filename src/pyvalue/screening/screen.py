@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import List, Optional
 import logging
 
-import yaml  # type: ignore[import-untyped]
+import yaml
 
 from pyvalue.currency import (
     MetricUnitKind,

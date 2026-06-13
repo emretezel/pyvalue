@@ -8,6 +8,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 import pyvalue.persistence.database_review_docs as database_review_docs
 from pyvalue.persistence.database_review_docs import (
     TableInventoryEntry,
@@ -464,7 +466,7 @@ def test_render_schema_snapshot_emits_live_ddl(tmp_path: Path) -> None:
 
 def test_generate_database_review_docs_sample_rows_only_preserves_inventory(
     tmp_path: Path,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path = tmp_path / "sample.db"
     conn = _seed_example_db(db_path)

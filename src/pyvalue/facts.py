@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
-from typing import List, Optional, Protocol, runtime_checkable
+from typing import Any, List, Optional, Protocol, runtime_checkable
 
 from pyvalue.currency import MetricUnitKind, is_monetary_unit_kind
 from pyvalue.money import Money
@@ -318,7 +318,11 @@ class RegionFactsRepository(TypedFactReaderMixin):
             limit=limit,
         )
 
-    def __getattr__(self, name: str):
+    def __getattr__(self, name: str) -> Any:
+        # Transparent proxy: forward any attribute not defined on this view to
+        # the wrapped repo. ``Any`` is the correct type for a dynamic forwarder
+        # (the attribute could be anything the repo exposes), not a way to
+        # silence the checker.
         return getattr(self._repo, name)
 
 

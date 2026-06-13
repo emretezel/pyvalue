@@ -1,6 +1,9 @@
 """Metric coverage report."""
 
 from datetime import date
+from pathlib import Path
+
+import pytest
 
 from pyvalue.cli import cmd_report_metric_coverage
 from pyvalue.metrics.working_capital import WorkingCapitalMetric
@@ -14,7 +17,7 @@ from pyvalue.persistence.storage import (
 from pyvalue.universe import Listing
 
 
-def _seed_universe(db_path):
+def _seed_universe(db_path: Path) -> None:
     universe = SupportedTickerRepository(db_path)
     universe.initialize_schema()
     universe.replace_from_listings(
@@ -37,7 +40,9 @@ def _seed_universe(db_path):
     )
 
 
-def test_metric_coverage_counts_symbols(tmp_path, capsys):
+def test_metric_coverage_counts_symbols(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     db_path = tmp_path / "coverage.db"
     _seed_universe(db_path)
     repo = FinancialFactsRepository(db_path)
