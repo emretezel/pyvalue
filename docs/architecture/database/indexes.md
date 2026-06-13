@@ -5,11 +5,9 @@ This page lists the current secondary indexes from the post-refactor schema. Pri
 ## Identity And Catalog
 
 - `provider_exchange`
-  - `idx_provider_exchange_exchange (exchange_id)`
-    - supports joins from provider exchange codes to canonical exchange identity
+  - Migration 076 dropped `idx_provider_exchange_exchange (exchange_id)` because no read query searches `provider_exchange` by `exchange_id` (joins drive from `provider_exchange` and probe `exchange` by its PK), and at ~73 rows even a future FK-enforcement scan is microseconds.
 - `listing`
-  - `idx_listing_currency_nonnull (currency) WHERE currency IS NOT NULL`
-    - narrows FX currency discovery and currency-scoped validation scans
+  - Migration 077 dropped `idx_listing_currency_nonnull (currency) WHERE currency IS NOT NULL` because migration 069 made `listing.currency` NOT NULL, so the partial predicate matched every row and the index never stayed partial. No read query filters `listing` by currency: symbol lookups use the `(exchange_id, symbol)` UNIQUE auto-index, and FX currency discovery reads `financial_facts`, not `listing`.
   - Migration 067 dropped `idx_listing_exchange (exchange_id)` because the existing `UNIQUE (exchange_id, symbol)` auto-index already leads with `exchange_id`.
 - `provider_listing`
   - `idx_provider_listing_listing (listing_id)`
@@ -53,4 +51,4 @@ This page lists the current secondary indexes from the post-refactor schema. Pri
 ## Review Notes
 
 - Migration 067 removed eight secondary indexes (idx_fin_facts_concept, idx_metric_compute_status_metric_status, idx_metrics_metric_id, idx_market_data_latest, idx_fundamentals_raw_last_fetched, idx_market_data_fetch_next, idx_listing_exchange, idx_fundamentals_fetch_next) that the post-audit index review confirmed were unused or strictly covered by a PK / UNIQUE auto-index. Combined they reclaimed roughly 3.4 GB on disk and removed write amplification from the hottest write paths (`financial_facts` ingest, `metrics` and `metric_compute_status` rewrites).
-- `sqlite_stat1` is currently empty — running `ANALYZE;` once after the migration applies gives the optimizer real statistics for the eight retained indexes.
+- `sqlite_stat1` is currently empty — running `ANALYZE;` once after the migration applies gives the optimizer real statistics for the six retained indexes.

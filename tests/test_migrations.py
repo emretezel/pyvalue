@@ -935,7 +935,11 @@ def test_migration_canonicalizes_listing_quote_currency_and_market_data(tmp_path
     assert "currency" not in market_data_columns
     assert "idx_provider_listing_currency_nonnull" not in provider_listing_index_names
     assert "idx_market_data_currency_nonnull" not in market_data_index_names
-    assert "idx_listing_currency_nonnull" in listing_index_names
+    # Migration 069 recreates this index while rebuilding ``listing``, but
+    # migration 077 later retires it: ``listing.currency`` is NOT NULL, so the
+    # partial predicate matched every row and no read path used it. After the
+    # full chain it must be gone.
+    assert "idx_listing_currency_nonnull" not in listing_index_names
     # Migration 070 then converts the subunit-listing prices to the major
     # currency (divide by 100); migration 072 drops the derived market_cap column.
     assert market_rows == [
@@ -3941,8 +3945,10 @@ _MIGRATION_067_DROPPED_INDEXES = frozenset(
 # secondary index the schema declares at head. Asserting on this set
 # catches the copy-paste mistake of accidentally dropping the wrong index.
 # ``idx_provider_exchange_exchange`` was retained by 067 but later retired by
-# migration 076 (unused FK index), so it is no longer part of the head set;
-# see ``test_migration_076_drops_provider_exchange_exchange_index``.
+# migration 076 (unused FK index), and ``idx_listing_currency_nonnull`` by
+# migration 077 (degenerate partial index — ``listing.currency`` became NOT
+# NULL, so it spanned every row and no read path used it). Neither is part of
+# the head set; see ``test_migration_076_*`` and ``test_migration_077_*``.
 _MIGRATION_067_RETAINED_INDEXES = frozenset(
     {
         "idx_fin_facts_security_concept_latest",
@@ -3950,7 +3956,6 @@ _MIGRATION_067_RETAINED_INDEXES = frozenset(
         "idx_fx_rates_pair_date",
         "idx_fx_supported_pairs_refreshable",
         "idx_issuer_name_country",
-        "idx_listing_currency_nonnull",
         "idx_provider_listing_listing",
     }
 )
@@ -3974,8 +3979,8 @@ def test_migration_067_drops_unused_indexes(tmp_path):
         f"{sorted(_MIGRATION_067_DROPPED_INDEXES & index_names)}"
     )
 
-    # And the eight indexes that the audit kept must still exist —
-    # protects against a future change that drops the wrong one.
+    # And the indexes the audit kept (and that later migrations did not retire)
+    # must still exist — protects against a future change dropping the wrong one.
     missing_retained = _MIGRATION_067_RETAINED_INDEXES - index_names
     assert not missing_retained, (
         f"migration 067 (or a later change) dropped indexes that the "
@@ -4032,6 +4037,51 @@ def test_migration_076_drops_provider_exchange_exchange_index(tmp_path):
 
 def test_migration_076_idempotent(tmp_path):
     db_path = tmp_path / "drop-provider-exchange-index-076-idempotent.sqlite"
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0
+
+
+# ---------------------------------------------------------------------------
+# Migration 077 — drop the unused idx_listing_currency_nonnull partial index
+# ---------------------------------------------------------------------------
+
+
+def test_migration_077_drops_listing_currency_index(tmp_path):
+    """The degenerate partial index is gone after a full apply; the UNIQUE survives.
+
+    Migration 069 made ``listing.currency`` NOT NULL, so the partial predicate
+    ``WHERE currency IS NOT NULL`` matched every row and no read path used the
+    index. This fails on the pre-077 schema (migration 069 recreates the index
+    when it rebuilds ``listing``) and passes once migration 077 retires it. The
+    ``(exchange_id, symbol)`` UNIQUE auto-index — which the currency lookups
+    actually use — must be untouched.
+    """
+
+    db_path = tmp_path / "drop-listing-currency-index-077.sqlite"
+    applied = apply_migrations(db_path)
+
+    assert applied == len(MIGRATIONS)
+
+    with sqlite3.connect(db_path) as conn:
+        index_rows = conn.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type = 'index' AND tbl_name = 'listing'
+            """
+        ).fetchall()
+    index_names = {row[0] for row in index_rows}
+
+    # The degenerate partial index must be gone …
+    assert "idx_listing_currency_nonnull" not in index_names
+    # … while the (exchange_id, symbol) UNIQUE constraint's auto-index remains.
+    assert "sqlite_autoindex_listing_1" in index_names
+
+
+def test_migration_077_idempotent(tmp_path):
+    db_path = tmp_path / "drop-listing-currency-index-077-idempotent.sqlite"
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
 

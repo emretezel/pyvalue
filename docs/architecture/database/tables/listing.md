@@ -26,7 +26,7 @@ One row per `(exchange_id, symbol)`.
 | `issuer_id` | `INTEGER` | no | FK | issuer metadata link |
 | `exchange_id` | `INTEGER` | no | FK, idx | canonical exchange link; part of composite unique key |
 | `symbol` | `TEXT` | no |  | bare canonical listing symbol such as `AAPL`; part of composite unique key. CHECK enforces uppercase, no whitespace, and `[A-Z0-9.&^*-]` characters only |
-| `currency` | `TEXT` | yes | partial idx | authoritative listing quote unit, including subunits such as `GBX`, `ZAC`, and `ILA`. CHECK enforces 3-char uppercase ASCII letters when present |
+| `currency` | `TEXT` | no |  | authoritative listing quote unit, including subunits such as `GBX`, `ZAC`, and `ILA`. NOT NULL since migration 069; CHECK enforces 3-char uppercase ASCII letters |
 | `primary_listing_status` | `TEXT` | no |  | canonical primary-listing classification: `unknown`, `primary`, or `secondary` |
 
 ## Keys And Relationships
@@ -51,7 +51,7 @@ One row per `(exchange_id, symbol)`.
 ## Secondary Indexes
 
 <!-- BEGIN generated_secondary_indexes -->
-- `idx_listing_currency_nonnull (currency)` WHERE currency IS NOT NULL
+- None beyond the primary key and unique constraints.
 <!-- END generated_secondary_indexes -->
 
 ## Main Read Paths

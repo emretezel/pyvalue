@@ -8073,6 +8073,38 @@ def _migration_076_drop_provider_exchange_exchange_index(
     conn.execute("DROP INDEX IF EXISTS idx_provider_exchange_exchange")
 
 
+def _migration_077_drop_listing_currency_index(
+    conn: sqlite3.Connection,
+) -> None:
+    """Drop ``idx_listing_currency_nonnull`` — an unused, now-degenerate partial index.
+
+    ``idx_listing_currency_nonnull (currency) WHERE currency IS NOT NULL`` was a
+    partial index that stopped being partial: migration 069 tightened
+    ``listing.currency`` to ``NOT NULL``, so the predicate ``WHERE currency IS NOT
+    NULL`` now matches every one of the ~75.8k listing rows. It is effectively a
+    full ``(currency)`` index, paying full storage and per-upsert write
+    amplification — but nothing reads it:
+
+    * No read query filters ``listing`` by a currency value or enumerates
+      ``SELECT DISTINCT currency FROM listing``. The only runtime reads that touch
+      ``listing.currency`` (``ticker_currency`` / ``listing_quote_currency`` in
+      ``storage/base.py``) locate a row by ``(exchange_id, symbol)`` via the
+      ``UNIQUE`` auto-index and merely *project* ``currency``; their trailing
+      ``AND l.currency IS NOT NULL`` is a no-op residual (the column is NOT NULL),
+      not an index seek.
+    * Currency *discovery* runs against ``financial_facts``
+      (``discover_currencies`` → ``idx_fin_facts_currency_nonnull``), whose
+      ``currency`` is genuinely nullable — that partial index is kept. ``listing``
+      has no analogous read path.
+
+    ``EXPLAIN QUERY PLAN`` confirms the optimizer never chooses this index for any
+    query in the codebase. ``DROP INDEX IF EXISTS`` keeps the migration re-runnable
+    against databases that never created it.
+    """
+
+    conn.execute("DROP INDEX IF EXISTS idx_listing_currency_nonnull")
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -8150,6 +8182,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_074_drop_financial_facts_frame_and_source_provider,
     _migration_075_purge_enterprise_value_facts,
     _migration_076_drop_provider_exchange_exchange_index,
+    _migration_077_drop_listing_currency_index,
 ]
 
 

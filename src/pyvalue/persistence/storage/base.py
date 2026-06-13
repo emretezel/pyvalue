@@ -356,7 +356,6 @@ class SQLiteStore:
                 FROM listing l
                 JOIN "exchange" e ON e.exchange_id = l.exchange_id
                 WHERE l.symbol = ? AND e.exchange_code = ?
-                  AND l.currency IS NOT NULL
                 LIMIT 1
                 """,
                 (ticker, exchange),
@@ -377,7 +376,6 @@ class SQLiteStore:
                 FROM listing l
                 JOIN "exchange" e ON e.exchange_id = l.exchange_id
                 WHERE l.symbol = ? AND e.exchange_code = ?
-                  AND l.currency IS NOT NULL
                 LIMIT 1
                 """,
                 (ticker, exchange),
