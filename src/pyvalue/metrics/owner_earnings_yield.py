@@ -13,7 +13,7 @@ import logging
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.enterprise_value import (
-    EV_FALLBACK_REQUIRED_CONCEPTS,
+    EV_REQUIRED_CONCEPTS,
     resolve_enterprise_value_denominator,
 )
 from pyvalue.metrics.owner_earnings_enterprise import (
@@ -37,7 +37,7 @@ REQUIRED_CONCEPTS = tuple(
     dict.fromkeys(OE_EQUITY_REQUIRED_CONCEPTS + SHARE_COUNT_CONCEPTS)
 )
 REQUIRED_EV_CONCEPTS = tuple(
-    dict.fromkeys(OE_EV_REQUIRED_CONCEPTS + EV_FALLBACK_REQUIRED_CONCEPTS)
+    dict.fromkeys(OE_EV_REQUIRED_CONCEPTS + EV_REQUIRED_CONCEPTS)
 )
 
 

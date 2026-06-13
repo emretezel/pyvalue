@@ -691,51 +691,6 @@ class MarketDataRepository(SQLiteStore):
                 _query(conn)
         return snapshots
 
-    def price_as_of(
-        self, symbol: str, on_or_before: str
-    ) -> Optional[MarketSnapshotRecord]:
-        """Return the latest price snapshot on or before ``on_or_before``.
-
-        Market cap is computed as a share-count fact x the price *as of that
-        fact's date* (see ``metrics.utils.market_cap_money``); this resolves that
-        price by taking the most recent ``market_data`` row whose ``as_of`` does
-        not exceed the requested date (so a share count dated on a non-trading
-        day still pairs with the prior trading day's close). The reported
-        currency is the listing's base (major) currency, consistent with the
-        stored major price.
-        """
-
-        self.initialize_schema()
-        security_id = self._security_repo().resolve_id(symbol)
-        if security_id is None:
-            return None
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT s.canonical_symbol, md.listing_id AS security_id, md.as_of,
-                       md.price, md.volume, l.currency, md.updated_at
-                FROM market_data md
-                JOIN securities s ON s.security_id = md.listing_id
-                JOIN listing l ON l.listing_id = md.listing_id
-                WHERE md.listing_id = ?
-                  AND md.as_of <= ?
-                ORDER BY md.as_of DESC
-                LIMIT 1
-                """,
-                (security_id, on_or_before),
-            ).fetchone()
-        if row is None:
-            return None
-        return MarketSnapshotRecord(
-            security_id=row["security_id"],
-            symbol=row["canonical_symbol"],
-            as_of=row["as_of"],
-            price=row["price"],
-            volume=row["volume"],
-            currency=canonical_trading_currency(row["currency"]),
-            updated_at=row["updated_at"],
-        )
-
 
 class EntityMetadataRepository(SQLiteStore):
     """Compatibility wrapper backed by canonical securities metadata."""

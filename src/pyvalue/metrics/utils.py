@@ -53,9 +53,9 @@ LOGGER = logging.getLogger(__name__)
 class MarketCap:
     """Market capitalization as ``Money`` plus the price date it was computed for.
 
-    ``as_of`` is the ``market_data`` price date paired with the share-count fact
-    (so callers that report a market-cap-derived value -- e.g. the
-    ``market_cap`` metric itself -- can stamp the right observation date).
+    ``as_of`` is the latest ``market_data`` price date (market cap = latest share
+    count x latest price), so callers that report a market-cap-derived value --
+    e.g. the ``market_cap`` metric itself -- can stamp the right observation date.
     """
 
     money: Money
@@ -420,21 +420,25 @@ def market_cap_money(
     target_currency: Optional[str] = None,
     contexts: Sequence[object] = (),
 ) -> Optional[MarketCap]:
-    """Compute market cap on demand as a share-count fact x a co-dated price.
+    """Compute market cap on demand as the latest share count x the latest price.
 
     Market cap is shares-outstanding x price, so persisting it (the removed
     ``market_data.market_cap`` column, migration 072) duplicated derivable
-    state. The amount is the latest shares-outstanding ``financial_facts`` row
-    times the ``market_data`` price *as of that fact's date*
-    (:meth:`MarketDataRepository.price_as_of`). Co-dating the share count with
-    its contemporaneous price means we never multiply today's price by a stale
-    share count -- and it removes the need for the old cross-snapshot
-    suspicious-jump guard.
+    state. The amount is the latest positive shares-outstanding
+    ``financial_facts`` row times the latest ``market_data`` price
+    (:meth:`MarketDataRepository.latest_snapshot`). Pairing the latest share
+    count with the latest price -- rather than the price as of the share-count
+    date -- means every price refresh re-prices market cap (and every metric
+    built on it), which is what a value screen that refreshes prices between
+    quarterly fundamentals needs. Shares outstanding move slowly, so a share
+    count that is at most a quarter stale adds negligible error; price is the
+    fast, decision-relevant input and is kept current. Both inputs are on the
+    current split basis (EODHD adjusts historical share counts to it, and the
+    latest price is as-traded today), so the product is split-consistent.
 
     The stored price is already in the listing's major currency, so the market
-    cap is too. Returns ``None`` when there is no usable share count or no price
-    as of that date (the latter applies until ``update-market-data`` is extended
-    to backfill prices at share-count dates -- see the refactor doc).
+    cap is too. Returns ``None`` when there is no usable share count or no stored
+    price at all; ``MarketCap.as_of`` is the latest price's date.
 
     The listing-currency invariant is preserved via the shared Money seam
     (:func:`require_metric_amount_money`): if the price currency differs from the
@@ -448,12 +452,11 @@ def market_cap_money(
         LOGGER.warning("%s: no shares-outstanding fact for %s", metric_id, symbol)
         return None
 
-    snapshot = market_repo.price_as_of(symbol, share_fact.end_date)
+    snapshot = market_repo.latest_snapshot(symbol)
     if snapshot is None or snapshot.price is None or snapshot.price <= 0:
         LOGGER.warning(
-            "%s: no market price as of %s for %s",
+            "%s: no latest market price for %s",
             metric_id,
-            share_fact.end_date,
             symbol,
         )
         return None

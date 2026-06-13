@@ -8020,6 +8020,22 @@ def _migration_074_drop_financial_facts_frame_and_source_provider(
     )
 
 
+def _migration_075_purge_enterprise_value_facts(conn: sqlite3.Connection) -> None:
+    """Purge ``EnterpriseValue`` rows; EV is now always computed, never ingested.
+
+    EODHD's ``Valuation.EnterpriseValue`` snapshot is no longer normalized into
+    ``financial_facts`` -- the metric layer computes EV on the fly as market cap +
+    total debt - cash, so it floats with every price refresh and uses one
+    consistent definition across the universe. Any rows ingested before that
+    change are now dead data with no reader, so they are deleted.
+
+    Idempotent: the ``DELETE`` is a no-op once no ``EnterpriseValue`` rows remain.
+    """
+
+    if _table_exists(conn, "financial_facts"):
+        conn.execute("DELETE FROM financial_facts WHERE concept = 'EnterpriseValue'")
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -8095,6 +8111,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_072_drop_market_data_market_cap,
     _migration_073_drop_sec_columns_and_purge_providers,
     _migration_074_drop_financial_facts_frame_and_source_provider,
+    _migration_075_purge_enterprise_value_facts,
 ]
 
 

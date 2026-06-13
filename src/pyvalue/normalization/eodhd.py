@@ -171,7 +171,7 @@ EODHD_STATEMENT_FIELDS = {
     },
 }
 
-EODHD_EXTRA_CONCEPTS = {"EnterpriseValue", "CommonStockDividendsPerShareCashPaid"}
+EODHD_EXTRA_CONCEPTS = {"CommonStockDividendsPerShareCashPaid"}
 EODHD_TARGET_CONCEPTS = {
     concept for statement in EODHD_STATEMENT_FIELDS.values() for concept in statement
 } | EODHD_EXTRA_CONCEPTS
@@ -247,13 +247,6 @@ class EODHDFactsNormalizer:
                 )
             )
 
-        records.extend(
-            self._normalize_enterprise_value(
-                payload,
-                symbol=symbol,
-                default_currency=currency_code,
-            )
-        )
         records.extend(self._normalize_share_counts(payload, symbol, currency_code))
         records.extend(
             self._normalize_outstanding_shares(payload, symbol, currency_code)
@@ -634,84 +627,6 @@ class EODHDFactsNormalizer:
                         )
                     )
         return records
-
-    def _normalize_enterprise_value(
-        self,
-        payload: Dict,
-        *,
-        symbol: str,
-        default_currency: Optional[str],
-    ) -> List[FactRecord]:
-        if "EnterpriseValue" not in self.concepts:
-            return []
-
-        valuation = payload.get("Valuation") or {}
-        raw_value = _to_float(valuation.get("EnterpriseValue"))
-        if raw_value is None:
-            return []
-
-        # EODHD's Valuation.EnterpriseValue is a point-in-time scalar timestamped by
-        # General.UpdatedAt — not by the balance-sheet quarter. Earlier code used
-        # Highlights.MostRecentQuarter, which can be off by up to ~90 days and made
-        # the (listing, concept, end_date, ...) PK collide across re-ingests, silently
-        # overwriting history. UpdatedAt restores correct INSTANT semantics.
-        end_date = self._payload_updated_at(payload)
-        if not end_date:
-            LOGGER.warning(
-                "EnterpriseValue: missing General.UpdatedAt for %s; skipping snapshot",
-                symbol,
-            )
-            return []
-
-        currency_resolution = resolve_eodhd_currency(
-            valuation if isinstance(valuation, Mapping) else None,
-            statement_currency=self._enterprise_value_statement_currency(
-                payload.get("Financials") or {}
-            ),
-            payload_currency=default_currency,
-        )
-        currency = currency_resolution.currency_code
-        normalized_value, normalized_currency = self._normalize_value_currency(
-            raw_value, currency
-        )
-        if normalized_value is None:
-            return []
-        if normalized_currency is None:
-            # EnterpriseValue is monetary; the schema couples monetary facts to a
-            # non-null currency. Without a resolvable currency we drop the snapshot
-            # rather than persist a currency-less monetary row.
-            LOGGER.warning(
-                "EnterpriseValue: missing currency for %s; skipping snapshot",
-                symbol,
-            )
-            return []
-
-        return [
-            FactRecord(
-                symbol=symbol.upper(),
-                concept="EnterpriseValue",
-                fiscal_period="INSTANT",
-                end_date=end_date,
-                unit_kind="monetary",
-                value=normalized_value,
-                filed=None,
-                currency=normalized_currency,
-            )
-        ]
-
-    def _enterprise_value_statement_currency(
-        self, financials: Mapping[str, object]
-    ) -> Optional[str]:
-        """Return the first usable statement-derived currency for valuation facts."""
-
-        for statement_name in ("Balance_Sheet", "Income_Statement", "Cash_Flow"):
-            statement_payload = financials.get(statement_name)
-            if not isinstance(statement_payload, dict):
-                continue
-            code = self._normalize_statement_currency(statement_payload)
-            if code is not None:
-                return code
-        return None
 
     def _payload_updated_at(self, payload: Dict) -> Optional[str]:
         """Return the ISO date in `General.UpdatedAt`, or None if absent/invalid.

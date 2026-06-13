@@ -19,8 +19,8 @@ pruned payloads for **MSFT**, **GOOGL**, and **ADBE** pulled from `fundamentals_
 
 > EODHD is the only provider, so every distinct `concept` in `financial_facts` came from
 > this normalizer. The authoritative concept set is therefore whatever
-> `SELECT DISTINCT concept FROM financial_facts` returns — **45 concepts** as of
-> 2026-06-01 (the live DB currently holds one fully normalized symbol, **AAPL/USD**;
+> `SELECT DISTINCT concept FROM financial_facts` returns — **44 concepts** as of
+> 2026-06-13 (the live DB currently holds one fully normalized symbol, **AAPL/USD**;
 > MSFT/GOOGL/ADBE appear only as raw input payloads).
 
 ## Normalized fact shape
@@ -39,9 +39,8 @@ table doc):
 | Section | Used for |
 | --- | --- |
 | `General.CurrencyCode` | payload-level currency fallback (precedence step 3) |
-| `General.UpdatedAt` | `end_date` for all snapshot facts (EV, TTM DPS, INSTANT shares) |
+| `General.UpdatedAt` | `end_date` for snapshot facts (TTM DPS, INSTANT shares) |
 | `Highlights.DividendShare` | `CommonStockDividendsPerShareCashPaid` (TTM) |
-| `Valuation.EnterpriseValue` | `EnterpriseValue` (INSTANT) |
 | `SharesStats.SharesOutstanding` / `.SharesFloat` | `CommonStockSharesOutstanding` (INSTANT) |
 | `outstandingShares.{annual,quarterly}` | `CommonStockSharesOutstanding` (FY / Qn) |
 | `Earnings.{History,Annual}` | `EarningsPerShareDiluted` (`epsActual`) |
@@ -131,7 +130,6 @@ tables below.
 | StockBasedCompensation | Cash Flow | monetary | FY, Q1–Q4 | F |
 | SalePurchaseOfStock | Cash Flow | monetary | FY, Q1–Q4 | F |
 | IssuanceOfCapitalStock | Cash Flow | monetary | FY, Q1–Q4 | F |
-| EnterpriseValue | Snapshot | monetary | INSTANT | S |
 | CommonStockDividendsPerShareCashPaid | Snapshot | per_share | TTM | S |
 
 Four concepts are mapped in code but **not present** in the live table — see
@@ -220,13 +218,6 @@ All three statement families share the same header rules; only the leaf field(s)
 
 These are point-in-time facts dated by `General.UpdatedAt` (EODHD's own refresh date), **not**
 by a fiscal quarter.
-
-### Enterprise value — `Valuation.EnterpriseValue`
-
-Scalar (no `yearly`/`quarterly`). `fiscal_period = INSTANT`, `unit_kind = monetary`,
-`end_date = General.UpdatedAt`. Currency = `resolve_eodhd_currency(Valuation,
-statement_currency = first usable currency among BS/IS/CF, payload = General.CurrencyCode)`.
-Skipped if `UpdatedAt` is missing or no currency resolves.
 
 ### Dividends per share — `Highlights.DividendShare`
 
@@ -318,7 +309,6 @@ which drives quarter labeling.
 {
   "General":     { "CurrencyCode": "USD", "FiscalYearEnd": "June", "UpdatedAt": "2026-03-29" },
   "Highlights":  { "DividendShare": 3.48 },                  // → CommonStockDividendsPerShareCashPaid (per_share, TTM, end_date=UpdatedAt)
-  "Valuation":   { "EnterpriseValue": 2803775975252 },       // → EnterpriseValue (monetary, INSTANT, end_date=UpdatedAt)
   "SharesStats": { "SharesOutstanding": 7425629076 },        // → CommonStockSharesOutstanding (count, INSTANT, end_date=UpdatedAt)
   "outstandingShares": {
     "annual":    { "0": { "dateFormatted": "2025-12-31", "shares": 7460000000 } },  // → CommonStockSharesOutstanding (count, FY, end_date 2025-12-31)

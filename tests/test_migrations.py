@@ -4827,5 +4827,56 @@ def test_migration_074_drops_frame_and_source_provider_preserving_rows(tmp_path)
         assert foreign_keys[0][2] == "listing"
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
-    # Idempotent: a second run is a no-op (074 is the latest migration).
+    # Idempotent: re-running migration 074 is a no-op.
+    assert apply_migrations(db_path, target_version=74) == 0
+
+
+def test_migration_075_purges_enterprise_value_facts(tmp_path):
+    """Migration 075 deletes every ``EnterpriseValue`` row from ``financial_facts``
+    (EV is now always computed, never ingested) and leaves other facts intact."""
+
+    db_path = tmp_path / "purge-ev-075.sqlite"
+    # Bring the DB to the post-074 state, then seed facts.
+    assert apply_migrations(db_path, target_version=74) == 74
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("INSERT INTO issuer (issuer_id, name) VALUES (1, 'Acme')")
+        conn.execute(
+            """
+            INSERT INTO listing (listing_id, issuer_id, exchange_id, symbol, currency)
+            VALUES (1, 1, (SELECT exchange_id FROM exchange WHERE exchange_code = 'US'),
+                    'AAA', 'USD')
+            """
+        )
+        # One EnterpriseValue snapshot (doomed) plus an unrelated fact (preserved).
+        conn.execute(
+            """
+            INSERT INTO financial_facts (
+                listing_id, concept, fiscal_period, end_date, unit_kind, value, currency
+            ) VALUES
+                (1, 'EnterpriseValue', 'INSTANT', '2025-11-15', 'monetary', 1234.0, 'USD'),
+                (1, 'Assets', 'FY', '2024-12-31', 'monetary', 100.0, 'USD')
+            """
+        )
+
+    # Apply migration 075 in isolation.
+    assert apply_migrations(db_path, target_version=75) == 1
+
+    with sqlite3.connect(db_path) as conn:
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM financial_facts WHERE concept = 'EnterpriseValue'"
+            ).fetchone()[0]
+            == 0
+        )
+        # Non-EnterpriseValue facts are left untouched.
+        assert (
+            conn.execute(
+                "SELECT value FROM financial_facts WHERE concept = 'Assets'"
+            ).fetchone()[0]
+            == 100.0
+        )
+
+    # Idempotent: a second run is a no-op (075 is the latest migration).
     assert apply_migrations(db_path) == 0

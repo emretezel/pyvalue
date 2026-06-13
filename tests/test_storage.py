@@ -1395,33 +1395,6 @@ def test_market_data_repository_latest_snapshots_many_matches_single_lookup(tmp_
     assert snapshots["BBB.US"].price == repo.latest_snapshot("BBB.US").price
 
 
-def test_market_data_repository_price_as_of_returns_latest_on_or_before(tmp_path):
-    # ``price_as_of`` resolves the price the on-demand market cap pairs with a
-    # share-count fact: the most recent snapshot whose ``as_of`` does not exceed
-    # the requested date, reported in the listing's base currency.
-    db_path = tmp_path / "price-as-of.db"
-    ticker_repo = SupportedTickerRepository(db_path)
-    ticker_repo.initialize_schema()
-    ticker_repo.replace_for_exchange(
-        "EODHD",
-        "US",
-        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock", "Currency": "USD"}],
-    )
-    repo = MarketDataRepository(db_path)
-    repo.initialize_schema()
-    repo.upsert_price("AAA.US", "2026-01-15", 10.0, currency="USD")
-    repo.upsert_price("AAA.US", "2026-03-31", 12.0, currency="USD")
-
-    assert repo.price_as_of("AAA.US", "2026-02-01").price == 10.0
-    assert repo.price_as_of("AAA.US", "2026-03-31").price == 12.0
-    assert repo.price_as_of("AAA.US", "2026-04-15").price == 12.0
-    assert repo.price_as_of("AAA.US", "2026-03-31").currency == "USD"
-    # No snapshot on or before the date -> None.
-    assert repo.price_as_of("AAA.US", "2026-01-01") is None
-    # Unknown symbol -> None.
-    assert repo.price_as_of("ZZZ.US", "2026-03-31") is None
-
-
 def test_financial_facts_repository_latest_share_counts_many_matches_single_lookup(
     tmp_path,
 ):

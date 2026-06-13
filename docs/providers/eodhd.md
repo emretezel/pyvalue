@@ -292,8 +292,8 @@ Important market-data options:
   before market-data refresh planning and progress accounting
 - retry backoff is respected by default; use `--retry-failed-now` to bypass it
 
-Market cap is not stored; it is computed on demand as a share-count fact x the
-`market_data` price as of that fact's date (`metrics.utils.market_cap_money`).
+Market cap is not stored; it is computed on demand as the latest share-count fact
+x the latest `market_data` price (`metrics.utils.market_cap_money`).
 
 ## EODHD-Oriented Metrics
 

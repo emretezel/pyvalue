@@ -425,10 +425,10 @@ def test_market_capitalization_metric_uses_listing_currency_for_market_cap():
     assert result.currency == "USD"
 
 
-def test_market_cap_money_pairs_share_count_with_codated_price(tmp_path):
+def test_market_cap_money_uses_latest_price(tmp_path):
     # The defining behaviour of the on-demand market cap: it multiplies the
-    # latest share-count fact by the price AS OF that fact's date, not by the
-    # most recent price.
+    # latest share-count fact by the LATEST price, so the value floats with every
+    # price refresh -- not the price as of the share-count date.
     from pyvalue.metrics.utils import market_cap_money
     from pyvalue.persistence.storage import (
         FinancialFactsRepository,
@@ -472,10 +472,10 @@ def test_market_cap_money_pairs_share_count_with_codated_price(tmp_path):
         target_currency="USD",
     )
     assert cap is not None
-    # 100 shares x the co-dated price (10.0), NOT the latest price (99.0).
-    assert cap.money.amount == 1000.0
+    # 100 shares x the LATEST price (99.0), NOT the share-count-dated price (10.0).
+    assert cap.money.amount == 9900.0
     assert cap.money.currency == "USD"
-    assert cap.as_of == "2026-01-31"
+    assert cap.as_of == "2026-03-31"
 
     # No share-count fact for an unrelated symbol -> no market cap.
     ticker_repo.replace_for_exchange(
@@ -4482,17 +4482,11 @@ def test_price_to_fcf_metric():
     class DummyMarketRepo:
         def latest_snapshot(self, symbol):
             class Snapshot:
-                market_cap = 6400.0
+                price = 6400.0
                 as_of = (date.today() - timedelta(days=10)).isoformat()
                 currency = "USD"
 
             return Snapshot()
-
-        def price_as_of(self, symbol, on_or_before):
-            snapshot = self.latest_snapshot(symbol)
-            snapshot.price = snapshot.market_cap
-            snapshot.security_id = 1
-            return snapshot
 
         def ticker_currency(self, symbol):
             return "USD"
@@ -4550,17 +4544,11 @@ def test_price_to_fcf_metric_uses_zero_capex_when_missing():
     class DummyMarketRepo:
         def latest_snapshot(self, symbol):
             class Snapshot:
-                market_cap = 6400.0
+                price = 6400.0
                 as_of = (date.today() - timedelta(days=10)).isoformat()
                 currency = "USD"
 
             return Snapshot()
-
-        def price_as_of(self, symbol, on_or_before):
-            snapshot = self.latest_snapshot(symbol)
-            snapshot.price = snapshot.market_cap
-            snapshot.security_id = 1
-            return snapshot
 
         def ticker_currency(self, symbol):
             return "USD"
@@ -4698,17 +4686,11 @@ def test_market_capitalization_metric():
     class DummyMarketRepo:
         def latest_snapshot(self, symbol):
             class Snapshot:
-                market_cap = 123456789.0
+                price = 123456789.0
                 as_of = "2024-05-01"
                 currency = "USD"
 
             return Snapshot()
-
-        def price_as_of(self, symbol, on_or_before):
-            snapshot = self.latest_snapshot(symbol)
-            snapshot.price = snapshot.market_cap
-            snapshot.security_id = 1
-            return snapshot
 
         def ticker_currency(self, symbol):
             return "USD"
@@ -6672,14 +6654,13 @@ def _build_market_repo(
     market_cap,
     as_of,
     currency="USD",
-    price=100.0,
     ticker_currency="USD",
 ):
-    # Market cap is derived (share-count fact x price as of that fact's date), so
-    # these tests pin the market cap directly by returning a price_as_of price
-    # equal to ``market_cap`` and pairing it with a shares=1.0 fact (see
-    # _share_count_records). A None market_cap means "no price as of that date",
-    # i.e. the metric sees a missing market cap.
+    # Market cap is derived as the latest share-count fact x the latest price, so
+    # these tests pin it directly: latest_snapshot returns a price equal to
+    # ``market_cap`` paired with a shares=1.0 fact (see _share_count_records). A
+    # None market_cap means "no latest price", i.e. the metric sees a missing
+    # market cap.
     class Snapshot:
         def __init__(self, snapshot_price):
             self.security_id = 1
@@ -6689,9 +6670,6 @@ def _build_market_repo(
 
     class DummyMarketRepo:
         def latest_snapshot(self, symbol):
-            return Snapshot(price)
-
-        def price_as_of(self, symbol, on_or_before):
             if market_cap is None:
                 return None
             return Snapshot(market_cap)
@@ -6730,8 +6708,6 @@ def _build_ev_ratio_records(
         25.0,
     ),
     da_fallback_values: tuple[float, float, float, float] | None = None,
-    enterprise_value: float | None = 1000.0,
-    enterprise_currency: str = "USD",
     short_debt: float = 50.0,
     long_debt: float = 150.0,
     cash: float = 20.0,
@@ -6773,17 +6749,9 @@ def _build_ev_ratio_records(
             da_fallback_values,
             currency=ebit_currency,
         )
-    if enterprise_value is not None:
-        records["EnterpriseValue"] = [
-            fact(
-                symbol=symbol,
-                concept="EnterpriseValue",
-                end_date=q4,
-                fiscal_period="INSTANT",
-                value=enterprise_value,
-                currency=enterprise_currency,
-            )
-        ]
+    # EV is computed (never ingested) as market cap + short + long - cash. With
+    # the defaults below (50 + 150 - 20 = +180), a test that pins market cap at
+    # 820 yields a clean EV of 1000.
     records["ShortTermDebt"] = [
         fact(
             symbol=symbol,
@@ -9023,17 +8991,11 @@ def test_oey_equity_metric_computes_ratio_from_ttm_numerator():
     class DummyMarketRepo:
         def latest_snapshot(self, symbol):
             class Snapshot:
-                market_cap = 7440.0
+                price = 7440.0
                 as_of = q3
                 currency = "USD"
 
             return Snapshot()
-
-        def price_as_of(self, symbol, on_or_before):
-            snapshot = self.latest_snapshot(symbol)
-            snapshot.price = snapshot.market_cap
-            snapshot.security_id = 1
-            return snapshot
 
     result = metric.compute(
         symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
@@ -9124,17 +9086,11 @@ def test_oey_equity_5y_metric_computes_ratio_from_5y_numerator():
     class DummyMarketRepo:
         def latest_snapshot(self, symbol):
             class Snapshot:
-                market_cap = 3900.0
+                price = 3900.0
                 as_of = "2026-01-01"
                 currency = "USD"
 
             return Snapshot()
-
-        def price_as_of(self, symbol, on_or_before):
-            snapshot = self.latest_snapshot(symbol)
-            snapshot.price = snapshot.market_cap
-            snapshot.security_id = 1
-            return snapshot
 
     result = metric.compute(
         symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
@@ -9233,17 +9189,11 @@ def test_oey_equity_metric_returns_none_when_market_cap_missing():
     class DummyMarketRepo:
         def latest_snapshot(self, symbol):
             class Snapshot:
-                market_cap = None
+                price = None
                 as_of = q3
                 currency = "USD"
 
             return Snapshot()
-
-        def price_as_of(self, symbol, on_or_before):
-            snapshot = self.latest_snapshot(symbol)
-            snapshot.price = snapshot.market_cap
-            snapshot.security_id = 1
-            return snapshot
 
     result = metric.compute(
         symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
@@ -9340,17 +9290,11 @@ def test_oey_equity_metric_returns_none_when_market_cap_non_positive():
     class DummyMarketRepo:
         def latest_snapshot(self, symbol):
             class Snapshot:
-                market_cap = 0.0
+                price = 0.0
                 as_of = q3
                 currency = "USD"
 
             return Snapshot()
-
-        def price_as_of(self, symbol, on_or_before):
-            snapshot = self.latest_snapshot(symbol)
-            snapshot.price = snapshot.market_cap
-            snapshot.security_id = 1
-            return snapshot
 
     result = metric.compute(
         symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
@@ -9370,17 +9314,11 @@ def test_oey_equity_metric_returns_none_when_numerator_missing():
     class DummyMarketRepo:
         def latest_snapshot(self, symbol):
             class Snapshot:
-                market_cap = 1000.0
+                price = 1000.0
                 as_of = "2026-01-01"
                 currency = "USD"
 
             return Snapshot()
-
-        def price_as_of(self, symbol, on_or_before):
-            snapshot = self.latest_snapshot(symbol)
-            snapshot.price = snapshot.market_cap
-            snapshot.security_id = 1
-            return snapshot
 
     result = metric.compute(
         symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
@@ -9513,17 +9451,11 @@ def test_oey_equity_metric_uses_listing_currency_for_market_cap():
     class DummyMarketRepo:
         def latest_snapshot(self, symbol):
             class Snapshot:
-                market_cap = 100.0
+                price = 100.0
                 as_of = q3
                 currency = "USD"
 
             return Snapshot()
-
-        def price_as_of(self, symbol, on_or_before):
-            snapshot = self.latest_snapshot(symbol)
-            snapshot.price = snapshot.market_cap
-            snapshot.security_id = 1
-            return snapshot
 
         def ticker_currency(self, symbol):
             return "USD"
@@ -9624,17 +9556,11 @@ def test_oey_equity_metric_allows_negative_values():
     class DummyMarketRepo:
         def latest_snapshot(self, symbol):
             class Snapshot:
-                market_cap = 4920.0
+                price = 4920.0
                 as_of = q3
                 currency = "USD"
 
             return Snapshot()
-
-        def price_as_of(self, symbol, on_or_before):
-            snapshot = self.latest_snapshot(symbol)
-            snapshot.price = snapshot.market_cap
-            snapshot.security_id = 1
-            return snapshot
 
     result = metric.compute(
         symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
@@ -9643,48 +9569,7 @@ def test_oey_equity_metric_allows_negative_values():
     assert result.value == -500.0 / 4920.0
 
 
-def test_oey_ev_metric_uses_normalized_enterprise_value_denominator():
-    metric = OwnerEarningsYieldEVMetric()
-    symbol = "AAPL.US"
-    today = date.today()
-    q4 = (today - timedelta(days=20)).isoformat()
-    q3 = (today - timedelta(days=110)).isoformat()
-    q2 = (today - timedelta(days=200)).isoformat()
-    q1 = (today - timedelta(days=290)).isoformat()
-    latest_year = date.today().year - 1
-
-    records_by_concept = _build_oe_ev_ttm_input_records(
-        symbol=symbol,
-        q4=q4,
-        q3=q3,
-        q2=q2,
-        q1=q1,
-        latest_year=latest_year,
-    )
-    records_by_concept["EnterpriseValue"] = [
-        fact(
-            symbol=symbol,
-            concept="EnterpriseValue",
-            end_date=q4,
-            value=5840.0,
-            currency="USD",
-            fiscal_period="INSTANT",
-        )
-    ]
-
-    class DummyMarketRepo:
-        def latest_snapshot(self, symbol):
-            return None
-
-    result = metric.compute(
-        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
-    )
-    assert result is not None
-    assert result.as_of == q4
-    assert result.value == 0.1
-
-
-def test_oey_ev_metric_falls_back_to_derived_ev_when_primary_missing():
+def test_oey_ev_metric_computes_ev_from_components():
     metric = OwnerEarningsYieldEVMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -9716,18 +9601,13 @@ def test_oey_ev_metric_falls_back_to_derived_ev_when_primary_missing():
     class DummyMarketRepo:
         def latest_snapshot(self, symbol):
             class Snapshot:
-                market_cap = 1000.0
+                price = 1000.0
                 as_of = q4
                 currency = "USD"
 
             return Snapshot()
 
-        def price_as_of(self, symbol, on_or_before):
-            snapshot = self.latest_snapshot(symbol)
-            snapshot.price = snapshot.market_cap
-            snapshot.security_id = 1
-            return snapshot
-
+    # EV is derived (no fact): market cap 1000 + debt/cash components = 1250.
     result = metric.compute(
         symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
     )
@@ -9735,7 +9615,7 @@ def test_oey_ev_metric_falls_back_to_derived_ev_when_primary_missing():
     assert result.value == 584.0 / 1250.0
 
 
-def test_oey_ev_metric_falls_back_to_derived_ev_when_primary_non_positive():
+def test_oey_ev_metric_returns_none_when_market_cap_unavailable():
     metric = OwnerEarningsYieldEVMetric()
     symbol = "AAPL.US"
     today = date.today()
@@ -9753,174 +9633,16 @@ def test_oey_ev_metric_falls_back_to_derived_ev_when_primary_non_positive():
         q1=q1,
         latest_year=latest_year,
     )
-    records_by_concept["EnterpriseValue"] = [
-        fact(
-            symbol=symbol,
-            concept="EnterpriseValue",
-            end_date=q4,
-            value=0.0,
-            currency="USD",
-            fiscal_period="INSTANT",
-        )
-    ]
-    records_by_concept["LongTermDebt"] = [
-        fact(
-            symbol=symbol,
-            concept="LongTermDebt",
-            fiscal_period="FY",
-            end_date=f"{latest_year}-09-30",
-            value=300.0,
-            currency="USD",
-        )
-    ]
 
+    # No latest price -> market cap is unavailable -> EV cannot be derived.
     class DummyMarketRepo:
         def latest_snapshot(self, symbol):
             class Snapshot:
-                market_cap = 1000.0
+                price = None
                 as_of = q4
                 currency = "USD"
 
             return Snapshot()
-
-        def price_as_of(self, symbol, on_or_before):
-            snapshot = self.latest_snapshot(symbol)
-            snapshot.price = snapshot.market_cap
-            snapshot.security_id = 1
-            return snapshot
-
-    result = metric.compute(
-        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
-    )
-    assert result is not None
-    assert result.value == 584.0 / 1250.0
-
-
-def test_oey_ev_metric_returns_none_when_ev_primary_and_fallback_unavailable():
-    metric = OwnerEarningsYieldEVMetric()
-    symbol = "AAPL.US"
-    today = date.today()
-    q4 = (today - timedelta(days=20)).isoformat()
-    q3 = (today - timedelta(days=110)).isoformat()
-    q2 = (today - timedelta(days=200)).isoformat()
-    q1 = (today - timedelta(days=290)).isoformat()
-    latest_year = date.today().year - 1
-
-    records_by_concept = _build_oe_ev_ttm_input_records(
-        symbol=symbol,
-        q4=q4,
-        q3=q3,
-        q2=q2,
-        q1=q1,
-        latest_year=latest_year,
-    )
-
-    class DummyMarketRepo:
-        def latest_snapshot(self, symbol):
-            class Snapshot:
-                market_cap = None
-                as_of = q4
-                currency = "USD"
-
-            return Snapshot()
-
-        def price_as_of(self, symbol, on_or_before):
-            snapshot = self.latest_snapshot(symbol)
-            snapshot.price = snapshot.market_cap
-            snapshot.security_id = 1
-            return snapshot
-
-    result = metric.compute(
-        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
-    )
-    assert result is None
-
-
-def test_oey_ev_metric_returns_none_for_enterprise_value_currency_mismatch():
-    metric = OwnerEarningsYieldEVMetric()
-    symbol = "AAPL.US"
-    today = date.today()
-    q4 = (today - timedelta(days=20)).isoformat()
-    q3 = (today - timedelta(days=110)).isoformat()
-    q2 = (today - timedelta(days=200)).isoformat()
-    q1 = (today - timedelta(days=290)).isoformat()
-    latest_year = date.today().year - 1
-
-    records_by_concept = _build_oe_ev_ttm_input_records(
-        symbol=symbol,
-        q4=q4,
-        q3=q3,
-        q2=q2,
-        q1=q1,
-        latest_year=latest_year,
-    )
-    records_by_concept["EnterpriseValue"] = [
-        fact(
-            symbol=symbol,
-            concept="EnterpriseValue",
-            end_date=q4,
-            value=100.0,
-            currency="EUR",
-            fiscal_period="INSTANT",
-        )
-    ]
-
-    class DummyMarketRepo:
-        def latest_snapshot(self, symbol):
-            return None
-
-        def price_as_of(self, symbol, on_or_before):
-            return None
-
-        def ticker_currency(self, symbol):
-            return "USD"
-
-    result = metric.compute(
-        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
-    )
-    assert result is None
-
-
-def test_oey_ev_metric_returns_none_when_enterprise_value_missing():
-    metric = OwnerEarningsYieldEVMetric()
-    symbol = "AAPL.US"
-    today = date.today()
-    q4 = (today - timedelta(days=20)).isoformat()
-    q3 = (today - timedelta(days=110)).isoformat()
-    q2 = (today - timedelta(days=200)).isoformat()
-    q1 = (today - timedelta(days=290)).isoformat()
-    latest_year = date.today().year - 1
-
-    records_by_concept = _build_oe_ev_ttm_input_records(
-        symbol=symbol,
-        q4=q4,
-        q3=q3,
-        q2=q2,
-        q1=q1,
-        latest_year=latest_year,
-    )
-    records_by_concept["EnterpriseValue"] = [
-        fact(
-            symbol=symbol,
-            concept="EnterpriseValue",
-            end_date=q4,
-            value=100.0,
-            currency="EUR",
-            fiscal_period="INSTANT",
-        )
-    ]
-
-    records_by_concept.pop("EnterpriseValue")
-
-    class DummyMarketRepo:
-        def latest_snapshot(self, symbol):
-            return None
-
-        def price_as_of(self, symbol, on_or_before):
-            return None
-
-        def ticker_currency(self, symbol):
-            return "USD"
 
     result = metric.compute(
         symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
@@ -9951,21 +9673,28 @@ def test_oey_ev_metric_allows_negative_values():
         capex=30.0,
         da=None,
     )
-    records_by_concept["EnterpriseValue"] = [
+    records_by_concept["LongTermDebt"] = [
         fact(
             symbol=symbol,
-            concept="EnterpriseValue",
-            end_date=q4,
-            value=1080.0,
+            concept="LongTermDebt",
+            fiscal_period="FY",
+            end_date=f"{latest_year}-09-30",
+            value=130.0,
             currency="USD",
-            fiscal_period="INSTANT",
         )
     ]
 
     class DummyMarketRepo:
         def latest_snapshot(self, symbol):
-            return None
+            class Snapshot:
+                price = 1000.0
+                as_of = q4
+                currency = "USD"
 
+            return Snapshot()
+
+    # OE TTM is negative; EV is derived as market cap 1000 + long 130 + (short -
+    # cash) = 1080, so the yield is -108 / 1080.
     result = metric.compute(
         symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
     )
@@ -9973,7 +9702,7 @@ def test_oey_ev_metric_allows_negative_values():
     assert result.value == -0.1
 
 
-def test_ebit_yield_ev_metric_uses_normalized_enterprise_value():
+def test_ebit_yield_ev_metric_computes_ev_from_components():
     metric = EBITYieldEVMetric()
     symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
@@ -9981,35 +9710,13 @@ def test_ebit_yield_ev_metric_uses_normalized_enterprise_value():
         _build_ev_ratio_records(symbol=symbol, q4=q4, q3=q3, q2=q2, q1=q1)
     )
 
-    result = metric.compute(
-        symbol, repo, _build_market_repo(market_cap=999.0, as_of=q4)
-    )
-
-    assert result is not None
-    assert result.as_of == q4
-    assert result.value == 0.4
-
-
-def test_ebit_yield_ev_metric_falls_back_to_derived_ev_when_primary_missing():
-    metric = EBITYieldEVMetric()
-    symbol = "AAPL.US"
-    q4, q3, q2, q1 = _net_debt_quarter_dates()
-    repo = _OwnerEarningsRepo(
-        _build_ev_ratio_records(
-            symbol=symbol,
-            q4=q4,
-            q3=q3,
-            q2=q2,
-            q1=q1,
-            enterprise_value=None,
-        )
-    )
-
+    # EV = market cap 820 + short 50 + long 150 - cash 20 = 1000; EBIT TTM = 400.
     result = metric.compute(
         symbol, repo, _build_market_repo(market_cap=820.0, as_of=q4)
     )
 
     assert result is not None
+    assert result.as_of == q4
     assert result.value == 0.4
 
 
@@ -10029,11 +9736,39 @@ def test_ebit_yield_ev_metric_allows_negative_values():
     )
 
     result = metric.compute(
-        symbol, repo, _build_market_repo(market_cap=999.0, as_of=q4)
+        symbol, repo, _build_market_repo(market_cap=820.0, as_of=q4)
     )
 
     assert result is not None
     assert result.value == -0.2
+
+
+def test_ev_resolver_ignores_enterprise_value_fact():
+    # Regression: even when an EnterpriseValue fact is present (e.g. left over in
+    # a pre-migration DB), the resolver ignores it and always computes EV from
+    # market cap + debt - cash. A bogus fact value must not change the result.
+    metric = EBITYieldEVMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    records = _build_ev_ratio_records(symbol=symbol, q4=q4, q3=q3, q2=q2, q1=q1)
+    records["EnterpriseValue"] = [
+        fact(
+            symbol=symbol,
+            concept="EnterpriseValue",
+            end_date=q4,
+            fiscal_period="INSTANT",
+            value=999_999.0,
+            currency="USD",
+        )
+    ]
+    repo = _OwnerEarningsRepo(records)
+
+    # EV = market cap 820 + short 50 + long 150 - cash 20 = 1000, NOT 999999.
+    result = metric.compute(
+        symbol, repo, _build_market_repo(market_cap=820.0, as_of=q4)
+    )
+    assert result is not None
+    assert result.value == 0.4
 
 
 def test_fcf_yield_ev_metric_uses_existing_fcf_policy():
@@ -10045,7 +9780,7 @@ def test_fcf_yield_ev_metric_uses_existing_fcf_policy():
     )
 
     result = metric.compute(
-        symbol, repo, _build_market_repo(market_cap=999.0, as_of=q4)
+        symbol, repo, _build_market_repo(market_cap=820.0, as_of=q4)
     )
 
     assert result is not None
@@ -10068,7 +9803,7 @@ def test_fcf_yield_ev_metric_uses_zero_capex_when_missing():
     )
 
     result = metric.compute(
-        symbol, repo, _build_market_repo(market_cap=999.0, as_of=q4)
+        symbol, repo, _build_market_repo(market_cap=820.0, as_of=q4)
     )
 
     assert result is not None
@@ -10092,7 +9827,7 @@ def test_fcf_yield_ev_metric_allows_negative_values():
     )
 
     result = metric.compute(
-        symbol, repo, _build_market_repo(market_cap=999.0, as_of=q4)
+        symbol, repo, _build_market_repo(market_cap=820.0, as_of=q4)
     )
 
     assert result is not None
@@ -10108,7 +9843,7 @@ def test_ev_to_ebit_metric_computes_with_positive_ebit():
     )
 
     result = metric.compute(
-        symbol, repo, _build_market_repo(market_cap=999.0, as_of=q4)
+        symbol, repo, _build_market_repo(market_cap=820.0, as_of=q4)
     )
 
     assert result is not None
@@ -10131,7 +9866,7 @@ def test_ev_to_ebit_metric_returns_none_when_ebit_non_positive():
     )
 
     assert (
-        metric.compute(symbol, repo, _build_market_repo(market_cap=999.0, as_of=q4))
+        metric.compute(symbol, repo, _build_market_repo(market_cap=820.0, as_of=q4))
         is None
     )
 
@@ -10153,7 +9888,7 @@ def test_ev_to_ebitda_metric_uses_component_ebitda_and_da_fallback():
     )
 
     result = metric.compute(
-        symbol, repo, _build_market_repo(market_cap=999.0, as_of=q4)
+        symbol, repo, _build_market_repo(market_cap=820.0, as_of=q4)
     )
 
     assert result is not None
@@ -10177,67 +9912,9 @@ def test_ev_to_ebitda_metric_returns_none_when_ebitda_non_positive():
     )
 
     assert (
-        metric.compute(symbol, repo, _build_market_repo(market_cap=999.0, as_of=q4))
+        metric.compute(symbol, repo, _build_market_repo(market_cap=820.0, as_of=q4))
         is None
     )
-
-
-def test_ebit_yield_ev_metric_returns_none_for_ev_currency_mismatch():
-    metric = EBITYieldEVMetric()
-    symbol = "AAPL.US"
-    q4, q3, q2, q1 = _net_debt_quarter_dates()
-    repo = _OwnerEarningsRepo(
-        _build_ev_ratio_records(
-            symbol=symbol,
-            q4=q4,
-            q3=q3,
-            q2=q2,
-            q1=q1,
-            enterprise_value=500.0,
-            enterprise_currency="EUR",
-        )
-    )
-
-    result = metric.compute(
-        symbol, repo, _build_market_repo(market_cap=999.0, as_of=q4)
-    )
-    assert result is not None
-    assert result.value == 400.0 / 1179.0
-
-
-def test_ebit_yield_ev_metric_uses_market_cap_fallback_when_ev_missing():
-    metric = EBITYieldEVMetric()
-    symbol = "AAPL.US"
-    q4, q3, q2, q1 = _net_debt_quarter_dates()
-    repo = _OwnerEarningsRepo(
-        _build_ev_ratio_records(
-            symbol=symbol,
-            q4=q4,
-            q3=q3,
-            q2=q2,
-            q1=q1,
-            enterprise_value=500.0,
-            enterprise_currency="EUR",
-        )
-    )
-
-    repo = _OwnerEarningsRepo(
-        _build_ev_ratio_records(
-            symbol=symbol,
-            q4=q4,
-            q3=q3,
-            q2=q2,
-            q1=q1,
-        )
-    )
-
-    result = metric.compute(
-        symbol,
-        repo,
-        _build_market_repo(market_cap=999.0, as_of=q4),
-    )
-    assert result is not None
-    assert result.value == 0.4
 
 
 def test_cfo_to_ni_ttm_metric():
@@ -12197,42 +11874,7 @@ def test_ni_loss_years_10y_metric_requires_strict_consecutive_years():
     assert metric.compute(symbol, _OwnerEarningsRepo(records_by_concept)) is None
 
 
-def test_oey_ev_norm_metric_uses_oe_fy_median_and_normalized_ev():
-    metric = OwnerEarningsYieldEVNormalizedMetric()
-    symbol = "AAPL.US"
-    latest_year = date.today().year - 1
-    years = [latest_year - offset for offset in range(5)]
-    records_by_concept = _build_oe_ev_fy_input_records(
-        symbol=symbol,
-        latest_year=latest_year,
-        years=years,
-        ebit_values=[500.0, 450.0, 400.0, 350.0, 300.0],
-        tax_values=[100.0, 90.0, 80.0, 70.0, 60.0],
-        pretax_values=[500.0, 450.0, 400.0, 350.0, 300.0],
-        da_values=[100.0, 100.0, 100.0, 100.0, 100.0],
-        capex_values=[90.0, 90.0, 90.0, 90.0, 90.0],
-    )
-    records_by_concept["EnterpriseValue"] = [
-        fact(
-            symbol=symbol,
-            concept="EnterpriseValue",
-            end_date=f"{latest_year}-09-30",
-            fiscal_period="INSTANT",
-            value=3200.0,
-            currency="USD",
-        )
-    ]
-
-    result = metric.compute(
-        symbol,
-        _OwnerEarningsRepo(records_by_concept),
-        _build_market_repo(market_cap=1.0, as_of=f"{latest_year}-09-30"),
-    )
-    assert result is not None
-    assert result.value == 300.0 / 3200.0
-
-
-def test_oey_ev_norm_metric_falls_back_to_derived_ev():
+def test_oey_ev_norm_metric_computes_ev_from_components():
     metric = OwnerEarningsYieldEVNormalizedMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -12258,6 +11900,7 @@ def test_oey_ev_norm_metric_falls_back_to_derived_ev():
         )
     ]
 
+    # EV is derived (no fact): market cap 2950 + debt/cash components = 3250.
     result = metric.compute(
         symbol,
         _OwnerEarningsRepo(records_by_concept),
@@ -12269,40 +11912,6 @@ def test_oey_ev_norm_metric_falls_back_to_derived_ev():
     )
     assert result is not None
     assert result.value == 300.0 / 3250.0
-
-
-def test_oey_ev_norm_metric_returns_none_for_enterprise_value_currency_mismatch():
-    metric = OwnerEarningsYieldEVNormalizedMetric()
-    symbol = "AAPL.US"
-    latest_year = date.today().year - 1
-    years = [latest_year - offset for offset in range(5)]
-    records_by_concept = _build_oe_ev_fy_input_records(
-        symbol=symbol,
-        latest_year=latest_year,
-        years=years,
-        ebit_values=[500.0, 450.0, 400.0, 350.0, 300.0],
-        tax_values=[100.0, 90.0, 80.0, 70.0, 60.0],
-        pretax_values=[500.0, 450.0, 400.0, 350.0, 300.0],
-        da_values=[100.0, 100.0, 100.0, 100.0, 100.0],
-        capex_values=[90.0, 90.0, 90.0, 90.0, 90.0],
-    )
-    records_by_concept["EnterpriseValue"] = [
-        fact(
-            symbol=symbol,
-            concept="EnterpriseValue",
-            end_date=f"{latest_year}-09-30",
-            fiscal_period="INSTANT",
-            value=100.0,
-            currency="EUR",
-        )
-    ]
-
-    result = metric.compute(
-        symbol,
-        _OwnerEarningsRepo(records_by_concept),
-        _build_market_repo(market_cap=1.0, as_of=f"{latest_year}-09-30"),
-    )
-    assert result is None
 
 
 def _new_metric_quarter_dates():
@@ -12570,7 +12179,7 @@ def test_dividend_yield_ttm_metric_uses_cash_dividends_and_abs_sign():
     )
 
     result = metric.compute(
-        symbol, repo, _build_market_repo(market_cap=200.0, as_of=q4, price=100.0)
+        symbol, repo, _build_market_repo(market_cap=200.0, as_of=q4)
     )
     assert result is not None
     assert result.value == 20.0 / 200.0
@@ -12595,9 +12204,7 @@ def test_dividend_yield_ttm_metric_falls_back_to_dps_and_price():
         }
     )
 
-    result = metric.compute(
-        symbol, repo, _build_market_repo(market_cap=None, as_of=q4, price=50.0)
-    )
+    result = metric.compute(symbol, repo, _build_market_repo(market_cap=50.0, as_of=q4))
     assert result is not None
     assert result.value == 2.5 / 50.0
 
@@ -12622,7 +12229,7 @@ def test_shareholder_yield_ttm_metric_sums_dividend_and_buyback_yields():
     )
 
     result = metric.compute(
-        symbol, repo, _build_market_repo(market_cap=200.0, as_of=q4, price=100.0)
+        symbol, repo, _build_market_repo(market_cap=200.0, as_of=q4)
     )
     assert result is not None
     assert result.value == (20.0 / 200.0) + (40.0 / 200.0)

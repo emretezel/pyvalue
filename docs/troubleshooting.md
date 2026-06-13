@@ -85,10 +85,9 @@ freshness window.
 
 ## Market Cap Looks Wrong or Missing
 
-Market cap is computed on demand as a share-count fact x the `market_data` price
-*as of that fact's date* (it is no longer a stored column). It is missing when
-there is no shares-outstanding fact, or no stored price at or before the latest
-share-count date.
+Market cap is computed on demand as the latest share-count fact x the latest
+`market_data` price (it is no longer a stored column). It is missing when there
+is no shares-outstanding fact or no stored price at all.
 
 Typical causes:
 - market data not refreshed yet

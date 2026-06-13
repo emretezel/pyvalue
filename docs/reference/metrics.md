@@ -71,13 +71,13 @@ Columns:
 
 | English Descriptive Name of the Metric | pyvalue key | How is it calculated | Why is it important in identifying quality/value stocks |
 | --- | --- | --- | --- |
-| Market Capitalization | `market_cap` | Computed on demand: latest shares-outstanding fact x the `market_data` price as of that fact's date. | Size matters for liquidity, survivability, and practical investability. |
+| Market Capitalization | `market_cap` | Computed on demand: latest shares-outstanding fact x the latest `market_data` price, so it floats with every price refresh. | Size matters for liquidity, survivability, and practical investability. |
 | Earnings Yield | `earnings_yield` | `EPS_TTM / latest price`. | A simple inverse-PE view of how much earnings you get per dollar paid. |
 | Price to Free Cash Flow | `price_to_fcf` | Latest market cap divided by `FCF_TTM`, where `FCF_TTM = OCF_TTM - Capex_TTM`. | Useful when accounting earnings understate or distort cash generation. |
 | Graham Multiplier | `graham_multiplier` | `(Price / TTM EPS) * (Price / TBVPS)`. | Enforces discipline against overpaying for both earnings and balance-sheet value. |
 | Owner Earnings Yield on Equity (TTM) | `oey_equity` | EODHD-oriented: `oe_equity_ttm / market_cap`. | Values the business against a maintenance-adjusted equity cash-earnings proxy. |
 | Owner Earnings Yield on Equity (5Y) | `oey_equity_5y` | EODHD-oriented: `oe_equity_5y_avg / market_cap`. | Pairs current equity value with a normalized owner-earnings baseline. |
-| Owner Earnings Yield on EV (TTM) | `oey_ev` | EODHD-oriented: `oe_ev_ttm / EV`, where EV prefers normalized `EnterpriseValue` and falls back to derived EV. | A capital-structure-neutral owner-earnings yield. |
+| Owner Earnings Yield on EV (TTM) | `oey_ev` | EODHD-oriented: `oe_ev_ttm / EV`, where EV is always computed as market cap + total debt − cash. | A capital-structure-neutral owner-earnings yield. |
 | Owner Earnings Yield on EV (Normalized) | `oey_ev_norm` | EODHD-oriented: `oe_ev_fy_median_5y / EV`, using the same EV denominator policy as `oey_ev`. | Helps avoid buying a business on peak recent owner earnings. |
 | EBIT Yield on EV | `ebit_yield_ev` | EODHD-oriented: `EBIT_TTM / EV`. | A simple enterprise earnings-yield lens before owner-earnings refinements. |
 | Free Cash Flow Yield on EV | `fcf_yield_ev` | EODHD-oriented: `FCF_TTM / EV`. | Shows how much enterprise value is backed by trailing free cash flow. |

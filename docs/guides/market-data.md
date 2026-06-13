@@ -20,7 +20,7 @@ Storage invariants:
   divided by its subunit divisor before it is written, and the snapshot read
   path reports the same base currency so the price and currency stay consistent.
 - there is no stored `market_cap` column (removed in migration 072): market cap
-  is computed on demand as a share-count fact x the price as of that fact's date
+  is computed on demand as the latest share-count fact x the latest price
   (`metrics.utils.market_cap_money`)
 - market-data rows do not persist a duplicate currency column
 
@@ -96,13 +96,13 @@ counts as complete for the selected freshness window.
 
 ## Market Cap
 
-Market cap is not stored. It is computed on demand as a share-count
-`financial_facts` row x the `market_data` price *as of that fact's date*
-(`metrics.utils.market_cap_money`), so a price and a share count are never
-multiplied across mismatched dates. For this to resolve, `market_data` must hold
-a price at or before each share-count date; a future enhancement to
-`update-market-data` will backfill those share-count-dated prices alongside the
-latest day.
+Market cap is not stored. It is computed on demand as the latest share-count
+`financial_facts` row x the latest `market_data` price
+(`metrics.utils.market_cap_money`), so it re-prices on every market-data refresh.
+Shares outstanding move slowly, so pairing a share count up to a quarter stale
+with the current price adds negligible error, and both inputs sit on the current
+split basis. It resolves whenever the symbol has a shares-outstanding fact and any
+stored price.
 
 ## Operational Notes
 
@@ -110,7 +110,7 @@ latest day.
 - API-call accounting is hybrid on EODHD market-data refreshes: per-symbol calls
   cost `1`, and full exchange-bulk calls cost `100`.
 - Some valuation metrics require both fresh market data and fresh normalized facts.
-- Market cap stored in `market_data` is a snapshot, not a time series of fully modeled enterprise value.
+- Market cap is a simple shares x price figure, not a fully modeled enterprise value.
 
 ## Related Docs
 

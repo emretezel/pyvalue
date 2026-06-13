@@ -271,6 +271,17 @@ share-count date (plus the most recent day) is a **separate, later change**; thi
 phase assumes those co-dated prices exist and resolves market cap to `None` when
 they do not.
 
+> **Superseded by a later change.** Market cap now uses the **latest** price
+> (`MarketDataRepository.latest_snapshot`), not the price as of the share-count
+> date, and `price_as_of` is removed. A value screen refreshes prices far more
+> often than fundamentals, so co-dating froze market cap (and every metric built
+> on it) between fundamentals ingests and required a co-dated historical price the
+> provider never backfilled. Pairing the latest share count with the latest price
+> re-prices on every refresh and is split-consistent (both inputs on the current
+> basis); the planned share-count-dated backfill is dropped. EnterpriseValue is no
+> longer ingested either — EV is always computed as market cap + total debt − cash
+> (migration 075).
+
 - Migration **072** (`_migration_072_drop_market_data_market_cap`): rebuilds
   `market_data` without `market_cap`, **copying** the existing rows (price,
   volume, source_provider, updated_at) — unlike the financial_facts rebuild,

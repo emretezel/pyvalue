@@ -47,10 +47,9 @@ One row per `(listing_id, as_of)` snapshot date.
 
 ## Main Read Paths
 
-- latest price lookup for price-based metrics
-- price *as of* a share-count fact's date, paired with that fact to compute
-  market cap on demand (`MarketDataRepository.price_as_of` /
-  `metrics.utils.market_cap_money`)
+- latest price lookup for price-based metrics, including market cap on demand
+  (latest share-count fact x latest price via
+  `MarketDataRepository.latest_snapshot` / `metrics.utils.market_cap_money`)
 
 ## Main Write Paths
 
@@ -115,8 +114,8 @@ One row per `(listing_id, as_of)` snapshot date.
   (`GBX`/`ZAC`/`ILA`) are divided by their divisor before persistence
   (migration 070), so subunits never cross the data boundary.
 - The derived `market_cap` column was **removed (migration 072)**: market cap is
-  shares-outstanding x price, so it is computed on demand as a share-count
-  `financial_facts` row x the price as of that fact's date
+  shares-outstanding x price, so it is computed on demand as the latest share-count
+  `financial_facts` row x the latest `market_data` price
   (`metrics.utils.market_cap_money`) rather than stored. The generated Live
   Stats / Sample Rows above predate migration 072 and still show the column.
 - Market-data rows do not persist a duplicate currency column.

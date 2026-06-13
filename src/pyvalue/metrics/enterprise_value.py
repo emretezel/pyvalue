@@ -10,7 +10,6 @@ from typing import Optional
 import logging
 
 from pyvalue.facts import MonetaryFact, RegionFactsRepository
-from pyvalue.metrics.base import MetricCurrencyInvariantError
 from pyvalue.metrics.utils import (
     SHARE_COUNT_CONCEPTS,
     market_cap_money,
@@ -21,13 +20,12 @@ from pyvalue.persistence.storage import MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
 
-EV_FALLBACK_REQUIRED_CONCEPTS = (
-    "EnterpriseValue",
+EV_REQUIRED_CONCEPTS = (
     "ShortTermDebt",
     "LongTermDebt",
     "CashAndShortTermInvestments",
-    # The market-cap fallback (market cap = shares x price) reads a share-count
-    # fact, so every EV metric that can fall back must preload it. See
+    # EV = market cap + total debt - cash. Market cap (= shares x price) reads a
+    # share-count fact, so every EV metric must preload it too. See
     # metrics.utils.market_cap_money.
     *SHARE_COUNT_CONCEPTS,
 )
@@ -36,7 +34,7 @@ EV_FALLBACK_REQUIRED_CONCEPTS = (
 def _money(
     fact: MonetaryFact, *, target_currency: str, symbol: str, context: str
 ) -> Money:
-    """Align one EV fact to the target (listing) currency via the Money seam."""
+    """Align one EV component fact to the target (listing) currency via the seam."""
 
     return require_metric_money(
         fact.money,
@@ -56,39 +54,16 @@ def resolve_enterprise_value_denominator(
     target_currency: str,
     context: str,
 ) -> Optional[Money]:
-    """Resolve EV (as ``Money``) using the EV fact first, then a debt/cash build.
+    """Compute EV (as ``Money``) as market cap + total debt - cash.
 
-    The reported ``EnterpriseValue`` fact wins when present and positive; failing
-    that, EV is rebuilt as market cap + total debt - cash. Every input is aligned
-    to ``target_currency`` through the shared Money seam, so the result is a
-    single-currency ``Money`` and a mismatched EV fact degrades to the fallback
-    rather than mixing currencies.
+    EV is always built from components -- market cap (latest shares x latest
+    price) plus short- and long-term debt minus cash -- rather than read from a
+    stored ``EnterpriseValue`` fact, so it floats with every price refresh and
+    uses one consistent definition across the universe. Every input is aligned to
+    ``target_currency`` through the shared Money seam, so the result is a
+    single-currency ``Money``. Returns ``None`` when market cap or any debt/cash
+    component is missing, or when the computed EV is non-positive.
     """
-
-    ev_fact = repo.latest_monetary_fact(symbol, "EnterpriseValue")
-    if ev_fact is not None:
-        try:
-            ev_money = _money(
-                ev_fact,
-                target_currency=target_currency,
-                symbol=symbol,
-                context=context,
-            )
-        except MetricCurrencyInvariantError as exc:
-            LOGGER.warning(
-                "%s: unusable enterprise value fact for %s (%s); trying fallback",
-                context,
-                symbol,
-                exc.summary_reason,
-            )
-        else:
-            if ev_money.amount > 0:
-                return ev_money
-            LOGGER.warning(
-                "%s: non-positive normalized enterprise value for %s; trying fallback",
-                context,
-                symbol,
-            )
 
     cap = market_cap_money(
         symbol,
@@ -106,9 +81,7 @@ def resolve_enterprise_value_denominator(
     long_debt = repo.latest_monetary_fact(symbol, "LongTermDebt")
     cash = repo.latest_monetary_fact(symbol, "CashAndShortTermInvestments")
     if short_debt is None or long_debt is None or cash is None:
-        LOGGER.warning(
-            "%s: missing EV fallback debt/cash facts for %s", context, symbol
-        )
+        LOGGER.warning("%s: missing EV debt/cash facts for %s", context, symbol)
         return None
 
     enterprise_value = (
@@ -129,6 +102,6 @@ def resolve_enterprise_value_denominator(
 
 
 __all__ = [
-    "EV_FALLBACK_REQUIRED_CONCEPTS",
+    "EV_REQUIRED_CONCEPTS",
     "resolve_enterprise_value_denominator",
 ]

@@ -132,12 +132,12 @@ read path reports that same base currency. The table does not persist a
 duplicate currency column.
 
 The derived `market_cap` column was removed (migration 072): market cap is
-shares-outstanding x price, so it is computed on demand as a share-count
-`financial_facts` row x the price *as of that fact's date*
-(`MarketDataRepository.price_as_of` paired by `metrics.utils.market_cap_money`),
-not persisted. The on-demand value pairs the share count with its
-contemporaneous price, so a price and a share count are never multiplied across
-mismatched dates.
+shares-outstanding x price, so it is computed on demand as the latest share-count
+`financial_facts` row x the latest `market_data` price
+(`MarketDataRepository.latest_snapshot` via `metrics.utils.market_cap_money`), not
+persisted. Using the latest price means market cap (and every metric built on it)
+re-prices on every market-data refresh; shares outstanding move slowly, so a
+share count up to a quarter stale adds negligible error.
 
 ### `market_data_fetch_state`
 

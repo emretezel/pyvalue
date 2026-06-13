@@ -37,8 +37,7 @@ def latest_share_count(
 
     A standalone helper (no service state) so any caller holding a facts
     repository can resolve a share count without constructing a provider-backed
-    service -- used both by the on-demand market-cap computation and, in future,
-    by the share-count-dated price backfill in ``update-market-data``.
+    service -- used by the on-demand market-cap computation.
     """
 
     counts = repo.latest_share_counts_many([symbol], chunk_size=1)
@@ -91,11 +90,10 @@ class MarketDataService:
         stored in the major currency and the snapshot read path reports the same
         base currency.
 
-        No anomaly guard runs here. Market value is derived by pairing a
-        share-count fact with the price *as of that fact's date*
-        (``metrics.utils.market_cap_money``), so a price and a share count are
-        never multiplied across mismatched dates -- there is no cross-snapshot
-        value jump left to police.
+        No anomaly guard runs here. Market value is derived on demand as the
+        latest share-count fact times the latest price
+        (``metrics.utils.market_cap_money``); the price stored here is just the
+        latest observation, so there is no cross-snapshot value jump to police.
         """
 
         normalized_symbol = symbol.upper()

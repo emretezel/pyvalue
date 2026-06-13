@@ -13,7 +13,7 @@ import logging
 from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.enterprise_value import (
-    EV_FALLBACK_REQUIRED_CONCEPTS,
+    EV_REQUIRED_CONCEPTS,
     resolve_enterprise_value_denominator,
 )
 from pyvalue.metrics.utils import (
@@ -36,16 +36,14 @@ CAPEX_CONCEPT = "CapitalExpenditures"
 DA_PRIMARY_CONCEPT = "DepreciationDepletionAndAmortization"
 DA_FALLBACK_CONCEPT = "DepreciationFromCashFlow"
 
-EBIT_REQUIRED_CONCEPTS = tuple(
-    dict.fromkeys((EBIT_CONCEPT,) + EV_FALLBACK_REQUIRED_CONCEPTS)
-)
+EBIT_REQUIRED_CONCEPTS = tuple(dict.fromkeys((EBIT_CONCEPT,) + EV_REQUIRED_CONCEPTS))
 FCF_REQUIRED_CONCEPTS = tuple(
     dict.fromkeys(
         (
             OPERATING_CASH_FLOW_CONCEPT,
             CAPEX_CONCEPT,
         )
-        + EV_FALLBACK_REQUIRED_CONCEPTS
+        + EV_REQUIRED_CONCEPTS
     )
 )
 EBITDA_REQUIRED_CONCEPTS = tuple(
@@ -55,7 +53,7 @@ EBITDA_REQUIRED_CONCEPTS = tuple(
             DA_PRIMARY_CONCEPT,
             DA_FALLBACK_CONCEPT,
         )
-        + EV_FALLBACK_REQUIRED_CONCEPTS
+        + EV_REQUIRED_CONCEPTS
     )
 )
 
