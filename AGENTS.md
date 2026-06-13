@@ -18,14 +18,6 @@ pyvalue is a Python toolkit for ingesting, normalizing, and screening fundamenta
 - **Ongoing design review.** As the project grows, whenever you are working on a part of the code, review whether that part should be refactored to better adhere to established design patterns and object-oriented principles. Long-term maintainability, ease of change, readability, and the ability to add new features without friction are paramount. Do not defer this review — if a structural improvement is warranted, propose it to the author before moving on.
 - **Revisit tool and library choices.** As the project grows, periodically reassess the libraries, frameworks, and tools in use. If a better-fit alternative exists, propose the migration to the author with a concrete rationale (what it improves, what it costs, what it breaks) before switching.
 
-## Pyvalue-Specific Agent Review Rules
-- When querying the database, check the sign of field values and verify the metric formula still makes sense with those signs. If you find a sign-related bug, fix it and report it.
-- Keep track of why a metric cannot be calculated for a stock or exchange: missing data, a calculation bug, insufficient history, or an overly strict horizon such as 10Y versus 5Y.
-- If a screen returns very few hits, identify which criterion eliminates the most stocks and consider whether the threshold is too strict or whether a different metric would be better.
-- When reviewing metric calculations, verify that every monetary input is converted to the listing's currency before it is combined with another. Metrics convert each input to the listing currency via the `fx_rates` table through the single `require_metric_money` seam (`metrics/utils.py`), logging every conversion; a missing FX rate makes the metric unavailable (a structured `missing_fx_rate` reason) rather than silently mixing currencies. Subunits (GBX/ZAC/ILA) are collapsed to their major unit at the data boundary and never reach metric arithmetic.
-- For UK stocks and UK exchanges, explicitly guard against mixing GBP and GBX.
-- If a field value looks suspiciously small or large, flag it to the user.
-
 ## Database and SQL Design
 
 ### Schema Design Principles
