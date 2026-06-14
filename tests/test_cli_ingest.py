@@ -1911,6 +1911,123 @@ def test_cmd_update_market_data_stage_skips_secondary_listings(
     assert market_repo.latest_snapshot("AAA.LSE") is None
 
 
+def test_cmd_update_market_data_stage_does_not_reconcile_or_mutate_listing_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """update-market-data reads classification but never (re)writes it.
+
+    Classification is owned by ingest-fundamentals and reconcile-listing-status.
+    AAA.LSE is left deliberately 'unknown' (a full reconcile would flip it to
+    'secondary' via its PrimaryTicker); the stage must leave the cached status
+    untouched. Patching the reconcile entrypoint to fail guards against a
+    regression that re-introduces reconcile-on-read. Regression for the
+    provider-scope read-only refactor.
+    """
+    db_path = tmp_path / "stage-market-data-readonly-status.db"
+    store_supported_tickers(
+        db_path,
+        "LSE",
+        rows=[
+            {"Code": "AAA", "Exchange": "LSE", "Type": "Common Stock"},
+            {"Code": "BBB", "Exchange": "LSE", "Type": "Common Stock"},
+        ],
+    )
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD",
+        "AAA.LSE",
+        {"General": {"Name": "AAA plc", "PrimaryTicker": "AAA.US"}},
+        exchange="LSE",
+    )
+    fund_repo.upsert(
+        "EODHD",
+        "BBB.LSE",
+        {"General": {"Name": "BBB plc"}},
+        exchange="LSE",
+    )
+    # Deliberately stale cache after ingest classified the listings.
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE listing SET primary_listing_status = "
+            "CASE WHEN symbol = 'AAA' THEN 'unknown' ELSE 'primary' END"
+        )
+
+    today = date.today().isoformat()
+
+    class FakeClient:
+        def __init__(self, api_key: str) -> None:
+            self.api_key = api_key
+
+        def user_metadata(self) -> dict[str, object]:
+            return {
+                "dailyRateLimit": "1000",
+                "apiRequests": "0",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
+
+    class FakeProvider:
+        def __init__(
+            self, api_key: str, session: requests.Session | None = None
+        ) -> None:
+            assert api_key == "TOKEN"
+
+        def latest_price(self, symbol: str) -> PriceData | None:
+            return PriceData(
+                symbol=symbol,
+                price=20.0,
+                as_of=today,
+                volume=50,
+                currency="GBP",
+            )
+
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "EODHDProvider", FakeProvider)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(
+        monkeypatch,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_api_key="TOKEN",
+            eodhd_market_data_daily_buffer_calls=0,
+            eodhd_market_data_requests_per_minute=950,
+        ),
+    )
+
+    def fail_reconcile(*args: object, **kwargs: object) -> None:
+        pytest.fail("update-market-data must not reconcile listing status")
+
+    patch_cli(monkeypatch, "_reconcile_eodhd_listing_scope", fail_reconcile)
+
+    rc = cli.cmd_update_market_data_stage(
+        provider="EODHD",
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=None,
+        all_supported=True,
+        rate=None,
+        max_symbols=None,
+        max_age_days=7,
+        respect_backoff=True,
+    )
+
+    assert rc == 0
+    with sqlite3.connect(db_path) as conn:
+        statuses = conn.execute(
+            """
+            SELECT l.symbol || '.' || e.exchange_code, l.primary_listing_status
+            FROM listing l
+            JOIN "exchange" e ON e.exchange_id = l.exchange_id
+            ORDER BY l.symbol || '.' || e.exchange_code
+            """
+        ).fetchall()
+
+    assert statuses == [
+        ("AAA.LSE", "unknown"),
+        ("BBB.LSE", "primary"),
+    ]
+
+
 def test_cmd_reconcile_listing_status_backfills_from_raw_only(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -3580,6 +3697,83 @@ def test_cmd_compute_metrics_stage_all_supported_scope(
     repo.initialize_schema()
     assert repo.fetch("AAA.US", "market_cap") == (120.0, "2024-01-01")
     assert repo.fetch("BBB.LSE", "market_cap") == (210.0, "2024-01-01")
+
+
+def test_cmd_compute_metrics_stage_does_not_reconcile_or_mutate_listing_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """compute-metrics is a pure reader of primary_listing_status.
+
+    It previously ran a full reconcile while resolving its canonical scope; it
+    must not any longer. AAA.LSE is left deliberately 'unknown' (a reconcile
+    would flip it to 'secondary' via its PrimaryTicker) and must stay untouched,
+    and the reconcile entrypoint must never be called. Regression for the
+    canonical-scope read-only refactor.
+    """
+    db_path = tmp_path / "metric-stage-readonly-status.db"
+    store_catalog_listings(
+        db_path,
+        "LSE",
+        [
+            Listing(symbol="AAA.LSE", security_name="AAA PLC", exchange="LSE"),
+            Listing(symbol="BBB.LSE", security_name="BBB PLC", exchange="LSE"),
+        ],
+        provider="EODHD",
+    )
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD",
+        "AAA.LSE",
+        {"General": {"Name": "AAA plc", "PrimaryTicker": "AAA.US"}},
+        exchange="LSE",
+    )
+    fund_repo.upsert(
+        "EODHD",
+        "BBB.LSE",
+        {"General": {"Name": "BBB plc"}},
+        exchange="LSE",
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE listing SET primary_listing_status = "
+            "CASE WHEN symbol = 'AAA' THEN 'unknown' ELSE 'primary' END"
+        )
+    store_market_data(
+        db_path, "AAA.LSE", "2024-01-01", price=20.0, market_cap=210.0, currency="GBP"
+    )
+    store_market_data(
+        db_path, "BBB.LSE", "2024-01-01", price=20.0, market_cap=210.0, currency="GBP"
+    )
+
+    def fail_reconcile(*args: object, **kwargs: object) -> None:
+        pytest.fail("compute-metrics must not reconcile listing status")
+
+    patch_cli(monkeypatch, "_reconcile_eodhd_listing_scope", fail_reconcile)
+
+    rc = cli.cmd_compute_metrics_stage(
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=None,
+        all_supported=True,
+        metric_ids=["market_cap"],
+    )
+
+    assert rc == 0
+    with sqlite3.connect(db_path) as conn:
+        statuses = conn.execute(
+            """
+            SELECT l.symbol || '.' || e.exchange_code, l.primary_listing_status
+            FROM listing l
+            JOIN "exchange" e ON e.exchange_id = l.exchange_id
+            ORDER BY l.symbol || '.' || e.exchange_code
+            """
+        ).fetchall()
+
+    assert statuses == [
+        ("AAA.LSE", "unknown"),
+        ("BBB.LSE", "primary"),
+    ]
 
 
 def test_cmd_compute_metrics_stage_parallel_with_inline_executor(
@@ -5765,10 +5959,21 @@ criteria:
     assert rc == 0
 
 
-def test_cmd_run_screen_stage_backfills_missing_listing_status_without_full_reconcile(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_cmd_run_screen_stage_does_not_reconcile_or_mutate_listing_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    db_path = tmp_path / "screen-stage-missing-listing-status.db"
+    """run-screen is a pure reader of ``primary_listing_status``.
+
+    Classification is written only by ingest-fundamentals and
+    reconcile-listing-status (with migration 078 as the one-time backstop), so a
+    read-only screen must neither reconcile nor purge. To prove no write happens,
+    AAA.LSE is left deliberately ``'unknown'`` -- a value a full reconcile WOULD
+    flip to ``'secondary'`` because its ``PrimaryTicker`` points at AAA.US -- and
+    the test asserts it stays ``'unknown'`` with its metrics intact. Regression
+    for the removal of the reconcile-on-read behaviour.
+    """
+    db_path = tmp_path / "screen-stage-readonly-listing-status.db"
     store_catalog_listings(
         db_path,
         "LSE",
@@ -5792,8 +5997,13 @@ def test_cmd_run_screen_stage_backfills_missing_listing_status_without_full_reco
         {"General": {"Name": "BBB plc"}},
         exchange="LSE",
     )
+    # Deliberately stale cache: AAA.LSE left 'unknown' (a reconcile would flip it
+    # to 'secondary'), BBB.LSE already 'primary'.
     with sqlite3.connect(db_path) as conn:
-        conn.execute("UPDATE listing SET primary_listing_status = 'unknown'")
+        conn.execute(
+            "UPDATE listing SET primary_listing_status = "
+            "CASE WHEN symbol = 'AAA' THEN 'unknown' ELSE 'primary' END"
+        )
 
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
@@ -5813,10 +6023,10 @@ criteria:
 """
     )
 
-    def fail_full_reconcile(*args: object, **kwargs: object) -> None:
-        pytest.fail("unexpected full reconcile in read-only canonical screening")
+    def fail_reconcile(*args: object, **kwargs: object) -> None:
+        pytest.fail("run-screen must not reconcile listing status")
 
-    patch_cli(monkeypatch, "_reconcile_eodhd_listing_scope", fail_full_reconcile)
+    patch_cli(monkeypatch, "_reconcile_eodhd_listing_scope", fail_reconcile)
 
     rc = cli.cmd_run_screen_stage(
         config_path=str(screen_path),
@@ -5837,14 +6047,23 @@ criteria:
             ORDER BY l.symbol || '.' || e.exchange_code
             """
         ).fetchall()
+        aaa_metric_rows = conn.execute(
+            """
+            SELECT COUNT(*) FROM metrics
+            WHERE listing_id = (
+                SELECT security_id FROM provider_listing_catalog
+                WHERE provider = 'EODHD' AND provider_symbol = 'AAA.LSE'
+            )
+            """
+        ).fetchone()[0]
 
+    # No reconcile-on-read: the deliberately-stale 'unknown' is left untouched
+    # (a reconcile would have flipped it to 'secondary'), and no purge ran.
     assert statuses == [
-        ("AAA.LSE", "secondary"),
+        ("AAA.LSE", "unknown"),
         ("BBB.LSE", "primary"),
     ]
-    output = capsys.readouterr().out
-    assert "Entity: BBB PLC" in output
-    assert "AAA.LSE" not in output
+    assert aaa_metric_rows == 1
 
 
 def test_cmd_run_screen_stage_failure_status_shadows_stored_metric_value(

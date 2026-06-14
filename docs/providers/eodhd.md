@@ -105,9 +105,13 @@ again, run:
 pyvalue reconcile-listing-status --all-supported
 ```
 
-Read-only canonical/report commands backfill only unknown listing statuses in
-scope. Run `reconcile-listing-status` when you want an immediate full
-backfill sweep from stored raw fundamentals.
+Every other command (normalize, market-data, metrics, screening,
+metadata-refresh, reports) only *reads* the cached classification -- it never
+reconciles or purges as a side effect. `ingest-fundamentals` keeps the cache
+current (it reclassifies in the same transaction that stores each raw payload),
+and migration 078 is the one-time backstop that resolves any leftover `unknown`
+listing with stored fundamentals. Run `reconcile-listing-status` for an explicit
+full re-derivation from stored raw fundamentals.
 
 `ingest-fundamentals` checks the EODHD user/quota endpoint
 before each multi-symbol run, subtracts the configured daily buffer, throttles

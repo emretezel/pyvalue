@@ -25,7 +25,6 @@ from pyvalue.persistence.storage import (
     MetricsRepository,
     SecurityMetadataUpdate,
     SecurityRepository,
-    SecurityListingStatusRecord,
     SecurityListingStatusRepository,
     StoredMetricRow,
     SupportedTickerRepository,
@@ -384,6 +383,142 @@ def test_fundamentals_repository_classifies_and_purges_secondary_listings(
     assert status_rows == 0
     assert normalization_rows == 0
     assert market_state_rows == 0
+
+
+def test_migration_078_backfills_unknown_status_and_purges_secondary(
+    tmp_path: Path,
+) -> None:
+    """Migration 078 resolves leftover 'unknown' EODHD classification.
+
+    It is the one-time backstop that lets read/compute commands stop reconciling
+    on read: every still-'unknown' listing with fundamentals is classified, and
+    the derived data of any that turns out secondary is purged -- mirroring
+    ``reconcile-listing-status`` and ``_build_status_record``.
+    """
+    from pyvalue.persistence.migrations import (
+        _migration_078_backfill_unknown_listing_status,
+    )
+
+    db_path = tmp_path / "migration-078.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock", "Currency": "USD"}],
+    )
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "LSE",
+        [
+            {
+                "Code": "AAA",
+                "Name": "AAA plc",
+                "Type": "Common Stock",
+                "Currency": "GBX",
+            },
+            {
+                "Code": "BBB",
+                "Name": "BBB plc",
+                "Type": "Common Stock",
+                "Currency": "GBX",
+            },
+        ],
+    )
+    by_symbol = {row.symbol: row for row in ticker_repo.list_for_provider("EODHD")}
+    aaa_lse_id = by_symbol["AAA.LSE"].security_id
+
+    repo = FundamentalsRepository(db_path)
+    repo.upsert(
+        "EODHD",
+        "AAA.US",
+        {"General": {"Name": "AAA", "PrimaryTicker": "AAA.US"}},
+        exchange="US",
+    )
+    repo.upsert(
+        "EODHD",
+        "AAA.LSE",
+        {"General": {"Name": "AAA plc", "PrimaryTicker": "AAA.US"}},
+        exchange="LSE",
+    )
+    repo.upsert(
+        "EODHD",
+        "BBB.LSE",
+        {"General": {"Name": "BBB plc"}},
+        exchange="LSE",
+    )
+
+    # Simulate a database whose classification never ran: force every listing
+    # back to 'unknown', then (re)seed derived data on the listing that should
+    # become secondary so the migration's purge step has something to remove.
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE listing SET primary_listing_status = 'unknown'")
+    FinancialFactsRepository(db_path).replace_facts(
+        "AAA.LSE",
+        [
+            FactRecord(
+                symbol="AAA.LSE",
+                concept="Assets",
+                fiscal_period="FY",
+                end_date="2024-12-31",
+                unit_kind="monetary",
+                value=100.0,
+                currency="GBP",
+            )
+        ],
+    )
+    MarketDataRepository(db_path).upsert_prices(
+        [
+            MarketDataUpdate(
+                security_id=aaa_lse_id,
+                symbol="AAA.LSE",
+                as_of="2025-01-02",
+                price=10.0,
+                volume=100,
+                currency="GBP",
+            )
+        ]
+    )
+    MetricsRepository(db_path).upsert(
+        "AAA.LSE",
+        "market_cap",
+        1000.0,
+        "2025-01-02",
+        unit_kind="monetary",
+        currency="GBP",
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        _migration_078_backfill_unknown_listing_status(conn)
+        statuses = conn.execute(
+            """
+            SELECT l.symbol || '.' || e.exchange_code, l.primary_listing_status
+            FROM listing l
+            JOIN "exchange" e ON e.exchange_id = l.exchange_id
+            ORDER BY l.symbol || '.' || e.exchange_code
+            """
+        ).fetchall()
+        fact_rows = conn.execute(
+            "SELECT COUNT(*) FROM financial_facts WHERE listing_id = ?",
+            (aaa_lse_id,),
+        ).fetchone()[0]
+        market_rows = conn.execute(
+            "SELECT COUNT(*) FROM market_data WHERE listing_id = ?",
+            (aaa_lse_id,),
+        ).fetchone()[0]
+        metric_rows = conn.execute(
+            "SELECT COUNT(*) FROM metrics WHERE listing_id = ?",
+            (aaa_lse_id,),
+        ).fetchone()[0]
+
+    assert statuses == [
+        ("AAA.LSE", "secondary"),
+        ("AAA.US", "primary"),
+        ("BBB.LSE", "primary"),
+    ]
+    assert fact_rows == 0
+    assert market_rows == 0
+    assert metric_rows == 0
 
 
 def test_exchange_provider_repository_replaces_rows_per_provider(
@@ -1208,77 +1343,6 @@ def test_supported_ticker_repository_primary_only_filters_secondary_listings(
         "AAA.US",
         "BBB.LSE",
     ]
-
-
-def test_listing_status_repository_lists_unknown_provider_symbols(
-    tmp_path: Path,
-) -> None:
-    db_path = tmp_path / "missing-listing-status.db"
-    ticker_repo = SupportedTickerRepository(db_path)
-    ticker_repo.initialize_schema()
-    ticker_repo.replace_for_exchange(
-        "EODHD",
-        "US",
-        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock", "Currency": "USD"}],
-    )
-    ticker_repo.replace_for_exchange(
-        "EODHD",
-        "LSE",
-        [
-            {
-                "Code": "AAA",
-                "Name": "AAA plc",
-                "Type": "Common Stock",
-                "Currency": "GBX",
-            },
-            {
-                "Code": "BBB",
-                "Name": "BBB plc",
-                "Type": "Common Stock",
-                "Currency": "GBX",
-            },
-        ],
-    )
-    by_symbol = {row.symbol: row for row in ticker_repo.list_for_provider("EODHD")}
-
-    status_repo = SecurityListingStatusRepository(db_path)
-    status_repo.initialize_schema()
-    status_repo.upsert_many(
-        [
-            SecurityListingStatusRecord(
-                security_id=by_symbol["AAA.US"].security_id,
-                source_provider="EODHD",
-                provider_symbol="AAA.US",
-                raw_fetched_at="2025-01-01T00:00:00+00:00",
-                is_primary_listing=True,
-                primary_provider_symbol="AAA.US",
-                classification_basis="matched_primary_ticker",
-            ),
-            SecurityListingStatusRecord(
-                security_id=by_symbol["BBB.LSE"].security_id,
-                source_provider="EODHD",
-                provider_symbol="BBB.LSE",
-                raw_fetched_at="2025-01-01T00:00:00+00:00",
-                is_primary_listing=True,
-                primary_provider_symbol=None,
-                classification_basis="missing_primary_ticker",
-            ),
-        ]
-    )
-
-    assert status_repo.list_missing_eodhd_provider_symbols() == ["AAA.LSE"]
-    assert status_repo.list_missing_eodhd_provider_symbols(
-        exchange_codes=["LSE"],
-    ) == ["AAA.LSE"]
-    assert (
-        status_repo.list_missing_eodhd_provider_symbols(
-            exchange_codes=["US"],
-        )
-        == []
-    )
-    assert status_repo.list_missing_eodhd_provider_symbols(
-        provider_symbols=["AAA.LSE", "BBB.LSE"],
-    ) == ["AAA.LSE"]
 
 
 def test_market_data_fetch_state_repository_tracks_success_and_failure(

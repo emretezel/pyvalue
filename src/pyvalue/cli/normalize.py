@@ -49,7 +49,6 @@ from ._common import (
     _extract_entity_name_from_eodhd,
     _extract_entity_sector_from_eodhd,
     _normalize_provider,
-    _reconcile_eodhd_listing_scope,
     _resolve_database_path,
     _resolve_provider_scope_rows,
     _resolve_ticker_target_currency,
@@ -456,7 +455,9 @@ def cmd_normalize_eodhd_fundamentals_bulk(
         if not symbols:
             raise SystemExit("No symbols provided for EODHD normalization.")
 
-    _reconcile_eodhd_listing_scope(database, provider_symbols=symbols)
+    # Listing classification is read-only here: ingest-fundamentals already wrote
+    # it (with reconcile-listing-status / migration 078 as the backstop), so the
+    # secondary-listing filter below trusts the cached primary_listing_status.
     ticker_repo = SupportedTickerRepository(database)
     supported_rows = ticker_repo.list_for_provider(
         "EODHD",

@@ -127,3 +127,8 @@ One row per `(exchange_id, symbol)`.
   metrics derive base currency from `listing.currency`.
 - Unknown primary-listing status is treated as eligible; downstream
   primary-only scopes exclude only `secondary`.
+- `primary_listing_status` is written only by `ingest-fundamentals` (as it
+  stores each raw payload) and `reconcile-listing-status`; every other command
+  reads it. Migration 078 is the one-time backfill that resolves any leftover
+  `unknown` listing with stored fundamentals, and a flip to `secondary` purges
+  that listing's downstream facts/metrics/market-data.

@@ -26,14 +26,16 @@ Provider rules:
   are provider-agnostic and operate on canonical symbols
 
 For EODHD-backed symbols, downstream stage commands and canonical-scope
-commands also apply canonical primary-listing classification from raw
-fundamentals. Listings classified as secondary through `General.PrimaryTicker`
-are excluded from normalization, market-data refresh, metric, screening,
-metadata-refresh, and canonical reporting scopes. Missing or unusable
-`PrimaryTicker` values are treated as primary. Read-only canonical/report
-commands backfill unknown listing statuses in scope; use
-`reconcile-listing-status` when you want a full backfill sweep from stored raw
-fundamentals.
+commands filter by canonical primary-listing classification: listings
+classified as secondary through `General.PrimaryTicker` are excluded from
+normalization, market-data refresh, metric, screening, metadata-refresh, and
+canonical reporting scopes. Missing or unusable `PrimaryTicker` values are
+treated as primary. That classification is *written* only by
+`ingest-fundamentals` (in the same transaction that stores each raw payload) and
+by `reconcile-listing-status`; every other command reads the cached
+`listing.primary_listing_status` and never reconciles or purges as a side
+effect. A one-time migration (078) resolves any leftover `unknown` listing that
+already has stored fundamentals, so reads can trust the cache.
 
 ## Catalog Commands
 
@@ -123,9 +125,11 @@ Notes:
 - this command does not download fundamentals or market data
 - it reads existing `fundamentals_raw` payloads and writes
   `listing.primary_listing_status`
-- use this command after upgrading an existing database if you want to refresh
-  all stored listing statuses immediately instead of waiting for read-only
-  commands to backfill unknown statuses on demand
+- this is the only command (besides `ingest-fundamentals`, which reclassifies
+  as it stores each raw payload) that writes `listing.primary_listing_status`;
+  run it to re-derive classification on demand, e.g. to re-apply changed
+  classification rules. Migration 078 performs the equivalent one-time backfill
+  when upgrading an existing database
 - listings classified as secondary via `General.PrimaryTicker` trigger
   downstream cleanup of normalized facts, market data, metrics, and related
   refresh-state rows for that listing

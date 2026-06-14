@@ -44,7 +44,6 @@ from ._common import (
     MARKET_DATA_WRITE_BATCH_SIZE,
     _MarketDataExchangeTask,
     _PlannedMarketDataRun,
-    _ensure_eodhd_listing_scope_cached,
     _eodhd_request_budget,
     _normalize_provider,
     _parse_exchange_filters,
@@ -228,10 +227,8 @@ def cmd_report_market_data_progress(
     effective_max_age_days = max_age_days or 7
 
     ticker_repo = SupportedTickerRepository(database)
-    _ensure_eodhd_listing_scope_cached(
-        database,
-        exchange_codes=selected_exchanges,
-    )
+    # Read-only progress report: trust the cached primary_listing_status rather
+    # than reconciling here (ingest / reconcile-listing-status own the writes).
     breakdown = ticker_repo.market_data_progress_by_exchange(
         provider=provider_norm,
         exchange_codes=selected_exchanges,

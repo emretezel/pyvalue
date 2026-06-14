@@ -450,60 +450,6 @@ def _reconcile_eodhd_listing_scope(
     return updates
 
 
-def _ensure_eodhd_listing_scope_cached(
-    database: str,
-    *,
-    provider_symbols: Optional[Sequence[str]] = None,
-    exchange_codes: Optional[Sequence[str]] = None,
-    security_ids: Optional[Sequence[int]] = None,
-) -> List[SecurityListingStatusRecord]:
-    """Backfill only unknown listing-status values for an EODHD scope."""
-
-    repo = SecurityListingStatusRepository(database)
-    missing_provider_symbols = repo.list_missing_eodhd_provider_symbols(
-        provider_symbols=provider_symbols,
-        exchange_codes=exchange_codes,
-        security_ids=security_ids,
-    )
-    if not missing_provider_symbols:
-        return []
-    updates = repo.reconcile_eodhd_fundamentals(
-        provider_symbols=missing_provider_symbols,
-    )
-    secondary_updates = [update for update in updates if not update.is_primary_listing]
-    if secondary_updates:
-        repo.purge_secondary_security_data(
-            security_ids=[update.security_id for update in secondary_updates],
-            provider_symbols=[update.provider_symbol for update in secondary_updates],
-        )
-    return updates
-
-
-def _sync_eodhd_listing_scope(
-    database: str,
-    *,
-    listing_status_mode: Literal["full", "ensure_missing"] = "full",
-    provider_symbols: Optional[Sequence[str]] = None,
-    exchange_codes: Optional[Sequence[str]] = None,
-    security_ids: Optional[Sequence[int]] = None,
-) -> List[SecurityListingStatusRecord]:
-    if listing_status_mode == "full":
-        return _reconcile_eodhd_listing_scope(
-            database,
-            provider_symbols=provider_symbols,
-            exchange_codes=exchange_codes,
-            security_ids=security_ids,
-        )
-    if listing_status_mode == "ensure_missing":
-        return _ensure_eodhd_listing_scope_cached(
-            database,
-            provider_symbols=provider_symbols,
-            exchange_codes=exchange_codes,
-            security_ids=security_ids,
-        )
-    raise ValueError(f"Unsupported listing_status_mode: {listing_status_mode}")
-
-
 def _resolve_provider_scope_rows(
     database: str,
     provider: str,
@@ -537,10 +483,9 @@ def _resolve_provider_scope_rows(
                 f"{_catalog_bootstrap_guidance(provider_norm)}"
             )
         if primary_only and provider_norm == "EODHD":
-            _reconcile_eodhd_listing_scope(
-                database,
-                provider_symbols=normalized_symbols,
-            )
+            # Read classification from the cache; only ingest-fundamentals and
+            # reconcile-listing-status (re)derive it. The validation below trusts
+            # the stored status, which migration 078 guarantees is resolved.
             rows = ticker_repo.list_for_provider(
                 provider_norm,
                 provider_symbols=normalized_symbols,
@@ -557,11 +502,6 @@ def _resolve_provider_scope_rows(
                 )
         return rows, normalized_symbols, None
 
-    if primary_only and provider_norm == "EODHD":
-        _reconcile_eodhd_listing_scope(
-            database,
-            exchange_codes=exchange_filters,
-        )
     rows = ticker_repo.list_for_provider(
         provider_norm,
         exchange_codes=exchange_filters,
@@ -590,7 +530,6 @@ def _resolve_canonical_scope_symbols(
     all_supported: bool,
     *,
     primary_only: bool = True,
-    listing_status_mode: Literal["full", "ensure_missing"] = "full",
 ) -> Tuple[List[str], Optional[List[str]], Optional[List[str]]]:
     symbol_filters, exchange_filters = _validate_scope_selector(
         symbols, exchange_codes, all_supported
@@ -609,11 +548,8 @@ def _resolve_canonical_scope_symbols(
                 f"Unsupported canonical tickers: {', '.join(missing)}. Populate provider_listing first."
             )
         if primary_only:
-            _sync_eodhd_listing_scope(
-                database,
-                listing_status_mode=listing_status_mode,
-                provider_symbols=normalized_symbols,
-            )
+            # Trust the cached classification (written only by ingest /
+            # reconcile-listing-status); migration 078 ensures it is resolved.
             primary_supported = set(
                 ticker_repo.list_canonical_symbols(primary_only=True)
             )
@@ -629,12 +565,6 @@ def _resolve_canonical_scope_symbols(
                 )
         return normalized_symbols, normalized_symbols, None
 
-    if primary_only:
-        _sync_eodhd_listing_scope(
-            database,
-            listing_status_mode=listing_status_mode,
-            exchange_codes=exchange_filters,
-        )
     canonical_symbols = ticker_repo.list_canonical_symbols(
         exchange_filters,
         primary_only=primary_only,

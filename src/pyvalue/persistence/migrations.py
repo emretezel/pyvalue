@@ -8105,6 +8105,139 @@ def _migration_077_drop_listing_currency_index(
     conn.execute("DROP INDEX IF EXISTS idx_listing_currency_nonnull")
 
 
+def _migration_078_backfill_unknown_listing_status(
+    conn: sqlite3.Connection,
+) -> None:
+    """Resolve any 'unknown' EODHD listing classification from stored fundamentals.
+
+    ``listing.primary_listing_status`` is a cached classification derived from
+    each EODHD raw payload's ``General.PrimaryTicker`` (see
+    ``SecurityListingStatusRepository._build_status_record``). Historically a
+    range of read/compute commands re-derived it lazily as a side effect of
+    resolving their scope. That lazy backfill has been removed: the column is now
+    written only at ingest (in the same transaction that stores the raw payload)
+    and by the explicit ``reconcile-listing-status`` command.
+
+    Removing the lazy backfill is only safe if no listing is left ``'unknown'``
+    while it actually has a raw payload to classify from. This one-time migration
+    establishes that invariant: it classifies every still-``'unknown'`` EODHD
+    listing that has stored fundamentals, then purges the derived data of any
+    listing that turns out to be ``'secondary'`` -- exactly what
+    ``reconcile-listing-status`` does at runtime, so a secondary listing never
+    retains facts/metrics/market-data.
+
+    Classification rule, faithful to ``_build_status_record`` (which runs the
+    ticker through ``_normalize_qualified_symbol``):
+      * ``PrimaryTicker`` missing / empty / unqualified (no ``'.'``) -> primary
+        (``_normalize_qualified_symbol`` returns ``None`` for those inputs).
+      * ``PrimaryTicker`` equal to the listing's own qualified symbol -> primary.
+      * otherwise -> secondary (EODHD points at a different listing).
+
+    Data-only migration with no schema marker; the version gate runs it exactly
+    once. Expected to be a no-op on a database whose ingest path has kept
+    classification current (no ``'unknown'`` rows with fundamentals remain).
+    EODHD ``listing``:``provider_listing`` is 1:1, so the per-listing lookup is
+    deterministic. Guarded so it no-ops on the minimal schemas used by isolated
+    migration tests (where ``fundamentals_raw`` may not exist).
+    """
+
+    catalog_view_exists = (
+        conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'view' AND name = 'provider_listing_catalog'"
+        ).fetchone()
+        is not None
+    )
+    if (
+        not _table_exists(conn, "listing")
+        or not _table_exists(conn, "fundamentals_raw")
+        or not catalog_view_exists
+    ):
+        return
+
+    # Snapshot the listings this migration owns -- still 'unknown' and backed by
+    # an EODHD raw payload -- with their computed status, so the purge below
+    # targets exactly the listings that flip to 'secondary' instead of
+    # re-scanning every pre-existing secondary. ``provider_listing_catalog``
+    # already exposes ``primary_listing_status`` (joined from ``listing``).
+    conn.execute("DROP TABLE IF EXISTS _migration_078_classification")
+    conn.execute(
+        """
+        CREATE TEMP TABLE _migration_078_classification AS
+        SELECT
+            catalog.security_id AS listing_id,
+            catalog.provider_listing_id AS provider_listing_id,
+            CASE
+                WHEN json_extract(fr.data, '$.General.PrimaryTicker') IS NULL
+                     OR TRIM(json_extract(fr.data, '$.General.PrimaryTicker')) = ''
+                     OR INSTR(TRIM(json_extract(fr.data, '$.General.PrimaryTicker')), '.') = 0
+                    THEN 'primary'
+                WHEN UPPER(TRIM(json_extract(fr.data, '$.General.PrimaryTicker')))
+                     = UPPER(catalog.provider_symbol)
+                    THEN 'primary'
+                ELSE 'secondary'
+            END AS status
+        FROM fundamentals_raw fr
+        JOIN provider_listing_catalog catalog
+          ON catalog.provider_listing_id = fr.provider_listing_id
+        WHERE catalog.provider = 'EODHD'
+          AND catalog.primary_listing_status = 'unknown'
+        """
+    )
+
+    conn.execute(
+        """
+        UPDATE listing
+        SET primary_listing_status = (
+            SELECT c.status
+            FROM _migration_078_classification c
+            WHERE c.listing_id = listing.listing_id
+        )
+        WHERE listing_id IN (SELECT listing_id FROM _migration_078_classification)
+        """
+    )
+
+    # Purge derived data for the listings that just became secondary, mirroring
+    # SecurityListingStatusRepository.purge_secondary_security_data. Tables keyed
+    # by listing_id first, then those keyed by provider_listing_id.
+    for table_name in (
+        "financial_facts",
+        "financial_facts_refresh_state",
+        "market_data",
+        "metrics",
+        "metric_compute_status",
+    ):
+        if not _table_exists(conn, table_name):
+            continue
+        conn.execute(
+            f"""
+            DELETE FROM {table_name}
+            WHERE listing_id IN (
+                SELECT listing_id FROM _migration_078_classification
+                WHERE status = 'secondary'
+            )
+            """
+        )
+
+    for table_name in (
+        "fundamentals_normalization_state",
+        "market_data_fetch_state",
+    ):
+        if not _table_exists(conn, table_name):
+            continue
+        conn.execute(
+            f"""
+            DELETE FROM {table_name}
+            WHERE provider_listing_id IN (
+                SELECT provider_listing_id FROM _migration_078_classification
+                WHERE status = 'secondary'
+            )
+            """
+        )
+
+    conn.execute("DROP TABLE IF EXISTS _migration_078_classification")
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -8183,6 +8316,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_075_purge_enterprise_value_facts,
     _migration_076_drop_provider_exchange_exchange_index,
     _migration_077_drop_listing_currency_index,
+    _migration_078_backfill_unknown_listing_status,
 ]
 
 

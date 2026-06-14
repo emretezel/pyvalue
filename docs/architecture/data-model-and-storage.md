@@ -57,7 +57,10 @@ Canonical listing identity lives here. A listing is defined by
 are derived from `listing.symbol + exchange.exchange_code`.
 EODHD primary-vs-secondary classification is stored as
 `primary_listing_status`; unknown listings remain eligible in primary-only
-scopes, while secondary listings are excluded.
+scopes, while secondary listings are excluded. It is written only by
+`ingest-fundamentals` (step 5 below) and `reconcile-listing-status`; every other
+command reads it without reconciling. Migration 078 backfills any leftover
+`unknown` listing that already has stored fundamentals.
 
 ### `provider_listing`
 

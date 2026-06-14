@@ -173,7 +173,6 @@ def cmd_report_fact_freshness(
             symbols,
             exchange_codes,
             all_supported,
-            listing_status_mode="ensure_missing",
         )
     )
 
@@ -232,7 +231,6 @@ def cmd_report_metric_coverage(
             symbols,
             exchange_codes,
             all_supported,
-            listing_status_mode="ensure_missing",
         )
     )
 
@@ -690,7 +688,6 @@ def cmd_report_metric_failures(
             symbols,
             exchange_codes,
             all_supported,
-            listing_status_mode="ensure_missing",
         )
     )
 
@@ -860,7 +857,6 @@ def cmd_report_screen_failures(
             symbols,
             exchange_codes,
             all_supported,
-            listing_status_mode="ensure_missing",
         )
     )
     selected_symbols = [symbol.upper() for symbol in selected_symbols]

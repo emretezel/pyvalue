@@ -392,7 +392,6 @@ def cmd_run_screen_stage(
             symbols,
             exchange_codes,
             all_supported,
-            listing_status_mode="ensure_missing",
         )
     )
     definition = load_screen(config_path)
