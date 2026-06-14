@@ -37,6 +37,8 @@ from collections.abc import Sequence
 from types import TracebackType
 from typing import Literal, Optional, Tuple, Type
 
+from conftest import seed_exchange
+
 
 def _listing(symbol: str, is_etf: bool = False, currency: str = "USD") -> Listing:
     """Helper to instantiate listings in a compact way.
@@ -83,6 +85,7 @@ def _seed_listing(
     """
     ticker, _, suffix = symbol.partition(".")
     exchange = suffix or "US"
+    seed_exchange(db_path, exchange, provider=provider, currency=currency)
     repo = SupportedTickerRepository(db_path)
     repo.initialize_schema()
     rows = {
@@ -103,6 +106,7 @@ def test_supported_ticker_repository_replace_from_listings_persists_rows(
     repo = SupportedTickerRepository(tmp_path / "universe.db")
     repo.initialize_schema()
 
+    seed_exchange(tmp_path / "universe.db", "US", provider="SEC")
     result = repo.replace_from_listings(
         "SEC",
         "US",
@@ -144,6 +148,7 @@ def test_supported_ticker_repository_replace_from_listings_overwrites_exchange_s
     repo = SupportedTickerRepository(tmp_path / "universe.db")
     repo.initialize_schema()
 
+    seed_exchange(tmp_path / "universe.db", "US", provider="SEC")
     repo.replace_from_listings("SEC", "US", [_listing("AAA")])
     repo.replace_from_listings("SEC", "US", [_listing("CCC")])
 
@@ -180,6 +185,7 @@ def test_supported_ticker_repository_normalizes_exchange_and_fetches_currency(
         isin="GB00TEST",
         currency="GBP",
     )
+    seed_exchange(tmp_path / "universe.db", "LSE")
     repo.replace_from_listings("EODHD", "LSE", [listing])
 
     assert repo.list_symbols_by_exchange("EODHD", "LSE") == ["FOO.LSE"]
@@ -204,6 +210,7 @@ def test_fundamentals_repository_classifies_and_purges_secondary_listings(
     db_path = tmp_path / "listing-status.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
+    seed_exchange(db_path, "US", "LSE")
     ticker_repo.replace_for_exchange(
         "EODHD",
         "US",
@@ -403,6 +410,7 @@ def test_migration_078_backfills_unknown_status_and_purges_secondary(
     db_path = tmp_path / "migration-078.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
+    seed_exchange(db_path, "US", "LSE")
     ticker_repo.replace_for_exchange(
         "EODHD",
         "US",
@@ -593,6 +601,7 @@ def test_exchange_provider_repository_fetch_normalizes_code(tmp_path: Path) -> N
 def test_supported_ticker_repository_replaces_rows_per_exchange(tmp_path: Path) -> None:
     repo = SupportedTickerRepository(tmp_path / "supported-tickers.db")
     repo.initialize_schema()
+    seed_exchange(tmp_path / "supported-tickers.db", "US", "LSE")
     repo.replace_for_exchange(
         "EODHD",
         "LSE",
@@ -669,6 +678,7 @@ def test_supported_ticker_repository_reports_skipped_no_currency(
     repo = SupportedTickerRepository(tmp_path / "skip-no-ccy.db")
     repo.initialize_schema()
 
+    seed_exchange(tmp_path / "skip-no-ccy.db", "LSE")
     result = repo.replace_for_exchange(
         "EODHD",
         "LSE",
@@ -699,6 +709,7 @@ def test_supported_ticker_repository_lists_eligible_symbols(tmp_path: Path) -> N
     db_path = tmp_path / "supported-tickers.db"
     repo = SupportedTickerRepository(db_path)
     repo.initialize_schema()
+    seed_exchange(db_path, "LSE")
     repo.replace_for_exchange(
         "EODHD",
         "LSE",
@@ -736,6 +747,7 @@ def test_list_eligible_orders_missing_then_stale(tmp_path: Path) -> None:
     db_path = tmp_path / "eligible-missing-stale.db"
     repo = SupportedTickerRepository(db_path)
     repo.initialize_schema()
+    seed_exchange(db_path, "LSE")
     repo.replace_for_exchange(
         "EODHD",
         "LSE",
@@ -782,6 +794,7 @@ def test_list_eligible_reads_base_tables_not_catalog_view(
     db_path = tmp_path / "eligible-plan.db"
     repo = SupportedTickerRepository(db_path)
     repo.initialize_schema()
+    seed_exchange(db_path, "LSE")
     repo.replace_for_exchange(
         "EODHD",
         "LSE",
@@ -822,6 +835,7 @@ def test_fundamentals_upsert_resolves_via_base_tables_not_catalog_view(
     db_path = tmp_path / "upsert-resolve-plan.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
+    seed_exchange(db_path, "LSE")
     # refresh-supported-tickers catalogs the listing the payload attaches to.
     ticker_repo.replace_for_exchange(
         "EODHD",
@@ -867,6 +881,7 @@ def test_fundamentals_upsert_never_overwrites_listing_currency(tmp_path: Path) -
     db_path = tmp_path / "fundamentals-currency-owner.db"
     repo = SupportedTickerRepository(db_path)
     repo.initialize_schema()
+    seed_exchange(db_path, "LSE")
     # refresh-supported-tickers is the sole writer of listing.currency.
     repo.replace_for_exchange(
         "EODHD",
@@ -914,6 +929,7 @@ def test_purge_downstream_for_secondary_purges_only_secondary(tmp_path: Path) ->
     db_path = tmp_path / "purge-secondary.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
+    seed_exchange(db_path, "US")
     ticker_repo.replace_for_exchange(
         "EODHD",
         "US",
@@ -994,6 +1010,7 @@ def test_purge_downstream_for_secondary_noop_when_all_primary(tmp_path: Path) ->
     db_path = tmp_path / "purge-secondary-noop.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
+    seed_exchange(db_path, "US")
     ticker_repo.replace_for_exchange(
         "EODHD",
         "US",
@@ -1374,6 +1391,7 @@ def test_fundamentals_repository_upsert_clears_active_fetch_failure(
     db_path = tmp_path / "fundamentals-fetch-state.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
+    seed_exchange(db_path, "US")
     ticker_repo.replace_for_exchange(
         "EODHD",
         "US",
@@ -1397,6 +1415,7 @@ def test_fundamentals_repository_upsert_many_uses_resolved_metadata_and_overwrit
     db_path = tmp_path / "fundamentals-batch.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
+    seed_exchange(db_path, "US")
     ticker_repo.replace_for_exchange(
         "EODHD",
         "US",
@@ -1428,7 +1447,6 @@ def test_fundamentals_repository_upsert_many_uses_resolved_metadata_and_overwrit
         provider: str,
         symbol: str,
         exchange: Optional[str],
-        create: bool = True,
     ) -> Tuple[Optional[str], Optional[str], Optional[int]]:
         raise AssertionError("upsert_many should not resolve securities per symbol")
 
@@ -1531,6 +1549,7 @@ def test_supported_ticker_repository_lists_market_data_symbols_missing_then_olde
     db_path = tmp_path / "supported-market-data.db"
     repo = SupportedTickerRepository(db_path)
     repo.initialize_schema()
+    seed_exchange(db_path, "US")
     repo.replace_for_exchange(
         "EODHD",
         "US",
@@ -1589,6 +1608,7 @@ def test_supported_ticker_repository_primary_only_filters_secondary_listings(
     db_path = tmp_path / "supported-primary-only.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
+    seed_exchange(db_path, "US", "LSE")
     ticker_repo.replace_for_exchange(
         "EODHD",
         "US",
@@ -1655,6 +1675,7 @@ def test_market_data_fetch_state_repository_tracks_success_and_failure(
     db_path = tmp_path / "market-state.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
+    seed_exchange(db_path, "US")
     ticker_repo.replace_for_exchange(
         "EODHD",
         "US",
@@ -1686,6 +1707,7 @@ def test_market_data_repository_upsert_prices_batches_rows(tmp_path: Path) -> No
     db_path = tmp_path / "market-data-batch.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
+    seed_exchange(db_path, "US")
     ticker_repo.replace_for_exchange(
         "EODHD",
         "US",
@@ -1742,6 +1764,7 @@ def test_market_data_fetch_state_repository_batch_methods(tmp_path: Path) -> Non
     db_path = tmp_path / "market-state-batch.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
+    seed_exchange(db_path, "US")
     ticker_repo.replace_for_exchange(
         "EODHD",
         "US",
@@ -1790,6 +1813,7 @@ def test_market_data_repository_latest_snapshots_many_matches_single_lookup(
     db_path = tmp_path / "market-snapshots-many.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
+    seed_exchange(db_path, "US")
     ticker_repo.replace_for_exchange(
         "EODHD",
         "US",
@@ -2193,6 +2217,7 @@ def test_latest_share_counts_many_prefers_best_same_date_share_fact(
     db_path = tmp_path / "share-count-selection.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
+    seed_exchange(db_path, "US")
     ticker_repo.replace_from_listings("EODHD", "US", [_listing("AAA")])
 
     repo = FinancialFactsRepository(db_path)
@@ -2594,6 +2619,7 @@ def test_fx_rates_repository_discover_currencies_excludes_secondary_supported_ti
     db_path = tmp_path / "fx-secondary-supported.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
+    seed_exchange(db_path, "US", "LSE", "JSE")
     ticker_repo.replace_for_exchange(
         "EODHD",
         "US",
@@ -2795,3 +2821,175 @@ def test_fundamentals_repository_fetch_many_returns_payloads_by_symbol(
     assert rows["AAA.US"]["General"]["Sector"] == "Technology"
     assert rows["BBB.US"]["General"]["Sector"] == "Industrials"
     assert "CCC.US" not in rows
+
+
+def test_replace_for_exchange_requires_seeded_exchange(tmp_path: Path) -> None:
+    """The exchange catalog is owned by refresh-supported-exchanges.
+
+    ``replace_for_exchange`` / ``replace_from_listings`` resolve the
+    provider_exchange read-only and raise a clear error (rather than fabricating
+    a stub) when the exchange has not been seeded -- the operator must run
+    refresh-supported-exchanges first.
+    """
+    repo = SupportedTickerRepository(tmp_path / "needs-exchange.db")
+    repo.initialize_schema()
+    with pytest.raises(ValueError, match="refresh-supported-exchanges"):
+        repo.replace_for_exchange(
+            "EODHD",
+            "US",
+            [
+                {
+                    "Code": "AAA",
+                    "Name": "AAA Inc",
+                    "Type": "Common Stock",
+                    "Currency": "USD",
+                }
+            ],
+        )
+    with pytest.raises(ValueError, match="refresh-supported-exchanges"):
+        repo.replace_from_listings("EODHD", "US", [_listing("AAA")])
+
+
+def test_replace_for_exchange_does_not_write_exchange_metadata(tmp_path: Path) -> None:
+    """Refreshing tickers must not overwrite provider_exchange metadata.
+
+    The provider symbol-list payload carries security-level Name/Country/Currency,
+    not exchange metadata. refresh-supported-tickers only *reads* the exchange
+    catalog, so the rich metadata seeded by refresh-supported-exchanges (a proper
+    exchange name, country, and operating MIC) survives a ticker refresh whose
+    rows carry a company name.
+    """
+    db_path = tmp_path / "exchange-metadata-owner.db"
+    exchanges = ExchangeProviderRepository(db_path)
+    exchanges.replace_for_provider(
+        "EODHD",
+        [
+            {
+                "Code": "US",
+                "Name": "USA Stocks",
+                "Country": "USA",
+                "Currency": "USD",
+                "OperatingMIC": "XNAS",
+            }
+        ],
+    )
+
+    SupportedTickerRepository(db_path).replace_for_exchange(
+        "EODHD",
+        "US",
+        [
+            {
+                "Code": "AAA",
+                "Name": "Apple Inc",
+                "Country": "Freedonia",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            }
+        ],
+    )
+
+    record = exchanges.fetch("EODHD", "US")
+    assert record is not None
+    # Untouched by the ticker refresh -- NOT clobbered with the ticker's company
+    # name / country (the latent bug this change removes).
+    assert record.name == "USA Stocks"
+    assert record.country == "USA"
+    assert record.operating_mic == "XNAS"
+
+
+def test_replace_for_exchange_cascade_purges_both_fetch_states(tmp_path: Path) -> None:
+    """Dropping a provider listing cascades to BOTH fetch-state tables.
+
+    A ticker absent from the refreshed payload is removed, and
+    ``_delete_provider_listing_ids`` purges its fundamentals_raw,
+    fundamentals_fetch_state, and market_data_fetch_state rows. This is why the
+    CLI no longer calls ``delete_symbols`` separately; the dropped count is
+    reported via ``SupportedTickerRefreshResult.removed``.
+    """
+    db_path = tmp_path / "refresh-cascade.db"
+    seed_exchange(db_path, "US")
+    repo = SupportedTickerRepository(db_path)
+    repo.initialize_schema()
+    repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [
+            {
+                "Code": "AAA",
+                "Name": "AAA Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
+            {
+                "Code": "BBB",
+                "Name": "BBB Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
+        ],
+    )
+
+    # Give AAA and BBB downstream rows. upsert clears fundamentals fetch-state, so
+    # mark the fundamentals failure AFTER upserting the raw payloads.
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.upsert("EODHD", "AAA.US", {"General": {}}, exchange="US")
+    fund_repo.upsert("EODHD", "BBB.US", {"General": {}}, exchange="US")
+    storage.FundamentalsFetchStateRepository(db_path).mark_failure(
+        "EODHD", "BBB.US", "boom"
+    )
+    MarketDataFetchStateRepository(db_path).mark_failure("EODHD", "AAA.US", "boom")
+    MarketDataFetchStateRepository(db_path).mark_failure("EODHD", "BBB.US", "boom")
+
+    # Refresh with only AAA -> BBB is dropped and fully purged.
+    result = repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [
+            {
+                "Code": "AAA",
+                "Name": "AAA Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            }
+        ],
+    )
+
+    assert result.removed == 1
+    assert [row.symbol for row in repo.list_for_exchange("EODHD", "US")] == ["AAA.US"]
+    with sqlite3.connect(db_path) as conn:
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM provider_listing WHERE provider_symbol = 'BBB'"
+            ).fetchone()[0]
+            == 0
+        )
+        # BBB's fundamentals fetch-state was the only one -> table is empty now.
+        assert (
+            conn.execute("SELECT COUNT(*) FROM fundamentals_fetch_state").fetchone()[0]
+            == 0
+        )
+        market_state_symbols = {
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT pl.provider_symbol
+                FROM market_data_fetch_state ms
+                JOIN provider_listing pl
+                  ON pl.provider_listing_id = ms.provider_listing_id
+                """
+            )
+        }
+        raw_symbols = {
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT pl.provider_symbol
+                FROM fundamentals_raw fr
+                JOIN provider_listing pl
+                  ON pl.provider_listing_id = fr.provider_listing_id
+                """
+            )
+        }
+    # AAA's market-data fetch-state and raw payload survive; BBB's are purged.
+    assert market_state_symbols == {"AAA"}
+    assert raw_symbols == {"AAA"}

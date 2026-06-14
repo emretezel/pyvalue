@@ -23,6 +23,7 @@ from pyvalue import cli
 from pyvalue.cli._common import _PreparedFundamentalsRun
 from pyvalue.cli.ingest import _run_eodhd_fundamentals_ingestion
 from cli_test_helpers import patch_cli
+from conftest import seed_exchange
 from pyvalue.currency import MetricUnitKind
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.marketdata.service import MarketDataService
@@ -188,6 +189,7 @@ def store_supported_tickers(
                 str(normalized.get("Exchange") or exchange_code),
             )
         normalized_rows.append(normalized)
+    seed_exchange(db_path, exchange_code, provider=provider)
     repo.replace_for_exchange(
         provider,
         exchange_code,
@@ -213,6 +215,7 @@ def store_catalog_listings(
         )
         for listing in listings
     ]
+    seed_exchange(db_path, exchange_code, provider=provider)
     repo.replace_from_listings(provider, exchange_code, listings_with_currency)
     return repo
 
@@ -248,6 +251,7 @@ def _seed_listing(
     repo = SupportedTickerRepository(db_path)
     repo.initialize_schema()
     for suffix, rows in rows_by_exchange.items():
+        seed_exchange(db_path, suffix, provider=provider, currency=currency)
         repo.replace_for_exchange(provider, suffix, rows)
     return repo
 
@@ -4763,6 +4767,7 @@ def test_ingest_run_reports_and_purges_secondary_reclassification(
     db_path = tmp_path / "ingest-secondary.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
+    seed_exchange(db_path, "US", "LSE")
     ticker_repo.replace_for_exchange(
         "EODHD",
         "US",
@@ -7227,6 +7232,7 @@ def test_resolve_ticker_target_currency_from_supported_tickers(tmp_path: Path) -
     db_path = tmp_path / "resolve.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
+    seed_exchange(db_path, "LSE")
     ticker_repo.replace_for_exchange(
         "EODHD",
         "LSE",

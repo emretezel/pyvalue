@@ -16,8 +16,6 @@ from typing import (
 from pyvalue.ingestion import EODHDFundamentalsClient
 from pyvalue.persistence.storage import (
     ExchangeProviderRepository,
-    FundamentalsFetchStateRepository,
-    MarketDataFetchStateRepository,
     SupportedTickerRepository,
 )
 
@@ -107,9 +105,13 @@ def _refresh_supported_tickers_for_exchange(
     client: EODHDFundamentalsClient,
     exchange_code: str,
 ) -> Tuple[int, int, Tuple[str, ...]]:
-    """Refresh one exchange's supported tickers and prune stale fetch state.
+    """Refresh one exchange's supported tickers.
 
-    Returns ``(inserted, removed, skipped_no_currency)``.
+    Returns ``(inserted, removed, skipped_no_currency)``. ``replace_for_exchange``
+    deletes the provider listings absent from the refreshed payload and cascades
+    those deletes to ``fundamentals_raw`` / ``fundamentals_fetch_state`` /
+    ``fundamentals_normalization_state`` / ``market_data_fetch_state``, so no
+    separate fetch-state cleanup is needed here.
     """
 
     provider_norm = provider.strip().upper()
@@ -128,20 +130,10 @@ def _refresh_supported_tickers_for_exchange(
         filtered_rows.append(row)
 
     ticker_repo = SupportedTickerRepository(database)
-    existing = ticker_repo.list_for_exchange(provider_norm, exchange_norm)
-    existing_symbols = {row.symbol for row in existing}
     result = ticker_repo.replace_for_exchange(
         provider_norm, exchange_norm, filtered_rows
     )
-    current = ticker_repo.list_for_exchange(provider_norm, exchange_norm)
-    current_symbols = {row.symbol for row in current}
-    removed_symbols = sorted(existing_symbols - current_symbols)
-
-    state_repo = FundamentalsFetchStateRepository(database)
-    state_repo.delete_symbols(provider_norm, removed_symbols)
-    market_state_repo = MarketDataFetchStateRepository(database)
-    market_state_repo.delete_symbols(provider_norm, removed_symbols)
-    return result.inserted, len(removed_symbols), result.skipped_no_currency
+    return result.inserted, result.removed, result.skipped_no_currency
 
 
 def _list_eodhd_exchange_codes(

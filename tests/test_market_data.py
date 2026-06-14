@@ -18,6 +18,8 @@ from pyvalue.persistence.storage import (
     SupportedTickerRepository,
 )
 
+from conftest import seed_exchange
+
 
 class DummyEODSession(requests.Session):
     """A stand-in ``requests.Session`` that returns a canned EODHD payload.
@@ -90,6 +92,7 @@ def _seed_listing(
     """
 
     ticker, suffix = symbol.split(".")
+    seed_exchange(db_path, suffix, currency=currency)
     repo = SupportedTickerRepository(db_path)
     repo.initialize_schema()
     repo.replace_for_exchange(
@@ -181,6 +184,7 @@ def test_market_data_service_stores_major_price_for_subunit_quote(
     db_path = tmp_path / f"{quote_currency.lower()}-market-data.db"
     catalog_repo = SupportedTickerRepository(db_path)
     catalog_repo.initialize_schema()
+    seed_exchange(db_path, exchange, currency=quote_currency)
     catalog_repo.replace_for_exchange(
         "EODHD",
         exchange,

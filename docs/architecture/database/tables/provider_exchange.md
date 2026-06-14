@@ -25,8 +25,8 @@ One row per `(provider_id, provider_exchange_code)`.
 | `provider_id` | `INTEGER` | no | FK | provider namespace; part of composite unique keys |
 | `provider_exchange_code` | `TEXT` | no |  | provider-local exchange code; part of composite unique key |
 | `exchange_id` | `INTEGER` | no | FK | canonical exchange identity |
-| `name` | `TEXT` | no |  | provider display name; migration 066 tightened to NOT NULL. Runtime ingest falls back to `provider_exchange_code` when the upstream catalog doesn't supply a name. |
-| `country` | `TEXT` | no |  | provider country label; migration 066 tightened to NOT NULL. Runtime ingest falls back to `'Unknown'` when not provided. |
+| `name` | `TEXT` | no |  | provider display name; migration 066 tightened to NOT NULL. `refresh-supported-exchanges` falls back to `provider_exchange_code` when the upstream catalog doesn't supply a name. |
+| `country` | `TEXT` | no |  | provider country label; migration 066 tightened to NOT NULL. `refresh-supported-exchanges` falls back to `'Unknown'` when not provided. |
 | `currency` | `TEXT` | yes |  | provider exchange-currency hint. CHECK enforces 3-char uppercase ASCII letters when present (legacy `'UNKNOWN'` placeholders were normalized to NULL by migration 057) |
 | `operating_mic` | `TEXT` | yes |  | MIC when supplied by the provider |
 | `country_iso2` | `TEXT` | yes |  | normalized country code |

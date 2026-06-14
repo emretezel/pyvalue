@@ -377,12 +377,15 @@ class FundamentalsNormalizationCandidate:
 class SupportedTickerRefreshResult:
     """Outcome of refreshing one provider/exchange supported-ticker slice.
 
-    ``inserted`` counts the listings actually catalogued. ``skipped_no_currency``
-    lists the provider tickers dropped because the payload carried no currency:
-    ``listing.currency`` is NOT NULL with no fallback, so a currency-less entry
-    cannot be modelled. It is surfaced to the operator so the underlying data
-    issue can be chased with the provider.
+    ``inserted`` counts the listings actually catalogued. ``removed`` counts the
+    provider listings dropped because they were absent from the refreshed payload
+    (their fundamentals/market-data rows are cascade-deleted with them).
+    ``skipped_no_currency`` lists the provider tickers dropped because the payload
+    carried no currency: ``listing.currency`` is NOT NULL with no fallback, so a
+    currency-less entry cannot be modelled. It is surfaced to the operator so the
+    underlying data issue can be chased with the provider.
     """
 
     inserted: int
+    removed: int
     skipped_no_currency: Tuple[str, ...]

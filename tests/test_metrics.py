@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import seed_exchange
 from pyvalue.currency import MetricUnitKind
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.marketdata.base import PriceData
@@ -477,6 +478,7 @@ def test_market_cap_money_uses_latest_price(tmp_path: Path) -> None:
     db_path = tmp_path / "market-cap-money.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
+    seed_exchange(db_path, "US")
     ticker_repo.replace_for_exchange(
         "EODHD",
         "US",

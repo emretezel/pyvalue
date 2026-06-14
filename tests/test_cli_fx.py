@@ -25,6 +25,8 @@ from pyvalue.persistence.storage import (
     SupportedTickerRepository,
 )
 
+from conftest import seed_exchange
+
 
 def _ranking_definition(metric: RankingMetric) -> ScreenDefinition:
     return ScreenDefinition(
@@ -47,6 +49,7 @@ def _seed_listing(db_path: Path, symbol: str, *, currency: str = "USD") -> None:
     """
 
     ticker, _, suffix = symbol.partition(".")
+    seed_exchange(db_path, suffix or "US", currency=currency)
     repo = SupportedTickerRepository(db_path)
     repo.initialize_schema()
     repo.replace_for_exchange(

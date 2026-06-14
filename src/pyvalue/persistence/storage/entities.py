@@ -203,6 +203,93 @@ class SecurityRepository(SQLiteStore):
         self._remember(security)
         return security
 
+    def _ensure_listing_for_exchange_id(
+        self,
+        conn: sqlite3.Connection,
+        exchange_id: int,
+        ticker: str,
+        canonical_symbol: str,
+        entity_name: Optional[str],
+        description: Optional[str],
+        sector: Optional[str],
+        industry: Optional[str],
+        listing_currency: Optional[str],
+    ) -> Optional[Security]:
+        """Create or update the issuer + listing for an already-resolved exchange.
+
+        ``exchange_id`` must reference an existing ``exchange`` row -- this helper
+        never writes the exchange catalog (that ownership belongs to
+        refresh-supported-exchanges). Shared by :meth:`ensure` (which resolves the
+        exchange by code) and :meth:`ensure_with_exchange_id` (handed the id).
+        """
+        security = self._load_by_exchange_and_symbol(conn, exchange_id, ticker)
+        if security is None:
+            if listing_currency is None:
+                raise ValueError(
+                    f"Cannot create listing {canonical_symbol} without a "
+                    "quote currency. Listings are created from the "
+                    "refresh-supported-tickers payload currency; there is "
+                    "no currency fallback."
+                )
+            # migration 064 enforces issuer.name NOT NULL. Use the
+            # canonical_symbol as a placeholder name when the caller doesn't
+            # supply one; downstream metadata refreshes can promote it to the
+            # real entity name.
+            cursor = conn.execute(
+                """
+                INSERT INTO issuer (
+                    name,
+                    description,
+                    sector,
+                    industry,
+                    country
+                ) VALUES (?, ?, ?, ?, NULL)
+                """,
+                (
+                    entity_name or canonical_symbol,
+                    description,
+                    sector,
+                    industry,
+                ),
+            )
+            if cursor.lastrowid is None:
+                raise RuntimeError(f"Failed to create issuer for {canonical_symbol}")
+            issuer_id = int(cursor.lastrowid)
+            conn.execute(
+                """
+                INSERT INTO listing (
+                    issuer_id,
+                    exchange_id,
+                    symbol,
+                    currency
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (issuer_id, exchange_id, ticker, listing_currency),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE issuer
+                SET name = COALESCE(?, name),
+                    description = COALESCE(?, description),
+                    sector = COALESCE(?, sector),
+                    industry = COALESCE(?, industry)
+                WHERE issuer_id = (
+                    SELECT issuer_id
+                    FROM listing
+                    WHERE listing_id = ?
+                )
+                """,
+                (
+                    entity_name,
+                    description,
+                    sector,
+                    industry,
+                    security.security_id,
+                ),
+            )
+        return self._load_by_exchange_and_symbol(conn, exchange_id, ticker)
+
     def ensure(
         self,
         canonical_ticker: str,
@@ -231,84 +318,69 @@ class SecurityRepository(SQLiteStore):
         listing_currency = raw_currency_code(currency)
 
         def _ensure(conn: sqlite3.Connection) -> Optional[Security]:
+            # ``ensure`` resolves (and, if absent, creates) the exchange by code.
+            # Callers that already hold a resolved exchange_id and must NOT write
+            # the exchange catalog use ``ensure_with_exchange_id`` instead.
             exchange = self._exchange_repo().ensure(exchange_code, connection=conn)
-            security = self._load_by_exchange_and_symbol(
-                conn, exchange.exchange_id, ticker
+            return self._ensure_listing_for_exchange_id(
+                conn,
+                exchange.exchange_id,
+                ticker,
+                canonical_symbol,
+                entity_name,
+                description,
+                sector,
+                industry,
+                listing_currency,
             )
-            if security is None:
-                if listing_currency is None:
-                    raise ValueError(
-                        f"Cannot create listing {canonical_symbol} without a "
-                        "quote currency. Listings are created from the "
-                        "refresh-supported-tickers payload currency; there is "
-                        "no currency fallback."
-                    )
-                # migration 064 enforces issuer.name NOT NULL. Use the
-                # canonical_symbol as a placeholder name when the
-                # caller doesn't supply one; downstream metadata
-                # refreshes can promote it to the real entity name.
-                cursor = conn.execute(
-                    """
-                    INSERT INTO issuer (
-                        name,
-                        description,
-                        sector,
-                        industry,
-                        country
-                    ) VALUES (?, ?, ?, ?, NULL)
-                    """,
-                    (
-                        entity_name or canonical_symbol,
-                        description,
-                        sector,
-                        industry,
-                    ),
-                )
-                if cursor.lastrowid is None:
-                    raise RuntimeError(
-                        f"Failed to create issuer for {canonical_symbol}"
-                    )
-                issuer_id = int(cursor.lastrowid)
-                conn.execute(
-                    """
-                    INSERT INTO listing (
-                        issuer_id,
-                        exchange_id,
-                        symbol,
-                        currency
-                    ) VALUES (?, ?, ?, ?)
-                    """,
-                    (issuer_id, exchange.exchange_id, ticker, listing_currency),
-                )
-            else:
-                conn.execute(
-                    """
-                    UPDATE issuer
-                    SET name = COALESCE(?, name),
-                        description = COALESCE(?, description),
-                        sector = COALESCE(?, sector),
-                        industry = COALESCE(?, industry)
-                    WHERE issuer_id = (
-                        SELECT issuer_id
-                        FROM listing
-                        WHERE listing_id = ?
-                    )
-                    """,
-                    (
-                        entity_name,
-                        description,
-                        sector,
-                        industry,
-                        security.security_id,
-                    ),
-                )
-            return self._load_by_exchange_and_symbol(conn, exchange.exchange_id, ticker)
 
         if connection is not None:
             loaded = _ensure(connection)
         else:
             with self._connect() as conn:
                 loaded = _ensure(conn)
+        if loaded is None:  # pragma: no cover - defensive
+            raise RuntimeError(f"Failed to create or load security {canonical_symbol}")
+        return loaded
+
+    def ensure_with_exchange_id(
+        self,
+        exchange_id: int,
+        canonical_exchange_code: str,
+        canonical_ticker: str,
+        entity_name: Optional[str] = None,
+        description: Optional[str] = None,
+        sector: Optional[str] = None,
+        industry: Optional[str] = None,
+        *,
+        currency: Optional[str] = None,
+        connection: sqlite3.Connection,
+    ) -> Security:
+        """Create/update the issuer + listing against an ALREADY-RESOLVED exchange.
+
+        Unlike :meth:`ensure`, this never touches the ``exchange`` table: the
+        caller resolved ``exchange_id`` from an existing row, because the exchange
+        catalog is owned by refresh-supported-exchanges. ``canonical_exchange_code``
+        is used only to build the canonical symbol / placeholder name. A live
+        ``connection`` is required -- every caller runs inside a refresh
+        transaction.
+        """
+        ticker = _normalize_required_text(canonical_ticker, "canonical_ticker").upper()
+        exchange_code = _normalize_required_text(
+            canonical_exchange_code, "canonical_exchange_code"
+        ).upper()
+        canonical_symbol = f"{ticker}.{exchange_code}"
+        loaded = self._ensure_listing_for_exchange_id(
+            connection,
+            exchange_id,
+            ticker,
+            canonical_symbol,
+            _normalize_optional_text(entity_name),
+            _normalize_optional_text(description),
+            _normalize_optional_text(sector),
+            _normalize_optional_text(industry),
+            raw_currency_code(currency),
+        )
         if loaded is None:  # pragma: no cover - defensive
             raise RuntimeError(f"Failed to create or load security {canonical_symbol}")
         return loaded

@@ -16,6 +16,8 @@ from pyvalue.cli import (
 from pyvalue.persistence.storage import SupportedTickerRepository
 from pyvalue.universe import Listing
 
+from conftest import seed_exchange
+
 
 def test_resolve_database_path_falls_back_to_repo_data(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -50,6 +52,7 @@ def test_resolve_canonical_scope_symbols_defaults_to_all_supported(
 ) -> None:
     repo = SupportedTickerRepository(tmp_path / "scope.db")
     repo.initialize_schema()
+    seed_exchange(tmp_path / "scope.db", "US")
     repo.replace_from_listings(
         "EODHD",
         "US",
@@ -98,6 +101,7 @@ def test_resolve_canonical_scope_symbols_defaults_to_all_supported(
 def test_resolve_provider_scope_rows_defaults_to_all_supported(tmp_path: Path) -> None:
     repo = SupportedTickerRepository(tmp_path / "provider-scope.db")
     repo.initialize_schema()
+    seed_exchange(tmp_path / "provider-scope.db", "US")
     repo.replace_from_listings(
         "EODHD",
         "US",

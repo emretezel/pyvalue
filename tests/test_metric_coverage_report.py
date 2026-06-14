@@ -16,10 +16,13 @@ from pyvalue.persistence.storage import (
 )
 from pyvalue.universe import Listing
 
+from conftest import seed_exchange
+
 
 def _seed_universe(db_path: Path) -> None:
     universe = SupportedTickerRepository(db_path)
     universe.initialize_schema()
+    seed_exchange(db_path, "US", provider="SEC")
     universe.replace_from_listings(
         "SEC",
         "US",

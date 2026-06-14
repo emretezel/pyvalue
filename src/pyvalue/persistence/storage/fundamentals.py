@@ -67,7 +67,7 @@ class FundamentalsRepository(SQLiteStore):
         """
         self.initialize_schema()
         provider_symbol, provider_exchange_code, security_id = self._resolve_security(
-            provider, symbol, exchange, create=False
+            provider, symbol, exchange
         )
         provider_norm = provider.strip().upper()
         data = canonical_json_dumps(payload)
@@ -218,9 +218,7 @@ class FundamentalsRepository(SQLiteStore):
 
     def fetch(self, provider: str, symbol: str) -> Optional[Dict[str, Any]]:
         self.initialize_schema()
-        provider_symbol, _, _ = self._resolve_security(
-            provider, symbol, None, create=False
-        )
+        provider_symbol, _, _ = self._resolve_security(provider, symbol, None)
         if provider_symbol is None:
             return None
         with self._connect() as conn:
@@ -353,9 +351,7 @@ class FundamentalsRepository(SQLiteStore):
         self, provider: str, symbol: str
     ) -> Optional[Tuple[str, Optional[str], Dict[str, Any]]]:
         self.initialize_schema()
-        provider_symbol, _, _ = self._resolve_security(
-            provider, symbol, None, create=False
-        )
+        provider_symbol, _, _ = self._resolve_security(provider, symbol, None)
         if provider_symbol is None:
             return None
         with self._connect() as conn:
@@ -377,9 +373,7 @@ class FundamentalsRepository(SQLiteStore):
         self, provider: str, symbol: str
     ) -> Optional[Tuple[Dict[str, Any], str]]:
         self.initialize_schema()
-        provider_symbol, _, _ = self._resolve_security(
-            provider, symbol, None, create=False
-        )
+        provider_symbol, _, _ = self._resolve_security(provider, symbol, None)
         if provider_symbol is None:
             return None
         with self._connect() as conn:
@@ -541,8 +535,11 @@ class FundamentalsRepository(SQLiteStore):
         provider: str,
         symbol: str,
         exchange: Optional[str],
-        create: bool = True,
     ) -> Tuple[Optional[str], Optional[str], Optional[int]]:
+        # Read-only: ingest never creates catalog rows. Securities/listings are
+        # owned by refresh-supported-tickers (exchanges by
+        # refresh-supported-exchanges); an uncatalogued symbol resolves to a
+        # None security_id and the caller skips it.
         try:
             (
                 provider_norm,
@@ -555,9 +552,6 @@ class FundamentalsRepository(SQLiteStore):
         canonical_exchange = self._exchange_provider_repo().resolve_canonical_code(
             provider_norm, provider_exchange_code
         )
-        if create:
-            security = self._security_repo().ensure(provider_ticker, canonical_exchange)
-            return provider_symbol, provider_exchange_code, security.security_id
         existing_security = self._security_repo().fetch_by_symbol(
             f"{provider_ticker}.{canonical_exchange}"
         )

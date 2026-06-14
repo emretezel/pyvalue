@@ -26,11 +26,9 @@ from .base import (
     _batched,
     _coerce_int,
     _normalize_optional_text,
-    _normalize_provider_identity,
     _normalize_symbol_base,
     _normalized_codes,
     _provider_listing_catalog_view,
-    _utc_now_iso,
 )
 from .records import (
     IngestProgressExchange,
@@ -74,107 +72,53 @@ class SupportedTickerRepository(SQLiteStore):
             f"{alias}.country, {alias}.currency, {alias}.isin, {alias}.updated_at"
         )
 
-    def _ensure_provider_exchange_row(
+    def _resolve_provider_exchange(
         self,
         conn: sqlite3.Connection,
         provider: str,
         provider_exchange_code: str,
-        *,
-        canonical_exchange_code: Optional[str] = None,
-        name: Optional[str] = None,
-        country: Optional[str] = None,
-        currency: Optional[str] = None,
-        operating_mic: Optional[str] = None,
-        country_iso2: Optional[str] = None,
-        country_iso3: Optional[str] = None,
-    ) -> sqlite3.Row:
-        provider_row = self._provider_repo().ensure(provider, connection=conn)
-        exchange_code = (
-            _normalize_optional_text(canonical_exchange_code) or provider_exchange_code
-        ).upper()
-        exchange = self._exchange_repo().ensure(exchange_code, connection=conn)
-        now = _utc_now_iso()
-        # migration 066 enforces NOT NULL on name and country. Use the
-        # provider exchange code as a name fallback and 'Unknown' as a
-        # country fallback when the caller doesn't supply them. The
-        # ON CONFLICT branch only updates these when a non-NULL/non-empty
-        # value comes in, so a richer subsequent refresh can promote the
-        # placeholder.
-        name_value = _normalize_optional_text(name) or provider_exchange_code
-        country_value = _normalize_optional_text(country) or "Unknown"
-        conn.execute(
-            """
-            INSERT INTO provider_exchange (
-                provider_id,
-                provider_exchange_code,
-                exchange_id,
-                name,
-                country,
-                currency,
-                operating_mic,
-                country_iso2,
-                country_iso3,
-                updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(provider_id, provider_exchange_code) DO UPDATE SET
-                exchange_id = excluded.exchange_id,
-                name = CASE
-                    WHEN excluded.name IS NOT NULL AND excluded.name != ''
-                         AND excluded.name != provider_exchange.provider_exchange_code
-                    THEN excluded.name
-                    ELSE provider_exchange.name
-                END,
-                country = CASE
-                    WHEN excluded.country IS NOT NULL AND excluded.country != ''
-                         AND excluded.country != 'Unknown'
-                    THEN excluded.country
-                    ELSE provider_exchange.country
-                END,
-                currency = COALESCE(excluded.currency, provider_exchange.currency),
-                operating_mic = COALESCE(excluded.operating_mic, provider_exchange.operating_mic),
-                country_iso2 = COALESCE(excluded.country_iso2, provider_exchange.country_iso2),
-                country_iso3 = COALESCE(excluded.country_iso3, provider_exchange.country_iso3),
-                updated_at = excluded.updated_at
-            """,
-            (
-                provider_row.provider_id,
-                provider_exchange_code,
-                exchange.exchange_id,
-                name_value,
-                country_value,
-                _normalize_optional_text(currency),
-                _normalize_optional_text(operating_mic),
-                _normalize_optional_text(country_iso2),
-                _normalize_optional_text(country_iso3),
-                now,
-            ),
-        )
+    ) -> Tuple[int, int, str]:
+        """Resolve an existing provider_exchange to its ids + canonical code.
+
+        Returns ``(provider_exchange_id, exchange_id, exchange_code)``. This is
+        read-only on purpose: the exchange catalog (``exchange`` +
+        ``provider_exchange``) is owned by refresh-supported-exchanges. If the
+        row is absent we raise rather than fabricate a stub -- the operator must
+        run refresh-supported-exchanges for the provider first. ``provider`` and
+        ``provider_exchange_code`` are expected already upper-normalised.
+        """
         row = conn.execute(
             """
-            SELECT
-                ep.provider_exchange_id,
-                ep.provider_id,
-                ep.provider_exchange_code,
-                e.exchange_code
-            FROM provider_exchange ep
-            JOIN "exchange" e ON e.exchange_id = ep.exchange_id
-            WHERE ep.provider_id = ? AND ep.provider_exchange_code = ?
+            SELECT px.provider_exchange_id, px.exchange_id, e.exchange_code
+            FROM provider_exchange px
+            JOIN provider p ON p.provider_id = px.provider_id
+            JOIN "exchange" e ON e.exchange_id = px.exchange_id
+            WHERE p.provider_code = ? AND px.provider_exchange_code = ?
             """,
-            (provider_row.provider_id, provider_exchange_code),
+            (provider, provider_exchange_code),
         ).fetchone()
         if row is None:
-            raise RuntimeError(
-                f"Failed to persist provider exchange {provider}:{provider_exchange_code}"
+            raise ValueError(
+                f"Provider exchange {provider}:{provider_exchange_code} is not in "
+                "the catalog. Run refresh-supported-exchanges for this provider "
+                "first -- refresh-supported-tickers only reads the exchange catalog."
             )
-        return row
+        return (
+            int(row["provider_exchange_id"]),
+            int(row["exchange_id"]),
+            str(row["exchange_code"]),
+        )
 
     def _ensure_provider_listing(
         self,
         conn: sqlite3.Connection,
-        provider: str,
-        symbol: str,
         *,
-        exchange_code: Optional[str] = None,
+        provider_norm: str,
+        provider_exchange_id: int,
+        exchange_id: int,
+        provider_exchange_code: str,
+        canonical_exchange_code: str,
+        bare_symbol: str,
         currency: Optional[str] = None,
         entity_name: Optional[str] = None,
     ) -> Optional[sqlite3.Row]:
@@ -185,21 +129,13 @@ class SupportedTickerRepository(SQLiteStore):
         quote_currency = raw_currency_code(currency)
         if quote_currency is None:
             return None
-        provider_norm, bare_symbol, provider_exchange_code, _ = (
-            _normalize_provider_identity(
-                provider,
-                symbol,
-                exchange_code,
-            )
-        )
-        provider_exchange_row = self._ensure_provider_exchange_row(
-            conn,
-            provider_norm,
-            provider_exchange_code,
-        )
-        security = self._security_repo().ensure(
+        # The exchange row is already resolved by the caller; build the canonical
+        # issuer/listing against that exchange_id WITHOUT writing the exchange
+        # catalog (ensure_with_exchange_id never touches the exchange table).
+        security = self._security_repo().ensure_with_exchange_id(
+            exchange_id,
+            canonical_exchange_code,
             bare_symbol,
-            str(provider_exchange_row["exchange_code"]),
             entity_name=entity_name,
             currency=quote_currency,
             connection=conn,
@@ -224,16 +160,11 @@ class SupportedTickerRepository(SQLiteStore):
             ON CONFLICT(provider_exchange_id, provider_symbol) DO UPDATE SET
                 listing_id = excluded.listing_id
             """,
-            (
-                int(provider_exchange_row["provider_exchange_id"]),
-                bare_symbol,
-                security.security_id,
-            ),
+            (provider_exchange_id, bare_symbol, security.security_id),
         )
         # The only column callers consume from the returned Row is
-        # provider_listing_id. Querying the full row via SELECT * was a
-        # CLAUDE.md violation (audit P2 #6). Materialise the post-insert
-        # provider_listing_id with an explicit projection.
+        # provider_listing_id. Materialise the post-insert provider_listing_id
+        # with an explicit projection (no SELECT *).
         row = conn.execute(
             """
             SELECT provider_listing_id
@@ -308,10 +239,10 @@ class SupportedTickerRepository(SQLiteStore):
         retained_tickers: List[str] = []
         skipped_no_currency: List[str] = []
         with self._connect() as conn:
-            provider_exchange_row = self._ensure_provider_exchange_row(
-                conn,
-                provider_norm,
-                provider_exchange_code,
+            provider_exchange_id, exchange_id, canonical_exchange_code = (
+                self._resolve_provider_exchange(
+                    conn, provider_norm, provider_exchange_code
+                )
             )
             for listing in listings:
                 symbol = listing.symbol.strip().upper()
@@ -320,9 +251,12 @@ class SupportedTickerRepository(SQLiteStore):
                     continue
                 created = self._ensure_provider_listing(
                     conn,
-                    provider_norm,
-                    symbol,
-                    exchange_code=provider_exchange_code,
+                    provider_norm=provider_norm,
+                    provider_exchange_id=provider_exchange_id,
+                    exchange_id=exchange_id,
+                    provider_exchange_code=provider_exchange_code,
+                    canonical_exchange_code=canonical_exchange_code,
+                    bare_symbol=bare_symbol,
                     currency=listing.currency,
                     entity_name=listing.security_name,
                 )
@@ -330,22 +264,24 @@ class SupportedTickerRepository(SQLiteStore):
                     skipped_no_currency.append(bare_symbol)
                     continue
                 retained_tickers.append(bare_symbol)
+            retained = set(retained_tickers)
             existing_rows = conn.execute(
                 """
                 SELECT provider_listing_id, provider_symbol
                 FROM provider_listing
                 WHERE provider_exchange_id = ?
                 """,
-                (int(provider_exchange_row["provider_exchange_id"]),),
+                (provider_exchange_id,),
             ).fetchall()
             to_delete = [
                 int(row["provider_listing_id"])
                 for row in existing_rows
-                if str(row["provider_symbol"]) not in set(retained_tickers)
+                if str(row["provider_symbol"]) not in retained
             ]
             self._delete_provider_listing_ids(conn, to_delete)
         return SupportedTickerRefreshResult(
             inserted=len(retained_tickers),
+            removed=len(to_delete),
             skipped_no_currency=tuple(skipped_no_currency),
         )
 
@@ -361,36 +297,28 @@ class SupportedTickerRepository(SQLiteStore):
         retained_tickers: List[str] = []
         skipped_no_currency: List[str] = []
         with self._connect() as conn:
-            provider_exchange_row = self._ensure_provider_exchange_row(
-                conn,
-                provider_norm,
-                provider_exchange_code,
+            # The exchange catalog is owned by refresh-supported-exchanges; this
+            # path only reads it. Resolve the provider_exchange once (raises if
+            # the operator hasn't refreshed exchanges) and reuse it for every
+            # ticker -- no per-ticker exchange writes.
+            provider_exchange_id, exchange_id, canonical_exchange_code = (
+                self._resolve_provider_exchange(
+                    conn, provider_norm, provider_exchange_code
+                )
             )
             for row in rows:
                 code = _normalize_optional_text(row.get("Code") or row.get("code"))
                 if not code:
                     continue
                 bare_symbol = code.upper()
-                self._ensure_provider_exchange_row(
-                    conn,
-                    provider_norm,
-                    provider_exchange_code,
-                    canonical_exchange_code=(
-                        row.get("CanonicalExchangeCode")
-                        or row.get("canonical_exchange_code")
-                    ),
-                    name=row.get("Name") or row.get("name"),
-                    country=row.get("Country") or row.get("country"),
-                    currency=row.get("Currency") or row.get("currency"),
-                    operating_mic=row.get("OperatingMIC") or row.get("operating_mic"),
-                    country_iso2=row.get("CountryISO2") or row.get("country_iso2"),
-                    country_iso3=row.get("CountryISO3") or row.get("country_iso3"),
-                )
                 created = self._ensure_provider_listing(
                     conn,
-                    provider_norm,
-                    bare_symbol,
-                    exchange_code=provider_exchange_code,
+                    provider_norm=provider_norm,
+                    provider_exchange_id=provider_exchange_id,
+                    exchange_id=exchange_id,
+                    provider_exchange_code=provider_exchange_code,
+                    canonical_exchange_code=canonical_exchange_code,
+                    bare_symbol=bare_symbol,
                     currency=row.get("Currency") or row.get("currency"),
                     entity_name=row.get("Name") or row.get("name"),
                 )
@@ -398,15 +326,15 @@ class SupportedTickerRepository(SQLiteStore):
                     skipped_no_currency.append(bare_symbol)
                     continue
                 retained_tickers.append(bare_symbol)
+            retained = set(retained_tickers)
             existing_rows = conn.execute(
                 """
                 SELECT provider_listing_id, provider_symbol
                 FROM provider_listing
                 WHERE provider_exchange_id = ?
                 """,
-                (int(provider_exchange_row["provider_exchange_id"]),),
+                (provider_exchange_id,),
             ).fetchall()
-            retained = set(retained_tickers)
             to_delete = [
                 int(row["provider_listing_id"])
                 for row in existing_rows
@@ -415,6 +343,7 @@ class SupportedTickerRepository(SQLiteStore):
             self._delete_provider_listing_ids(conn, to_delete)
         return SupportedTickerRefreshResult(
             inserted=len(retained_tickers),
+            removed=len(to_delete),
             skipped_no_currency=tuple(skipped_no_currency),
         )
 
