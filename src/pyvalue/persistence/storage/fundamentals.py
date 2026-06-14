@@ -106,6 +106,19 @@ class FundamentalsRepository(SQLiteStore):
         listing_repo.initialize_schema()
         listing_updates: List[SecurityListingStatusRecord] = []
         with self._connect() as conn:
+            # Resolve the provider once. Each payload's provider_listing_id is
+            # then found by the provider_listing natural key
+            # (provider_exchange_id, provider_symbol) via its UNIQUE auto-index.
+            # The previous lookup filtered provider_listing_catalog on its
+            # *computed* provider_symbol (bare || '.' || exchange_code); a
+            # computed cross-table predicate can't use any index, so it scanned
+            # all ~75k listings per payload (~7.6 ms each). The natural-key seek
+            # is ~0.003 ms and, unlike a security_id lookup, stays unambiguous
+            # even if a listing is ever catalogued under two provider symbols
+            # (UNIQUE is on (provider_exchange_id, provider_symbol), not listing).
+            provider_id = self._provider_repo().resolve_id(
+                provider_norm, connection=conn
+            )
             rows = []
             skipped_uncatalogued: List[str] = []
             for update in updates:
@@ -118,13 +131,31 @@ class FundamentalsRepository(SQLiteStore):
                 # (creating a listing would mean writing listing.currency, which
                 # is NOT NULL with no fallback). A payload whose listing is absent
                 # from the catalog is skipped -- refresh the catalog first.
+                #
+                # provider_listing stores the *bare* provider_symbol; the catalog
+                # view is what appends '.' || provider_exchange_code to qualify
+                # it. Recover the bare form by stripping that exact suffix so the
+                # match hits the stored column directly. A missing provider
+                # (provider_id is None) makes px.provider_id = NULL match nothing,
+                # so every payload falls through to the skip path.
+                exchange_code = (update.provider_exchange_code or "").strip().upper()
+                suffix = f".{exchange_code}"
+                provider_ticker = (
+                    provider_symbol[: -len(suffix)]
+                    if exchange_code and provider_symbol.endswith(suffix)
+                    else provider_symbol
+                )
                 provider_listing_row = conn.execute(
                     """
-                    SELECT provider_listing_id
-                    FROM provider_listing_catalog
-                    WHERE provider = ? AND provider_symbol = ?
+                    SELECT pl.provider_listing_id
+                    FROM provider_listing pl
+                    JOIN provider_exchange px
+                      ON px.provider_exchange_id = pl.provider_exchange_id
+                    WHERE px.provider_id = ?
+                      AND px.provider_exchange_code = ?
+                      AND pl.provider_symbol = ?
                     """,
-                    (provider_norm, provider_symbol),
+                    (provider_id, exchange_code, provider_ticker),
                 ).fetchone()
                 if provider_listing_row is None:
                     skipped_uncatalogued.append(provider_symbol)

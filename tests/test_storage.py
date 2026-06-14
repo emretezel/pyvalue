@@ -816,6 +816,53 @@ def test_list_eligible_reads_base_tables_not_catalog_view(
         assert "JOIN provider_exchange px" in sql
 
 
+def test_fundamentals_upsert_resolves_via_base_tables_not_catalog_view(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "upsert-resolve-plan.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    # refresh-supported-tickers catalogs the listing the payload attaches to.
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "LSE",
+        [{"Code": "AAA", "Name": "AAA plc", "Type": "Common Stock", "Currency": "GBP"}],
+    )
+
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+
+    # Capture the SQL the write path runs. Resolving provider_listing_id must hit
+    # the base tables by the provider_listing natural key: routing it back through
+    # provider_listing_catalog would filter on the view's *computed*
+    # provider_symbol, which no index can serve (the slow path this replaced).
+    captured: list[str] = []
+    original_connect = fund_repo._connect
+
+    def _tracing_connect() -> sqlite3.Connection:
+        conn = original_connect()
+        conn.set_trace_callback(captured.append)
+        return conn
+
+    monkeypatch.setattr(fund_repo, "_connect", _tracing_connect)
+
+    fund_repo.upsert("EODHD", "AAA.LSE", {"General": {"Name": "AAA plc"}})
+
+    resolution_sql = [
+        sql
+        for sql in captured
+        if "provider_listing_id" in sql and "FROM provider_listing pl" in sql
+    ]
+    assert resolution_sql, "expected the provider_listing_id resolution SELECT"
+    for sql in resolution_sql:
+        assert "provider_listing_catalog" not in sql
+        assert "JOIN provider_exchange px" in sql
+
+    # The payload actually landed, proving the natural-key lookup matched the row
+    # (guards against the bare-symbol derivation regressing).
+    assert fund_repo.fetch("EODHD", "AAA.LSE") is not None
+
+
 def test_fundamentals_upsert_never_overwrites_listing_currency(tmp_path: Path) -> None:
     db_path = tmp_path / "fundamentals-currency-owner.db"
     repo = SupportedTickerRepository(db_path)
