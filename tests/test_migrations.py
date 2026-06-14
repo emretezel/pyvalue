@@ -1159,9 +1159,8 @@ def test_migration_creates_fundamentals_hot_path_indexes(tmp_path: Path) -> None
         raw_fks = conn.execute("PRAGMA foreign_key_list(fundamentals_raw)").fetchall()
         raw_fk_targets = {row[2] for row in raw_fks}
 
-    # ``idx_fundamentals_fetch_next`` and
-    # ``idx_fundamentals_raw_last_fetched`` were dropped by migration
-    # 067 as unused; see ``test_migration_067_drops_unused_indexes``.
+    # ``idx_fundamentals_fetch_next`` was dropped by migration 067 as unused; see
+    # ``test_migration_067_drops_unused_indexes``.
     assert "idx_fundamentals_fetch_next" not in state_index_names
     assert raw_columns == {
         "provider_listing_id",
@@ -1169,7 +1168,10 @@ def test_migration_creates_fundamentals_hot_path_indexes(tmp_path: Path) -> None
         "payload_hash",
         "last_fetched_at",
     }
-    assert "idx_fundamentals_raw_last_fetched" not in raw_index_names
+    # ``idx_fundamentals_raw_last_fetched`` was dropped by 067 but re-created by
+    # migration 079 once the ``_fetch_stale`` rewrite gave it a covering role for
+    # the stale-eligibility scan; see ``test_migration_079_*``.
+    assert "idx_fundamentals_raw_last_fetched" in raw_index_names
     assert "idx_fundamentals_raw_provider_fetched" not in raw_index_names
     assert "idx_fundamentals_raw_security" not in raw_index_names
     assert raw_fk_targets == {"provider_listing"}
@@ -1273,9 +1275,10 @@ def test_migration_drops_fundamentals_raw_listing_identity_columns(
         "payload_hash",
         "last_fetched_at",
     }
-    # ``idx_fundamentals_raw_last_fetched`` was dropped by migration
-    # 067; see ``test_migration_067_drops_unused_indexes``.
-    assert "idx_fundamentals_raw_last_fetched" not in index_names
+    # ``idx_fundamentals_raw_last_fetched`` was dropped by 067 but re-created by
+    # migration 079 (re-run at the tail of the full chain); see
+    # ``test_migration_079_*``.
+    assert "idx_fundamentals_raw_last_fetched" in index_names
     assert "idx_fundamentals_raw_security" not in index_names
     assert "idx_fundamentals_raw_provider_symbol" not in index_names
     assert row == (
@@ -1355,9 +1358,10 @@ def test_migration_drops_fundamentals_raw_currency_from_current_schema(
         "payload_hash",
         "last_fetched_at",
     }
-    # ``idx_fundamentals_raw_last_fetched`` was dropped by migration
-    # 067; see ``test_migration_067_drops_unused_indexes``.
-    assert "idx_fundamentals_raw_last_fetched" not in index_names
+    # ``idx_fundamentals_raw_last_fetched`` was dropped by 067 but re-created by
+    # migration 079 (re-run at the tail of the full chain); see
+    # ``test_migration_079_*``.
+    assert "idx_fundamentals_raw_last_fetched" in index_names
     assert row == (
         1,
         "{}",
@@ -3975,13 +3979,16 @@ def test_migration_066_idempotent(tmp_path: Path) -> None:
 # Indexes that migration 067 must drop. Audit found they were either
 # never picked by the optimizer or strictly covered by a PK / UNIQUE
 # auto-index. See the migration docstring for per-index rationale.
+# ``idx_fundamentals_raw_last_fetched`` was dropped here too, but migration 079
+# re-created it once the ``_fetch_stale`` rewrite gave the optimizer a reason to
+# seek on ``last_fetched_at`` again — so it is asserted as *retained* below, not
+# as part of this doomed set.
 _MIGRATION_067_DROPPED_INDEXES = frozenset(
     {
         "idx_fin_facts_concept",
         "idx_metric_compute_status_metric_status",
         "idx_metrics_metric_id",
         "idx_market_data_latest",
-        "idx_fundamentals_raw_last_fetched",
         "idx_market_data_fetch_next",
         "idx_listing_exchange",
         "idx_fundamentals_fetch_next",
@@ -3996,6 +4003,10 @@ _MIGRATION_067_DROPPED_INDEXES = frozenset(
 # migration 077 (degenerate partial index — ``listing.currency`` became NOT
 # NULL, so it spanned every row and no read path used it). Neither is part of
 # the head set; see ``test_migration_076_*`` and ``test_migration_077_*``.
+# ``idx_fundamentals_raw_last_fetched`` was dropped by 067 but re-created by
+# migration 079 (the ``_fetch_stale`` rewrite made it the covering index for the
+# stale-eligibility scan), so it must survive the full chain; see
+# ``test_migration_079_*``.
 _MIGRATION_067_RETAINED_INDEXES = frozenset(
     {
         "idx_fin_facts_security_concept_latest",
@@ -4004,6 +4015,7 @@ _MIGRATION_067_RETAINED_INDEXES = frozenset(
         "idx_fx_supported_pairs_refreshable",
         "idx_issuer_name_country",
         "idx_provider_listing_listing",
+        "idx_fundamentals_raw_last_fetched",
     }
 )
 
@@ -4129,6 +4141,46 @@ def test_migration_077_drops_listing_currency_index(tmp_path: Path) -> None:
 
 def test_migration_077_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "drop-listing-currency-index-077-idempotent.sqlite"
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0
+
+
+# ---------------------------------------------------------------------------
+# Migration 079 — re-create idx_fundamentals_raw_last_fetched
+# ---------------------------------------------------------------------------
+
+
+def test_migration_079_readds_last_fetched_index(tmp_path: Path) -> None:
+    db_path = tmp_path / "readd-last-fetched-index-079.sqlite"
+
+    applied = apply_migrations(db_path)
+    assert applied == len(MIGRATIONS)
+
+    with sqlite3.connect(db_path) as conn:
+        index_names = {
+            row[1]
+            for row in conn.execute("PRAGMA index_list(fundamentals_raw)").fetchall()
+        }
+        # PRAGMA index_info rows are (seqno, cid, column_name).
+        indexed_columns = {
+            row[2]
+            for row in conn.execute(
+                "PRAGMA index_info(idx_fundamentals_raw_last_fetched)"
+            ).fetchall()
+        }
+
+    # Migration 067 dropped this index; migration 079 re-created it once the
+    # ``_fetch_stale`` rewrite made ``(last_fetched_at)`` the covering index for
+    # the stale-eligibility scan (it filters and orders by that column).
+    assert "idx_fundamentals_raw_last_fetched" in index_names
+    assert indexed_columns == {"last_fetched_at"}
+
+
+def test_migration_079_idempotent(tmp_path: Path) -> None:
+    db_path = tmp_path / "readd-last-fetched-index-079-idempotent.sqlite"
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
 

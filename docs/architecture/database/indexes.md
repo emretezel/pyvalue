@@ -16,7 +16,11 @@ This page lists the current secondary indexes from the post-refactor schema. Pri
 
 ## Raw Ingestion And State
 
-- Migration 067 dropped `idx_fundamentals_raw_last_fetched`, `idx_fundamentals_fetch_next`, and `idx_market_data_fetch_next`. All three tables are reached through `provider_listing_catalog` joins and resolved via PK in the join plan; no scan uses `last_fetched_at` or `next_eligible_at` as the leading predicate.
+- `fundamentals_raw`
+  - `idx_fundamentals_raw_last_fetched (last_fetched_at)`
+    - serves the stale-eligibility scan (`_fetch_stale`), which filters `WHERE last_fetched_at <= ?` and orders by `last_fetched_at`. As the covering index for that branch it reads the timestamp without cracking the wide `data` blob (which spills to overflow pages, with `last_fetched_at` stored after it) — ~16 s → ~0.1 s on the live ~75.8k-row DB.
+    - Dropped by migration 067 (then unused: `_fetch_stale` reached `fundamentals_raw` via PK through `provider_listing_catalog`) and re-created by migration 079 after that branch was rewritten to drive `FROM fundamentals_raw fr`.
+- Migration 067 dropped `idx_fundamentals_fetch_next` and `idx_market_data_fetch_next`: both fetch-state tables are reached via PK in joins, so no scan uses `next_eligible_at` as the leading predicate.
 
 ## Canonical Analytics
 
@@ -50,5 +54,5 @@ This page lists the current secondary indexes from the post-refactor schema. Pri
 
 ## Review Notes
 
-- Migration 067 removed eight secondary indexes (idx_fin_facts_concept, idx_metric_compute_status_metric_status, idx_metrics_metric_id, idx_market_data_latest, idx_fundamentals_raw_last_fetched, idx_market_data_fetch_next, idx_listing_exchange, idx_fundamentals_fetch_next) that the post-audit index review confirmed were unused or strictly covered by a PK / UNIQUE auto-index. Combined they reclaimed roughly 3.4 GB on disk and removed write amplification from the hottest write paths (`financial_facts` ingest, `metrics` and `metric_compute_status` rewrites).
-- `sqlite_stat1` is currently empty — running `ANALYZE;` once after the migration applies gives the optimizer real statistics for the six retained indexes.
+- Migration 067 removed eight secondary indexes (idx_fin_facts_concept, idx_metric_compute_status_metric_status, idx_metrics_metric_id, idx_market_data_latest, idx_fundamentals_raw_last_fetched, idx_market_data_fetch_next, idx_listing_exchange, idx_fundamentals_fetch_next) that the post-audit index review confirmed were unused or strictly covered by a PK / UNIQUE auto-index. Combined they reclaimed roughly 3.4 GB on disk and removed write amplification from the hottest write paths (`financial_facts` ingest, `metrics` and `metric_compute_status` rewrites). Migration 079 later re-created one of them, `idx_fundamentals_raw_last_fetched` (~4 MB), after the `_fetch_stale` rewrite made `last_fetched_at` a first-class filter/sort predicate; the other seven remain retired.
+- `sqlite_stat1` is currently empty — running `ANALYZE;` once after the migration applies gives the optimizer real statistics for the seven retained indexes.

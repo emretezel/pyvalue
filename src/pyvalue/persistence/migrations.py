@@ -8238,6 +8238,50 @@ def _migration_078_backfill_unknown_listing_status(
     conn.execute("DROP TABLE IF EXISTS _migration_078_classification")
 
 
+def _migration_079_readd_fundamentals_raw_last_fetched_index(
+    conn: sqlite3.Connection,
+) -> None:
+    """Re-create ``idx_fundamentals_raw_last_fetched (last_fetched_at)``.
+
+    Migration 067 dropped this index as "unused", and at the time it genuinely
+    was: ``_fetch_stale`` (the stale-eligibility branch of
+    ``SupportedTickerRepository.list_eligible_for_fundamentals``) drove from
+    ``provider_listing_catalog`` and reached ``fundamentals_raw`` by its INTEGER
+    PRIMARY KEY, so the optimizer never had a reason to seek on
+    ``last_fetched_at``.
+
+    That rationale no longer holds. The fundamentals-eligibility refactor
+    rewrote ``_fetch_stale`` to drive ``FROM fundamentals_raw fr`` with
+    ``WHERE fr.last_fetched_at <= ?`` and ``ORDER BY fr.last_fetched_at`` — a
+    first-class range filter plus sort on that column. Without the index the
+    planner must instead scan every provider listing and probe each
+    ``fundamentals_raw`` row by PK, and because ``last_fetched_at`` is stored
+    *after* the very wide ``data`` JSON blob (which spills to overflow pages),
+    reading just the timestamp walks each row's overflow chain. On the live
+    ~75.8k-row database that default ``--max-age-days 30`` scan took ~16 s.
+
+    With this index the planner switches to a covering scan of
+    ``(last_fetched_at)`` for both the filter and the ordering — never touching
+    the ``data`` blob — which measured ~16 s -> ~0.1 s (~170x). The write-side
+    cost is negligible: one compact key per ``fundamentals_raw`` upsert, ~4 MB
+    total, versus the multi-gigabyte payload column it sits beside.
+
+    ``CREATE INDEX IF NOT EXISTS`` keeps the migration idempotent and
+    re-runnable; the ``_table_exists`` guard lets it no-op on the minimal
+    schemas used by isolated migration tests (where ``fundamentals_raw`` may
+    not have been created).
+    """
+
+    if not _table_exists(conn, "fundamentals_raw"):
+        return
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fundamentals_raw_last_fetched
+        ON fundamentals_raw(last_fetched_at)
+        """
+    )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -8317,6 +8361,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_076_drop_provider_exchange_exchange_index,
     _migration_077_drop_listing_currency_index,
     _migration_078_backfill_unknown_listing_status,
+    _migration_079_readd_fundamentals_raw_last_fetched_index,
 ]
 
 
