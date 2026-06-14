@@ -10,7 +10,7 @@ import pytest
 from pyvalue.cli import (
     _resolve_canonical_scope_symbols,
     _resolve_database_path,
-    _resolve_provider_scope_rows,
+    _resolve_provider_scope,
     _validate_scope_selector,
 )
 from pyvalue.persistence.storage import SupportedTickerRepository
@@ -98,7 +98,7 @@ def test_resolve_canonical_scope_symbols_defaults_to_all_supported(
     assert exchanges is None
 
 
-def test_resolve_provider_scope_rows_defaults_to_all_supported(tmp_path: Path) -> None:
+def test_resolve_provider_scope_defaults_to_all_supported(tmp_path: Path) -> None:
     repo = SupportedTickerRepository(tmp_path / "provider-scope.db")
     repo.initialize_schema()
     seed_exchange(tmp_path / "provider-scope.db", "US")
@@ -122,7 +122,7 @@ def test_resolve_provider_scope_rows_defaults_to_all_supported(tmp_path: Path) -
         ],
     )
 
-    rows, symbols, exchanges = _resolve_provider_scope_rows(
+    count, symbols, exchanges = _resolve_provider_scope(
         str(tmp_path / "provider-scope.db"),
         provider="EODHD",
         symbols=None,
@@ -130,6 +130,6 @@ def test_resolve_provider_scope_rows_defaults_to_all_supported(tmp_path: Path) -
         all_supported=False,
     )
 
-    assert [row.symbol for row in rows] == ["AAA.US"]
+    assert count == 1
     assert symbols is None
     assert exchanges is None

@@ -52,7 +52,7 @@ from ._common import (
     _reconcile_eodhd_listing_scope,
     _require_eodhd_key,
     _resolve_database_path,
-    _resolve_provider_scope_rows,
+    _resolve_provider_scope,
     _safe_eodhd_quota_snapshot,
     _scope_label,
     _summarize_progress_breakdown,
@@ -84,7 +84,7 @@ def cmd_reconcile_listing_status(
         )
 
     db_path = _resolve_database_path(database)
-    scope_rows, symbol_filters, resolved_exchange_codes = _resolve_provider_scope_rows(
+    scope_count, symbol_filters, resolved_exchange_codes = _resolve_provider_scope(
         str(db_path),
         provider_norm,
         symbols,
@@ -104,7 +104,7 @@ def cmd_reconcile_listing_status(
     print("EODHD listing-status reconciliation")
     print(f"Database: {db_path}")
     print(f"Scope: {scope_label}")
-    print(f"Supported tickers in scope: {len(scope_rows)}")
+    print(f"Supported tickers in scope: {scope_count}")
     print(f"Listings classified: {len(updates)}")
     print(f"Primary listings classified: {primary_updates}")
     print(f"Secondary listings classified: {secondary_updates}")

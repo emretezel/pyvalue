@@ -34,7 +34,7 @@ from ._common import (
     _reconcile_eodhd_listing_scope,  # noqa: F401
     _resolve_canonical_scope_symbols,
     _resolve_database_path,
-    _resolve_provider_scope_rows,
+    _resolve_provider_scope,
     _resolve_ticker_target_currency,
     _validate_scope_selector,
 )
@@ -138,7 +138,7 @@ __all__ = [
     "_ProfiledComputedMetricsBatchResult",
     "_resolve_canonical_scope_symbols",
     "_resolve_database_path",
-    "_resolve_provider_scope_rows",
+    "_resolve_provider_scope",
     "_resolve_ticker_target_currency",
     "_validate_scope_selector",
     "_RateLimiter",

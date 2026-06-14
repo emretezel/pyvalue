@@ -415,6 +415,45 @@ class SupportedTickerRepository(SQLiteStore):
             rows = conn.execute(" ".join(query), params).fetchall()
         return [SupportedTicker(*row) for row in rows]
 
+    def count_for_provider(
+        self,
+        provider: str,
+        exchange_codes: Optional[Sequence[str]] = None,
+        provider_symbols: Optional[Sequence[str]] = None,
+        *,
+        primary_only: bool = False,
+    ) -> int:
+        """Count supported tickers for a provider within an optional scope.
+
+        Applies the same provider/exchange/symbol filters as
+        :meth:`list_for_provider` but returns only the row count. Callers that
+        need a scope *size* for reporting (e.g. ``reconcile-listing-status``'s
+        summary line) use this instead of hydrating every ``SupportedTicker``
+        across the 6-table catalog view just to call ``len()`` on the result.
+        """
+        self.initialize_schema()
+        provider_norm = provider.strip().upper()
+        params: List[object] = [provider_norm]
+        catalog_view = _provider_listing_catalog_view(primary_only=primary_only)
+        query = [
+            "SELECT COUNT(*)",
+            f"FROM {catalog_view} catalog",
+            "WHERE catalog.provider = ?",
+        ]
+        normalized_codes = _normalized_codes(exchange_codes)
+        if normalized_codes:
+            placeholders = ", ".join("?" for _ in normalized_codes)
+            query.append(f"AND catalog.provider_exchange_code IN ({placeholders})")
+            params.extend(normalized_codes)
+        normalized_symbols = _normalized_codes(provider_symbols)
+        if normalized_symbols:
+            placeholders = ", ".join("?" for _ in normalized_symbols)
+            query.append(f"AND catalog.provider_symbol IN ({placeholders})")
+            params.extend(normalized_symbols)
+        with self._connect() as conn:
+            row = conn.execute(" ".join(query), params).fetchone()
+        return int(row[0]) if row is not None else 0
+
     def list_symbols_by_exchange(
         self,
         provider: str,

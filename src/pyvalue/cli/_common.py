@@ -445,7 +445,7 @@ def _reconcile_eodhd_listing_scope(
     return updates
 
 
-def _resolve_provider_scope_rows(
+def _resolve_provider_scope(
     database: str,
     provider: str,
     symbols: Optional[Sequence[str]],
@@ -453,7 +453,18 @@ def _resolve_provider_scope_rows(
     all_supported: bool,
     *,
     primary_only: bool = False,
-) -> Tuple[List["SupportedTicker"], Optional[List[str]], Optional[List[str]]]:
+) -> Tuple[int, Optional[List[str]], Optional[List[str]]]:
+    """Validate a scope selector and resolve it to a count plus filters.
+
+    Returns ``(supported_ticker_count, symbol_filters, exchange_filters)``,
+    raising :class:`SystemExit` for an unsupported symbol or an empty scope. The
+    count is derived without hydrating the full ``SupportedTicker`` rows -- the
+    summary-line callers (``reconcile-listing-status``, ``update-market-data``)
+    only need the size, so they avoid materialising every row across the 6-table
+    catalog view. The one caller that needs the rows (normalize) re-fetches them
+    via :meth:`SupportedTickerRepository.list_for_provider` using the returned
+    filters.
+    """
     provider_norm = _normalize_provider(provider)
     symbol_filters, exchange_filters = _validate_scope_selector(
         symbols, exchange_codes, all_supported
@@ -481,12 +492,12 @@ def _resolve_provider_scope_rows(
             # Read classification from the cache; only ingest-fundamentals and
             # reconcile-listing-status (re)derive it. The validation below trusts
             # the stored status, which migration 078 guarantees is resolved.
-            rows = ticker_repo.list_for_provider(
+            primary_rows = ticker_repo.list_for_provider(
                 provider_norm,
                 provider_symbols=normalized_symbols,
                 primary_only=True,
             )
-            primary_found = {row.symbol.upper() for row in rows}
+            primary_found = {row.symbol.upper() for row in primary_rows}
             secondary = [
                 symbol for symbol in normalized_symbols if symbol not in primary_found
             ]
@@ -495,14 +506,16 @@ def _resolve_provider_scope_rows(
                     "Secondary listings are excluded for provider EODHD once raw "
                     f"fundamentals classification is available: {', '.join(secondary)}"
                 )
-        return rows, normalized_symbols, None
+        # Every requested symbol is supported (and primary when primary_only),
+        # so the scope size is exactly the number of requested symbols.
+        return len(normalized_symbols), normalized_symbols, None
 
-    rows = ticker_repo.list_for_provider(
+    count = ticker_repo.count_for_provider(
         provider_norm,
         exchange_codes=exchange_filters,
         primary_only=primary_only and provider_norm == "EODHD",
     )
-    if not rows:
+    if count == 0:
         scope_label = (
             ", ".join(exchange_filters) if exchange_filters else "all supported tickers"
         )
@@ -515,7 +528,7 @@ def _resolve_provider_scope_rows(
             f"No supported tickers found for provider {provider_norm} in scope {scope_label}. "
             f"{_catalog_bootstrap_guidance(provider_norm)}"
         )
-    return rows, None, exchange_filters
+    return count, None, exchange_filters
 
 
 def _resolve_canonical_scope_symbols(

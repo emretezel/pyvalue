@@ -50,7 +50,7 @@ from ._common import (
     _extract_entity_sector_from_eodhd,
     _normalize_provider,
     _resolve_database_path,
-    _resolve_provider_scope_rows,
+    _resolve_provider_scope,
     _resolve_ticker_target_currency,
 )
 from ._batch import (
@@ -81,12 +81,22 @@ def cmd_normalize_fundamentals_stage(
 
     db_path = _resolve_database_path(database)
     provider_norm = _normalize_provider(provider)
-    scope_rows, _, _ = _resolve_provider_scope_rows(
+    _, symbol_filters, exchange_filters = _resolve_provider_scope(
         str(db_path),
         provider_norm,
         symbols,
         exchange_codes,
         all_supported,
+        primary_only=provider_norm == "EODHD",
+    )
+    # Normalize genuinely needs the per-listing symbols (to intersect with the
+    # raw fundamentals it has on hand), so it fetches the rows itself from the
+    # resolved filters rather than forcing the scope resolver to hydrate them.
+    ticker_repo = SupportedTickerRepository(db_path)
+    scope_rows = ticker_repo.list_for_provider(
+        provider_norm,
+        exchange_codes=exchange_filters,
+        provider_symbols=symbol_filters,
         primary_only=provider_norm == "EODHD",
     )
     fund_repo = FundamentalsRepository(db_path)

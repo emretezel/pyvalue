@@ -57,18 +57,22 @@ class SecurityListingStatusRepository(SQLiteStore):
         security_id: int,
         provider_symbol: str,
         raw_fetched_at: str,
-        payload: Mapping[str, Any],
+        primary_ticker: Optional[str],
     ) -> SecurityListingStatusRecord:
+        """Classify one listing as primary/secondary from its EODHD PrimaryTicker.
+
+        ``primary_ticker`` is the raw ``General.PrimaryTicker`` value already
+        extracted from the stored payload -- by SQL ``json_extract`` on the
+        reconcile path, or by dict access on the ingest path. Extraction lives in
+        the callers so reconcile never has to load the full ~228 KB payload per
+        listing just to read this one field; the classification rule lives here,
+        in one place, regardless of where the ticker came from.
+        """
         provider_symbol_norm = _normalize_qualified_symbol(provider_symbol)
         if provider_symbol_norm is None:
             raise ValueError(f"provider_symbol must be qualified: {provider_symbol}")
 
-        general = payload.get("General") if isinstance(payload, Mapping) else None
-        primary_provider_symbol = (
-            _normalize_qualified_symbol(general.get("PrimaryTicker"))
-            if isinstance(general, Mapping)
-            else None
-        )
+        primary_provider_symbol = _normalize_qualified_symbol(primary_ticker)
         classification_basis: Literal[
             "matched_primary_ticker",
             "different_primary_ticker",
@@ -149,12 +153,19 @@ class SecurityListingStatusRepository(SQLiteStore):
                 payload = json.loads(update.data)
             except (TypeError, ValueError):
                 payload = {}
+            # The ingest path already holds the parsed payload in memory, so it
+            # reads General.PrimaryTicker directly (the reconcile path extracts
+            # the same field in SQL); both feed the shared classifier below.
+            general = payload.get("General") if isinstance(payload, Mapping) else None
+            primary_ticker = (
+                general.get("PrimaryTicker") if isinstance(general, Mapping) else None
+            )
             records.append(
                 self._build_status_record(
                     security_id=update.security_id,
                     provider_symbol=update.provider_symbol,
                     raw_fetched_at=update.last_fetched_at,
-                    payload=payload if isinstance(payload, Mapping) else {},
+                    primary_ticker=primary_ticker,
                 )
             )
         self.upsert_many(records, connection=connection)
@@ -176,62 +187,82 @@ class SecurityListingStatusRepository(SQLiteStore):
             {int(security_id) for security_id in security_ids or () if security_id}
         )
 
+        # Query the base catalog tables directly instead of the 6-table
+        # ``provider_listing_catalog`` view. Reconcile only needs the listing id,
+        # the composed provider symbol, and ``General.PrimaryTicker``; the view's
+        # ``listing``/``issuer``/``exchange`` joins contribute no consumed column
+        # (FKs guarantee those inner joins never drop rows), and the view's SEC
+        # ``||'.US'`` branch never applies because reconcile is EODHD-only.
+        # ``PrimaryTicker`` is pulled with ``json_extract`` so each ~228 KB raw
+        # payload is parsed inside SQLite and never crosses into Python.
         def _select_rows(
             conn: sqlite3.Connection,
             *,
             symbols_chunk: Optional[Sequence[str]] = None,
             security_chunk: Optional[Sequence[int]] = None,
-        ) -> List[sqlite3.Row]:
+        ) -> sqlite3.Cursor:
             params: List[Any] = [provider_norm]
             query = [
-                "SELECT catalog.security_id, catalog.provider_symbol, fr.last_fetched_at, fr.data",
+                "SELECT pl.listing_id AS security_id,",
+                "  pl.provider_symbol || '.' || px.provider_exchange_code"
+                " AS provider_symbol,",
+                "  fr.last_fetched_at AS last_fetched_at,",
+                "  json_extract(fr.data, '$.General.PrimaryTicker') AS primary_ticker",
                 "FROM fundamentals_raw fr",
-                "JOIN provider_listing_catalog catalog",
-                "  ON catalog.provider_listing_id = fr.provider_listing_id",
-                "WHERE catalog.provider = ?",
+                "JOIN provider_listing pl"
+                "  ON pl.provider_listing_id = fr.provider_listing_id",
+                "JOIN provider_exchange px"
+                "  ON px.provider_exchange_id = pl.provider_exchange_id",
+                "JOIN provider p ON p.provider_id = px.provider_id",
+                "WHERE p.provider_code = ?",
             ]
             if normalized_exchanges:
                 placeholders = ", ".join("?" for _ in normalized_exchanges)
-                query.append(f"AND catalog.provider_exchange_code IN ({placeholders})")
+                query.append(f"AND px.provider_exchange_code IN ({placeholders})")
                 params.extend(normalized_exchanges)
             if symbols_chunk:
                 placeholders = ", ".join("?" for _ in symbols_chunk)
-                query.append(f"AND catalog.provider_symbol IN ({placeholders})")
+                query.append(
+                    "AND (pl.provider_symbol || '.' || px.provider_exchange_code)"
+                    f" IN ({placeholders})"
+                )
                 params.extend(symbols_chunk)
             if security_chunk:
                 placeholders = ", ".join("?" for _ in security_chunk)
-                query.append(f"AND catalog.security_id IN ({placeholders})")
+                query.append(f"AND pl.listing_id IN ({placeholders})")
                 params.extend(security_chunk)
-            query.append("ORDER BY catalog.provider_symbol ASC")
-            return conn.execute(" ".join(query), params).fetchall()
+            # Keep the sorted return contract (a test and callers rely on it); the
+            # composed symbol is not indexable, but sorting the tiny projected
+            # rows is cheap next to the raw-payload read.
+            query.append("ORDER BY provider_symbol ASC")
+            return conn.execute(" ".join(query), params)
 
-        fetched_rows: List[sqlite3.Row] = []
+        records: List[SecurityListingStatusRecord] = []
+
+        def _consume(cursor: sqlite3.Cursor) -> None:
+            # Stream the cursor: with only the four small columns projected, at
+            # most one row is materialised at a time and the raw payloads never
+            # accumulate in Python memory.
+            for row in cursor:
+                records.append(
+                    self._build_status_record(
+                        security_id=int(row["security_id"]),
+                        provider_symbol=str(row["provider_symbol"]),
+                        raw_fetched_at=str(row["last_fetched_at"]),
+                        primary_ticker=row["primary_ticker"],
+                    )
+                )
+
         with self._connect() as conn:
             if normalized_symbols:
                 for symbol_chunk in _batched(normalized_symbols, chunk_size):
-                    fetched_rows.extend(_select_rows(conn, symbols_chunk=symbol_chunk))
+                    _consume(_select_rows(conn, symbols_chunk=symbol_chunk))
             elif normalized_security_ids:
                 for security_chunk in _batched(normalized_security_ids, chunk_size):
-                    fetched_rows.extend(
-                        _select_rows(conn, security_chunk=security_chunk)
-                    )
+                    _consume(_select_rows(conn, security_chunk=security_chunk))
             else:
-                fetched_rows.extend(_select_rows(conn))
+                _consume(_select_rows(conn))
 
-        records: List[SecurityListingStatusRecord] = []
-        for row in fetched_rows:
-            try:
-                payload = json.loads(row["data"])
-            except (TypeError, ValueError):
-                payload = {}
-            records.append(
-                self._build_status_record(
-                    security_id=int(row["security_id"]),
-                    provider_symbol=str(row["provider_symbol"]),
-                    raw_fetched_at=str(row["last_fetched_at"]),
-                    payload=payload if isinstance(payload, Mapping) else {},
-                )
-            )
         self.upsert_many(records)
         return records
 

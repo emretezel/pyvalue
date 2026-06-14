@@ -49,7 +49,7 @@ from ._common import (
     _parse_exchange_filters,
     _require_eodhd_key,
     _resolve_database_path,
-    _resolve_provider_scope_rows,
+    _resolve_provider_scope,
     _safe_eodhd_quota_snapshot,
     _scope_label,
     _summarize_progress_breakdown,
@@ -367,7 +367,7 @@ def cmd_update_market_data_stage(
     if provider_norm != "EODHD":
         raise SystemExit("update-market-data currently only supports provider=EODHD.")
 
-    _, symbol_filters, resolved_exchange_codes = _resolve_provider_scope_rows(
+    _, symbol_filters, resolved_exchange_codes = _resolve_provider_scope(
         str(db_path),
         provider_norm,
         symbols,

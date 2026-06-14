@@ -1669,6 +1669,88 @@ def test_supported_ticker_repository_primary_only_filters_secondary_listings(
     ]
 
 
+def test_supported_ticker_repository_count_for_provider_matches_list(
+    tmp_path: Path,
+) -> None:
+    """count_for_provider returns the scope size without hydrating rows.
+
+    It must agree with ``len(list_for_provider(...))`` for every scope -- the
+    whole point is that ``reconcile-listing-status`` (and ``update-market-data``)
+    can report the supported-ticker count without materialising every row across
+    the 6-table catalog view. Same primary/secondary fixture as the test above:
+    AAA.US (primary), AAA.LSE (secondary of AAA.US), BBB.LSE (primary; no
+    PrimaryTicker), i.e. 3 listings total, 2 primary.
+    """
+    db_path = tmp_path / "count-for-provider.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    seed_exchange(db_path, "US", "LSE")
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock", "Currency": "USD"}],
+    )
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "LSE",
+        [
+            {
+                "Code": "AAA",
+                "Name": "AAA plc",
+                "Type": "Common Stock",
+                "Currency": "GBX",
+            },
+            {
+                "Code": "BBB",
+                "Name": "BBB plc",
+                "Type": "Common Stock",
+                "Currency": "GBX",
+            },
+        ],
+    )
+
+    fundamentals = FundamentalsRepository(db_path)
+    fundamentals.initialize_schema()
+    fundamentals.upsert(
+        "EODHD", "AAA.US", {"General": {"PrimaryTicker": "AAA.US"}}, exchange="US"
+    )
+    fundamentals.upsert(
+        "EODHD", "AAA.LSE", {"General": {"PrimaryTicker": "AAA.US"}}, exchange="LSE"
+    )
+    fundamentals.upsert(
+        "EODHD", "BBB.LSE", {"General": {"Name": "BBB plc"}}, exchange="LSE"
+    )
+
+    # Equivalence with the row-hydrating method across every scope shape.
+    assert ticker_repo.count_for_provider("EODHD") == len(
+        ticker_repo.list_for_provider("EODHD")
+    )
+    assert ticker_repo.count_for_provider("EODHD", primary_only=True) == len(
+        ticker_repo.list_for_provider("EODHD", primary_only=True)
+    )
+    assert ticker_repo.count_for_provider("EODHD", exchange_codes=["LSE"]) == len(
+        ticker_repo.list_for_provider("EODHD", exchange_codes=["LSE"])
+    )
+    assert ticker_repo.count_for_provider("EODHD", provider_symbols=["AAA.US"]) == len(
+        ticker_repo.list_for_provider("EODHD", provider_symbols=["AAA.US"])
+    )
+
+    # Absolute counts so the equivalence above cannot pass vacuously.
+    assert ticker_repo.count_for_provider("EODHD") == 3
+    assert ticker_repo.count_for_provider("EODHD", primary_only=True) == 2
+    assert ticker_repo.count_for_provider("EODHD", exchange_codes=["LSE"]) == 2
+    assert (
+        ticker_repo.count_for_provider(
+            "EODHD", exchange_codes=["LSE"], primary_only=True
+        )
+        == 1
+    )
+
+    # Absent exchange -> empty scope: count 0, matching an empty row list.
+    assert ticker_repo.count_for_provider("EODHD", exchange_codes=["XETRA"]) == 0
+    assert ticker_repo.list_for_provider("EODHD", exchange_codes=["XETRA"]) == []
+
+
 def test_market_data_fetch_state_repository_tracks_success_and_failure(
     tmp_path: Path,
 ) -> None:
