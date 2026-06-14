@@ -909,77 +909,115 @@ class SupportedTickerRepository(SQLiteStore):
     ) -> List[SupportedTicker]:
         """Return supported tickers eligible for a market-data refresh.
 
-        Audit P3 #14: the previous form materialised
-        ``SELECT listing_id, MAX(as_of) FROM market_data GROUP BY listing_id``
-        as a derived subquery and joined the result against the catalog,
-        which forced a full scan of ``market_data`` (~6.8M rows on the
-        live DB) regardless of how narrow the provider/exchange/symbol
-        scope was.
+        Mirrors :meth:`list_eligible_for_fundamentals`: the provider is resolved
+        once so the eligibility query reads straight from the base tables
+        (``provider_listing`` + ``provider_exchange`` + ``listing``) instead of
+        the six-table ``provider_listing_catalog`` view. ``security_id`` is just
+        ``provider_listing.listing_id`` and ``currency`` comes from
+        ``listing.currency`` (NOT NULL); the issuer/exchange joins the view adds
+        only feed metadata this command never reads, so they fall away.
 
-        The query now scopes the catalog *first* and uses a correlated
-        ``(SELECT MAX(as_of) FROM market_data WHERE listing_id = ?)``
-        probe per scoped row. The probe is served by the
-        ``market_data`` PK ``(listing_id, as_of)`` — SQLite traverses
-        the index backwards for the ``MAX``, so each probe is a single
-        index seek and total work scales with the scoped catalog size
-        rather than the full ``market_data`` row count. The probe is
-        computed once via an inline subquery and then both filtered on
-        and ordered by in the outer ``WHERE`` / ``ORDER BY``, so the
-        planner doesn't run it multiple times per row.
+        Freshness is the latest stored ``market_data.as_of`` per listing,
+        computed by a correlated ``(SELECT MAX(as_of) ... WHERE listing_id = ?)``
+        probe served backwards by the ``market_data`` PK ``(listing_id, as_of)``
+        -- one index seek per scoped row. The probe lives in a
+        ``WITH ... AS MATERIALIZED`` CTE so SQLite evaluates it exactly once per
+        row: without the materialisation barrier the planner flattens the
+        subquery and re-runs the probe for every reference in the outer
+        ``WHERE`` / ``ORDER BY``.
         """
 
         self.initialize_schema()
         provider_norm = provider.strip().upper()
+        # Resolve the provider once so the CTE can filter on
+        # provider_exchange.provider_id and avoid the catalog view entirely.
+        provider_id = self._provider_repo().resolve_id(provider_norm)
+        if provider_id is None:
+            return []
         now = datetime.now(timezone.utc)
         cutoff = (now.date() - timedelta(days=max_age_days)).isoformat()
-        params: List[object] = [provider_norm]
-        catalog_view = _provider_listing_catalog_view(primary_only=primary_only)
-        inner = [
-            f"SELECT {self._catalog_select_columns('catalog')},",
-            "(SELECT MAX(as_of) FROM market_data "
-            "WHERE listing_id = catalog.security_id) AS latest_as_of,",
-            "ms.next_eligible_at AS next_eligible_at",
-            f"FROM {catalog_view} catalog",
-            "LEFT JOIN market_data_fetch_state ms "
-            "ON ms.provider_listing_id = catalog.provider_listing_id",
-            "WHERE catalog.provider = ?",
-        ]
         normalized_codes = _normalized_codes(exchange_codes)
+        normalized_symbols = _normalized_codes(provider_symbols)
+
+        # Rebuild the catalog's qualified provider_symbol from base columns so
+        # scope filtering and ordering stay identical to the view. SEC symbols
+        # are implicitly US-listed; every other provider qualifies by its
+        # provider exchange code.
+        if provider_norm == "SEC":
+            qualified_symbol = "(pl.provider_symbol || '.US')"
+        else:
+            qualified_symbol = (
+                "(pl.provider_symbol || '.' || px.provider_exchange_code)"
+            )
+
+        params: List[object] = [provider_id]
+        inner = [
+            "SELECT",
+            "px.provider_exchange_code AS provider_exchange_code,",
+            f"{qualified_symbol} AS provider_symbol,",
+            "pl.provider_symbol AS provider_ticker,",
+            "pl.listing_id AS security_id,",
+            "l.currency AS currency,",
+            "(SELECT MAX(as_of) FROM market_data "
+            "WHERE listing_id = pl.listing_id) AS latest_as_of,",
+            "ms.next_eligible_at AS next_eligible_at",
+            "FROM provider_listing pl",
+            "JOIN provider_exchange px "
+            "ON px.provider_exchange_id = pl.provider_exchange_id",
+            "JOIN listing l ON l.listing_id = pl.listing_id",
+            "LEFT JOIN market_data_fetch_state ms "
+            "ON ms.provider_listing_id = pl.provider_listing_id",
+            "WHERE px.provider_id = ?",
+        ]
+        if primary_only:
+            # primary_listing_status lives on the listing, so the secondary
+            # exclusion needs no view (matches primary_provider_listing_catalog).
+            inner.append("AND l.primary_listing_status != 'secondary'")
         if normalized_codes:
             placeholders = ", ".join("?" for _ in normalized_codes)
-            inner.append(f"AND catalog.provider_exchange_code IN ({placeholders})")
+            inner.append(f"AND px.provider_exchange_code IN ({placeholders})")
             params.extend(normalized_codes)
-        normalized_symbols = _normalized_codes(provider_symbols)
         if normalized_symbols:
             placeholders = ", ".join("?" for _ in normalized_symbols)
-            inner.append(f"AND catalog.provider_symbol IN ({placeholders})")
+            inner.append(f"AND {qualified_symbol} IN ({placeholders})")
             params.extend(normalized_symbols)
-        select_columns = ", ".join(
-            f"sub.{col.split('.', 1)[1]}"
-            for col in self._catalog_select_columns("catalog").split(", ")
-        )
+
         outer = [
-            f"SELECT {select_columns}",
-            "FROM (" + " ".join(inner) + ") AS sub",
-            "WHERE (sub.latest_as_of IS NULL OR sub.latest_as_of <= ?)",
+            "WITH eligible AS MATERIALIZED (",
+            " ".join(inner),
+            ")",
+            "SELECT provider_exchange_code, provider_symbol, provider_ticker, "
+            "security_id, currency",
+            "FROM eligible",
+            "WHERE (latest_as_of IS NULL OR latest_as_of <= ?)",
         ]
         params.append(cutoff)
         if respect_backoff:
-            outer.append(
-                "AND (sub.next_eligible_at IS NULL OR sub.next_eligible_at <= ?)"
-            )
+            outer.append("AND (next_eligible_at IS NULL OR next_eligible_at <= ?)")
             params.append(now.isoformat())
         outer.append(
-            "ORDER BY CASE WHEN sub.latest_as_of IS NULL THEN 0 ELSE 1 END, "
-            "sub.latest_as_of ASC, "
-            "sub.provider_exchange_code ASC, sub.provider_symbol ASC"
+            "ORDER BY CASE WHEN latest_as_of IS NULL THEN 0 ELSE 1 END, "
+            "latest_as_of ASC, "
+            "provider_exchange_code ASC, provider_symbol ASC"
         )
         if max_symbols is not None:
             outer.append("LIMIT ?")
             params.append(max_symbols)
         with self._connect() as conn:
             rows = conn.execute(" ".join(outer), params).fetchall()
-        return [SupportedTicker(*row) for row in rows]
+        # Project only the columns the market-data command consumes; the other
+        # SupportedTicker fields are catalog metadata it never reads.
+        return [
+            SupportedTicker(
+                provider=provider_norm,
+                provider_exchange_code=str(row["provider_exchange_code"]),
+                provider_symbol=str(row["provider_symbol"]),
+                provider_ticker=str(row["provider_ticker"]),
+                security_id=int(row["security_id"]),
+                currency=str(row["currency"]),
+            )
+            for row in rows
+        ]
 
     def market_data_progress_summary(
         self,

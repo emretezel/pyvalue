@@ -15,6 +15,7 @@ from pyvalue.persistence.storage import (
     FundamentalsNormalizationStateRepository,
     FundamentalsUpdate,
     FundamentalsRepository,
+    FundamentalsFetchStateRepository,
     FundamentalsNormalizationCandidate,
     FinancialFactsRepository,
     FactRecord,
@@ -1602,6 +1603,107 @@ def test_supported_ticker_repository_lists_market_data_symbols_missing_then_olde
     assert [row.symbol for row in rows] == ["AAA.US", "CCC.US", "DDD.US"]
 
 
+def test_list_eligible_for_market_data_reads_base_tables_not_catalog_view(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "market-eligible-plan.db"
+    repo = SupportedTickerRepository(db_path)
+    repo.initialize_schema()
+    seed_exchange(db_path, "US")
+    repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock", "Currency": "USD"}],
+    )
+
+    # Capture the SQL the repository runs. The eligibility SELECT must read the
+    # base tables directly and compute freshness inside a MATERIALIZED CTE:
+    # routing it back through provider_listing_catalog would drag in the
+    # issuer/exchange joins this refactor removed, and dropping the
+    # materialisation barrier lets the planner re-run the MAX(as_of) probe per
+    # row.
+    captured: list[str] = []
+    original_connect = repo._connect
+
+    def _tracing_connect() -> sqlite3.Connection:
+        conn = original_connect()
+        conn.set_trace_callback(captured.append)
+        return conn
+
+    monkeypatch.setattr(repo, "_connect", _tracing_connect)
+
+    repo.list_eligible_for_market_data(
+        "EODHD", exchange_codes=["US"], max_age_days=7, primary_only=True
+    )
+
+    eligibility_sql = [
+        sql for sql in captured if "provider_listing pl" in sql and "ORDER BY" in sql
+    ]
+    assert eligibility_sql, "expected the eligibility SELECT to be captured"
+    for sql in eligibility_sql:
+        assert "provider_listing_catalog" not in sql
+        assert "FROM provider_listing pl" in sql
+        assert "JOIN provider_exchange px" in sql
+        assert "MATERIALIZED" in sql
+
+
+def test_list_eligible_for_market_data_primary_only_excludes_secondary(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "market-eligible-primary.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    seed_exchange(db_path, "US", "LSE")
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock", "Currency": "USD"}],
+    )
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "LSE",
+        [
+            {
+                "Code": "AAA",
+                "Name": "AAA plc",
+                "Type": "Common Stock",
+                "Currency": "GBX",
+            },
+            {
+                "Code": "BBB",
+                "Name": "BBB plc",
+                "Type": "Common Stock",
+                "Currency": "GBX",
+            },
+        ],
+    )
+    # Classify AAA.LSE as a secondary listing of the US primary; BBB.LSE stays
+    # primary. (Same setup the primary_only catalog test relies on below.)
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD", "AAA.US", {"General": {"PrimaryTicker": "AAA.US"}}, exchange="US"
+    )
+    fund_repo.upsert(
+        "EODHD", "AAA.LSE", {"General": {"PrimaryTicker": "AAA.US"}}, exchange="LSE"
+    )
+    fund_repo.upsert(
+        "EODHD", "BBB.LSE", {"General": {"Name": "BBB plc"}}, exchange="LSE"
+    )
+
+    # No market_data rows -> every listing is "missing" and thus eligible, so the
+    # only thing filtering the LSE rows is the primary_only flag.
+    all_rows = ticker_repo.list_eligible_for_market_data(
+        "EODHD", exchange_codes=["LSE"], max_age_days=7
+    )
+    assert {row.symbol for row in all_rows} == {"AAA.LSE", "BBB.LSE"}
+
+    primary_rows = ticker_repo.list_eligible_for_market_data(
+        "EODHD", exchange_codes=["LSE"], max_age_days=7, primary_only=True
+    )
+    assert [row.symbol for row in primary_rows] == ["BBB.LSE"]
+
+
 def test_supported_ticker_repository_primary_only_filters_secondary_listings(
     tmp_path: Path,
 ) -> None:
@@ -1887,6 +1989,128 @@ def test_market_data_fetch_state_repository_batch_methods(tmp_path: Path) -> Non
     assert bbb_ok is not None
     assert aaa_ok["last_status"] == "ok"
     assert bbb_ok["attempts"] == 0
+
+
+def test_market_data_fetch_state_writes_resolve_via_base_tables_in_one_query(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "market-state-resolve-plan.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    seed_exchange(db_path, "US")
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [
+            {
+                "Code": "AAA",
+                "Name": "AAA Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
+            {
+                "Code": "BBB",
+                "Name": "BBB Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
+            {
+                "Code": "CCC",
+                "Name": "CCC Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
+        ],
+    )
+    repo = MarketDataFetchStateRepository(db_path)
+    repo.initialize_schema()
+
+    # Capture the SQL the write path runs. Resolving provider_listing_id for a
+    # whole batch must be ONE base-table query, not one catalog-view scan per
+    # symbol (the O(symbols x catalog) slow path this replaced).
+    captured: list[str] = []
+    original_connect = repo._connect
+
+    def _tracing_connect() -> sqlite3.Connection:
+        conn = original_connect()
+        conn.set_trace_callback(captured.append)
+        return conn
+
+    monkeypatch.setattr(repo, "_connect", _tracing_connect)
+
+    repo.mark_success_many("EODHD", ["AAA.US", "BBB.US", "CCC.US"])
+
+    resolution_sql = [sql for sql in captured if "FROM provider_listing pl" in sql]
+    assert len(resolution_sql) == 1, (
+        f"expected one bulk resolution query, got {len(resolution_sql)}"
+    )
+    assert "provider_listing_catalog" not in resolution_sql[0]
+    assert "JOIN provider_exchange px" in resolution_sql[0]
+
+    # All three rows resolved and landed via the bulk path.
+    assert all(
+        repo.fetch("EODHD", sym) is not None for sym in ("AAA.US", "BBB.US", "CCC.US")
+    )
+
+
+def test_fundamentals_fetch_state_writes_resolve_via_base_tables_in_one_query(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "fundamentals-state-resolve-plan.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    seed_exchange(db_path, "US")
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [
+            {
+                "Code": "AAA",
+                "Name": "AAA Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
+            {
+                "Code": "BBB",
+                "Name": "BBB Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
+            {
+                "Code": "CCC",
+                "Name": "CCC Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
+        ],
+    )
+    repo = FundamentalsFetchStateRepository(db_path)
+    repo.initialize_schema()
+
+    captured: list[str] = []
+    original_connect = repo._connect
+
+    def _tracing_connect() -> sqlite3.Connection:
+        conn = original_connect()
+        conn.set_trace_callback(captured.append)
+        return conn
+
+    monkeypatch.setattr(repo, "_connect", _tracing_connect)
+
+    repo.mark_failure_many(
+        "EODHD",
+        [("AAA.US", "boom"), ("BBB.US", "bang"), ("CCC.US", "crash")],
+        base_backoff_seconds=60,
+    )
+
+    resolution_sql = [sql for sql in captured if "FROM provider_listing pl" in sql]
+    assert len(resolution_sql) == 1, (
+        f"expected one bulk resolution query, got {len(resolution_sql)}"
+    )
+    assert "provider_listing_catalog" not in resolution_sql[0]
+    assert "JOIN provider_exchange px" in resolution_sql[0]
+
+    assert repo.fetch("EODHD", "AAA.US") is not None
 
 
 def test_market_data_repository_latest_snapshots_many_matches_single_lookup(

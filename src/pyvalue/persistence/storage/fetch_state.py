@@ -9,7 +9,6 @@ from datetime import datetime, timedelta, timezone
 import sqlite3
 from typing import (
     Dict,
-    List,
     Optional,
     Sequence,
     Tuple,
@@ -17,12 +16,66 @@ from typing import (
 
 
 from .base import (
+    SQLITE_MAX_BOUND_PARAMETERS,
     SQLiteStore,
     _batched,
     _normalized_codes,
     _utc_now_iso,
 )
 from ..migrations import apply_migrations
+
+
+def _resolve_provider_listing_ids(
+    conn: sqlite3.Connection,
+    provider: str,
+    symbols: Sequence[str],
+) -> Dict[str, int]:
+    """Resolve qualified provider symbols to ``provider_listing_id`` in bulk.
+
+    Reads the base tables (``provider_listing`` + ``provider_exchange`` +
+    ``provider``) by the ``provider_listing`` natural key rather than the
+    ``provider_listing_catalog`` view. The view exposes ``provider_symbol`` only
+    as the computed expression ``pl.provider_symbol || '.' || provider_exchange``
+    (``|| '.US'`` for SEC), which no index can serve -- so a per-symbol view
+    lookup scans the whole catalog. Resolving an entire batch here keeps the hot
+    write path (fetch-state upserts after every flush) to a single
+    covering-index scan per batch instead of one full catalog scan per symbol.
+
+    Returns a ``{qualified_symbol: provider_listing_id}`` map. Symbols with no
+    matching listing are simply absent so callers can skip them. Inputs are
+    normalised (upper-cased/de-duplicated) the same way the writers normalise
+    their symbol lists, so the keys line up with the caller's symbols.
+    """
+    normalized = _normalized_codes(symbols)
+    if not normalized:
+        return {}
+    provider_norm = provider.strip().upper()
+    # Rebuild the catalog's qualified provider_symbol from base columns so the
+    # match is byte-identical to the view. SEC symbols are implicitly US-listed;
+    # every other provider qualifies by its provider exchange code.
+    if provider_norm == "SEC":
+        qualified = "(pl.provider_symbol || '.US')"
+    else:
+        qualified = "(pl.provider_symbol || '.' || px.provider_exchange_code)"
+    resolved: Dict[str, int] = {}
+    # One bound slot is spent on provider_code; the rest carry the IN list.
+    for chunk in _batched(normalized, SQLITE_MAX_BOUND_PARAMETERS - 1):
+        placeholders = ", ".join("?" for _ in chunk)
+        rows = conn.execute(
+            f"""
+            SELECT {qualified} AS qualified_symbol, pl.provider_listing_id
+            FROM provider_listing pl
+            JOIN provider_exchange px
+              ON px.provider_exchange_id = pl.provider_exchange_id
+            JOIN provider p ON p.provider_id = px.provider_id
+            WHERE p.provider_code = ?
+              AND {qualified} IN ({placeholders})
+            """,
+            [provider_norm, *chunk],
+        ).fetchall()
+        for row in rows:
+            resolved[str(row["qualified_symbol"])] = int(row["provider_listing_id"])
+    return resolved
 
 
 class _FetchStateRepository(SQLiteStore):
@@ -32,9 +85,9 @@ class _FetchStateRepository(SQLiteStore):
         # The table and its FK to provider_listing are owned by
         # migrations 040+ (see migration 053 for the runtime-column
         # cleanup, migration 067 for the next_eligible_at index drop).
-        # All provider/symbol resolution is now done through
-        # ``provider_listing_catalog`` joins; this repository writes
-        # directly against the ``provider_listing_id`` PK.
+        # All provider/symbol resolution is done by
+        # ``_resolve_provider_listing_ids`` against the base tables; this
+        # repository writes directly against the ``provider_listing_id`` PK.
         apply_migrations(self.db_path)
 
     def _resolve_provider_listing_id(
@@ -43,15 +96,12 @@ class _FetchStateRepository(SQLiteStore):
         provider: str,
         symbol: str,
     ) -> Optional[int]:
-        row = conn.execute(
-            """
-            SELECT provider_listing_id
-            FROM provider_listing_catalog
-            WHERE provider = ? AND provider_symbol = ?
-            """,
-            (provider.strip().upper(), symbol.strip().upper()),
-        ).fetchone()
-        return int(row["provider_listing_id"]) if row else None
+        # Single-symbol convenience over the bulk resolver so every
+        # provider_listing lookup shares one base-table query path and never the
+        # catalog view's un-indexable computed provider_symbol.
+        return _resolve_provider_listing_ids(conn, provider, [symbol]).get(
+            symbol.strip().upper()
+        )
 
     def fetch(
         self, provider: str, symbol: str
@@ -128,14 +178,14 @@ class _FetchStateRepository(SQLiteStore):
         provider_norm = provider.strip().upper()
         timestamp = fetched_at or _utc_now_iso()
         with self._connect() as conn:
-            rows = []
-            for symbol in normalized:
-                provider_listing_id = self._resolve_provider_listing_id(
-                    conn, provider_norm, symbol
-                )
-                if provider_listing_id is None:
-                    continue
-                rows.append((provider_listing_id, timestamp))
+            id_by_symbol = _resolve_provider_listing_ids(
+                conn, provider_norm, normalized
+            )
+            rows = [
+                (id_by_symbol[symbol], timestamp)
+                for symbol in normalized
+                if symbol in id_by_symbol
+            ]
             conn.executemany(
                 f"""
                 INSERT INTO {self.table_name} (
@@ -220,19 +270,16 @@ class _FetchStateRepository(SQLiteStore):
         if not normalized_errors:
             return
         provider_norm = provider.strip().upper()
-        # Resolve provider_listing_id for every error symbol up front so
-        # we can fetch the existing attempt counter / last_fetched_at by
-        # PK in a single query, then build the upsert rows from the same
-        # mapping. Symbols that don't resolve are skipped — there is
-        # nothing to write state for.
-        listing_id_by_symbol: Dict[str, int] = {}
+        # Resolve provider_listing_id for every error symbol in one bulk query,
+        # then fetch the existing attempt counter / last_fetched_at by PK so the
+        # upsert rows are built from the same mapping. Symbols that don't resolve
+        # are skipped -- there is nothing to write state for.
         with self._connect() as conn:
-            for symbol, _error in normalized_errors:
-                provider_listing_id = self._resolve_provider_listing_id(
-                    conn, provider_norm, symbol
-                )
-                if provider_listing_id is not None:
-                    listing_id_by_symbol[symbol] = provider_listing_id
+            listing_id_by_symbol = _resolve_provider_listing_ids(
+                conn,
+                provider_norm,
+                [symbol for symbol, _error in normalized_errors],
+            )
             if not listing_id_by_symbol:
                 return
 
@@ -304,13 +351,9 @@ class _FetchStateRepository(SQLiteStore):
             return 0
         provider_norm = provider.strip().upper()
         with self._connect() as conn:
-            provider_listing_ids: List[int] = []
-            for symbol in normalized:
-                provider_listing_id = self._resolve_provider_listing_id(
-                    conn, provider_norm, symbol
-                )
-                if provider_listing_id is not None:
-                    provider_listing_ids.append(provider_listing_id)
+            provider_listing_ids = list(
+                _resolve_provider_listing_ids(conn, provider_norm, normalized).values()
+            )
             if not provider_listing_ids:
                 return 0
             placeholders = ", ".join("?" for _ in provider_listing_ids)
@@ -339,15 +382,12 @@ class FundamentalsFetchStateRepository(SQLiteStore):
         provider: str,
         symbol: str,
     ) -> Optional[int]:
-        row = conn.execute(
-            """
-            SELECT provider_listing_id
-            FROM provider_listing_catalog
-            WHERE provider = ? AND provider_symbol = ?
-            """,
-            (provider.strip().upper(), symbol.strip().upper()),
-        ).fetchone()
-        return int(row["provider_listing_id"]) if row else None
+        # Single-symbol convenience over the bulk resolver so every
+        # provider_listing lookup shares one base-table query path and never the
+        # catalog view's un-indexable computed provider_symbol.
+        return _resolve_provider_listing_ids(conn, provider, [symbol]).get(
+            symbol.strip().upper()
+        )
 
     def fetch(
         self, provider: str, symbol: str
@@ -400,13 +440,9 @@ class FundamentalsFetchStateRepository(SQLiteStore):
             return
         provider_norm = provider.strip().upper()
         with self._connect() as conn:
-            provider_listing_ids = []
-            for symbol in normalized:
-                provider_listing_id = self._resolve_provider_listing_id(
-                    conn, provider_norm, symbol
-                )
-                if provider_listing_id is not None:
-                    provider_listing_ids.append(provider_listing_id)
+            provider_listing_ids = list(
+                _resolve_provider_listing_ids(conn, provider_norm, normalized).values()
+            )
             if not provider_listing_ids:
                 return
             placeholders = ", ".join("?" for _ in provider_listing_ids)
@@ -490,24 +526,40 @@ class FundamentalsFetchStateRepository(SQLiteStore):
             return
         provider_norm = provider.strip().upper()
         now = datetime.now(timezone.utc)
+        # Resolve every error symbol in one bulk query, then read existing
+        # attempt counters by PK in batches so the upsert rows are built without
+        # a per-symbol round-trip. Symbols that don't resolve are skipped.
         with self._connect() as conn:
+            listing_id_by_symbol = _resolve_provider_listing_ids(
+                conn,
+                provider_norm,
+                [symbol for symbol, _error in normalized_errors],
+            )
+            if not listing_id_by_symbol:
+                return
+
+            attempts_by_id: Dict[int, int] = {}
+            for chunk in _batched(list(listing_id_by_symbol.values()), 500):
+                placeholders = ", ".join("?" for _ in chunk)
+                rows_state = conn.execute(
+                    f"""
+                    SELECT provider_listing_id, attempts
+                    FROM fundamentals_fetch_state
+                    WHERE provider_listing_id IN ({placeholders})
+                    """,
+                    list(chunk),
+                ).fetchall()
+                for row in rows_state:
+                    attempts_by_id[int(row["provider_listing_id"])] = int(
+                        row["attempts"]
+                    )
+
             rows = []
             for symbol, error in normalized_errors:
-                provider_listing_id = self._resolve_provider_listing_id(
-                    conn, provider_norm, symbol
-                )
+                provider_listing_id = listing_id_by_symbol.get(symbol)
                 if provider_listing_id is None:
                     continue
-                state = conn.execute(
-                    """
-                    SELECT attempts
-                    FROM fundamentals_fetch_state
-                    WHERE provider_listing_id = ?
-                    """,
-                    (provider_listing_id,),
-                ).fetchone()
-                attempts = int(state["attempts"]) if state else 0
-                attempts += 1
+                attempts = attempts_by_id.get(provider_listing_id, 0) + 1
                 backoff = min(
                     base_backoff_seconds * (2 ** (attempts - 1)),
                     max_backoff_seconds,
@@ -546,13 +598,9 @@ class FundamentalsFetchStateRepository(SQLiteStore):
             return 0
         provider_norm = provider.strip().upper()
         with self._connect() as conn:
-            provider_listing_ids = []
-            for symbol in normalized:
-                provider_listing_id = self._resolve_provider_listing_id(
-                    conn, provider_norm, symbol
-                )
-                if provider_listing_id is not None:
-                    provider_listing_ids.append(provider_listing_id)
+            provider_listing_ids = list(
+                _resolve_provider_listing_ids(conn, provider_norm, normalized).values()
+            )
             if not provider_listing_ids:
                 return 0
             placeholders = ", ".join("?" for _ in provider_listing_ids)
