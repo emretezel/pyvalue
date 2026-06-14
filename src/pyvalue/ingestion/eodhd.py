@@ -45,17 +45,6 @@ class EODHDFundamentalsClient:
             raise ValueError(f"Unexpected EODHD exchange response: {payload}")
         return payload
 
-    def exchange_metadata(
-        self, code: str, timeout: int = DEFAULT_TIMEOUT
-    ) -> Optional[Dict]:
-        payload = self.list_exchanges(timeout=timeout)
-        for entry in payload:
-            if not isinstance(entry, dict):
-                continue
-            if (entry.get("Code") or "").upper() == code.upper():
-                return entry
-        return None
-
     def list_symbols(
         self, exchange_code: str, timeout: int = DEFAULT_TIMEOUT
     ) -> List[Dict]:
