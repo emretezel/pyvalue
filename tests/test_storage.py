@@ -3032,3 +3032,76 @@ def test_replace_for_exchange_write_path_avoids_catalog_view(
     assert not any("provider_listing_catalog" in sql for sql in captured)
     # Sanity: it really did write the provider_listing row via the base table.
     assert any("INSERT INTO provider_listing" in sql for sql in captured)
+
+
+def test_replace_for_exchange_skips_writes_when_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A re-refresh with identical rows must issue no writes (skip-unchanged).
+
+    Re-cataloging tickers that already match everything the command owns
+    (listing.currency, issuer.name, the provider_listing mapping) is detected by
+    a single read, so a steady-state re-run does zero INSERT/UPDATE/DELETE.
+    """
+    db_path = tmp_path / "skip-unchanged.db"
+    seed_exchange(db_path, "US")
+    repo = SupportedTickerRepository(db_path)
+    repo.initialize_schema()
+    rows = [
+        {"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock", "Currency": "USD"},
+        {"Code": "BBB", "Name": "BBB Inc", "Type": "Common Stock", "Currency": "USD"},
+    ]
+    repo.replace_for_exchange("EODHD", "US", rows)  # first build -- writes
+
+    captured: list[str] = []
+    original_connect = repo._connect
+
+    def _tracing_connect() -> sqlite3.Connection:
+        conn = original_connect()
+        conn.set_trace_callback(captured.append)
+        return conn
+
+    monkeypatch.setattr(repo, "_connect", _tracing_connect)
+
+    # Identical second run -> nothing this command owns has changed.
+    result = repo.replace_for_exchange("EODHD", "US", rows)
+
+    assert captured, "expected the re-refresh to execute SQL on the traced connection"
+    writes = [
+        sql
+        for sql in captured
+        if any(kw in sql.upper() for kw in ("INSERT", "UPDATE", "DELETE"))
+    ]
+    assert writes == [], f"re-refresh should issue no writes, got: {writes}"
+    # The catalog is intact and the tickers are still reported as retained.
+    assert result.inserted == 2
+    assert result.removed == 0
+    assert [row.symbol for row in repo.list_for_exchange("EODHD", "US")] == [
+        "AAA.US",
+        "BBB.US",
+    ]
+
+
+def test_replace_for_exchange_applies_currency_change_on_re_refresh(
+    tmp_path: Path,
+) -> None:
+    """Skip-unchanged must not skip a real change: a new currency is applied."""
+    db_path = tmp_path / "skip-currency-change.db"
+    seed_exchange(db_path, "LSE")
+    repo = SupportedTickerRepository(db_path)
+    repo.initialize_schema()
+    repo.replace_for_exchange(
+        "EODHD",
+        "LSE",
+        [{"Code": "AAA", "Name": "AAA plc", "Type": "Common Stock", "Currency": "GBP"}],
+    )
+    assert repo.fetch_currency("AAA.LSE", provider="EODHD") == "GBP"
+
+    # Same ticker, different currency -> must fall through the skip check and
+    # update rather than skip.
+    repo.replace_for_exchange(
+        "EODHD",
+        "LSE",
+        [{"Code": "AAA", "Name": "AAA plc", "Type": "Common Stock", "Currency": "USD"}],
+    )
+    assert repo.fetch_currency("AAA.LSE", provider="EODHD") == "USD"

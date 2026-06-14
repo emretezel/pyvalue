@@ -34,7 +34,6 @@ from .records import (
     IngestProgressExchange,
     IngestProgressFailure,
     IngestProgressSummary,
-    Security,
     SupportedTicker,
     SupportedTickerRefreshResult,
 )
@@ -120,14 +119,55 @@ class SupportedTickerRepository(SQLiteStore):
         bare_symbol: str,
         currency: Optional[str] = None,
         entity_name: Optional[str] = None,
-    ) -> Optional[Security]:
+    ) -> bool:
+        """Catalog one provider listing; return True when retained.
+
+        Returns False only when the payload carries no currency (the listing
+        cannot be modelled and is skipped). Otherwise the ticker is retained and
+        this returns True -- whether it was created, updated, or already current.
+
+        Skip-unchanged: a re-refresh re-sees rows that already match everything
+        this command owns (``listing.currency``, ``issuer.name``, and the
+        ``provider_listing`` mapping). When the stored state already matches,
+        every write would be a no-op, so a single base-table read detects that
+        and returns early -- a steady-state re-refresh then issues zero writes.
+        Anything new or changed (new ticker, currency correction, name promotion,
+        stale mapping) falls through to the write path.
+        """
         # Listings must carry a currency (listing.currency is NOT NULL and there
         # is no fallback). A catalog entry whose payload omits the currency is
         # skipped entirely -- neither the listing nor the provider_listing row
         # is created.
         quote_currency = raw_currency_code(currency)
         if quote_currency is None:
-            return None
+            return False
+        normalized_name = _normalize_optional_text(entity_name)
+        # Change-detection read against base tables (never the catalog view). The
+        # l.exchange_id / l.symbol predicates also confirm the existing
+        # provider_listing points at the *correct* listing, so a stale mapping
+        # fails the match and is repaired by the write path below.
+        current = conn.execute(
+            """
+            SELECT l.currency AS currency, i.name AS name
+            FROM provider_listing pl
+            JOIN listing l ON l.listing_id = pl.listing_id
+            JOIN issuer i ON i.issuer_id = l.issuer_id
+            WHERE pl.provider_exchange_id = ?
+              AND pl.provider_symbol = ?
+              AND l.exchange_id = ?
+              AND l.symbol = ?
+            """,
+            (provider_exchange_id, bare_symbol, exchange_id, bare_symbol),
+        ).fetchone()
+        # The refresh only writes issuer.name when entity_name is supplied
+        # (COALESCE keeps the stored name otherwise), so a NULL payload name is
+        # always "unchanged" for the name dimension.
+        if (
+            current is not None
+            and current["currency"] == quote_currency
+            and (normalized_name is None or current["name"] == normalized_name)
+        ):
+            return True
         # The exchange row is already resolved by the caller; build the canonical
         # issuer/listing against that exchange_id WITHOUT writing the exchange
         # catalog (ensure_with_exchange_id never touches the exchange table).
@@ -140,9 +180,8 @@ class SupportedTickerRepository(SQLiteStore):
             connection=conn,
         )
         # Keep listing.currency in sync when the listing pre-existed with a
-        # different currency. The guard skips the no-op write on the common
-        # refresh path where the currency is already correct (and on a freshly
-        # inserted listing, which already carries this currency).
+        # different currency. The guard skips the no-op write when the currency
+        # is already correct (e.g. a freshly inserted listing).
         conn.execute(
             """
             UPDATE listing
@@ -163,11 +202,7 @@ class SupportedTickerRepository(SQLiteStore):
             """,
             (provider_exchange_id, bare_symbol, security.security_id),
         )
-        # Return the canonical security itself. Callers only need
-        # created-vs-skipped (the skip is the no-currency early return above), so
-        # there is no need to read the provider_listing_id back through the
-        # six-table catalog view -- the INSERT above already guarantees the row.
-        return security
+        return True
 
     def _delete_provider_listing_ids(
         self,
@@ -237,7 +272,7 @@ class SupportedTickerRepository(SQLiteStore):
                 bare_symbol, _ = _normalize_symbol_base(symbol)
                 if not bare_symbol:
                     continue
-                created = self._ensure_provider_listing(
+                cataloged = self._ensure_provider_listing(
                     conn,
                     provider_exchange_id=provider_exchange_id,
                     exchange_id=exchange_id,
@@ -246,7 +281,7 @@ class SupportedTickerRepository(SQLiteStore):
                     currency=listing.currency,
                     entity_name=listing.security_name,
                 )
-                if created is None:
+                if not cataloged:
                     skipped_no_currency.append(bare_symbol)
                     continue
                 retained_tickers.append(bare_symbol)
@@ -297,7 +332,7 @@ class SupportedTickerRepository(SQLiteStore):
                 if not code:
                     continue
                 bare_symbol = code.upper()
-                created = self._ensure_provider_listing(
+                cataloged = self._ensure_provider_listing(
                     conn,
                     provider_exchange_id=provider_exchange_id,
                     exchange_id=exchange_id,
@@ -306,7 +341,7 @@ class SupportedTickerRepository(SQLiteStore):
                     currency=row.get("Currency") or row.get("currency"),
                     entity_name=row.get("Name") or row.get("name"),
                 )
-                if created is None:
+                if not cataloged:
                     skipped_no_currency.append(bare_symbol)
                     continue
                 retained_tickers.append(bare_symbol)
