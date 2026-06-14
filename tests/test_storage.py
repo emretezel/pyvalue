@@ -866,16 +866,80 @@ def test_fundamentals_upsert_resolves_via_base_tables_not_catalog_view(
     resolution_sql = [
         sql
         for sql in captured
-        if "provider_listing_id" in sql and "FROM provider_listing pl" in sql
+        if "provider_listing_id" in sql
+        and "(provider_exchange_id, provider_symbol) IN" in sql
     ]
     assert resolution_sql, "expected the provider_listing_id resolution SELECT"
     for sql in resolution_sql:
         assert "provider_listing_catalog" not in sql
-        assert "JOIN provider_exchange px" in sql
+        assert "FROM provider_listing" in sql
 
     # The payload actually landed, proving the natural-key lookup matched the row
     # (guards against the bare-symbol derivation regressing).
     assert fund_repo.fetch("EODHD", "AAA.LSE") is not None
+
+
+def test_fundamentals_upsert_many_resolves_listing_ids_in_one_query(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "fundamentals-upsert-bulk.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    seed_exchange(db_path, "US")
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [
+            {"Code": c, "Name": f"{c} Inc", "Type": "Common Stock", "Currency": "USD"}
+            for c in ("AAA", "BBB", "CCC")
+        ],
+    )
+    repo = FundamentalsRepository(db_path)
+    repo.initialize_schema()
+
+    # A whole ingest batch: provider_listing_id must be resolved for all three
+    # payloads in ONE row-value (provider_exchange_id, provider_symbol) IN query
+    # served by the natural-key index, not one indexed seek per payload (the
+    # per-update round-trip this replaced) and never the catalog view.
+    updates = [
+        FundamentalsUpdate(
+            security_id=0,
+            provider_symbol=f"{c}.US",
+            provider_exchange_code="US",
+            data="{}",
+            payload_hash=f"{i:064x}",  # fundamentals_raw.payload_hash CHECK len == 64
+            last_fetched_at="2026-01-01T00:00:00+00:00",
+        )
+        for i, c in enumerate(("AAA", "BBB", "CCC"))
+    ]
+
+    captured: list[str] = []
+    original_connect = repo._connect
+
+    def _tracing_connect() -> sqlite3.Connection:
+        conn = original_connect()
+        conn.set_trace_callback(captured.append)
+        return conn
+
+    monkeypatch.setattr(repo, "_connect", _tracing_connect)
+
+    repo.upsert_many("EODHD", updates)
+
+    resolution_sql = [
+        sql
+        for sql in captured
+        if "provider_listing_id" in sql
+        and "(provider_exchange_id, provider_symbol) IN" in sql
+    ]
+    assert len(resolution_sql) == 1, (
+        f"expected one bulk resolution query, got {len(resolution_sql)}"
+    )
+    assert "provider_listing_catalog" not in resolution_sql[0]
+
+    # All three payloads resolved and landed via the bulk path.
+    assert all(
+        repo.fetch("EODHD", f"{c}.US") is not None for c in ("AAA", "BBB", "CCC")
+    )
 
 
 def test_fundamentals_upsert_never_overwrites_listing_currency(tmp_path: Path) -> None:

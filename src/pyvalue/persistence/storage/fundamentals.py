@@ -19,6 +19,7 @@ from typing import (
 
 
 from .base import (
+    SQLITE_MAX_BOUND_PARAMETERS,
     SQLiteStore,
     _batched,
     _normalize_optional_text,
@@ -38,6 +39,73 @@ from ..migrations import apply_migrations
 from .listing_status import SecurityListingStatusRepository
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_provider_listing_ids_by_natural_key(
+    conn: sqlite3.Connection,
+    provider_id: Optional[int],
+    pairs: Sequence[Tuple[str, str]],
+) -> Dict[Tuple[str, str], int]:
+    """Resolve ``(provider_exchange_code, bare provider_symbol)`` pairs to
+    ``provider_listing_id`` in bulk via the ``provider_listing`` natural key.
+
+    The batch's exchange codes are resolved to ``provider_exchange_id`` once,
+    then a single row-value ``(provider_exchange_id, provider_symbol) IN (...)``
+    query resolves every payload. SQLite serves that row-value ``IN`` with the
+    UNIQUE ``(provider_exchange_id, provider_symbol)`` auto-index, so the whole
+    batch is a handful of index seeks rather than one ``execute`` round-trip per
+    payload. A ``None`` ``provider_id`` (unknown provider) yields an empty map so
+    every payload is treated as uncatalogued, matching the prior per-row lookup.
+
+    Returns a ``{(provider_exchange_code, bare provider_symbol):
+    provider_listing_id}`` map; pairs with no catalogued listing are absent.
+    """
+    if provider_id is None or not pairs:
+        return {}
+    # provider_exchange_code -> provider_exchange_id for this provider. The
+    # provider has at most a few dozen exchanges, so this is a single small read.
+    pxid_by_code: Dict[str, int] = {
+        str(row["provider_exchange_code"]): int(row["provider_exchange_id"])
+        for row in conn.execute(
+            """
+            SELECT provider_exchange_code, provider_exchange_id
+            FROM provider_exchange
+            WHERE provider_id = ?
+            """,
+            (provider_id,),
+        )
+    }
+    # Map each (provider_exchange_id, bare symbol) key back to its original
+    # (code, bare) pair so the caller can look results up by what it passed in.
+    pair_by_pxid_key: Dict[Tuple[int, str], Tuple[str, str]] = {}
+    for exchange_code, bare in pairs:
+        pxid = pxid_by_code.get(exchange_code)
+        if pxid is not None:
+            pair_by_pxid_key[(pxid, bare)] = (exchange_code, bare)
+    if not pair_by_pxid_key:
+        return {}
+    resolved: Dict[Tuple[str, str], int] = {}
+    keys = list(pair_by_pxid_key)
+    # Each pair binds two parameters, so chunk on half the bound-parameter cap.
+    for chunk in _batched(keys, SQLITE_MAX_BOUND_PARAMETERS // 2):
+        placeholders = ", ".join("(?, ?)" for _ in chunk)
+        flat: List[object] = []
+        for pxid, bare in chunk:
+            flat.extend((pxid, bare))
+        for row in conn.execute(
+            f"""
+            SELECT provider_exchange_id, provider_symbol, provider_listing_id
+            FROM provider_listing
+            WHERE (provider_exchange_id, provider_symbol) IN ({placeholders})
+            """,
+            flat,
+        ):
+            code_bare = pair_by_pxid_key.get(
+                (int(row["provider_exchange_id"]), str(row["provider_symbol"]))
+            )
+            if code_bare is not None:
+                resolved[code_bare] = int(row["provider_listing_id"])
+    return resolved
 
 
 class FundamentalsRepository(SQLiteStore):
@@ -119,25 +187,25 @@ class FundamentalsRepository(SQLiteStore):
             provider_id = self._provider_repo().resolve_id(
                 provider_norm, connection=conn
             )
-            rows = []
-            skipped_uncatalogued: List[str] = []
+            # Derive each payload's (exchange_code, bare provider_symbol).
+            #
+            # Listing identity and currency are owned solely by
+            # refresh-supported-tickers. Fundamentals ingest only attaches a
+            # payload to an EXISTING catalogued listing; it never creates one
+            # (creating a listing would mean writing listing.currency, which is
+            # NOT NULL with no fallback). A payload whose listing is absent from
+            # the catalog is skipped -- refresh the catalog first.
+            #
+            # provider_listing stores the *bare* provider_symbol; the catalog
+            # view is what appends '.' || provider_exchange_code to qualify it.
+            # Recover the bare form by stripping that exact suffix so the match
+            # hits the stored column directly.
+            derived: List[Tuple[FundamentalsUpdate, str, str, str]] = []
+            pairs: List[Tuple[str, str]] = []
             for update in updates:
                 if not update.provider_symbol:
                     continue
                 provider_symbol = update.provider_symbol.strip().upper()
-                # Listing identity and currency are owned solely by
-                # refresh-supported-tickers. Fundamentals ingest only attaches a
-                # payload to an EXISTING catalogued listing; it never creates one
-                # (creating a listing would mean writing listing.currency, which
-                # is NOT NULL with no fallback). A payload whose listing is absent
-                # from the catalog is skipped -- refresh the catalog first.
-                #
-                # provider_listing stores the *bare* provider_symbol; the catalog
-                # view is what appends '.' || provider_exchange_code to qualify
-                # it. Recover the bare form by stripping that exact suffix so the
-                # match hits the stored column directly. A missing provider
-                # (provider_id is None) makes px.provider_id = NULL match nothing,
-                # so every payload falls through to the skip path.
                 exchange_code = (update.provider_exchange_code or "").strip().upper()
                 suffix = f".{exchange_code}"
                 provider_ticker = (
@@ -145,24 +213,28 @@ class FundamentalsRepository(SQLiteStore):
                     if exchange_code and provider_symbol.endswith(suffix)
                     else provider_symbol
                 )
-                provider_listing_row = conn.execute(
-                    """
-                    SELECT pl.provider_listing_id
-                    FROM provider_listing pl
-                    JOIN provider_exchange px
-                      ON px.provider_exchange_id = pl.provider_exchange_id
-                    WHERE px.provider_id = ?
-                      AND px.provider_exchange_code = ?
-                      AND pl.provider_symbol = ?
-                    """,
-                    (provider_id, exchange_code, provider_ticker),
-                ).fetchone()
-                if provider_listing_row is None:
+                derived.append(
+                    (update, provider_symbol, exchange_code, provider_ticker)
+                )
+                pairs.append((exchange_code, provider_ticker))
+            # One bulk natural-key resolution for the whole batch instead of an
+            # index seek (and execute round-trip) per payload. A missing provider
+            # yields an empty map, so every payload falls through to the skip path.
+            listing_id_by_pair = _resolve_provider_listing_ids_by_natural_key(
+                conn, provider_id, pairs
+            )
+            rows = []
+            skipped_uncatalogued: List[str] = []
+            for update, provider_symbol, exchange_code, provider_ticker in derived:
+                provider_listing_id = listing_id_by_pair.get(
+                    (exchange_code, provider_ticker)
+                )
+                if provider_listing_id is None:
                     skipped_uncatalogued.append(provider_symbol)
                     continue
                 rows.append(
                     (
-                        int(provider_listing_row["provider_listing_id"]),
+                        provider_listing_id,
                         update.data,
                         update.payload_hash,
                         update.last_fetched_at,
