@@ -90,7 +90,16 @@ class FundamentalsRepository(SQLiteStore):
         self,
         provider: str,
         updates: Sequence[FundamentalsUpdate],
-    ) -> None:
+    ) -> int:
+        """Persist a batch of raw payloads for already-catalogued listings.
+
+        Writes each payload to ``fundamentals_raw``, clears any fetch-state
+        backoff, refreshes primary-listing status, and eagerly purges the
+        downstream data of any listing the payloads reclassify as secondary.
+
+        Returns the number of listings reclassified to secondary (and therefore
+        purged) in this batch, so the caller can report the cascade.
+        """
         self.initialize_schema()
         provider_norm = provider.strip().upper()
         listing_repo = SecurityListingStatusRepository(self.db_path)
@@ -140,7 +149,7 @@ class FundamentalsRepository(SQLiteStore):
                     ", ".join(sorted(skipped_uncatalogued)[:20]),
                 )
             if not rows:
-                return
+                return 0
             conn.executemany(
                 """
                 INSERT INTO fundamentals_raw (
@@ -170,16 +179,11 @@ class FundamentalsRepository(SQLiteStore):
                 updates,
                 connection=conn,
             )
-        secondary_updates = [
-            update for update in listing_updates if not update.is_primary_listing
-        ]
-        if secondary_updates:
-            listing_repo.purge_secondary_security_data(
-                security_ids=[update.security_id for update in secondary_updates],
-                provider_symbols=[
-                    update.provider_symbol for update in secondary_updates
-                ],
-            )
+        # The purge runs in its own connection after the write transaction above
+        # has closed, so it stays outside the `with conn` block. Both ingest and
+        # reconcile route secondary reclassifications through this one method.
+        secondary_updates = listing_repo.purge_downstream_for_secondary(listing_updates)
+        return len(secondary_updates)
 
     def fetch(self, provider: str, symbol: str) -> Optional[Dict[str, Any]]:
         self.initialize_schema()

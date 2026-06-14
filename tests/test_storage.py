@@ -25,6 +25,7 @@ from pyvalue.persistence.storage import (
     MetricsRepository,
     SecurityMetadataUpdate,
     SecurityRepository,
+    SecurityListingStatusRecord,
     SecurityListingStatusRepository,
     StoredMetricRow,
     SupportedTickerRepository,
@@ -860,6 +861,134 @@ def test_fundamentals_upsert_skips_uncatalogued_listing(tmp_path: Path) -> None:
         listing_count = conn.execute("SELECT COUNT(*) FROM listing").fetchone()[0]
     assert raw_count == 0
     assert listing_count == 0
+
+
+def test_purge_downstream_for_secondary_purges_only_secondary(tmp_path: Path) -> None:
+    db_path = tmp_path / "purge-secondary.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [
+            {
+                "Code": "AAA",
+                "Name": "AAA Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
+            {
+                "Code": "BBB",
+                "Name": "BBB Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
+        ],
+    )
+    by_symbol = {row.symbol: row for row in ticker_repo.list_for_provider("EODHD")}
+    aaa_id = by_symbol["AAA.US"].security_id
+    bbb_id = by_symbol["BBB.US"].security_id
+
+    # Seed downstream facts for both listings so we can prove the primary's
+    # survive and only the secondary's are purged.
+    facts_repo = FinancialFactsRepository(db_path)
+    for symbol in ("AAA.US", "BBB.US"):
+        facts_repo.replace_facts(
+            symbol,
+            [
+                FactRecord(
+                    symbol=symbol,
+                    concept="Assets",
+                    fiscal_period="FY",
+                    end_date="2024-12-31",
+                    unit_kind="monetary",
+                    value=100.0,
+                    currency="USD",
+                )
+            ],
+        )
+
+    repo = SecurityListingStatusRepository(db_path)
+    records = [
+        SecurityListingStatusRecord(
+            security_id=aaa_id,
+            source_provider="EODHD",
+            provider_symbol="AAA.US",
+            raw_fetched_at="2026-01-01T00:00:00+00:00",
+            is_primary_listing=True,
+            primary_provider_symbol="AAA.US",
+            classification_basis="matched_primary_ticker",
+        ),
+        SecurityListingStatusRecord(
+            security_id=bbb_id,
+            source_provider="EODHD",
+            provider_symbol="BBB.US",
+            raw_fetched_at="2026-01-01T00:00:00+00:00",
+            is_primary_listing=False,
+            primary_provider_symbol="AAA.US",
+            classification_basis="different_primary_ticker",
+        ),
+    ]
+
+    purged = repo.purge_downstream_for_secondary(records)
+
+    # Only the secondary record is returned and purged; the primary is untouched.
+    assert [record.provider_symbol for record in purged] == ["BBB.US"]
+    with sqlite3.connect(db_path) as conn:
+        listing_ids_with_facts = {
+            row[0]
+            for row in conn.execute("SELECT DISTINCT listing_id FROM financial_facts")
+        }
+    assert aaa_id in listing_ids_with_facts
+    assert bbb_id not in listing_ids_with_facts
+
+
+def test_purge_downstream_for_secondary_noop_when_all_primary(tmp_path: Path) -> None:
+    db_path = tmp_path / "purge-secondary-noop.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock", "Currency": "USD"}],
+    )
+    aaa_id = next(iter(ticker_repo.list_for_provider("EODHD"))).security_id
+    FinancialFactsRepository(db_path).replace_facts(
+        "AAA.US",
+        [
+            FactRecord(
+                symbol="AAA.US",
+                concept="Assets",
+                fiscal_period="FY",
+                end_date="2024-12-31",
+                unit_kind="monetary",
+                value=100.0,
+                currency="USD",
+            )
+        ],
+    )
+
+    repo = SecurityListingStatusRepository(db_path)
+    purged = repo.purge_downstream_for_secondary(
+        [
+            SecurityListingStatusRecord(
+                security_id=aaa_id,
+                source_provider="EODHD",
+                provider_symbol="AAA.US",
+                raw_fetched_at="2026-01-01T00:00:00+00:00",
+                is_primary_listing=True,
+                primary_provider_symbol="AAA.US",
+                classification_basis="matched_primary_ticker",
+            )
+        ]
+    )
+
+    assert purged == []
+    with sqlite3.connect(db_path) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM financial_facts WHERE listing_id = ?", (aaa_id,)
+        ).fetchone()[0]
+    assert count == 1
 
 
 def test_financial_facts_repository_replace_fact_rows_matches_replace_facts(

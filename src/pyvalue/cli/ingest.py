@@ -258,13 +258,20 @@ def _flush_fundamentals_batches(
     state_repo: FundamentalsFetchStateRepository,
     success_updates: List[FundamentalsUpdate],
     failures: List[Tuple[str, str]],
-) -> None:
+) -> int:
+    """Flush buffered payloads and failures.
+
+    Returns the number of listings the stored payloads reclassified to secondary
+    (and therefore purged), so the caller can tally the cascade for its summary.
+    """
+    reclassified_secondary = 0
     if success_updates:
-        repo.upsert_many("EODHD", success_updates)
+        reclassified_secondary = repo.upsert_many("EODHD", success_updates)
         success_updates.clear()
     if failures:
         state_repo.mark_failure_many("EODHD", failures)
         failures.clear()
+    return reclassified_secondary
 
 
 def _fetch_symbol_fundamentals(
@@ -306,6 +313,7 @@ def _run_eodhd_fundamentals_ingestion(
     total = len(prepared.eligible)
     processed = 0
     failed = 0
+    reclassified_secondary = 0
     pending_updates: List[FundamentalsUpdate] = []
     pending_failures: List[Tuple[str, str]] = []
     last_flush = time.monotonic()
@@ -319,7 +327,7 @@ def _run_eodhd_fundamentals_ingestion(
     )
 
     def maybe_flush(force: bool = False) -> None:
-        nonlocal last_flush
+        nonlocal last_flush, reclassified_secondary
         if not pending_updates and not pending_failures:
             return
         if not force:
@@ -330,7 +338,9 @@ def _run_eodhd_fundamentals_ingestion(
                 and elapsed < FUNDAMENTALS_WRITE_BATCH_INTERVAL_SECONDS
             ):
                 return
-        _flush_fundamentals_batches(repo, state_repo, pending_updates, pending_failures)
+        reclassified_secondary += _flush_fundamentals_batches(
+            repo, state_repo, pending_updates, pending_failures
+        )
         last_flush = time.monotonic()
 
     def maybe_report(force: bool = False) -> None:
@@ -394,6 +404,11 @@ def _run_eodhd_fundamentals_ingestion(
     print(
         f"Stored fundamentals for {processed} of {total} planned supported tickers in {db_path}"
     )
+    if reclassified_secondary:
+        print(
+            f"Reclassified {reclassified_secondary} listing(s) to secondary and "
+            "purged their downstream facts/metrics/market-data"
+        )
     return 0
 
 

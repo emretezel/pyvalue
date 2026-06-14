@@ -20,6 +20,8 @@ import pytest
 import requests
 
 from pyvalue import cli
+from pyvalue.cli._common import _PreparedFundamentalsRun
+from pyvalue.cli.ingest import _run_eodhd_fundamentals_ingestion
 from cli_test_helpers import patch_cli
 from pyvalue.currency import MetricUnitKind
 from pyvalue.facts import RegionFactsRepository
@@ -4753,6 +4755,76 @@ def test_cmd_normalize_fundamentals_stage_all_supported_filters_to_raw_symbols(
     assert isinstance(captured_symbols, list)
     assert sorted(captured_symbols) == ["AAA.US", "DDD.LSE"]
     assert captured["force"] is False
+
+
+def test_ingest_run_reports_and_purges_secondary_reclassification(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db_path = tmp_path / "ingest-secondary.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock", "Currency": "USD"}],
+    )
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "LSE",
+        [{"Code": "AAA", "Name": "AAA plc", "Type": "Common Stock", "Currency": "GBX"}],
+    )
+    by_symbol = {row.symbol: row for row in ticker_repo.list_for_provider("EODHD")}
+    aaa_lse_id = by_symbol["AAA.LSE"].security_id
+
+    # Seed downstream facts on the listing ingest will reclassify secondary.
+    FinancialFactsRepository(db_path).replace_facts(
+        "AAA.LSE",
+        [
+            FactRecord(
+                symbol="AAA.LSE",
+                concept="Assets",
+                fiscal_period="FY",
+                end_date="2024-12-31",
+                unit_kind="monetary",
+                value=100.0,
+                currency="GBP",
+            )
+        ],
+    )
+
+    eligible = tuple(ticker_repo.list_for_provider("EODHD"))
+    prepared = _PreparedFundamentalsRun(
+        rate_value=100000.0,
+        daily_limit=1000,
+        used_calls=0,
+        buffer_calls=0,
+        request_budget=len(eligible),
+        eligible=eligible,
+    )
+
+    def fake_fetch(api_key: str, limiter: object, symbol: str) -> dict[str, object]:
+        # PrimaryTicker points at AAA.US, so AAA.US is primary and AAA.LSE
+        # secondary -- the cascade should purge AAA.LSE's seeded facts.
+        return {"General": {"Name": symbol, "PrimaryTicker": "AAA.US"}}
+
+    patch_cli(monkeypatch, "_fetch_symbol_fundamentals", fake_fetch)
+
+    rc = _run_eodhd_fundamentals_ingestion(
+        database=db_path,
+        api_key="key",
+        scope_label="test scope",
+        prepared=prepared,
+    )
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Reclassified 1 listing(s) to secondary" in out
+    with sqlite3.connect(db_path) as conn:
+        remaining_facts = conn.execute(
+            "SELECT COUNT(*) FROM financial_facts WHERE listing_id = ?",
+            (aaa_lse_id,),
+        ).fetchone()[0]
+    assert remaining_facts == 0
 
 
 def test_cmd_normalize_eodhd_fundamentals_bulk_reports_freshness_scan(

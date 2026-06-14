@@ -441,12 +441,7 @@ def _reconcile_eodhd_listing_scope(
         exchange_codes=exchange_codes,
         security_ids=security_ids,
     )
-    secondary_updates = [update for update in updates if not update.is_primary_listing]
-    if secondary_updates:
-        repo.purge_secondary_security_data(
-            security_ids=[update.security_id for update in secondary_updates],
-            provider_symbols=[update.provider_symbol for update in secondary_updates],
-        )
+    repo.purge_downstream_for_secondary(updates)
     return updates
 
 

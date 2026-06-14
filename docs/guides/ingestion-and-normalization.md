@@ -67,6 +67,13 @@ has already catalogued — always refresh the catalog first. An uncatalogued
 symbol is skipped, because ingestion never creates a listing (doing so would
 mean writing `listing.currency`, which only the catalog refresh may do).
 
+As it stores each payload, ingestion also refreshes the listing's
+primary/secondary classification. When a listing is reclassified **secondary**,
+its now-invalid downstream data (facts, metrics, market data, and the related
+fetch/normalization state) is purged immediately, and the run summary reports
+how many listings were reclassified. `reconcile-listing-status` runs the same
+classification and purge as a separate, full-scope pass.
+
 The raw table does not store listing currency. Listing currency is catalog
 metadata stored on `listing.currency` as the authoritative quote unit.
 

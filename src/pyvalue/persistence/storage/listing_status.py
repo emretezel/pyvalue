@@ -235,6 +235,29 @@ class SecurityListingStatusRepository(SQLiteStore):
         self.upsert_many(records)
         return records
 
+    def purge_downstream_for_secondary(
+        self,
+        records: Sequence[SecurityListingStatusRecord],
+    ) -> List[SecurityListingStatusRecord]:
+        """Purge downstream data for every record now classified secondary.
+
+        The invariant "a secondary listing owns no facts/metrics/market-data"
+        is maintained eagerly by whoever writes the listing status, so both
+        ``ingest-fundamentals`` and ``reconcile-listing-status`` route their
+        secondary reclassifications through this one method instead of
+        duplicating the filter-and-purge step.
+
+        Returns the secondary records that were purged (empty when none), so the
+        caller can report how many listings were reclassified.
+        """
+        secondary = [record for record in records if not record.is_primary_listing]
+        if secondary:
+            self.purge_secondary_security_data(
+                security_ids=[record.security_id for record in secondary],
+                provider_symbols=[record.provider_symbol for record in secondary],
+            )
+        return secondary
+
     def purge_secondary_security_data(
         self,
         *,
