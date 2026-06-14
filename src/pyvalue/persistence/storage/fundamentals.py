@@ -24,6 +24,7 @@ from .base import (
     _batched,
     _normalize_optional_text,
     _normalize_provider_identity,
+    _normalize_symbol_base,
     _normalized_codes,
     _utc_now_iso,
     canonical_json_dumps,
@@ -106,6 +107,50 @@ def _resolve_provider_listing_ids_by_natural_key(
             if code_bare is not None:
                 resolved[code_bare] = int(row["provider_listing_id"])
     return resolved
+
+
+def _resolve_provider_listing_id(
+    conn: sqlite3.Connection,
+    provider_id: Optional[int],
+    provider: str,
+    qualified_symbol: str,
+) -> Optional[int]:
+    """Resolve one qualified provider symbol (e.g. ``AAPL.US``) to its
+    ``provider_listing_id``.
+
+    Fast path: split the qualified symbol into its bare ``provider_symbol`` and
+    ``provider_exchange_code`` and resolve through the ``provider_listing``
+    natural key -- three covering-index seeks (~0.1 ms), the same path
+    :meth:`FundamentalsRepository.upsert_many` uses. This serves the entire
+    EODHD workload, where the qualifying suffix *is* the provider exchange code.
+
+    Fallback: the ``provider_listing_catalog`` view's *computed*
+    ``provider_symbol``. A computed cross-table predicate can't use an index, so
+    this is a full catalog walk (~33 ms on a ~75k-listing DB) -- but it only
+    runs when the fast path misses, which in practice means a non-EODHD
+    provider. SEC, for instance, synthesises a literal ``.US`` suffix in the
+    view that need not equal the stored ``provider_exchange_code``; the view
+    lookup stays correct there.
+
+    Returns ``None`` when no catalogued listing matches.
+    """
+    bare, exchange_code = _normalize_symbol_base(qualified_symbol)
+    if provider_id is not None and exchange_code is not None:
+        resolved = _resolve_provider_listing_ids_by_natural_key(
+            conn, provider_id, [(exchange_code, bare)]
+        )
+        listing_id = resolved.get((exchange_code, bare))
+        if listing_id is not None:
+            return listing_id
+    row = conn.execute(
+        """
+        SELECT provider_listing_id
+        FROM provider_listing_catalog
+        WHERE provider = ? AND provider_symbol = ?
+        """,
+        (provider.strip().upper(), qualified_symbol.strip().upper()),
+    ).fetchone()
+    return int(row["provider_listing_id"]) if row is not None else None
 
 
 class FundamentalsRepository(SQLiteStore):
@@ -444,20 +489,30 @@ class FundamentalsRepository(SQLiteStore):
     def fetch_payload_with_hash(
         self, provider: str, symbol: str
     ) -> Optional[Tuple[Dict[str, Any], str]]:
+        # Resolve the listing by its natural key, then read fundamentals_raw by
+        # its primary key (provider_listing_id). The previous shape joined
+        # through provider_listing_catalog and filtered the view's *computed*
+        # provider_symbol, which no index can serve -- a full catalog walk
+        # (~33 ms) per call, on the per-symbol normalize hot path. The natural
+        # key is three covering-index seeks (~0.1 ms).
         self.initialize_schema()
-        provider_symbol, _, _ = self._resolve_security(provider, symbol, None)
-        if provider_symbol is None:
-            return None
+        provider_norm = provider.strip().upper()
         with self._connect() as conn:
+            provider_id = self._provider_repo().resolve_id(
+                provider_norm, connection=conn
+            )
+            provider_listing_id = _resolve_provider_listing_id(
+                conn, provider_id, provider_norm, symbol
+            )
+            if provider_listing_id is None:
+                return None
             row = conn.execute(
                 """
-                SELECT fr.data, fr.payload_hash
-                FROM fundamentals_raw fr
-                JOIN provider_listing_catalog catalog
-                  ON catalog.provider_listing_id = fr.provider_listing_id
-                WHERE catalog.provider = ? AND catalog.provider_symbol = ?
+                SELECT data, payload_hash
+                FROM fundamentals_raw
+                WHERE provider_listing_id = ?
                 """,
-                (provider.strip().upper(), provider_symbol),
+                (provider_listing_id,),
             ).fetchone()
         if row is None:
             return None
@@ -673,22 +728,24 @@ class FundamentalsNormalizationStateRepository(SQLiteStore):
         self,
         provider: str,
         symbol: str,
-        security_id: int,
         normalized_payload_hash: str,
         normalized_at: Optional[str] = None,
     ) -> None:
-        del security_id
+        # Resolve provider_listing_id via the natural key (covering-index seeks)
+        # instead of filtering the catalog view's computed provider_symbol, which
+        # forced a full catalog walk (~33 ms) per call. This method runs serially
+        # in the main process, once per normalized symbol, so the view-filter
+        # shape dominated wall-clock on a full-universe normalize.
         self.initialize_schema()
+        provider_norm = provider.strip().upper()
         with self._connect() as conn:
-            provider_listing_row = conn.execute(
-                """
-                SELECT provider_listing_id
-                FROM provider_listing_catalog
-                WHERE provider = ? AND provider_symbol = ?
-                """,
-                (provider.strip().upper(), symbol.strip().upper()),
-            ).fetchone()
-            if provider_listing_row is None:
+            provider_id = self._provider_repo().resolve_id(
+                provider_norm, connection=conn
+            )
+            provider_listing_id = _resolve_provider_listing_id(
+                conn, provider_id, provider_norm, symbol
+            )
+            if provider_listing_id is None:
                 return
             conn.execute(
                 """
@@ -702,7 +759,7 @@ class FundamentalsNormalizationStateRepository(SQLiteStore):
                     normalized_at = excluded.normalized_at
                 """,
                 (
-                    int(provider_listing_row["provider_listing_id"]),
+                    provider_listing_id,
                     normalized_payload_hash,
                     normalized_at or _utc_now_iso(),
                 ),

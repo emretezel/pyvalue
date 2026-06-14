@@ -4555,13 +4555,11 @@ def test_cmd_clear_fundamentals_raw(tmp_path: Path) -> None:
     repo.initialize_schema()
     repo.upsert("SEC", "AAA.US", {"facts": {}})
     state_repo = FundamentalsNormalizationStateRepository(db_path)
-    security_id = repo._security_repo().ensure_from_symbol("AAA.US").security_id
     raw_record = repo.fetch_payload_with_hash("SEC", "AAA.US")
     assert raw_record is not None
     state_repo.mark_success(
         "SEC",
         "AAA.US",
-        security_id=security_id,
         normalized_payload_hash=raw_record[1],
     )
 
@@ -4606,7 +4604,6 @@ def test_cmd_clear_financial_facts_clears_normalization_state(tmp_path: Path) ->
     state_repo = FundamentalsNormalizationStateRepository(db_path)
     refresh_state_repo = FinancialFactsRefreshStateRepository(db_path)
     metric_status_repo = MetricComputeStatusRepository(db_path)
-    security_id = fact_repo._security_repo().ensure_from_symbol("AAA.US").security_id
     FundamentalsRepository(db_path).upsert("SEC", "AAA.US", {"facts": {}})
     raw_record = FundamentalsRepository(db_path).fetch_payload_with_hash(
         "SEC", "AAA.US"
@@ -4615,7 +4612,6 @@ def test_cmd_clear_financial_facts_clears_normalization_state(tmp_path: Path) ->
     state_repo.mark_success(
         "SEC",
         "AAA.US",
-        security_id=security_id,
         normalized_payload_hash=raw_record[1],
     )
     assert refresh_state_repo.fetch("AAA.US") is not None

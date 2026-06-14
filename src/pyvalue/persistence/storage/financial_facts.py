@@ -180,12 +180,21 @@ class FinancialFactsRepository(SQLiteStore):
         self,
         symbol: str,
         rows: Iterable[StoredFactRow],
+        *,
+        security_id: Optional[int] = None,
     ) -> int:
+        # Callers that already hold the security_id (the bulk normalizer resolved
+        # it during its freshness scan) pass it in to skip ``ensure_from_symbol``.
+        # That path runs the full create-or-update routine -- including a no-op
+        # ``UPDATE issuer`` -- on every symbol, redundant work on the serialized
+        # writer when the listing is already known to exist. When omitted we fall
+        # back to ensuring the listing (back-compat for symbol-only callers).
         self.initialize_schema()
-        security = self._security_repo().ensure_from_symbol(symbol)
+        if security_id is None:
+            security_id = self._security_repo().ensure_from_symbol(symbol).security_id
         prepared_rows = [
             (
-                security.security_id,
+                security_id,
                 concept,
                 fiscal_period,
                 end_date,
@@ -207,7 +216,7 @@ class FinancialFactsRepository(SQLiteStore):
         with self._connect() as conn:
             conn.execute(
                 "DELETE FROM financial_facts WHERE listing_id = ?",
-                (security.security_id,),
+                (security_id,),
             )
             if prepared_rows:
                 conn.executemany(
@@ -220,7 +229,7 @@ class FinancialFactsRepository(SQLiteStore):
                     prepared_rows,
                 )
             FinancialFactsRefreshStateRepository(self.db_path).mark_security_refreshed(
-                security.security_id,
+                security_id,
                 connection=conn,
             )
         return len(prepared_rows)

@@ -31,12 +31,13 @@ from pyvalue.persistence.storage import (
     StoredMetricRow,
     SupportedTickerRepository,
 )
+from pyvalue.persistence.storage.fundamentals import _resolve_provider_listing_id
 from pyvalue.marketdata import MarketDataUpdate
 from pyvalue.marketdata.service import latest_share_count
 from pyvalue.universe import Listing
 from collections.abc import Sequence
 from types import TracebackType
-from typing import Literal, Optional, Tuple, Type
+from typing import Literal, NoReturn, Optional, Tuple, Type
 
 from conftest import seed_exchange
 
@@ -291,7 +292,6 @@ def test_fundamentals_repository_classifies_and_purges_secondary_listings(
     FundamentalsNormalizationStateRepository(db_path).mark_success(
         "EODHD",
         "AAA.LSE",
-        by_symbol["AAA.LSE"].security_id,
         "a" * 64,
     )
     MarketDataFetchStateRepository(db_path).mark_success(
@@ -1226,9 +1226,6 @@ def test_fundamentals_repository_normalization_candidates_match_state_and_facts(
     aaa_security_id = (
         fund_repo._security_repo().ensure_from_symbol("AAA.US").security_id
     )
-    bbb_security_id = (
-        fund_repo._security_repo().ensure_from_symbol("BBB.US").security_id
-    )
 
     aaa_record = fund_repo.fetch_payload_with_hash("SEC", "AAA.US")
     assert aaa_record is not None
@@ -1237,8 +1234,8 @@ def test_fundamentals_repository_normalization_candidates_match_state_and_facts(
     assert bbb_record is not None
     _, bbb_payload_hash = bbb_record
 
-    state_repo.mark_success("SEC", "AAA.US", aaa_security_id, aaa_payload_hash)
-    state_repo.mark_success("SEC", "BBB.US", bbb_security_id, bbb_payload_hash)
+    state_repo.mark_success("SEC", "AAA.US", aaa_payload_hash)
+    state_repo.mark_success("SEC", "BBB.US", bbb_payload_hash)
     fact_repo.replace_facts(
         "AAA.US",
         [
@@ -1346,6 +1343,169 @@ def test_fundamentals_repository_normalization_candidates_skip_facts_scan_withou
         candidate.normalized_payload_hash is None for candidate in candidates.values()
     )
     assert not any("FROM financial_facts" in sql for sql in seen_sql)
+
+
+def test_resolve_provider_listing_id_natural_key_and_view_fallback(
+    tmp_path: Path,
+) -> None:
+    """``_resolve_provider_listing_id`` resolves via the provider_listing natural
+    key, falls back to the catalog view, and returns ``None`` for unknowns."""
+    db_path = tmp_path / "resolve-listing-id.db"
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    _seed_listing(db_path, "AAA.US")
+    fund_repo.upsert("EODHD", "AAA.US", {"General": {"Name": "AAA"}}, exchange="US")
+
+    with fund_repo._connect() as conn:
+        expected = conn.execute(
+            """
+            SELECT provider_listing_id
+            FROM provider_listing_catalog
+            WHERE provider = ? AND provider_symbol = ?
+            """,
+            ("EODHD", "AAA.US"),
+        ).fetchone()["provider_listing_id"]
+        provider_id = conn.execute(
+            "SELECT provider_id FROM provider WHERE provider_code = ?",
+            ("EODHD",),
+        ).fetchone()["provider_id"]
+
+        # Fast path: natural key.
+        assert (
+            _resolve_provider_listing_id(conn, provider_id, "EODHD", "AAA.US")
+            == expected
+        )
+        # Fallback path: a None provider_id skips the natural-key branch, so
+        # resolution falls through to the catalog-view lookup -- the branch that
+        # keeps non-EODHD providers (e.g. SEC's synthetic '.US' suffix) correct.
+        assert _resolve_provider_listing_id(conn, None, "EODHD", "AAA.US") == expected
+        # Unknown symbol resolves to nothing.
+        assert (
+            _resolve_provider_listing_id(conn, provider_id, "EODHD", "ZZZ.US") is None
+        )
+
+
+def test_fetch_payload_with_hash_resolves_without_scanning_catalog(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The per-symbol payload read resolves the listing by its natural key and
+    reads ``fundamentals_raw`` by primary key, never walking the
+    computed-``provider_symbol`` catalog view. Regression guard for the
+    ~33 ms-per-symbol full catalog scan the view filter forced."""
+    db_path = tmp_path / "fetch-payload-plan.db"
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    # Several exchanges/listings so a stray full catalog scan would be obvious.
+    _seed_listing(db_path, "AAA.US")
+    _seed_listing(db_path, "BBB.LSE")
+    _seed_listing(db_path, "CCC.AU")
+    fund_repo.upsert("EODHD", "AAA.US", {"General": {"Name": "AAA"}}, exchange="US")
+
+    seen: list[tuple[str, tuple[object, ...]]] = []
+
+    class _LoggingConnection:
+        """Records each executed statement and its parameters so the test can
+        re-run EXPLAIN QUERY PLAN on them."""
+
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self._conn = conn
+
+        def __enter__(self) -> "_LoggingConnection":
+            self._conn.__enter__()
+            return self
+
+        def __exit__(
+            self,
+            exc_type: Optional[Type[BaseException]],
+            exc_value: Optional[BaseException],
+            traceback: Optional[TracebackType],
+        ) -> bool:
+            return bool(self._conn.__exit__(exc_type, exc_value, traceback))
+
+        def execute(
+            self, sql: str, parameters: Sequence[object] = ()
+        ) -> sqlite3.Cursor:
+            seen.append((" ".join(sql.split()), tuple(parameters)))
+            return self._conn.execute(sql, parameters)
+
+    real_connect = fund_repo._connect
+    monkeypatch.setattr(
+        fund_repo, "_connect", lambda: _LoggingConnection(real_connect())
+    )
+
+    record = fund_repo.fetch_payload_with_hash("EODHD", "AAA.US")
+    assert record is not None
+
+    selects = [
+        (sql, params) for sql, params in seen if sql.lower().startswith("select")
+    ]
+    assert selects, "expected the read path to issue at least one SELECT"
+    # The fast path never touches the 6-table catalog view...
+    assert not any("provider_listing_catalog" in sql for sql, _ in selects)
+    # ...and no statement degrades into a full catalog walk (which always begins
+    # by scanning the exchange table at the base of the view's join).
+    with sqlite3.connect(db_path) as plan_conn:
+        plan_conn.row_factory = sqlite3.Row
+        for sql, params in selects:
+            plan = plan_conn.execute("EXPLAIN QUERY PLAN " + sql, params).fetchall()
+            plan_text = " ".join(str(row["detail"]) for row in plan)
+            assert "SCAN TABLE exchange" not in plan_text
+
+
+def test_replace_fact_rows_with_known_security_id_skips_ensure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A provided ``security_id`` writes facts directly and skips the
+    create-or-update ``ensure_from_symbol`` path (and its redundant issuer
+    UPDATE)."""
+    db_path = tmp_path / "replace-known-id.db"
+    repo = FinancialFactsRepository(db_path)
+    repo.initialize_schema()
+    _seed_listing(db_path, "AAA.US")
+    security_id = repo._security_repo().ensure_from_symbol("AAA.US").security_id
+
+    def _boom(*args: object, **kwargs: object) -> NoReturn:
+        raise AssertionError(
+            "ensure_from_symbol must be skipped when security_id given"
+        )
+
+    monkeypatch.setattr(repo._security_repo(), "ensure_from_symbol", _boom)
+
+    stored = repo.replace_fact_rows(
+        "AAA.US",
+        [("Assets", "FY", "2024-12-31", "monetary", 100.0, None, "USD")],
+        security_id=security_id,
+    )
+
+    assert stored == 1
+    with repo._connect() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM financial_facts WHERE listing_id = ?",
+            (security_id,),
+        ).fetchone()[0]
+    assert count == 1
+
+
+def test_supported_ticker_repository_provider_symbols_honours_primary_only(
+    tmp_path: Path,
+) -> None:
+    """``provider_symbols`` returns qualified symbols and honours
+    ``primary_only`` (excluding secondary listings)."""
+    db_path = tmp_path / "provider-symbols.db"
+    repo = SupportedTickerRepository(db_path)
+    repo.initialize_schema()
+    _seed_listing(db_path, "AAA.US")
+    _seed_listing(db_path, "BBB.US")
+    # Mark BBB secondary so it drops out of the primary-only projection.
+    with repo._connect() as conn:
+        conn.execute(
+            "UPDATE listing SET primary_listing_status = 'secondary' WHERE symbol = ?",
+            ("BBB",),
+        )
+        conn.commit()
+
+    assert sorted(repo.provider_symbols("EODHD")) == ["AAA.US", "BBB.US"]
+    assert repo.provider_symbols("EODHD", primary_only=True) == ["AAA.US"]
 
 
 def test_financial_facts_repository_replace_fact_rows_replaces_symbol_slice(

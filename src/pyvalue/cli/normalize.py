@@ -329,24 +329,17 @@ def _run_bulk_normalization(
                         sector=result.entity_sector,
                         industry=result.entity_industry,
                     )
-                stored = fact_repo.replace_fact_rows(
-                    symbol,
-                    result.rows,
-                )
                 candidate = (
                     candidate_map.get(symbol) if candidate_map is not None else None
                 )
-                security_id = (
-                    candidate.security_id
-                    if candidate is not None
-                    else fact_repo._security_repo()
-                    .ensure_from_symbol(symbol)
-                    .security_id
+                stored = fact_repo.replace_fact_rows(
+                    symbol,
+                    result.rows,
+                    security_id=candidate.security_id if candidate else None,
                 )
                 state_repo.mark_success(
                     provider,
                     symbol,
-                    security_id,
                     result.payload_hash,
                 )
                 processed += 1
@@ -395,24 +388,17 @@ def _run_bulk_normalization(
                             sector=result.entity_sector,
                             industry=result.entity_industry,
                         )
-                    stored = fact_repo.replace_fact_rows(
-                        symbol,
-                        result.rows,
-                    )
                     candidate = (
                         candidate_map.get(symbol) if candidate_map is not None else None
                     )
-                    security_id = (
-                        candidate.security_id
-                        if candidate is not None
-                        else fact_repo._security_repo()
-                        .ensure_from_symbol(symbol)
-                        .security_id
+                    stored = fact_repo.replace_fact_rows(
+                        symbol,
+                        result.rows,
+                        security_id=candidate.security_id if candidate else None,
                     )
                     state_repo.mark_success(
                         provider,
                         symbol,
-                        security_id,
                         result.payload_hash,
                     )
                     processed += 1
@@ -468,20 +454,20 @@ def cmd_normalize_eodhd_fundamentals_bulk(
     # Listing classification is read-only here: ingest-fundamentals already wrote
     # it (with reconcile-listing-status / migration 078 as the backstop), so the
     # secondary-listing filter below trusts the cached primary_listing_status.
+    # Pull just the symbol sets (not full SupportedTicker rows) so this is two
+    # light single-column scans instead of two full 6-table catalog hydrations,
+    # and so we never pass the entire symbol list as a SQL IN (...) clause. A
+    # symbol is dropped iff it is supported but not primary (i.e. a secondary
+    # listing); symbols restricted to ``symbols`` make the provider-wide sets
+    # safe to subtract here.
     ticker_repo = SupportedTickerRepository(database)
-    supported_rows = ticker_repo.list_for_provider(
-        "EODHD",
-        provider_symbols=symbols,
-    )
-    primary_rows = ticker_repo.list_for_provider(
-        "EODHD",
-        provider_symbols=symbols,
-        primary_only=True,
-    )
-    excluded_supported = {row.symbol.upper() for row in supported_rows} - {
-        row.symbol.upper() for row in primary_rows
+    secondary_symbols = {
+        symbol.upper() for symbol in ticker_repo.provider_symbols("EODHD")
+    } - {
+        symbol.upper()
+        for symbol in ticker_repo.provider_symbols("EODHD", primary_only=True)
     }
-    symbols = [symbol for symbol in symbols if symbol.upper() not in excluded_supported]
+    symbols = [symbol for symbol in symbols if symbol.upper() not in secondary_symbols]
     if not symbols:
         raise SystemExit(
             "No primary EODHD symbols remain after secondary-listing filtering."
