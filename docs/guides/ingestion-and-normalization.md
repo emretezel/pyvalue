@@ -61,6 +61,12 @@ Ingestion stores raw provider payloads as received, keyed by:
 - `provider_listing_id`
 
 This stage is useful because it preserves source payloads for later re-normalization.
+
+Ingestion only stores a payload for a listing that `refresh-supported-tickers`
+has already catalogued — always refresh the catalog first. An uncatalogued
+symbol is skipped, because ingestion never creates a listing (doing so would
+mean writing `listing.currency`, which only the catalog refresh may do).
+
 The raw table does not store listing currency. Listing currency is catalog
 metadata stored on `listing.currency` as the authoritative quote unit.
 

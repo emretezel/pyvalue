@@ -247,7 +247,6 @@ def _build_fundamentals_update(
         security_id=ticker.security_id,
         provider_symbol=ticker.symbol,
         provider_exchange_code=ticker.exchange_code,
-        listing_currency=ticker.currency,
         data=data,
         payload_hash=fundamentals_payload_hash(data),
         last_fetched_at=datetime.now(timezone.utc).isoformat(),

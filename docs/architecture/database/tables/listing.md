@@ -62,9 +62,14 @@ One row per `(exchange_id, symbol)`.
 
 ## Main Write Paths
 
-- provider-listing refreshes
-- raw fundamentals upserts that need to materialize a canonical listing
+- `refresh-supported-tickers` — the sole runtime writer of `listing` rows and
+  of `listing.currency`
 - migration-time backfill from legacy securities
+
+`ingest-fundamentals` never writes here. It attaches each payload to a listing
+that `refresh-supported-tickers` has already catalogued and skips any symbol
+whose listing is absent (creating one would require writing the NOT NULL
+`listing.currency`). Currency therefore has a single source of truth.
 
 ## Sample Rows
 
@@ -122,7 +127,9 @@ One row per `(exchange_id, symbol)`.
 
 - Canonical user-facing symbols such as `AAPL.US` are derived, not stored.
 - `listing.currency` is the only persisted listing-currency truth. It is a
-  quote unit and is not collapsed to base currency at storage time.
+  quote unit and is not collapsed to base currency at storage time. It is
+  written solely by `refresh-supported-tickers`; fundamentals ingestion reads
+  the catalog and never creates or mutates a listing's currency.
 - Monetary normalization, market-cap calculations, FX discovery, and monetary
   metrics derive base currency from `listing.currency`.
 - Unknown primary-listing status is treated as eligible; downstream

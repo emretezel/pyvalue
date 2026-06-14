@@ -304,7 +304,6 @@ class FundamentalsUpdate:
     security_id: int
     provider_symbol: str
     provider_exchange_code: Optional[str]
-    listing_currency: Optional[str]
     data: str
     payload_hash: str
     last_fetched_at: str

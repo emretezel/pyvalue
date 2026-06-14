@@ -638,26 +638,70 @@ class SupportedTickerRepository(SQLiteStore):
         normalized_codes = _normalized_codes(exchange_codes)
         normalized_symbols = _normalized_codes(provider_symbols)
 
+        # Resolve the provider once so the eligibility queries can filter on
+        # provider_exchange.provider_id and read straight from the base tables
+        # (provider_listing + provider_exchange) instead of the six-table
+        # provider_listing_catalog view. security_id is just
+        # provider_listing.listing_id (the join key), and currency -- the only
+        # other column ingest used to read -- is now owned solely by
+        # refresh-supported-tickers, so the issuer/exchange/listing/provider
+        # joins all fall away, leaving three joins per branch.
+        provider_id = self._provider_repo().resolve_id(provider_norm)
+        if provider_id is None:
+            return []
+
+        # Rebuild the catalog's qualified provider_symbol from base columns so
+        # scope filtering and ordering stay identical to the view. SEC symbols
+        # are implicitly US-listed; every other provider qualifies by its
+        # provider exchange code.
+        if provider_norm == "SEC":
+            qualified_symbol = "(pl.provider_symbol || '.US')"
+        else:
+            qualified_symbol = (
+                "(pl.provider_symbol || '.' || px.provider_exchange_code)"
+            )
+        select_columns = (
+            "px.provider_exchange_code AS provider_exchange_code, "
+            f"{qualified_symbol} AS provider_symbol, "
+            "pl.provider_symbol AS provider_ticker, "
+            "pl.listing_id AS security_id"
+        )
+
+        def _build_ticker(row: sqlite3.Row) -> SupportedTicker:
+            # Project only the columns ingest consumes. The remaining
+            # SupportedTicker fields (currency, name, country, ...) are catalog
+            # metadata the fundamentals path never reads, so they default to
+            # None instead of dragging in extra joins.
+            return SupportedTicker(
+                provider=provider_norm,
+                provider_exchange_code=str(row["provider_exchange_code"]),
+                provider_symbol=str(row["provider_symbol"]),
+                provider_ticker=str(row["provider_ticker"]),
+                security_id=int(row["security_id"]),
+            )
+
         def _apply_scope_filters(query: List[str], params: List[object]) -> None:
             if normalized_codes:
                 placeholders = ", ".join("?" for _ in normalized_codes)
-                query.append(f"AND catalog.provider_exchange_code IN ({placeholders})")
+                query.append(f"AND px.provider_exchange_code IN ({placeholders})")
                 params.extend(normalized_codes)
             if normalized_symbols:
                 placeholders = ", ".join("?" for _ in normalized_symbols)
-                query.append(f"AND catalog.provider_symbol IN ({placeholders})")
+                query.append(f"AND {qualified_symbol} IN ({placeholders})")
                 params.extend(normalized_symbols)
 
         def _fetch_missing(limit: Optional[int]) -> List[SupportedTicker]:
-            params: List[object] = [provider_norm]
+            params: List[object] = [provider_id]
             query = [
-                f"SELECT {self._catalog_select_columns('catalog')}",
-                "FROM provider_listing_catalog catalog",
+                f"SELECT {select_columns}",
+                "FROM provider_listing pl",
+                "JOIN provider_exchange px "
+                "ON px.provider_exchange_id = pl.provider_exchange_id",
                 "LEFT JOIN fundamentals_raw fr "
-                "ON fr.provider_listing_id = catalog.provider_listing_id",
+                "ON fr.provider_listing_id = pl.provider_listing_id",
                 "LEFT JOIN fundamentals_fetch_state fs "
-                "ON fs.provider_listing_id = catalog.provider_listing_id",
-                "WHERE catalog.provider = ?",
+                "ON fs.provider_listing_id = pl.provider_listing_id",
+                "WHERE px.provider_id = ?",
                 "AND fr.provider_listing_id IS NULL",
             ]
             _apply_scope_filters(query, params)
@@ -666,24 +710,26 @@ class SupportedTickerRepository(SQLiteStore):
                     "AND (fs.next_eligible_at IS NULL OR fs.next_eligible_at <= ?)"
                 )
                 params.append(now.isoformat())
-            query.append("ORDER BY catalog.provider_symbol ASC")
+            query.append(f"ORDER BY {qualified_symbol} ASC")
             if limit is not None:
                 query.append("LIMIT ?")
                 params.append(limit)
             with self._connect() as conn:
                 rows = conn.execute(" ".join(query), params).fetchall()
-            return [SupportedTicker(*row) for row in rows]
+            return [_build_ticker(row) for row in rows]
 
         def _fetch_stale(limit: Optional[int], cutoff: str) -> List[SupportedTicker]:
-            params: List[object] = [provider_norm, cutoff]
+            params: List[object] = [provider_id, cutoff]
             query = [
-                f"SELECT {self._catalog_select_columns('catalog')}",
+                f"SELECT {select_columns}",
                 "FROM fundamentals_raw fr",
-                "JOIN provider_listing_catalog catalog "
-                "ON catalog.provider_listing_id = fr.provider_listing_id",
+                "JOIN provider_listing pl "
+                "ON pl.provider_listing_id = fr.provider_listing_id",
+                "JOIN provider_exchange px "
+                "ON px.provider_exchange_id = pl.provider_exchange_id",
                 "LEFT JOIN fundamentals_fetch_state fs "
                 "ON fs.provider_listing_id = fr.provider_listing_id",
-                "WHERE catalog.provider = ?",
+                "WHERE px.provider_id = ?",
                 "AND fr.last_fetched_at <= ?",
             ]
             _apply_scope_filters(query, params)
@@ -692,22 +738,24 @@ class SupportedTickerRepository(SQLiteStore):
                     "AND (fs.next_eligible_at IS NULL OR fs.next_eligible_at <= ?)"
                 )
                 params.append(now.isoformat())
-            query.append("ORDER BY fr.last_fetched_at ASC, catalog.provider_symbol ASC")
+            query.append(f"ORDER BY fr.last_fetched_at ASC, {qualified_symbol} ASC")
             if limit is not None:
                 query.append("LIMIT ?")
                 params.append(limit)
             with self._connect() as conn:
                 rows = conn.execute(" ".join(query), params).fetchall()
-            return [SupportedTicker(*row) for row in rows]
+            return [_build_ticker(row) for row in rows]
 
         if max_age_days is None and not missing_only:
-            params: List[object] = [provider_norm]
+            params: List[object] = [provider_id]
             query = [
-                f"SELECT {self._catalog_select_columns('catalog')}",
-                "FROM provider_listing_catalog catalog",
+                f"SELECT {select_columns}",
+                "FROM provider_listing pl",
+                "JOIN provider_exchange px "
+                "ON px.provider_exchange_id = pl.provider_exchange_id",
                 "LEFT JOIN fundamentals_fetch_state fs "
-                "ON fs.provider_listing_id = catalog.provider_listing_id",
-                "WHERE catalog.provider = ?",
+                "ON fs.provider_listing_id = pl.provider_listing_id",
+                "WHERE px.provider_id = ?",
             ]
             _apply_scope_filters(query, params)
             if respect_backoff:
@@ -715,13 +763,13 @@ class SupportedTickerRepository(SQLiteStore):
                     "AND (fs.next_eligible_at IS NULL OR fs.next_eligible_at <= ?)"
                 )
                 params.append(now.isoformat())
-            query.append("ORDER BY catalog.provider_symbol ASC")
+            query.append(f"ORDER BY {qualified_symbol} ASC")
             if max_symbols is not None:
                 query.append("LIMIT ?")
                 params.append(max_symbols)
             with self._connect() as conn:
                 rows = conn.execute(" ".join(query), params).fetchall()
-            return [SupportedTicker(*row) for row in rows]
+            return [_build_ticker(row) for row in rows]
 
         missing_rows = _fetch_missing(max_symbols)
         if missing_only:

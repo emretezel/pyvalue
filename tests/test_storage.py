@@ -731,6 +731,137 @@ def test_supported_ticker_repository_lists_eligible_symbols(tmp_path: Path) -> N
     assert [row.symbol for row in rows] == ["BBB.LSE"]
 
 
+def test_list_eligible_orders_missing_then_stale(tmp_path: Path) -> None:
+    db_path = tmp_path / "eligible-missing-stale.db"
+    repo = SupportedTickerRepository(db_path)
+    repo.initialize_schema()
+    repo.replace_for_exchange(
+        "EODHD",
+        "LSE",
+        [
+            {
+                "Code": code,
+                "Name": f"{code} plc",
+                "Type": "Common Stock",
+                "Currency": "GBP",
+            }
+            for code in ("AAA", "BBB", "CCC")
+        ],
+    )
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    # BBB and CCC have stored fundamentals; AAA has none, so it is "missing".
+    fund_repo.upsert("EODHD", "BBB.LSE", {"General": {}})
+    fund_repo.upsert("EODHD", "CCC.LSE", {"General": {}})
+    # Age BBB well past the freshness cutoff; CCC stays fresh (just upserted).
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE fundamentals_raw
+            SET last_fetched_at = '2000-01-01T00:00:00+00:00'
+            WHERE provider_listing_id = (
+                SELECT provider_listing_id FROM provider_listing_catalog
+                WHERE provider = 'EODHD' AND provider_symbol = 'BBB.LSE'
+            )
+            """
+        )
+
+    rows = repo.list_eligible_for_fundamentals(
+        "EODHD", exchange_codes=["LSE"], max_age_days=30
+    )
+
+    # Missing (AAA) comes first in symbol order, then stale (BBB); fresh CCC is
+    # excluded entirely. This exercises the narrowed missing+stale branches.
+    assert [row.symbol for row in rows] == ["AAA.LSE", "BBB.LSE"]
+
+
+def test_list_eligible_reads_base_tables_not_catalog_view(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "eligible-plan.db"
+    repo = SupportedTickerRepository(db_path)
+    repo.initialize_schema()
+    repo.replace_for_exchange(
+        "EODHD",
+        "LSE",
+        [{"Code": "AAA", "Name": "AAA plc", "Type": "Common Stock", "Currency": "GBP"}],
+    )
+
+    # Capture the SQL the repository actually executes so we assert on the real
+    # query, not a copy. The eligibility SELECT must read the base tables
+    # directly: routing it back through provider_listing_catalog would drag in
+    # the issuer/exchange/listing/provider joins this refactor removed.
+    captured: list[str] = []
+    original_connect = repo._connect
+
+    def _tracing_connect() -> sqlite3.Connection:
+        conn = original_connect()
+        conn.set_trace_callback(captured.append)
+        return conn
+
+    monkeypatch.setattr(repo, "_connect", _tracing_connect)
+
+    repo.list_eligible_for_fundamentals(
+        "EODHD", exchange_codes=["LSE"], max_age_days=None, missing_only=True
+    )
+
+    eligibility_sql = [
+        sql for sql in captured if "fundamentals_raw" in sql and "ORDER BY" in sql
+    ]
+    assert eligibility_sql, "expected the eligibility SELECT to be captured"
+    for sql in eligibility_sql:
+        assert "provider_listing_catalog" not in sql
+        assert "FROM provider_listing pl" in sql
+        assert "JOIN provider_exchange px" in sql
+
+
+def test_fundamentals_upsert_never_overwrites_listing_currency(tmp_path: Path) -> None:
+    db_path = tmp_path / "fundamentals-currency-owner.db"
+    repo = SupportedTickerRepository(db_path)
+    repo.initialize_schema()
+    # refresh-supported-tickers is the sole writer of listing.currency.
+    repo.replace_for_exchange(
+        "EODHD",
+        "LSE",
+        [{"Code": "AAA", "Name": "AAA plc", "Type": "Common Stock", "Currency": "GBP"}],
+    )
+
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    # The payload reports a *different* currency; fundamentals ingest must not
+    # let it leak into the listing.
+    fund_repo.upsert("EODHD", "AAA.LSE", {"General": {"CurrencyCode": "USD"}})
+
+    assert fund_repo.fetch("EODHD", "AAA.LSE") is not None
+    with sqlite3.connect(db_path) as conn:
+        currency = conn.execute(
+            """
+            SELECT currency FROM provider_listing_catalog
+            WHERE provider = 'EODHD' AND provider_symbol = 'AAA.LSE'
+            """
+        ).fetchone()[0]
+    assert currency == "GBP"
+
+
+def test_fundamentals_upsert_skips_uncatalogued_listing(tmp_path: Path) -> None:
+    db_path = tmp_path / "fundamentals-uncatalogued.db"
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    # No catalog refresh has run, so NEW.LSE is unknown. Fundamentals ingest must
+    # not create it (that would require writing listing.currency, owned solely by
+    # refresh-supported-tickers); the payload is skipped instead.
+    fund_repo.upsert(
+        "EODHD", "NEW.LSE", {"General": {"CurrencyCode": "GBP"}}, exchange="LSE"
+    )
+
+    assert fund_repo.fetch("EODHD", "NEW.LSE") is None
+    with sqlite3.connect(db_path) as conn:
+        raw_count = conn.execute("SELECT COUNT(*) FROM fundamentals_raw").fetchone()[0]
+        listing_count = conn.execute("SELECT COUNT(*) FROM listing").fetchone()[0]
+    assert raw_count == 0
+    assert listing_count == 0
+
+
 def test_financial_facts_repository_replace_fact_rows_matches_replace_facts(
     tmp_path: Path,
 ) -> None:
@@ -1137,7 +1268,6 @@ def test_fundamentals_repository_upsert_many_uses_resolved_metadata_and_overwrit
                 security_id=tickers["AAA.US"].security_id,
                 provider_symbol="AAA.US",
                 provider_exchange_code="US",
-                listing_currency="USD",
                 data=aaa_data,
                 payload_hash=storage.fundamentals_payload_hash(aaa_data),
                 last_fetched_at="2026-03-30T00:00:00+00:00",
@@ -1146,7 +1276,6 @@ def test_fundamentals_repository_upsert_many_uses_resolved_metadata_and_overwrit
                 security_id=tickers["BBB.US"].security_id,
                 provider_symbol="BBB.US",
                 provider_exchange_code="US",
-                listing_currency="USD",
                 data=bbb_data,
                 payload_hash=storage.fundamentals_payload_hash(bbb_data),
                 last_fetched_at="2026-03-30T00:00:00+00:00",
@@ -1160,7 +1289,6 @@ def test_fundamentals_repository_upsert_many_uses_resolved_metadata_and_overwrit
                 security_id=tickers["AAA.US"].security_id,
                 provider_symbol="AAA.US",
                 provider_exchange_code="US",
-                listing_currency="USD",
                 data=aaa_updated_data,
                 payload_hash=storage.fundamentals_payload_hash(aaa_updated_data),
                 last_fetched_at="2026-03-31T00:00:00+00:00",

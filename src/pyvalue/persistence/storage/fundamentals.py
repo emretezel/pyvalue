@@ -6,6 +6,7 @@ Author: Emre Tezel
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from typing import (
     Any,
@@ -36,6 +37,8 @@ from .records import (
 from ..migrations import apply_migrations
 from .listing_status import SecurityListingStatusRepository
 
+logger = logging.getLogger(__name__)
+
 
 class FundamentalsRepository(SQLiteStore):
     """Persist raw fundamentals payloads by provider."""
@@ -53,12 +56,18 @@ class FundamentalsRepository(SQLiteStore):
         provider: str,
         symbol: str,
         payload: Dict[str, Any],
-        listing_currency: Optional[str] = None,
         exchange: Optional[str] = None,
     ) -> None:
+        """Store a single fundamentals payload for an already-catalogued listing.
+
+        Listing identity and currency are owned exclusively by
+        ``refresh-supported-tickers``; this method never creates a listing.
+        When the symbol is absent from the catalog the payload is skipped by
+        :meth:`upsert_many`.
+        """
         self.initialize_schema()
         provider_symbol, provider_exchange_code, security_id = self._resolve_security(
-            provider, symbol, exchange
+            provider, symbol, exchange, create=False
         )
         provider_norm = provider.strip().upper()
         data = canonical_json_dumps(payload)
@@ -70,9 +79,6 @@ class FundamentalsRepository(SQLiteStore):
                     security_id=int(security_id or 0),
                     provider_symbol=str(provider_symbol or ""),
                     provider_exchange_code=provider_exchange_code,
-                    listing_currency=_normalize_optional_text(
-                        listing_currency.upper() if listing_currency else None
-                    ),
                     data=data,
                     payload_hash=fundamentals_payload_hash(data),
                     last_fetched_at=last_fetched_at,
@@ -92,30 +98,27 @@ class FundamentalsRepository(SQLiteStore):
         listing_updates: List[SecurityListingStatusRecord] = []
         with self._connect() as conn:
             rows = []
-            ticker_repo = self._supported_ticker_repo()
+            skipped_uncatalogued: List[str] = []
             for update in updates:
                 if not update.provider_symbol:
                     continue
                 provider_symbol = update.provider_symbol.strip().upper()
+                # Listing identity and currency are owned solely by
+                # refresh-supported-tickers. Fundamentals ingest only attaches a
+                # payload to an EXISTING catalogued listing; it never creates one
+                # (creating a listing would mean writing listing.currency, which
+                # is NOT NULL with no fallback). A payload whose listing is absent
+                # from the catalog is skipped -- refresh the catalog first.
                 provider_listing_row = conn.execute(
                     """
-                    SELECT provider_listing_id, security_id, provider_exchange_code
+                    SELECT provider_listing_id
                     FROM provider_listing_catalog
                     WHERE provider = ? AND provider_symbol = ?
                     """,
                     (provider_norm, provider_symbol),
                 ).fetchone()
-                if provider_listing_row is None or update.listing_currency is not None:
-                    provider_listing_row = ticker_repo._ensure_provider_listing(
-                        conn,
-                        provider_norm,
-                        provider_symbol,
-                        exchange_code=update.provider_exchange_code,
-                        currency=update.listing_currency,
-                    )
                 if provider_listing_row is None:
-                    # No currency available to model the listing (listing.currency
-                    # is NOT NULL with no fallback), so skip storing this payload.
+                    skipped_uncatalogued.append(provider_symbol)
                     continue
                 rows.append(
                     (
@@ -124,6 +127,17 @@ class FundamentalsRepository(SQLiteStore):
                         update.payload_hash,
                         update.last_fetched_at,
                     )
+                )
+            if skipped_uncatalogued:
+                # Surface but do not fail: one stray uncatalogued symbol must not
+                # abort the whole batch. Production eligibles always originate
+                # from the catalog, so this path is effectively unreachable there.
+                logger.warning(
+                    "Skipped %d fundamentals payload(s) for uncatalogued %s "
+                    "listing(s); run refresh-supported-tickers first: %s",
+                    len(skipped_uncatalogued),
+                    provider_norm,
+                    ", ".join(sorted(skipped_uncatalogued)[:20]),
                 )
             if not rows:
                 return

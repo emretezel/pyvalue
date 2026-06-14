@@ -4769,7 +4769,6 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_reports_freshness_scan(
             "EODHD",
             symbol,
             {"General": {"Name": symbol}, "Financials": {}},
-            listing_currency="USD",
             exchange="US",
         )
         store_market_data(db_path, symbol, "2024-12-31", currency="USD")
@@ -4804,7 +4803,6 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_force_skips_freshness_scan(
             "EODHD",
             symbol,
             {"General": {"Name": symbol}, "Financials": {}},
-            listing_currency="USD",
             exchange="US",
         )
         store_market_data(db_path, symbol, "2024-12-31", currency="USD")
@@ -4887,7 +4885,6 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_suppresses_missing_fx_warnings_on
                 }
             },
         },
-        listing_currency="EUR",
         exchange="AS",
     )
     store_market_data(db_path, "AALB.AS", "2024-12-31", currency="EUR")
@@ -4936,7 +4933,6 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_continues_after_symbol_failure_wi
             "EODHD",
             symbol,
             {"General": {"Name": symbol}, "Financials": {}},
-            listing_currency="USD",
             exchange="US",
         )
         store_market_data(db_path, symbol, "2024-12-31", currency="USD")
@@ -5023,7 +5019,6 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_interrupts_cleanly(
             "EODHD",
             symbol,
             {"General": {"Name": symbol}, "Financials": {}},
-            listing_currency="USD",
             exchange="US",
         )
         store_market_data(db_path, symbol, "2024-12-31", currency="USD")
@@ -5137,7 +5132,6 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_process_pool_smoke(
                     }
                 },
             },
-            listing_currency="USD",
             exchange="US",
         )
         store_market_data(db_path, symbol, "2024-12-31", currency="USD")

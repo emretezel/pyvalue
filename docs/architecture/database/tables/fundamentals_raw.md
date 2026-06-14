@@ -67,6 +67,10 @@ Wide-table sample rows live in the [Sample Rows appendix](../sample-rows.md#fund
 
 - The `data` column is the widest row in the schema and a major I/O hotspot.
 - The durable provider key is now `provider_listing_id`, not `(provider, provider_symbol)`.
+- A payload is stored only for a listing that `refresh-supported-tickers` has
+  already catalogued. `ingest-fundamentals` never creates a listing (that would
+  mean writing the NOT NULL `listing.currency`), so an uncatalogued symbol is
+  skipped — run the catalog refresh first.
 - `payload_hash` is the raw content version; `last_fetched_at` is not used as a
   normalization watermark.
 - Listing currency is intentionally not stored here. Use `listing.currency` for
