@@ -2993,3 +2993,42 @@ def test_replace_for_exchange_cascade_purges_both_fetch_states(tmp_path: Path) -
     # AAA's market-data fetch-state and raw payload survive; BBB's are purged.
     assert market_state_symbols == {"AAA"}
     assert raw_symbols == {"AAA"}
+
+
+def test_replace_for_exchange_write_path_avoids_catalog_view(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cataloging a ticker must not re-read it back through the 6-table view.
+
+    ``_ensure_provider_listing`` once issued a per-ticker
+    ``provider_listing_catalog`` SELECT whose ``provider_listing_id`` both callers
+    discarded. The write path now resolves and writes against base tables only.
+    """
+    db_path = tmp_path / "write-path-no-view.db"
+    seed_exchange(db_path, "US")
+    repo = SupportedTickerRepository(db_path)
+    # Run migrations now so the CREATE VIEW DDL is not captured by the trace
+    # below (migrations open their own connection, not repo._connect).
+    repo.initialize_schema()
+
+    captured: list[str] = []
+    original_connect = repo._connect
+
+    def _tracing_connect() -> sqlite3.Connection:
+        conn = original_connect()
+        conn.set_trace_callback(captured.append)
+        return conn
+
+    monkeypatch.setattr(repo, "_connect", _tracing_connect)
+
+    repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock", "Currency": "USD"}],
+    )
+
+    assert captured, "expected the refresh to execute SQL on the traced connection"
+    # The write path touches base tables only -- never the six-table catalog view.
+    assert not any("provider_listing_catalog" in sql for sql in captured)
+    # Sanity: it really did write the provider_listing row via the base table.
+    assert any("INSERT INTO provider_listing" in sql for sql in captured)

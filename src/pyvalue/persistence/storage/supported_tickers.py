@@ -34,6 +34,7 @@ from .records import (
     IngestProgressExchange,
     IngestProgressFailure,
     IngestProgressSummary,
+    Security,
     SupportedTicker,
     SupportedTickerRefreshResult,
 )
@@ -113,15 +114,13 @@ class SupportedTickerRepository(SQLiteStore):
         self,
         conn: sqlite3.Connection,
         *,
-        provider_norm: str,
         provider_exchange_id: int,
         exchange_id: int,
-        provider_exchange_code: str,
         canonical_exchange_code: str,
         bare_symbol: str,
         currency: Optional[str] = None,
         entity_name: Optional[str] = None,
-    ) -> Optional[sqlite3.Row]:
+    ) -> Optional[Security]:
         # Listings must carry a currency (listing.currency is NOT NULL and there
         # is no fallback). A catalog entry whose payload omits the currency is
         # skipped entirely -- neither the listing nor the provider_listing row
@@ -141,14 +140,16 @@ class SupportedTickerRepository(SQLiteStore):
             connection=conn,
         )
         # Keep listing.currency in sync when the listing pre-existed with a
-        # different currency.
+        # different currency. The guard skips the no-op write on the common
+        # refresh path where the currency is already correct (and on a freshly
+        # inserted listing, which already carries this currency).
         conn.execute(
             """
             UPDATE listing
             SET currency = ?
-            WHERE listing_id = ?
+            WHERE listing_id = ? AND currency != ?
             """,
-            (quote_currency, security.security_id),
+            (quote_currency, security.security_id, quote_currency),
         )
         conn.execute(
             """
@@ -162,24 +163,11 @@ class SupportedTickerRepository(SQLiteStore):
             """,
             (provider_exchange_id, bare_symbol, security.security_id),
         )
-        # The only column callers consume from the returned Row is
-        # provider_listing_id. Materialise the post-insert provider_listing_id
-        # with an explicit projection (no SELECT *).
-        row = conn.execute(
-            """
-            SELECT provider_listing_id
-            FROM provider_listing_catalog
-            WHERE provider = ?
-              AND provider_exchange_code = ?
-              AND provider_ticker = ?
-            """,
-            (provider_norm, provider_exchange_code, bare_symbol),
-        ).fetchone()
-        if row is None:
-            raise RuntimeError(
-                f"Failed to persist provider listing {provider_norm}:{bare_symbol}.{provider_exchange_code}"
-            )
-        return row
+        # Return the canonical security itself. Callers only need
+        # created-vs-skipped (the skip is the no-currency early return above), so
+        # there is no need to read the provider_listing_id back through the
+        # six-table catalog view -- the INSERT above already guarantees the row.
+        return security
 
     def _delete_provider_listing_ids(
         self,
@@ -251,10 +239,8 @@ class SupportedTickerRepository(SQLiteStore):
                     continue
                 created = self._ensure_provider_listing(
                     conn,
-                    provider_norm=provider_norm,
                     provider_exchange_id=provider_exchange_id,
                     exchange_id=exchange_id,
-                    provider_exchange_code=provider_exchange_code,
                     canonical_exchange_code=canonical_exchange_code,
                     bare_symbol=bare_symbol,
                     currency=listing.currency,
@@ -313,10 +299,8 @@ class SupportedTickerRepository(SQLiteStore):
                 bare_symbol = code.upper()
                 created = self._ensure_provider_listing(
                     conn,
-                    provider_norm=provider_norm,
                     provider_exchange_id=provider_exchange_id,
                     exchange_id=exchange_id,
-                    provider_exchange_code=provider_exchange_code,
                     canonical_exchange_code=canonical_exchange_code,
                     bare_symbol=bare_symbol,
                     currency=row.get("Currency") or row.get("currency"),
