@@ -591,6 +591,86 @@ def _resolve_canonical_scope_symbols(
     return canonical_symbols, None, exchange_filters
 
 
+def _resolve_canonical_scope_listings(
+    database: str,
+    symbols: Optional[Sequence[str]],
+    exchange_codes: Optional[Sequence[str]],
+    all_supported: bool,
+    *,
+    primary_only: bool = True,
+) -> List[Tuple[int, str]]:
+    """Resolve a CLI scope to ordered ``(listing_id, canonical_symbol)`` pairs.
+
+    The id-bearing counterpart of :func:`_resolve_canonical_scope_symbols`
+    (kept untouched -- it has several callers). ``compute-metrics`` uses this so
+    the natural ``listing_id`` the scope join already holds is carried straight
+    through to reads and writes, eliminating the per-batch / per-flush
+    symbol->id resolution. The same validation rules apply: every requested
+    ``--symbols`` entry must be supported, and (when ``primary_only``) must be a
+    primary listing.
+    """
+
+    symbol_filters, exchange_filters = _validate_scope_selector(
+        symbols, exchange_codes, all_supported
+    )
+    ticker_repo = SupportedTickerRepository(database)
+    ticker_repo.initialize_schema()
+
+    if symbol_filters:
+        normalized_symbols = [
+            _normalize_canonical_scope_symbol(symbol) for symbol in symbol_filters
+        ]
+        # One pass over the supported universe validates membership and captures
+        # the listing_id in the same dict -- mirrors the set() membership check
+        # in _resolve_canonical_scope_symbols, but keeps the id.
+        listing_id_by_symbol = {
+            symbol: listing_id
+            for listing_id, symbol in ticker_repo.list_canonical_listings()
+        }
+        missing = [
+            symbol
+            for symbol in normalized_symbols
+            if symbol not in listing_id_by_symbol
+        ]
+        if missing:
+            raise SystemExit(
+                f"Unsupported canonical tickers: {', '.join(missing)}. Populate provider_listing first."
+            )
+        if primary_only:
+            primary_supported = {
+                symbol
+                for _, symbol in ticker_repo.list_canonical_listings(primary_only=True)
+            }
+            secondary = [
+                symbol
+                for symbol in normalized_symbols
+                if symbol not in primary_supported
+            ]
+            if secondary:
+                raise SystemExit(
+                    "Secondary listings are excluded once raw fundamentals "
+                    f"classification is available: {', '.join(secondary)}"
+                )
+        return [(listing_id_by_symbol[symbol], symbol) for symbol in normalized_symbols]
+
+    listings = ticker_repo.list_canonical_listings(
+        exchange_filters,
+        primary_only=primary_only,
+    )
+    if not listings:
+        scope_label = (
+            ", ".join(exchange_filters) if exchange_filters else "all supported tickers"
+        )
+        if primary_only:
+            raise SystemExit(
+                f"No primary canonical supported tickers found in scope {scope_label}. Populate provider_listing first."
+            )
+        raise SystemExit(
+            f"No canonical supported tickers found in scope {scope_label}. Populate provider_listing first."
+        )
+    return listings
+
+
 def _scope_label(
     symbol_filters: Optional[Sequence[str]],
     exchange_filters: Optional[Sequence[str]],

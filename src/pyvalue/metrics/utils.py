@@ -273,6 +273,26 @@ def metric_fx_service_context(*contexts: object) -> Iterator[FXService]:
         _ACTIVE_FX_SERVICE.reset(token)
 
 
+@contextmanager
+def reuse_or_bind_metric_fx_service(*contexts: object) -> Iterator[FXService]:
+    """Reuse the already-bound batch FX service, or bind one if none is active.
+
+    The compute driver binds a single service for the whole symbol loop and each
+    symbol's compute reuses it through this helper -- so a batch builds one
+    ``FXService`` (one rate cache, one schema check) instead of one per symbol.
+    A standalone caller that computes a single symbol with no surrounding batch
+    binding still gets a freshly bound service, preserving the same observable
+    behaviour as :func:`metric_fx_service_context`.
+    """
+
+    existing = _ACTIVE_FX_SERVICE.get()
+    if existing is not None:
+        yield existing
+        return
+    with metric_fx_service_context(*contexts) as service:
+        yield service
+
+
 def _active_fx_service() -> FXService:
     """Return the batch FX service, or a no-fetch ephemeral one when unbound."""
 
@@ -519,6 +539,7 @@ __all__ = [
     "MarketCap",
     "market_cap_money",
     "metric_fx_service_context",
+    "reuse_or_bind_metric_fx_service",
     "require_metric_amount_money",
     "require_metric_money",
     "require_metric_ticker_currency",

@@ -22,6 +22,7 @@ from pyvalue.currency import (
 )
 
 from .base import (
+    SQLITE_MAX_BOUND_PARAMETERS,
     SQLiteStore,
     _batched,
     _normalize_optional_text,
@@ -148,6 +149,33 @@ class ProviderRepository(SQLiteStore):
             return int(row["provider_id"]) if row else None
         provider = self.fetch(provider_norm)
         return provider.provider_id if provider else None
+
+
+def _listing_pair_filter(
+    chunk: Sequence[Tuple[str, str]],
+) -> Tuple[str, List[str], set[Tuple[str, str]]]:
+    """Build an index-seekable predicate for a chunk of (ticker, exchange) pairs.
+
+    SQLite cannot turn a row-value ``(l.symbol, e.exchange_code) IN (VALUES ...)``
+    spanning two tables into index seeks for more than one pair -- it degrades to
+    a full ``listing`` enumeration (``SCAN exchange`` -> ``SEARCH listing``).
+    Splitting it into two single-column ``IN`` lists lets the planner seek
+    ``exchange`` by its UNIQUE ``exchange_code`` and ``listing`` by the UNIQUE
+    ``(exchange_id, symbol)`` index instead. The two-IN form matches the cross
+    product of symbols x exchange_codes, so callers filter rows back to the exact
+    requested pairs via the returned ``wanted`` set -- keeping the result
+    identical to the row-value form while making it index-driven.
+    """
+
+    symbols = list({ticker for ticker, _ in chunk})
+    exchanges = list({exchange for _, exchange in chunk})
+    symbol_placeholders = ", ".join("?" for _ in symbols)
+    exchange_placeholders = ", ".join("?" for _ in exchanges)
+    clause = (
+        f"l.symbol IN ({symbol_placeholders}) "
+        f"AND e.exchange_code IN ({exchange_placeholders})"
+    )
+    return clause, [*symbols, *exchanges], set(chunk)
 
 
 class SecurityRepository(SQLiteStore):
@@ -491,28 +519,32 @@ class SecurityRepository(SQLiteStore):
         if not pairs:
             return resolved
 
+        # Two single-column INs (see _listing_pair_filter) so the existing
+        # unique indexes drive the lookup instead of a full listing scan; cap the
+        # chunk so the combined IN lists stay within SQLite's parameter limit.
+        effective_chunk = min(chunk_size, SQLITE_MAX_BOUND_PARAMETERS // 2)
+
         def _query(conn: sqlite3.Connection) -> None:
-            # SQLite supports tuple IN with row constructors; the parameter
-            # list is flat (ticker_1, exchange_1, ticker_2, exchange_2, ...).
-            for chunk in _batched(pairs, chunk_size):
-                placeholders = ", ".join("(?, ?)" for _ in chunk)
-                params: List[str] = []
-                for ticker, exchange in chunk:
-                    params.append(ticker)
-                    params.append(exchange)
+            for chunk in _batched(pairs, effective_chunk):
+                clause, params, wanted = _listing_pair_filter(chunk)
                 rows = conn.execute(
                     f"""
                     SELECT
                         l.listing_id AS security_id,
+                        l.symbol AS ticker,
+                        e.exchange_code AS exchange_code,
                         l.symbol || '.' || e.exchange_code AS canonical_symbol
                     FROM listing l
                     JOIN "exchange" e ON e.exchange_id = l.exchange_id
-                    WHERE (l.symbol, e.exchange_code) IN (VALUES {placeholders})
+                    WHERE {clause}
                     """,
                     params,
                 ).fetchall()
                 for row in rows:
-                    resolved[row["canonical_symbol"]] = row["security_id"]
+                    # The two-IN predicate matches the cross product, so keep only
+                    # the exact pairs that were requested.
+                    if (row["ticker"], row["exchange_code"]) in wanted:
+                        resolved[row["canonical_symbol"]] = row["security_id"]
 
         if connection is not None:
             _query(connection)
@@ -542,8 +574,9 @@ class SecurityRepository(SQLiteStore):
         if not uncached:
             return resolved
 
-        # Probe (l.symbol, e.exchange_code) directly via row-constructor
-        # IN to use the underlying UNIQUE index on listing.
+        # Probe via two single-column INs (see _listing_pair_filter) so the
+        # UNIQUE indexes on exchange + listing drive the lookup instead of a
+        # full listing scan.
         pairs: List[Tuple[str, str]] = []
         for canonical in uncached:
             ticker, exchange = _normalize_symbol_base(canonical)
@@ -553,13 +586,10 @@ class SecurityRepository(SQLiteStore):
         if not pairs:
             return resolved
 
+        effective_chunk = min(chunk_size, SQLITE_MAX_BOUND_PARAMETERS // 2)
         with self._connect() as conn:
-            for chunk in _batched(pairs, chunk_size):
-                placeholders = ", ".join("(?, ?)" for _ in chunk)
-                params: List[str] = []
-                for ticker, exchange in chunk:
-                    params.append(ticker)
-                    params.append(exchange)
+            for chunk in _batched(pairs, effective_chunk):
+                clause, params, wanted = _listing_pair_filter(chunk)
                 rows = conn.execute(
                     f"""
                     SELECT
@@ -576,11 +606,18 @@ class SecurityRepository(SQLiteStore):
                     FROM listing l
                     JOIN issuer i ON i.issuer_id = l.issuer_id
                     JOIN "exchange" e ON e.exchange_id = l.exchange_id
-                    WHERE (l.symbol, e.exchange_code) IN (VALUES {placeholders})
+                    WHERE {clause}
                     """,
                     params,
                 ).fetchall()
                 for row in rows:
+                    # The two-IN predicate matches the cross product; keep only
+                    # the exact requested pairs.
+                    if (
+                        row["canonical_ticker"],
+                        row["canonical_exchange_code"],
+                    ) not in wanted:
+                        continue
                     security = Security(*row)
                     resolved[security.canonical_symbol] = security
                     self._remember(security)
@@ -731,16 +768,30 @@ class SecurityRepository(SQLiteStore):
         security = self.fetch_by_symbol(symbol)
         return security.industry if security else None
 
-    def list_supported_symbols(
+    def list_supported_listings(
         self,
         exchange_codes: Optional[Sequence[str]] = None,
         *,
         primary_only: bool = False,
-    ) -> List[str]:
+    ) -> List[Tuple[int, str]]:
+        """Return ``(listing_id, canonical_symbol)`` for supported listings in scope.
+
+        Mirrors :meth:`list_supported_symbols` but also surfaces the
+        ``listing_id`` that the scope join already carries. Callers that key
+        downstream work on the natural id (e.g. ``compute-metrics``) take this
+        variant so they never have to resolve the canonical symbol back to a
+        ``listing_id`` per batch and per write flush. ``DISTINCT`` over
+        ``(listing_id, canonical_symbol)`` collapses duplicate provider rows the
+        same way the symbol-only query does -- the canonical symbol maps to
+        exactly one listing (``listing`` is UNIQUE on ``(exchange_id, symbol)``),
+        so the row count is identical to :meth:`list_supported_symbols`.
+        """
+
         self.initialize_schema()
         params: List[object] = []
         query = [
-            "SELECT DISTINCT l.symbol || '.' || e.exchange_code AS canonical_symbol",
+            "SELECT DISTINCT l.listing_id AS listing_id,",
+            "l.symbol || '.' || e.exchange_code AS canonical_symbol",
             "FROM provider_listing pl",
             "JOIN listing l ON l.listing_id = pl.listing_id",
             'JOIN "exchange" e ON e.exchange_id = l.exchange_id',
@@ -757,7 +808,21 @@ class SecurityRepository(SQLiteStore):
         query.append("ORDER BY canonical_symbol")
         with self._connect() as conn:
             rows = conn.execute(" ".join(query), params).fetchall()
-        return [row[0] for row in rows]
+        return [(int(row["listing_id"]), row["canonical_symbol"]) for row in rows]
+
+    def list_supported_symbols(
+        self,
+        exchange_codes: Optional[Sequence[str]] = None,
+        *,
+        primary_only: bool = False,
+    ) -> List[str]:
+        return [
+            canonical_symbol
+            for _, canonical_symbol in self.list_supported_listings(
+                exchange_codes,
+                primary_only=primary_only,
+            )
+        ]
 
     def list_supported_symbol_name_pairs(
         self,

@@ -522,6 +522,24 @@ class SupportedTickerRepository(SQLiteStore):
             primary_only=primary_only,
         )
 
+    def list_canonical_listings(
+        self,
+        exchange_codes: Optional[Sequence[str]] = None,
+        *,
+        primary_only: bool = False,
+    ) -> List[Tuple[int, str]]:
+        """Return ``(listing_id, canonical_symbol)`` pairs for the requested scope.
+
+        The id-bearing counterpart of :meth:`list_canonical_symbols`, used by
+        ``compute-metrics`` to carry the natural ``listing_id`` from scope
+        resolution through to reads and writes instead of re-resolving it.
+        """
+
+        return self._security_repo().list_supported_listings(
+            exchange_codes,
+            primary_only=primary_only,
+        )
+
     def list_canonical_symbol_name_pairs(
         self,
         exchange_codes: Optional[Sequence[str]] = None,

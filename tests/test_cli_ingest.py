@@ -3468,6 +3468,100 @@ def test_compute_metric_batch_results_reuses_shared_read_connection_per_batch(
     assert len(set(observed_security_map_ids)) == 1
 
 
+def test_compute_metric_batch_results_skips_resolution_when_ids_supplied(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # When the caller hands in the scope-resolved listing ids, the batch read
+    # path must perform no symbol->id resolution at all -- the ids ride straight
+    # into the facts/refresh preloads -- while still computing the same values
+    # as the self-resolving path.
+    db_path = tmp_path / "metric-batch-supplied-ids.db"
+    recent_date = (date.today() - timedelta(days=1)).isoformat()
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    fact_repo.replace_facts(
+        "AAA.US",
+        [
+            make_fact(
+                symbol="AAA.US",
+                concept="AssetsCurrent",
+                end_date=recent_date,
+                value=10.0,
+            ),
+            make_fact(
+                symbol="AAA.US",
+                concept="LiabilitiesCurrent",
+                end_date=recent_date,
+                value=3.0,
+            ),
+        ],
+    )
+    fact_repo.replace_facts(
+        "BBB.US",
+        [
+            make_fact(
+                symbol="BBB.US",
+                concept="AssetsCurrent",
+                end_date=recent_date,
+                value=8.0,
+            ),
+            make_fact(
+                symbol="BBB.US",
+                concept="LiabilitiesCurrent",
+                end_date=recent_date,
+                value=2.0,
+            ),
+        ],
+    )
+
+    # Resolve once up front (this call is intentionally before the counter is
+    # installed) to build the id map the way scope resolution would.
+    ids_by_symbol = SecurityRepository(db_path).resolve_ids_many(["AAA.US", "BBB.US"])
+    assert set(ids_by_symbol) == {"AAA.US", "BBB.US"}
+
+    calls: dict[str, int] = {"resolve_ids_many": 0}
+    original_resolve_ids_many = SecurityRepository.resolve_ids_many
+
+    def counting_resolve_ids_many(
+        self: SecurityRepository,
+        symbols: Sequence[str],
+        chunk_size: int = 500,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, int]:
+        calls["resolve_ids_many"] += 1
+        return original_resolve_ids_many(
+            self, symbols, chunk_size=chunk_size, connection=connection
+        )
+
+    monkeypatch.setattr(
+        SecurityRepository, "resolve_ids_many", counting_resolve_ids_many
+    )
+
+    results = cli._compute_metric_batch_results(
+        ["AAA.US", "BBB.US"],
+        ["working_capital"],
+        FinancialFactsRepository(db_path),
+        None,
+        security_ids_by_symbol=ids_by_symbol,
+    )
+
+    assert calls == {"resolve_ids_many": 0}
+    assert [result.computed_count for result in results] == [1, 1]
+    value_by_symbol = {result.symbol: result.rows[0][2] for result in results}
+    # working_capital = AssetsCurrent - LiabilitiesCurrent.
+    assert value_by_symbol == {"AAA.US": 7.0, "BBB.US": 6.0}
+
+
 def test_cmd_run_screen_stage_suppresses_metric_warnings_on_console_by_default(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -3607,6 +3701,79 @@ def test_cmd_compute_metrics_stage_symbol_scope(
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
     assert repo.fetch("AAA.US", "dummy_metric") is None
+    assert repo.fetch("BBB.US", "dummy_metric") == (6.0, "2024-01-01")
+
+
+def test_cmd_compute_metrics_stage_threads_listing_ids_without_resolving(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # End-to-end guard for listing_id threading: a whole compute-metrics run
+    # resolves symbol->listing_id ZERO times because the scope query already
+    # carries the ids into both the read preloads and the writer. Forced serial
+    # so the single-process counter observes the worker reads too (parallel
+    # workers run in child processes the patch can't see); serial vs parallel
+    # does not change whether resolution happens.
+    db_path = tmp_path / "metric-stage-no-resolve.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+
+    class DummyMetric:
+        id = "dummy_metric"
+        required_concepts = ()
+        uses_market_data = False
+
+        def compute(
+            self, symbol: str, repo: RegionFactsRepository
+        ) -> MetricResult | None:
+            return MetricResult(
+                symbol=symbol,
+                metric_id=self.id,
+                value=float(len(symbol)),
+                as_of="2024-01-01",
+            )
+
+    patch_cli(monkeypatch, "REGISTRY", {DummyMetric.id: DummyMetric})
+    monkeypatch.setattr("pyvalue.cli.metrics._metric_worker_count", lambda total: 1)
+
+    calls: dict[str, int] = {"resolve_ids_many": 0}
+    original_resolve_ids_many = SecurityRepository.resolve_ids_many
+
+    def counting_resolve_ids_many(
+        self: SecurityRepository,
+        symbols: Sequence[str],
+        chunk_size: int = 500,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, int]:
+        calls["resolve_ids_many"] += 1
+        return original_resolve_ids_many(
+            self, symbols, chunk_size=chunk_size, connection=connection
+        )
+
+    monkeypatch.setattr(
+        SecurityRepository, "resolve_ids_many", counting_resolve_ids_many
+    )
+
+    rc = cli.cmd_compute_metrics_stage(
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=None,
+        all_supported=True,
+        metric_ids=None,
+    )
+
+    assert rc == 0
+    assert calls == {"resolve_ids_many": 0}
+    repo = MetricsRepository(db_path)
+    repo.initialize_schema()
+    assert repo.fetch("AAA.US", "dummy_metric") == (6.0, "2024-01-01")
     assert repo.fetch("BBB.US", "dummy_metric") == (6.0, "2024-01-01")
 
 
@@ -3894,6 +4061,7 @@ def test_cmd_compute_metrics_stage_parallel_partial_failure(
         symbol: str,
         metric_ids: Sequence[str],
         suppress_metric_warnings: bool = True,
+        security_ids_by_symbol: Mapping[str, int] | None = None,
     ) -> cli._ComputedMetricsResult:
         if symbol == "BBB.US":
             raise ValueError("boom")
@@ -3971,6 +4139,7 @@ def test_run_metric_computation_interrupts_cleanly(
         symbol: str,
         metric_ids: Sequence[str],
         suppress_metric_warnings: bool = True,
+        security_ids_by_symbol: Mapping[str, int] | None = None,
     ) -> cli._ComputedMetricsResult:
         return cli._ComputedMetricsResult(
             symbol=symbol,
@@ -4146,6 +4315,7 @@ def test_run_metric_computation_batches_metric_writes(
         symbol: str,
         metric_ids: Sequence[str],
         suppress_metric_warnings: bool = True,
+        security_ids_by_symbol: Mapping[str, int] | None = None,
     ) -> cli._ComputedMetricsResult:
         return cli._ComputedMetricsResult(
             symbol=symbol,
@@ -4170,6 +4340,7 @@ def test_run_metric_computation_batches_metric_writes(
         self: MetricsRepository,
         rows: Iterable[StoredMetricRow],
         *,
+        ids_by_symbol: Mapping[str, int] | None = None,
         connection: sqlite3.Connection | None = None,
         commit: bool = True,
     ) -> int:
@@ -4178,6 +4349,7 @@ def test_run_metric_computation_batches_metric_writes(
         return original_upsert_many(
             self,
             materialized,
+            ids_by_symbol=ids_by_symbol,
             connection=connection,
             commit=commit,
         )
@@ -4326,6 +4498,7 @@ def test_run_metric_computation_parallel_profile_accumulates_worker_timings(
         symbols: Sequence[str],
         metric_ids: Sequence[str],
         suppress_metric_warnings: bool = True,
+        security_ids_by_symbol: Mapping[str, int] | None = None,
     ) -> cli._ProfiledComputedMetricsBatchResult:
         assert suppress_metric_warnings is True
         return cli._ProfiledComputedMetricsBatchResult(

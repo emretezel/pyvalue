@@ -3635,3 +3635,154 @@ def test_replace_for_exchange_applies_currency_change_on_re_refresh(
         [{"Code": "AAA", "Name": "AAA plc", "Type": "Common Stock", "Currency": "USD"}],
     )
     assert repo.fetch_currency("AAA.LSE", provider="EODHD") == "USD"
+
+
+def test_list_supported_listings_returns_ids_matching_symbol_scope(
+    tmp_path: Path,
+) -> None:
+    """``list_supported_listings`` surfaces the listing_id the scope join holds.
+
+    The id-bearing scope query must return exactly the same canonical symbols
+    (and order) as ``list_supported_symbols``, paired with the listing_id that
+    ``resolve_ids_many`` would otherwise reconstruct -- that equivalence is what
+    lets compute-metrics carry the id instead of re-resolving it.
+    """
+    db_path = tmp_path / "supported-listings.db"
+    _seed_listing(db_path, "AAA.US")
+    _seed_listing(db_path, "BBB.US")
+    _seed_listing(db_path, "CCC.LSE")
+
+    repo = SecurityRepository(db_path)
+    listings = repo.list_supported_listings()
+
+    # Same canonical symbols, same order as the symbol-only scope query.
+    assert [symbol for _, symbol in listings] == repo.list_supported_symbols()
+    assert [symbol for _, symbol in listings] == ["AAA.US", "BBB.US", "CCC.LSE"]
+
+    # Ids agree with the resolver they are meant to replace.
+    resolved = repo.resolve_ids_many(["AAA.US", "BBB.US", "CCC.LSE"])
+    assert {symbol: listing_id for listing_id, symbol in listings} == resolved
+
+    # Exchange filter narrows the scope just like the symbol-only variant.
+    lse_only = repo.list_supported_listings(["LSE"])
+    assert [symbol for _, symbol in lse_only] == ["CCC.LSE"]
+
+
+def test_metrics_upsert_many_uses_supplied_ids_without_resolving(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A complete ``ids_by_symbol`` short-circuits all symbol->id resolution."""
+    db_path = tmp_path / "metrics-upsert-ids.db"
+    _seed_listing(db_path, "AAA.US")
+    _seed_listing(db_path, "BBB.US")
+
+    repo = MetricsRepository(db_path)
+    repo.initialize_schema()
+    ids_by_symbol = repo._security_repo().resolve_ids_many(["AAA.US", "BBB.US"])
+
+    calls: dict[str, int] = {"resolve_ids_many": 0}
+    original_resolve_ids_many = SecurityRepository.resolve_ids_many
+
+    def counting_resolve_ids_many(
+        self: SecurityRepository,
+        symbols: Sequence[str],
+        chunk_size: int = 500,
+        *,
+        connection: "sqlite3.Connection | None" = None,
+    ) -> dict[str, int]:
+        calls["resolve_ids_many"] += 1
+        return original_resolve_ids_many(
+            self, symbols, chunk_size=chunk_size, connection=connection
+        )
+
+    monkeypatch.setattr(
+        SecurityRepository, "resolve_ids_many", counting_resolve_ids_many
+    )
+
+    rows: list[StoredMetricRow] = [
+        ("AAA.US", "m1", 1.0, "2024-01-01", "other", None, None),
+        ("BBB.US", "m1", 2.0, "2024-01-01", "other", None, None),
+    ]
+    written = repo.upsert_many(rows, ids_by_symbol=ids_by_symbol)
+
+    assert written == 2
+    assert calls == {"resolve_ids_many": 0}
+    # Values landed under the supplied listing ids (fetch resolves each symbol
+    # independently, so a hit confirms the write used the right id).
+    assert repo.fetch("AAA.US", "m1") == (1.0, "2024-01-01")
+    assert repo.fetch("BBB.US", "m1") == (2.0, "2024-01-01")
+
+
+def test_metrics_upsert_many_resolves_only_symbols_absent_from_ids_map(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A partial ``ids_by_symbol`` resolves only the unmapped symbols."""
+    db_path = tmp_path / "metrics-upsert-partial-ids.db"
+    _seed_listing(db_path, "AAA.US")
+    _seed_listing(db_path, "BBB.US")
+
+    repo = MetricsRepository(db_path)
+    repo.initialize_schema()
+    aaa_id = repo._security_repo().resolve_ids_many(["AAA.US"])["AAA.US"]
+
+    calls: dict[str, int] = {"resolve_ids_many": 0}
+    observed: list[tuple[str, ...]] = []
+    original_resolve_ids_many = SecurityRepository.resolve_ids_many
+
+    def counting_resolve_ids_many(
+        self: SecurityRepository,
+        symbols: Sequence[str],
+        chunk_size: int = 500,
+        *,
+        connection: "sqlite3.Connection | None" = None,
+    ) -> dict[str, int]:
+        calls["resolve_ids_many"] += 1
+        observed.append(tuple(symbols))
+        return original_resolve_ids_many(
+            self, symbols, chunk_size=chunk_size, connection=connection
+        )
+
+    monkeypatch.setattr(
+        SecurityRepository, "resolve_ids_many", counting_resolve_ids_many
+    )
+
+    rows: list[StoredMetricRow] = [
+        ("AAA.US", "m1", 1.0, "2024-01-01", "other", None, None),
+        ("BBB.US", "m1", 2.0, "2024-01-01", "other", None, None),
+    ]
+    repo.upsert_many(rows, ids_by_symbol={"AAA.US": aaa_id})
+
+    # Only the unmapped symbol hits the resolver.
+    assert calls == {"resolve_ids_many": 1}
+    assert observed == [("BBB.US",)]
+    assert repo.fetch("AAA.US", "m1") == (1.0, "2024-01-01")
+    assert repo.fetch("BBB.US", "m1") == (2.0, "2024-01-01")
+
+
+def test_resolve_ids_many_does_not_cross_match_across_exchanges(
+    tmp_path: Path,
+) -> None:
+    """The two-IN predicate must not resolve unrequested cross-listing pairs.
+
+    With the same ticker listed on two exchanges, a batch spanning both
+    exchanges produces a symbol x exchange cross product in SQL; the resolver
+    must filter it back to exactly the requested ``SYMBOL.EXCHANGE`` pairs.
+    """
+    db_path = tmp_path / "resolve-cross-exchange.db"
+    _seed_listing(db_path, "AAA.US")
+    _seed_listing(db_path, "AAA.LSE")
+    _seed_listing(db_path, "BBB.US")
+    _seed_listing(db_path, "BBB.LSE")
+
+    repo = SecurityRepository(db_path)
+    resolved = repo.resolve_ids_many(["AAA.US", "BBB.LSE"])
+
+    # Only the exact requested pairs come back -- never AAA.LSE or BBB.US.
+    assert set(resolved) == {"AAA.US", "BBB.LSE"}
+    full = repo.resolve_ids_many(["AAA.US", "AAA.LSE", "BBB.US", "BBB.LSE"])
+    assert resolved["AAA.US"] == full["AAA.US"]
+    assert resolved["BBB.LSE"] == full["BBB.LSE"]
+    # All four listings are genuinely distinct ids.
+    assert len(set(full.values())) == 4

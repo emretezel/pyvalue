@@ -42,7 +42,7 @@ from pyvalue.metrics.base import (
     consume_metric_currency_invariant_error,
     metadata_for_metric,
 )
-from pyvalue.metrics.utils import metric_fx_service_context
+from pyvalue.metrics.utils import reuse_or_bind_metric_fx_service
 from pyvalue.logging_utils import (
     suppress_console_metric_warnings,
 )
@@ -72,7 +72,7 @@ from ._common import (
     _ProfiledComputedMetricsBatchResult,
     _batch_values,
     _metric_status_rows_from_attempts,
-    _resolve_canonical_scope_symbols,
+    _resolve_canonical_scope_listings,
     _resolve_database_path,
 )
 from ._batch import (
@@ -248,8 +248,14 @@ def _flush_metric_write_batch(
     pending_attempts: List[_MetricAttemptResult],
     profile_state: Optional["_MetricComputationProfile"] = None,
     write_connection: Optional[sqlite3.Connection] = None,
+    ids_by_symbol: Optional[Mapping[str, int]] = None,
 ) -> None:
-    """Persist one buffered metric batch."""
+    """Persist one buffered metric batch.
+
+    ``ids_by_symbol`` carries compute-metrics' scope-resolved listing ids so the
+    upserts write by id without any symbol->id resolution; it is ``None`` for
+    callers that do not pre-resolve (the upserts then resolve as before).
+    """
 
     if not pending_rows and not pending_attempts:
         return
@@ -262,12 +268,14 @@ def _flush_metric_write_batch(
             if pending_rows:
                 metrics_repo.upsert_many(
                     pending_rows,
+                    ids_by_symbol=ids_by_symbol,
                     connection=write_connection,
                     commit=False,
                 )
             if status_rows:
                 status_repo.upsert_many(
                     status_rows,
+                    ids_by_symbol=ids_by_symbol,
                     connection=write_connection,
                     commit=False,
                 )
@@ -282,9 +290,9 @@ def _flush_metric_write_batch(
             _persist_with_external_connection()
         else:
             if pending_rows:
-                metrics_repo.upsert_many(pending_rows)
+                metrics_repo.upsert_many(pending_rows, ids_by_symbol=ids_by_symbol)
             if status_rows:
-                status_repo.upsert_many(status_rows)
+                status_repo.upsert_many(status_rows, ids_by_symbol=ids_by_symbol)
         profile_state.write_seconds += time.perf_counter() - flush_start
         profile_state.write_flush_count += 1
         profile_state.write_row_count += row_count
@@ -293,9 +301,9 @@ def _flush_metric_write_batch(
             _persist_with_external_connection()
         else:
             if pending_rows:
-                metrics_repo.upsert_many(pending_rows)
+                metrics_repo.upsert_many(pending_rows, ids_by_symbol=ids_by_symbol)
             if status_rows:
-                status_repo.upsert_many(status_rows)
+                status_repo.upsert_many(status_rows, ids_by_symbol=ids_by_symbol)
     pending_rows.clear()
     pending_attempts.clear()
 
@@ -401,17 +409,19 @@ def _compute_metrics_for_symbol(
     facts_refreshed_at: Optional[str] = None,
     warning_collector: Optional["_MetricWarningCollector"] = None,
 ) -> _ComputedMetricsResult:
-    """Compute one symbol's metrics under a batch FX-conversion context.
+    """Compute one symbol's metrics under the batch FX-conversion context.
 
     Metric inputs are converted to the listing currency by the shared seam
-    (``metrics.utils.require_metric_money``), which reads the active FX service
-    bound here -- resolved from the fact/market repos' database. Binding around
-    each symbol (rather than once per run) keeps this correct under the
-    multiprocessing workers, which each invoke this function in their own process
-    where a parent-set context var would not be visible.
+    (``metrics.utils.require_metric_money``), which reads the active FX service.
+    The batch driver (:func:`_compute_metric_batch_results`) binds one service
+    for the whole symbol loop; this function reuses it via
+    ``reuse_or_bind_metric_fx_service`` and only binds its own when called
+    standalone with no active binding. Because the batch binding is established
+    inside each worker process, the context var is visible to the seam under the
+    multiprocessing workers.
     """
 
-    with metric_fx_service_context(fact_repo, market_repo):
+    with reuse_or_bind_metric_fx_service(fact_repo, market_repo):
         return _compute_metrics_for_symbol_inner(
             symbol,
             metric_ids,
@@ -616,6 +626,7 @@ def _compute_metric_batch_results(
     *,
     suppress_metric_warnings: bool = True,
     profile_state: Optional["_MetricComputationProfile"] = None,
+    security_ids_by_symbol: Optional[Mapping[str, int]] = None,
     preloaded_snapshots_by_symbol: Optional[Mapping[str, MarketSnapshotRecord]] = None,
     preloaded_facts_refresh_rows: Optional[
         Mapping[str, FinancialFactsRefreshStateRecord]
@@ -658,11 +669,15 @@ def _compute_metric_batch_results(
     if needs_shared_read_connection:
         read_start = time.perf_counter() if profile_enabled else 0.0
         with fact_repo._connect() as read_connection:
-            security_ids_by_symbol = fact_repo._security_repo().resolve_ids_many(
-                selected_symbols,
-                chunk_size=METRICS_COMPUTE_BATCH_SIZE,
-                connection=read_connection,
-            )
+            # compute-metrics supplies the listing ids from scope resolution, so
+            # the per-batch symbol->id resolution is skipped entirely; only
+            # callers that omit the map (e.g. report builders) resolve here.
+            if security_ids_by_symbol is None:
+                security_ids_by_symbol = fact_repo._security_repo().resolve_ids_many(
+                    selected_symbols,
+                    chunk_size=METRICS_COMPUTE_BATCH_SIZE,
+                    connection=read_connection,
+                )
             if uses_financial_facts:
                 facts_by_symbol = _prefetch_metric_facts_for_symbols(
                     fact_repo,
@@ -701,28 +716,33 @@ def _compute_metric_batch_results(
     root_logger.addHandler(warning_collector)
     try:
         with suppress_console_metric_warnings(suppress_metric_warnings):
-            for symbol in selected_symbols:
-                snapshot_record = snapshots_by_symbol.get(symbol)
-                results.append(
-                    _compute_metrics_for_symbol(
-                        symbol,
-                        metric_ids,
-                        fact_repo,
-                        market_repo,
-                        preloaded_facts=(
-                            facts_by_symbol.get(symbol, ())
-                            if uses_financial_facts
-                            else ()
-                        ),
-                        preloaded_market_snapshot_record=snapshot_record,
-                        facts_refreshed_at=(
-                            facts_refresh_rows[symbol].refreshed_at
-                            if symbol in facts_refresh_rows
-                            else None
-                        ),
-                        warning_collector=warning_collector,
+            # Bind one FX service for the whole batch; each symbol's compute
+            # reuses it (one rate cache + one schema check per batch instead of
+            # per symbol). This runs inside the worker process, so the context
+            # var is visible to require_metric_money under multiprocessing.
+            with reuse_or_bind_metric_fx_service(fact_repo, market_repo):
+                for symbol in selected_symbols:
+                    snapshot_record = snapshots_by_symbol.get(symbol)
+                    results.append(
+                        _compute_metrics_for_symbol(
+                            symbol,
+                            metric_ids,
+                            fact_repo,
+                            market_repo,
+                            preloaded_facts=(
+                                facts_by_symbol.get(symbol, ())
+                                if uses_financial_facts
+                                else ()
+                            ),
+                            preloaded_market_snapshot_record=snapshot_record,
+                            facts_refreshed_at=(
+                                facts_refresh_rows[symbol].refreshed_at
+                                if symbol in facts_refresh_rows
+                                else None
+                            ),
+                            warning_collector=warning_collector,
+                        )
                     )
-                )
     finally:
         root_logger.removeHandler(warning_collector)
     return tuple(results)
@@ -733,6 +753,7 @@ def _compute_metrics_for_symbol_worker(
     symbol: str,
     metric_ids: Sequence[str],
     suppress_metric_warnings: bool = True,
+    security_ids_by_symbol: Optional[Mapping[str, int]] = None,
 ) -> _ComputedMetricsResult:
     """Compute all requested metrics for one symbol using symbol-scoped caches."""
 
@@ -748,6 +769,7 @@ def _compute_metrics_for_symbol_worker(
         fact_repo,
         market_repo,
         suppress_metric_warnings=suppress_metric_warnings,
+        security_ids_by_symbol=security_ids_by_symbol,
     )
     return results[0]
 
@@ -757,6 +779,7 @@ def _compute_metrics_for_symbol_batch_worker(
     symbols: Sequence[str],
     metric_ids: Sequence[str],
     suppress_metric_warnings: bool = True,
+    security_ids_by_symbol: Optional[Mapping[str, int]] = None,
 ) -> Tuple[_ComputedMetricsResult, ...]:
     """Compute requested metrics for a batch of symbols in one worker."""
 
@@ -772,6 +795,7 @@ def _compute_metrics_for_symbol_batch_worker(
         fact_repo,
         market_repo,
         suppress_metric_warnings=suppress_metric_warnings,
+        security_ids_by_symbol=security_ids_by_symbol,
     )
 
 
@@ -780,6 +804,7 @@ def _compute_metrics_for_symbol_batch_worker_profiled(
     symbols: Sequence[str],
     metric_ids: Sequence[str],
     suppress_metric_warnings: bool = True,
+    security_ids_by_symbol: Optional[Mapping[str, int]] = None,
 ) -> _ProfiledComputedMetricsBatchResult:
     """Compute one worker batch and return worker-side timing breakdowns."""
 
@@ -795,6 +820,7 @@ def _compute_metrics_for_symbol_batch_worker_profiled(
         ),
         suppress_metric_warnings=suppress_metric_warnings,
         profile_state=profile_state,
+        security_ids_by_symbol=security_ids_by_symbol,
     )
     return _ProfiledComputedMetricsBatchResult(
         results=results,
@@ -823,10 +849,24 @@ def _run_metric_computation(
     cancelled_message: str,
     suppress_metric_warnings: bool = True,
     profile: bool = False,
+    ids_by_symbol: Optional[Mapping[str, int]] = None,
 ) -> int:
     db_path = _resolve_database_path(database)
     selected_symbols = [symbol.upper() for symbol in symbols]
     total_symbols = len(selected_symbols)
+
+    def _batch_ids(batch: Sequence[str]) -> Optional[Dict[str, int]]:
+        """Per-batch slice of the scope-resolved listing ids (None if absent).
+
+        Lets each worker / batch reuse the listing_id the scope query already
+        produced instead of re-resolving symbol->id against the DB.
+        """
+
+        if ids_by_symbol is None:
+            return None
+        return {
+            symbol: ids_by_symbol[symbol] for symbol in batch if symbol in ids_by_symbol
+        }
 
     profile_state = _MetricComputationProfile(enabled=profile)
     run_start_at = time.perf_counter()
@@ -884,6 +924,7 @@ def _run_metric_computation(
             pending_attempts,
             profile_state,
             write_connection=write_connection,
+            ids_by_symbol=ids_by_symbol,
         )
         buffered_symbols = 0
         last_flush_at = time.monotonic()
@@ -906,6 +947,7 @@ def _run_metric_computation(
             pending_attempts,
             profile_state,
             write_connection=write_connection,
+            ids_by_symbol=ids_by_symbol,
         )
         buffered_symbols = 0
         last_flush_at = time.monotonic()
@@ -950,6 +992,7 @@ def _run_metric_computation(
                     market_repo,
                     suppress_metric_warnings=suppress_metric_warnings,
                     profile_state=profile_state if profile_state.enabled else None,
+                    security_ids_by_symbol=_batch_ids(symbol_batch),
                 ):
                     buffer_result(result)
                     metric_failures.extend(result.failures)
@@ -995,6 +1038,7 @@ def _run_metric_computation(
                         (symbol,),
                         tuple(metric_ids),
                         suppress_metric_warnings,
+                        _batch_ids((symbol,)),
                     ): symbol
                     for symbol in selected_symbols
                 }
@@ -1023,6 +1067,7 @@ def _run_metric_computation(
                         symbol,
                         tuple(metric_ids),
                         suppress_metric_warnings,
+                        _batch_ids((symbol,)),
                     ): symbol
                     for symbol in selected_symbols
                 }
@@ -1050,6 +1095,7 @@ def _run_metric_computation(
                         tuple(symbol_batch),
                         tuple(metric_ids),
                         suppress_metric_warnings,
+                        _batch_ids(symbol_batch),
                     ): tuple(symbol_batch)
                     for symbol_batch in _batch_values(
                         selected_symbols,
@@ -1089,6 +1135,7 @@ def _run_metric_computation(
                         tuple(symbol_batch),
                         tuple(metric_ids),
                         suppress_metric_warnings,
+                        _batch_ids(symbol_batch),
                     ): tuple(symbol_batch)
                     for symbol_batch in _batch_values(
                         selected_symbols,
@@ -1175,12 +1222,17 @@ def cmd_compute_metrics_stage(
     """Unified metric computation over symbol, exchange, or full supported scope."""
 
     db_path = _resolve_database_path(database)
-    canonical_symbols, _, _ = _resolve_canonical_scope_symbols(
+    # Resolve the scope to (listing_id, canonical_symbol) pairs so the natural
+    # listing_id rides through reads and writes -- compute-metrics never
+    # re-resolves symbol->listing_id from the DB.
+    scope_listings = _resolve_canonical_scope_listings(
         str(db_path),
         symbols,
         exchange_codes,
         all_supported,
     )
+    ids_by_symbol = {symbol: listing_id for listing_id, symbol in scope_listings}
+    canonical_symbols = [symbol for _, symbol in scope_listings]
     ids_to_compute = _validated_metric_ids(metric_ids)
     return _run_metric_computation(
         database=str(db_path),
@@ -1189,6 +1241,7 @@ def cmd_compute_metrics_stage(
         cancelled_message="\nMetric computation cancelled by user.",
         suppress_metric_warnings=not show_metric_warnings,
         profile=profile,
+        ids_by_symbol=ids_by_symbol,
     )
 
 

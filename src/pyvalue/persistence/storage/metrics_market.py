@@ -72,6 +72,7 @@ class MetricsRepository(SQLiteStore):
         self,
         rows: Iterable[StoredMetricRow],
         *,
+        ids_by_symbol: Optional[Mapping[str, int]] = None,
         connection: Optional[sqlite3.Connection] = None,
         commit: bool = True,
     ) -> int:
@@ -90,22 +91,31 @@ class MetricsRepository(SQLiteStore):
             seen_symbols.add(symbol)
             unique_symbols.append(symbol)
 
-        security_ids = self._security_repo().resolve_ids_many(
-            unique_symbols,
-            connection=connection,
-        )
-        for symbol in unique_symbols:
-            if symbol in security_ids:
-                continue
-            # Slow path: a metric row references a symbol that does not yet
-            # exist in the canonical listing table. When the caller supplied a
-            # write connection, create the row through that same transaction to
-            # avoid self-locking SQLite during batched metric writes.
-            security = self._security_repo().ensure_from_symbol(
-                symbol,
-                connection=connection,
+        # Callers that already hold the listing_id (compute-metrics carries it
+        # from scope resolution) supply ``ids_by_symbol`` so this write performs
+        # no symbol->id resolution at all. Only symbols absent from the map fall
+        # through to the resolver, preserving the standalone-caller contract.
+        security_ids: Dict[str, int] = dict(ids_by_symbol or {})
+        unresolved = [symbol for symbol in unique_symbols if symbol not in security_ids]
+        if unresolved:
+            security_ids.update(
+                self._security_repo().resolve_ids_many(
+                    unresolved,
+                    connection=connection,
+                )
             )
-            security_ids[symbol] = security.security_id
+            for symbol in unresolved:
+                if symbol in security_ids:
+                    continue
+                # Slow path: a metric row references a symbol that does not yet
+                # exist in the canonical listing table. When the caller supplied
+                # a write connection, create the row through that same
+                # transaction to avoid self-locking SQLite during batched writes.
+                security = self._security_repo().ensure_from_symbol(
+                    symbol,
+                    connection=connection,
+                )
+                security_ids[symbol] = security.security_id
         persisted_rows = [
             (
                 security_ids[symbol],
@@ -279,6 +289,7 @@ class MetricComputeStatusRepository(SQLiteStore):
         self,
         rows: Iterable[MetricComputeStatusRecord],
         *,
+        ids_by_symbol: Optional[Mapping[str, int]] = None,
         connection: Optional[sqlite3.Connection] = None,
         commit: bool = True,
     ) -> int:
@@ -297,18 +308,26 @@ class MetricComputeStatusRepository(SQLiteStore):
 
         if connection is None:
             self.initialize_schema()
-        security_ids = self._security_repo().resolve_ids_many(
-            unique_symbols,
-            connection=connection,
-        )
-        for symbol in unique_symbols:
-            if symbol in security_ids:
-                continue
-            security = self._security_repo().ensure_from_symbol(
-                symbol,
-                connection=connection,
+        # See MetricsRepository.upsert_many: a supplied ``ids_by_symbol`` (from
+        # compute-metrics' scope-resolved listing ids) means zero resolution;
+        # only unmapped symbols hit the resolver / ensure fallback.
+        security_ids: Dict[str, int] = dict(ids_by_symbol or {})
+        unresolved = [symbol for symbol in unique_symbols if symbol not in security_ids]
+        if unresolved:
+            security_ids.update(
+                self._security_repo().resolve_ids_many(
+                    unresolved,
+                    connection=connection,
+                )
             )
-            security_ids[symbol] = security.security_id
+            for symbol in unresolved:
+                if symbol in security_ids:
+                    continue
+                security = self._security_repo().ensure_from_symbol(
+                    symbol,
+                    connection=connection,
+                )
+                security_ids[symbol] = security.security_id
 
         payload = [
             (
