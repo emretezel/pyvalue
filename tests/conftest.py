@@ -210,3 +210,69 @@ def seed_security_metadata(
             )
         ]
     )
+
+
+def _resolve_seeded_provider_listing_id(
+    db_path: Path, provider: str, symbol: str
+) -> int:
+    """Resolve a catalogued ``(provider, symbol)`` to its ``provider_listing_id``.
+
+    The provider-edge counterpart of :func:`_resolve_seeded_listing_id`: the
+    id-keyed normalization-state writer keys on ``provider_listing_id``, so this
+    resolves it via the ``provider_listing`` natural key (provider code + bare
+    provider symbol + provider exchange code). Splits on the *last* dot so multi-dot
+    tickers (e.g. ``BRK.B.US``) resolve correctly. The listing must already be
+    catalogued; a miss is a test-setup bug surfaced as an ``AssertionError``.
+    """
+    import sqlite3
+
+    ticker, _, exchange = symbol.rpartition(".")
+    bare = ticker or symbol
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT pl.provider_listing_id
+            FROM provider_listing pl
+            JOIN provider_exchange px
+              ON px.provider_exchange_id = pl.provider_exchange_id
+            JOIN provider p ON p.provider_id = px.provider_id
+            WHERE p.provider_code = ?
+              AND pl.provider_symbol = ?
+              AND px.provider_exchange_code = ?
+            """,
+            (
+                provider.strip().upper(),
+                bare.strip().upper(),
+                (exchange or "US").strip().upper(),
+            ),
+        ).fetchone()
+    assert row is not None, (
+        f"provider listing {provider}:{symbol!r} must be catalogued before "
+        "seeding normalization state (seed the catalog + a raw upsert first)"
+    )
+    return int(row[0])
+
+
+def seed_normalization_success(
+    db_path: Path,
+    symbol: str,
+    *,
+    provider: str = "EODHD",
+    payload_hash: str = "a" * 64,
+) -> int:
+    """Mark a catalogued listing's payload as normalized, keyed by id.
+
+    Resolves ``(provider, symbol)`` to its ``provider_listing_id`` and writes the
+    watermark through the id-keyed :meth:`mark_success_by_id` (the only
+    normalization-state writer). ``payload_hash`` defaults to a valid 64-char
+    placeholder for "just mark it normalized" seeds; pass a specific hash when the
+    test asserts on the stored value. Returns the ``provider_listing_id``.
+    """
+    # Imported lazily so the src/ path insert above has already run.
+    from pyvalue.persistence.storage import FundamentalsNormalizationStateRepository
+
+    provider_listing_id = _resolve_seeded_provider_listing_id(db_path, provider, symbol)
+    FundamentalsNormalizationStateRepository(db_path).mark_success_by_id(
+        provider_listing_id, payload_hash
+    )
+    return provider_listing_id

@@ -29,7 +29,6 @@ from pyvalue.persistence.storage import (
     SecurityListingStatusRepository,
     SupportedTickerRepository,
 )
-from pyvalue.persistence.storage.fundamentals import _resolve_provider_listing_id
 from pyvalue.marketdata import MarketDataUpdate
 from pyvalue.universe import Listing
 from collections.abc import Sequence
@@ -41,6 +40,7 @@ from conftest import (
     seed_facts,
     seed_metric,
     seed_metric_status,
+    seed_normalization_success,
     seed_price,
     seed_security_metadata,
 )
@@ -281,11 +281,7 @@ def test_fundamentals_repository_classifies_and_purges_secondary_listings(
             value_as_of="2025-01-02",
         ),
     )
-    FundamentalsNormalizationStateRepository(db_path).mark_success(
-        "EODHD",
-        "AAA.LSE",
-        "a" * 64,
-    )
+    seed_normalization_success(db_path, "AAA.LSE", payload_hash="a" * 64)
     MarketDataFetchStateRepository(db_path).mark_success(
         "EODHD",
         "AAA.LSE",
@@ -1220,7 +1216,6 @@ def test_normalization_units_keyed_by_id_with_freshness(tmp_path: Path) -> None:
     db_path = tmp_path / "normalization-units.db"
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    state_repo = FundamentalsNormalizationStateRepository(db_path)
     # AAA + BBB carry raw payloads; CCC is a bare listing with no raw row.
     _seed_listing(db_path, "AAA.US")
     _seed_listing(db_path, "BBB.US")
@@ -1228,7 +1223,7 @@ def test_normalization_units_keyed_by_id_with_freshness(tmp_path: Path) -> None:
     fund_repo.upsert("EODHD", "AAA.US", {"General": {"Name": "AAA"}}, exchange="US")
     fund_repo.upsert("EODHD", "BBB.US", {"General": {"Name": "BBB"}}, exchange="US")
     # Mark AAA already normalized so its freshness hash is populated.
-    state_repo.mark_success("EODHD", "AAA.US", "a" * 64)
+    seed_normalization_success(db_path, "AAA.US", payload_hash="a" * 64)
 
     units = fund_repo.normalization_units("EODHD", primary_only=True)
 
@@ -1372,113 +1367,6 @@ def test_normalization_units_is_view_free(
     assert selects  # the unit query ran through the logging proxy
     assert not any("provider_listing_catalog" in sql for sql in seen_sql)
     assert not any("FROM financial_facts" in sql for sql in seen_sql)
-
-
-def test_resolve_provider_listing_id_natural_key_and_view_fallback(
-    tmp_path: Path,
-) -> None:
-    """``_resolve_provider_listing_id`` resolves via the provider_listing natural
-    key, falls back to the catalog view, and returns ``None`` for unknowns."""
-    db_path = tmp_path / "resolve-listing-id.db"
-    fund_repo = FundamentalsRepository(db_path)
-    fund_repo.initialize_schema()
-    _seed_listing(db_path, "AAA.US")
-    fund_repo.upsert("EODHD", "AAA.US", {"General": {"Name": "AAA"}}, exchange="US")
-
-    with fund_repo._connect() as conn:
-        expected = conn.execute(
-            """
-            SELECT provider_listing_id
-            FROM provider_listing_catalog
-            WHERE provider = ? AND provider_symbol = ?
-            """,
-            ("EODHD", "AAA.US"),
-        ).fetchone()["provider_listing_id"]
-        provider_id = conn.execute(
-            "SELECT provider_id FROM provider WHERE provider_code = ?",
-            ("EODHD",),
-        ).fetchone()["provider_id"]
-
-        # Fast path: natural key.
-        assert (
-            _resolve_provider_listing_id(conn, provider_id, "EODHD", "AAA.US")
-            == expected
-        )
-        # Fallback path: a None provider_id skips the natural-key branch, so
-        # resolution falls through to the catalog-view lookup -- the branch that
-        # keeps non-EODHD providers (e.g. SEC's synthetic '.US' suffix) correct.
-        assert _resolve_provider_listing_id(conn, None, "EODHD", "AAA.US") == expected
-        # Unknown symbol resolves to nothing.
-        assert (
-            _resolve_provider_listing_id(conn, provider_id, "EODHD", "ZZZ.US") is None
-        )
-
-
-def test_fetch_payload_with_hash_resolves_without_scanning_catalog(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The per-symbol payload read resolves the listing by its natural key and
-    reads ``fundamentals_raw`` by primary key, never walking the
-    computed-``provider_symbol`` catalog view. Regression guard for the
-    ~33 ms-per-symbol full catalog scan the view filter forced."""
-    db_path = tmp_path / "fetch-payload-plan.db"
-    fund_repo = FundamentalsRepository(db_path)
-    fund_repo.initialize_schema()
-    # Several exchanges/listings so a stray full catalog scan would be obvious.
-    _seed_listing(db_path, "AAA.US")
-    _seed_listing(db_path, "BBB.LSE")
-    _seed_listing(db_path, "CCC.AU")
-    fund_repo.upsert("EODHD", "AAA.US", {"General": {"Name": "AAA"}}, exchange="US")
-
-    seen: list[tuple[str, tuple[object, ...]]] = []
-
-    class _LoggingConnection:
-        """Records each executed statement and its parameters so the test can
-        re-run EXPLAIN QUERY PLAN on them."""
-
-        def __init__(self, conn: sqlite3.Connection) -> None:
-            self._conn = conn
-
-        def __enter__(self) -> "_LoggingConnection":
-            self._conn.__enter__()
-            return self
-
-        def __exit__(
-            self,
-            exc_type: Optional[Type[BaseException]],
-            exc_value: Optional[BaseException],
-            traceback: Optional[TracebackType],
-        ) -> bool:
-            return bool(self._conn.__exit__(exc_type, exc_value, traceback))
-
-        def execute(
-            self, sql: str, parameters: Sequence[object] = ()
-        ) -> sqlite3.Cursor:
-            seen.append((" ".join(sql.split()), tuple(parameters)))
-            return self._conn.execute(sql, parameters)
-
-    real_connect = fund_repo._connect
-    monkeypatch.setattr(
-        fund_repo, "_connect", lambda: _LoggingConnection(real_connect())
-    )
-
-    record = fund_repo.fetch_payload_with_hash("EODHD", "AAA.US")
-    assert record is not None
-
-    selects = [
-        (sql, params) for sql, params in seen if sql.lower().startswith("select")
-    ]
-    assert selects, "expected the read path to issue at least one SELECT"
-    # The fast path never touches the 6-table catalog view...
-    assert not any("provider_listing_catalog" in sql for sql, _ in selects)
-    # ...and no statement degrades into a full catalog walk (which always begins
-    # by scanning the exchange table at the base of the view's join).
-    with sqlite3.connect(db_path) as plan_conn:
-        plan_conn.row_factory = sqlite3.Row
-        for sql, params in selects:
-            plan = plan_conn.execute("EXPLAIN QUERY PLAN " + sql, params).fetchall()
-            plan_text = " ".join(str(row["detail"]) for row in plan)
-            assert "SCAN TABLE exchange" not in plan_text
 
 
 def test_replace_fact_rows_writes_by_id_without_resolving_symbol(

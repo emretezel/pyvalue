@@ -29,6 +29,7 @@ from conftest import (
     seed_facts,
     seed_metric,
     seed_metric_status,
+    seed_normalization_success,
     seed_price,
     seed_security_metadata,
 )
@@ -4972,14 +4973,7 @@ def test_cmd_clear_fundamentals_raw(tmp_path: Path) -> None:
     repo = FundamentalsRepository(db_path)
     repo.initialize_schema()
     repo.upsert("SEC", "AAA.US", {"facts": {}})
-    state_repo = FundamentalsNormalizationStateRepository(db_path)
-    raw_record = repo.fetch_payload_with_hash("SEC", "AAA.US")
-    assert raw_record is not None
-    state_repo.mark_success(
-        "SEC",
-        "AAA.US",
-        normalized_payload_hash=raw_record[1],
-    )
+    seed_normalization_success(db_path, "AAA.US", provider="SEC")
 
     with repo._connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM fundamentals_raw").fetchone()[0] == 1
@@ -5020,18 +5014,9 @@ def test_cmd_clear_financial_facts_clears_normalization_state(tmp_path: Path) ->
             )
         ],
     )
-    state_repo = FundamentalsNormalizationStateRepository(db_path)
     refresh_state_repo = FinancialFactsRefreshStateRepository(db_path)
     FundamentalsRepository(db_path).upsert("SEC", "AAA.US", {"facts": {}})
-    raw_record = FundamentalsRepository(db_path).fetch_payload_with_hash(
-        "SEC", "AAA.US"
-    )
-    assert raw_record is not None
-    state_repo.mark_success(
-        "SEC",
-        "AAA.US",
-        normalized_payload_hash=raw_record[1],
-    )
+    seed_normalization_success(db_path, "AAA.US", provider="SEC")
     security_repo = SecurityRepository(db_path)
     id_aaa = security_repo.resolve_id("AAA.US")
     assert id_aaa is not None
