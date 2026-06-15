@@ -42,6 +42,25 @@ from ._common import (
 )
 
 
+def _subset_ids_by_symbol(
+    ids_by_symbol: Optional[Mapping[str, int]],
+    symbols: Sequence[str],
+) -> Optional[Mapping[str, int]]:
+    """Narrow a scope-wide listing-id map to ``symbols`` for a downstream read.
+
+    ``states_many`` threads one scope-resolved id map to four repositories, but
+    the facts-refresh and market-snapshot reads only cover the subset of symbols
+    whose metrics use those inputs. Those repos key their query off the supplied
+    map directly, so we narrow it here to avoid over-fetching the whole scope.
+    Returns ``None`` (the resolve-internally signal) when no map was supplied.
+    """
+    if ids_by_symbol is None:
+        return None
+    return {
+        symbol: ids_by_symbol[symbol] for symbol in symbols if symbol in ids_by_symbol
+    }
+
+
 class _CachedRegionFactsRepository(RegionFactsRepository):
     """Serve one symbol's facts from memory while preserving the repo interface."""
 
@@ -372,6 +391,7 @@ class _StatusAwareMetricsRepository(_SchemaReadyMetricsRepository):
         metric_ids: Sequence[str],
         *,
         chunk_size: int = 500,
+        security_ids_by_symbol: Optional[Mapping[str, int]] = None,
     ) -> Dict[str, Dict[str, _MetricAvailabilityState]]:
         normalized_symbols = [symbol.strip().upper() for symbol in symbols if symbol]
         requested_metric_ids = [
@@ -380,15 +400,19 @@ class _StatusAwareMetricsRepository(_SchemaReadyMetricsRepository):
         if not normalized_symbols or not requested_metric_ids:
             return {}
 
+        # A supplied map (run-screen / report-* resolved its scope to listing ids)
+        # is threaded to every underlying read so none of them re-resolves symbols.
         raw_rows = self._raw_metrics_repo.fetch_many_for_symbols(
             normalized_symbols,
             requested_metric_ids,
             chunk_size=chunk_size,
+            security_ids_by_symbol=security_ids_by_symbol,
         )
         status_rows = self._status_repo.fetch_many_for_symbols(
             normalized_symbols,
             requested_metric_ids,
             chunk_size=chunk_size,
+            security_ids_by_symbol=security_ids_by_symbol,
         )
         facts_refresh_symbols = sorted(
             {
@@ -402,6 +426,9 @@ class _StatusAwareMetricsRepository(_SchemaReadyMetricsRepository):
             self._facts_refresh_repo.fetch_many_for_symbols(
                 facts_refresh_symbols,
                 chunk_size=chunk_size,
+                security_ids_by_symbol=_subset_ids_by_symbol(
+                    security_ids_by_symbol, facts_refresh_symbols
+                ),
             )
             if facts_refresh_symbols
             else {}
@@ -418,6 +445,9 @@ class _StatusAwareMetricsRepository(_SchemaReadyMetricsRepository):
             self._market_repo.latest_snapshots_many(
                 market_snapshot_symbols,
                 chunk_size=chunk_size,
+                security_ids_by_symbol=_subset_ids_by_symbol(
+                    security_ids_by_symbol, market_snapshot_symbols
+                ),
             )
             if market_snapshot_symbols
             else {}
@@ -449,8 +479,15 @@ class _StatusAwareMetricsRepository(_SchemaReadyMetricsRepository):
         symbols: Sequence[str],
         metric_ids: Sequence[str],
         chunk_size: int = 500,
+        *,
+        security_ids_by_symbol: Optional[Mapping[str, int]] = None,
     ) -> Dict[str, Dict[str, MetricRecord]]:
-        states = self.states_many(symbols, metric_ids, chunk_size=chunk_size)
+        states = self.states_many(
+            symbols,
+            metric_ids,
+            chunk_size=chunk_size,
+            security_ids_by_symbol=security_ids_by_symbol,
+        )
         rows_by_symbol: Dict[str, Dict[str, MetricRecord]] = {}
         for symbol, per_symbol_states in states.items():
             for metric_id, state in per_symbol_states.items():

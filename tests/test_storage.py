@@ -1990,7 +1990,9 @@ def test_supported_ticker_repository_primary_only_filters_secondary_listings(
         "LSE",
         primary_only=True,
     ) == ["BBB.LSE"]
-    assert ticker_repo.list_canonical_symbols(primary_only=True) == [
+    assert [
+        symbol for _, symbol in ticker_repo.list_canonical_listings(primary_only=True)
+    ] == [
         "AAA.US",
         "BBB.LSE",
     ]
@@ -2409,6 +2411,115 @@ def test_market_data_repository_latest_snapshots_many_matches_single_lookup(
     assert snapshots["AAA.US"].price == aaa_single.price
     assert snapshots["BBB.US"].as_of == bbb_single.as_of
     assert snapshots["BBB.US"].price == bbb_single.price
+
+
+def test_metric_repositories_fetch_many_for_symbols_carry_scope_listing_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Supplying scope-resolved listing ids skips the symbol->id re-resolution.
+
+    run-screen and the report-* commands resolve their scope to ``listing_id``
+    up front (``_resolve_canonical_scope_listings``) and thread the ids in via
+    ``security_ids_by_symbol``. With the map supplied neither the metric-value
+    nor the compute-status read may fall back to
+    ``SecurityRepository.resolve_ids_many`` -- we prove that by making it raise.
+    A superset map must still query only the requested subset, which is what the
+    run-screen ranking pass relies on.
+
+    Author: Emre Tezel
+    """
+    db_path = tmp_path / "metrics-fetch-many-ids.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    seed_exchange(db_path, "US")
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [
+            {
+                "Code": "AAA",
+                "Name": "AAA Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
+            {
+                "Code": "BBB",
+                "Name": "BBB Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
+        ],
+    )
+    rows = ticker_repo.list_for_exchange("EODHD", "US")
+    ids_by_symbol = {row.symbol: row.security_id for row in rows}
+
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.upsert("AAA.US", "pe_ratio", 12.0, "2026-03-29", unit_kind="other")
+    metrics_repo.upsert("BBB.US", "pe_ratio", 20.0, "2026-03-29", unit_kind="other")
+    status_repo = MetricComputeStatusRepository(db_path)
+    status_repo.upsert_many(
+        [
+            MetricComputeStatusRecord(
+                symbol="AAA.US",
+                metric_id="pe_ratio",
+                status="success",
+                attempted_at="2026-03-29T00:00:00+00:00",
+                value_as_of="2026-03-29",
+            ),
+            MetricComputeStatusRecord(
+                symbol="BBB.US",
+                metric_id="pe_ratio",
+                status="success",
+                attempted_at="2026-03-29T00:00:00+00:00",
+                value_as_of="2026-03-29",
+            ),
+        ]
+    )
+
+    # Baseline reads resolve internally (no id map supplied).
+    baseline_metrics = metrics_repo.fetch_many_for_symbols(
+        ["AAA.US", "BBB.US"], ["pe_ratio"]
+    )
+    baseline_status = status_repo.fetch_many_for_symbols(
+        ["AAA.US", "BBB.US"], ["pe_ratio"]
+    )
+
+    def _explode(*args: object, **kwargs: object) -> NoReturn:
+        raise AssertionError("resolve_ids_many must not run when ids are supplied")
+
+    monkeypatch.setattr(SecurityRepository, "resolve_ids_many", _explode)
+
+    carried_metrics = metrics_repo.fetch_many_for_symbols(
+        ["AAA.US", "BBB.US"], ["pe_ratio"], security_ids_by_symbol=ids_by_symbol
+    )
+    carried_status = status_repo.fetch_many_for_symbols(
+        ["AAA.US", "BBB.US"], ["pe_ratio"], security_ids_by_symbol=ids_by_symbol
+    )
+
+    assert set(carried_metrics) == {"AAA.US", "BBB.US"}
+    assert (
+        carried_metrics["AAA.US"]["pe_ratio"].value
+        == baseline_metrics["AAA.US"]["pe_ratio"].value
+        == 12.0
+    )
+    assert (
+        carried_metrics["BBB.US"]["pe_ratio"].value
+        == baseline_metrics["BBB.US"]["pe_ratio"].value
+        == 20.0
+    )
+    assert set(carried_status) == {"AAA.US", "BBB.US"}
+    assert (
+        carried_status["AAA.US"]["pe_ratio"].status
+        == baseline_status["AAA.US"]["pe_ratio"].status
+        == "success"
+    )
+
+    # A superset map only queries the requested subset (run-screen ranking pass).
+    subset_metrics = metrics_repo.fetch_many_for_symbols(
+        ["AAA.US"], ["pe_ratio"], security_ids_by_symbol=ids_by_symbol
+    )
+    assert set(subset_metrics) == {"AAA.US"}
 
 
 def test_financial_facts_repository_latest_share_counts_many_matches_single_lookup(
@@ -3643,10 +3754,10 @@ def test_list_supported_listings_returns_ids_matching_symbol_scope(
 ) -> None:
     """``list_supported_listings`` surfaces the listing_id the scope join holds.
 
-    The id-bearing scope query must return exactly the same canonical symbols
-    (and order) as ``list_supported_symbols``, paired with the listing_id that
-    ``resolve_ids_many`` would otherwise reconstruct -- that equivalence is what
-    lets compute-metrics carry the id instead of re-resolving it.
+    The id-bearing scope query returns canonical symbols in stable order, each
+    paired with the listing_id that ``resolve_ids_many`` would otherwise
+    reconstruct -- that equivalence is what lets the canonical-scope commands
+    carry the id instead of re-resolving it.
     """
     db_path = tmp_path / "supported-listings.db"
     _seed_listing(db_path, "AAA.US")
@@ -3656,8 +3767,7 @@ def test_list_supported_listings_returns_ids_matching_symbol_scope(
     repo = SecurityRepository(db_path)
     listings = repo.list_supported_listings()
 
-    # Same canonical symbols, same order as the symbol-only scope query.
-    assert [symbol for _, symbol in listings] == repo.list_supported_symbols()
+    # Canonical symbols in stable (canonical_symbol ORDER BY) order.
     assert [symbol for _, symbol in listings] == ["AAA.US", "BBB.US", "CCC.LSE"]
 
     # Ids agree with the resolver they are meant to replace.

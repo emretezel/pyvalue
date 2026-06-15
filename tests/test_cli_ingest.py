@@ -3658,6 +3658,81 @@ criteria:
     )
 
 
+def test_cmd_run_screen_stage_carries_scope_listing_ids(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """run-screen carries scope listing ids into its scope-wide metric reads.
+
+    ``_resolve_canonical_scope_listings`` already holds every listing_id, so the
+    screen's metric/fact/market reads must not re-resolve symbol->listing_id. We
+    install a counter over the bulk resolver and assert a multi-symbol screen
+    never calls it. This fails on the pre-fix code (which resolved the scope to
+    symbols and re-resolved them inside ``fetch_many_for_symbols``).
+
+    Author: Emre Tezel
+    """
+    db_path = tmp_path / "screen-stage-carry-ids.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.upsert("AAA.US", "current_ratio", 2.0, "2026-03-29", unit_kind="ratio")
+    metrics_repo.upsert("BBB.US", "current_ratio", 1.5, "2026-03-29", unit_kind="ratio")
+
+    screen_path = tmp_path / "screen.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Liquidity"
+    left:
+      metric: current_ratio
+    operator: ">="
+    right:
+      value: 1.0
+"""
+    )
+
+    calls = {"resolve_ids_many": 0}
+    original_resolve_ids_many = SecurityRepository.resolve_ids_many
+
+    def counting_resolve_ids_many(
+        self: SecurityRepository,
+        symbols: Sequence[str],
+        chunk_size: int = 500,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, int]:
+        calls["resolve_ids_many"] += 1
+        return original_resolve_ids_many(
+            self, symbols, chunk_size=chunk_size, connection=connection
+        )
+
+    monkeypatch.setattr(
+        SecurityRepository, "resolve_ids_many", counting_resolve_ids_many
+    )
+
+    rc = cli.cmd_run_screen_stage(
+        config_path=str(screen_path),
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=["US"],
+        all_supported=False,
+        output_csv=None,
+    )
+
+    assert rc == 0
+    assert calls == {"resolve_ids_many": 0}
+    output = capsys.readouterr().out
+    assert "AAA.US" in output
+    assert "BBB.US" in output
+
+
 def test_cmd_compute_metrics_stage_symbol_scope(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -5611,6 +5686,71 @@ def test_cmd_refresh_security_metadata_does_not_use_full_payload_fetch(
     assert "Updated metadata for 1 symbols." in capsys.readouterr().out
 
 
+def test_cmd_refresh_security_metadata_carries_scope_listing_ids(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The command carries scope listing ids instead of re-resolving symbols.
+
+    refresh-security-metadata now resolves its scope to (listing_id, symbol)
+    pairs via ``_resolve_canonical_scope_listings`` and threads those ids into
+    the raw / metadata reads. Re-running ``resolve_ids_many`` would be a second
+    pass over the listing table for ids the scope already produced, so we make
+    it raise to prove the command never calls it.
+
+    Author: Emre Tezel
+    """
+    db_path = tmp_path / "refresh-security-metadata-carry-ids.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+    _seed_listing(db_path, ("AAA.US", "BBB.US"), currency="USD", provider="EODHD")
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    fund_repo.upsert(
+        "EODHD",
+        "AAA.US",
+        {"General": {"Sector": "Technology", "Industry": "Software"}},
+        exchange="US",
+    )
+    fund_repo.upsert(
+        "EODHD",
+        "BBB.US",
+        {"General": {"Sector": "Industrials", "Industry": "Machinery"}},
+        exchange="US",
+    )
+
+    monkeypatch.setattr(
+        SecurityRepository,
+        "resolve_ids_many",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError(
+                "refresh-security-metadata must carry scope listing ids, "
+                "not re-resolve symbols"
+            )
+        ),
+    )
+
+    rc = cli.cmd_refresh_security_metadata(
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=["US"],
+        all_supported=False,
+    )
+
+    assert rc == 0
+    entity_repo = EntityMetadataRepository(db_path)
+    entity_repo.initialize_schema()
+    assert entity_repo.fetch_sector("AAA.US") == "Technology"
+    assert entity_repo.fetch_sector("BBB.US") == "Industrials"
+    assert "Updated metadata for 2 symbols." in capsys.readouterr().out
+
+
 def test_cmd_refresh_security_metadata_reports_progress(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -6013,6 +6153,8 @@ ranking:
         symbols: Sequence[str],
         metric_ids: Sequence[str],
         chunk_size: int = 500,
+        *,
+        security_ids_by_symbol: Mapping[str, int] | None = None,
     ) -> dict[str, dict[str, MetricRecord]]:
         calls.append((tuple(symbols), tuple(metric_ids)))
         return original_fetch_many(
@@ -6020,6 +6162,7 @@ ranking:
             symbols,
             metric_ids,
             chunk_size=chunk_size,
+            security_ids_by_symbol=security_ids_by_symbol,
         )
 
     monkeypatch.setattr(
@@ -6560,6 +6703,81 @@ def test_cmd_report_metric_failures_with_exchange(
     assert "symbols=1" in output
     assert "example=AAA.LSE" in output
     assert "BBB.US" not in output
+
+
+def test_cmd_report_metric_failures_carries_scope_listing_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """report-metric-failures carries scope listing ids into its reads.
+
+    The snapshot, availability-state, and batch-recompute reads must use the
+    listing_id the scope resolver already produced -- never re-resolving
+    symbol->listing_id. We count ``resolve_ids_many`` and assert it never runs.
+
+    Author: Emre Tezel
+    """
+    db_path = tmp_path / "failures-carry-ids.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    fact_repo.replace_facts(
+        "AAA.US",
+        [
+            make_fact(
+                symbol="AAA.US",
+                concept="AssetsCurrent",
+                end_date="2024-12-31",
+                value=100.0,
+            ),
+            make_fact(
+                symbol="AAA.US",
+                concept="LiabilitiesCurrent",
+                end_date="2024-12-31",
+                value=40.0,
+            ),
+        ],
+    )
+
+    calls = {"resolve_ids_many": 0}
+    original_resolve_ids_many = SecurityRepository.resolve_ids_many
+
+    def counting_resolve_ids_many(
+        self: SecurityRepository,
+        symbols: Sequence[str],
+        chunk_size: int = 500,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, int]:
+        calls["resolve_ids_many"] += 1
+        return original_resolve_ids_many(
+            self, symbols, chunk_size=chunk_size, connection=connection
+        )
+
+    monkeypatch.setattr(
+        SecurityRepository, "resolve_ids_many", counting_resolve_ids_many
+    )
+
+    rc = cli.cmd_report_metric_failures(
+        database=str(db_path),
+        metric_ids=["working_capital"],
+        symbols=None,
+        exchange_codes=["US"],
+        all_supported=False,
+        output_csv=None,
+    )
+
+    assert rc == 0
+    assert calls == {"resolve_ids_many": 0}
+    # Both scope symbols were considered (AAA computable, BBB missing facts).
+    assert "symbols=2" in capsys.readouterr().out
 
 
 def test_cmd_report_metric_failures_surfaces_roic_specific_reason(

@@ -163,6 +163,37 @@ Metric rows also persist unit metadata:
 - `currency`: present only for currency-bearing metric kinds
 - `unit_label`: optional display/unit hint such as `x` or `per_share`
 
+## Scope Resolution
+
+Every CLI command that works over the security universe — `compute-metrics`,
+`run-screen`, and the `report-*` commands — resolves its scope **from the
+`listing` table** and carries the natural `listing_id` down into every read and
+write. The single entry point is `_resolve_canonical_scope_listings`
+(`cli/_common.py`), which returns ordered `(listing_id, canonical_symbol)` pairs
+from `SecurityRepository.list_supported_listings`. Commands build a
+`{canonical_symbol: listing_id}` map once and thread it (as `security_ids_by_symbol`
+/ `ids_by_symbol`) through the fact, market, and metric reads/writes, so the id
+the scope join already holds is never re-derived. The canonical symbol
+(`symbol || '.' || exchange_code`) survives only as a display/CSV label and as
+result-dict keys — it is never used as a database selection, filter, join, or
+sort key. Downstream tables are filtered on `listing_id` (or a real PK such as
+`exchange_id`), never on a computed/concatenated symbol.
+
+Two categories legitimately deviate:
+
+- **Provider-axis pipeline commands** (`ingest-fundamentals`,
+  `normalize-fundamentals`, `update-market-data`, `reconcile-listing-status`)
+  start from the provider catalog because they operate on provider symbols and
+  `fundamentals_raw` keyed by `provider_listing_id`. Their scope rows already
+  expose `security_id` (from `provider_listing_catalog`), which they carry into
+  the canonical writes (`replace_fact_rows(security_id=…)`,
+  `MarketDataUpdate(security_id=…)`); the only symbol matching is the inherent
+  provider-symbol → raw-payload intersection.
+- **Non-listing commands** — `refresh-fx-rates` (FX pairs), the `clear-*`
+  maintenance commands (blanket `DELETE FROM`), and the `report-*-progress`
+  commands (aggregated by the real `provider_exchange_code` column) — have no
+  per-listing scope to carry.
+
 ## Persistence Flow
 
 A normal run looks like:

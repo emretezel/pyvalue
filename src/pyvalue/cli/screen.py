@@ -58,7 +58,7 @@ from ._common import (
     _format_value,
     _prepare_output_csv_path,
     _print_symbol_progress,
-    _resolve_canonical_scope_symbols,
+    _resolve_canonical_scope_listings,
     _resolve_database_path,
 )
 from ._repos import (
@@ -386,14 +386,23 @@ def cmd_run_screen_stage(
     """Unified screen evaluation over symbol, exchange, or full supported scope."""
 
     db_path = _resolve_database_path(database)
-    canonical_symbols, _explicit_symbols, resolved_exchange_codes = (
-        _resolve_canonical_scope_symbols(
+    scope_listings, _explicit_symbols, resolved_exchange_codes = (
+        _resolve_canonical_scope_listings(
             str(db_path),
             symbols,
             exchange_codes,
             all_supported,
         )
     )
+    canonical_symbols = [symbol for _, symbol in scope_listings]
+    # Carry the scope-resolved listing ids into the scope-wide metric / fact /
+    # market reads so the screen never re-resolves symbol->listing_id from the
+    # DB. The per-symbol entity name / description / price lookups below stay
+    # symbol-keyed: they are display-only and served from the security cache via
+    # single-symbol resolution, not the bulk resolver.
+    security_ids_by_symbol = {
+        symbol: listing_id for listing_id, symbol in scope_listings
+    }
     definition = load_screen(config_path)
     filter_metric_ids = _screen_filter_metric_ids(definition)
     ranking_extra_metric_ids = _screen_ranking_extra_metric_ids(definition)
@@ -451,6 +460,7 @@ def cmd_run_screen_stage(
         metric_rows_by_symbol = metrics_repo.fetch_many_for_symbols(
             canonical_symbols,
             filter_metric_ids,
+            security_ids_by_symbol=security_ids_by_symbol,
         )
         evaluation_metrics_repo = _PreloadedMetricsRepository(
             db_path,
@@ -486,6 +496,7 @@ def cmd_run_screen_stage(
             ranking_metric_rows = metrics_repo.fetch_many_for_symbols(
                 passed_symbols,
                 ranking_extra_metric_ids,
+                security_ids_by_symbol=security_ids_by_symbol,
             )
             if ranking_metric_rows:
                 _merge_metric_rows_by_symbol(

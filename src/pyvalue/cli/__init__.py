@@ -33,7 +33,6 @@ from ._common import (
     _ProfiledComputedMetricsBatchResult,
     _reconcile_eodhd_listing_scope,  # noqa: F401
     _resolve_canonical_scope_listings,
-    _resolve_canonical_scope_symbols,
     _resolve_database_path,
     _resolve_provider_scope,
     _resolve_ticker_target_currency,
@@ -138,7 +137,6 @@ __all__ = [
     "_MetricAttemptResult",
     "_ProfiledComputedMetricsBatchResult",
     "_resolve_canonical_scope_listings",
-    "_resolve_canonical_scope_symbols",
     "_resolve_database_path",
     "_resolve_provider_scope",
     "_resolve_ticker_target_currency",

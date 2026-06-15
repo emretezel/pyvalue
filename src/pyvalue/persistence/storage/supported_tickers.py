@@ -511,17 +511,6 @@ class SupportedTickerRepository(SQLiteStore):
         )
         return [(row.provider_symbol, row.security_name) for row in rows]
 
-    def list_canonical_symbols(
-        self,
-        exchange_codes: Optional[Sequence[str]] = None,
-        *,
-        primary_only: bool = False,
-    ) -> List[str]:
-        return self._security_repo().list_supported_symbols(
-            exchange_codes,
-            primary_only=primary_only,
-        )
-
     def list_canonical_listings(
         self,
         exchange_codes: Optional[Sequence[str]] = None,
@@ -530,9 +519,10 @@ class SupportedTickerRepository(SQLiteStore):
     ) -> List[Tuple[int, str]]:
         """Return ``(listing_id, canonical_symbol)`` pairs for the requested scope.
 
-        The id-bearing counterpart of :meth:`list_canonical_symbols`, used by
-        ``compute-metrics`` to carry the natural ``listing_id`` from scope
-        resolution through to reads and writes instead of re-resolving it.
+        The canonical-scope universe read used by every canonical-scope command
+        (compute-metrics, run-screen, the report-* commands) to carry the natural
+        ``listing_id`` from scope resolution through to reads and writes instead
+        of re-resolving it.
         """
 
         return self._security_repo().list_supported_listings(

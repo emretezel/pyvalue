@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from pyvalue.cli import (
-    _resolve_canonical_scope_symbols,
+    _resolve_canonical_scope_listings,
     _resolve_database_path,
     _resolve_provider_scope,
     _validate_scope_selector,
@@ -47,7 +47,7 @@ def test_validate_scope_selector_rejects_multiple_explicit_selectors() -> None:
         raise AssertionError("Expected SystemExit for conflicting selectors")
 
 
-def test_resolve_canonical_scope_symbols_defaults_to_all_supported(
+def test_resolve_canonical_scope_listings_defaults_to_all_supported(
     tmp_path: Path,
 ) -> None:
     repo = SupportedTickerRepository(tmp_path / "scope.db")
@@ -86,14 +86,17 @@ def test_resolve_canonical_scope_symbols_defaults_to_all_supported(
         ],
     )
 
-    selected, explicit, exchanges = _resolve_canonical_scope_symbols(
+    listings, explicit, exchanges = _resolve_canonical_scope_listings(
         str(tmp_path / "scope.db"),
         symbols=None,
         exchange_codes=None,
         all_supported=False,
     )
 
-    assert selected == ["AAA.US", "BBB.US"]
+    # The id-bearing scope carries (listing_id, canonical_symbol) pairs; ids are
+    # real integers from the listing table, not re-derived downstream.
+    assert [symbol for _, symbol in listings] == ["AAA.US", "BBB.US"]
+    assert all(isinstance(listing_id, int) for listing_id, _ in listings)
     assert explicit is None
     assert exchanges is None
 

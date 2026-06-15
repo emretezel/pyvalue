@@ -10,12 +10,12 @@ from typing import (
     List,
     Optional,
     Sequence,
+    Tuple,
 )
 
 from pyvalue.persistence.storage import (
     EntityMetadataRepository,
     FundamentalsRepository,
-    SecurityRepository,
     SecurityMetadataUpdate,
 )
 
@@ -23,7 +23,7 @@ from ._common import (
     SECURITY_METADATA_CHUNK_SIZE,
     SECURITY_METADATA_PROGRESS_INTERVAL_SECONDS,
     _print_symbol_progress,
-    _resolve_canonical_scope_symbols,
+    _resolve_canonical_scope_listings,
     _resolve_database_path,
 )
 from ._batch import (
@@ -40,24 +40,28 @@ def cmd_refresh_security_metadata(
     """Refresh canonical security metadata from stored raw fundamentals only."""
 
     db_path = _resolve_database_path(database)
-    canonical_symbols, _, _ = _resolve_canonical_scope_symbols(
-        str(db_path),
-        symbols,
-        exchange_codes,
-        all_supported,
+    # Resolve the scope to (listing_id, canonical_symbol) pairs so the natural
+    # listing_id the scope join already holds is carried straight into the raw /
+    # metadata reads. Previously this command resolved the scope to symbols and
+    # then immediately re-resolved those symbols back to listing ids -- a second
+    # pass over the listing table for ids the scope already had.
+    scope_listings, _explicit_symbols, _resolved_exchange_codes = (
+        _resolve_canonical_scope_listings(
+            str(db_path),
+            symbols,
+            exchange_codes,
+            all_supported,
+        )
     )
+    canonical_symbols = [symbol for _, symbol in scope_listings]
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     entity_repo = EntityMetadataRepository(db_path)
     entity_repo.initialize_schema()
-    security_repo = SecurityRepository(db_path)
-    security_repo.initialize_schema()
-    security_ids_by_symbol = security_repo.resolve_ids_many(
-        canonical_symbols,
-        chunk_size=SECURITY_METADATA_CHUNK_SIZE,
-    )
-    scoped_rows = [
-        (symbol, security_ids_by_symbol.get(symbol)) for symbol in canonical_symbols
+    # The scope guarantees every listing exists, so each id is present; the
+    # Optional element type keeps the defensive None-handling in the loop valid.
+    scoped_rows: List[Tuple[str, Optional[int]]] = [
+        (symbol, listing_id) for listing_id, symbol in scope_listings
     ]
 
     updated = 0

@@ -1225,11 +1225,13 @@ def cmd_compute_metrics_stage(
     # Resolve the scope to (listing_id, canonical_symbol) pairs so the natural
     # listing_id rides through reads and writes -- compute-metrics never
     # re-resolves symbol->listing_id from the DB.
-    scope_listings = _resolve_canonical_scope_listings(
-        str(db_path),
-        symbols,
-        exchange_codes,
-        all_supported,
+    scope_listings, _explicit_symbols, _resolved_exchange_codes = (
+        _resolve_canonical_scope_listings(
+            str(db_path),
+            symbols,
+            exchange_codes,
+            all_supported,
+        )
     )
     ids_by_symbol = {symbol: listing_id for listing_id, symbol in scope_listings}
     canonical_symbols = [symbol for _, symbol in scope_listings]

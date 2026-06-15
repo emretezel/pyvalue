@@ -3,6 +3,8 @@
 Author: Emre Tezel
 """
 
+import sqlite3
+from collections.abc import Sequence
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -15,6 +17,7 @@ from pyvalue.reporting import compute_fact_coverage
 from pyvalue.persistence.storage import (
     FactRecord,
     FinancialFactsRepository,
+    SecurityRepository,
     SupportedTickerRepository,
 )
 from pyvalue.universe import Listing
@@ -144,6 +147,57 @@ def test_cmd_report_fact_freshness_outputs_counts(
     assert "AssetsCurrent" in output
     assert "stale=1" in output
     assert "missing=1" in output
+
+
+def test_cmd_report_fact_freshness_carries_scope_listing_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """report-fact-freshness carries scope listing ids into the bulk fact load.
+
+    The scope resolver already holds each listing_id, so the single bulk
+    ``facts_for_symbols_many`` read must carry them in rather than re-resolving
+    symbol->listing_id. We count ``resolve_ids_many`` and assert it never runs.
+
+    Author: Emre Tezel
+    """
+    db_path = tmp_path / "freshness-carry-ids.db"
+    _seed_universe(db_path)
+    fact_repo = FinancialFactsRepository(db_path)
+    fact_repo.initialize_schema()
+    _seed_facts(fact_repo)
+
+    calls = {"resolve_ids_many": 0}
+    original_resolve_ids_many = SecurityRepository.resolve_ids_many
+
+    def counting_resolve_ids_many(
+        self: SecurityRepository,
+        symbols: Sequence[str],
+        chunk_size: int = 500,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, int]:
+        calls["resolve_ids_many"] += 1
+        return original_resolve_ids_many(
+            self, symbols, chunk_size=chunk_size, connection=connection
+        )
+
+    monkeypatch.setattr(
+        SecurityRepository, "resolve_ids_many", counting_resolve_ids_many
+    )
+
+    exit_code = cmd_report_fact_freshness(
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=["US"],
+        all_supported=False,
+        metric_ids=["working_capital"],
+        max_age_days=MAX_FACT_AGE_DAYS,
+        output_csv=None,
+        show_all=True,
+    )
+
+    assert exit_code == 0
+    assert calls == {"resolve_ids_many": 0}
 
 
 def test_fact_report_counts_assets_current_from_components(tmp_path: Path) -> None:

@@ -776,15 +776,13 @@ class SecurityRepository(SQLiteStore):
     ) -> List[Tuple[int, str]]:
         """Return ``(listing_id, canonical_symbol)`` for supported listings in scope.
 
-        Mirrors :meth:`list_supported_symbols` but also surfaces the
-        ``listing_id`` that the scope join already carries. Callers that key
-        downstream work on the natural id (e.g. ``compute-metrics``) take this
-        variant so they never have to resolve the canonical symbol back to a
-        ``listing_id`` per batch and per write flush. ``DISTINCT`` over
-        ``(listing_id, canonical_symbol)`` collapses duplicate provider rows the
-        same way the symbol-only query does -- the canonical symbol maps to
-        exactly one listing (``listing`` is UNIQUE on ``(exchange_id, symbol)``),
-        so the row count is identical to :meth:`list_supported_symbols`.
+        The canonical-scope universe read: it surfaces the ``listing_id`` the
+        scope join already carries so callers (compute-metrics, run-screen, the
+        report-* commands) never resolve the canonical symbol back to a
+        ``listing_id`` per batch or write flush. ``DISTINCT`` over
+        ``(listing_id, canonical_symbol)`` collapses duplicate provider rows; the
+        canonical symbol maps to exactly one listing (``listing`` is UNIQUE on
+        ``(exchange_id, symbol)``).
         """
 
         self.initialize_schema()
@@ -809,20 +807,6 @@ class SecurityRepository(SQLiteStore):
         with self._connect() as conn:
             rows = conn.execute(" ".join(query), params).fetchall()
         return [(int(row["listing_id"]), row["canonical_symbol"]) for row in rows]
-
-    def list_supported_symbols(
-        self,
-        exchange_codes: Optional[Sequence[str]] = None,
-        *,
-        primary_only: bool = False,
-    ) -> List[str]:
-        return [
-            canonical_symbol
-            for _, canonical_symbol in self.list_supported_listings(
-                exchange_codes,
-                primary_only=primary_only,
-            )
-        ]
 
     def list_supported_symbol_name_pairs(
         self,

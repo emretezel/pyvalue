@@ -228,8 +228,17 @@ class MetricsRepository(SQLiteStore):
         symbols: Sequence[str],
         metric_ids: Sequence[str],
         chunk_size: int = 500,
+        *,
+        security_ids_by_symbol: Optional[Mapping[str, int]] = None,
     ) -> Dict[str, Dict[str, MetricRecord]]:
-        """Fetch requested stored metrics for a symbol scope with chunked indexed reads."""
+        """Fetch requested stored metrics for a symbol scope with chunked indexed reads.
+
+        ``security_ids_by_symbol`` lets callers that already resolved their scope
+        (run-screen / report-* via ``_resolve_canonical_scope_listings``) carry the
+        natural ``listing_id`` straight in, eliminating the symbol->id round trip.
+        A superset map is fine -- only the requested ``symbols`` are queried -- so
+        the ranking pass can reuse the full scope map for a subset of passers.
+        """
 
         self.initialize_schema()
         normalized_symbols = _normalized_codes(symbols)
@@ -243,17 +252,22 @@ class MetricsRepository(SQLiteStore):
         if not normalized_symbols or not requested_metric_ids:
             return {}
 
-        security_ids_by_symbol = self._security_repo().resolve_ids_many(
-            normalized_symbols,
-            chunk_size=chunk_size,
+        resolved_security_ids = (
+            dict(security_ids_by_symbol)
+            if security_ids_by_symbol is not None
+            else self._security_repo().resolve_ids_many(
+                normalized_symbols,
+                chunk_size=chunk_size,
+            )
         )
-        if not security_ids_by_symbol:
+        symbol_by_security_id = {
+            resolved_security_ids[symbol]: symbol
+            for symbol in normalized_symbols
+            if symbol in resolved_security_ids
+        }
+        if not symbol_by_security_id:
             return {}
 
-        symbol_by_security_id = {
-            security_id: symbol
-            for symbol, security_id in security_ids_by_symbol.items()
-        }
         metric_rows_by_symbol: Dict[str, Dict[str, MetricRecord]] = {}
 
         metric_chunk_size = max(
@@ -442,7 +456,17 @@ class MetricComputeStatusRepository(SQLiteStore):
         symbols: Sequence[str],
         metric_ids: Sequence[str],
         chunk_size: int = 500,
+        *,
+        security_ids_by_symbol: Optional[Mapping[str, int]] = None,
     ) -> Dict[str, Dict[str, MetricComputeStatusRecord]]:
+        """Fetch the latest compute-status rows for a symbol scope.
+
+        ``security_ids_by_symbol`` carries scope-resolved ``listing_id`` values in
+        (see :meth:`MetricsRepository.fetch_many_for_symbols`) so report-* commands
+        avoid the symbol->id re-resolution; a superset map only queries the
+        requested ``symbols``.
+        """
+
         self.initialize_schema()
         normalized_symbols = _normalized_codes(symbols)
         requested_metric_ids = sorted(
@@ -455,17 +479,22 @@ class MetricComputeStatusRepository(SQLiteStore):
         if not normalized_symbols or not requested_metric_ids:
             return {}
 
-        security_ids_by_symbol = self._security_repo().resolve_ids_many(
-            normalized_symbols,
-            chunk_size=chunk_size,
+        resolved_security_ids = (
+            dict(security_ids_by_symbol)
+            if security_ids_by_symbol is not None
+            else self._security_repo().resolve_ids_many(
+                normalized_symbols,
+                chunk_size=chunk_size,
+            )
         )
-        if not security_ids_by_symbol:
+        symbol_by_security_id = {
+            resolved_security_ids[symbol]: symbol
+            for symbol in normalized_symbols
+            if symbol in resolved_security_ids
+        }
+        if not symbol_by_security_id:
             return {}
 
-        symbol_by_security_id = {
-            security_id: symbol
-            for symbol, security_id in security_ids_by_symbol.items()
-        }
         rows_by_symbol: Dict[str, Dict[str, MetricComputeStatusRecord]] = {}
         metric_chunk_size = max(
             1,
