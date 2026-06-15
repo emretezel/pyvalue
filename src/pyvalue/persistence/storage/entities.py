@@ -774,36 +774,42 @@ class SecurityRepository(SQLiteStore):
             _query(conn)
         return resolved
 
-    def list_supported_symbol_name_pairs(
+    def entity_names_by_ids(
         self,
-        exchange_codes: Optional[Sequence[str]] = None,
-        *,
-        primary_only: bool = False,
-    ) -> List[Tuple[str, Optional[str]]]:
+        listing_ids: Sequence[int],
+        chunk_size: int = 500,
+    ) -> Dict[int, Optional[str]]:
+        """Return ``{listing_id: issuer name}`` for the given listings (id-keyed).
+
+        The display-label read for run-screen: it keys on the ``listing_id``s the
+        scope already resolved, so no symbol/exchange lookup is needed. A listing
+        whose issuer carries no name is absent from the map (the caller falls back to
+        the canonical symbol).
+        """
         self.initialize_schema()
-        params: List[object] = []
-        query = [
-            "SELECT l.symbol || '.' || e.exchange_code AS canonical_symbol,",
-            "COALESCE(i.name, l.symbol || '.' || e.exchange_code) AS entity_name",
-            "FROM provider_listing pl",
-            "JOIN listing l ON l.listing_id = pl.listing_id",
-            "JOIN issuer i ON i.issuer_id = l.issuer_id",
-            'JOIN "exchange" e ON e.exchange_id = l.exchange_id',
-        ]
-        normalized = _normalized_codes(exchange_codes)
-        if normalized:
-            placeholders = ", ".join("?" for _ in normalized)
-            query.append(f"WHERE e.exchange_code IN ({placeholders})")
-            params.extend(normalized)
-            if primary_only:
-                query.append(f"AND {_primary_listing_predicate('l')}")
-        elif primary_only:
-            query.append(f"WHERE {_primary_listing_predicate('l')}")
-        query.append("GROUP BY l.listing_id, canonical_symbol, i.name")
-        query.append("ORDER BY canonical_symbol")
+        normalized = sorted(
+            {int(listing_id) for listing_id in listing_ids if listing_id}
+        )
+        if not normalized:
+            return {}
+        names: Dict[int, Optional[str]] = {}
         with self._connect() as conn:
-            rows = conn.execute(" ".join(query), params).fetchall()
-        return [(row["canonical_symbol"], row["entity_name"]) for row in rows]
+            for chunk in _batched(normalized, chunk_size):
+                placeholders = ", ".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""
+                    SELECT l.listing_id AS listing_id, i.name AS entity_name
+                    FROM listing l
+                    JOIN issuer i ON i.issuer_id = l.issuer_id
+                    WHERE l.listing_id IN ({placeholders})
+                    """,
+                    list(chunk),
+                ).fetchall()
+                for row in rows:
+                    names[int(row["listing_id"])] = _normalize_optional_text(
+                        row["entity_name"]
+                    )
+        return names
 
     def _remember(self, security: Security) -> None:
         self._by_id[security.security_id] = security

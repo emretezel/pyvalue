@@ -42,7 +42,6 @@ from pyvalue.persistence.storage import (
     MetricRecord,
     MetricsRepository,
     SecurityRepository,
-    SupportedTickerRepository,
 )
 
 from ._common import (
@@ -127,7 +126,7 @@ def _evaluate_screen_scope(
     definition: ScreenDefinition,
     listings: Sequence[tuple[int, str]],
     metrics_repo: MetricsRepository,
-    universe_names: Mapping[str, Optional[str]],
+    universe_names: Mapping[int, Optional[str]],
     *,
     report_progress: bool,
 ) -> tuple[List[int], Dict[str, Dict[int, float]], Dict[int, str]]:
@@ -165,7 +164,7 @@ def _evaluate_screen_scope(
     for listing_id, display_symbol in listings:
         listing_passed = True
         per_listing_values: Dict[str, float] = {}
-        entity_labels[listing_id] = universe_names.get(display_symbol) or display_symbol
+        entity_labels[listing_id] = universe_names.get(listing_id) or display_symbol
         for criterion in definition.criteria:
             passed, left_value = evaluate_criterion_verbose(
                 criterion,
@@ -429,7 +428,7 @@ def cmd_run_screen_stage(
     """Unified screen evaluation over symbol, exchange, or full supported scope."""
 
     db_path = _resolve_database_path(database)
-    scope_listings, _explicit_symbols, resolved_exchange_codes = (
+    scope_listings, _explicit_symbols, _resolved_exchange_codes = (
         _resolve_canonical_scope_listings(
             str(db_path),
             symbols,
@@ -492,14 +491,10 @@ def cmd_run_screen_stage(
                 print(f"{name}: {'PASS' if passed else 'FAIL'} (value={value_display})")
             return 0 if passed_all else 1
 
-        ticker_repo = SupportedTickerRepository(db_path)
-        universe_names = dict(
-            ticker_repo.list_canonical_symbol_name_pairs(
-                resolved_exchange_codes,
-                primary_only=True,
-            )
-        )
         listing_ids = [listing_id for listing_id, _ in scope_listings]
+        # Entity display names keyed by the scope's already-resolved listing_ids --
+        # no second, exchange-code-filtered scope read.
+        universe_names = security_repo.entity_names_by_ids(listing_ids)
         metric_rows_by_id = metrics_repo.fetch_many_by_ids(
             listing_ids,
             filter_metric_ids,

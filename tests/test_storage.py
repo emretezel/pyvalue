@@ -3658,6 +3658,23 @@ def test_list_supported_listings_returns_ids_matching_symbol_scope(
     assert [symbol for _, symbol in lse_only] == ["CCC.LSE"]
 
 
+def test_entity_names_by_ids_keys_by_listing_id(tmp_path: Path) -> None:
+    """``entity_names_by_ids`` returns issuer names keyed by listing_id (the id the
+    scope already holds), for run-screen's display labels -- no symbol/exchange read."""
+    db_path = tmp_path / "entity-names.db"
+    _seed_listing(db_path, "AAA.US")
+    _seed_listing(db_path, "BBB.US")
+    seed_security_metadata(db_path, "AAA.US", entity_name="AAA Holdings")
+
+    repo = SecurityRepository(db_path)
+    ids = repo.resolve_ids_many(["AAA.US", "BBB.US"])
+    names = repo.entity_names_by_ids(list(ids.values()))
+
+    assert names[ids["AAA.US"]] == "AAA Holdings"
+    assert set(names) == set(ids.values())  # keyed by listing_id, both present
+    assert repo.entity_names_by_ids([]) == {}
+
+
 def test_list_supported_listings_for_symbols_targeted_lookup(
     tmp_path: Path,
 ) -> None:

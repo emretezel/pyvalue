@@ -514,17 +514,6 @@ class SupportedTickerRepository(SQLiteStore):
 
         return self._security_repo().list_supported_listings_for_symbols(symbols)
 
-    def list_canonical_symbol_name_pairs(
-        self,
-        exchange_codes: Optional[Sequence[str]] = None,
-        *,
-        primary_only: bool = False,
-    ) -> List[Tuple[str, Optional[str]]]:
-        return self._security_repo().list_supported_symbol_name_pairs(
-            exchange_codes,
-            primary_only=primary_only,
-        )
-
     def available_exchanges(self, provider: Optional[str] = None) -> List[str]:
         self.initialize_schema()
         params: List[object] = []
