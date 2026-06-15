@@ -3330,6 +3330,54 @@ def test_fundamentals_repository_fetch_metadata_candidates_extracts_fields(
     assert security_ids["CCC.US"] not in rows
 
 
+def test_fetch_metadata_candidates_reads_raw_payload_not_canonical_issuer(
+    tmp_path: Path,
+) -> None:
+    """Candidates come from ``fundamentals_raw``, never the canonical issuer row.
+
+    Guards the query that bypasses ``provider_listing_catalog``: it must read the
+    payload's ``General.*`` fields, not the issuer columns the old view join
+    pulled in. The canonical issuer below is deliberately set to stale values
+    that differ from the raw payload -- if a future edit reintroduced an issuer
+    read, those stale values would leak into the candidate and fail this test.
+    """
+    db_path = tmp_path / "candidates-from-raw.db"
+    repo = FundamentalsRepository(db_path)
+    repo.initialize_schema()
+    _seed_listing(db_path, "AAA.US")
+    repo.upsert(
+        "EODHD",
+        "AAA.US",
+        {
+            "General": {
+                "Name": "AAA Holdings",
+                "Description": "Raw description",
+                "Sector": "Technology",
+                "Industry": "Software",
+            }
+        },
+        exchange="US",
+    )
+    # Canonical issuer diverges from the raw payload on every field, so a query
+    # that mistakenly read issuer instead of the payload would be caught.
+    seed_security_metadata(
+        db_path,
+        "AAA.US",
+        entity_name="STALE Name",
+        description="Stale description",
+        sector="Energy",
+        industry="Oil & Gas",
+    )
+
+    security_id = SecurityRepository(db_path).resolve_ids_many(["AAA.US"])["AAA.US"]
+    candidate = repo.fetch_metadata_candidates([security_id])[security_id]
+
+    assert candidate.entity_name == "AAA Holdings"
+    assert candidate.description == "Raw description"
+    assert candidate.sector == "Technology"
+    assert candidate.industry == "Software"
+
+
 def test_fundamentals_repository_fetch_many_returns_payloads_by_symbol(
     tmp_path: Path,
 ) -> None:

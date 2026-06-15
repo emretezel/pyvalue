@@ -417,14 +417,31 @@ class FundamentalsRepository(SQLiteStore):
         with self._connect() as conn:
             for chunk in _batched(normalized_ids, chunk_size):
                 placeholders = ", ".join("?" for _ in chunk)
+                # Read straight from the base tables, not the
+                # provider_listing_catalog view. The view INNER-joins listing,
+                # issuer and exchange, none of which this query needs:
+                # security_id is provider_listing.listing_id, provider is
+                # provider.provider_code, and the payload lives on
+                # fundamentals_raw. Routing through the view forced three extra
+                # per-row B-tree seeks (listing, issuer, exchange) that yield no
+                # column we read -- ~3x the table touches for each of ~75k raw
+                # payloads on a full refresh. No ORDER BY either: rows are merged
+                # into a dict keyed by security_id and the EODHD-over-SEC
+                # precedence is handled by the merge below, not by row order.
                 rows = conn.execute(
                     f"""
-                    SELECT catalog.security_id, catalog.provider, fr.data
+                    SELECT
+                        pl.listing_id AS security_id,
+                        p.provider_code AS provider,
+                        fr.data
                     FROM fundamentals_raw fr
-                    JOIN provider_listing_catalog catalog
-                      ON catalog.provider_listing_id = fr.provider_listing_id
-                    WHERE catalog.security_id IN ({placeholders})
-                    ORDER BY catalog.security_id
+                    JOIN provider_listing pl
+                      ON pl.provider_listing_id = fr.provider_listing_id
+                    JOIN provider_exchange px
+                      ON px.provider_exchange_id = pl.provider_exchange_id
+                    JOIN provider p
+                      ON p.provider_id = px.provider_id
+                    WHERE pl.listing_id IN ({placeholders})
                     """,
                     list(chunk),
                 ).fetchall()
