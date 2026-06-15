@@ -481,28 +481,6 @@ class FundamentalsRepository(SQLiteStore):
                         )
         return results
 
-    def fetch_record(
-        self, provider: str, symbol: str
-    ) -> Optional[Tuple[str, Optional[str], Dict[str, Any]]]:
-        self.initialize_schema()
-        provider_symbol, _, _ = self._resolve_security(provider, symbol, None)
-        if provider_symbol is None:
-            return None
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT catalog.provider_symbol, catalog.provider_exchange_code, fr.data
-                FROM fundamentals_raw fr
-                JOIN provider_listing_catalog catalog
-                  ON catalog.provider_listing_id = fr.provider_listing_id
-                WHERE catalog.provider = ? AND catalog.provider_symbol = ?
-                """,
-                (provider.strip().upper(), provider_symbol),
-            ).fetchone()
-        if row is None:
-            return None
-        return row[0], row[1], json.loads(row[2])
-
     def fetch_payload_with_hash(
         self, provider: str, symbol: str
     ) -> Optional[Tuple[Dict[str, Any], str]]:
