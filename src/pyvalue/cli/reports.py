@@ -44,7 +44,6 @@ from ._common import (
     _CriterionFailureSummary,
     _MetricAttemptResult,
     _ScreenMetricImpactSummary,
-    _batch_values,
     _format_value,
     _metric_status_rows_from_attempts,
     _prepare_output_csv_path,
@@ -64,6 +63,7 @@ from ._repos import (
     _StatusAwareMetricsRepository,
 )
 from .metrics import (
+    _batch_listings,
     _compute_metric_batch_results,
     _initialize_metric_read_schema,
 )
@@ -103,19 +103,18 @@ def _persist_metric_attempts(
     metrics_repo: MetricsRepository,
     status_repo: MetricComputeStatusRepository,
     attempts: Sequence[_MetricAttemptResult],
-    *,
-    ids_by_symbol: Optional[Mapping[str, int]] = None,
 ) -> None:
-    # The recomputed attempts are for symbols already in the caller's scope, so
-    # the writers reuse the scope-resolved listing ids instead of re-resolving.
+    # The recomputed attempts carry the scope-resolved listing_id, so the writers
+    # select by id with no symbol->id resolution. ``stored_row`` is already the
+    # id-led row shape consumed by ``upsert_many_by_id``.
     metric_rows = [
         attempt.stored_row for attempt in attempts if attempt.stored_row is not None
     ]
     if metric_rows:
-        metrics_repo.upsert_many(metric_rows, ids_by_symbol=ids_by_symbol)
+        metrics_repo.upsert_many_by_id(metric_rows)
     status_rows = _metric_status_rows_from_attempts(attempts)
     if status_rows:
-        status_repo.upsert_many(status_rows, ids_by_symbol=ids_by_symbol)
+        status_repo.upsert_many_by_id(status_rows)
 
 
 def _print_screen_progress_bar(completed_symbols: int, total_symbols: int) -> None:
@@ -173,20 +172,18 @@ def cmd_report_fact_freshness(
             all_supported,
         )
     )
-    selected_symbols = [symbol for _, symbol in scope_listings]
-    security_ids_by_symbol = {
-        symbol: listing_id for listing_id, symbol in scope_listings
-    }
+    # The coverage report counts per metric/concept only; the scope listing ids
+    # ride straight into the bulk fact read with no symbol resolution.
+    listing_ids = [listing_id for listing_id, _ in scope_listings]
 
     metric_classes = _select_metric_classes(metric_ids)
     base_fact_repo = FinancialFactsRepository(db_path)
     fact_repo = RegionFactsRepository(base_fact_repo)
     coverage = compute_fact_coverage(
         fact_repo,
-        selected_symbols,
+        listing_ids,
         metric_classes,
         max_age_days=max_age_days,
-        security_ids_by_symbol=security_ids_by_symbol,
     )
     scope_label = _scope_label(
         explicit_symbols,
@@ -196,7 +193,7 @@ def cmd_report_fact_freshness(
 
     print(
         f"Fact coverage for {scope_label} "
-        f"({len(selected_symbols)} symbols, max_age_days={max_age_days})"
+        f"({len(listing_ids)} symbols, max_age_days={max_age_days})"
     )
     for entry in coverage:
         missing_total = sum(c.missing for c in entry.concepts)
@@ -236,10 +233,6 @@ def cmd_report_metric_coverage(
             all_supported,
         )
     )
-    selected_symbols = [symbol for _, symbol in scope_listings]
-    security_ids_by_symbol = {
-        symbol: listing_id for listing_id, symbol in scope_listings
-    }
 
     metric_classes = _select_metric_classes(metric_ids)
     metric_id_order = [getattr(cls, "id", cls.__name__) for cls in metric_classes]
@@ -254,23 +247,17 @@ def cmd_report_metric_coverage(
     per_metric_success: Dict[str, int] = {metric_id: 0 for metric_id in metric_id_order}
     all_success = 0
 
-    # Recompute via the shared batch engine (same path compute-metrics uses): it
-    # carries the scope-resolved listing ids straight into the facts / snapshot
-    # preloads -- no per-symbol symbol->id resolution -- and binds one FX service
-    # per batch. A symbol "covers" a metric when its attempt succeeds.
-    for symbol_batch in _batch_values(selected_symbols, METRICS_COMPUTE_BATCH_SIZE):
-        batch_ids = {
-            symbol: security_ids_by_symbol[symbol]
-            for symbol in symbol_batch
-            if symbol in security_ids_by_symbol
-        }
+    # Recompute via the shared batch engine (same path compute-metrics uses): the
+    # scope-resolved (listing_id, symbol) pairs ride straight into the facts /
+    # snapshot preloads -- no per-symbol symbol->id resolution -- and one FX
+    # service is bound per batch. A listing "covers" a metric when it succeeds.
+    for listing_batch in _batch_listings(scope_listings, METRICS_COMPUTE_BATCH_SIZE):
         batch_results = _compute_metric_batch_results(
-            symbol_batch,
+            listing_batch,
             metric_id_order,
             fact_repo,
             market_repo,
             suppress_metric_warnings=True,
-            security_ids_by_symbol=batch_ids,
         )
         for result in batch_results:
             success_metric_ids = {
@@ -284,7 +271,7 @@ def cmd_report_metric_coverage(
             if metric_id_order and len(success_metric_ids) == len(metric_id_order):
                 all_success += 1
 
-    total_symbols = len(selected_symbols)
+    total_symbols = len(scope_listings)
     scope_label = _scope_label(
         explicit_symbols,
         resolved_exchange_codes,
@@ -403,29 +390,26 @@ def _write_screen_failure_report_csv(
 
 def _estimate_market_caps(
     fact_repo: FinancialFactsRepository,
-    snapshots_by_symbol: Mapping[str, MarketSnapshotRecord],
-) -> Dict[str, Optional[float]]:
+    snapshots_by_id: Mapping[int, MarketSnapshotRecord],
+) -> Dict[int, Optional[float]]:
     """Estimate market caps (latest shares x latest price) for report examples.
 
     Market cap is no longer a stored column; this is a diagnostic-only sizing
     heuristic used to pick a representative (large) failing example. It pairs the
     latest share count with the latest price rather than the share-count-dated
     price the metrics use -- close enough for ranking examples by size, and cheap
-    (one bulk share-count read over the already-loaded snapshots).
+    (one bulk share-count read by listing_id over the already-loaded snapshots).
+    The result is keyed by ``listing_id``.
     """
 
-    estimates: Dict[str, Optional[float]] = {}
-    if not snapshots_by_symbol:
+    estimates: Dict[int, Optional[float]] = {}
+    if not snapshots_by_id:
         return estimates
-    share_counts = fact_repo.latest_share_counts_many(
-        list(snapshots_by_symbol.keys()),
-        security_ids_by_symbol={
-            symbol: snapshot.security_id
-            for symbol, snapshot in snapshots_by_symbol.items()
-        },
+    share_counts = fact_repo.latest_share_counts_many_by_ids(
+        list(snapshots_by_id.keys()),
     )
-    for symbol, snapshot in snapshots_by_symbol.items():
-        shares = share_counts.get(symbol)
+    for listing_id, snapshot in snapshots_by_id.items():
+        shares = share_counts.get(listing_id)
         if (
             shares is None
             or shares <= 0
@@ -433,15 +417,15 @@ def _estimate_market_caps(
             or snapshot.price <= 0
         ):
             continue
-        estimates[symbol] = snapshot.price * shares
+        estimates[listing_id] = snapshot.price * shares
     return estimates
 
 
 def _metric_market_cap(
-    market_caps: Dict[str, Optional[float]],
-    symbol: str,
+    market_caps: Dict[int, Optional[float]],
+    listing_id: int,
 ) -> Optional[float]:
-    return market_caps.get(symbol)
+    return market_caps.get(listing_id)
 
 
 def _record_failure_example(
@@ -463,14 +447,17 @@ def _record_failure_example(
 def _record_metric_failure_reason(
     failures: Dict[str, Counter],
     examples: Dict[str, Dict[str, tuple[str, Optional[float]]]],
-    market_caps: Dict[str, Optional[float]],
+    market_caps: Dict[int, Optional[float]],
     *,
     metric_id: str,
     reason: str,
+    listing_id: int,
     symbol: str,
 ) -> None:
+    # ``listing_id`` keys the market-cap lookup; ``symbol`` is the display label
+    # carried into the example tuple (and ultimately the CSV/print output).
     failures[metric_id][reason] += 1
-    cap = _metric_market_cap(market_caps, symbol)
+    cap = _metric_market_cap(market_caps, listing_id)
     _record_failure_example(examples, metric_id, reason, symbol, cap)
 
 
@@ -480,34 +467,31 @@ def _recompute_missing_screen_metrics(
     market_repo: MarketDataRepository,
     progress_interval_seconds: Optional[float] = None,
     *,
-    security_ids_by_symbol: Optional[Mapping[str, int]] = None,
+    listing_id_by_symbol: Mapping[str, int],
 ) -> tuple[Dict[str, Counter], Dict[str, Dict[str, tuple[str, Optional[float]]]]]:
+    # ``metric_impacts`` carries display symbols (the screen evaluator recorded
+    # them); the recompute keys everything on listing_id via the scope's
+    # ``listing_id_by_symbol`` map, retaining the display symbol only for the
+    # example tuples that feed the CSV/print output.
     failures: Dict[str, Counter] = {
         metric_id: Counter() for metric_id in metric_impacts.keys()
     }
     examples: Dict[str, Dict[str, tuple[str, Optional[float]]]] = {
         metric_id: {} for metric_id in metric_impacts.keys()
     }
-    metric_ids_by_symbol: Dict[str, List[str]] = {}
+    metric_ids_by_id: Dict[int, List[str]] = {}
+    symbol_by_id: Dict[int, str] = {}
     for metric_id, impact in metric_impacts.items():
         for symbol in impact.missing_symbols:
-            metric_ids_by_symbol.setdefault(symbol, []).append(metric_id)
+            listing_id = listing_id_by_symbol.get(symbol)
+            if listing_id is None:
+                continue
+            metric_ids_by_id.setdefault(listing_id, []).append(metric_id)
+            symbol_by_id.setdefault(listing_id, symbol)
 
-    symbols_to_recompute = sorted(metric_ids_by_symbol.keys())
-    if not symbols_to_recompute:
+    ids_to_recompute = sorted(metric_ids_by_id.keys())
+    if not ids_to_recompute:
         return failures, examples
-
-    # Narrow the scope-wide id map to just the symbols we recompute so the
-    # snapshot / availability reads carry the listing_id instead of re-resolving.
-    recompute_ids: Optional[Dict[str, int]] = (
-        {
-            symbol: security_ids_by_symbol[symbol]
-            for symbol in symbols_to_recompute
-            if symbol in security_ids_by_symbol
-        }
-        if security_ids_by_symbol is not None
-        else None
-    )
 
     db_path = fact_repo.db_path
     metrics_repo = _SchemaReadyMetricsRepository(db_path)
@@ -521,7 +505,7 @@ def _recompute_missing_screen_metrics(
     )
     maybe_report_progress = (
         _make_symbol_progress_reporter(
-            len(symbols_to_recompute),
+            len(ids_to_recompute),
             progress_interval_seconds,
             printer=_print_recompute_progress_bar,
             start_immediately=True,
@@ -530,24 +514,21 @@ def _recompute_missing_screen_metrics(
         else None
     )
 
-    snapshots_by_symbol = market_repo.latest_snapshots_many(
-        symbols_to_recompute,
-        security_ids_by_symbol=recompute_ids,
-    )
-    market_caps = _estimate_market_caps(fact_repo, snapshots_by_symbol)
+    snapshots_by_id = market_repo.latest_snapshots_many_by_ids(ids_to_recompute)
+    market_caps = _estimate_market_caps(fact_repo, snapshots_by_id)
 
-    availability_states = availability_repo.states_many(
-        symbols_to_recompute,
+    availability_states = availability_repo.states_many_by_ids(
+        ids_to_recompute,
         tuple(metric_impacts.keys()),
         chunk_size=METRICS_COMPUTE_BATCH_SIZE,
-        security_ids_by_symbol=recompute_ids,
     )
-    pending_metric_ids_by_symbol: Dict[str, List[str]] = {}
+    pending_metric_ids_by_id: Dict[int, List[str]] = {}
     completed_symbols = 0
 
-    for symbol in symbols_to_recompute:
+    for listing_id in ids_to_recompute:
+        display_symbol = symbol_by_id[listing_id]
         pending_metric_ids: List[str] = []
-        for metric_id in metric_ids_by_symbol[symbol]:
+        for metric_id in metric_ids_by_id[listing_id]:
             if metric_id not in REGISTRY:
                 _record_metric_failure_reason(
                     failures,
@@ -555,10 +536,11 @@ def _recompute_missing_screen_metrics(
                     market_caps,
                     metric_id=metric_id,
                     reason="unknown_metric_id",
-                    symbol=symbol,
+                    listing_id=listing_id,
+                    symbol=display_symbol,
                 )
                 continue
-            state = availability_states.get(symbol, {}).get(metric_id)
+            state = availability_states.get(listing_id, {}).get(metric_id)
             if (
                 state is not None
                 and state.status_record is not None
@@ -571,44 +553,37 @@ def _recompute_missing_screen_metrics(
                     market_caps,
                     metric_id=metric_id,
                     reason=state.status_record.reason_code or "no warning emitted",
-                    symbol=symbol,
+                    listing_id=listing_id,
+                    symbol=display_symbol,
                 )
                 continue
             pending_metric_ids.append(metric_id)
         if pending_metric_ids:
-            pending_metric_ids_by_symbol[symbol] = pending_metric_ids
+            pending_metric_ids_by_id[listing_id] = pending_metric_ids
             continue
         completed_symbols += 1
         if maybe_report_progress is not None:
             maybe_report_progress(completed_symbols, False)
 
-    symbols_by_metric_group: Dict[Tuple[str, ...], List[str]] = {}
-    for symbol, pending_metric_ids in pending_metric_ids_by_symbol.items():
+    listings_by_metric_group: Dict[Tuple[str, ...], List[Tuple[int, str]]] = {}
+    for listing_id, pending_metric_ids in pending_metric_ids_by_id.items():
         metric_group = tuple(pending_metric_ids)
-        symbols_by_metric_group.setdefault(metric_group, []).append(symbol)
+        listings_by_metric_group.setdefault(metric_group, []).append(
+            (listing_id, symbol_by_id[listing_id])
+        )
 
-    for metric_group, group_symbols in symbols_by_metric_group.items():
-        for symbol_batch in _batch_values(
-            group_symbols,
+    for metric_group, group_listings in listings_by_metric_group.items():
+        for listing_batch in _batch_listings(
+            group_listings,
             METRICS_COMPUTE_BATCH_SIZE,
         ):
-            batch_ids: Optional[Dict[str, int]] = (
-                {
-                    symbol: recompute_ids[symbol]
-                    for symbol in symbol_batch
-                    if symbol in recompute_ids
-                }
-                if recompute_ids is not None
-                else None
-            )
             batch_results = _compute_metric_batch_results(
-                symbol_batch,
+                listing_batch,
                 metric_group,
                 fact_repo,
                 market_repo,
                 suppress_metric_warnings=True,
-                preloaded_snapshots_by_symbol=snapshots_by_symbol,
-                security_ids_by_symbol=batch_ids,
+                preloaded_snapshots_by_id=snapshots_by_id,
             )
             batch_attempts: List[_MetricAttemptResult] = []
             for result in batch_results:
@@ -625,6 +600,7 @@ def _recompute_missing_screen_metrics(
                         market_caps,
                         metric_id=attempt.metric_id,
                         reason=reason,
+                        listing_id=attempt.listing_id,
                         symbol=attempt.symbol,
                     )
                 completed_symbols += 1
@@ -634,11 +610,10 @@ def _recompute_missing_screen_metrics(
                 metrics_repo,
                 status_repo,
                 batch_attempts,
-                ids_by_symbol=batch_ids,
             )
 
     if maybe_report_progress is not None:
-        maybe_report_progress(len(symbols_to_recompute), True)
+        maybe_report_progress(len(ids_to_recompute), True)
     return failures, examples
 
 
@@ -728,10 +703,9 @@ def cmd_report_metric_failures(
             all_supported,
         )
     )
-    selected_symbols = [symbol for _, symbol in scope_listings]
-    security_ids_by_symbol = {
-        symbol: listing_id for listing_id, symbol in scope_listings
-    }
+    # Keep the scope's (listing_id, symbol) pairs: reads/writes/market-cap key on
+    # the listing_id, the display symbol feeds the failure-example output only.
+    listing_ids = [listing_id for listing_id, _ in scope_listings]
 
     metric_classes = _select_metric_classes(metric_ids)
     metric_id_order = [getattr(cls, "id", cls.__name__) for cls in metric_classes]
@@ -763,26 +737,24 @@ def cmd_report_metric_failures(
     }
     market_caps = _estimate_market_caps(
         fact_repo,
-        market_repo.latest_snapshots_many(
-            selected_symbols,
+        market_repo.latest_snapshots_many_by_ids(
+            listing_ids,
             chunk_size=METRICS_COMPUTE_BATCH_SIZE,
-            security_ids_by_symbol=security_ids_by_symbol,
         ),
     )
 
     for metric_cls in metric_classes:
         metric_id = getattr(metric_cls, "id", metric_cls.__name__)
-        states_by_symbol = availability_repo.states_many(
-            selected_symbols,
+        states_by_id = availability_repo.states_many_by_ids(
+            listing_ids,
             [metric_id],
             chunk_size=METRICS_COMPUTE_BATCH_SIZE,
-            security_ids_by_symbol=security_ids_by_symbol,
         )
-        pending_symbols: List[str] = []
-        for symbol in selected_symbols:
-            state = states_by_symbol.get(symbol, {}).get(metric_id)
+        pending_listings: List[Tuple[int, str]] = []
+        for listing_id, symbol in scope_listings:
+            state = states_by_id.get(listing_id, {}).get(metric_id)
             if state is None:
-                pending_symbols.append(symbol)
+                pending_listings.append((listing_id, symbol))
                 continue
             if (
                 state.status_record is None
@@ -800,35 +772,30 @@ def cmd_report_metric_failures(
                         market_caps,
                         metric_id=metric_id,
                         reason=reason,
+                        listing_id=listing_id,
                         symbol=symbol,
                     )
                     continue
                 if state.record is not None:
                     continue
-            pending_symbols.append(symbol)
+            pending_listings.append((listing_id, symbol))
 
-        if not pending_symbols:
+        if not pending_listings:
             continue
 
         batch_market_repo = (
             market_repo if getattr(metric_cls, "uses_market_data", False) else None
         )
-        for symbol_batch in _batch_values(
-            pending_symbols,
+        for listing_batch in _batch_listings(
+            pending_listings,
             METRICS_COMPUTE_BATCH_SIZE,
         ):
-            batch_ids = {
-                symbol: security_ids_by_symbol[symbol]
-                for symbol in symbol_batch
-                if symbol in security_ids_by_symbol
-            }
             batch_results = _compute_metric_batch_results(
-                symbol_batch,
+                listing_batch,
                 [metric_id],
                 fact_repo,
                 batch_market_repo,
                 suppress_metric_warnings=True,
-                security_ids_by_symbol=batch_ids,
             )
             batch_attempts: List[_MetricAttemptResult] = []
             for result in batch_results:
@@ -843,16 +810,16 @@ def cmd_report_metric_failures(
                         market_caps,
                         metric_id=metric_id,
                         reason=attempt.reason_code or "no warning emitted",
+                        listing_id=attempt.listing_id,
                         symbol=attempt.symbol,
                     )
             _persist_metric_attempts(
                 metrics_repo,
                 status_repo,
                 batch_attempts,
-                ids_by_symbol=batch_ids,
             )
 
-    total_symbols = len(selected_symbols)
+    total_symbols = len(scope_listings)
     metric_order = sorted(
         metric_id_order,
         key=lambda current_metric_id: (
@@ -916,11 +883,10 @@ def cmd_report_screen_failures(
     )
     # Scope symbols are already uppercase canonical tickers; keep the listing_id
     # the scope join produced so the screen reads carry it instead of re-resolving.
-    selected_symbols = [symbol for _, symbol in scope_listings]
-    security_ids_by_symbol = {
-        symbol: listing_id for listing_id, symbol in scope_listings
-    }
-    total_symbols = len(selected_symbols)
+    # The recompute step maps the screen evaluator's display symbols back to
+    # listing ids through this map.
+    listing_id_by_symbol = {symbol: listing_id for listing_id, symbol in scope_listings}
+    total_symbols = len(scope_listings)
     completed_symbols = 0
     last_progress_at = time.monotonic()
     last_reported_completed = 0 if total_symbols > 0 else -1
@@ -1011,7 +977,7 @@ def cmd_report_screen_failures(
             fact_repo,
             market_repo,
             progress_interval_seconds=SCREEN_PROGRESS_INTERVAL_SECONDS,
-            security_ids_by_symbol=security_ids_by_symbol,
+            listing_id_by_symbol=listing_id_by_symbol,
         )
 
     ordered_impacts = sorted(

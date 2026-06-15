@@ -28,6 +28,7 @@ from pyvalue.screening import (
     Criterion,
 )
 from pyvalue.persistence.storage import (
+    IdKeyedStoredMetricRow,
     IngestProgressExchange,
     IngestProgressSummary,
     MetricComputeStatusRecord,
@@ -35,7 +36,6 @@ from pyvalue.persistence.storage import (
     SecurityListingStatusRecord,
     SecurityListingStatusRepository,
     StoredFactRow,
-    StoredMetricRow,
     SupportedTicker,
     SupportedTickerRepository,
 )
@@ -154,8 +154,11 @@ class _NormalizedFactsResult:
 
 @dataclass(frozen=True)
 class _ComputedMetricsResult:
+    # ``listing_id`` is the natural identity the compute keys on; ``symbol`` is a
+    # display label only (CSV/log). Rows are id-led (see ``IdKeyedStoredMetricRow``).
     symbol: str
-    rows: Tuple[StoredMetricRow, ...]
+    listing_id: int
+    rows: Tuple[IdKeyedStoredMetricRow, ...]
     computed_count: int
     failures: Tuple["_MetricComputationFailure", ...] = ()
     attempts: Tuple["_MetricAttemptResult", ...] = ()
@@ -172,7 +175,10 @@ class _ProfiledComputedMetricsBatchResult:
 
 @dataclass(frozen=True)
 class _MetricComputationFailure:
+    # ``listing_id`` keys the failure; ``symbol`` is the display label used in the
+    # grouped invariant-failure summary output.
     symbol: str
+    listing_id: int
     metric_id: str
     reason: str
     message: str
@@ -180,11 +186,15 @@ class _MetricComputationFailure:
 
 @dataclass(frozen=True)
 class _MetricAttemptResult:
+    # ``listing_id`` is the natural identity the id-keyed metric/status writers
+    # use; ``symbol`` is retained only as a display label. ``stored_row`` is the
+    # id-led row shape consumed by ``MetricsRepository.upsert_many_by_id``.
     symbol: str
+    listing_id: int
     metric_id: str
     status: str
     attempted_at: str
-    stored_row: Optional[StoredMetricRow] = None
+    stored_row: Optional[IdKeyedStoredMetricRow] = None
     reason_code: Optional[str] = None
     reason_detail: Optional[str] = None
     value_as_of: Optional[str] = None
@@ -704,9 +714,12 @@ def _require_eodhd_key() -> str:
 def _metric_status_rows_from_attempts(
     attempts: Sequence[_MetricAttemptResult],
 ) -> List[MetricComputeStatusRecord]:
+    # The record carries both identities; the id-keyed writer
+    # (``upsert_many_by_id``) selects on ``listing_id`` and ignores ``symbol``.
     return [
         MetricComputeStatusRecord(
             symbol=attempt.symbol,
+            listing_id=attempt.listing_id,
             metric_id=attempt.metric_id,
             status=cast(Literal["success", "failure"], attempt.status),
             attempted_at=attempt.attempted_at,

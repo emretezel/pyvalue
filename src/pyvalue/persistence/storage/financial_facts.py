@@ -677,6 +677,126 @@ class FinancialFactsRepository(SQLiteStore):
                 continue
         return counts
 
+    def _populate_temp_selected_listing_ids(
+        self,
+        conn: sqlite3.Connection,
+        listing_ids: Sequence[int],
+        chunk_size: int = 500,
+    ) -> None:
+        """Populate the id-only scratch table the ``*_by_ids`` share reads scan.
+
+        The natural-identity counterpart of
+        :meth:`_populate_temp_selected_securities`: the table carries only
+        ``listing_id`` because the id-keyed reads project the natural key and
+        never the display symbol.
+        """
+
+        conn.execute("DROP TABLE IF EXISTS temp_selected_securities")
+        conn.execute(
+            """
+            CREATE TEMP TABLE temp_selected_securities (
+                listing_id INTEGER PRIMARY KEY
+            )
+            """
+        )
+        rows = [(int(listing_id),) for listing_id in listing_ids]
+        for chunk in _batched(rows, chunk_size):
+            conn.executemany(
+                "INSERT OR IGNORE INTO temp_selected_securities (listing_id) "
+                "VALUES (?)",
+                list(chunk),
+            )
+
+    def _latest_share_counts_for_temp_selected_ids(
+        self,
+        conn: sqlite3.Connection,
+        primary_concept: str,
+        fallback_concept: str,
+    ) -> Dict[int, float]:
+        """``listing_id``-keyed twin of
+        :meth:`_latest_share_counts_for_temp_selected_securities`.
+
+        The tie-break ORDER BY is copied verbatim so the share count chosen for a
+        listing is independent of whether the caller keyed the read by symbol or
+        by id.
+        """
+
+        counts: Dict[int, float] = {}
+        rows = conn.execute(
+            """
+            SELECT
+                selected.listing_id,
+                (
+                    SELECT ff.value
+                    FROM financial_facts ff INDEXED BY idx_fin_facts_security_concept_latest
+                    WHERE ff.listing_id = selected.listing_id
+                      AND ff.concept IN (?, ?)
+                    ORDER BY ff.end_date DESC,
+                             CASE ff.concept
+                                 WHEN 'CommonStockSharesOutstanding' THEN 0
+                                 ELSE 1
+                             END,
+                             CASE ff.unit_kind
+                                 WHEN 'count' THEN 0
+                                 ELSE 1
+                             END,
+                             CASE
+                                 WHEN ff.currency IS NULL THEN 0
+                                 ELSE 1
+                             END,
+                             CASE UPPER(COALESCE(ff.fiscal_period, ''))
+                                 WHEN 'Q4' THEN 0
+                                 WHEN 'Q3' THEN 1
+                                 WHEN 'Q2' THEN 2
+                                 WHEN 'Q1' THEN 3
+                                 WHEN 'FY' THEN 4
+                                 ELSE 5
+                             END,
+                             ABS(ff.value) ASC,
+                             ff.filed DESC
+                    LIMIT 1
+                ) AS value
+            FROM temp_selected_securities selected
+            """,
+            (primary_concept, fallback_concept),
+        ).fetchall()
+        for row in rows:
+            try:
+                if row["value"] is None:
+                    continue
+                counts[int(row["listing_id"])] = float(row["value"])
+            except (TypeError, ValueError):
+                continue
+        return counts
+
+    def latest_share_counts_many_by_ids(
+        self,
+        listing_ids: Sequence[int],
+        chunk_size: int = 500,
+    ) -> Dict[int, float]:
+        """Latest shares-outstanding per ``listing_id`` (no symbol resolution).
+
+        The natural-identity counterpart of :meth:`latest_share_counts_many`
+        used by the report market-cap estimator. Reads the same primary/fallback
+        share-count concepts (``EntityCommonStockSharesOutstanding`` then
+        ``CommonStockSharesOutstanding``) with the identical tie-break ordering.
+        """
+
+        normalized_ids = [int(listing_id) for listing_id in listing_ids]
+        if not normalized_ids:
+            return {}
+        with self._connect() as conn:
+            self._populate_temp_selected_listing_ids(
+                conn,
+                normalized_ids,
+                chunk_size=chunk_size,
+            )
+            return self._latest_share_counts_for_temp_selected_ids(
+                conn,
+                primary_concept="EntityCommonStockSharesOutstanding",
+                fallback_concept="CommonStockSharesOutstanding",
+            )
+
     def latest_share_counts_many(
         self,
         symbols: Sequence[str],

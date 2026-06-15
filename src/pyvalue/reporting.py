@@ -6,7 +6,7 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple, Type
+from typing import Dict, List, Sequence, Tuple, Type
 
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS, is_recent_fact
@@ -34,24 +34,23 @@ class MetricCoverage:
 
 def compute_fact_coverage(
     fact_repo: FinancialFactsRepository | RegionFactsRepository,
-    symbols: Sequence[str],
+    listing_ids: Sequence[int],
     metric_classes: Sequence[Type],
     *,
     max_age_days: int = MAX_FACT_AGE_DAYS,
-    security_ids_by_symbol: Optional[Mapping[str, int]] = None,
 ) -> List[MetricCoverage]:
     """Return coverage summaries for the financial facts used by metrics.
 
     Args:
         fact_repo: Repository that stores normalized financial facts.
-        symbols: Sequence of ticker symbols to evaluate.
+        listing_ids: Scope-resolved ``listing_id`` values to evaluate. The
+            ``report-fact-freshness`` caller resolves these once via
+            ``_resolve_canonical_scope_listings`` and passes them straight in, so
+            the bulk fact load seeks by id with no symbol resolution. The output
+            is metric/concept-keyed counts only -- no per-listing identity is
+            emitted -- so the display symbol is not needed here.
         metric_classes: Metric classes with ``id`` and ``required_concepts`` attributes.
         max_age_days: Maximum allowed age (days) for a fact to be considered fresh.
-        security_ids_by_symbol: Optional scope-resolved ``{symbol: listing_id}``
-            map (report-fact-freshness resolves it once via
-            ``_resolve_canonical_scope_listings``). When supplied the bulk fact
-            load carries those ids straight in, so no symbol->id re-resolution
-            happens.
     """
 
     if isinstance(fact_repo, RegionFactsRepository):
@@ -59,14 +58,13 @@ def compute_fact_coverage(
     else:
         fact_repo.initialize_schema()
         fact_repo_wrapped = RegionFactsRepository(fact_repo)
-    symbols_upper = [symbol.upper() for symbol in symbols]
+    normalized_ids = [int(listing_id) for listing_id in listing_ids]
     coverage: List[MetricCoverage] = []
 
     # Bulk-load every required concept for the whole scope in one indexed pass
-    # keyed by the carried listing ids -- replacing the per-(symbol, concept)
-    # latest_fact round trips and their symbol->id re-resolution. The bulk query
-    # orders (listing_id, concept, end_date DESC, filed DESC), so the first row
-    # per (symbol, concept) is the latest, exactly what latest_fact returned.
+    # keyed by the carried listing ids. The bulk query orders (listing_id,
+    # concept, end_date DESC, filed DESC), so the first row per (listing_id,
+    # concept) is the latest, exactly what latest_fact returned.
     all_concepts: List[str] = []
     seen_all_concepts: set[str] = set()
     for metric_cls in metric_classes:
@@ -75,19 +73,18 @@ def compute_fact_coverage(
                 seen_all_concepts.add(concept)
                 all_concepts.append(concept)
 
-    latest_fact_by_symbol_concept: Dict[Tuple[str, str], FactRecord] = {}
-    if all_concepts and symbols_upper:
-        facts_by_symbol = fact_repo_wrapped.facts_for_symbols_many(
-            symbols_upper,
+    latest_fact_by_id_concept: Dict[Tuple[int, str], FactRecord] = {}
+    if all_concepts and normalized_ids:
+        facts_by_id = fact_repo_wrapped.facts_for_ids_many(
+            normalized_ids,
             concepts=all_concepts,
-            security_ids_by_symbol=security_ids_by_symbol,
         )
-        for symbol, records in facts_by_symbol.items():
+        for listing_id, records in facts_by_id.items():
             for record in records:
-                key = (symbol, record.concept)
+                key = (listing_id, record.concept)
                 # Rows arrive newest-first within each concept; keep the first.
-                if key not in latest_fact_by_symbol_concept:
-                    latest_fact_by_symbol_concept[key] = record
+                if key not in latest_fact_by_id_concept:
+                    latest_fact_by_id_concept[key] = record
 
     for metric_cls in metric_classes:
         required = getattr(metric_cls, "required_concepts", ()) or ()
@@ -102,29 +99,29 @@ def compute_fact_coverage(
         concept_counts: Dict[str, Dict[str, int]] = {
             concept: {"missing": 0, "stale": 0} for concept in ordered_concepts
         }
-        fully_covered = len(symbols_upper) if not ordered_concepts else 0
+        fully_covered = len(normalized_ids) if not ordered_concepts else 0
 
-        for symbol in symbols_upper:
+        for listing_id in normalized_ids:
             if not ordered_concepts:
                 break
-            symbol_has_all = True
+            listing_has_all = True
             for concept in ordered_concepts:
-                record = latest_fact_by_symbol_concept.get((symbol, concept))
+                record = latest_fact_by_id_concept.get((listing_id, concept))
                 if record is None:
                     concept_counts[concept]["missing"] += 1
-                    symbol_has_all = False
+                    listing_has_all = False
                     continue
                 if not is_recent_fact(record, max_age_days=max_age_days):
                     concept_counts[concept]["stale"] += 1
-                    symbol_has_all = False
-            if symbol_has_all:
+                    listing_has_all = False
+            if listing_has_all:
                 fully_covered += 1
 
         metric_id = getattr(metric_cls, "id", metric_cls.__name__)
         coverage.append(
             MetricCoverage(
                 metric_id=metric_id,
-                total_symbols=len(symbols_upper),
+                total_symbols=len(normalized_ids),
                 fully_covered=fully_covered,
                 concepts=[
                     ConceptCoverage(

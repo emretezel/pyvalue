@@ -103,9 +103,14 @@ def test_compute_fact_coverage_counts_missing_and_stale(tmp_path: Path) -> None:
     fact_repo.initialize_schema()
     _seed_facts(fact_repo)
 
+    # compute_fact_coverage now keys on the scope's listing ids; resolve the
+    # symbols the way _resolve_canonical_scope_listings would for the CLI.
+    listing_ids = list(
+        SecurityRepository(db_path).resolve_ids_many(["AAA.US", "BBB.US"]).values()
+    )
     report = compute_fact_coverage(
         fact_repo,
-        ["AAA.US", "BBB.US"],
+        listing_ids,
         [WorkingCapitalMetric],
     )
 
@@ -155,7 +160,7 @@ def test_cmd_report_fact_freshness_carries_scope_listing_ids(
     """report-fact-freshness carries scope listing ids into the bulk fact load.
 
     The scope resolver already holds each listing_id, so the single bulk
-    ``facts_for_symbols_many`` read must carry them in rather than re-resolving
+    ``facts_for_ids_many`` read seeks by id rather than re-resolving
     symbol->listing_id. We count ``resolve_ids_many`` and assert it never runs.
 
     Author: Emre Tezel
@@ -230,7 +235,9 @@ def test_fact_report_counts_assets_current_from_components(tmp_path: Path) -> No
         ],
     )
 
-    report = compute_fact_coverage(fact_repo, ["AAA.US"], [WorkingCapitalMetric])
+    listing_id = SecurityRepository(db_path).resolve_id("AAA.US")
+    assert listing_id is not None
+    report = compute_fact_coverage(fact_repo, [listing_id], [WorkingCapitalMetric])
     entry = report[0]
     coverage = {c.concept: c for c in entry.concepts}
     assert coverage["AssetsCurrent"].missing == 1
@@ -277,7 +284,9 @@ def test_fact_report_counts_liabilities_current_from_components(tmp_path: Path) 
         ],
     )
 
-    report = compute_fact_coverage(fact_repo, ["AAA.US"], [WorkingCapitalMetric])
+    listing_id = SecurityRepository(db_path).resolve_id("AAA.US")
+    assert listing_id is not None
+    report = compute_fact_coverage(fact_repo, [listing_id], [WorkingCapitalMetric])
     entry = report[0]
     coverage = {c.concept: c for c in entry.concepts}
     assert coverage["LiabilitiesCurrent"].missing == 1

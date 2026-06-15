@@ -29,6 +29,7 @@ from .records import (
     FinancialFactsRefreshStateRecord,
     FundamentalsNormalizationCandidate,  # noqa: F401
     FundamentalsUpdate,  # noqa: F401
+    IdKeyedStoredMetricRow,  # noqa: F401
     IngestProgressExchange,
     IngestProgressFailure,
     IngestProgressSummary,

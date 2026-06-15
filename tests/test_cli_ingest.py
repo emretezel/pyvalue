@@ -9,7 +9,7 @@ import sqlite3
 import threading
 import time
 import concurrent.futures.thread as thread_futures
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import Future, ProcessPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
@@ -41,6 +41,7 @@ from pyvalue.persistence.storage import (
     FundamentalsFetchStateRepository,
     FinancialFactsRepository,
     FactRecord,
+    IdKeyedStoredMetricRow,
     MarketDataFetchStateRepository,
     MarketDataRepository,
     MarketSnapshotRecord,
@@ -50,7 +51,6 @@ from pyvalue.persistence.storage import (
     MetricsRepository,
     SecurityMetadataCandidate,
     SecurityRepository,
-    StoredMetricRow,
     SupportedTicker,
     SupportedTickerRepository,
 )
@@ -3290,9 +3290,11 @@ def test_compute_metrics_batch_worker_suppresses_metric_warnings_by_default(
     cli.setup_logging(log_dir=log_dir)
     try:
         cli._initialize_metric_read_schema(Path(db_path), include_market_data=False)
+        # The batch worker now keys on (listing_id, display_symbol) pairs.
+        ids = SecurityRepository(db_path).resolve_ids_many(["AAA.US", "BBB.US"])
         results = cli._compute_metrics_for_symbol_batch_worker(
             str(db_path),
-            ["AAA.US", "BBB.US"],
+            [(ids["AAA.US"], "AAA.US"), (ids["BBB.US"], "BBB.US")],
             [DummyMetric.id],
         )
     finally:
@@ -3329,8 +3331,12 @@ def test_compute_metric_batch_results_uses_share_facts_for_market_cap(
         currency="USD",
     )
 
+    # The batch driver is keyed by (listing_id, display_symbol) pairs and writes
+    # id-led rows; resolve the listing id the scope would have carried.
+    listing_id = SecurityRepository(db_path).resolve_id("AAA.US")
+    assert listing_id is not None
     results = cli._compute_metric_batch_results(
-        ["AAA.US"],
+        [(listing_id, "AAA.US")],
         ["market_cap"],
         FinancialFactsRepository(db_path),
         MarketDataRepository(db_path),
@@ -3338,7 +3344,7 @@ def test_compute_metric_batch_results_uses_share_facts_for_market_cap(
 
     assert len(results) == 1
     assert results[0].rows == (
-        ("AAA.US", "market_cap", 120.0, recent_date, "monetary", "USD", None),
+        (listing_id, "market_cap", 120.0, recent_date, "monetary", "USD", None),
     )
 
 
@@ -3399,15 +3405,17 @@ def test_compute_metric_batch_results_reuses_shared_read_connection_per_batch(
     _seed_share_count(db_path, "AAA.US", recent_date, 10.0)
     _seed_share_count(db_path, "BBB.US", recent_date, 10.0)
 
+    # The batch driver now keys on listing ids, so it reads via the id-keyed
+    # methods and never resolves symbol->id. We track the three id-keyed reads:
+    # they must share one read connection, and resolve_ids_many must never run.
     calls: dict[str, int] = {"resolve_ids_many": 0}
     observed_connection_ids = []
-    observed_security_map_ids = []
     original_resolve_ids_many = SecurityRepository.resolve_ids_many
-    original_facts_for_symbols_many = FinancialFactsRepository.facts_for_symbols_many
-    original_fetch_many_for_symbols = (
-        FinancialFactsRefreshStateRepository.fetch_many_for_symbols
+    original_facts_for_ids_many = FinancialFactsRepository.facts_for_ids_many
+    original_fetch_many_by_ids = FinancialFactsRefreshStateRepository.fetch_many_by_ids
+    original_latest_snapshots_many_by_ids = (
+        MarketDataRepository.latest_snapshots_many_by_ids
     )
-    original_latest_snapshots_many = MarketDataRepository.latest_snapshots_many
 
     def counting_resolve_ids_many(
         self: SecurityRepository,
@@ -3424,59 +3432,50 @@ def test_compute_metric_batch_results_reuses_shared_read_connection_per_batch(
             connection=connection,
         )
 
-    def tracking_facts_for_symbols_many(
+    def tracking_facts_for_ids_many(
         self: FinancialFactsRepository,
-        symbols: Sequence[str],
+        listing_ids: Sequence[int],
         chunk_size: int = 25,
         *,
         concepts: Sequence[str] | None = None,
-        security_ids_by_symbol: Mapping[str, int] | None = None,
         connection: sqlite3.Connection | None = None,
-    ) -> dict[str, list[FactRecord]]:
+    ) -> dict[int, list[FactRecord]]:
         observed_connection_ids.append(id(connection))
-        observed_security_map_ids.append(id(security_ids_by_symbol))
-        return original_facts_for_symbols_many(
+        return original_facts_for_ids_many(
             self,
-            symbols,
+            listing_ids,
             chunk_size=chunk_size,
             concepts=concepts,
-            security_ids_by_symbol=security_ids_by_symbol,
             connection=connection,
         )
 
-    def tracking_fetch_many_for_symbols(
+    def tracking_fetch_many_by_ids(
         self: FinancialFactsRefreshStateRepository,
-        symbols: Sequence[str],
+        listing_ids: Sequence[int],
         chunk_size: int = 500,
         *,
-        security_ids_by_symbol: Mapping[str, int] | None = None,
         connection: sqlite3.Connection | None = None,
-    ) -> dict[str, FinancialFactsRefreshStateRecord]:
+    ) -> dict[int, FinancialFactsRefreshStateRecord]:
         observed_connection_ids.append(id(connection))
-        observed_security_map_ids.append(id(security_ids_by_symbol))
-        return original_fetch_many_for_symbols(
+        return original_fetch_many_by_ids(
             self,
-            symbols,
+            listing_ids,
             chunk_size=chunk_size,
-            security_ids_by_symbol=security_ids_by_symbol,
             connection=connection,
         )
 
-    def tracking_latest_snapshots_many(
+    def tracking_latest_snapshots_many_by_ids(
         self: MarketDataRepository,
-        symbols: Sequence[str],
+        listing_ids: Sequence[int],
         chunk_size: int = 500,
         *,
-        security_ids_by_symbol: Mapping[str, int] | None = None,
         connection: sqlite3.Connection | None = None,
-    ) -> dict[str, MarketSnapshotRecord]:
+    ) -> dict[int, MarketSnapshotRecord]:
         observed_connection_ids.append(id(connection))
-        observed_security_map_ids.append(id(security_ids_by_symbol))
-        return original_latest_snapshots_many(
+        return original_latest_snapshots_many_by_ids(
             self,
-            symbols,
+            listing_ids,
             chunk_size=chunk_size,
-            security_ids_by_symbol=security_ids_by_symbol,
             connection=connection,
         )
 
@@ -3485,36 +3484,35 @@ def test_compute_metric_batch_results_reuses_shared_read_connection_per_batch(
     )
     monkeypatch.setattr(
         FinancialFactsRepository,
-        "facts_for_symbols_many",
-        tracking_facts_for_symbols_many,
+        "facts_for_ids_many",
+        tracking_facts_for_ids_many,
     )
     monkeypatch.setattr(
         FinancialFactsRefreshStateRepository,
-        "fetch_many_for_symbols",
-        tracking_fetch_many_for_symbols,
+        "fetch_many_by_ids",
+        tracking_fetch_many_by_ids,
     )
     monkeypatch.setattr(
         MarketDataRepository,
-        "latest_snapshots_many",
-        tracking_latest_snapshots_many,
+        "latest_snapshots_many_by_ids",
+        tracking_latest_snapshots_many_by_ids,
     )
 
+    ids = SecurityRepository(db_path).resolve_ids_many(["AAA.US", "BBB.US"])
+    # The resolve above is intentionally before the counter is installed.
+    calls["resolve_ids_many"] = 0
     results = cli._compute_metric_batch_results(
-        ["AAA.US", "BBB.US"],
+        [(ids["AAA.US"], "AAA.US"), (ids["BBB.US"], "BBB.US")],
         ["working_capital", "market_cap"],
         FinancialFactsRepository(db_path),
         MarketDataRepository(db_path),
     )
 
     assert [result.computed_count for result in results] == [2, 2]
-    assert calls == {"resolve_ids_many": 1}
+    assert calls == {"resolve_ids_many": 0}
     assert len(observed_connection_ids) == 3
     assert all(connection_id != id(None) for connection_id in observed_connection_ids)
     assert len(set(observed_connection_ids)) == 1
-    assert all(
-        security_map_id != id(None) for security_map_id in observed_security_map_ids
-    )
-    assert len(set(observed_security_map_ids)) == 1
 
 
 def test_compute_metric_batch_results_skips_resolution_when_ids_supplied(
@@ -3597,11 +3595,10 @@ def test_compute_metric_batch_results_skips_resolution_when_ids_supplied(
     )
 
     results = cli._compute_metric_batch_results(
-        ["AAA.US", "BBB.US"],
+        [(ids_by_symbol["AAA.US"], "AAA.US"), (ids_by_symbol["BBB.US"], "BBB.US")],
         ["working_capital"],
         FinancialFactsRepository(db_path),
         None,
-        security_ids_by_symbol=ids_by_symbol,
     )
 
     assert calls == {"resolve_ids_many": 0}
@@ -4188,18 +4185,22 @@ def test_cmd_compute_metrics_stage_parallel_partial_failure(
         def shutdown(self, wait: bool = True, cancel_futures: bool = False) -> None:
             return None
 
+    # The worker payload is now the picklable (listing_id, display_symbol) pair.
     def fake_worker(
         database: str,
-        symbol: str,
+        listing: tuple[int, str],
         metric_ids: Sequence[str],
         suppress_metric_warnings: bool = True,
-        security_ids_by_symbol: Mapping[str, int] | None = None,
     ) -> cli._ComputedMetricsResult:
+        listing_id, symbol = listing
         if symbol == "BBB.US":
             raise ValueError("boom")
         return cli._ComputedMetricsResult(
             symbol=symbol,
-            rows=((symbol, "dummy_metric", 1.0, "2024-01-01", "ratio", None, None),),
+            listing_id=listing_id,
+            rows=(
+                (listing_id, "dummy_metric", 1.0, "2024-01-01", "ratio", None, None),
+            ),
             computed_count=1,
         )
 
@@ -4217,9 +4218,10 @@ def test_cmd_compute_metrics_stage_parallel_partial_failure(
     patch_cli(monkeypatch, "_compute_metrics_for_symbol_worker", fake_worker)
     patch_cli(monkeypatch, "METRICS_PROGRESS_INTERVAL_SECONDS", 0.0)
 
+    ids = SecurityRepository(db_path).resolve_ids_many(["AAA.US", "BBB.US"])
     rc = cli._run_metric_computation(
         database=str(db_path),
-        symbols=["AAA.US", "BBB.US"],
+        listings=[(ids["AAA.US"], "AAA.US"), (ids["BBB.US"], "BBB.US")],
         metric_ids=["dummy_metric"],
         cancelled_message="\nMetric computation cancelled by user.",
     )
@@ -4268,14 +4270,17 @@ def test_run_metric_computation_interrupts_cleanly(
 
     def fake_worker(
         database: str,
-        symbol: str,
+        listing: tuple[int, str],
         metric_ids: Sequence[str],
         suppress_metric_warnings: bool = True,
-        security_ids_by_symbol: Mapping[str, int] | None = None,
     ) -> cli._ComputedMetricsResult:
+        listing_id, symbol = listing
         return cli._ComputedMetricsResult(
             symbol=symbol,
-            rows=((symbol, "dummy_metric", 1.0, "2024-01-01", "ratio", None, None),),
+            listing_id=listing_id,
+            rows=(
+                (listing_id, "dummy_metric", 1.0, "2024-01-01", "ratio", None, None),
+            ),
             computed_count=1,
         )
 
@@ -4302,9 +4307,10 @@ def test_run_metric_computation_interrupts_cleanly(
     patch_cli(monkeypatch, "as_completed", interrupting_as_completed)
     patch_cli(monkeypatch, "METRICS_PROGRESS_INTERVAL_SECONDS", 0.0)
 
+    ids = SecurityRepository(db_path).resolve_ids_many(["AAA.US", "BBB.US"])
     rc = cli._run_metric_computation(
         database=str(db_path),
-        symbols=["AAA.US", "BBB.US"],
+        listings=[(ids["AAA.US"], "AAA.US"), (ids["BBB.US"], "BBB.US")],
         metric_ids=["dummy_metric"],
         cancelled_message="\nMetric computation cancelled by user.",
     )
@@ -4444,16 +4450,17 @@ def test_run_metric_computation_batches_metric_writes(
 
     def fake_worker(
         database: str,
-        symbol: str,
+        listing: tuple[int, str],
         metric_ids: Sequence[str],
         suppress_metric_warnings: bool = True,
-        security_ids_by_symbol: Mapping[str, int] | None = None,
     ) -> cli._ComputedMetricsResult:
+        listing_id, symbol = listing
         return cli._ComputedMetricsResult(
             symbol=symbol,
+            listing_id=listing_id,
             rows=(
                 (
-                    symbol,
+                    listing_id,
                     "dummy_metric",
                     float(len(symbol)),
                     "2024-01-01",
@@ -4465,23 +4472,23 @@ def test_run_metric_computation_batches_metric_writes(
             computed_count=1,
         )
 
+    # The flush path now writes id-led rows via upsert_many_by_id; record those
+    # flush sizes to assert the same batching behaviour.
     batch_sizes = []
-    original_upsert_many = MetricsRepository.upsert_many
+    original_upsert_many_by_id = MetricsRepository.upsert_many_by_id
 
-    def recording_upsert_many(
+    def recording_upsert_many_by_id(
         self: MetricsRepository,
-        rows: Iterable[StoredMetricRow],
+        rows: Iterable[IdKeyedStoredMetricRow],
         *,
-        ids_by_symbol: Mapping[str, int] | None = None,
         connection: sqlite3.Connection | None = None,
         commit: bool = True,
     ) -> int:
         materialized = list(rows)
         batch_sizes.append(len(materialized))
-        return original_upsert_many(
+        return original_upsert_many_by_id(
             self,
             materialized,
-            ids_by_symbol=ids_by_symbol,
             connection=connection,
             commit=commit,
         )
@@ -4497,11 +4504,18 @@ def test_run_metric_computation_batches_metric_writes(
     patch_cli(monkeypatch, "_compute_metrics_for_symbol_worker", fake_worker)
     patch_cli(monkeypatch, "METRICS_WRITE_BATCH_SIZE", 2)
     patch_cli(monkeypatch, "METRICS_WRITE_BATCH_INTERVAL_SECONDS", 999.0)
-    monkeypatch.setattr(MetricsRepository, "upsert_many", recording_upsert_many)
+    monkeypatch.setattr(
+        MetricsRepository, "upsert_many_by_id", recording_upsert_many_by_id
+    )
 
+    ids = SecurityRepository(db_path).resolve_ids_many(["AAA.US", "BBB.US", "CCC.US"])
     rc = cli._run_metric_computation(
         database=str(db_path),
-        symbols=["AAA.US", "BBB.US", "CCC.US"],
+        listings=[
+            (ids["AAA.US"], "AAA.US"),
+            (ids["BBB.US"], "BBB.US"),
+            (ids["CCC.US"], "CCC.US"),
+        ],
         metric_ids=["dummy_metric"],
         cancelled_message="\nMetric computation cancelled by user.",
     )
@@ -4555,13 +4569,16 @@ def test_flush_metric_write_batch_commits_external_connection_once(
     # Match the persistent-connection configuration the production path uses so
     # the foreign-key checks behave identically for the batch's writes.
     MetricsRepository._configure_connection(write_connection)
+    # The flush path now writes id-led rows / status records keyed by listing_id.
+    listing_id = SecurityRepository(db_path).resolve_id("AAA.US")
+    assert listing_id is not None
     try:
         cli._flush_metric_write_batch(
             metrics_repo,
             status_repo,
             [
                 (
-                    "AAA.US",
+                    listing_id,
                     "dummy_metric",
                     1.0,
                     "2024-01-01",
@@ -4573,6 +4590,7 @@ def test_flush_metric_write_batch_commits_external_connection_once(
             [
                 cli._MetricAttemptResult(
                     symbol="AAA.US",
+                    listing_id=listing_id,
                     metric_id="dummy_metric",
                     status="success",
                     attempted_at="2024-01-02T00:00:00+00:00",
@@ -4627,19 +4645,19 @@ def test_run_metric_computation_parallel_profile_accumulates_worker_timings(
 
     def fake_profiled_worker(
         database: str,
-        symbols: Sequence[str],
+        listings: Sequence[tuple[int, str]],
         metric_ids: Sequence[str],
         suppress_metric_warnings: bool = True,
-        security_ids_by_symbol: Mapping[str, int] | None = None,
     ) -> cli._ProfiledComputedMetricsBatchResult:
         assert suppress_metric_warnings is True
         return cli._ProfiledComputedMetricsBatchResult(
             results=tuple(
                 cli._ComputedMetricsResult(
                     symbol=symbol,
+                    listing_id=listing_id,
                     rows=(
                         (
-                            symbol,
+                            listing_id,
                             "dummy_metric",
                             float(len(symbol)),
                             "2024-01-01",
@@ -4650,10 +4668,10 @@ def test_run_metric_computation_parallel_profile_accumulates_worker_timings(
                     ),
                     computed_count=1,
                 )
-                for symbol in symbols
+                for listing_id, symbol in listings
             ),
-            read_seconds=0.25 * len(symbols),
-            compute_seconds=0.50 * len(symbols),
+            read_seconds=0.25 * len(listings),
+            compute_seconds=0.50 * len(listings),
         )
 
     patch_cli(monkeypatch, "REGISTRY", {DummyMetric.id: DummyMetric})
@@ -4672,9 +4690,14 @@ def test_run_metric_computation_parallel_profile_accumulates_worker_timings(
     patch_cli(monkeypatch, "METRICS_COMPUTE_BATCH_SIZE", 2)
     patch_cli(monkeypatch, "METRICS_PROGRESS_INTERVAL_SECONDS", 0.0)
 
+    ids = SecurityRepository(db_path).resolve_ids_many(["AAA.US", "BBB.US", "CCC.US"])
     rc = cli._run_metric_computation(
         database=str(db_path),
-        symbols=["AAA.US", "BBB.US", "CCC.US"],
+        listings=[
+            (ids["AAA.US"], "AAA.US"),
+            (ids["BBB.US"], "BBB.US"),
+            (ids["CCC.US"], "CCC.US"),
+        ],
         metric_ids=["dummy_metric"],
         cancelled_message="\nMetric computation cancelled by user.",
         profile=True,
@@ -4785,9 +4808,10 @@ def test_cmd_compute_metrics_stage_parallel_workers_skip_schema_init(
         locked_initialize_schema,
     )
 
+    ids = SecurityRepository(db_path).resolve_ids_many(["AAA.US", "BBB.US"])
     rc = cli._run_metric_computation(
         database=str(db_path),
-        symbols=["AAA.US", "BBB.US"],
+        listings=[(ids["AAA.US"], "AAA.US"), (ids["BBB.US"], "BBB.US")],
         metric_ids=["working_capital", "market_cap"],
         cancelled_message="\nMetric computation cancelled by user.",
     )
@@ -7380,19 +7404,21 @@ def test_cmd_report_screen_failures_recompute_uses_symbol_caches(
     @dataclass
     class FactsManyCalls:
         # The bulk-fact reader is invoked once per recompute batch; we record how
-        # many times and with which symbol tuples / concept filter so the test can
-        # assert the symbol-cache path issued a single bulk call. A plain dict
+        # many times and with which listing-id tuples / concept filter so the test
+        # can assert the id-keyed path issued a single bulk call. A plain dict
         # literal would infer ``dict[str, object]`` and break ``count += 1`` and
-        # ``symbols.append(...)``, so the accumulator is a typed record instead.
+        # ``listing_ids.append(...)``, so the accumulator is a typed record instead.
         count: int = 0
-        symbols: list[tuple[str, ...]] = field(default_factory=list)
+        listing_ids: list[tuple[int, ...]] = field(default_factory=list)
         concepts: tuple[str, ...] | None = None
 
     facts_many_calls = FactsManyCalls()
     snapshot_batch_calls: dict[str, int] = {"count": 0}
     original_facts_for_id = FinancialFactsRepository.facts_for_id
-    original_facts_for_symbols_many = FinancialFactsRepository.facts_for_symbols_many
-    original_latest_snapshots_many = MarketDataRepository.latest_snapshots_many
+    original_facts_for_ids_many = FinancialFactsRepository.facts_for_ids_many
+    original_latest_snapshots_many_by_ids = (
+        MarketDataRepository.latest_snapshots_many_by_ids
+    )
 
     def counting_facts_for_id(
         self: FinancialFactsRepository, listing_id: int
@@ -7400,41 +7426,37 @@ def test_cmd_report_screen_failures_recompute_uses_symbol_caches(
         fact_calls["count"] += 1
         return original_facts_for_id(self, listing_id)
 
-    def counting_facts_for_symbols_many(
+    def counting_facts_for_ids_many(
         self: FinancialFactsRepository,
-        symbols: Sequence[str],
+        listing_ids: Sequence[int],
         chunk_size: int = 25,
         *,
         concepts: Sequence[str] | None = None,
-        security_ids_by_symbol: Mapping[str, int] | None = None,
         connection: sqlite3.Connection | None = None,
-    ) -> dict[str, list[FactRecord]]:
+    ) -> dict[int, list[FactRecord]]:
         facts_many_calls.count += 1
-        facts_many_calls.symbols.append(tuple(symbols))
+        facts_many_calls.listing_ids.append(tuple(listing_ids))
         facts_many_calls.concepts = tuple(concepts) if concepts is not None else None
-        return original_facts_for_symbols_many(
+        return original_facts_for_ids_many(
             self,
-            symbols,
+            listing_ids,
             chunk_size=chunk_size,
             concepts=concepts,
-            security_ids_by_symbol=security_ids_by_symbol,
             connection=connection,
         )
 
-    def counting_latest_snapshots_many(
+    def counting_latest_snapshots_many_by_ids(
         self: MarketDataRepository,
-        symbols: Sequence[str],
+        listing_ids: Sequence[int],
         chunk_size: int = 500,
         *,
-        security_ids_by_symbol: Mapping[str, int] | None = None,
         connection: sqlite3.Connection | None = None,
-    ) -> dict[str, MarketSnapshotRecord]:
+    ) -> dict[int, MarketSnapshotRecord]:
         snapshot_batch_calls["count"] += 1
-        return original_latest_snapshots_many(
+        return original_latest_snapshots_many_by_ids(
             self,
-            symbols,
+            listing_ids,
             chunk_size=chunk_size,
-            security_ids_by_symbol=security_ids_by_symbol,
             connection=connection,
         )
 
@@ -7448,13 +7470,13 @@ def test_cmd_report_screen_failures_recompute_uses_symbol_caches(
     )
     monkeypatch.setattr(
         FinancialFactsRepository,
-        "facts_for_symbols_many",
-        counting_facts_for_symbols_many,
+        "facts_for_ids_many",
+        counting_facts_for_ids_many,
     )
     monkeypatch.setattr(
         MarketDataRepository,
-        "latest_snapshots_many",
-        counting_latest_snapshots_many,
+        "latest_snapshots_many_by_ids",
+        counting_latest_snapshots_many_by_ids,
     )
     monkeypatch.setattr(MarketDataRepository, "latest_snapshot", fail_latest_snapshot)
 
@@ -7550,8 +7572,10 @@ criteria:
     assert "- repeat_market: missing=1 symbols, affects=1 criteria" in output
     assert "stored_missing_but_computable_now: 1 (example=AAA.US" in output
     assert fact_calls["count"] == 0
+    listing_id = SecurityRepository(db_path).resolve_id("AAA.US")
+    assert listing_id is not None
     assert facts_many_calls.count == 1
-    assert facts_many_calls.symbols == [("AAA.US",)]
+    assert facts_many_calls.listing_ids == [(listing_id,)]
     assert facts_many_calls.concepts == ("AssetsCurrent",)
     assert snapshot_batch_calls["count"] == 1
 

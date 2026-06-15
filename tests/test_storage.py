@@ -2586,6 +2586,11 @@ def test_financial_facts_repository_latest_share_counts_many_matches_single_look
     assert counts["AAA.US"] == 222.0
     assert counts["BBB.US"] == 333.0
     assert counts_with_security_ids == counts
+    # The id-keyed reader returns the same values re-keyed by listing_id.
+    counts_by_ids = repo.latest_share_counts_many_by_ids(list(security_ids.values()))
+    assert counts_by_ids == {
+        security_ids[symbol]: value for symbol, value in counts.items()
+    }
     assert "CCC.US" not in counts
 
 
