@@ -83,7 +83,7 @@ def is_recent_fact(
 
 def has_recent_fact(
     repo: RawFactSource,
-    symbol: str,
+    listing_id: int,
     concepts: Sequence[str],
     max_age_days: int = MAX_FACT_AGE_DAYS,
 ) -> bool:
@@ -92,11 +92,11 @@ def has_recent_fact(
     for concept in concepts:
         record = None
         if hasattr(repo, "latest_fact"):
-            record = repo.latest_fact(symbol, concept)
+            record = repo.latest_fact(listing_id, concept)
             if is_recent_fact(record, max_age_days=max_age_days):
                 return True
         if hasattr(repo, "facts_for_concept"):
-            records = repo.facts_for_concept(symbol, concept)
+            records = repo.facts_for_concept(listing_id, concept)
             for rec in records:
                 if is_recent_fact(rec, max_age_days=max_age_days):
                     return True
@@ -133,8 +133,8 @@ def ttm_sum(records: Sequence[FactRecord], periods: int = 4) -> float | None:
 
 
 def latest_quarterly_records(
-    repo_fetcher: Callable[[str, str], Sequence[FactT]],
-    symbol: str,
+    repo_fetcher: Callable[[int, str], Sequence[FactT]],
+    listing_id: int,
     concepts: Sequence[str],
     periods: int = 4,
     max_age_days: int = MAX_FACT_AGE_DAYS,
@@ -142,7 +142,7 @@ def latest_quarterly_records(
     """Fetch recent quarterly records for the first concept with enough data."""
 
     for concept in concepts:
-        records = repo_fetcher(symbol, concept)
+        records = repo_fetcher(listing_id, concept)
         quarterly = _filter_quarterly(records)
         if not quarterly:
             continue
@@ -154,7 +154,7 @@ def latest_quarterly_records(
 
 
 def resolve_metric_ticker_currency(
-    symbol: str,
+    listing_id: int,
     *objects: object,
     candidate_currencies: Iterable[Optional[str]] = (),
 ) -> Optional[str]:
@@ -169,9 +169,9 @@ def resolve_metric_ticker_currency(
     for obj in objects:
         if obj is None:
             continue
-        resolver = getattr(obj, "ticker_currency", None)
+        resolver = getattr(obj, "ticker_currency_by_id", None)
         if callable(resolver):
-            resolved = normalize_currency_code(resolver(symbol))
+            resolved = normalize_currency_code(resolver(listing_id))
             if resolved is not None:
                 return resolved
     del candidate_currencies
@@ -179,7 +179,7 @@ def resolve_metric_ticker_currency(
 
 
 def require_metric_ticker_currency(
-    symbol: str,
+    listing_id: int,
     *objects: object,
     metric_id: str,
     input_name: str = "listing_currency",
@@ -189,14 +189,14 @@ def require_metric_ticker_currency(
     """Return the stored listing currency or raise a structured invariant error."""
 
     resolved = resolve_metric_ticker_currency(
-        symbol,
+        listing_id,
         *objects,
         candidate_currencies=candidate_currencies,
     )
     if resolved is None:
         _raise_currency_invariant(
             metric_id=metric_id,
-            symbol=symbol,
+            listing_id=listing_id,
             input_name=input_name,
             reason_code="missing_trading_currency",
             as_of=as_of,
@@ -208,7 +208,7 @@ def require_metric_ticker_currency(
 def _raise_currency_invariant(
     *,
     metric_id: str,
-    symbol: str,
+    listing_id: int,
     input_name: str,
     reason_code: str,
     expected_currency: Optional[str] = None,
@@ -217,7 +217,7 @@ def _raise_currency_invariant(
 ) -> None:
     error = MetricCurrencyInvariantError(
         metric_id=metric_id,
-        symbol=symbol,
+        listing_id=listing_id,
         input_name=input_name,
         reason_code=reason_code,
         expected_currency=expected_currency,
@@ -225,9 +225,9 @@ def _raise_currency_invariant(
         as_of=as_of,
     )
     LOGGER.warning(
-        "Metric currency invariant violated | metric=%s symbol=%s input=%s reason=%s expected=%s actual=%s as_of=%s",
+        "Metric currency invariant violated | metric=%s listing_id=%s input=%s reason=%s expected=%s actual=%s as_of=%s",
         metric_id,
-        symbol,
+        listing_id,
         input_name,
         reason_code,
         expected_currency,
@@ -305,7 +305,7 @@ def require_metric_money(
     *,
     target_currency: str,
     metric_id: str,
-    symbol: str,
+    listing_id: int,
     input_name: str,
     as_of: Optional[str],
 ) -> Money:
@@ -334,7 +334,7 @@ def require_metric_money(
     if converted is None:
         _raise_currency_invariant(
             metric_id=metric_id,
-            symbol=symbol,
+            listing_id=listing_id,
             input_name=input_name,
             reason_code="missing_fx_rate",
             expected_currency=target_currency,
@@ -343,9 +343,9 @@ def require_metric_money(
         )
     assert converted is not None
     LOGGER.info(
-        "metric FX conversion | metric=%s symbol=%s input=%s %s->%s as_of=%s",
+        "metric FX conversion | metric=%s listing_id=%s input=%s %s->%s as_of=%s",
         metric_id,
-        symbol,
+        listing_id,
         input_name,
         money.currency,
         target_currency,
@@ -360,7 +360,7 @@ def require_metric_amount_money(
     *,
     target_currency: str,
     metric_id: str,
-    symbol: str,
+    listing_id: int,
     input_name: str,
     as_of: Optional[str],
 ) -> Money:
@@ -378,7 +378,7 @@ def require_metric_amount_money(
     if money is None:
         _raise_currency_invariant(
             metric_id=metric_id,
-            symbol=symbol,
+            listing_id=listing_id,
             input_name=input_name,
             reason_code="missing_input_currency",
             expected_currency=target_currency,
@@ -389,7 +389,7 @@ def require_metric_amount_money(
         money,
         target_currency=target_currency,
         metric_id=metric_id,
-        symbol=symbol,
+        listing_id=listing_id,
         input_name=input_name,
         as_of=as_of,
     )
@@ -418,7 +418,9 @@ def sum_money(values: Sequence[Money]) -> Money:
     return Money.of(sum(value.amount for value in values), currency)
 
 
-def _latest_share_count_fact(symbol: str, repo: RawFactSource) -> Optional[FactRecord]:
+def _latest_share_count_fact(
+    listing_id: int, repo: RawFactSource
+) -> Optional[FactRecord]:
     """Return the most recent positive shares-outstanding fact (Entity first).
 
     The share count is a currency-less ``count`` fact, so it is read raw (no
@@ -428,14 +430,14 @@ def _latest_share_count_fact(symbol: str, repo: RawFactSource) -> Optional[FactR
     """
 
     for concept in SHARE_COUNT_CONCEPTS:
-        fact = repo.latest_fact(symbol, concept)
+        fact = repo.latest_fact(listing_id, concept)
         if fact is not None and fact.value is not None and fact.value > 0:
             return fact
     return None
 
 
 def market_cap_money(
-    symbol: str,
+    listing_id: int,
     *,
     repo: RawFactSource,
     market_repo: MarketDataRepository,
@@ -470,17 +472,19 @@ def market_cap_money(
     will turn that seam into an FX conversion to the target instead.
     """
 
-    share_fact = _latest_share_count_fact(symbol, repo)
+    share_fact = _latest_share_count_fact(listing_id, repo)
     if share_fact is None:
-        LOGGER.warning("%s: no shares-outstanding fact for %s", metric_id, symbol)
+        LOGGER.warning(
+            "%s: no shares-outstanding fact for listing_id=%s", metric_id, listing_id
+        )
         return None
 
-    snapshot = market_repo.latest_snapshot(symbol)
+    snapshot = market_repo.latest_snapshot_by_id(listing_id)
     if snapshot is None or snapshot.price is None or snapshot.price <= 0:
         LOGGER.warning(
-            "%s: no latest market price for %s",
+            "%s: no latest market price for listing_id=%s",
             metric_id,
-            symbol,
+            listing_id,
         )
         return None
 
@@ -490,12 +494,12 @@ def market_cap_money(
     # Market cap = price (per share) x share count, so it carries the price's
     # (target) currency; the share count is a dimensionless multiplier.
     target = normalize_currency_code(target_currency) or resolve_metric_ticker_currency(
-        symbol, *contexts
+        listing_id, *contexts
     )
     if target is None:
         _raise_currency_invariant(
             metric_id=metric_id,
-            symbol=symbol,
+            listing_id=listing_id,
             input_name="market_cap",
             reason_code="missing_trading_currency",
             as_of=snapshot.as_of,
@@ -507,7 +511,7 @@ def market_cap_money(
         snapshot.currency,
         target_currency=target,
         metric_id=metric_id,
-        symbol=symbol,
+        listing_id=listing_id,
         input_name="market_cap_price",
         as_of=snapshot.as_of,
     )

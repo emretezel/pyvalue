@@ -39,55 +39,63 @@ class ShortTermDebtShareMetric:
     required_concepts = tuple(DEBT_COMPONENT_CONCEPTS + TOTAL_DEBT_FALLBACK_CONCEPTS)
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
-        short_record = self._latest_recent_fact(repo, symbol, "ShortTermDebt")
+        short_record = self._latest_recent_fact(repo, listing_id, "ShortTermDebt")
         if short_record is None:
             LOGGER.warning(
-                "short_term_debt_share: missing short-term debt for %s", symbol
+                "short_term_debt_share: missing short-term debt for listing_id=%s",
+                listing_id,
             )
             return None
 
         # Resolve the listing currency once; every debt input is then aligned to
         # it before any Money arithmetic, so the ratio is currency-safe.
         target_currency = require_metric_ticker_currency(
-            symbol,
+            listing_id,
             repo,
             metric_id=self.id,
             input_name="ShortTermDebt",
             as_of=short_record.end_date,
         )
         short_debt = _DebtAmount(
-            money=self._money(short_record, "ShortTermDebt", target_currency, symbol),
+            money=self._money(
+                short_record, "ShortTermDebt", target_currency, listing_id
+            ),
             as_of=short_record.end_date,
         )
 
         total_debt = self._compute_total_debt(
-            symbol=symbol,
+            listing_id=listing_id,
             repo=repo,
             short_debt=short_debt,
             target_currency=target_currency,
         )
         if total_debt is None:
             LOGGER.warning(
-                "short_term_debt_share: missing usable total debt for %s", symbol
+                "short_term_debt_share: missing usable total debt for listing_id=%s",
+                listing_id,
             )
             return None
 
         if total_debt.money.amount <= 0:
             LOGGER.warning(
-                "short_term_debt_share: non-positive total debt for %s", symbol
+                "short_term_debt_share: non-positive total debt for listing_id=%s",
+                listing_id,
             )
             return None
 
         ratio = short_debt.money / total_debt.money
         if ratio < 0 or ratio > 1:
-            LOGGER.warning("short_term_debt_share: ratio out of bounds for %s", symbol)
+            LOGGER.warning(
+                "short_term_debt_share: ratio out of bounds for listing_id=%s",
+                listing_id,
+            )
             return None
 
         as_of = max(short_debt.as_of, total_debt.as_of)
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=ratio,
             as_of=as_of,
@@ -97,15 +105,15 @@ class ShortTermDebtShareMetric:
     def _compute_total_debt(
         self,
         *,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         short_debt: _DebtAmount,
         target_currency: str,
     ) -> Optional[_DebtAmount]:
-        long_record = self._latest_recent_fact(repo, symbol, "LongTermDebt")
+        long_record = self._latest_recent_fact(repo, listing_id, "LongTermDebt")
         if long_record is not None:
             long_money = self._money(
-                long_record, "LongTermDebt", target_currency, symbol
+                long_record, "LongTermDebt", target_currency, listing_id
             )
             return _DebtAmount(
                 money=short_debt.money + long_money,
@@ -113,21 +121,21 @@ class ShortTermDebtShareMetric:
             )
 
         total_record = self._latest_recent_fact(
-            repo, symbol, "TotalDebtFromBalanceSheet"
+            repo, listing_id, "TotalDebtFromBalanceSheet"
         )
         if total_record is None:
             return None
         return _DebtAmount(
             money=self._money(
-                total_record, "TotalDebtFromBalanceSheet", target_currency, symbol
+                total_record, "TotalDebtFromBalanceSheet", target_currency, listing_id
             ),
             as_of=total_record.end_date,
         )
 
     def _latest_recent_fact(
-        self, repo: RegionFactsRepository, symbol: str, concept: str
+        self, repo: RegionFactsRepository, listing_id: int, concept: str
     ) -> Optional[MonetaryFact]:
-        record = repo.latest_monetary_fact(symbol, concept)
+        record = repo.latest_monetary_fact(listing_id, concept)
         if record is None or not is_recent_fact(record):
             return None
         return record
@@ -137,13 +145,13 @@ class ShortTermDebtShareMetric:
         fact: MonetaryFact,
         concept: str,
         target_currency: str,
-        symbol: str,
+        listing_id: int,
     ) -> Money:
         return require_metric_money(
             fact.money,
             target_currency=target_currency,
             metric_id=self.id,
-            symbol=symbol,
+            listing_id=listing_id,
             input_name=concept,
             as_of=fact.end_date,
         )

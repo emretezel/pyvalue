@@ -29,22 +29,22 @@ class MarketCapitalizationMetric:
 
     def compute(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
         cap = market_cap_money(
-            symbol,
+            listing_id,
             repo=repo,
             market_repo=market_repo,
             metric_id=self.id,
             contexts=(market_repo, repo),
         )
         if cap is None:
-            LOGGER.warning("market_cap: no market cap for %s", symbol)
+            LOGGER.warning("market_cap: no market cap for listing_id=%s", listing_id)
             return None
         return MetricResult.monetary(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=cap.money.amount,
             as_of=cap.as_of,

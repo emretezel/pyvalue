@@ -34,25 +34,27 @@ class EPSAverageSixYearMetric:
 
     def compute(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
     ) -> Optional[MetricResult]:
-        history = self._fetch_history(symbol, repo)
+        history = self._fetch_history(listing_id, repo)
         if len(history) < 6:
             LOGGER.warning(
-                "eps_6y_avg: need >=6 FY EPS records for %s, found %s",
-                symbol,
+                "eps_6y_avg: need >=6 FY EPS records for listing_id=%s, found %s",
+                listing_id,
                 len(history),
             )
             return None
         if not has_recent_fact(
-            repo, symbol, EPS_CONCEPTS, max_age_days=MAX_FY_FACT_AGE_DAYS
+            repo, listing_id, EPS_CONCEPTS, max_age_days=MAX_FY_FACT_AGE_DAYS
         ):
-            LOGGER.warning("eps_6y_avg: no recent FY EPS fact for %s", symbol)
+            LOGGER.warning(
+                "eps_6y_avg: no recent FY EPS fact for listing_id=%s", listing_id
+            )
             return None
         latest_records = history[:6]
         target_currency = require_metric_ticker_currency(
-            symbol,
+            listing_id,
             repo,
             metric_id=self.id,
             input_name="EarningsPerShare",
@@ -66,7 +68,7 @@ class EPSAverageSixYearMetric:
                     record.money,
                     target_currency=target_currency,
                     metric_id=self.id,
-                    symbol=symbol,
+                    listing_id=listing_id,
                     input_name="EarningsPerShare",
                     as_of=record.end_date,
                 )
@@ -76,7 +78,7 @@ class EPSAverageSixYearMetric:
         avg = total.amount / 6
         as_of = latest_records[0].end_date
         return MetricResult.per_share(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=avg,
             as_of=as_of,
@@ -84,11 +86,11 @@ class EPSAverageSixYearMetric:
         )
 
     def _fetch_history(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> list[MonetaryFact]:
         for concept in EPS_CONCEPTS:
             records = repo.monetary_facts_for_concept(
-                symbol, concept, fiscal_period="FY"
+                listing_id, concept, fiscal_period="FY"
             )
             unique = filter_unique_fy(records)
             if unique:

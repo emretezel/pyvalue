@@ -62,16 +62,16 @@ def _subset_ids_by_symbol(
 
 
 class _CachedRegionFactsRepository(RegionFactsRepository):
-    """Serve one symbol's facts from memory while preserving the repo interface."""
+    """Serve one listing's facts from memory while preserving the repo interface."""
 
     def __init__(
         self,
         repo: FinancialFactsRepository,
-        symbol: str,
+        listing_id: int,
         records: Sequence[FactRecord],
     ) -> None:
         super().__init__(repo)
-        self._symbol = symbol.strip().upper()
+        self._listing_id = int(listing_id)
         self._ticker_currency_loaded = False
         self._ticker_currency: Optional[str] = None
         self._latest_by_concept: Dict[str, FactRecord] = {}
@@ -98,23 +98,23 @@ class _CachedRegionFactsRepository(RegionFactsRepository):
 
     def latest_fact(
         self,
-        symbol: str,
+        listing_id: int,
         concept: str,
     ) -> Optional[FactRecord]:
-        if symbol.strip().upper() != self._symbol:
-            return super().latest_fact(symbol, concept)
+        if int(listing_id) != self._listing_id:
+            return super().latest_fact(listing_id, concept)
         return self._latest_by_concept.get(concept)
 
     def facts_for_concept(
         self,
-        symbol: str,
+        listing_id: int,
         concept: str,
         fiscal_period: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> list[FactRecord]:
-        if symbol.strip().upper() != self._symbol:
+        if int(listing_id) != self._listing_id:
             return super().facts_for_concept(
-                symbol,
+                listing_id,
                 concept,
                 fiscal_period=fiscal_period,
                 limit=limit,
@@ -130,9 +130,9 @@ class _CachedRegionFactsRepository(RegionFactsRepository):
             # opt in by setting the logger level.
             if not records and concept not in self._facts_by_concept:
                 LOGGER.debug(
-                    "preloaded fact cache miss: symbol=%s concept=%s — "
+                    "preloaded fact cache miss: listing_id=%s concept=%s — "
                     "metric may have under-declared required_concepts",
-                    self._symbol,
+                    self._listing_id,
                     concept,
                 )
         else:
@@ -143,16 +143,15 @@ class _CachedRegionFactsRepository(RegionFactsRepository):
             selected = selected[:limit]
         return selected
 
-    def ticker_currency(self, symbol: str) -> Optional[str]:
-        symbol_upper = symbol.strip().upper()
-        if symbol_upper != self._symbol:
-            resolver = getattr(self._repo, "ticker_currency", None)
+    def ticker_currency_by_id(self, listing_id: int) -> Optional[str]:
+        if int(listing_id) != self._listing_id:
+            resolver = getattr(self._repo, "ticker_currency_by_id", None)
             if callable(resolver):
-                return resolver(symbol)
+                return resolver(listing_id)
             return None
         if not self._ticker_currency_loaded:
-            resolver = getattr(self._repo, "ticker_currency", None)
-            self._ticker_currency = resolver(symbol) if callable(resolver) else None
+            resolver = getattr(self._repo, "ticker_currency_by_id", None)
+            self._ticker_currency = resolver(listing_id) if callable(resolver) else None
             self._ticker_currency_loaded = True
         return self._ticker_currency
 
@@ -622,18 +621,18 @@ class _StatusAwareMetricsRepository(_SchemaReadyMetricsRepository):
 
 
 class _CachedMarketDataRepository:
-    """Serve one symbol's latest market snapshot from memory."""
+    """Serve one listing's latest market snapshot from memory."""
 
     def __init__(
         self,
         repo: MarketDataRepository,
-        symbol: str,
+        listing_id: int,
         *,
         snapshot: Optional[PriceData] = None,
         snapshot_loaded: bool = False,
     ) -> None:
         self._repo = repo
-        self._symbol = symbol.strip().upper()
+        self._listing_id = int(listing_id)
         self._snapshot_loaded = snapshot_loaded
         self._snapshot: Optional[PriceData] = snapshot
         self._ticker_currency_loaded = False
@@ -642,31 +641,30 @@ class _CachedMarketDataRepository:
     def _load_snapshot(self) -> None:
         if self._snapshot_loaded:
             return
-        self._snapshot = self._repo.latest_snapshot(self._symbol)
+        self._snapshot = self._repo.latest_snapshot_by_id(self._listing_id)
         self._snapshot_loaded = True
 
-    def latest_snapshot(self, symbol: str) -> Optional[PriceData]:
-        if symbol.strip().upper() != self._symbol:
-            return self._repo.latest_snapshot(symbol)
+    def latest_snapshot_by_id(self, listing_id: int) -> Optional[PriceData]:
+        if int(listing_id) != self._listing_id:
+            return self._repo.latest_snapshot_by_id(listing_id)
         self._load_snapshot()
         return self._snapshot
 
-    def latest_price(self, symbol: str) -> Optional[Tuple[str, float]]:
-        snapshot = self.latest_snapshot(symbol)
+    def latest_price_by_id(self, listing_id: int) -> Optional[Tuple[str, float]]:
+        snapshot = self.latest_snapshot_by_id(listing_id)
         if snapshot is None:
             return None
         return snapshot.as_of, snapshot.price
 
-    def ticker_currency(self, symbol: str) -> Optional[str]:
-        symbol_upper = symbol.strip().upper()
-        if symbol_upper != self._symbol:
-            resolver = getattr(self._repo, "ticker_currency", None)
+    def ticker_currency_by_id(self, listing_id: int) -> Optional[str]:
+        if int(listing_id) != self._listing_id:
+            resolver = getattr(self._repo, "ticker_currency_by_id", None)
             if callable(resolver):
-                return resolver(symbol)
+                return resolver(listing_id)
             return None
         if not self._ticker_currency_loaded:
-            resolver = getattr(self._repo, "ticker_currency", None)
-            self._ticker_currency = resolver(symbol) if callable(resolver) else None
+            resolver = getattr(self._repo, "ticker_currency_by_id", None)
+            self._ticker_currency = resolver(listing_id) if callable(resolver) else None
             self._ticker_currency_loaded = True
         return self._ticker_currency
 

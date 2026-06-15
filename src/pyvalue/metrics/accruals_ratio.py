@@ -67,33 +67,40 @@ class AccrualsRatioCalculator:
     """Shared calculator for accruals ratio inputs."""
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[AccrualsRatioSnapshot]:
         net_income = self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             NET_INCOME_CONCEPTS,
             context=_METRIC_ID,
         )
         if net_income is None:
-            LOGGER.warning("accruals_ratio: missing TTM net income for %s", symbol)
+            LOGGER.warning(
+                "accruals_ratio: missing TTM net income for listing_id=%s", listing_id
+            )
             return None
 
         cfo = self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             OPERATING_CASH_FLOW_CONCEPTS,
             context=_METRIC_ID,
         )
         if cfo is None:
-            LOGGER.warning("accruals_ratio: missing TTM CFO for %s", symbol)
+            LOGGER.warning(
+                "accruals_ratio: missing TTM CFO for listing_id=%s", listing_id
+            )
             return None
 
-        average_assets = self._compute_avg_total_assets(symbol, repo)
+        average_assets = self._compute_avg_total_assets(listing_id, repo)
         if average_assets is None:
             return None
         if average_assets.money.amount <= 0:
-            LOGGER.warning("accruals_ratio: non-positive average assets for %s", symbol)
+            LOGGER.warning(
+                "accruals_ratio: non-positive average assets for listing_id=%s",
+                listing_id,
+            )
             return None
 
         # NI, CFO and average assets are each aligned to the listing currency by
@@ -106,46 +113,46 @@ class AccrualsRatioCalculator:
         )
 
     def compute_avg_total_assets(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[_AmountResult]:
         """Return the average-assets denominator used by accrual-based metrics."""
 
-        return self._compute_avg_total_assets(symbol, repo)
+        return self._compute_avg_total_assets(listing_id, repo)
 
     def _compute_ttm_amount(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         concepts: Sequence[str],
         *,
         context: str,
     ) -> Optional[_AmountResult]:
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id=context
+            listing_id, repo, metric_id=context
         )
         for concept in concepts:
-            records = repo.monetary_facts_for_concept(symbol, concept)
+            records = repo.monetary_facts_for_concept(listing_id, concept)
             quarterly = self._filter_periods(records, QUARTERLY_PERIODS)
             if len(quarterly) < 4:
                 LOGGER.warning(
-                    "%s: need 4 quarterly %s records for %s, found %s",
+                    "%s: need 4 quarterly %s records for listing_id=%s, found %s",
                     context,
                     concept,
-                    symbol,
+                    listing_id,
                     len(quarterly),
                 )
                 continue
             if not is_recent_fact(quarterly[0], max_age_days=MAX_FACT_AGE_DAYS):
                 LOGGER.warning(
-                    "%s: latest %s (%s) too old for %s",
+                    "%s: latest %s (%s) too old for listing_id=%s",
                     context,
                     concept,
                     quarterly[0].end_date,
-                    symbol,
+                    listing_id,
                 )
                 continue
             monies = [
-                self._money(record, target_currency, symbol, context)
+                self._money(record, target_currency, listing_id, context)
                 for record in quarterly[:4]
             ]
             return _AmountResult(
@@ -156,36 +163,41 @@ class AccrualsRatioCalculator:
 
     def _compute_avg_total_assets(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
     ) -> Optional[_AmountResult]:
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id=_METRIC_ID
+            listing_id, repo, metric_id=_METRIC_ID
         )
-        records = repo.monetary_facts_for_concept(symbol, ASSETS_CONCEPT)
+        records = repo.monetary_facts_for_concept(listing_id, ASSETS_CONCEPT)
         quarterly = self._filter_periods(records, QUARTERLY_PERIODS)
         if not quarterly:
-            LOGGER.warning("accruals_ratio: missing quarterly assets for %s", symbol)
+            LOGGER.warning(
+                "accruals_ratio: missing quarterly assets for listing_id=%s", listing_id
+            )
             return None
 
         latest = quarterly[0]
         if not is_recent_fact(latest, max_age_days=MAX_FACT_AGE_DAYS):
             LOGGER.warning(
-                "accruals_ratio: latest assets quarter (%s) too old for %s",
+                "accruals_ratio: latest assets quarter (%s) too old for listing_id=%s",
                 latest.end_date,
-                symbol,
+                listing_id,
             )
             return None
 
         latest_point = _AssetPoint(
-            money=self._money(latest, target_currency, symbol, _METRIC_ID),
+            money=self._money(latest, target_currency, listing_id, _METRIC_ID),
             as_of=latest.end_date,
             fiscal_period=(latest.fiscal_period or "").upper(),
         )
 
         latest_year = self._extract_year(latest.end_date)
         if latest_year is None:
-            LOGGER.warning("accruals_ratio: invalid latest assets date for %s", symbol)
+            LOGGER.warning(
+                "accruals_ratio: invalid latest assets date for listing_id=%s",
+                listing_id,
+            )
             return None
 
         prior_point: Optional[_AssetPoint] = None
@@ -197,7 +209,7 @@ class AccrualsRatioCalculator:
                 and point_year == latest_year - 1
             ):
                 prior_point = _AssetPoint(
-                    money=self._money(record, target_currency, symbol, _METRIC_ID),
+                    money=self._money(record, target_currency, listing_id, _METRIC_ID),
                     as_of=record.end_date,
                     fiscal_period=(record.fiscal_period or "").upper(),
                 )
@@ -205,7 +217,8 @@ class AccrualsRatioCalculator:
 
         if prior_point is None:
             LOGGER.warning(
-                "accruals_ratio: missing same-quarter prior-year assets for %s", symbol
+                "accruals_ratio: missing same-quarter prior-year assets for listing_id=%s",
+                listing_id,
             )
             return None
 
@@ -231,13 +244,13 @@ class AccrualsRatioCalculator:
         return filtered
 
     def _money(
-        self, fact: MonetaryFact, target_currency: str, symbol: str, context: str
+        self, fact: MonetaryFact, target_currency: str, listing_id: int, context: str
     ) -> Money:
         return require_metric_money(
             fact.money,
             target_currency=target_currency,
             metric_id=context,
-            symbol=symbol,
+            listing_id=listing_id,
             input_name=fact.concept,
             as_of=fact.end_date,
         )
@@ -259,13 +272,13 @@ class AccrualsRatioMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
-        snapshot = AccrualsRatioCalculator().compute(symbol, repo)
+        snapshot = AccrualsRatioCalculator().compute(listing_id, repo)
         if snapshot is None:
             return None
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=snapshot.value,
             as_of=snapshot.as_of,

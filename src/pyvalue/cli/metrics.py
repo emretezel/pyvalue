@@ -339,7 +339,7 @@ def _metric_attempt_success(
     unit_label = result.unit_label or metadata.unit_label
     currency = metric_currency_or_none(unit_kind, result.currency)
     stored_row: StoredMetricRow = (
-        result.symbol,
+        symbol,
         result.metric_id,
         result.value,
         result.as_of,
@@ -399,6 +399,7 @@ def _metric_attempt_failure(
 
 def _compute_metrics_for_symbol(
     symbol: str,
+    listing_id: int,
     metric_ids: Sequence[str],
     fact_repo: FinancialFactsRepository,
     market_repo: Optional[MarketDataRepository] = None,
@@ -424,6 +425,7 @@ def _compute_metrics_for_symbol(
     with reuse_or_bind_metric_fx_service(fact_repo, market_repo):
         return _compute_metrics_for_symbol_inner(
             symbol,
+            listing_id,
             metric_ids,
             fact_repo,
             market_repo,
@@ -437,6 +439,7 @@ def _compute_metrics_for_symbol(
 
 def _compute_metrics_for_symbol_inner(
     symbol: str,
+    listing_id: int,
     metric_ids: Sequence[str],
     fact_repo: FinancialFactsRepository,
     market_repo: Optional[MarketDataRepository] = None,
@@ -447,15 +450,19 @@ def _compute_metrics_for_symbol_inner(
     facts_refreshed_at: Optional[str] = None,
     warning_collector: Optional["_MetricWarningCollector"] = None,
 ) -> _ComputedMetricsResult:
+    # The compute orchestration is the boundary that holds both identities: the
+    # ``listing_id`` keys the metric layer (cache, compute, fact reads) while the
+    # display ``symbol`` is retained only for the symbol-keyed write path and
+    # status/attempt records the worker emits.
     symbol_upper = symbol.strip().upper()
     records = (
         list(preloaded_facts)
         if preloaded_facts is not None
-        else fact_repo.facts_for_symbol(symbol_upper)
+        else fact_repo.facts_for_id(listing_id)
     )
     cached_fact_repo = _CachedRegionFactsRepository(
         fact_repo,
-        symbol_upper,
+        listing_id,
         records,
     )
     snapshot_loaded = (
@@ -477,7 +484,7 @@ def _compute_metrics_for_symbol_inner(
     cached_market_repo = (
         _CachedMarketDataRepository(
             market_repo,
-            symbol_upper,
+            listing_id,
             snapshot=snapshot,
             snapshot_loaded=snapshot_loaded,
         )
@@ -516,10 +523,10 @@ def _compute_metrics_for_symbol_inner(
                         f"Metric {metric_id} requires market data but no market repo was provided."
                     )
                 result = metric.compute(
-                    symbol_upper, cached_fact_repo, cached_market_repo
+                    listing_id, cached_fact_repo, cached_market_repo
                 )
             else:
-                result = metric.compute(symbol_upper, cached_fact_repo)
+                result = metric.compute(listing_id, cached_fact_repo)
         except MetricCurrencyInvariantError as exc:
             failures.append(
                 _MetricComputationFailure(
@@ -636,6 +643,16 @@ def _compute_metric_batch_results(
     if not selected_symbols:
         return ()
 
+    # The compute orchestration keys the metric layer by listing_id. Resolve the
+    # scope's ids once here -- compute-metrics supplies them from scope
+    # resolution, so this is a no-op in the hot path; only callers that omit the
+    # map (e.g. report builders) resolve here.
+    if security_ids_by_symbol is None:
+        security_ids_by_symbol = fact_repo._security_repo().resolve_ids_many(
+            selected_symbols,
+            chunk_size=METRICS_COMPUTE_BATCH_SIZE,
+        )
+
     known_metric_ids = tuple(
         metric_id for metric_id in metric_ids if metric_id in REGISTRY
     )
@@ -669,15 +686,6 @@ def _compute_metric_batch_results(
     if needs_shared_read_connection:
         read_start = time.perf_counter() if profile_enabled else 0.0
         with fact_repo._connect() as read_connection:
-            # compute-metrics supplies the listing ids from scope resolution, so
-            # the per-batch symbol->id resolution is skipped entirely; only
-            # callers that omit the map (e.g. report builders) resolve here.
-            if security_ids_by_symbol is None:
-                security_ids_by_symbol = fact_repo._security_repo().resolve_ids_many(
-                    selected_symbols,
-                    chunk_size=METRICS_COMPUTE_BATCH_SIZE,
-                    connection=read_connection,
-                )
             if uses_financial_facts:
                 facts_by_symbol = _prefetch_metric_facts_for_symbols(
                     fact_repo,
@@ -722,10 +730,16 @@ def _compute_metric_batch_results(
             # var is visible to require_metric_money under multiprocessing.
             with reuse_or_bind_metric_fx_service(fact_repo, market_repo):
                 for symbol in selected_symbols:
+                    # The compute scope is catalog-derived, so every selected
+                    # symbol has a resolved listing id; the metric layer keys on
+                    # it while the symbol stays for the symbol-keyed write path.
+                    listing_id = security_ids_by_symbol.get(symbol)
+                    assert listing_id is not None
                     snapshot_record = snapshots_by_symbol.get(symbol)
                     results.append(
                         _compute_metrics_for_symbol(
                             symbol,
+                            listing_id,
                             metric_ids,
                             fact_repo,
                             market_repo,

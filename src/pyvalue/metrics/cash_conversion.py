@@ -79,34 +79,41 @@ class CashConversionCalculator:
     """
 
     def compute_ttm(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[CashConversionSnapshot]:
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id="cfo_to_ni_ttm"
+            listing_id, repo, metric_id="cfo_to_ni_ttm"
         )
         cfo = self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             OPERATING_CASH_FLOW_CONCEPTS,
             context="cfo_to_ni_ttm",
             target_currency=target_currency,
         )
         if cfo is None:
-            LOGGER.warning("cfo_to_ni_ttm: missing TTM CFO for %s", symbol)
+            LOGGER.warning(
+                "cfo_to_ni_ttm: missing TTM CFO for listing_id=%s", listing_id
+            )
             return None
 
         net_income = self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             NET_INCOME_CONCEPTS,
             context="cfo_to_ni_ttm",
             target_currency=target_currency,
         )
         if net_income is None:
-            LOGGER.warning("cfo_to_ni_ttm: missing TTM net income for %s", symbol)
+            LOGGER.warning(
+                "cfo_to_ni_ttm: missing TTM net income for listing_id=%s", listing_id
+            )
             return None
         if net_income.money.amount <= 0:
-            LOGGER.warning("cfo_to_ni_ttm: non-positive TTM net income for %s", symbol)
+            LOGGER.warning(
+                "cfo_to_ni_ttm: non-positive TTM net income for listing_id=%s",
+                listing_id,
+            )
             return None
 
         return CashConversionSnapshot(
@@ -116,37 +123,41 @@ class CashConversionCalculator:
         )
 
     def compute_10y_series(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[CashConversionTenYearSnapshot]:
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id="cfo_to_ni_10y_median"
+            listing_id, repo, metric_id="cfo_to_ni_10y_median"
         )
         cfo_map = self._build_fy_amount_map(
-            symbol,
+            listing_id,
             repo,
             OPERATING_CASH_FLOW_CONCEPTS,
             target_currency=target_currency,
         )
         if not cfo_map:
-            LOGGER.warning("cfo_to_ni_10y: missing FY CFO history for %s", symbol)
+            LOGGER.warning(
+                "cfo_to_ni_10y: missing FY CFO history for listing_id=%s", listing_id
+            )
             return None
 
         net_income_map = self._build_fy_amount_map(
-            symbol,
+            listing_id,
             repo,
             NET_INCOME_CONCEPTS,
             target_currency=target_currency,
         )
         if not net_income_map:
             LOGGER.warning(
-                "cfo_to_ni_10y: missing FY net income history for %s", symbol
+                "cfo_to_ni_10y: missing FY net income history for listing_id=%s",
+                listing_id,
             )
             return None
 
         candidate_years = set(cfo_map.keys()).intersection(net_income_map.keys())
         if not candidate_years:
             LOGGER.warning(
-                "cfo_to_ni_10y: missing overlapping FY history for %s", symbol
+                "cfo_to_ni_10y: missing overlapping FY history for listing_id=%s",
+                listing_id,
             )
             return None
 
@@ -158,14 +169,15 @@ class CashConversionCalculator:
             net_income = net_income_map.get(year)
             if cfo is None or net_income is None:
                 LOGGER.warning(
-                    "cfo_to_ni_10y: missing strict consecutive FY chain for %s", symbol
+                    "cfo_to_ni_10y: missing strict consecutive FY chain for listing_id=%s",
+                    listing_id,
                 )
                 return None
             if net_income.money.amount <= 0:
                 LOGGER.warning(
-                    "cfo_to_ni_10y: non-positive FY net income in %s for %s",
+                    "cfo_to_ni_10y: non-positive FY net income in %s for listing_id=%s",
                     year,
-                    symbol,
+                    listing_id,
                 )
                 return None
             selected.append(
@@ -179,7 +191,9 @@ class CashConversionCalculator:
         if not self._is_recent_as_of(
             selected[0].as_of, max_age_days=MAX_FY_FACT_AGE_DAYS
         ):
-            LOGGER.warning("cfo_to_ni_10y: latest FY point too old for %s", symbol)
+            LOGGER.warning(
+                "cfo_to_ni_10y: latest FY point too old for listing_id=%s", listing_id
+            )
             return None
 
         return CashConversionTenYearSnapshot(
@@ -190,7 +204,7 @@ class CashConversionCalculator:
 
     def _compute_ttm_amount(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         concepts: Sequence[str],
         *,
@@ -198,29 +212,29 @@ class CashConversionCalculator:
         target_currency: str,
     ) -> Optional[_MoneyResult]:
         for concept in concepts:
-            records = repo.monetary_facts_for_concept(symbol, concept)
+            records = repo.monetary_facts_for_concept(listing_id, concept)
             quarterly = self._filter_periods(records, QUARTERLY_PERIODS)
             if len(quarterly) < 4:
                 LOGGER.warning(
-                    "%s: need 4 quarterly %s records for %s, found %s",
+                    "%s: need 4 quarterly %s records for listing_id=%s, found %s",
                     context,
                     concept,
-                    symbol,
+                    listing_id,
                     len(quarterly),
                 )
                 continue
             if not is_recent_fact(quarterly[0], max_age_days=MAX_FACT_AGE_DAYS):
                 LOGGER.warning(
-                    "%s: latest %s (%s) too old for %s",
+                    "%s: latest %s (%s) too old for listing_id=%s",
                     context,
                     concept,
                     quarterly[0].end_date,
-                    symbol,
+                    listing_id,
                 )
                 continue
 
             monies = [
-                self._money(record, concept, target_currency, symbol, context)
+                self._money(record, concept, target_currency, listing_id, context)
                 for record in quarterly[:4]
             ]
             return _MoneyResult(money=sum_money(monies), as_of=quarterly[0].end_date)
@@ -228,14 +242,14 @@ class CashConversionCalculator:
 
     def _build_fy_amount_map(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         concepts: Sequence[str],
         *,
         target_currency: str,
     ) -> dict[int, _MoneyResult]:
         concept_maps = [
-            self._fy_map(symbol, repo, concept, target_currency=target_currency)
+            self._fy_map(listing_id, repo, concept, target_currency=target_currency)
             for concept in concepts
         ]
         merged: dict[int, _MoneyResult] = {}
@@ -251,13 +265,15 @@ class CashConversionCalculator:
 
     def _fy_map(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         concept: str,
         *,
         target_currency: str,
     ) -> dict[int, _MoneyResult]:
-        records = repo.monetary_facts_for_concept(symbol, concept, fiscal_period="FY")
+        records = repo.monetary_facts_for_concept(
+            listing_id, concept, fiscal_period="FY"
+        )
         ordered = self._filter_periods(records, FY_PERIODS)
         mapped: dict[int, _MoneyResult] = {}
         for record in ordered:
@@ -266,7 +282,7 @@ class CashConversionCalculator:
                 continue
             mapped[year] = _MoneyResult(
                 money=self._money(
-                    record, concept, target_currency, symbol, "cfo_to_ni_10y_median"
+                    record, concept, target_currency, listing_id, "cfo_to_ni_10y_median"
                 ),
                 as_of=record.end_date,
             )
@@ -293,14 +309,14 @@ class CashConversionCalculator:
         fact: MonetaryFact,
         concept: str,
         target_currency: str,
-        symbol: str,
+        listing_id: int,
         metric_id: str,
     ) -> Money:
         return require_metric_money(
             fact.money,
             target_currency=target_currency,
             metric_id=metric_id,
-            symbol=symbol,
+            listing_id=listing_id,
             input_name=concept,
             as_of=fact.end_date,
         )
@@ -329,13 +345,13 @@ class CFOToNITTMMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
-        snapshot = CashConversionCalculator().compute_ttm(symbol, repo)
+        snapshot = CashConversionCalculator().compute_ttm(listing_id, repo)
         if snapshot is None:
             return None
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=snapshot.value,
             as_of=snapshot.as_of,
@@ -351,15 +367,15 @@ class CFOToNITenYearMedianMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
-        snapshot = CashConversionCalculator().compute_10y_series(symbol, repo)
+        snapshot = CashConversionCalculator().compute_10y_series(listing_id, repo)
         if snapshot is None:
             return None
         values = sorted(point.value for point in snapshot.points)
         median = (values[4] + values[5]) / 2.0
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=median,
             as_of=snapshot.as_of,

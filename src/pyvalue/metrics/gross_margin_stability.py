@@ -65,21 +65,23 @@ class GrossMarginTenYearCalculator:
     """
 
     def compute_series(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[GrossMarginTenYearSnapshot]:
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id="gm_10y_std"
+            listing_id, repo, metric_id="gm_10y_std"
         )
-        revenue_map = self._fy_map(symbol, repo, REVENUE_CONCEPT, target_currency)
+        revenue_map = self._fy_map(listing_id, repo, REVENUE_CONCEPT, target_currency)
         if not revenue_map:
-            LOGGER.warning("gm_10y_std: missing FY revenues history for %s", symbol)
+            LOGGER.warning(
+                "gm_10y_std: missing FY revenues history for listing_id=%s", listing_id
+            )
             return None
 
         gross_profit_map = self._fy_map(
-            symbol, repo, GROSS_PROFIT_CONCEPT, target_currency
+            listing_id, repo, GROSS_PROFIT_CONCEPT, target_currency
         )
         cost_of_revenue_map = self._fy_map(
-            symbol, repo, COST_OF_REVENUE_CONCEPT, target_currency
+            listing_id, repo, COST_OF_REVENUE_CONCEPT, target_currency
         )
 
         margins_by_year: dict[int, _GrossMarginFYPoint] = {}
@@ -105,7 +107,9 @@ class GrossMarginTenYearCalculator:
             )
 
         if not margins_by_year:
-            LOGGER.warning("gm_10y_std: no FY gross-margin points for %s", symbol)
+            LOGGER.warning(
+                "gm_10y_std: no FY gross-margin points for listing_id=%s", listing_id
+            )
             return None
 
         latest_year = max(margins_by_year.keys())
@@ -114,7 +118,8 @@ class GrossMarginTenYearCalculator:
             point = margins_by_year.get(year)
             if point is None:
                 LOGGER.warning(
-                    "gm_10y_std: missing strict consecutive FY chain for %s", symbol
+                    "gm_10y_std: missing strict consecutive FY chain for listing_id=%s",
+                    listing_id,
                 )
                 return None
             selected.append(point)
@@ -122,7 +127,9 @@ class GrossMarginTenYearCalculator:
         if not self._is_recent_as_of(
             selected[0].as_of, max_age_days=MAX_FY_FACT_AGE_DAYS
         ):
-            LOGGER.warning("gm_10y_std: latest FY point too old for %s", symbol)
+            LOGGER.warning(
+                "gm_10y_std: latest FY point too old for listing_id=%s", listing_id
+            )
             return None
 
         return GrossMarginTenYearSnapshot(
@@ -133,12 +140,14 @@ class GrossMarginTenYearCalculator:
 
     def _fy_map(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         concept: str,
         target_currency: str,
     ) -> dict[int, _MoneyResult]:
-        records = repo.monetary_facts_for_concept(symbol, concept, fiscal_period="FY")
+        records = repo.monetary_facts_for_concept(
+            listing_id, concept, fiscal_period="FY"
+        )
         ordered = self._filter_periods(records, FY_PERIODS)
         mapped: dict[int, _MoneyResult] = {}
         for record in ordered:
@@ -150,7 +159,7 @@ class GrossMarginTenYearCalculator:
                     record.money,
                     target_currency=target_currency,
                     metric_id="gm_10y_std",
-                    symbol=symbol,
+                    listing_id=listing_id,
                     input_name=concept,
                     as_of=record.end_date,
                 ),
@@ -195,9 +204,9 @@ class GrossMarginTenYearStdMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
-        snapshot = GrossMarginTenYearCalculator().compute_series(symbol, repo)
+        snapshot = GrossMarginTenYearCalculator().compute_series(listing_id, repo)
         if snapshot is None:
             return None
 
@@ -207,7 +216,7 @@ class GrossMarginTenYearStdMetric:
         stddev = sqrt(variance)
 
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=stddev,
             as_of=snapshot.as_of,

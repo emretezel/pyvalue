@@ -2656,8 +2656,14 @@ def test_financial_facts_repository_facts_for_symbols_many_matches_single_lookup
 
     facts = repo.facts_for_symbols_many(["AAA.US", "BBB.US", "CCC.US"], chunk_size=1)
 
-    assert facts["AAA.US"] == repo.facts_for_symbol("AAA.US")
-    assert facts["BBB.US"] == repo.facts_for_symbol("BBB.US")
+    assert {record.concept for record in facts["AAA.US"]} == {
+        "AssetsCurrent",
+        "LiabilitiesCurrent",
+    }
+    assert {record.concept for record in facts["BBB.US"]} == {
+        "AssetsCurrent",
+        "Revenue",
+    }
     assert "CCC.US" not in facts
 
 

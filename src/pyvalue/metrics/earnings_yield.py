@@ -37,18 +37,20 @@ class EarningsYieldMetric:
 
     def compute(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
-        eps = self._ttm_eps(symbol, repo)
+        eps = self._ttm_eps(listing_id, repo)
         if eps is None:
             return None
         eps_money, as_of = eps
 
-        price_data = self._latest_snapshot(market_repo, symbol)
+        price_data = self._latest_snapshot(market_repo, listing_id)
         if price_data is None or price_data.price is None:
-            LOGGER.warning("earnings_yield: missing price for %s", symbol)
+            LOGGER.warning(
+                "earnings_yield: missing price for listing_id=%s", listing_id
+            )
             return None
         # Price is aligned to the EPS (listing) currency, so the yield
         # (EPS Money / price Money) is currency-safe.
@@ -57,25 +59,27 @@ class EarningsYieldMetric:
             price_data.currency,
             target_currency=eps_money.currency,
             metric_id=self.id,
-            symbol=symbol,
+            listing_id=listing_id,
             input_name="price",
             as_of=price_data.as_of,
         )
         if price_money.amount <= 0:
-            LOGGER.warning("earnings_yield: non-positive price for %s", symbol)
+            LOGGER.warning(
+                "earnings_yield: non-positive price for listing_id=%s", listing_id
+            )
             return None
         yield_value = eps_money / price_money
         return MetricResult(
-            symbol=symbol, metric_id=self.id, value=yield_value, as_of=as_of
+            listing_id=listing_id, metric_id=self.id, value=yield_value, as_of=as_of
         )
 
     def _ttm_eps(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[tuple[Money, str]]:
-        quarterly_records = self._latest_quarters(symbol, repo)
+        quarterly_records = self._latest_quarters(listing_id, repo)
         if len(quarterly_records) >= 4:
             target_currency = require_metric_ticker_currency(
-                symbol,
+                listing_id,
                 repo,
                 metric_id=self.id,
                 input_name="EarningsPerShare",
@@ -87,7 +91,7 @@ class EarningsYieldMetric:
                         record.money,
                         target_currency=target_currency,
                         metric_id=self.id,
-                        symbol=symbol,
+                        listing_id=listing_id,
                         input_name="EarningsPerShare",
                         as_of=record.end_date,
                     )
@@ -96,19 +100,21 @@ class EarningsYieldMetric:
             )
             return ttm, quarterly_records[0].end_date
 
-        fy_record = self._latest_fy_eps(symbol, repo)
+        fy_record = self._latest_fy_eps(listing_id, repo)
         if fy_record is None:
-            LOGGER.warning("earnings_yield: missing EPS quarters for %s", symbol)
+            LOGGER.warning(
+                "earnings_yield: missing EPS quarters for listing_id=%s", listing_id
+            )
             return None
         if not is_recent_fact(fy_record):
             LOGGER.warning(
-                "earnings_yield: latest FY EPS too old for %s (%s)",
-                symbol,
+                "earnings_yield: latest FY EPS too old for listing_id=%s (%s)",
+                listing_id,
                 fy_record.end_date,
             )
             return None
         target_currency = require_metric_ticker_currency(
-            symbol,
+            listing_id,
             repo,
             metric_id=self.id,
             input_name="EarningsPerShare",
@@ -118,41 +124,41 @@ class EarningsYieldMetric:
             fy_record.money,
             target_currency=target_currency,
             metric_id=self.id,
-            symbol=symbol,
+            listing_id=listing_id,
             input_name="EarningsPerShare",
             as_of=fy_record.end_date,
         )
         return money, fy_record.end_date
 
     def _latest_quarters(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> list[MonetaryFact]:
         return latest_quarterly_records(
-            repo.monetary_facts_for_concept, symbol, EPS_CONCEPTS, periods=4
+            repo.monetary_facts_for_concept, listing_id, EPS_CONCEPTS, periods=4
         )
 
     def _latest_fy_eps(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MonetaryFact]:
         records = repo.monetary_facts_for_concept(
-            symbol, "EarningsPerShare", fiscal_period="FY", limit=1
+            listing_id, "EarningsPerShare", fiscal_period="FY", limit=1
         )
         if records:
             return records[0]
         return None
 
     def _latest_snapshot(
-        self, market_repo: MarketDataRepository, symbol: str
+        self, market_repo: MarketDataRepository, listing_id: int
     ) -> Optional[PriceData]:
-        if hasattr(market_repo, "latest_snapshot"):
-            snapshot = market_repo.latest_snapshot(symbol)
+        if hasattr(market_repo, "latest_snapshot_by_id"):
+            snapshot = market_repo.latest_snapshot_by_id(listing_id)
             if snapshot:
                 return snapshot
-        if hasattr(market_repo, "latest_price"):
-            price_entry = market_repo.latest_price(symbol)
+        if hasattr(market_repo, "latest_price_by_id"):
+            price_entry = market_repo.latest_price_by_id(listing_id)
             if isinstance(price_entry, PriceData):
                 return price_entry
             if isinstance(price_entry, tuple) and len(price_entry) >= 2:
                 as_of, price = price_entry[0], price_entry[1]
-                return PriceData(symbol=symbol, price=price, as_of=as_of)
+                return PriceData(symbol="", price=price, as_of=as_of)
         return None

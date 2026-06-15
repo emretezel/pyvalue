@@ -35,36 +35,38 @@ class GrahamEPSCAGRMetric:
     required_concepts = tuple(EPS_CONCEPTS)
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         records: List[MonetaryFact] = []
         for concept in EPS_CONCEPTS:
             records = repo.monetary_facts_for_concept(
-                symbol, concept, fiscal_period="FY"
+                listing_id, concept, fiscal_period="FY"
             )
             if records:
                 break
         if len(records) < MIN_REQUIRED:
             LOGGER.warning(
-                "graham_eps_cagr: need >=%s FY EPS records for %s, found %s",
+                "graham_eps_cagr: need >=%s FY EPS records for listing_id=%s, found %s",
                 MIN_REQUIRED,
-                symbol,
+                listing_id,
                 len(records),
             )
             return None
         if not has_recent_fact(
-            repo, symbol, EPS_CONCEPTS, max_age_days=MAX_FY_FACT_AGE_DAYS
+            repo, listing_id, EPS_CONCEPTS, max_age_days=MAX_FY_FACT_AGE_DAYS
         ):
-            LOGGER.warning("graham_eps_cagr: no recent FY EPS fact for %s", symbol)
+            LOGGER.warning(
+                "graham_eps_cagr: no recent FY EPS fact for listing_id=%s", listing_id
+            )
             return None
         latest_date = records[0].end_date
         filtered = filter_unique_fy(records)
         ordered = sorted(filtered.values(), key=lambda r: r.end_date)
         if len(ordered) < MIN_REQUIRED:
             LOGGER.warning(
-                "graham_eps_cagr: need >=%s unique FY EPS records for %s after filtering, found %s",
+                "graham_eps_cagr: need >=%s unique FY EPS records for listing_id=%s after filtering, found %s",
                 MIN_REQUIRED,
-                symbol,
+                listing_id,
                 len(ordered),
             )
             return None
@@ -72,7 +74,7 @@ class GrahamEPSCAGRMetric:
         # EPS is per-share money; align every year to the listing currency before
         # the CAGR (currency cancels in the ratio, but the invariant still holds).
         target_currency = require_metric_ticker_currency(
-            symbol,
+            listing_id,
             repo,
             metric_id=self.id,
             input_name="EarningsPerShare",
@@ -83,7 +85,7 @@ class GrahamEPSCAGRMetric:
                 record.money,
                 target_currency=target_currency,
                 metric_id=self.id,
-                symbol=symbol,
+                listing_id=listing_id,
                 input_name="EarningsPerShare",
                 as_of=record.end_date,
             ).amount
@@ -93,11 +95,15 @@ class GrahamEPSCAGRMetric:
         cagr_value = self._compute_cagr(eps_amounts)
         if cagr_value is None:
             LOGGER.warning(
-                "graham_eps_cagr: could not derive CAGR value for %s", symbol
+                "graham_eps_cagr: could not derive CAGR value for listing_id=%s",
+                listing_id,
             )
             return None
         return MetricResult(
-            symbol=symbol, metric_id=self.id, value=cagr_value, as_of=latest_date
+            listing_id=listing_id,
+            metric_id=self.id,
+            value=cagr_value,
+            as_of=latest_date,
         )
 
     def _compute_cagr(self, eps_amounts: List[float]) -> Optional[float]:

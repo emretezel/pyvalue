@@ -54,31 +54,38 @@ class NetDebtToEBITDAMetric:
     )
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         # Resolve the listing currency once; every monetary input is aligned to
         # it before any Money arithmetic, so the ratio is currency-safe.
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id=self.id
+            listing_id, repo, metric_id=self.id
         )
 
-        ttm_ebitda = self._compute_ttm_ebitda(symbol, repo, target_currency)
+        ttm_ebitda = self._compute_ttm_ebitda(listing_id, repo, target_currency)
         if ttm_ebitda is None:
-            LOGGER.warning("net_debt_to_ebitda: missing TTM EBITDA for %s", symbol)
+            LOGGER.warning(
+                "net_debt_to_ebitda: missing TTM EBITDA for listing_id=%s", listing_id
+            )
             return None
         if ttm_ebitda.money.amount <= 0:
-            LOGGER.warning("net_debt_to_ebitda: non-positive EBITDA for %s", symbol)
+            LOGGER.warning(
+                "net_debt_to_ebitda: non-positive EBITDA for listing_id=%s", listing_id
+            )
             return None
 
-        net_debt = self._compute_net_debt(symbol, repo, target_currency)
+        net_debt = self._compute_net_debt(listing_id, repo, target_currency)
         if net_debt is None:
-            LOGGER.warning("net_debt_to_ebitda: missing net debt inputs for %s", symbol)
+            LOGGER.warning(
+                "net_debt_to_ebitda: missing net debt inputs for listing_id=%s",
+                listing_id,
+            )
             return None
 
         ratio = net_debt.money / ttm_ebitda.money
         as_of = max(ttm_ebitda.as_of, net_debt.as_of)
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=ratio,
             as_of=as_of,
@@ -87,31 +94,32 @@ class NetDebtToEBITDAMetric:
 
     def _compute_ttm_ebitda(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         target_currency: str,
     ) -> Optional[_MoneyResult]:
         ebit_records = self._filter_quarterly(
-            repo.monetary_facts_for_concept(symbol, EBIT_CONCEPTS[0])
+            repo.monetary_facts_for_concept(listing_id, EBIT_CONCEPTS[0])
         )
         if len(ebit_records) < 4:
             LOGGER.warning(
-                "net_debt_to_ebitda: need 4 quarterly EBIT records for %s", symbol
+                "net_debt_to_ebitda: need 4 quarterly EBIT records for listing_id=%s",
+                listing_id,
             )
             return None
         if not is_recent_fact(ebit_records[0]):
             LOGGER.warning(
-                "net_debt_to_ebitda: latest EBIT (%s) too old for %s",
+                "net_debt_to_ebitda: latest EBIT (%s) too old for listing_id=%s",
                 ebit_records[0].end_date,
-                symbol,
+                listing_id,
             )
             return None
 
         da_primary = self._quarterly_map(
-            repo.monetary_facts_for_concept(symbol, DA_PRIMARY_CONCEPTS[0])
+            repo.monetary_facts_for_concept(listing_id, DA_PRIMARY_CONCEPTS[0])
         )
         da_fallback = self._quarterly_map(
-            repo.monetary_facts_for_concept(symbol, DA_FALLBACK_CONCEPTS[0])
+            repo.monetary_facts_for_concept(listing_id, DA_FALLBACK_CONCEPTS[0])
         )
 
         quarter_totals: list[Money] = []
@@ -121,17 +129,17 @@ class NetDebtToEBITDAMetric:
             )
             if da_record is None:
                 LOGGER.warning(
-                    "net_debt_to_ebitda: missing D&A for quarter %s (%s)",
+                    "net_debt_to_ebitda: missing D&A for quarter %s (listing_id=%s)",
                     ebit_record.end_date,
-                    symbol,
+                    listing_id,
                 )
                 return None
 
             ebit_money = self._money(
-                ebit_record, EBIT_CONCEPTS[0], target_currency, symbol
+                ebit_record, EBIT_CONCEPTS[0], target_currency, listing_id
             )
             da_money = self._money(
-                da_record, DA_PRIMARY_CONCEPTS[0], target_currency, symbol
+                da_record, DA_PRIMARY_CONCEPTS[0], target_currency, listing_id
             )
             quarter_totals.append(ebit_money + da_money)
 
@@ -141,16 +149,16 @@ class NetDebtToEBITDAMetric:
 
     def _compute_net_debt(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         target_currency: str,
     ) -> Optional[_MoneyResult]:
-        short_debt = self._latest_recent_fact(repo, symbol, "ShortTermDebt")
-        long_debt = self._latest_recent_fact(repo, symbol, "LongTermDebt")
+        short_debt = self._latest_recent_fact(repo, listing_id, "ShortTermDebt")
+        long_debt = self._latest_recent_fact(repo, listing_id, "LongTermDebt")
         if short_debt is None and long_debt is None:
             return None
 
-        cash = self._compute_cash(symbol, repo, target_currency)
+        cash = self._compute_cash(listing_id, repo, target_currency)
         if cash is None:
             return None
 
@@ -158,11 +166,13 @@ class NetDebtToEBITDAMetric:
         as_of_candidates = [cash.as_of]
         if short_debt is not None:
             debt_money = self._money(
-                short_debt, "ShortTermDebt", target_currency, symbol
+                short_debt, "ShortTermDebt", target_currency, listing_id
             )
             as_of_candidates.append(short_debt.end_date)
         if long_debt is not None:
-            long_money = self._money(long_debt, "LongTermDebt", target_currency, symbol)
+            long_money = self._money(
+                long_debt, "LongTermDebt", target_currency, listing_id
+            )
             debt_money = long_money if debt_money is None else debt_money + long_money
             as_of_candidates.append(long_debt.end_date)
         # At least one debt component is present (guarded above).
@@ -172,33 +182,38 @@ class NetDebtToEBITDAMetric:
 
     def _compute_cash(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         target_currency: str,
     ) -> Optional[_MoneyResult]:
-        primary = self._latest_recent_fact(repo, symbol, "CashAndShortTermInvestments")
+        primary = self._latest_recent_fact(
+            repo, listing_id, "CashAndShortTermInvestments"
+        )
         if primary is not None:
             return _MoneyResult(
                 money=self._money(
-                    primary, "CashAndShortTermInvestments", target_currency, symbol
+                    primary, "CashAndShortTermInvestments", target_currency, listing_id
                 ),
                 as_of=primary.end_date,
             )
 
-        cash_eq = self._latest_recent_fact(repo, symbol, "CashAndCashEquivalents")
+        cash_eq = self._latest_recent_fact(repo, listing_id, "CashAndCashEquivalents")
         if cash_eq is None:
             return None
         short_term_investments = self._latest_recent_fact(
-            repo, symbol, "ShortTermInvestments"
+            repo, listing_id, "ShortTermInvestments"
         )
 
         cash_money = self._money(
-            cash_eq, "CashAndCashEquivalents", target_currency, symbol
+            cash_eq, "CashAndCashEquivalents", target_currency, listing_id
         )
         as_of_candidates = [cash_eq.end_date]
         if short_term_investments is not None:
             cash_money = cash_money + self._money(
-                short_term_investments, "ShortTermInvestments", target_currency, symbol
+                short_term_investments,
+                "ShortTermInvestments",
+                target_currency,
+                listing_id,
             )
             as_of_candidates.append(short_term_investments.end_date)
         return _MoneyResult(money=cash_money, as_of=max(as_of_candidates))
@@ -223,10 +238,10 @@ class NetDebtToEBITDAMetric:
     def _latest_recent_fact(
         self,
         repo: RegionFactsRepository,
-        symbol: str,
+        listing_id: int,
         concept: str,
     ) -> Optional[MonetaryFact]:
-        record = repo.latest_monetary_fact(symbol, concept)
+        record = repo.latest_monetary_fact(listing_id, concept)
         if record is None or not is_recent_fact(record):
             return None
         return record
@@ -236,13 +251,13 @@ class NetDebtToEBITDAMetric:
         fact: MonetaryFact,
         concept: str,
         target_currency: str,
-        symbol: str,
+        listing_id: int,
     ) -> Money:
         return require_metric_money(
             fact.money,
             target_currency=target_currency,
             metric_id=self.id,
-            symbol=symbol,
+            listing_id=listing_id,
             input_name=concept,
             as_of=fact.end_date,
         )

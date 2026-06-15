@@ -134,6 +134,13 @@ from pyvalue.persistence.storage import (
     MarketDataRepository,
 )
 
+# Metrics now key on an integer ``listing_id`` (was a ``symbol`` string). The
+# fake repos below ignore the id value -- they serve fixed in-memory facts -- so
+# a single shared constant suffices wherever a test calls ``compute`` or a fact
+# read. (The one real-DB integration test resolves the actual listing_id from
+# the seeded catalog instead of using this constant.)
+LISTING_ID = 1
+
 
 class _TickerCurrencyRepo(RegionFactsRepository):
     """Base fake facts repo exposing a fixed ticker currency and share count.
@@ -158,12 +165,12 @@ class _TickerCurrencyRepo(RegionFactsRepository):
     def __init__(self) -> None:
         super().__init__(self)
 
-    def ticker_currency(self, symbol: str) -> str | None:
+    def ticker_currency_by_id(self, listing_id: int) -> str | None:
         return self._ticker_currency
 
     def facts_for_concept(
         self,
-        symbol: str,
+        listing_id: int,
         concept: str,
         fiscal_period: str | None = None,
         limit: int | None = None,
@@ -173,10 +180,9 @@ class _TickerCurrencyRepo(RegionFactsRepository):
         # this single hook, mirroring the production read path.
         return []
 
-    def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
+    def latest_fact(self, listing_id: int, concept: str) -> FactRecord | None:
         if concept == "EntityCommonStockSharesOutstanding":
             return fact(
-                symbol=symbol,
                 concept=concept,
                 fiscal_period="INSTANT",
                 end_date="2099-12-31",
@@ -184,7 +190,7 @@ class _TickerCurrencyRepo(RegionFactsRepository):
                 currency=None,
                 value=1.0,
             )
-        records = self.facts_for_concept(symbol, concept)
+        records = self.facts_for_concept(listing_id, concept)
         return max(records, key=lambda record: record.end_date) if records else None
 
 
@@ -331,7 +337,7 @@ def test_current_ratio_metric_returns_none_for_fact_currency_mismatch() -> None:
         ticker_currency="USD",
     )
 
-    assert metric.compute(symbol, repo) is None
+    assert metric.compute(LISTING_ID, repo) is None
 
 
 class _FXDatabaseHandle:
@@ -407,7 +413,7 @@ def test_current_ratio_converts_cross_currency_input_via_fx(tmp_path: Path) -> N
 
     repo = _current_ratio_fx_repo(today)
     with metric_fx_service_context(_FXDatabaseHandle(db_path)):
-        result = CurrentRatioMetric().compute("AAPL.US", repo)
+        result = CurrentRatioMetric().compute(LISTING_ID, repo)
 
     assert result is not None
     # AssetsCurrent 150 EUR -> 300 USD; current ratio = 300 / 100.
@@ -419,7 +425,7 @@ def test_current_ratio_skips_when_fx_rate_missing() -> None:
     today = date.today().isoformat()
     repo = _current_ratio_fx_repo(today)
     # No FX context bound -> the no-fetch ephemeral service has no EUR->USD rate.
-    assert CurrentRatioMetric().compute("AAPL.US", repo) is None
+    assert CurrentRatioMetric().compute(LISTING_ID, repo) is None
 
 
 def test_metric_fx_conversion_is_byte_reproducible(tmp_path: Path) -> None:
@@ -431,13 +437,13 @@ def test_metric_fx_conversion_is_byte_reproducible(tmp_path: Path) -> None:
     def run_once() -> str:
         repo = _current_ratio_fx_repo(today)
         with metric_fx_service_context(_FXDatabaseHandle(db_path)):
-            result = CurrentRatioMetric().compute("AAPL.US", repo)
+            result = CurrentRatioMetric().compute(LISTING_ID, repo)
         assert result is not None
         buffer = io.StringIO()
         # repr() round-trips the float exactly, so any nondeterminism in the
         # FX/Money path would change the bytes.
         csv.writer(buffer).writerow(
-            [result.symbol, result.metric_id, repr(result.value), result.as_of]
+            [result.listing_id, result.metric_id, repr(result.value), result.as_of]
         )
         return buffer.getvalue()
 
@@ -446,12 +452,11 @@ def test_metric_fx_conversion_is_byte_reproducible(tmp_path: Path) -> None:
 
 def test_market_capitalization_metric_uses_listing_currency_for_market_cap() -> None:
     metric = MarketCapitalizationMetric()
-    symbol = "AAPL.US"
 
     # The stored price is in the listing's (major) currency, so the derived
     # market cap is reported in that same currency.
     result = metric.compute(
-        symbol,
+        LISTING_ID,
         _OwnerEarningsRepo({}, ticker_currency="USD"),
         _build_market_repo(
             market_cap=100.0,
@@ -472,6 +477,7 @@ def test_market_cap_money_uses_latest_price(tmp_path: Path) -> None:
     from pyvalue.metrics.utils import market_cap_money
     from pyvalue.persistence.storage import (
         FinancialFactsRepository,
+        SecurityRepository,
         SupportedTickerRepository,
     )
 
@@ -504,8 +510,12 @@ def test_market_cap_money_uses_latest_price(tmp_path: Path) -> None:
     market.upsert_price("AAA.US", "2026-01-31", 10.0, currency="USD")
     market.upsert_price("AAA.US", "2026-03-31", 99.0, currency="USD")
 
+    # Unlike the in-memory fakes, this exercises the real repos, which key on the
+    # listing_id assigned by the catalog -- so resolve the actual id rather than
+    # the LISTING_ID placeholder.
+    aaa_id = SecurityRepository(db_path).ensure_from_symbol("AAA.US").security_id
     cap = market_cap_money(
-        "AAA.US",
+        aaa_id,
         repo=facts,
         market_repo=market,
         metric_id="market_cap",
@@ -537,9 +547,10 @@ def test_market_cap_money_uses_latest_price(tmp_path: Path) -> None:
         ],
     )
     market.upsert_price("BBB.US", "2026-01-31", 10.0, currency="USD")
+    bbb_id = SecurityRepository(db_path).ensure_from_symbol("BBB.US").security_id
     assert (
         market_cap_money(
-            "BBB.US",
+            bbb_id,
             repo=facts,
             market_repo=market,
             metric_id="market_cap",
@@ -577,17 +588,17 @@ def _build_net_debt_repo(
     class DummyRepo(_GBPTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
         ) -> list[FactRecord]:
             return resolved_concept_records.get(concept, [])
 
-        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
+        def latest_fact(self, listing_id: int, concept: str) -> FactRecord | None:
             return resolved_latest_records.get(concept)
 
-        def ticker_currency(self, symbol: str) -> str | None:
+        def ticker_currency_by_id(self, listing_id: int) -> str | None:
             return ticker_currency
 
     return DummyRepo()
@@ -707,17 +718,17 @@ def _build_fcf_debt_repo(
     class DummyRepo(_GBPTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
         ) -> list[FactRecord]:
             return resolved_concept_records.get(concept, [])
 
-        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
+        def latest_fact(self, listing_id: int, concept: str) -> FactRecord | None:
             return resolved_latest_records.get(concept)
 
-        def ticker_currency(self, symbol: str) -> str | None:
+        def ticker_currency_by_id(self, listing_id: int) -> str | None:
             return ticker_currency
 
     return DummyRepo()
@@ -733,14 +744,14 @@ def _build_ic_repo(
     class DummyRepo(_GBPTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
         ) -> list[FactRecord]:
             return resolved_concept_records.get(concept, [])
 
-        def ticker_currency(self, symbol: str) -> str | None:
+        def ticker_currency_by_id(self, listing_id: int) -> str | None:
             return ticker_currency
 
     return DummyRepo()
@@ -758,7 +769,7 @@ def _build_metric_repo(
     class DummyRepo(_GBPTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -772,7 +783,7 @@ def _build_metric_repo(
                 if (record.fiscal_period or "").upper() == fiscal_period.upper()
             ]
 
-        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
+        def latest_fact(self, listing_id: int, concept: str) -> FactRecord | None:
             if concept in resolved_latest_records:
                 return resolved_latest_records[concept]
             records = resolved_concept_records.get(concept, [])
@@ -780,9 +791,9 @@ def _build_metric_repo(
                 return records[0]
             # Defer to the base for the Entity-shares count that market_cap_money
             # reads (so market-cap-backed metrics resolve a share count here too).
-            return super().latest_fact(symbol, concept)
+            return super().latest_fact(listing_id, concept)
 
-        def ticker_currency(self, symbol: str) -> str | None:
+        def ticker_currency_by_id(self, listing_id: int) -> str | None:
             return ticker_currency
 
     return DummyRepo()
@@ -1256,17 +1267,15 @@ def test_working_capital_metric_computes_difference() -> None:
     recent = (date.today() - timedelta(days=10)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
+        def latest_fact(self, listing_id: int, concept: str) -> FactRecord | None:
             if concept == "AssetsCurrent":
-                return fact(
-                    symbol=symbol, concept=concept, end_date=recent, value=200.0
-                )
+                return fact(concept=concept, end_date=recent, value=200.0)
             if concept == "LiabilitiesCurrent":
-                return fact(symbol=symbol, concept=concept, end_date=recent, value=50.0)
+                return fact(concept=concept, end_date=recent, value=50.0)
             return None
 
     repo = DummyRepo()
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 150.0
 
@@ -1276,19 +1285,15 @@ def test_current_ratio_metric() -> None:
     recent = (date.today() - timedelta(days=10)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
+        def latest_fact(self, listing_id: int, concept: str) -> FactRecord | None:
             if concept == "AssetsCurrent":
-                return fact(
-                    symbol=symbol, concept=concept, end_date=recent, value=400.0
-                )
+                return fact(concept=concept, end_date=recent, value=400.0)
             if concept == "LiabilitiesCurrent":
-                return fact(
-                    symbol=symbol, concept=concept, end_date=recent, value=200.0
-                )
+                return fact(concept=concept, end_date=recent, value=200.0)
             return None
 
     repo = DummyRepo()
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 2.0
 
@@ -1300,7 +1305,7 @@ def test_eps_streak_counts_consecutive_positive_years() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -1308,25 +1313,21 @@ def test_eps_streak_counts_consecutive_positive_years() -> None:
             if concept == "EarningsPerShare":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         end_date=recent,
                         value=2.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         end_date="2023-09-30",
                         value=2.1,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         end_date="2022-09-30",
                         value=1.5,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         end_date="2021-09-30",
                         value=-0.5,
@@ -1334,11 +1335,11 @@ def test_eps_streak_counts_consecutive_positive_years() -> None:
                 ]
             return []
 
-        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
-            return fact(symbol=symbol, concept=concept, end_date=recent, value=2.0)
+        def latest_fact(self, listing_id: int, concept: str) -> FactRecord | None:
+            return fact(concept=concept, end_date=recent, value=2.0)
 
     repo = DummyRepo()
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 3
     assert result.as_of == recent
@@ -1351,7 +1352,7 @@ def test_graham_eps_cagr_metric() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -1359,7 +1360,6 @@ def test_graham_eps_cagr_metric() -> None:
             if concept == "EarningsPerShare":
                 records = [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         end_date=recent,
                         value=2.0,
@@ -1370,7 +1370,6 @@ def test_graham_eps_cagr_metric() -> None:
                     value = 1.0 + (year - 2000) * 0.1
                     records.append(
                         fact(
-                            symbol=symbol,
                             concept=concept,
                             end_date=f"{year}-09-30",
                             value=value,
@@ -1379,11 +1378,11 @@ def test_graham_eps_cagr_metric() -> None:
                 return records
             return []
 
-        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
-            return fact(symbol=symbol, concept=concept, end_date=recent, value=2.0)
+        def latest_fact(self, listing_id: int, concept: str) -> FactRecord | None:
+            return fact(concept=concept, end_date=recent, value=2.0)
 
     repo = DummyRepo()
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
 
 
@@ -1402,7 +1401,7 @@ def test_graham_multiplier_metric() -> None:
 
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -1410,28 +1409,24 @@ def test_graham_multiplier_metric() -> None:
             if concept == "EarningsPerShare":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=recent,
                         value=2.5,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date="2024-09-30",
                         value=2.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q2",
                         end_date="2024-06-30",
                         value=1.5,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q1",
                         end_date="2024-03-31",
@@ -1440,13 +1435,13 @@ def test_graham_multiplier_metric() -> None:
                 ]
             return []
 
-        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
+        def latest_fact(self, listing_id: int, concept: str) -> FactRecord | None:
             value = self.values.get(concept)
             if value is None:
                 return None
-            return fact(symbol=symbol, concept=concept, end_date=recent, value=value)
+            return fact(concept=concept, end_date=recent, value=value)
 
-        def ticker_currency(self, symbol: str) -> str | None:
+        def ticker_currency_by_id(self, listing_id: int) -> str | None:
             return "USD"
 
     class DummyMarketRepo(MarketDataRepository):
@@ -1456,15 +1451,17 @@ def test_graham_multiplier_metric() -> None:
         def __init__(self) -> None:
             pass
 
-        def latest_snapshot(self, symbol: str) -> PriceData | None:
-            return PriceData(symbol=symbol, price=150.0, as_of=recent, currency="USD")
+        def latest_snapshot_by_id(self, listing_id: int) -> PriceData | None:
+            return PriceData(
+                symbol="AAPL.US", price=150.0, as_of=recent, currency="USD"
+            )
 
-        def ticker_currency(self, symbol: str) -> str | None:
+        def ticker_currency_by_id(self, listing_id: int) -> str | None:
             return "USD"
 
     repo = DummyRepo()
     market_repo = DummyMarketRepo()
-    result = metric.compute("AAPL.US", repo, market_repo)
+    result = metric.compute(LISTING_ID, repo, market_repo)
     assert result is not None
     assert result.value > 0
 
@@ -1484,7 +1481,7 @@ def test_graham_multiplier_falls_back_to_fy_eps() -> None:
 
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -1492,7 +1489,6 @@ def test_graham_multiplier_falls_back_to_fy_eps() -> None:
             if concept == "EarningsPerShare" and fiscal_period == "FY":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=recent,
@@ -1501,13 +1497,13 @@ def test_graham_multiplier_falls_back_to_fy_eps() -> None:
                 ]
             return []
 
-        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
+        def latest_fact(self, listing_id: int, concept: str) -> FactRecord | None:
             value = self.values.get(concept)
             if value is None:
                 return None
-            return fact(symbol=symbol, concept=concept, end_date=recent, value=value)
+            return fact(concept=concept, end_date=recent, value=value)
 
-        def ticker_currency(self, symbol: str) -> str | None:
+        def ticker_currency_by_id(self, listing_id: int) -> str | None:
             return "USD"
 
     class DummyMarketRepo(MarketDataRepository):
@@ -1517,15 +1513,17 @@ def test_graham_multiplier_falls_back_to_fy_eps() -> None:
         def __init__(self) -> None:
             pass
 
-        def latest_snapshot(self, symbol: str) -> PriceData | None:
-            return PriceData(symbol=symbol, price=150.0, as_of=recent, currency="USD")
+        def latest_snapshot_by_id(self, listing_id: int) -> PriceData | None:
+            return PriceData(
+                symbol="AAPL.US", price=150.0, as_of=recent, currency="USD"
+            )
 
-        def ticker_currency(self, symbol: str) -> str | None:
+        def ticker_currency_by_id(self, listing_id: int) -> str | None:
             return "USD"
 
     repo = DummyRepo()
     market_repo = DummyMarketRepo()
-    result = metric.compute("AAPL.US", repo, market_repo)
+    result = metric.compute(LISTING_ID, repo, market_repo)
     assert result is not None
 
 
@@ -1537,7 +1535,7 @@ def test_net_debt_to_ebitda_metric() -> None:
         concept_records=_base_ebit_da_concepts(quarter_dates),
         latest_records=_default_net_debt_latest_records(q4),
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 0.8
 
@@ -1557,7 +1555,7 @@ def test_net_debt_to_ebitda_uses_da_fallback_per_quarter() -> None:
         concept_records=concept_records,
         latest_records=_default_net_debt_latest_records(q4),
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 0.8
 
@@ -1571,7 +1569,7 @@ def test_net_debt_to_ebitda_requires_four_quarters_of_ebit() -> None:
         concept_records=concept_records,
         latest_records={},
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -1583,7 +1581,7 @@ def test_debt_paydown_years_metric() -> None:
         concept_records=_base_debt_paydown_concepts(quarter_dates),
         latest_records=_default_debt_paydown_latest_records(q4),
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 1.0
 
@@ -1596,7 +1594,7 @@ def test_fcf_to_debt_metric() -> None:
         concept_records=_base_debt_paydown_concepts(quarter_dates),
         latest_records=_default_debt_paydown_latest_records(q4),
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 1.0
 
@@ -1623,7 +1621,7 @@ def test_debt_paydown_years_uses_total_debt_fallback() -> None:
         concept_records=_base_debt_paydown_concepts(quarter_dates),
         latest_records=latest,
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 1.0
 
@@ -1644,7 +1642,7 @@ def test_debt_paydown_years_uses_one_side_debt_fallback() -> None:
         concept_records=_base_debt_paydown_concepts(quarter_dates),
         latest_records=latest,
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 0.75
 
@@ -1654,17 +1652,15 @@ def test_short_term_debt_share_metric() -> None:
     recent = (date.today() - timedelta(days=10)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
+        def latest_fact(self, listing_id: int, concept: str) -> FactRecord | None:
             if concept == "ShortTermDebt":
                 return fact(
-                    symbol=symbol,
                     concept=concept,
                     end_date=recent,
                     value=25.0,
                 )
             if concept == "LongTermDebt":
                 return fact(
-                    symbol=symbol,
                     concept=concept,
                     end_date=recent,
                     value=75.0,
@@ -1672,7 +1668,7 @@ def test_short_term_debt_share_metric() -> None:
             return None
 
     repo = DummyRepo()
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 0.25
 
@@ -1682,10 +1678,9 @@ def test_short_term_debt_share_uses_total_debt_fallback_when_long_missing() -> N
     recent = (date.today() - timedelta(days=10)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
+        def latest_fact(self, listing_id: int, concept: str) -> FactRecord | None:
             if concept == "ShortTermDebt":
                 return fact(
-                    symbol=symbol,
                     concept=concept,
                     end_date=recent,
                     value=30.0,
@@ -1695,7 +1690,6 @@ def test_short_term_debt_share_uses_total_debt_fallback_when_long_missing() -> N
                 return None
             if concept == "TotalDebtFromBalanceSheet":
                 return fact(
-                    symbol=symbol,
                     concept=concept,
                     end_date=recent,
                     value=120.0,
@@ -1704,7 +1698,7 @@ def test_short_term_debt_share_uses_total_debt_fallback_when_long_missing() -> N
             return None
 
     repo = DummyRepo()
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 0.25
 
@@ -1714,10 +1708,9 @@ def test_short_term_debt_share_requires_short_term_debt() -> None:
     recent = (date.today() - timedelta(days=10)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
+        def latest_fact(self, listing_id: int, concept: str) -> FactRecord | None:
             if concept == "LongTermDebt":
                 return fact(
-                    symbol=symbol,
                     concept=concept,
                     end_date=recent,
                     value=100.0,
@@ -1725,7 +1718,6 @@ def test_short_term_debt_share_requires_short_term_debt() -> None:
                 )
             if concept == "TotalDebtFromBalanceSheet":
                 return fact(
-                    symbol=symbol,
                     concept=concept,
                     end_date=recent,
                     value=140.0,
@@ -1734,7 +1726,7 @@ def test_short_term_debt_share_requires_short_term_debt() -> None:
             return None
 
     repo = DummyRepo()
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -1743,17 +1735,15 @@ def test_short_term_debt_share_skips_non_positive_total() -> None:
     recent = (date.today() - timedelta(days=10)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
+        def latest_fact(self, listing_id: int, concept: str) -> FactRecord | None:
             if concept == "ShortTermDebt":
                 return fact(
-                    symbol=symbol,
                     concept=concept,
                     end_date=recent,
                     value=0.0,
                 )
             if concept == "LongTermDebt":
                 return fact(
-                    symbol=symbol,
                     concept=concept,
                     end_date=recent,
                     value=0.0,
@@ -1761,7 +1751,7 @@ def test_short_term_debt_share_skips_non_positive_total() -> None:
             return None
 
     repo = DummyRepo()
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -1770,10 +1760,9 @@ def test_short_term_debt_share_skips_ratio_out_of_bounds() -> None:
     recent = (date.today() - timedelta(days=10)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
+        def latest_fact(self, listing_id: int, concept: str) -> FactRecord | None:
             if concept == "ShortTermDebt":
                 return fact(
-                    symbol=symbol,
                     concept=concept,
                     end_date=recent,
                     value=120.0,
@@ -1781,7 +1770,6 @@ def test_short_term_debt_share_skips_ratio_out_of_bounds() -> None:
                 )
             if concept == "TotalDebtFromBalanceSheet":
                 return fact(
-                    symbol=symbol,
                     concept=concept,
                     end_date=recent,
                     value=100.0,
@@ -1790,7 +1778,7 @@ def test_short_term_debt_share_skips_ratio_out_of_bounds() -> None:
             return None
 
     repo = DummyRepo()
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -1799,10 +1787,9 @@ def test_short_term_debt_share_skips_currency_mismatch() -> None:
     recent = (date.today() - timedelta(days=10)).isoformat()
 
     class DummyRepo(_USDTickerCurrencyRepo):
-        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
+        def latest_fact(self, listing_id: int, concept: str) -> FactRecord | None:
             if concept == "ShortTermDebt":
                 return fact(
-                    symbol=symbol,
                     concept=concept,
                     end_date=recent,
                     value=30.0,
@@ -1812,7 +1799,6 @@ def test_short_term_debt_share_skips_currency_mismatch() -> None:
                 return None
             if concept == "TotalDebtFromBalanceSheet":
                 return fact(
-                    symbol=symbol,
                     concept=concept,
                     end_date=recent,
                     value=120.0,
@@ -1821,7 +1807,7 @@ def test_short_term_debt_share_skips_currency_mismatch() -> None:
             return None
 
     repo = DummyRepo()
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -1867,7 +1853,7 @@ def test_ic_mqr_metric() -> None:
         ],
     }
     repo = _build_ic_repo(concept_records=concept_records)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 600.0
 
@@ -1914,7 +1900,7 @@ def test_ic_mqr_uses_total_debt_fallback_when_long_missing() -> None:
         ],
     }
     repo = _build_ic_repo(concept_records=concept_records)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 660.0
 
@@ -1952,7 +1938,7 @@ def test_ic_mqr_uses_one_side_debt_fallback() -> None:
         ],
     }
     repo = _build_ic_repo(concept_records=concept_records)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 580.0
 
@@ -1999,7 +1985,7 @@ def test_ic_mqr_uses_cash_fallback_when_primary_missing() -> None:
         ],
     }
     repo = _build_ic_repo(concept_records=concept_records)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 580.0
 
@@ -2037,7 +2023,7 @@ def test_ic_mqr_returns_none_when_missing_required_inputs() -> None:
         ],
     }
     repo = _build_ic_repo(concept_records=concept_records)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -2083,7 +2069,7 @@ def test_ic_mqr_returns_none_on_currency_mismatch() -> None:
         ],
     }
     repo = _build_ic_repo(concept_records=concept_records)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -2129,7 +2115,7 @@ def test_ic_mqr_emits_signed_negative_value() -> None:
         ],
     }
     repo = _build_ic_repo(concept_records=concept_records)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == -100.0
 
@@ -2176,7 +2162,7 @@ def test_ic_mqr_returns_none_when_latest_quarter_is_stale() -> None:
         ],
     }
     repo = _build_ic_repo(concept_records=concept_records)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -2222,7 +2208,7 @@ def test_ic_fy_metric() -> None:
         ],
     }
     repo = _build_ic_repo(concept_records=concept_records)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 1100.0
 
@@ -2269,7 +2255,7 @@ def test_ic_fy_returns_none_when_latest_fy_is_stale() -> None:
         ],
     }
     repo = _build_ic_repo(concept_records=concept_records)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -2344,7 +2330,7 @@ def test_avg_ic_uses_same_quarter_yoy_when_available() -> None:
         ],
     }
     repo = _build_ic_repo(concept_records=concept_records)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 555.0
     assert result.as_of == q4
@@ -2443,7 +2429,7 @@ def test_avg_ic_falls_back_to_fy_when_quarterly_pair_missing() -> None:
         ],
     }
     repo = _build_ic_repo(concept_records=concept_records)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 1050.0
     assert result.as_of == fy_latest
@@ -2542,7 +2528,7 @@ def test_avg_ic_requires_strict_prior_year_for_fy_fallback() -> None:
         ],
     }
     repo = _build_ic_repo(concept_records=concept_records)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -2579,7 +2565,7 @@ def test_avg_ic_returns_none_when_no_quarterly_or_fy_pairs() -> None:
         ],
     }
     repo = _build_ic_repo(concept_records=concept_records)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -2654,7 +2640,7 @@ def test_avg_ic_returns_none_on_cross_point_currency_mismatch() -> None:
         ],
     }
     repo = _build_ic_repo(concept_records=concept_records)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -2669,7 +2655,7 @@ def test_return_on_invested_capital_metric() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -2677,28 +2663,24 @@ def test_return_on_invested_capital_metric() -> None:
             if concept == "OperatingIncomeLoss":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
                         value=100.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=q3,
                         value=100.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q2",
                         end_date=q2,
                         value=100.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q1",
                         end_date=q1,
@@ -2708,28 +2690,24 @@ def test_return_on_invested_capital_metric() -> None:
             if concept == "IncomeBeforeIncomeTaxes":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
                         value=125.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=q3,
                         value=125.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q2",
                         end_date=q2,
                         value=125.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q1",
                         end_date=q1,
@@ -2739,28 +2717,24 @@ def test_return_on_invested_capital_metric() -> None:
             if concept == "IncomeTaxExpense":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
                         value=25.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=q3,
                         value=25.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q2",
                         end_date=q2,
                         value=25.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q1",
                         end_date=q1,
@@ -2770,14 +2744,12 @@ def test_return_on_invested_capital_metric() -> None:
             if concept == "ShortTermDebt":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
                         value=50.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=q3,
@@ -2787,14 +2759,12 @@ def test_return_on_invested_capital_metric() -> None:
             if concept == "LongTermDebt":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
                         value=150.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=q3,
@@ -2804,14 +2774,12 @@ def test_return_on_invested_capital_metric() -> None:
             if concept == "StockholdersEquity":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
                         value=600.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=q3,
@@ -2821,14 +2789,12 @@ def test_return_on_invested_capital_metric() -> None:
             if concept == "CashAndShortTermInvestments":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
                         value=150.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=q3,
@@ -2838,7 +2804,7 @@ def test_return_on_invested_capital_metric() -> None:
             return []
 
     repo = DummyRepo()
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 0.5
 
@@ -2854,7 +2820,7 @@ def test_return_on_invested_capital_uses_fallback_tax_rate() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -2862,28 +2828,24 @@ def test_return_on_invested_capital_uses_fallback_tax_rate() -> None:
             if concept == "OperatingIncomeLoss":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
                         value=100.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=q3,
                         value=100.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q2",
                         end_date=q2,
                         value=100.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q1",
                         end_date=q1,
@@ -2893,14 +2855,12 @@ def test_return_on_invested_capital_uses_fallback_tax_rate() -> None:
             if concept == "ShortTermDebt":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
                         value=50.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=q3,
@@ -2910,14 +2870,12 @@ def test_return_on_invested_capital_uses_fallback_tax_rate() -> None:
             if concept == "LongTermDebt":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
                         value=150.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=q3,
@@ -2927,14 +2885,12 @@ def test_return_on_invested_capital_uses_fallback_tax_rate() -> None:
             if concept == "StockholdersEquity":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
                         value=600.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=q3,
@@ -2944,14 +2900,12 @@ def test_return_on_invested_capital_uses_fallback_tax_rate() -> None:
             if concept == "CashAndShortTermInvestments":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
                         value=150.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=q3,
@@ -2961,7 +2915,7 @@ def test_return_on_invested_capital_uses_fallback_tax_rate() -> None:
             return []
 
     repo = DummyRepo()
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert round(result.value, 4) == round(316.0 / 640.0, 4)
 
@@ -2969,7 +2923,7 @@ def test_return_on_invested_capital_uses_fallback_tax_rate() -> None:
 def test_roic_ttm_metric() -> None:
     metric = RoicTTMMetric()
     repo = _build_ic_repo(concept_records=_base_roic_concepts())
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert round(result.value, 6) == round(320.0 / 555.0, 6)
 
@@ -2981,7 +2935,7 @@ def test_roic_ttm_uses_fy_tax_proxy_when_ttm_rate_invalid() -> None:
             quarterly_pretax_values=(0.0, 0.0, 0.0, 0.0),
         )
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert round(result.value, 6) == round(280.0 / 555.0, 6)
 
@@ -2995,7 +2949,7 @@ def test_roic_ttm_uses_default_tax_rate_when_no_valid_tax_inputs() -> None:
             include_fy_tax_proxy=False,
         )
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert round(result.value, 6) == round(316.0 / 555.0, 6)
 
@@ -3005,7 +2959,7 @@ def test_roic_ttm_returns_none_when_ebit_missing() -> None:
     concepts = _base_roic_concepts()
     concepts["OperatingIncomeLoss"] = concepts["OperatingIncomeLoss"][:3]
     repo = _build_ic_repo(concept_records=concepts)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -3029,7 +2983,7 @@ def test_roic_ttm_returns_none_when_ebit_stale() -> None:
         for period, end_date in zip(("Q4", "Q3", "Q2", "Q1"), stale_dates, strict=True)
     ]
     repo = _build_ic_repo(concept_records=concepts)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -3040,7 +2994,7 @@ def test_roic_ttm_returns_none_when_avg_ic_missing() -> None:
             include_avg_ic=False,
         )
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -3054,7 +3008,7 @@ def test_roic_ttm_returns_none_when_nopat_non_positive() -> None:
             quarterly_ebit_values=(-100.0, -100.0, -100.0, -100.0),
         )
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -3066,7 +3020,7 @@ def test_roic_ttm_returns_none_when_avg_ic_non_positive() -> None:
             avg_prior=(50.0, 100.0, 100.0, 450.0),
         )
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -3081,7 +3035,7 @@ def test_roic_ttm_returns_none_on_numerator_currency_mismatch() -> None:
         currency="EUR",
     )
     repo = _build_ic_repo(concept_records=concepts)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -3092,7 +3046,7 @@ def test_roic_ttm_returns_none_on_numerator_vs_avg_ic_currency_mismatch() -> Non
             avg_currency="EUR",
         )
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -3102,9 +3056,9 @@ def test_roic_10y_metrics_happy_path() -> None:
     min_metric = ROIC10YMinMetric()
     repo = _build_ic_repo(concept_records=_base_roic_10y_concepts())
 
-    median_result = median_metric.compute("AAPL.US", repo)
-    count_result = count_metric.compute("AAPL.US", repo)
-    min_result = min_metric.compute("AAPL.US", repo)
+    median_result = median_metric.compute(LISTING_ID, repo)
+    count_result = count_metric.compute(LISTING_ID, repo)
+    min_result = min_metric.compute(LISTING_ID, repo)
 
     assert median_result is not None
     assert count_result is not None
@@ -3124,7 +3078,7 @@ def test_roic_10y_returns_none_when_strict_window_missing_year() -> None:
         if rec.end_date != f"{latest_year - 5}-09-30"
     ]
     repo = _build_ic_repo(concept_records=concepts)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -3144,7 +3098,7 @@ def test_roic_10y_tax_fallback_uses_latest_valid_fy_proxy() -> None:
             pretax_by_year=pretax,
         )
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 0.0
 
@@ -3164,7 +3118,7 @@ def test_roic_10y_tax_fallback_uses_default_when_no_valid_proxy() -> None:
             pretax_by_year=pretax,
         )
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert round(result.value, 6) == round(0.158, 6)
 
@@ -3184,7 +3138,7 @@ def test_roic_10y_min_keeps_signed_negative_year() -> None:
         for rec in concepts["OperatingIncomeLoss"]
     ]
     repo = _build_ic_repo(concept_records=concepts)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert round(result.value, 6) == -0.04
 
@@ -3199,7 +3153,7 @@ def test_roic_10y_returns_none_when_avg_ic_year_pair_is_zero() -> None:
         }
     )
     repo = _build_ic_repo(concept_records=concepts)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -3210,7 +3164,7 @@ def test_roic_10y_returns_none_on_series_currency_conflict() -> None:
         currency_by_year={latest_year - 3: "EUR"},
     )
     repo = _build_ic_repo(concept_records=concepts)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -3220,7 +3174,7 @@ def test_roic_10y_returns_none_when_latest_fy_stale() -> None:
     repo = _build_ic_repo(
         concept_records=_base_roic_10y_concepts(latest_year=stale_latest_year)
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -3239,7 +3193,7 @@ def test_roic_10y_diagnostics_reports_missing_prior_ic_year() -> None:
         )
     )
 
-    diagnostic = calculator.diagnose_series("AAPL.US", repo)
+    diagnostic = calculator.diagnose_series(LISTING_ID, repo)
 
     assert diagnostic.snapshot is None
     assert diagnostic.failure_reason == "missing prior FY invested capital"
@@ -3249,7 +3203,7 @@ def test_roic_10y_diagnostics_reports_missing_prior_ic_year() -> None:
         item for item in diagnostic.year_diagnostics if item.year == latest_year - 9
     )
     assert oldest_year.roic_failure_reason == "missing prior FY invested capital"
-    assert metric.compute("AAPL.US", repo) is None
+    assert metric.compute(LISTING_ID, repo) is None
 
 
 def test_roic_10y_diagnostics_reports_missing_debt_input_on_latest_year() -> None:
@@ -3268,7 +3222,7 @@ def test_roic_10y_diagnostics_reports_missing_debt_input_on_latest_year() -> Non
     ]
     repo = _build_ic_repo(concept_records=concepts)
 
-    diagnostic = calculator.diagnose_series("AAPL.US", repo)
+    diagnostic = calculator.diagnose_series(LISTING_ID, repo)
 
     assert diagnostic.snapshot is None
     assert diagnostic.failure_reason == "missing invested capital debt input"
@@ -3292,7 +3246,7 @@ def test_roic_10y_diagnostics_raises_for_currency_conflict_on_latest_year() -> N
     )
 
     with pytest.raises(MetricCurrencyInvariantError):
-        calculator.diagnose_series("AAPL.US", repo)
+        calculator.diagnose_series(LISTING_ID, repo)
 
 
 def test_roic_10y_diagnostics_records_tax_fallback_without_failing() -> None:
@@ -3308,7 +3262,7 @@ def test_roic_10y_diagnostics_records_tax_fallback_without_failing() -> None:
         )
     )
 
-    diagnostic = calculator.diagnose_series("AAPL.US", repo)
+    diagnostic = calculator.diagnose_series(LISTING_ID, repo)
 
     assert diagnostic.snapshot is not None
     assert diagnostic.failure_reason is None
@@ -3332,10 +3286,10 @@ def test_roic_7y_metrics_pass_when_10y_fails_on_missing_eleventh_ic_year() -> No
         )
     )
 
-    assert ROIC10YMedianMetric().compute("AAPL.US", repo) is None
+    assert ROIC10YMedianMetric().compute(LISTING_ID, repo) is None
 
-    median_result = ROIC7YMedianMetric().compute("AAPL.US", repo)
-    min_result = ROIC7YMinMetric().compute("AAPL.US", repo)
+    median_result = ROIC7YMedianMetric().compute(LISTING_ID, repo)
+    min_result = ROIC7YMinMetric().compute(LISTING_ID, repo)
 
     assert median_result is not None
     assert min_result is not None
@@ -3351,7 +3305,7 @@ def test_iroic_5y_metric_happy_path() -> None:
         ic_short_by_year=_iroic_short_debt_ramp(latest_year, step=10.0),
     )
     repo = _build_ic_repo(concept_records=concepts)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert round(result.value, 6) == 2.0
 
@@ -3369,7 +3323,7 @@ def test_iroic_5y_returns_none_when_strict_t_minus_5_missing() -> None:
         if record.end_date != f"{latest_year - 5}-09-30"
     ]
     repo = _build_ic_repo(concept_records=concepts)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -3388,7 +3342,7 @@ def test_iroic_5y_tax_fallback_uses_latest_valid_fy_proxy() -> None:
         ic_short_by_year=_iroic_short_debt_ramp(latest_year, step=10.0),
     )
     repo = _build_ic_repo(concept_records=concepts)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert round(result.value, 6) == 1.4
 
@@ -3406,7 +3360,7 @@ def test_iroic_5y_tax_fallback_uses_default_when_no_valid_proxy() -> None:
         ic_short_by_year=_iroic_short_debt_ramp(latest_year, step=10.0),
     )
     repo = _build_ic_repo(concept_records=concepts)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert round(result.value, 6) == 1.975
 
@@ -3414,7 +3368,7 @@ def test_iroic_5y_tax_fallback_uses_default_when_no_valid_proxy() -> None:
 def test_iroic_5y_returns_none_when_delta_ic_non_positive() -> None:
     metric = IncrementalROICFiveYearMetric()
     repo = _build_ic_repo(concept_records=_base_roic_10y_concepts())
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -3429,7 +3383,7 @@ def test_iroic_5y_returns_none_when_relative_delta_ic_is_tiny() -> None:
         },
     )
     repo = _build_ic_repo(concept_records=concepts)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -3442,7 +3396,7 @@ def test_iroic_5y_returns_none_on_currency_conflict() -> None:
         currency_by_year={latest_year - 5: "EUR"},
     )
     repo = _build_ic_repo(concept_records=concepts)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -3454,7 +3408,7 @@ def test_iroic_5y_returns_none_when_latest_fy_stale() -> None:
         ic_short_by_year=_iroic_short_debt_ramp(stale_latest_year, step=10.0),
     )
     repo = _build_ic_repo(concept_records=concepts)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -3476,7 +3430,7 @@ def test_iroic_5y_keeps_signed_negative_delta_nopat() -> None:
         for record in concepts["OperatingIncomeLoss"]
     ]
     repo = _build_ic_repo(concept_records=concepts)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert round(result.value, 6) == -1.52
 
@@ -3484,7 +3438,7 @@ def test_iroic_5y_keeps_signed_negative_delta_nopat() -> None:
 def test_gm_10y_std_metric_happy_path() -> None:
     metric = GrossMarginTenYearStdMetric()
     repo = _build_ic_repo(concept_records=_base_gm_10y_concepts())
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
 
     margins = [0.10 + 0.01 * idx for idx in range(10)]
@@ -3503,7 +3457,7 @@ def test_gm_10y_std_uses_revenue_minus_cost_fallback_when_gross_missing() -> Non
         if record.end_date != f"{latest_year - 4}-09-30"
     ]
     repo = _build_ic_repo(concept_records=concepts)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
 
 
@@ -3517,7 +3471,7 @@ def test_gm_10y_std_returns_none_when_strict_window_missing_year() -> None:
         if record.end_date != f"{latest_year - 5}-09-30"
     ]
     repo = _build_ic_repo(concept_records=concepts)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -3532,7 +3486,7 @@ def test_gm_10y_std_returns_none_when_revenue_non_positive() -> None:
         },
     )
     repo = _build_ic_repo(concept_records=concepts)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -3544,7 +3498,7 @@ def test_gm_10y_std_allows_mixed_series_currencies_when_yearly_margins_align() -
         currency_by_year={latest_year - 2: "EUR"},
     )
     repo = _build_ic_repo(concept_records=concepts)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -3554,7 +3508,7 @@ def test_gm_10y_std_returns_none_when_latest_fy_stale() -> None:
     repo = _build_ic_repo(
         concept_records=_base_gm_10y_concepts(latest_year=stale_latest_year)
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -3563,8 +3517,8 @@ def test_opm_10y_metrics_happy_path() -> None:
     min_metric = OperatingMarginTenYearMinMetric()
     repo = _build_ic_repo(concept_records=_base_opm_10y_concepts())
 
-    std_result = std_metric.compute("AAPL.US", repo)
-    min_result = min_metric.compute("AAPL.US", repo)
+    std_result = std_metric.compute(LISTING_ID, repo)
+    min_result = min_metric.compute(LISTING_ID, repo)
 
     assert std_result is not None
     assert min_result is not None
@@ -3586,7 +3540,7 @@ def test_opm_10y_returns_none_when_strict_window_missing_year() -> None:
         if record.end_date != f"{latest_year - 5}-09-30"
     ]
     repo = _build_ic_repo(concept_records=concepts)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -3601,7 +3555,7 @@ def test_opm_10y_returns_none_when_revenue_non_positive() -> None:
         },
     )
     repo = _build_ic_repo(concept_records=concepts)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -3613,7 +3567,7 @@ def test_opm_10y_allows_mixed_series_currencies_when_yearly_margins_align() -> N
         currency_by_year={latest_year - 2: "EUR"},
     )
     repo = _build_ic_repo(concept_records=concepts)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -3623,7 +3577,7 @@ def test_opm_10y_returns_none_when_latest_fy_stale() -> None:
     repo = _build_ic_repo(
         concept_records=_base_opm_10y_concepts(latest_year=stale_latest_year)
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -3642,7 +3596,7 @@ def test_opm_10y_min_keeps_signed_negative_margin() -> None:
         },
     )
     repo = _build_ic_repo(concept_records=concepts)
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert round(result.value, 12) == round(-20.0 / (1000.0 + 10.0 * 5), 12)
 
@@ -3654,7 +3608,7 @@ def test_opm_7y_min_happy_path() -> None:
         concept_records=_base_opm_10y_concepts(latest_year=latest_year)
     )
 
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
 
     assert result is not None
     margins = [0.08 + 0.01 * idx for idx in range(7)]
@@ -3672,7 +3626,7 @@ def test_opm_7y_min_returns_none_when_strict_window_missing_year() -> None:
     ]
     repo = _build_ic_repo(concept_records=concepts)
 
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
 
     assert result is None
 
@@ -3689,7 +3643,7 @@ def test_opm_7y_min_returns_none_when_revenue_non_positive() -> None:
     )
     repo = _build_ic_repo(concept_records=concepts)
 
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
 
     assert result is None
 
@@ -3710,7 +3664,7 @@ def test_opm_7y_min_keeps_signed_negative_margin() -> None:
     )
     repo = _build_ic_repo(concept_records=concepts)
 
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
 
     assert result is not None
     expected_revenue = 1000.0 + 10.0 * 7
@@ -3728,7 +3682,7 @@ def test_debt_paydown_years_skips_non_positive_fcf() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -3736,7 +3690,6 @@ def test_debt_paydown_years_skips_non_positive_fcf() -> None:
             if concept == "NetCashProvidedByUsedInOperatingActivities":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -3744,7 +3697,6 @@ def test_debt_paydown_years_skips_non_positive_fcf() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=q3,
@@ -3752,7 +3704,6 @@ def test_debt_paydown_years_skips_non_positive_fcf() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q2",
                         end_date=q2,
@@ -3760,7 +3711,6 @@ def test_debt_paydown_years_skips_non_positive_fcf() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q1",
                         end_date=q1,
@@ -3771,7 +3721,6 @@ def test_debt_paydown_years_skips_non_positive_fcf() -> None:
             if concept == "CapitalExpenditures":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -3779,7 +3728,6 @@ def test_debt_paydown_years_skips_non_positive_fcf() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=q3,
@@ -3787,7 +3735,6 @@ def test_debt_paydown_years_skips_non_positive_fcf() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q2",
                         end_date=q2,
@@ -3795,7 +3742,6 @@ def test_debt_paydown_years_skips_non_positive_fcf() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q1",
                         end_date=q1,
@@ -3805,10 +3751,9 @@ def test_debt_paydown_years_skips_non_positive_fcf() -> None:
                 ]
             return []
 
-        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
+        def latest_fact(self, listing_id: int, concept: str) -> FactRecord | None:
             if concept == "ShortTermDebt":
                 return fact(
-                    symbol=symbol,
                     concept=concept,
                     end_date=q4,
                     value=50.0,
@@ -3816,7 +3761,6 @@ def test_debt_paydown_years_skips_non_positive_fcf() -> None:
                 )
             if concept == "LongTermDebt":
                 return fact(
-                    symbol=symbol,
                     concept=concept,
                     end_date=q4,
                     value=150.0,
@@ -3825,7 +3769,7 @@ def test_debt_paydown_years_skips_non_positive_fcf() -> None:
             return None
 
     repo = DummyRepo()
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -3849,7 +3793,7 @@ def test_fcf_to_debt_skips_non_positive_fcf() -> None:
         concept_records=concept_records,
         latest_records=_default_debt_paydown_latest_records(q4),
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -3874,8 +3818,8 @@ def test_fcf_and_debt_paydown_skip_non_positive_debt() -> None:
         latest_records=latest,
     )
 
-    assert DebtPaydownYearsMetric().compute("AAPL.US", repo) is None
-    assert FCFToDebtMetric().compute("AAPL.US", repo) is None
+    assert DebtPaydownYearsMetric().compute(LISTING_ID, repo) is None
+    assert FCFToDebtMetric().compute(LISTING_ID, repo) is None
 
 
 def test_fcf_to_debt_uses_capex_zero_when_missing() -> None:
@@ -3893,7 +3837,7 @@ def test_fcf_to_debt_uses_capex_zero_when_missing() -> None:
         concept_records=concept_records,
         latest_records=_default_debt_paydown_latest_records(q4),
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 2.0
 
@@ -3920,8 +3864,8 @@ def test_fcf_and_debt_paydown_return_none_on_currency_mismatch() -> None:
         latest_records=_default_debt_paydown_latest_records(q4),
     )
 
-    assert DebtPaydownYearsMetric().compute("AAPL.US", repo) is None
-    assert FCFToDebtMetric().compute("AAPL.US", repo) is None
+    assert DebtPaydownYearsMetric().compute(LISTING_ID, repo) is None
+    assert FCFToDebtMetric().compute(LISTING_ID, repo) is None
 
 
 def test_registry_includes_fcf_to_debt_metric() -> None:
@@ -3939,7 +3883,7 @@ def test_interest_coverage_metric() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -3947,7 +3891,6 @@ def test_interest_coverage_metric() -> None:
             if concept == "OperatingIncomeLoss":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -3955,7 +3898,6 @@ def test_interest_coverage_metric() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=q3,
@@ -3963,7 +3905,6 @@ def test_interest_coverage_metric() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q2",
                         end_date=q2,
@@ -3971,7 +3912,6 @@ def test_interest_coverage_metric() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q1",
                         end_date=q1,
@@ -3982,7 +3922,6 @@ def test_interest_coverage_metric() -> None:
             if concept == "InterestExpense":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -3990,7 +3929,6 @@ def test_interest_coverage_metric() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=q3,
@@ -3998,7 +3936,6 @@ def test_interest_coverage_metric() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q2",
                         end_date=q2,
@@ -4006,7 +3943,6 @@ def test_interest_coverage_metric() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q1",
                         end_date=q1,
@@ -4017,7 +3953,7 @@ def test_interest_coverage_metric() -> None:
             return []
 
     repo = DummyRepo()
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 10.0
 
@@ -4033,7 +3969,7 @@ def test_interest_coverage_skips_non_positive_interest() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -4041,7 +3977,6 @@ def test_interest_coverage_skips_non_positive_interest() -> None:
             if concept == "OperatingIncomeLoss":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -4049,7 +3984,6 @@ def test_interest_coverage_skips_non_positive_interest() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=q3,
@@ -4057,7 +3991,6 @@ def test_interest_coverage_skips_non_positive_interest() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q2",
                         end_date=q2,
@@ -4065,7 +3998,6 @@ def test_interest_coverage_skips_non_positive_interest() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q1",
                         end_date=q1,
@@ -4076,7 +4008,6 @@ def test_interest_coverage_skips_non_positive_interest() -> None:
             if concept == "InterestExpense":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -4084,7 +4015,6 @@ def test_interest_coverage_skips_non_positive_interest() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=q3,
@@ -4092,7 +4022,6 @@ def test_interest_coverage_skips_non_positive_interest() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q2",
                         end_date=q2,
@@ -4100,7 +4029,6 @@ def test_interest_coverage_skips_non_positive_interest() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q1",
                         end_date=q1,
@@ -4111,7 +4039,7 @@ def test_interest_coverage_skips_non_positive_interest() -> None:
             return []
 
     repo = DummyRepo()
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -4122,7 +4050,7 @@ def test_interest_coverage_uses_derived_interest_fallback() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -4138,7 +4066,7 @@ def test_interest_coverage_uses_derived_interest_fallback() -> None:
             return []
 
     repo = DummyRepo()
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 10.0
 
@@ -4150,7 +4078,7 @@ def test_interest_coverage_keeps_direct_path_when_valid() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -4170,7 +4098,7 @@ def test_interest_coverage_keeps_direct_path_when_valid() -> None:
             return []
 
     repo = DummyRepo()
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 10.0
 
@@ -4182,7 +4110,7 @@ def test_interest_coverage_returns_none_when_fallback_insufficient() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -4198,7 +4126,7 @@ def test_interest_coverage_returns_none_when_fallback_insufficient() -> None:
             return []
 
     repo = DummyRepo()
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -4209,7 +4137,7 @@ def test_interest_coverage_returns_none_on_fallback_currency_mismatch() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -4225,7 +4153,7 @@ def test_interest_coverage_returns_none_on_fallback_currency_mismatch() -> None:
             return []
 
     repo = DummyRepo()
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -4236,7 +4164,7 @@ def test_interest_coverage_normalizes_gbx_to_gbp() -> None:
     class DummyRepo(_GBPTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -4255,7 +4183,7 @@ def test_interest_coverage_normalizes_gbx_to_gbp() -> None:
             return []
 
     repo = DummyRepo()
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 10.0
 
@@ -4272,7 +4200,7 @@ def test_net_debt_to_ebitda_skips_non_positive_ebitda() -> None:
         ),
         latest_records=_default_net_debt_latest_records(q4),
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -4286,7 +4214,7 @@ def test_net_debt_to_ebitda_allows_single_debt_side() -> None:
         concept_records=_base_ebit_da_concepts(quarter_dates),
         latest_records=latest_records,
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 0.7
 
@@ -4306,7 +4234,7 @@ def test_net_debt_to_ebitda_requires_at_least_one_debt_component() -> None:
             )
         },
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -4332,7 +4260,7 @@ def test_net_debt_to_ebitda_uses_cash_component_fallback() -> None:
         concept_records=_base_ebit_da_concepts(quarter_dates),
         latest_records=latest_records,
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 0.8
 
@@ -4353,7 +4281,7 @@ def test_net_debt_to_ebitda_cash_component_fallback_allows_missing_sti() -> None
         concept_records=_base_ebit_da_concepts(quarter_dates),
         latest_records=latest_records,
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 0.8
 
@@ -4368,7 +4296,7 @@ def test_net_debt_to_ebitda_requires_cash_source() -> None:
         concept_records=_base_ebit_da_concepts(quarter_dates),
         latest_records=latest_records,
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -4380,7 +4308,7 @@ def test_net_debt_to_ebitda_returns_none_on_denominator_currency_mismatch() -> N
         concept_records=_base_ebit_da_concepts(quarter_dates, da_currency="EUR"),
         latest_records=_default_net_debt_latest_records(q4),
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -4399,7 +4327,7 @@ def test_net_debt_to_ebitda_returns_none_on_net_debt_currency_mismatch() -> None
         concept_records=_base_ebit_da_concepts(quarter_dates),
         latest_records=latest_records,
     )
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is None
 
 
@@ -4416,7 +4344,7 @@ def test_graham_multiplier_uses_zero_when_optional_values_missing() -> None:
 
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -4424,28 +4352,24 @@ def test_graham_multiplier_uses_zero_when_optional_values_missing() -> None:
             if concept == "EarningsPerShare":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=recent,
                         value=2.5,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date="2024-09-30",
                         value=2.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q2",
                         end_date="2024-06-30",
                         value=1.5,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q1",
                         end_date="2024-03-31",
@@ -4454,13 +4378,13 @@ def test_graham_multiplier_uses_zero_when_optional_values_missing() -> None:
                 ]
             return []
 
-        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
+        def latest_fact(self, listing_id: int, concept: str) -> FactRecord | None:
             value = self.values.get(concept)
             if value is None:
                 return None
-            return fact(symbol=symbol, concept=concept, end_date=recent, value=value)
+            return fact(concept=concept, end_date=recent, value=value)
 
-        def ticker_currency(self, symbol: str) -> str | None:
+        def ticker_currency_by_id(self, listing_id: int) -> str | None:
             return "USD"
 
     class DummyMarketRepo(MarketDataRepository):
@@ -4470,15 +4394,17 @@ def test_graham_multiplier_uses_zero_when_optional_values_missing() -> None:
         def __init__(self) -> None:
             pass
 
-        def latest_snapshot(self, symbol: str) -> PriceData | None:
-            return PriceData(symbol=symbol, price=150.0, as_of=recent, currency="USD")
+        def latest_snapshot_by_id(self, listing_id: int) -> PriceData | None:
+            return PriceData(
+                symbol="AAPL.US", price=150.0, as_of=recent, currency="USD"
+            )
 
-        def ticker_currency(self, symbol: str) -> str | None:
+        def ticker_currency_by_id(self, listing_id: int) -> str | None:
             return "USD"
 
     repo = DummyRepo()
     market_repo = DummyMarketRepo()
-    result = metric.compute("AAPL.US", repo, market_repo)
+    result = metric.compute(LISTING_ID, repo, market_repo)
     assert result is not None
     assert result.value > 0
 
@@ -4491,7 +4417,7 @@ def test_earnings_yield_metric() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -4499,28 +4425,24 @@ def test_earnings_yield_metric() -> None:
             if concept == "EarningsPerShare":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=recent,
                         value=2.5,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=older,
                         value=2.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q2",
                         end_date="2024-06-30",
                         value=1.5,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q1",
                         end_date="2024-03-31",
@@ -4529,7 +4451,7 @@ def test_earnings_yield_metric() -> None:
                 ]
             return []
 
-        def ticker_currency(self, symbol: str) -> str | None:
+        def ticker_currency_by_id(self, listing_id: int) -> str | None:
             return "USD"
 
     class DummyMarketRepo(MarketDataRepository):
@@ -4539,15 +4461,15 @@ def test_earnings_yield_metric() -> None:
         def __init__(self) -> None:
             pass
 
-        def latest_snapshot(self, symbol: str) -> PriceData | None:
-            return PriceData(symbol=symbol, price=50.0, as_of=recent, currency="USD")
+        def latest_snapshot_by_id(self, listing_id: int) -> PriceData | None:
+            return PriceData(symbol="AAPL.US", price=50.0, as_of=recent, currency="USD")
 
-        def ticker_currency(self, symbol: str) -> str | None:
+        def ticker_currency_by_id(self, listing_id: int) -> str | None:
             return "USD"
 
     repo = DummyRepo()
     market_repo = DummyMarketRepo()
-    result = metric.compute("AAPL.US", repo, market_repo)
+    result = metric.compute(LISTING_ID, repo, market_repo)
     assert result is not None
     assert result.value == (2.5 + 2.0 + 1.5 + 1.0) / 50.0
 
@@ -4559,7 +4481,7 @@ def test_earnings_yield_metric_falls_back_to_fy() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -4567,7 +4489,6 @@ def test_earnings_yield_metric_falls_back_to_fy() -> None:
             if concept == "EarningsPerShare" and fiscal_period == "FY":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=recent_fy,
@@ -4576,7 +4497,7 @@ def test_earnings_yield_metric_falls_back_to_fy() -> None:
                 ]
             return []
 
-        def ticker_currency(self, symbol: str) -> str | None:
+        def ticker_currency_by_id(self, listing_id: int) -> str | None:
             return "USD"
 
     class DummyMarketRepo(MarketDataRepository):
@@ -4586,15 +4507,17 @@ def test_earnings_yield_metric_falls_back_to_fy() -> None:
         def __init__(self) -> None:
             pass
 
-        def latest_snapshot(self, symbol: str) -> PriceData | None:
-            return PriceData(symbol=symbol, price=40.0, as_of=recent_fy, currency="USD")
+        def latest_snapshot_by_id(self, listing_id: int) -> PriceData | None:
+            return PriceData(
+                symbol="AAPL.US", price=40.0, as_of=recent_fy, currency="USD"
+            )
 
-        def ticker_currency(self, symbol: str) -> str | None:
+        def ticker_currency_by_id(self, listing_id: int) -> str | None:
             return "USD"
 
     repo = DummyRepo()
     market_repo = DummyMarketRepo()
-    result = metric.compute("AAPL.US", repo, market_repo)
+    result = metric.compute(LISTING_ID, repo, market_repo)
     assert result is not None
     assert result.value == 4.0 / 40.0
 
@@ -4607,7 +4530,7 @@ def test_price_to_fcf_metric() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -4615,28 +4538,24 @@ def test_price_to_fcf_metric() -> None:
             if concept == "NetCashProvidedByUsedInOperatingActivities":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=recent,
                         value=130.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=older,
                         value=120.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q2",
                         end_date="2024-06-30",
                         value=110.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q1",
                         end_date="2024-03-31",
@@ -4646,28 +4565,24 @@ def test_price_to_fcf_metric() -> None:
             if concept == "CapitalExpenditures":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=recent,
                         value=-30.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=older,
                         value=-40.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q2",
                         end_date="2024-06-30",
                         value=-50.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q1",
                         end_date="2024-03-31",
@@ -4676,7 +4591,7 @@ def test_price_to_fcf_metric() -> None:
                 ]
             return []
 
-        def ticker_currency(self, symbol: str) -> str | None:
+        def ticker_currency_by_id(self, listing_id: int) -> str | None:
             return "USD"
 
     class DummyMarketRepo(MarketDataRepository):
@@ -4686,20 +4601,20 @@ def test_price_to_fcf_metric() -> None:
         def __init__(self) -> None:
             pass
 
-        def latest_snapshot(self, symbol: str) -> PriceData | None:
+        def latest_snapshot_by_id(self, listing_id: int) -> PriceData | None:
             return PriceData(
-                symbol=symbol,
+                symbol="AAPL.US",
                 price=6400.0,
                 as_of=(date.today() - timedelta(days=10)).isoformat(),
                 currency="USD",
             )
 
-        def ticker_currency(self, symbol: str) -> str | None:
+        def ticker_currency_by_id(self, listing_id: int) -> str | None:
             return "USD"
 
     repo = DummyRepo()
     market_repo = DummyMarketRepo()
-    result = metric.compute("AAPL.US", repo, market_repo)
+    result = metric.compute(LISTING_ID, repo, market_repo)
     assert result is not None
     assert result.value == 10.0
 
@@ -4712,7 +4627,7 @@ def test_price_to_fcf_metric_uses_zero_capex_when_missing() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -4720,28 +4635,24 @@ def test_price_to_fcf_metric_uses_zero_capex_when_missing() -> None:
             if concept == "NetCashProvidedByUsedInOperatingActivities":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=recent,
                         value=130.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=older,
                         value=120.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q2",
                         end_date="2024-06-30",
                         value=110.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q1",
                         end_date="2024-03-31",
@@ -4750,7 +4661,7 @@ def test_price_to_fcf_metric_uses_zero_capex_when_missing() -> None:
                 ]
             return []
 
-        def ticker_currency(self, symbol: str) -> str | None:
+        def ticker_currency_by_id(self, listing_id: int) -> str | None:
             return "USD"
 
     class DummyMarketRepo(MarketDataRepository):
@@ -4760,20 +4671,20 @@ def test_price_to_fcf_metric_uses_zero_capex_when_missing() -> None:
         def __init__(self) -> None:
             pass
 
-        def latest_snapshot(self, symbol: str) -> PriceData | None:
+        def latest_snapshot_by_id(self, listing_id: int) -> PriceData | None:
             return PriceData(
-                symbol=symbol,
+                symbol="AAPL.US",
                 price=6400.0,
                 as_of=(date.today() - timedelta(days=10)).isoformat(),
                 currency="USD",
             )
 
-        def ticker_currency(self, symbol: str) -> str | None:
+        def ticker_currency_by_id(self, listing_id: int) -> str | None:
             return "USD"
 
     repo = DummyRepo()
     market_repo = DummyMarketRepo()
-    result = metric.compute("AAPL.US", repo, market_repo)
+    result = metric.compute(LISTING_ID, repo, market_repo)
     assert result is not None
     assert result.value == 6400.0 / 460.0
 
@@ -4786,7 +4697,7 @@ def test_eps_ttm_metric() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -4794,35 +4705,30 @@ def test_eps_ttm_metric() -> None:
             if concept == "EarningsPerShare":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=recent,
                         value=2.5,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=older,
                         value=2.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q2",
                         end_date="2024-06-30",
                         value=1.5,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q1",
                         end_date="2024-03-31",
                         value=1.0,
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date="2023-12-31",
@@ -4832,7 +4738,7 @@ def test_eps_ttm_metric() -> None:
             return []
 
     repo = DummyRepo()
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 7.0
     assert result.as_of == recent
@@ -4845,7 +4751,7 @@ def test_eps_ttm_metric_falls_back_to_fy() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -4853,7 +4759,6 @@ def test_eps_ttm_metric_falls_back_to_fy() -> None:
             if concept == "EarningsPerShare" and fiscal_period == "FY":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=recent_fy,
@@ -4863,7 +4768,7 @@ def test_eps_ttm_metric_falls_back_to_fy() -> None:
             return []
 
     repo = DummyRepo()
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 4.2
     assert result.as_of == recent_fy
@@ -4876,7 +4781,7 @@ def test_eps_6y_avg_metric() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -4884,7 +4789,6 @@ def test_eps_6y_avg_metric() -> None:
             if concept == "EarningsPerShare":
                 records = [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=recent_fy,
@@ -4894,7 +4798,6 @@ def test_eps_6y_avg_metric() -> None:
                 for idx, year in enumerate(range(2018, 2025), start=1):
                     records.append(
                         fact(
-                            symbol=symbol,
                             concept=concept,
                             fiscal_period="FY",
                             end_date=f"{year}-09-30",
@@ -4904,11 +4807,11 @@ def test_eps_6y_avg_metric() -> None:
                 return records
             return []
 
-        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
-            return fact(symbol=symbol, concept=concept, end_date=recent_fy, value=7.0)
+        def latest_fact(self, listing_id: int, concept: str) -> FactRecord | None:
+            return fact(concept=concept, end_date=recent_fy, value=7.0)
 
     repo = DummyRepo()
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.as_of == recent_fy
 
@@ -4926,18 +4829,18 @@ def test_market_capitalization_metric() -> None:
         def __init__(self) -> None:
             pass
 
-        def latest_snapshot(self, symbol: str) -> PriceData | None:
+        def latest_snapshot_by_id(self, listing_id: int) -> PriceData | None:
             return PriceData(
-                symbol=symbol, price=123456789.0, as_of="2024-05-01", currency="USD"
+                symbol="AAPL.US", price=123456789.0, as_of="2024-05-01", currency="USD"
             )
 
-        def ticker_currency(self, symbol: str) -> str | None:
+        def ticker_currency_by_id(self, listing_id: int) -> str | None:
             return "USD"
 
     repo = DummyRepo()
     market_repo = DummyMarketRepo()
 
-    result = metric.compute("AAPL.US", repo, market_repo)
+    result = metric.compute(LISTING_ID, repo, market_repo)
     assert result is not None
     assert result.value == 123456789.0
     assert result.as_of == "2024-05-01"
@@ -4951,7 +4854,7 @@ def test_roc_greenblatt_metric() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -4960,28 +4863,24 @@ def test_roc_greenblatt_metric() -> None:
             if concept == "OperatingIncomeLoss":
                 records = [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         end_date=recent_fy,
                         value=220,
                         fiscal_period="FY",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         end_date="2023-09-30",
                         value=200,
                         fiscal_period="FY",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         end_date="2022-09-30",
                         value=150,
                         fiscal_period="FY",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         end_date=recent_quarter,
                         value=999,
@@ -4991,28 +4890,24 @@ def test_roc_greenblatt_metric() -> None:
             if concept == "PropertyPlantAndEquipmentNet":
                 records = [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         end_date=recent_fy,
                         value=520,
                         fiscal_period="FY",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         end_date="2023-09-30",
                         value=500,
                         fiscal_period="FY",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         end_date="2022-09-30",
                         value=450,
                         fiscal_period="FY",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         end_date=recent_quarter,
                         value=777,
@@ -5022,28 +4917,24 @@ def test_roc_greenblatt_metric() -> None:
             if concept == "AssetsCurrent":
                 records = [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         end_date=recent_fy,
                         value=420,
                         fiscal_period="FY",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         end_date="2023-09-30",
                         value=400,
                         fiscal_period="FY",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         end_date="2022-09-30",
                         value=350,
                         fiscal_period="FY",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         end_date=recent_quarter,
                         value=888,
@@ -5053,28 +4944,24 @@ def test_roc_greenblatt_metric() -> None:
             if concept == "LiabilitiesCurrent":
                 records = [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         end_date=recent_fy,
                         value=310,
                         fiscal_period="FY",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         end_date="2023-09-30",
                         value=300,
                         fiscal_period="FY",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         end_date="2022-09-30",
                         value=250,
                         fiscal_period="FY",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         end_date=recent_quarter,
                         value=444,
@@ -5089,9 +4976,8 @@ def test_roc_greenblatt_metric() -> None:
                 ]
             return records
 
-        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
+        def latest_fact(self, listing_id: int, concept: str) -> FactRecord | None:
             return fact(
-                symbol=symbol,
                 concept=concept,
                 end_date=recent_quarter,
                 value=0.0,
@@ -5099,7 +4985,7 @@ def test_roc_greenblatt_metric() -> None:
             )
 
     repo = DummyRepo()
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.as_of == recent_fy
 
@@ -5111,41 +4997,34 @@ def test_roe_greenblatt_metric() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
         ) -> list[FactRecord]:
             if concept == "NetIncomeLossAvailableToCommonStockholdersBasic":
                 return [
-                    fact(symbol=symbol, concept=concept, end_date=recent, value=220),
-                    fact(
-                        symbol=symbol, concept=concept, end_date="2024-09-30", value=200
-                    ),
-                    fact(
-                        symbol=symbol, concept=concept, end_date="2023-09-30", value=180
-                    ),
+                    fact(concept=concept, end_date=recent, value=220),
+                    fact(concept=concept, end_date="2024-09-30", value=200),
+                    fact(concept=concept, end_date="2023-09-30", value=180),
                 ]
             if concept == "CommonStockholdersEquity":
                 return [
-                    fact(symbol=symbol, concept=concept, end_date=recent, value=1100),
+                    fact(concept=concept, end_date=recent, value=1100),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         end_date="2024-09-30",
                         value=1000,
                     ),
-                    fact(
-                        symbol=symbol, concept=concept, end_date="2023-09-30", value=900
-                    ),
+                    fact(concept=concept, end_date="2023-09-30", value=900),
                 ]
             return []
 
-        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
+        def latest_fact(self, listing_id: int, concept: str) -> FactRecord | None:
             return None
 
     repo = DummyRepo()
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value > 0
 
@@ -5157,7 +5036,7 @@ def test_mcapex_fy_metric_uses_min_formula() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -5165,7 +5044,6 @@ def test_mcapex_fy_metric_uses_min_formula() -> None:
             if concept == "CapitalExpenditures":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=recent,
@@ -5176,7 +5054,6 @@ def test_mcapex_fy_metric_uses_min_formula() -> None:
             if concept == "DepreciationDepletionAndAmortization":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=recent,
@@ -5186,7 +5063,7 @@ def test_mcapex_fy_metric_uses_min_formula() -> None:
                 ]
             return []
 
-    result = metric.compute("AAPL.US", DummyRepo())
+    result = metric.compute(LISTING_ID, DummyRepo())
     assert result is not None
     assert result.value == 88.0
 
@@ -5198,7 +5075,7 @@ def test_mcapex_fy_metric_falls_back_to_capex_when_da_missing() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -5206,7 +5083,6 @@ def test_mcapex_fy_metric_falls_back_to_capex_when_da_missing() -> None:
             if concept == "CapitalExpenditures":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=recent,
@@ -5216,7 +5092,7 @@ def test_mcapex_fy_metric_falls_back_to_capex_when_da_missing() -> None:
                 ]
             return []
 
-    result = metric.compute("AAPL.US", DummyRepo())
+    result = metric.compute(LISTING_ID, DummyRepo())
     assert result is not None
     assert result.value == 120.0
 
@@ -5228,7 +5104,7 @@ def test_mcapex_fy_metric_falls_back_to_da_when_capex_missing() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -5236,7 +5112,6 @@ def test_mcapex_fy_metric_falls_back_to_da_when_capex_missing() -> None:
             if concept == "DepreciationDepletionAndAmortization":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=recent,
@@ -5246,7 +5121,7 @@ def test_mcapex_fy_metric_falls_back_to_da_when_capex_missing() -> None:
                 ]
             return []
 
-    result = metric.compute("AAPL.US", DummyRepo())
+    result = metric.compute(LISTING_ID, DummyRepo())
     assert result is not None
     assert round(result.value, 6) == 55.0
 
@@ -5258,7 +5133,7 @@ def test_mcapex_fy_metric_uses_absolute_values() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -5266,7 +5141,6 @@ def test_mcapex_fy_metric_uses_absolute_values() -> None:
             if concept == "CapitalExpenditures":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=recent,
@@ -5277,7 +5151,6 @@ def test_mcapex_fy_metric_uses_absolute_values() -> None:
             if concept == "DepreciationDepletionAndAmortization":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=recent,
@@ -5287,7 +5160,7 @@ def test_mcapex_fy_metric_uses_absolute_values() -> None:
                 ]
             return []
 
-    result = metric.compute("AAPL.US", DummyRepo())
+    result = metric.compute(LISTING_ID, DummyRepo())
     assert result is not None
     assert result.value == 88.0
 
@@ -5303,7 +5176,7 @@ def test_mcapex_ttm_metric_uses_quarterly_formula() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -5311,7 +5184,6 @@ def test_mcapex_ttm_metric_uses_quarterly_formula() -> None:
             if concept == "CapitalExpenditures":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -5319,7 +5191,6 @@ def test_mcapex_ttm_metric_uses_quarterly_formula() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=q3,
@@ -5327,7 +5198,6 @@ def test_mcapex_ttm_metric_uses_quarterly_formula() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q2",
                         end_date=q2,
@@ -5335,7 +5205,6 @@ def test_mcapex_ttm_metric_uses_quarterly_formula() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q1",
                         end_date=q1,
@@ -5346,7 +5215,6 @@ def test_mcapex_ttm_metric_uses_quarterly_formula() -> None:
             if concept == "DepreciationDepletionAndAmortization":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -5354,7 +5222,6 @@ def test_mcapex_ttm_metric_uses_quarterly_formula() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=q3,
@@ -5362,7 +5229,6 @@ def test_mcapex_ttm_metric_uses_quarterly_formula() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q2",
                         end_date=q2,
@@ -5370,7 +5236,6 @@ def test_mcapex_ttm_metric_uses_quarterly_formula() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q1",
                         end_date=q1,
@@ -5380,7 +5245,7 @@ def test_mcapex_ttm_metric_uses_quarterly_formula() -> None:
                 ]
             return []
 
-    result = metric.compute("AAPL.US", DummyRepo())
+    result = metric.compute(LISTING_ID, DummyRepo())
     assert result is not None
     assert result.value == 352.0
 
@@ -5396,7 +5261,7 @@ def test_mcapex_ttm_metric_falls_back_to_cash_flow_da() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -5404,7 +5269,6 @@ def test_mcapex_ttm_metric_falls_back_to_cash_flow_da() -> None:
             if concept == "CapitalExpenditures":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -5412,7 +5276,6 @@ def test_mcapex_ttm_metric_falls_back_to_cash_flow_da() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=q3,
@@ -5420,7 +5283,6 @@ def test_mcapex_ttm_metric_falls_back_to_cash_flow_da() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q2",
                         end_date=q2,
@@ -5428,7 +5290,6 @@ def test_mcapex_ttm_metric_falls_back_to_cash_flow_da() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q1",
                         end_date=q1,
@@ -5439,7 +5300,6 @@ def test_mcapex_ttm_metric_falls_back_to_cash_flow_da() -> None:
             if concept == "DepreciationFromCashFlow":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -5447,7 +5307,6 @@ def test_mcapex_ttm_metric_falls_back_to_cash_flow_da() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=q3,
@@ -5455,7 +5314,6 @@ def test_mcapex_ttm_metric_falls_back_to_cash_flow_da() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q2",
                         end_date=q2,
@@ -5463,7 +5321,6 @@ def test_mcapex_ttm_metric_falls_back_to_cash_flow_da() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q1",
                         end_date=q1,
@@ -5473,7 +5330,7 @@ def test_mcapex_ttm_metric_falls_back_to_cash_flow_da() -> None:
                 ]
             return []
 
-    result = metric.compute("AAPL.US", DummyRepo())
+    result = metric.compute(LISTING_ID, DummyRepo())
     assert result is not None
     assert result.value == 308.0
 
@@ -5488,7 +5345,7 @@ def test_mcapex_5y_metric_requires_exactly_five_values() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -5499,7 +5356,6 @@ def test_mcapex_5y_metric_requires_exactly_five_values() -> None:
             }:
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=d0,
@@ -5507,7 +5363,6 @@ def test_mcapex_5y_metric_requires_exactly_five_values() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=d1,
@@ -5515,7 +5370,6 @@ def test_mcapex_5y_metric_requires_exactly_five_values() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=d2,
@@ -5523,7 +5377,6 @@ def test_mcapex_5y_metric_requires_exactly_five_values() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=d3,
@@ -5533,7 +5386,7 @@ def test_mcapex_5y_metric_requires_exactly_five_values() -> None:
                 ]
             return []
 
-    result = metric.compute("AAPL.US", DummyRepo())
+    result = metric.compute(LISTING_ID, DummyRepo())
     assert result is None
 
 
@@ -5548,7 +5401,7 @@ def test_mcapex_5y_metric_allows_year_gaps() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -5556,7 +5409,6 @@ def test_mcapex_5y_metric_allows_year_gaps() -> None:
             if concept == "CapitalExpenditures":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=d0,
@@ -5564,7 +5416,6 @@ def test_mcapex_5y_metric_allows_year_gaps() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=d1,
@@ -5572,7 +5423,6 @@ def test_mcapex_5y_metric_allows_year_gaps() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=d2,
@@ -5580,7 +5430,6 @@ def test_mcapex_5y_metric_allows_year_gaps() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=d3,
@@ -5588,7 +5437,6 @@ def test_mcapex_5y_metric_allows_year_gaps() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=d4,
@@ -5599,7 +5447,6 @@ def test_mcapex_5y_metric_allows_year_gaps() -> None:
             if concept == "DepreciationDepletionAndAmortization":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=d0,
@@ -5607,7 +5454,6 @@ def test_mcapex_5y_metric_allows_year_gaps() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=d1,
@@ -5615,7 +5461,6 @@ def test_mcapex_5y_metric_allows_year_gaps() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=d2,
@@ -5623,7 +5468,6 @@ def test_mcapex_5y_metric_allows_year_gaps() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=d3,
@@ -5631,7 +5475,6 @@ def test_mcapex_5y_metric_allows_year_gaps() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=d4,
@@ -5641,7 +5484,7 @@ def test_mcapex_5y_metric_allows_year_gaps() -> None:
                 ]
             return []
 
-    result = metric.compute("AAPL.US", DummyRepo())
+    result = metric.compute(LISTING_ID, DummyRepo())
     assert result is not None
     assert result.value == 100.0
 
@@ -5653,7 +5496,7 @@ def test_nwc_mqr_metric_base_formula() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -5661,7 +5504,6 @@ def test_nwc_mqr_metric_base_formula() -> None:
             if concept == "AssetsCurrent":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -5672,7 +5514,6 @@ def test_nwc_mqr_metric_base_formula() -> None:
             if concept == "LiabilitiesCurrent":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -5683,7 +5524,6 @@ def test_nwc_mqr_metric_base_formula() -> None:
             if concept == "CashAndShortTermInvestments":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -5694,7 +5534,6 @@ def test_nwc_mqr_metric_base_formula() -> None:
             if concept == "ShortTermDebt":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -5704,7 +5543,7 @@ def test_nwc_mqr_metric_base_formula() -> None:
                 ]
             return []
 
-    result = metric.compute("AAPL.US", DummyRepo())
+    result = metric.compute(LISTING_ID, DummyRepo())
     assert result is not None
     assert result.value == 150.0
 
@@ -5716,7 +5555,7 @@ def test_nwc_mqr_metric_short_term_debt_fallback() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -5724,7 +5563,6 @@ def test_nwc_mqr_metric_short_term_debt_fallback() -> None:
             if concept == "AssetsCurrent":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -5735,7 +5573,6 @@ def test_nwc_mqr_metric_short_term_debt_fallback() -> None:
             if concept == "LiabilitiesCurrent":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -5746,7 +5583,6 @@ def test_nwc_mqr_metric_short_term_debt_fallback() -> None:
             if concept == "CashAndShortTermInvestments":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -5756,7 +5592,7 @@ def test_nwc_mqr_metric_short_term_debt_fallback() -> None:
                 ]
             return []
 
-    result = metric.compute("AAPL.US", DummyRepo())
+    result = metric.compute(LISTING_ID, DummyRepo())
     assert result is not None
     assert result.value == 100.0
 
@@ -5768,7 +5604,7 @@ def test_nwc_mqr_metric_cash_fallback_uses_components() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -5776,7 +5612,6 @@ def test_nwc_mqr_metric_cash_fallback_uses_components() -> None:
             if concept == "AssetsCurrent":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -5787,7 +5622,6 @@ def test_nwc_mqr_metric_cash_fallback_uses_components() -> None:
             if concept == "LiabilitiesCurrent":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -5798,7 +5632,6 @@ def test_nwc_mqr_metric_cash_fallback_uses_components() -> None:
             if concept == "CashAndCashEquivalents":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -5809,7 +5642,6 @@ def test_nwc_mqr_metric_cash_fallback_uses_components() -> None:
             if concept == "ShortTermInvestments":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -5820,7 +5652,6 @@ def test_nwc_mqr_metric_cash_fallback_uses_components() -> None:
             if concept == "ShortTermDebt":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -5830,7 +5661,7 @@ def test_nwc_mqr_metric_cash_fallback_uses_components() -> None:
                 ]
             return []
 
-    result = metric.compute("AAPL.US", DummyRepo())
+    result = metric.compute(LISTING_ID, DummyRepo())
     assert result is not None
     assert result.value == 150.0
 
@@ -5842,7 +5673,7 @@ def test_nwc_mqr_metric_returns_none_without_cash_source() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -5850,7 +5681,6 @@ def test_nwc_mqr_metric_returns_none_without_cash_source() -> None:
             if concept == "AssetsCurrent":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -5861,7 +5691,6 @@ def test_nwc_mqr_metric_returns_none_without_cash_source() -> None:
             if concept == "LiabilitiesCurrent":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -5871,7 +5700,7 @@ def test_nwc_mqr_metric_returns_none_without_cash_source() -> None:
                 ]
             return []
 
-    result = metric.compute("AAPL.US", DummyRepo())
+    result = metric.compute(LISTING_ID, DummyRepo())
     assert result is None
 
 
@@ -5882,7 +5711,7 @@ def test_nwc_mqr_metric_floors_adjusted_liabilities() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -5890,7 +5719,6 @@ def test_nwc_mqr_metric_floors_adjusted_liabilities() -> None:
             if concept == "AssetsCurrent":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -5901,7 +5729,6 @@ def test_nwc_mqr_metric_floors_adjusted_liabilities() -> None:
             if concept == "LiabilitiesCurrent":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -5912,7 +5739,6 @@ def test_nwc_mqr_metric_floors_adjusted_liabilities() -> None:
             if concept == "CashAndShortTermInvestments":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -5923,7 +5749,6 @@ def test_nwc_mqr_metric_floors_adjusted_liabilities() -> None:
             if concept == "ShortTermDebt":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -5933,7 +5758,7 @@ def test_nwc_mqr_metric_floors_adjusted_liabilities() -> None:
                 ]
             return []
 
-    result = metric.compute("AAPL.US", DummyRepo())
+    result = metric.compute(LISTING_ID, DummyRepo())
     assert result is not None
     assert result.value == 250.0
 
@@ -5945,7 +5770,7 @@ def test_nwc_fy_metric() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -5953,7 +5778,6 @@ def test_nwc_fy_metric() -> None:
             if concept == "AssetsCurrent":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=fy,
@@ -5964,7 +5788,6 @@ def test_nwc_fy_metric() -> None:
             if concept == "LiabilitiesCurrent":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=fy,
@@ -5975,7 +5798,6 @@ def test_nwc_fy_metric() -> None:
             if concept == "CashAndShortTermInvestments":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=fy,
@@ -5986,7 +5808,6 @@ def test_nwc_fy_metric() -> None:
             if concept == "ShortTermDebt":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=fy,
@@ -5996,7 +5817,7 @@ def test_nwc_fy_metric() -> None:
                 ]
             return []
 
-    result = metric.compute("AAPL.US", DummyRepo())
+    result = metric.compute(LISTING_ID, DummyRepo())
     assert result is not None
     assert result.value == 150.0
 
@@ -6010,7 +5831,7 @@ def test_delta_nwc_ttm_metric() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -6018,7 +5839,6 @@ def test_delta_nwc_ttm_metric() -> None:
             if concept == "AssetsCurrent":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -6026,7 +5846,6 @@ def test_delta_nwc_ttm_metric() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4_prev,
@@ -6037,7 +5856,6 @@ def test_delta_nwc_ttm_metric() -> None:
             if concept == "LiabilitiesCurrent":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -6045,7 +5863,6 @@ def test_delta_nwc_ttm_metric() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4_prev,
@@ -6056,7 +5873,6 @@ def test_delta_nwc_ttm_metric() -> None:
             if concept == "CashAndShortTermInvestments":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -6064,7 +5880,6 @@ def test_delta_nwc_ttm_metric() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4_prev,
@@ -6075,7 +5890,6 @@ def test_delta_nwc_ttm_metric() -> None:
             if concept == "ShortTermDebt":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -6083,7 +5897,6 @@ def test_delta_nwc_ttm_metric() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4_prev,
@@ -6093,7 +5906,7 @@ def test_delta_nwc_ttm_metric() -> None:
                 ]
             return []
 
-    result = metric.compute("AAPL.US", DummyRepo())
+    result = metric.compute(LISTING_ID, DummyRepo())
     assert result is not None
     assert result.value == 70.0
 
@@ -6107,7 +5920,7 @@ def test_delta_nwc_ttm_metric_requires_same_quarter_last_year() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -6115,7 +5928,6 @@ def test_delta_nwc_ttm_metric_requires_same_quarter_last_year() -> None:
             if concept == "AssetsCurrent":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -6123,7 +5935,6 @@ def test_delta_nwc_ttm_metric_requires_same_quarter_last_year() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=q3_prev,
@@ -6134,7 +5945,6 @@ def test_delta_nwc_ttm_metric_requires_same_quarter_last_year() -> None:
             if concept == "LiabilitiesCurrent":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -6142,7 +5952,6 @@ def test_delta_nwc_ttm_metric_requires_same_quarter_last_year() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=q3_prev,
@@ -6153,7 +5962,6 @@ def test_delta_nwc_ttm_metric_requires_same_quarter_last_year() -> None:
             if concept == "CashAndShortTermInvestments":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -6161,7 +5969,6 @@ def test_delta_nwc_ttm_metric_requires_same_quarter_last_year() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=q3_prev,
@@ -6172,7 +5979,6 @@ def test_delta_nwc_ttm_metric_requires_same_quarter_last_year() -> None:
             if concept == "ShortTermDebt":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q4",
                         end_date=q4,
@@ -6180,7 +5986,6 @@ def test_delta_nwc_ttm_metric_requires_same_quarter_last_year() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="Q3",
                         end_date=q3_prev,
@@ -6190,7 +5995,7 @@ def test_delta_nwc_ttm_metric_requires_same_quarter_last_year() -> None:
                 ]
             return []
 
-    result = metric.compute("AAPL.US", DummyRepo())
+    result = metric.compute(LISTING_ID, DummyRepo())
     assert result is None
 
 
@@ -6202,7 +6007,7 @@ def test_delta_nwc_fy_metric() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -6210,7 +6015,6 @@ def test_delta_nwc_fy_metric() -> None:
             if concept == "AssetsCurrent":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y0,
@@ -6218,7 +6022,6 @@ def test_delta_nwc_fy_metric() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y1,
@@ -6229,7 +6032,6 @@ def test_delta_nwc_fy_metric() -> None:
             if concept == "LiabilitiesCurrent":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y0,
@@ -6237,7 +6039,6 @@ def test_delta_nwc_fy_metric() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y1,
@@ -6248,7 +6049,6 @@ def test_delta_nwc_fy_metric() -> None:
             if concept == "CashAndShortTermInvestments":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y0,
@@ -6256,7 +6056,6 @@ def test_delta_nwc_fy_metric() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y1,
@@ -6267,7 +6066,6 @@ def test_delta_nwc_fy_metric() -> None:
             if concept == "ShortTermDebt":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y0,
@@ -6275,7 +6073,6 @@ def test_delta_nwc_fy_metric() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y1,
@@ -6285,7 +6082,7 @@ def test_delta_nwc_fy_metric() -> None:
                 ]
             return []
 
-    result = metric.compute("AAPL.US", DummyRepo())
+    result = metric.compute(LISTING_ID, DummyRepo())
     assert result is not None
     assert result.value == 70.0
 
@@ -6301,7 +6098,7 @@ def test_delta_nwc_maint_metric() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -6309,7 +6106,6 @@ def test_delta_nwc_maint_metric() -> None:
             if concept == "AssetsCurrent":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y0,
@@ -6317,7 +6113,6 @@ def test_delta_nwc_maint_metric() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y1,
@@ -6325,7 +6120,6 @@ def test_delta_nwc_maint_metric() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y2,
@@ -6333,7 +6127,6 @@ def test_delta_nwc_maint_metric() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y3,
@@ -6344,7 +6137,6 @@ def test_delta_nwc_maint_metric() -> None:
             if concept == "LiabilitiesCurrent":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y0,
@@ -6352,7 +6144,6 @@ def test_delta_nwc_maint_metric() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y1,
@@ -6360,7 +6151,6 @@ def test_delta_nwc_maint_metric() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y2,
@@ -6368,7 +6158,6 @@ def test_delta_nwc_maint_metric() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y3,
@@ -6379,7 +6168,6 @@ def test_delta_nwc_maint_metric() -> None:
             if concept == "CashAndShortTermInvestments":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y0,
@@ -6387,7 +6175,6 @@ def test_delta_nwc_maint_metric() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y1,
@@ -6395,7 +6182,6 @@ def test_delta_nwc_maint_metric() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y2,
@@ -6403,7 +6189,6 @@ def test_delta_nwc_maint_metric() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y3,
@@ -6414,7 +6199,6 @@ def test_delta_nwc_maint_metric() -> None:
             if concept == "ShortTermDebt":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y0,
@@ -6422,7 +6206,6 @@ def test_delta_nwc_maint_metric() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y1,
@@ -6430,7 +6213,6 @@ def test_delta_nwc_maint_metric() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y2,
@@ -6438,7 +6220,6 @@ def test_delta_nwc_maint_metric() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y3,
@@ -6448,7 +6229,7 @@ def test_delta_nwc_maint_metric() -> None:
                 ]
             return []
 
-    result = metric.compute("AAPL.US", DummyRepo())
+    result = metric.compute(LISTING_ID, DummyRepo())
     assert result is not None
     assert round(result.value, 4) == round((35.0 - 15.0 + 35.0) / 3.0, 4)
 
@@ -6464,7 +6245,7 @@ def test_delta_nwc_maint_metric_floors_negative_average_to_zero() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -6472,7 +6253,6 @@ def test_delta_nwc_maint_metric_floors_negative_average_to_zero() -> None:
             if concept == "AssetsCurrent":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y0,
@@ -6480,7 +6260,6 @@ def test_delta_nwc_maint_metric_floors_negative_average_to_zero() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y1,
@@ -6488,7 +6267,6 @@ def test_delta_nwc_maint_metric_floors_negative_average_to_zero() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y2,
@@ -6496,7 +6274,6 @@ def test_delta_nwc_maint_metric_floors_negative_average_to_zero() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y3,
@@ -6507,7 +6284,6 @@ def test_delta_nwc_maint_metric_floors_negative_average_to_zero() -> None:
             if concept == "LiabilitiesCurrent":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y0,
@@ -6515,7 +6291,6 @@ def test_delta_nwc_maint_metric_floors_negative_average_to_zero() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y1,
@@ -6523,7 +6298,6 @@ def test_delta_nwc_maint_metric_floors_negative_average_to_zero() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y2,
@@ -6531,7 +6305,6 @@ def test_delta_nwc_maint_metric_floors_negative_average_to_zero() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y3,
@@ -6542,7 +6315,6 @@ def test_delta_nwc_maint_metric_floors_negative_average_to_zero() -> None:
             if concept == "CashAndShortTermInvestments":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y0,
@@ -6550,7 +6322,6 @@ def test_delta_nwc_maint_metric_floors_negative_average_to_zero() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y1,
@@ -6558,7 +6329,6 @@ def test_delta_nwc_maint_metric_floors_negative_average_to_zero() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y2,
@@ -6566,7 +6336,6 @@ def test_delta_nwc_maint_metric_floors_negative_average_to_zero() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y3,
@@ -6577,7 +6346,6 @@ def test_delta_nwc_maint_metric_floors_negative_average_to_zero() -> None:
             if concept == "ShortTermDebt":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y0,
@@ -6585,7 +6353,6 @@ def test_delta_nwc_maint_metric_floors_negative_average_to_zero() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y1,
@@ -6593,7 +6360,6 @@ def test_delta_nwc_maint_metric_floors_negative_average_to_zero() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y2,
@@ -6601,7 +6367,6 @@ def test_delta_nwc_maint_metric_floors_negative_average_to_zero() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y3,
@@ -6611,7 +6376,7 @@ def test_delta_nwc_maint_metric_floors_negative_average_to_zero() -> None:
                 ]
             return []
 
-    result = metric.compute("AAPL.US", DummyRepo())
+    result = metric.compute(LISTING_ID, DummyRepo())
     assert result is not None
     assert result.value == 0.0
 
@@ -6626,7 +6391,7 @@ def test_delta_nwc_maint_metric_requires_consecutive_deltas() -> None:
     class DummyRepo(_USDTickerCurrencyRepo):
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
@@ -6634,7 +6399,6 @@ def test_delta_nwc_maint_metric_requires_consecutive_deltas() -> None:
             if concept == "AssetsCurrent":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y0,
@@ -6642,7 +6406,6 @@ def test_delta_nwc_maint_metric_requires_consecutive_deltas() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y1,
@@ -6650,7 +6413,6 @@ def test_delta_nwc_maint_metric_requires_consecutive_deltas() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y3,
@@ -6661,7 +6423,6 @@ def test_delta_nwc_maint_metric_requires_consecutive_deltas() -> None:
             if concept == "LiabilitiesCurrent":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y0,
@@ -6669,7 +6430,6 @@ def test_delta_nwc_maint_metric_requires_consecutive_deltas() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y1,
@@ -6677,7 +6437,6 @@ def test_delta_nwc_maint_metric_requires_consecutive_deltas() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y3,
@@ -6688,7 +6447,6 @@ def test_delta_nwc_maint_metric_requires_consecutive_deltas() -> None:
             if concept == "CashAndShortTermInvestments":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y0,
@@ -6696,7 +6454,6 @@ def test_delta_nwc_maint_metric_requires_consecutive_deltas() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y1,
@@ -6704,7 +6461,6 @@ def test_delta_nwc_maint_metric_requires_consecutive_deltas() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y3,
@@ -6715,7 +6471,6 @@ def test_delta_nwc_maint_metric_requires_consecutive_deltas() -> None:
             if concept == "ShortTermDebt":
                 return [
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y0,
@@ -6723,7 +6478,6 @@ def test_delta_nwc_maint_metric_requires_consecutive_deltas() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y1,
@@ -6731,7 +6485,6 @@ def test_delta_nwc_maint_metric_requires_consecutive_deltas() -> None:
                         currency="USD",
                     ),
                     fact(
-                        symbol=symbol,
                         concept=concept,
                         fiscal_period="FY",
                         end_date=y3,
@@ -6741,7 +6494,7 @@ def test_delta_nwc_maint_metric_requires_consecutive_deltas() -> None:
                 ]
             return []
 
-    result = metric.compute("AAPL.US", DummyRepo())
+    result = metric.compute(LISTING_ID, DummyRepo())
     assert result is None
 
 
@@ -7045,17 +6798,17 @@ def _build_market_repo(
         def __init__(self) -> None:
             pass
 
-        def latest_snapshot(self, symbol: str) -> PriceData | None:
+        def latest_snapshot_by_id(self, listing_id: int) -> PriceData | None:
             if captured_market_cap is None:
                 return None
             return PriceData(
-                symbol=symbol,
+                symbol="AAPL.US",
                 price=captured_market_cap,
                 as_of=captured_as_of,
                 currency=captured_currency,
             )
 
-        def ticker_currency(self, symbol: str) -> str | None:
+        def ticker_currency_by_id(self, listing_id: int) -> str | None:
             return captured_ticker_currency
 
     return DummyMarketRepo()
@@ -7190,7 +6943,7 @@ class _OwnerEarningsRepo(RegionFactsRepository):
 
     def facts_for_concept(
         self,
-        symbol: str,
+        listing_id: int,
         concept: str,
         fiscal_period: str | None = None,
         limit: int | None = None,
@@ -7207,13 +6960,13 @@ class _OwnerEarningsRepo(RegionFactsRepository):
             return records[:limit]
         return records
 
-    def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
-        records = self.facts_for_concept(symbol, concept)
+    def latest_fact(self, listing_id: int, concept: str) -> FactRecord | None:
+        records = self.facts_for_concept(listing_id, concept)
         if not records:
             return None
         return max(records, key=lambda record: record.end_date)
 
-    def ticker_currency(self, symbol: str) -> str | None:
+    def ticker_currency_by_id(self, listing_id: int) -> str | None:
         return self._ticker_currency
 
 
@@ -7509,7 +7262,7 @@ def test_oe_equity_ttm_metric_computes_formula() -> None:
         }
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
     assert result.as_of == q4
     assert result.value == 744.0
@@ -7635,7 +7388,7 @@ def test_oe_equity_ttm_metric_net_income_fallback() -> None:
         }
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
     assert result.value == 620.0
 
@@ -7760,7 +7513,7 @@ def test_oe_equity_ttm_metric_da_fallback_to_cash_flow() -> None:
         }
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
     assert result.value == 368.0
 
@@ -7851,7 +7604,7 @@ def test_oe_equity_ttm_metric_treats_missing_da_as_zero() -> None:
         }
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
     assert result.value == 300.0
 
@@ -7942,7 +7695,7 @@ def test_oe_equity_ttm_metric_requires_delta_nwc_maint() -> None:
         }
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is None
 
 
@@ -8066,7 +7819,7 @@ def test_oe_equity_ttm_metric_currency_mismatch_returns_none() -> None:
         }
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is None
 
 
@@ -8148,7 +7901,7 @@ def test_oe_equity_5y_avg_metric_computes_expected_average() -> None:
         }
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
     assert result.value == 390.0
     assert result.as_of == f"{years[0]}-09-30"
@@ -8190,7 +7943,7 @@ def test_oe_equity_5y_avg_metric_requires_five_points() -> None:
         }
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is None
 
 
@@ -8247,7 +8000,7 @@ def test_oe_equity_5y_avg_metric_allows_year_gaps() -> None:
         }
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
     assert result.value == 330.0
 
@@ -8300,7 +8053,7 @@ def test_oe_equity_5y_avg_metric_uses_latest_delta_nwc_maint_for_all_years() -> 
         }
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
     assert result.value == 280.0
 
@@ -8353,7 +8106,7 @@ def test_oe_equity_5y_avg_metric_requires_consistent_currency_across_years() -> 
         }
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is None
 
 
@@ -8430,7 +8183,7 @@ def test_oe_ev_ttm_metric_computes_formula() -> None:
         }
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
     assert result.as_of == q4
     assert result.value == 584.0
@@ -8571,7 +8324,7 @@ def test_oe_ev_ttm_metric_uses_fy_tax_rate_fallback() -> None:
         }
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
     assert result.value == 280.0
 
@@ -8638,7 +8391,7 @@ def test_oe_ev_ttm_metric_uses_default_tax_rate_when_no_valid_proxy() -> None:
         }
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
     assert result.value == 176.0
 
@@ -8705,7 +8458,7 @@ def test_oe_ev_ttm_metric_treats_missing_da_as_zero() -> None:
         }
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
     assert result.value == 156.0
 
@@ -8772,7 +8525,7 @@ def test_oe_ev_ttm_metric_requires_delta_nwc_maint() -> None:
         }
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is None
 
 
@@ -8849,7 +8602,7 @@ def test_oe_ev_ttm_metric_currency_mismatch_returns_none() -> None:
         }
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is None
 
 
@@ -8915,7 +8668,7 @@ def test_oe_ev_ttm_metric_allows_negative_values() -> None:
         }
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
     assert result.value == -108.0
 
@@ -8989,7 +8742,7 @@ def test_oe_ev_5y_avg_metric_computes_expected_average() -> None:
         }
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
     assert result.as_of == f"{years[0]}-09-30"
     assert result.value == 300.0
@@ -9031,7 +8784,7 @@ def test_oe_ev_5y_avg_metric_requires_five_points() -> None:
         }
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is None
 
 
@@ -9110,7 +8863,7 @@ def test_oe_ev_5y_avg_metric_allows_year_gaps() -> None:
         }
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
     assert result.value == 284.0
 
@@ -9184,7 +8937,7 @@ def test_oe_ev_5y_avg_metric_uses_latest_delta_nwc_maint_for_all_years() -> None
         }
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
     assert result.value == 140.0
 
@@ -9259,7 +9012,7 @@ def test_oe_ev_5y_avg_metric_requires_consistent_currency_across_years() -> None
         }
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is None
 
 
@@ -9390,11 +9143,11 @@ def test_oey_equity_metric_computes_ratio_from_ttm_numerator() -> None:
         def __init__(self) -> None:
             pass
 
-        def latest_snapshot(self, symbol: str) -> PriceData | None:
-            return PriceData(symbol=symbol, price=7440.0, as_of=q3, currency="USD")
+        def latest_snapshot_by_id(self, listing_id: int) -> PriceData | None:
+            return PriceData(symbol="AAPL.US", price=7440.0, as_of=q3, currency="USD")
 
     result = metric.compute(
-        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
+        LISTING_ID, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
     )
     assert result is not None
     assert result.as_of == q4
@@ -9486,13 +9239,13 @@ def test_oey_equity_5y_metric_computes_ratio_from_5y_numerator() -> None:
         def __init__(self) -> None:
             pass
 
-        def latest_snapshot(self, symbol: str) -> PriceData | None:
+        def latest_snapshot_by_id(self, listing_id: int) -> PriceData | None:
             return PriceData(
-                symbol=symbol, price=3900.0, as_of="2026-01-01", currency="USD"
+                symbol="AAPL.US", price=3900.0, as_of="2026-01-01", currency="USD"
             )
 
     result = metric.compute(
-        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
+        LISTING_ID, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
     )
     assert result is not None
     assert result.value == 0.1
@@ -9592,13 +9345,13 @@ def test_oey_equity_metric_returns_none_when_market_cap_missing() -> None:
         def __init__(self) -> None:
             pass
 
-        def latest_snapshot(self, symbol: str) -> PriceData | None:
+        def latest_snapshot_by_id(self, listing_id: int) -> PriceData | None:
             # No usable latest price -> no snapshot at all (the production
             # MarketDataRepository returns None when there is no price row).
             return None
 
     result = metric.compute(
-        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
+        LISTING_ID, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
     )
     assert result is None
 
@@ -9696,11 +9449,11 @@ def test_oey_equity_metric_returns_none_when_market_cap_non_positive() -> None:
         def __init__(self) -> None:
             pass
 
-        def latest_snapshot(self, symbol: str) -> PriceData | None:
-            return PriceData(symbol=symbol, price=0.0, as_of=q3, currency="USD")
+        def latest_snapshot_by_id(self, listing_id: int) -> PriceData | None:
+            return PriceData(symbol="AAPL.US", price=0.0, as_of=q3, currency="USD")
 
     result = metric.compute(
-        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
+        LISTING_ID, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
     )
     assert result is None
 
@@ -9721,13 +9474,13 @@ def test_oey_equity_metric_returns_none_when_numerator_missing() -> None:
         def __init__(self) -> None:
             pass
 
-        def latest_snapshot(self, symbol: str) -> PriceData | None:
+        def latest_snapshot_by_id(self, listing_id: int) -> PriceData | None:
             return PriceData(
-                symbol=symbol, price=1000.0, as_of="2026-01-01", currency="USD"
+                symbol="AAPL.US", price=1000.0, as_of="2026-01-01", currency="USD"
             )
 
     result = metric.compute(
-        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
+        LISTING_ID, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
     )
     assert result is None
 
@@ -9861,14 +9614,14 @@ def test_oey_equity_metric_uses_listing_currency_for_market_cap() -> None:
         def __init__(self) -> None:
             pass
 
-        def latest_snapshot(self, symbol: str) -> PriceData | None:
-            return PriceData(symbol=symbol, price=100.0, as_of=q3, currency="USD")
+        def latest_snapshot_by_id(self, listing_id: int) -> PriceData | None:
+            return PriceData(symbol="AAPL.US", price=100.0, as_of=q3, currency="USD")
 
-        def ticker_currency(self, symbol: str) -> str | None:
+        def ticker_currency_by_id(self, listing_id: int) -> str | None:
             return "USD"
 
     result = metric.compute(
-        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
+        LISTING_ID, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
     )
     assert result is not None
     assert result.value == 7.44
@@ -9967,11 +9720,11 @@ def test_oey_equity_metric_allows_negative_values() -> None:
         def __init__(self) -> None:
             pass
 
-        def latest_snapshot(self, symbol: str) -> PriceData | None:
-            return PriceData(symbol=symbol, price=4920.0, as_of=q3, currency="USD")
+        def latest_snapshot_by_id(self, listing_id: int) -> PriceData | None:
+            return PriceData(symbol="AAPL.US", price=4920.0, as_of=q3, currency="USD")
 
     result = metric.compute(
-        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
+        LISTING_ID, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
     )
     assert result is not None
     assert result.value == -500.0 / 4920.0
@@ -10013,12 +9766,12 @@ def test_oey_ev_metric_computes_ev_from_components() -> None:
         def __init__(self) -> None:
             pass
 
-        def latest_snapshot(self, symbol: str) -> PriceData | None:
-            return PriceData(symbol=symbol, price=1000.0, as_of=q4, currency="USD")
+        def latest_snapshot_by_id(self, listing_id: int) -> PriceData | None:
+            return PriceData(symbol="AAPL.US", price=1000.0, as_of=q4, currency="USD")
 
     # EV is derived (no fact): market cap 1000 + debt/cash components = 1250.
     result = metric.compute(
-        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
+        LISTING_ID, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
     )
     assert result is not None
     assert result.value == 584.0 / 1250.0
@@ -10051,13 +9804,13 @@ def test_oey_ev_metric_returns_none_when_market_cap_unavailable() -> None:
         def __init__(self) -> None:
             pass
 
-        def latest_snapshot(self, symbol: str) -> PriceData | None:
+        def latest_snapshot_by_id(self, listing_id: int) -> PriceData | None:
             # No usable latest price -> no snapshot at all (the production
             # MarketDataRepository returns None when there is no price row).
             return None
 
     result = metric.compute(
-        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
+        LISTING_ID, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
     )
     assert result is None
 
@@ -10103,13 +9856,13 @@ def test_oey_ev_metric_allows_negative_values() -> None:
         def __init__(self) -> None:
             pass
 
-        def latest_snapshot(self, symbol: str) -> PriceData | None:
-            return PriceData(symbol=symbol, price=1000.0, as_of=q4, currency="USD")
+        def latest_snapshot_by_id(self, listing_id: int) -> PriceData | None:
+            return PriceData(symbol="AAPL.US", price=1000.0, as_of=q4, currency="USD")
 
     # OE TTM is negative; EV is derived as market cap 1000 + long 130 + (short -
     # cash) = 1080, so the yield is -108 / 1080.
     result = metric.compute(
-        symbol, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
+        LISTING_ID, _OwnerEarningsRepo(records_by_concept), DummyMarketRepo()
     )
     assert result is not None
     assert result.value == -0.1
@@ -10125,7 +9878,7 @@ def test_ebit_yield_ev_metric_computes_ev_from_components() -> None:
 
     # EV = market cap 820 + short 50 + long 150 - cash 20 = 1000; EBIT TTM = 400.
     result = metric.compute(
-        symbol, repo, _build_market_repo(market_cap=820.0, as_of=q4)
+        LISTING_ID, repo, _build_market_repo(market_cap=820.0, as_of=q4)
     )
 
     assert result is not None
@@ -10149,7 +9902,7 @@ def test_ebit_yield_ev_metric_allows_negative_values() -> None:
     )
 
     result = metric.compute(
-        symbol, repo, _build_market_repo(market_cap=820.0, as_of=q4)
+        LISTING_ID, repo, _build_market_repo(market_cap=820.0, as_of=q4)
     )
 
     assert result is not None
@@ -10178,7 +9931,7 @@ def test_ev_resolver_ignores_enterprise_value_fact() -> None:
 
     # EV = market cap 820 + short 50 + long 150 - cash 20 = 1000, NOT 999999.
     result = metric.compute(
-        symbol, repo, _build_market_repo(market_cap=820.0, as_of=q4)
+        LISTING_ID, repo, _build_market_repo(market_cap=820.0, as_of=q4)
     )
     assert result is not None
     assert result.value == 0.4
@@ -10193,7 +9946,7 @@ def test_fcf_yield_ev_metric_uses_existing_fcf_policy() -> None:
     )
 
     result = metric.compute(
-        symbol, repo, _build_market_repo(market_cap=820.0, as_of=q4)
+        LISTING_ID, repo, _build_market_repo(market_cap=820.0, as_of=q4)
     )
 
     assert result is not None
@@ -10216,7 +9969,7 @@ def test_fcf_yield_ev_metric_uses_zero_capex_when_missing() -> None:
     )
 
     result = metric.compute(
-        symbol, repo, _build_market_repo(market_cap=820.0, as_of=q4)
+        LISTING_ID, repo, _build_market_repo(market_cap=820.0, as_of=q4)
     )
 
     assert result is not None
@@ -10240,7 +9993,7 @@ def test_fcf_yield_ev_metric_allows_negative_values() -> None:
     )
 
     result = metric.compute(
-        symbol, repo, _build_market_repo(market_cap=820.0, as_of=q4)
+        LISTING_ID, repo, _build_market_repo(market_cap=820.0, as_of=q4)
     )
 
     assert result is not None
@@ -10256,7 +10009,7 @@ def test_ev_to_ebit_metric_computes_with_positive_ebit() -> None:
     )
 
     result = metric.compute(
-        symbol, repo, _build_market_repo(market_cap=820.0, as_of=q4)
+        LISTING_ID, repo, _build_market_repo(market_cap=820.0, as_of=q4)
     )
 
     assert result is not None
@@ -10279,7 +10032,7 @@ def test_ev_to_ebit_metric_returns_none_when_ebit_non_positive() -> None:
     )
 
     assert (
-        metric.compute(symbol, repo, _build_market_repo(market_cap=820.0, as_of=q4))
+        metric.compute(LISTING_ID, repo, _build_market_repo(market_cap=820.0, as_of=q4))
         is None
     )
 
@@ -10301,7 +10054,7 @@ def test_ev_to_ebitda_metric_uses_component_ebitda_and_da_fallback() -> None:
     )
 
     result = metric.compute(
-        symbol, repo, _build_market_repo(market_cap=820.0, as_of=q4)
+        LISTING_ID, repo, _build_market_repo(market_cap=820.0, as_of=q4)
     )
 
     assert result is not None
@@ -10325,7 +10078,7 @@ def test_ev_to_ebitda_metric_returns_none_when_ebitda_non_positive() -> None:
     )
 
     assert (
-        metric.compute(symbol, repo, _build_market_repo(market_cap=820.0, as_of=q4))
+        metric.compute(LISTING_ID, repo, _build_market_repo(market_cap=820.0, as_of=q4))
         is None
     )
 
@@ -10348,7 +10101,7 @@ def test_cfo_to_ni_ttm_metric() -> None:
         }
     )
 
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.as_of == quarter_dates[0]
     assert result.value == 2.0
@@ -10372,7 +10125,7 @@ def test_cfo_to_ni_ttm_metric_net_income_fallback() -> None:
         }
     )
 
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 2.0
 
@@ -10395,7 +10148,7 @@ def test_cfo_to_ni_ttm_metric_requires_four_quarters() -> None:
         }
     )
 
-    assert metric.compute("AAPL.US", repo) is None
+    assert metric.compute(LISTING_ID, repo) is None
 
 
 def test_cfo_to_ni_ttm_metric_rejects_stale_latest_quarter() -> None:
@@ -10422,7 +10175,7 @@ def test_cfo_to_ni_ttm_metric_rejects_stale_latest_quarter() -> None:
         }
     )
 
-    assert metric.compute("AAPL.US", repo) is None
+    assert metric.compute(LISTING_ID, repo) is None
 
 
 def test_cfo_to_ni_ttm_metric_rejects_non_positive_net_income() -> None:
@@ -10443,7 +10196,7 @@ def test_cfo_to_ni_ttm_metric_rejects_non_positive_net_income() -> None:
         }
     )
 
-    assert metric.compute("AAPL.US", repo) is None
+    assert metric.compute(LISTING_ID, repo) is None
 
 
 def test_cfo_to_ni_ttm_metric_rejects_currency_mismatch() -> None:
@@ -10466,7 +10219,7 @@ def test_cfo_to_ni_ttm_metric_rejects_currency_mismatch() -> None:
         }
     )
 
-    assert metric.compute("AAPL.US", repo) is None
+    assert metric.compute(LISTING_ID, repo) is None
 
 
 def test_cfo_to_ni_10y_median_metric() -> None:
@@ -10481,7 +10234,7 @@ def test_cfo_to_ni_10y_median_metric() -> None:
         )
     )
 
-    result = metric.compute("AAPL.US", repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.as_of == f"{latest_year}-09-30"
     assert result.value == 5.5
@@ -10502,7 +10255,7 @@ def test_cfo_to_ni_10y_median_metric_requires_strict_consecutive_years() -> None
         if record.end_date != f"{latest_year - 4}-09-30"
     ]
 
-    assert metric.compute("AAPL.US", _OwnerEarningsRepo(records_by_concept)) is None
+    assert metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept)) is None
 
 
 def test_cfo_to_ni_10y_median_metric_rejects_non_positive_net_income_year() -> None:
@@ -10519,7 +10272,7 @@ def test_cfo_to_ni_10y_median_metric_rejects_non_positive_net_income_year() -> N
         )
     )
 
-    assert metric.compute("AAPL.US", repo) is None
+    assert metric.compute(LISTING_ID, repo) is None
 
 
 def test_cfo_to_ni_10y_median_metric_rejects_stale_latest_fy() -> None:
@@ -10534,7 +10287,7 @@ def test_cfo_to_ni_10y_median_metric_rejects_stale_latest_fy() -> None:
         )
     )
 
-    assert metric.compute("AAPL.US", repo) is None
+    assert metric.compute(LISTING_ID, repo) is None
 
 
 def test_cfo_to_ni_10y_median_metric_rejects_currency_conflict() -> None:
@@ -10555,7 +10308,7 @@ def test_cfo_to_ni_10y_median_metric_rejects_currency_conflict() -> None:
         currency="EUR",
     )
 
-    assert metric.compute("AAPL.US", _OwnerEarningsRepo(records_by_concept)) is None
+    assert metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept)) is None
 
 
 def test_accruals_ratio_metric() -> None:
@@ -10592,7 +10345,7 @@ def test_accruals_ratio_metric() -> None:
         }
     )
 
-    result = metric.compute(symbol, repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.as_of == q4
     assert result.value == 120.0 / 900.0
@@ -10631,7 +10384,7 @@ def test_accruals_ratio_metric_net_income_fallback() -> None:
         }
     )
 
-    result = metric.compute(symbol, repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 200.0 / 900.0
 
@@ -10669,7 +10422,7 @@ def test_accruals_ratio_metric_allows_negative_values() -> None:
         }
     )
 
-    result = metric.compute(symbol, repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == -200.0 / 900.0
 
@@ -10716,7 +10469,7 @@ def test_accruals_ratio_metric_requires_four_quarters() -> None:
         }
     )
 
-    assert metric.compute(symbol, repo) is None
+    assert metric.compute(LISTING_ID, repo) is None
 
 
 def test_accruals_ratio_metric_rejects_stale_numerator_quarter() -> None:
@@ -10752,7 +10505,7 @@ def test_accruals_ratio_metric_rejects_stale_numerator_quarter() -> None:
         }
     )
 
-    assert metric.compute(symbol, repo) is None
+    assert metric.compute(LISTING_ID, repo) is None
 
 
 def test_accruals_ratio_metric_rejects_stale_latest_assets_quarter() -> None:
@@ -10789,7 +10542,7 @@ def test_accruals_ratio_metric_rejects_stale_latest_assets_quarter() -> None:
         }
     )
 
-    assert metric.compute(symbol, repo) is None
+    assert metric.compute(LISTING_ID, repo) is None
 
 
 def test_accruals_ratio_metric_requires_same_quarter_last_year_assets() -> None:
@@ -10850,7 +10603,7 @@ def test_accruals_ratio_metric_requires_same_quarter_last_year_assets() -> None:
         }
     )
 
-    assert metric.compute(symbol, repo) is None
+    assert metric.compute(LISTING_ID, repo) is None
 
 
 def test_accruals_ratio_metric_rejects_non_positive_avg_assets() -> None:
@@ -10887,7 +10640,7 @@ def test_accruals_ratio_metric_rejects_non_positive_avg_assets() -> None:
         }
     )
 
-    assert metric.compute(symbol, repo) is None
+    assert metric.compute(LISTING_ID, repo) is None
 
 
 def test_accruals_ratio_metric_rejects_numerator_currency_mismatch() -> None:
@@ -10925,7 +10678,7 @@ def test_accruals_ratio_metric_rejects_numerator_currency_mismatch() -> None:
         }
     )
 
-    assert metric.compute(symbol, repo) is None
+    assert metric.compute(LISTING_ID, repo) is None
 
 
 def test_accruals_ratio_metric_rejects_assets_currency_mismatch() -> None:
@@ -10971,7 +10724,7 @@ def test_accruals_ratio_metric_rejects_assets_currency_mismatch() -> None:
         }
     )
 
-    assert metric.compute(symbol, repo) is None
+    assert metric.compute(LISTING_ID, repo) is None
 
 
 def test_accruals_ratio_metric_rejects_numerator_denominator_currency_mismatch() -> (
@@ -11012,7 +10765,7 @@ def test_accruals_ratio_metric_rejects_numerator_denominator_currency_mismatch()
         }
     )
 
-    assert metric.compute(symbol, repo) is None
+    assert metric.compute(LISTING_ID, repo) is None
 
 
 def test_share_count_change_metrics_prefer_quarterly_path() -> None:
@@ -11036,8 +10789,8 @@ def test_share_count_change_metrics_prefer_quarterly_path() -> None:
         )
     )
 
-    cagr = ShareCountCAGR10YMetric().compute(symbol, repo)
-    pct_change = Shares10YPctChangeMetric().compute(symbol, repo)
+    cagr = ShareCountCAGR10YMetric().compute(LISTING_ID, repo)
+    pct_change = Shares10YPctChangeMetric().compute(LISTING_ID, repo)
 
     assert cagr is not None
     assert pct_change is not None
@@ -11068,7 +10821,7 @@ def test_share_count_cagr_5y_metric_prefers_quarterly_path() -> None:
         )
     )
 
-    result = ShareCountCAGR5YMetric().compute(symbol, repo)
+    result = ShareCountCAGR5YMetric().compute(LISTING_ID, repo)
 
     assert result is not None
     assert result.as_of == q_latest
@@ -11094,8 +10847,8 @@ def test_share_count_change_metrics_fallback_to_fy_path() -> None:
         )
     )
 
-    cagr = ShareCountCAGR10YMetric().compute(symbol, repo)
-    pct_change = Shares10YPctChangeMetric().compute(symbol, repo)
+    cagr = ShareCountCAGR10YMetric().compute(LISTING_ID, repo)
+    pct_change = Shares10YPctChangeMetric().compute(LISTING_ID, repo)
 
     assert cagr is not None
     assert pct_change is not None
@@ -11124,7 +10877,7 @@ def test_share_count_cagr_5y_metric_fallbacks_to_fy_path() -> None:
         )
     )
 
-    result = ShareCountCAGR5YMetric().compute(symbol, repo)
+    result = ShareCountCAGR5YMetric().compute(LISTING_ID, repo)
 
     assert result is not None
     assert result.as_of == fy_latest
@@ -11148,8 +10901,8 @@ def test_share_count_change_metrics_require_exact_10_year_match() -> None:
         )
     )
 
-    assert ShareCountCAGR10YMetric().compute(symbol, repo) is None
-    assert Shares10YPctChangeMetric().compute(symbol, repo) is None
+    assert ShareCountCAGR10YMetric().compute(LISTING_ID, repo) is None
+    assert Shares10YPctChangeMetric().compute(LISTING_ID, repo) is None
 
 
 def test_share_count_cagr_5y_metric_requires_exact_5_year_match() -> None:
@@ -11169,7 +10922,7 @@ def test_share_count_cagr_5y_metric_requires_exact_5_year_match() -> None:
         )
     )
 
-    assert ShareCountCAGR5YMetric().compute(symbol, repo) is None
+    assert ShareCountCAGR5YMetric().compute(LISTING_ID, repo) is None
 
 
 def test_share_count_change_metrics_require_positive_share_counts() -> None:
@@ -11189,8 +10942,8 @@ def test_share_count_change_metrics_require_positive_share_counts() -> None:
         )
     )
 
-    assert ShareCountCAGR10YMetric().compute(symbol, repo) is None
-    assert Shares10YPctChangeMetric().compute(symbol, repo) is None
+    assert ShareCountCAGR10YMetric().compute(LISTING_ID, repo) is None
+    assert Shares10YPctChangeMetric().compute(LISTING_ID, repo) is None
 
 
 def test_share_count_cagr_5y_metric_requires_positive_share_counts() -> None:
@@ -11210,7 +10963,7 @@ def test_share_count_cagr_5y_metric_requires_positive_share_counts() -> None:
         )
     )
 
-    assert ShareCountCAGR5YMetric().compute(symbol, repo) is None
+    assert ShareCountCAGR5YMetric().compute(LISTING_ID, repo) is None
 
 
 def test_share_count_change_metrics_reject_stale_latest_quarter_without_fallback() -> (
@@ -11230,8 +10983,8 @@ def test_share_count_change_metrics_reject_stale_latest_quarter_without_fallback
         )
     )
 
-    assert ShareCountCAGR10YMetric().compute(symbol, repo) is None
-    assert Shares10YPctChangeMetric().compute(symbol, repo) is None
+    assert ShareCountCAGR10YMetric().compute(LISTING_ID, repo) is None
+    assert Shares10YPctChangeMetric().compute(LISTING_ID, repo) is None
 
 
 def test_share_count_cagr_5y_metric_rejects_stale_latest_quarter_without_fallback() -> (
@@ -11251,7 +11004,7 @@ def test_share_count_cagr_5y_metric_rejects_stale_latest_quarter_without_fallbac
         )
     )
 
-    assert ShareCountCAGR5YMetric().compute(symbol, repo) is None
+    assert ShareCountCAGR5YMetric().compute(LISTING_ID, repo) is None
 
 
 def test_share_count_change_metrics_reject_stale_latest_fy_fallback() -> None:
@@ -11270,8 +11023,8 @@ def test_share_count_change_metrics_reject_stale_latest_fy_fallback() -> None:
         )
     )
 
-    assert ShareCountCAGR10YMetric().compute(symbol, repo) is None
-    assert Shares10YPctChangeMetric().compute(symbol, repo) is None
+    assert ShareCountCAGR10YMetric().compute(LISTING_ID, repo) is None
+    assert Shares10YPctChangeMetric().compute(LISTING_ID, repo) is None
 
 
 def test_share_count_cagr_5y_metric_rejects_stale_latest_fy_fallback() -> None:
@@ -11290,7 +11043,7 @@ def test_share_count_cagr_5y_metric_rejects_stale_latest_fy_fallback() -> None:
         )
     )
 
-    assert ShareCountCAGR5YMetric().compute(symbol, repo) is None
+    assert ShareCountCAGR5YMetric().compute(LISTING_ID, repo) is None
 
 
 def test_share_count_change_metrics_ignore_weighted_average_share_concepts() -> None:
@@ -11308,9 +11061,9 @@ def test_share_count_change_metrics_ignore_weighted_average_share_concepts() -> 
         )
     )
 
-    assert ShareCountCAGR10YMetric().compute(symbol, repo) is None
-    assert Shares10YPctChangeMetric().compute(symbol, repo) is None
-    assert ShareCountCAGR5YMetric().compute(symbol, repo) is None
+    assert ShareCountCAGR10YMetric().compute(LISTING_ID, repo) is None
+    assert Shares10YPctChangeMetric().compute(LISTING_ID, repo) is None
+    assert ShareCountCAGR5YMetric().compute(LISTING_ID, repo) is None
 
 
 def test_share_count_cagr_5y_metric_declares_percent_metadata() -> None:
@@ -11319,7 +11072,6 @@ def test_share_count_cagr_5y_metric_declares_percent_metadata() -> None:
 
 def test_net_buyback_yield_metric_computes_from_sale_purchase_ttm() -> None:
     metric = NetBuybackYieldMetric()
-    symbol = "AAPL.US"
     today = date.today()
     q4 = (today - timedelta(days=20)).isoformat()
     q3 = (today - timedelta(days=110)).isoformat()
@@ -11338,7 +11090,7 @@ def test_net_buyback_yield_metric_computes_from_sale_purchase_ttm() -> None:
     )
 
     result = metric.compute(
-        symbol,
+        LISTING_ID,
         repo,
         _build_market_repo(market_cap=1000.0, as_of=q3),
     )
@@ -11350,7 +11102,6 @@ def test_net_buyback_yield_metric_computes_from_sale_purchase_ttm() -> None:
 
 def test_net_buyback_yield_metric_allows_negative_values_for_net_issuance() -> None:
     metric = NetBuybackYieldMetric()
-    symbol = "AAPL.US"
     today = date.today()
     q4 = (today - timedelta(days=20)).isoformat()
     q3 = (today - timedelta(days=110)).isoformat()
@@ -11369,7 +11120,7 @@ def test_net_buyback_yield_metric_allows_negative_values_for_net_issuance() -> N
     )
 
     result = metric.compute(
-        symbol,
+        LISTING_ID,
         repo,
         _build_market_repo(market_cap=1000.0, as_of=q3),
     )
@@ -11380,7 +11131,6 @@ def test_net_buyback_yield_metric_allows_negative_values_for_net_issuance() -> N
 
 def test_net_buyback_yield_metric_falls_back_to_issuance_cash_flow() -> None:
     metric = NetBuybackYieldMetric()
-    symbol = "AAPL.US"
     today = date.today()
     q4 = (today - timedelta(days=20)).isoformat()
     q3 = (today - timedelta(days=110)).isoformat()
@@ -11399,7 +11149,7 @@ def test_net_buyback_yield_metric_falls_back_to_issuance_cash_flow() -> None:
     )
 
     result = metric.compute(
-        symbol,
+        LISTING_ID,
         repo,
         _build_market_repo(market_cap=200.0, as_of=q3),
     )
@@ -11428,7 +11178,7 @@ def test_net_buyback_yield_metric_falls_back_to_share_count_when_market_cap_miss
     )
 
     result = metric.compute(
-        symbol,
+        LISTING_ID,
         repo,
         _build_market_repo(market_cap=None, as_of=q4),
     )
@@ -11442,7 +11192,6 @@ def test_net_buyback_yield_metric_returns_none_when_market_cap_missing_and_no_sh
     None
 ):
     metric = NetBuybackYieldMetric()
-    symbol = "AAPL.US"
     today = date.today()
     q4 = (today - timedelta(days=20)).isoformat()
     q3 = (today - timedelta(days=110)).isoformat()
@@ -11461,14 +11210,13 @@ def test_net_buyback_yield_metric_returns_none_when_market_cap_missing_and_no_sh
     )
 
     assert (
-        metric.compute(symbol, repo, _build_market_repo(market_cap=None, as_of=q4))
+        metric.compute(LISTING_ID, repo, _build_market_repo(market_cap=None, as_of=q4))
         is None
     )
 
 
 def test_net_buyback_yield_metric_uses_listing_currency_for_market_cap() -> None:
     metric = NetBuybackYieldMetric()
-    symbol = "AAPL.US"
     today = date.today()
     q4 = (today - timedelta(days=20)).isoformat()
     q3 = (today - timedelta(days=110)).isoformat()
@@ -11487,7 +11235,7 @@ def test_net_buyback_yield_metric_uses_listing_currency_for_market_cap() -> None
     )
 
     result = metric.compute(
-        symbol,
+        LISTING_ID,
         repo,
         _build_market_repo(
             market_cap=500.0,
@@ -11532,7 +11280,7 @@ def test_net_buyback_yield_metric_uses_share_count_fallback_when_market_cap_miss
     repo = _OwnerEarningsRepo(records)
 
     result = metric.compute(
-        symbol,
+        LISTING_ID,
         repo,
         _build_market_repo(market_cap=None, as_of=q3, currency="USD"),
     )
@@ -11557,7 +11305,7 @@ def test_net_buyback_yield_metric_falls_back_to_fy_share_change() -> None:
     )
 
     result = metric.compute(
-        symbol,
+        LISTING_ID,
         repo,
         _build_market_repo(market_cap=None, as_of=f"{latest_year}-09-30"),
     )
@@ -11583,7 +11331,7 @@ def test_net_buyback_yield_metric_ignores_weighted_average_shares_in_fallback() 
 
     assert (
         metric.compute(
-            symbol,
+            LISTING_ID,
             repo,
             _build_market_repo(market_cap=None, as_of=f"{latest_year}-09-30"),
         )
@@ -11607,7 +11355,7 @@ def test_net_buyback_yield_metric_requires_strict_prior_year_share_pair() -> Non
 
     assert (
         metric.compute(
-            symbol,
+            LISTING_ID,
             repo,
             _build_market_repo(market_cap=None, as_of=f"{latest_year}-09-30"),
         )
@@ -11631,7 +11379,7 @@ def test_net_buyback_yield_metric_requires_positive_share_counts_in_fallback() -
 
     assert (
         metric.compute(
-            symbol,
+            LISTING_ID,
             repo,
             _build_market_repo(market_cap=None, as_of=f"{latest_year}-09-30"),
         )
@@ -11641,7 +11389,6 @@ def test_net_buyback_yield_metric_requires_positive_share_counts_in_fallback() -
 
 def test_sbc_to_revenue_metric_computes_ttm_ratio() -> None:
     metric = SBCToRevenueMetric()
-    symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
 
     repo = _OwnerEarningsRepo(
@@ -11661,7 +11408,7 @@ def test_sbc_to_revenue_metric_computes_ttm_ratio() -> None:
         }
     )
 
-    result = metric.compute(symbol, repo)
+    result = metric.compute(LISTING_ID, repo)
 
     assert result is not None
     assert result.as_of == q4
@@ -11670,7 +11417,6 @@ def test_sbc_to_revenue_metric_computes_ttm_ratio() -> None:
 
 def test_sbc_to_fcf_metric_computes_ttm_ratio() -> None:
     metric = SBCToFCFMetric()
-    symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
 
     repo = _OwnerEarningsRepo(
@@ -11696,7 +11442,7 @@ def test_sbc_to_fcf_metric_computes_ttm_ratio() -> None:
         }
     )
 
-    result = metric.compute(symbol, repo)
+    result = metric.compute(LISTING_ID, repo)
 
     assert result is not None
     assert result.as_of == q4
@@ -11705,7 +11451,6 @@ def test_sbc_to_fcf_metric_computes_ttm_ratio() -> None:
 
 def test_sbc_to_fcf_metric_uses_zero_capex_when_capex_missing() -> None:
     metric = SBCToFCFMetric()
-    symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
 
     repo = _OwnerEarningsRepo(
@@ -11725,14 +11470,13 @@ def test_sbc_to_fcf_metric_uses_zero_capex_when_capex_missing() -> None:
         }
     )
 
-    result = metric.compute(symbol, repo)
+    result = metric.compute(LISTING_ID, repo)
 
     assert result is not None
     assert result.value == 0.1
 
 
 def test_sbc_load_metrics_return_none_when_sbc_missing() -> None:
-    symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
     repo = _OwnerEarningsRepo(
         {
@@ -11749,12 +11493,11 @@ def test_sbc_load_metrics_return_none_when_sbc_missing() -> None:
         }
     )
 
-    assert SBCToRevenueMetric().compute(symbol, repo) is None
-    assert SBCToFCFMetric().compute(symbol, repo) is None
+    assert SBCToRevenueMetric().compute(LISTING_ID, repo) is None
+    assert SBCToFCFMetric().compute(LISTING_ID, repo) is None
 
 
 def test_sbc_load_metrics_require_four_quarters_of_sbc() -> None:
-    symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
     repo = _OwnerEarningsRepo(
         {
@@ -11776,12 +11519,11 @@ def test_sbc_load_metrics_require_four_quarters_of_sbc() -> None:
         }
     )
 
-    assert SBCToRevenueMetric().compute(symbol, repo) is None
-    assert SBCToFCFMetric().compute(symbol, repo) is None
+    assert SBCToRevenueMetric().compute(LISTING_ID, repo) is None
+    assert SBCToFCFMetric().compute(LISTING_ID, repo) is None
 
 
 def test_sbc_load_metrics_reject_stale_latest_quarter() -> None:
-    symbol = "AAPL.US"
     q4 = (date.today() - timedelta(days=MAX_FACT_AGE_DAYS + 10)).isoformat()
     q3 = (date.today() - timedelta(days=MAX_FACT_AGE_DAYS + 100)).isoformat()
     q2 = (date.today() - timedelta(days=MAX_FACT_AGE_DAYS + 190)).isoformat()
@@ -11807,13 +11549,12 @@ def test_sbc_load_metrics_reject_stale_latest_quarter() -> None:
         }
     )
 
-    assert SBCToRevenueMetric().compute(symbol, repo) is None
-    assert SBCToFCFMetric().compute(symbol, repo) is None
+    assert SBCToRevenueMetric().compute(LISTING_ID, repo) is None
+    assert SBCToFCFMetric().compute(LISTING_ID, repo) is None
 
 
 def test_sbc_to_revenue_metric_requires_positive_revenue() -> None:
     metric = SBCToRevenueMetric()
-    symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
 
     repo = _OwnerEarningsRepo(
@@ -11831,12 +11572,11 @@ def test_sbc_to_revenue_metric_requires_positive_revenue() -> None:
         }
     )
 
-    assert metric.compute(symbol, repo) is None
+    assert metric.compute(LISTING_ID, repo) is None
 
 
 def test_sbc_to_fcf_metric_requires_positive_fcf() -> None:
     metric = SBCToFCFMetric()
-    symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
 
     repo = _OwnerEarningsRepo(
@@ -11859,11 +11599,10 @@ def test_sbc_to_fcf_metric_requires_positive_fcf() -> None:
         }
     )
 
-    assert metric.compute(symbol, repo) is None
+    assert metric.compute(LISTING_ID, repo) is None
 
 
 def test_sbc_load_metrics_reject_currency_mismatch() -> None:
-    symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
     sbc_repo = _OwnerEarningsRepo(
         {
@@ -11898,12 +11637,11 @@ def test_sbc_load_metrics_reject_currency_mismatch() -> None:
         }
     )
 
-    assert SBCToRevenueMetric().compute(symbol, sbc_repo) is None
-    assert SBCToFCFMetric().compute(symbol, fcf_repo) is None
+    assert SBCToRevenueMetric().compute(LISTING_ID, sbc_repo) is None
+    assert SBCToFCFMetric().compute(LISTING_ID, fcf_repo) is None
 
 
 def test_sbc_load_metrics_reject_currency_conflict_within_sbc() -> None:
-    symbol = "AAPL.US"
     q4, q3, q2, q1 = _net_debt_quarter_dates()
     repo = _OwnerEarningsRepo(
         {
@@ -11929,7 +11667,7 @@ def test_sbc_load_metrics_reject_currency_conflict_within_sbc() -> None:
         currency="EUR",
     )
 
-    assert SBCToRevenueMetric().compute(symbol, repo) is None
+    assert SBCToRevenueMetric().compute(LISTING_ID, repo) is None
 
 
 def test_oe_ev_fy_median_5y_metric_computes_expected_median() -> None:
@@ -11949,7 +11687,7 @@ def test_oe_ev_fy_median_5y_metric_computes_expected_median() -> None:
         capex_values=[90.0, 90.0, 90.0, 90.0, 90.0],
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
     assert result.as_of == f"{years[0]}-09-30"
     assert result.value == 300.0
@@ -11969,7 +11707,7 @@ def test_oe_ev_fy_median_5y_metric_requires_five_points() -> None:
         capex_values=[90.0, 90.0, 90.0, 90.0],
     )
 
-    assert metric.compute(symbol, _OwnerEarningsRepo(records_by_concept)) is None
+    assert metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept)) is None
 
 
 def test_oe_ev_fy_median_5y_metric_allows_year_gaps() -> None:
@@ -11995,7 +11733,7 @@ def test_oe_ev_fy_median_5y_metric_allows_year_gaps() -> None:
         capex_values=[90.0, 90.0, 90.0, 90.0, 90.0],
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
     assert result.value == 284.0
 
@@ -12018,7 +11756,7 @@ def test_oe_ev_fy_median_5y_metric_returns_none_when_delta_nwc_maint_missing() -
     )
     records_by_concept.pop("AssetsCurrent")
 
-    assert metric.compute(symbol, _OwnerEarningsRepo(records_by_concept)) is None
+    assert metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept)) is None
 
 
 def test_worst_oe_ev_fy_10y_metric_preserves_negative_worst_year() -> None:
@@ -12073,7 +11811,7 @@ def test_worst_oe_ev_fy_10y_metric_preserves_negative_worst_year() -> None:
         ],
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
     assert result.value == -20.0
 
@@ -12141,7 +11879,7 @@ def test_worst_oe_ev_fy_10y_metric_requires_strict_consecutive_years() -> None:
         ],
     )
 
-    assert metric.compute(symbol, _OwnerEarningsRepo(records_by_concept)) is None
+    assert metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept)) is None
 
 
 def test_fcf_fy_median_5y_metric_computes_expected_median() -> None:
@@ -12156,7 +11894,7 @@ def test_fcf_fy_median_5y_metric_computes_expected_median() -> None:
         capex_values=[50.0, 50.0, 50.0, 50.0, 50.0],
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
     assert result.value == 110.0
 
@@ -12172,7 +11910,7 @@ def test_fcf_fy_median_5y_metric_uses_zero_capex_when_missing() -> None:
         [150.0, 140.0, 130.0, 120.0, 110.0],
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
     assert result.value == 130.0
 
@@ -12216,7 +11954,7 @@ def test_fcf_fy_median_5y_metric_allows_year_gaps() -> None:
         ],
     }
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
     assert result.value == 110.0
 
@@ -12233,7 +11971,7 @@ def test_fcf_fy_median_5y_metric_requires_five_points() -> None:
         capex_values=[50.0, 50.0, 50.0, 50.0],
     )
 
-    assert metric.compute(symbol, _OwnerEarningsRepo(records_by_concept)) is None
+    assert metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept)) is None
 
 
 def test_fcf_neg_years_10y_metric_counts_negative_values() -> None:
@@ -12248,7 +11986,7 @@ def test_fcf_neg_years_10y_metric_counts_negative_values() -> None:
         capex_values=[20.0, 20.0, 20.0, 80.0, 80.0, 20.0, 20.0, 40.0, 30.0, 20.0],
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
     assert result.value == 5.0
 
@@ -12265,7 +12003,7 @@ def test_fcf_neg_years_10y_metric_requires_strict_consecutive_years() -> None:
         capex_values=[20.0] * 9,
     )
 
-    assert metric.compute(symbol, _OwnerEarningsRepo(records_by_concept)) is None
+    assert metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept)) is None
 
 
 def test_ni_loss_years_10y_metric_uses_fallback_and_counts_negative_values() -> None:
@@ -12280,7 +12018,7 @@ def test_ni_loss_years_10y_metric_uses_fallback_and_counts_negative_values() -> 
         concept="NetIncomeLossAvailableToCommonStockholdersBasic",
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
     assert result.value == 4.0
 
@@ -12296,7 +12034,7 @@ def test_ni_loss_years_10y_metric_requires_strict_consecutive_years() -> None:
         [10.0, -5.0, 20.0, -1.0, 30.0, -2.0, 40.0, 50.0, -3.0],
     )
 
-    assert metric.compute(symbol, _OwnerEarningsRepo(records_by_concept)) is None
+    assert metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept)) is None
 
 
 def test_oey_ev_norm_metric_computes_ev_from_components() -> None:
@@ -12327,7 +12065,7 @@ def test_oey_ev_norm_metric_computes_ev_from_components() -> None:
 
     # EV is derived (no fact): market cap 2950 + debt/cash components = 3250.
     result = metric.compute(
-        symbol,
+        LISTING_ID,
         _OwnerEarningsRepo(records_by_concept),
         _build_market_repo(
             market_cap=2950.0,
@@ -12352,7 +12090,6 @@ def _new_metric_quarter_dates() -> tuple[str, str, str, str, str]:
 
 def test_gross_margin_ttm_metric_clamps_and_uses_gross_profit_fallback() -> None:
     metric = GrossMarginTTMMetric()
-    symbol = "AAPL.US"
     q4, q3, q2, q1, _ = _new_metric_quarter_dates()
     repo = _build_metric_repo(
         concept_records={
@@ -12365,14 +12102,13 @@ def test_gross_margin_ttm_metric_clamps_and_uses_gross_profit_fallback() -> None
         }
     )
 
-    result = metric.compute(symbol, repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 1.0
 
 
 def test_gross_margin_ttm_metric_returns_none_when_revenue_non_positive() -> None:
     metric = GrossMarginTTMMetric()
-    symbol = "AAPL.US"
     q4, q3, q2, q1, _ = _new_metric_quarter_dates()
     repo = _build_metric_repo(
         concept_records={
@@ -12385,12 +12121,11 @@ def test_gross_margin_ttm_metric_returns_none_when_revenue_non_positive() -> Non
         }
     )
 
-    assert metric.compute(symbol, repo) is None
+    assert metric.compute(LISTING_ID, repo) is None
 
 
 def test_operating_margin_ttm_metric_allows_negative_values() -> None:
     metric = OperatingMarginTTMMetric()
-    symbol = "AAPL.US"
     q4, q3, q2, q1, _ = _new_metric_quarter_dates()
     repo = _build_metric_repo(
         concept_records={
@@ -12403,14 +12138,13 @@ def test_operating_margin_ttm_metric_allows_negative_values() -> None:
         }
     )
 
-    result = metric.compute(symbol, repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == -0.1
 
 
 def test_fcf_margin_ttm_metric_allows_negative_values() -> None:
     metric = FCFMarginTTMMetric()
-    symbol = "AAPL.US"
     q4, q3, q2, q1, _ = _new_metric_quarter_dates()
     repo = _build_metric_repo(
         concept_records={
@@ -12428,7 +12162,7 @@ def test_fcf_margin_ttm_metric_allows_negative_values() -> None:
         }
     )
 
-    result = metric.compute(symbol, repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == -0.05
 
@@ -12466,7 +12200,7 @@ def test_gross_profit_to_assets_ttm_metric_uses_avg_assets() -> None:
         }
     )
 
-    result = metric.compute(symbol, repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 240.0 / 150.0
 
@@ -12512,7 +12246,7 @@ def test_roe_ttm_metric_falls_back_to_fy_average() -> None:
         }
     )
 
-    result = metric.compute(symbol, repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 100.0 / 150.0
 
@@ -12547,7 +12281,7 @@ def test_roa_ttm_metric_uses_same_quarter_average_assets() -> None:
         }
     )
 
-    result = metric.compute(symbol, repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 40.0 / 200.0
 
@@ -12584,14 +12318,13 @@ def test_roetce_ttm_metric_treats_missing_goodwill_and_intangibles_as_zero() -> 
         }
     )
 
-    result = metric.compute(symbol, repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert result.value == 40.0 / 150.0
 
 
 def test_dividend_yield_ttm_metric_uses_cash_dividends_and_abs_sign() -> None:
     metric = DividendYieldTTMMetric()
-    symbol = "AAPL.US"
     q4, q3, q2, q1, _ = _new_metric_quarter_dates()
     repo = _build_metric_repo(
         concept_records={
@@ -12604,7 +12337,7 @@ def test_dividend_yield_ttm_metric_uses_cash_dividends_and_abs_sign() -> None:
     )
 
     result = metric.compute(
-        symbol, repo, _build_market_repo(market_cap=200.0, as_of=q4)
+        LISTING_ID, repo, _build_market_repo(market_cap=200.0, as_of=q4)
     )
     assert result is not None
     assert result.value == 20.0 / 200.0
@@ -12629,14 +12362,15 @@ def test_dividend_yield_ttm_metric_falls_back_to_dps_and_price() -> None:
         }
     )
 
-    result = metric.compute(symbol, repo, _build_market_repo(market_cap=50.0, as_of=q4))
+    result = metric.compute(
+        LISTING_ID, repo, _build_market_repo(market_cap=50.0, as_of=q4)
+    )
     assert result is not None
     assert result.value == 2.5 / 50.0
 
 
 def test_shareholder_yield_ttm_metric_sums_dividend_and_buyback_yields() -> None:
     metric = ShareholderYieldTTMMetric()
-    symbol = "AAPL.US"
     q4, q3, q2, q1, _ = _new_metric_quarter_dates()
     repo = _build_metric_repo(
         concept_records={
@@ -12654,7 +12388,7 @@ def test_shareholder_yield_ttm_metric_sums_dividend_and_buyback_yields() -> None
     )
 
     result = metric.compute(
-        symbol, repo, _build_market_repo(market_cap=200.0, as_of=q4)
+        LISTING_ID, repo, _build_market_repo(market_cap=200.0, as_of=q4)
     )
     assert result is not None
     assert result.value == (20.0 / 200.0) + (40.0 / 200.0)
@@ -12662,7 +12396,6 @@ def test_shareholder_yield_ttm_metric_sums_dividend_and_buyback_yields() -> None
 
 def test_dividend_payout_ratio_ttm_metric_requires_positive_net_income() -> None:
     metric = DividendPayoutRatioTTMMetric()
-    symbol = "AAPL.US"
     q4, q3, q2, q1, _ = _new_metric_quarter_dates()
     repo = _build_metric_repo(
         concept_records={
@@ -12679,7 +12412,7 @@ def test_dividend_payout_ratio_ttm_metric_requires_positive_net_income() -> None
         }
     )
 
-    assert metric.compute(symbol, repo) is None
+    assert metric.compute(LISTING_ID, repo) is None
 
 
 def test_revenue_cagr_10y_metric_uses_strict_fy_pair() -> None:
@@ -12709,7 +12442,7 @@ def test_revenue_cagr_10y_metric_uses_strict_fy_pair() -> None:
         }
     )
 
-    result = metric.compute(symbol, repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert round(result.value, 8) == round((2.0**0.1) - 1.0, 8)
 
@@ -12781,7 +12514,7 @@ def test_fcf_per_share_cagr_10y_metric_computes_happy_path() -> None:
         }
     )
 
-    result = metric.compute(symbol, repo)
+    result = metric.compute(LISTING_ID, repo)
     assert result is not None
     assert round(result.value, 8) == round((2.0**0.1) - 1.0, 8)
 
@@ -12813,7 +12546,7 @@ def test_fcf_per_share_cagr_10y_metric_requires_diluted_shares() -> None:
         }
     )
 
-    assert metric.compute(symbol, repo) is None
+    assert metric.compute(LISTING_ID, repo) is None
 
 
 def test_owner_earnings_cagr_10y_metric_uses_three_year_endpoint_averages() -> None:
@@ -12867,7 +12600,7 @@ def test_owner_earnings_cagr_10y_metric_uses_three_year_endpoint_averages() -> N
         ],
     )
 
-    result = metric.compute(symbol, _OwnerEarningsRepo(records_by_concept))
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
     start_avg = (246.0 + 222.0 + 198.0) / 3.0
     end_avg = (414.0 + 390.0 + 366.0) / 3.0

@@ -168,24 +168,31 @@ class ProfitabilityReturnsGrowthCalculator:
     """
 
     def compute_gross_margin_ttm(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[_RatioSnapshot]:
         revenue = self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             REVENUE_CONCEPTS,
             context="gross_margin_ttm",
         )
         if revenue is None:
-            LOGGER.warning("gross_margin_ttm: missing TTM revenue for %s", symbol)
+            LOGGER.warning(
+                "gross_margin_ttm: missing TTM revenue for listing_id=%s", listing_id
+            )
             return None
         if revenue.money.amount <= 0:
-            LOGGER.warning("gross_margin_ttm: non-positive TTM revenue for %s", symbol)
+            LOGGER.warning(
+                "gross_margin_ttm: non-positive TTM revenue for listing_id=%s",
+                listing_id,
+            )
             return None
 
-        cogs = self._compute_ttm_cogs(symbol, repo, context="gross_margin_ttm")
+        cogs = self._compute_ttm_cogs(listing_id, repo, context="gross_margin_ttm")
         if cogs is None:
-            LOGGER.warning("gross_margin_ttm: missing TTM COGS for %s", symbol)
+            LOGGER.warning(
+                "gross_margin_ttm: missing TTM COGS for listing_id=%s", listing_id
+            )
             return None
 
         gross_margin = (revenue.money - cogs.money) / revenue.money
@@ -195,31 +202,37 @@ class ProfitabilityReturnsGrowthCalculator:
         )
 
     def compute_operating_margin_ttm(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[_RatioSnapshot]:
         revenue = self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             REVENUE_CONCEPTS,
             context="operating_margin_ttm",
         )
         if revenue is None:
-            LOGGER.warning("operating_margin_ttm: missing TTM revenue for %s", symbol)
+            LOGGER.warning(
+                "operating_margin_ttm: missing TTM revenue for listing_id=%s",
+                listing_id,
+            )
             return None
         if revenue.money.amount <= 0:
             LOGGER.warning(
-                "operating_margin_ttm: non-positive TTM revenue for %s", symbol
+                "operating_margin_ttm: non-positive TTM revenue for listing_id=%s",
+                listing_id,
             )
             return None
 
         ebit = self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             EBIT_CONCEPTS,
             context="operating_margin_ttm",
         )
         if ebit is None:
-            LOGGER.warning("operating_margin_ttm: missing TTM EBIT for %s", symbol)
+            LOGGER.warning(
+                "operating_margin_ttm: missing TTM EBIT for listing_id=%s", listing_id
+            )
             return None
 
         return _RatioSnapshot(
@@ -228,24 +241,30 @@ class ProfitabilityReturnsGrowthCalculator:
         )
 
     def compute_fcf_margin_ttm(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[_RatioSnapshot]:
         revenue = self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             REVENUE_CONCEPTS,
             context="fcf_margin_ttm",
         )
         if revenue is None:
-            LOGGER.warning("fcf_margin_ttm: missing TTM revenue for %s", symbol)
+            LOGGER.warning(
+                "fcf_margin_ttm: missing TTM revenue for listing_id=%s", listing_id
+            )
             return None
         if revenue.money.amount <= 0:
-            LOGGER.warning("fcf_margin_ttm: non-positive TTM revenue for %s", symbol)
+            LOGGER.warning(
+                "fcf_margin_ttm: non-positive TTM revenue for listing_id=%s", listing_id
+            )
             return None
 
-        fcf = self._compute_ttm_fcf(symbol, repo, context="fcf_margin_ttm")
+        fcf = self._compute_ttm_fcf(listing_id, repo, context="fcf_margin_ttm")
         if fcf is None:
-            LOGGER.warning("fcf_margin_ttm: missing TTM FCF for %s", symbol)
+            LOGGER.warning(
+                "fcf_margin_ttm: missing TTM FCF for listing_id=%s", listing_id
+            )
             return None
 
         return _RatioSnapshot(
@@ -254,26 +273,31 @@ class ProfitabilityReturnsGrowthCalculator:
         )
 
     def compute_gross_profit_to_assets_ttm(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[_RatioSnapshot]:
         gross_profit = self._compute_ttm_gross_profit(
-            symbol,
+            listing_id,
             repo,
             context="gross_profit_to_assets_ttm",
         )
         if gross_profit is None:
             LOGGER.warning(
-                "gross_profit_to_assets_ttm: missing TTM gross profit for %s", symbol
+                "gross_profit_to_assets_ttm: missing TTM gross profit for"
+                " listing_id=%s",
+                listing_id,
             )
             return None
 
-        avg_assets = AccrualsRatioCalculator().compute_avg_total_assets(symbol, repo)
+        avg_assets = AccrualsRatioCalculator().compute_avg_total_assets(
+            listing_id, repo
+        )
         if avg_assets is None:
             return None
         if avg_assets.money.amount <= 0:
             LOGGER.warning(
-                "gross_profit_to_assets_ttm: non-positive average assets for %s",
-                symbol,
+                "gross_profit_to_assets_ttm: non-positive average assets for"
+                " listing_id=%s",
+                listing_id,
             )
             return None
 
@@ -283,23 +307,29 @@ class ProfitabilityReturnsGrowthCalculator:
         )
 
     def compute_roe_ttm(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[_RatioSnapshot]:
         net_income = self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             NET_INCOME_COMMON_CONCEPTS + NET_INCOME_CONCEPTS,
             context="roe_ttm",
         )
         if net_income is None:
-            LOGGER.warning("roe_ttm: missing TTM net income for %s", symbol)
+            LOGGER.warning(
+                "roe_ttm: missing TTM net income for listing_id=%s", listing_id
+            )
             return None
 
-        avg_equity = self._compute_avg_common_equity(symbol, repo, context="roe_ttm")
+        avg_equity = self._compute_avg_common_equity(
+            listing_id, repo, context="roe_ttm"
+        )
         if avg_equity is None:
             return None
         if avg_equity.money.amount <= 0:
-            LOGGER.warning("roe_ttm: non-positive average equity for %s", symbol)
+            LOGGER.warning(
+                "roe_ttm: non-positive average equity for listing_id=%s", listing_id
+            )
             return None
 
         return _RatioSnapshot(
@@ -308,23 +338,29 @@ class ProfitabilityReturnsGrowthCalculator:
         )
 
     def compute_roa_ttm(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[_RatioSnapshot]:
         net_income = self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             NET_INCOME_CONCEPTS + NET_INCOME_COMMON_CONCEPTS,
             context="roa_ttm",
         )
         if net_income is None:
-            LOGGER.warning("roa_ttm: missing TTM net income for %s", symbol)
+            LOGGER.warning(
+                "roa_ttm: missing TTM net income for listing_id=%s", listing_id
+            )
             return None
 
-        avg_assets = AccrualsRatioCalculator().compute_avg_total_assets(symbol, repo)
+        avg_assets = AccrualsRatioCalculator().compute_avg_total_assets(
+            listing_id, repo
+        )
         if avg_assets is None:
             return None
         if avg_assets.money.amount <= 0:
-            LOGGER.warning("roa_ttm: non-positive average assets for %s", symbol)
+            LOGGER.warning(
+                "roa_ttm: non-positive average assets for listing_id=%s", listing_id
+            )
             return None
 
         return _RatioSnapshot(
@@ -333,27 +369,31 @@ class ProfitabilityReturnsGrowthCalculator:
         )
 
     def compute_roetce_ttm(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[_RatioSnapshot]:
         net_income = self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             NET_INCOME_COMMON_CONCEPTS + NET_INCOME_CONCEPTS,
             context="roetce_ttm",
         )
         if net_income is None:
-            LOGGER.warning("roetce_ttm: missing TTM net income for %s", symbol)
+            LOGGER.warning(
+                "roetce_ttm: missing TTM net income for listing_id=%s", listing_id
+            )
             return None
 
         avg_tce = self._compute_avg_tangible_common_equity(
-            symbol,
+            listing_id,
             repo,
             context="roetce_ttm",
         )
         if avg_tce is None:
             return None
         if avg_tce.money.amount <= 0:
-            LOGGER.warning("roetce_ttm: non-positive average TCE for %s", symbol)
+            LOGGER.warning(
+                "roetce_ttm: non-positive average TCE for listing_id=%s", listing_id
+            )
             return None
 
         return _RatioSnapshot(
@@ -363,12 +403,12 @@ class ProfitabilityReturnsGrowthCalculator:
 
     def compute_dividend_yield_ttm(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[_RatioSnapshot]:
         dividends_paid = self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             DIVIDENDS_PAID_CONCEPTS,
             context="dividend_yield_ttm",
@@ -376,7 +416,7 @@ class ProfitabilityReturnsGrowthCalculator:
         )
         if dividends_paid is not None:
             cash_yield = self._compute_cash_dividend_yield(
-                symbol,
+                listing_id,
                 dividends_paid,
                 repo,
                 market_repo,
@@ -386,7 +426,7 @@ class ProfitabilityReturnsGrowthCalculator:
                 return cash_yield
 
         dividend_per_share = self._latest_amount(
-            symbol,
+            listing_id,
             repo,
             DIVIDENDS_PER_SHARE_CONCEPTS,
             context="dividend_yield_ttm",
@@ -395,14 +435,18 @@ class ProfitabilityReturnsGrowthCalculator:
         )
         if dividend_per_share is None:
             LOGGER.warning(
-                "dividend_yield_ttm: missing cash dividends and DPS fallback for %s",
-                symbol,
+                "dividend_yield_ttm: missing cash dividends and DPS fallback for"
+                " listing_id=%s",
+                listing_id,
             )
             return None
 
-        snapshot = market_repo.latest_snapshot(symbol)
+        snapshot = market_repo.latest_snapshot_by_id(listing_id)
         if snapshot is None or snapshot.price is None or snapshot.price <= 0:
-            LOGGER.warning("dividend_yield_ttm: missing price snapshot for %s", symbol)
+            LOGGER.warning(
+                "dividend_yield_ttm: missing price snapshot for listing_id=%s",
+                listing_id,
+            )
             return None
 
         price_money = require_metric_amount_money(
@@ -410,12 +454,14 @@ class ProfitabilityReturnsGrowthCalculator:
             getattr(snapshot, "currency", None),
             target_currency=dividend_per_share.money.currency,
             metric_id="dividend_yield_ttm",
-            symbol=symbol,
+            listing_id=listing_id,
             input_name="price",
             as_of=snapshot.as_of,
         )
         if price_money.amount <= 0:
-            LOGGER.warning("dividend_yield_ttm: non-positive price for %s", symbol)
+            LOGGER.warning(
+                "dividend_yield_ttm: non-positive price for listing_id=%s", listing_id
+            )
             return None
 
         return _RatioSnapshot(
@@ -424,10 +470,10 @@ class ProfitabilityReturnsGrowthCalculator:
         )
 
     def compute_dividend_payout_ratio_ttm(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[_RatioSnapshot]:
         dividends_paid = self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             DIVIDENDS_PAID_CONCEPTS,
             context="dividend_payout_ratio_ttm",
@@ -435,24 +481,29 @@ class ProfitabilityReturnsGrowthCalculator:
         )
         if dividends_paid is None:
             LOGGER.warning(
-                "dividend_payout_ratio_ttm: missing TTM cash dividends for %s", symbol
+                "dividend_payout_ratio_ttm: missing TTM cash dividends for"
+                " listing_id=%s",
+                listing_id,
             )
             return None
 
         net_income = self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             NET_INCOME_COMMON_CONCEPTS + NET_INCOME_CONCEPTS,
             context="dividend_payout_ratio_ttm",
         )
         if net_income is None:
             LOGGER.warning(
-                "dividend_payout_ratio_ttm: missing TTM net income for %s", symbol
+                "dividend_payout_ratio_ttm: missing TTM net income for listing_id=%s",
+                listing_id,
             )
             return None
         if net_income.money.amount <= 0:
             LOGGER.warning(
-                "dividend_payout_ratio_ttm: non-positive TTM net income for %s", symbol
+                "dividend_payout_ratio_ttm: non-positive TTM net income for"
+                " listing_id=%s",
+                listing_id,
             )
             return None
 
@@ -462,10 +513,10 @@ class ProfitabilityReturnsGrowthCalculator:
         )
 
     def compute_revenue_cagr_10y(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[_RatioSnapshot]:
         points = self._build_fy_amount_points(
-            symbol,
+            listing_id,
             repo,
             REVENUE_CONCEPTS,
             context="revenue_cagr_10y",
@@ -474,14 +525,15 @@ class ProfitabilityReturnsGrowthCalculator:
             points,
             years_back=TEN_YEARS,
             context="revenue_cagr_10y",
-            symbol=symbol,
+            listing_id=listing_id,
         )
         if pair is None:
             return None
         latest, prior = pair
         if latest.money.amount <= 0 or prior.money.amount <= 0:
             LOGGER.warning(
-                "revenue_cagr_10y: non-positive revenue endpoints for %s", symbol
+                "revenue_cagr_10y: non-positive revenue endpoints for listing_id=%s",
+                listing_id,
             )
             return None
 
@@ -491,10 +543,10 @@ class ProfitabilityReturnsGrowthCalculator:
         )
 
     def compute_fcf_per_share_cagr_10y(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[_RatioSnapshot]:
         fcf_points = self._build_fcf_fy_points(
-            symbol,
+            listing_id,
             repo,
             context="fcf_per_share_cagr_10y",
         )
@@ -503,11 +555,13 @@ class ProfitabilityReturnsGrowthCalculator:
         # a dimensionless ratio. Reading them through the scalar boundary makes the
         # type system reject treating the share count as money.
         share_counts = self._build_fy_share_count_map(
-            symbol, repo, DILUTED_SHARES_CONCEPT
+            listing_id, repo, DILUTED_SHARES_CONCEPT
         )
         if not share_counts:
             LOGGER.warning(
-                "fcf_per_share_cagr_10y: missing diluted share history for %s", symbol
+                "fcf_per_share_cagr_10y: missing diluted share history for"
+                " listing_id=%s",
+                listing_id,
             )
             return None
 
@@ -528,15 +582,16 @@ class ProfitabilityReturnsGrowthCalculator:
             per_share_points,
             years_back=TEN_YEARS,
             context="fcf_per_share_cagr_10y",
-            symbol=symbol,
+            listing_id=listing_id,
         )
         if pair is None:
             return None
         latest, prior = pair
         if latest.money.amount <= 0 or prior.money.amount <= 0:
             LOGGER.warning(
-                "fcf_per_share_cagr_10y: non-positive FCF/share endpoints for %s",
-                symbol,
+                "fcf_per_share_cagr_10y: non-positive FCF/share endpoints for"
+                " listing_id=%s",
+                listing_id,
             )
             return None
 
@@ -547,7 +602,7 @@ class ProfitabilityReturnsGrowthCalculator:
 
     def _compute_cash_dividend_yield(
         self,
-        symbol: str,
+        listing_id: int,
         dividends_paid: _MoneySnapshot,
         repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
@@ -555,7 +610,7 @@ class ProfitabilityReturnsGrowthCalculator:
         context: str,
     ) -> Optional[_RatioSnapshot]:
         cap = market_cap_money(
-            symbol,
+            listing_id,
             repo=repo,
             market_repo=market_repo,
             metric_id=context,
@@ -563,7 +618,9 @@ class ProfitabilityReturnsGrowthCalculator:
             contexts=(market_repo, repo),
         )
         if cap is None:
-            LOGGER.warning("%s: missing market cap for %s", context, symbol)
+            LOGGER.warning(
+                "%s: missing market cap for listing_id=%s", context, listing_id
+            )
             return None
 
         return _RatioSnapshot(
@@ -573,17 +630,17 @@ class ProfitabilityReturnsGrowthCalculator:
 
     def _compute_ttm_gross_profit(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         *,
         context: str,
     ) -> Optional[_MoneySnapshot]:
         revenue = self._compute_ttm_amount(
-            symbol, repo, REVENUE_CONCEPTS, context=context
+            listing_id, repo, REVENUE_CONCEPTS, context=context
         )
         if revenue is None:
             return None
-        cogs = self._compute_ttm_cogs(symbol, repo, context=context)
+        cogs = self._compute_ttm_cogs(listing_id, repo, context=context)
         if cogs is None:
             return None
         return _MoneySnapshot(
@@ -593,41 +650,42 @@ class ProfitabilityReturnsGrowthCalculator:
 
     def _compute_ttm_cogs(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         *,
         context: str,
     ) -> Optional[_MoneySnapshot]:
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id=context
+            listing_id, repo, metric_id=context
         )
         revenue_records = self._filter_periods(
-            repo.monetary_facts_for_concept(symbol, REVENUE_CONCEPT), QUARTERLY_PERIODS
+            repo.monetary_facts_for_concept(listing_id, REVENUE_CONCEPT),
+            QUARTERLY_PERIODS,
         )
         if len(revenue_records) < 4:
             LOGGER.warning(
-                "%s: need 4 quarterly revenue records for %s, found %s",
+                "%s: need 4 quarterly revenue records for listing_id=%s, found %s",
                 context,
-                symbol,
+                listing_id,
                 len(revenue_records),
             )
             return None
         latest_revenue = revenue_records[0]
         if not is_recent_fact(latest_revenue, max_age_days=MAX_FACT_AGE_DAYS):
             LOGGER.warning(
-                "%s: latest revenue quarter (%s) too old for %s",
+                "%s: latest revenue quarter (%s) too old for listing_id=%s",
                 context,
                 latest_revenue.end_date,
-                symbol,
+                listing_id,
             )
             return None
 
         cogs_map = self._period_record_map(
-            repo.monetary_facts_for_concept(symbol, COST_OF_REVENUE_CONCEPT),
+            repo.monetary_facts_for_concept(listing_id, COST_OF_REVENUE_CONCEPT),
             QUARTERLY_PERIODS,
         )
         gross_profit_map = self._period_record_map(
-            repo.monetary_facts_for_concept(symbol, GROSS_PROFIT_CONCEPT),
+            repo.monetary_facts_for_concept(listing_id, GROSS_PROFIT_CONCEPT),
             QUARTERLY_PERIODS,
         )
 
@@ -642,7 +700,10 @@ class ProfitabilityReturnsGrowthCalculator:
             if cogs_record is not None:
                 quarter_cogs.append(
                     self._money(
-                        cogs_record, target_currency=target_currency, context=context
+                        cogs_record,
+                        listing_id=listing_id,
+                        target_currency=target_currency,
+                        context=context,
                     )
                 )
                 as_of_dates.extend([revenue_record.end_date, cogs_record.end_date])
@@ -651,17 +712,23 @@ class ProfitabilityReturnsGrowthCalculator:
             gross_profit_record = gross_profit_map.get(key)
             if gross_profit_record is None:
                 LOGGER.warning(
-                    "%s: missing quarterly COGS/gross profit on %s for %s",
+                    "%s: missing quarterly COGS/gross profit on %s for listing_id=%s",
                     context,
                     revenue_record.end_date,
-                    symbol,
+                    listing_id,
                 )
                 return None
             revenue_money = self._money(
-                revenue_record, target_currency=target_currency, context=context
+                revenue_record,
+                listing_id=listing_id,
+                target_currency=target_currency,
+                context=context,
             )
             gross_profit_money = self._money(
-                gross_profit_record, target_currency=target_currency, context=context
+                gross_profit_record,
+                listing_id=listing_id,
+                target_currency=target_currency,
+                context=context,
             )
             quarter_cogs.append(revenue_money - gross_profit_money)
             as_of_dates.extend([revenue_record.end_date, gross_profit_record.end_date])
@@ -673,13 +740,13 @@ class ProfitabilityReturnsGrowthCalculator:
 
     def _compute_ttm_fcf(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         *,
         context: str,
     ) -> Optional[_MoneySnapshot]:
         operating_cash = self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             OPERATING_CASH_FLOW_CONCEPTS,
             context=context,
@@ -688,14 +755,16 @@ class ProfitabilityReturnsGrowthCalculator:
             return None
 
         capex = self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             CAPEX_CONCEPTS,
             context=context,
         )
         if capex is None:
             LOGGER.warning(
-                "%s: missing/stale capex for %s; assuming zero", context, symbol
+                "%s: missing/stale capex for listing_id=%s; assuming zero",
+                context,
+                listing_id,
             )
             return operating_cash
         return _MoneySnapshot(
@@ -705,16 +774,16 @@ class ProfitabilityReturnsGrowthCalculator:
 
     def _compute_avg_common_equity(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         *,
         context: str,
     ) -> Optional[_MoneySnapshot]:
         quarterly_points = self._build_common_equity_points(
-            symbol, repo, QUARTERLY_PERIODS, context=context
+            listing_id, repo, QUARTERLY_PERIODS, context=context
         )
         fy_points = self._build_common_equity_points(
-            symbol,
+            listing_id,
             repo,
             FY_PERIODS,
             context=context,
@@ -722,26 +791,26 @@ class ProfitabilityReturnsGrowthCalculator:
         return self._compute_average_balance_points(
             quarterly_points,
             fy_points,
-            symbol=symbol,
+            listing_id=listing_id,
             context=context,
             allow_fy_fallback=True,
         )
 
     def _compute_avg_tangible_common_equity(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         *,
         context: str,
     ) -> Optional[_MoneySnapshot]:
         quarterly_points = self._build_tangible_common_equity_points(
-            symbol,
+            listing_id,
             repo,
             QUARTERLY_PERIODS,
             context=context,
         )
         fy_points = self._build_tangible_common_equity_points(
-            symbol,
+            listing_id,
             repo,
             FY_PERIODS,
             context=context,
@@ -749,24 +818,24 @@ class ProfitabilityReturnsGrowthCalculator:
         return self._compute_average_balance_points(
             quarterly_points,
             fy_points,
-            symbol=symbol,
+            listing_id=listing_id,
             context=context,
             allow_fy_fallback=True,
         )
 
     def _build_common_equity_points(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         periods: set[str],
         *,
         context: str,
     ) -> list[_BalancePoint]:
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id=context
+            listing_id, repo, metric_id=context
         )
         equity_map = self._period_record_map(
-            repo.monetary_facts_for_concept(symbol, COMMON_EQUITY_CONCEPT), periods
+            repo.monetary_facts_for_concept(listing_id, COMMON_EQUITY_CONCEPT), periods
         )
         points: list[_BalancePoint] = []
         for (_, fiscal_period), record in sorted(
@@ -777,7 +846,10 @@ class ProfitabilityReturnsGrowthCalculator:
             points.append(
                 _BalancePoint(
                     money=self._money(
-                        record, target_currency=target_currency, context=context
+                        record,
+                        listing_id=listing_id,
+                        target_currency=target_currency,
+                        context=context,
                     ),
                     as_of=record.end_date,
                     fiscal_period=fiscal_period,
@@ -787,26 +859,27 @@ class ProfitabilityReturnsGrowthCalculator:
 
     def _build_tangible_common_equity_points(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         periods: set[str],
         *,
         context: str,
     ) -> list[_BalancePoint]:
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id=context
+            listing_id, repo, metric_id=context
         )
         equity_map = self._period_record_map(
-            repo.monetary_facts_for_concept(symbol, COMMON_EQUITY_CONCEPT), periods
+            repo.monetary_facts_for_concept(listing_id, COMMON_EQUITY_CONCEPT), periods
         )
         goodwill_map = self._period_record_map(
-            repo.monetary_facts_for_concept(symbol, GOODWILL_CONCEPT), periods
+            repo.monetary_facts_for_concept(listing_id, GOODWILL_CONCEPT), periods
         )
         intangibles_primary_map = self._period_record_map(
-            repo.monetary_facts_for_concept(symbol, INTANGIBLE_PRIMARY_CONCEPT), periods
+            repo.monetary_facts_for_concept(listing_id, INTANGIBLE_PRIMARY_CONCEPT),
+            periods,
         )
         intangibles_fallback_map = self._period_record_map(
-            repo.monetary_facts_for_concept(symbol, INTANGIBLE_FALLBACK_CONCEPT),
+            repo.monetary_facts_for_concept(listing_id, INTANGIBLE_FALLBACK_CONCEPT),
             periods,
         )
 
@@ -818,12 +891,18 @@ class ProfitabilityReturnsGrowthCalculator:
         ):
             zero = Money.of(0.0, target_currency)
             equity_money = self._money(
-                equity_record, target_currency=target_currency, context=context
+                equity_record,
+                listing_id=listing_id,
+                target_currency=target_currency,
+                context=context,
             )
             goodwill_record = goodwill_map.get(key)
             goodwill_money = (
                 self._money(
-                    goodwill_record, target_currency=target_currency, context=context
+                    goodwill_record,
+                    listing_id=listing_id,
+                    target_currency=target_currency,
+                    context=context,
                 )
                 if goodwill_record is not None
                 else zero
@@ -835,6 +914,7 @@ class ProfitabilityReturnsGrowthCalculator:
             intangible_money = (
                 self._money(
                     intangibles_record,
+                    listing_id=listing_id,
                     target_currency=target_currency,
                     context=context,
                 )
@@ -856,7 +936,7 @@ class ProfitabilityReturnsGrowthCalculator:
         quarterly_points: list[_BalancePoint],
         fy_points: list[_BalancePoint],
         *,
-        symbol: str,
+        listing_id: int,
         context: str,
         allow_fy_fallback: bool,
     ) -> Optional[_MoneySnapshot]:
@@ -864,7 +944,7 @@ class ProfitabilityReturnsGrowthCalculator:
             quarterly_points,
             max_age_days=MAX_FACT_AGE_DAYS,
             context=context,
-            symbol=symbol,
+            listing_id=listing_id,
         )
         if latest_quarter is not None:
             latest_year = self._parse_year(latest_quarter.as_of)
@@ -883,7 +963,9 @@ class ProfitabilityReturnsGrowthCalculator:
 
         if not allow_fy_fallback:
             LOGGER.warning(
-                "%s: missing same-quarter prior-year pair for %s", context, symbol
+                "%s: missing same-quarter prior-year pair for listing_id=%s",
+                context,
+                listing_id,
             )
             return None
 
@@ -891,14 +973,16 @@ class ProfitabilityReturnsGrowthCalculator:
             fy_points,
             max_age_days=MAX_FY_FACT_AGE_DAYS,
             context=context,
-            symbol=symbol,
+            listing_id=listing_id,
         )
         if latest_fy is None:
             return None
 
         latest_year = self._parse_year(latest_fy.as_of)
         if latest_year is None:
-            LOGGER.warning("%s: invalid latest FY date for %s", context, symbol)
+            LOGGER.warning(
+                "%s: invalid latest FY date for listing_id=%s", context, listing_id
+            )
             return None
         for point in fy_points[1:]:
             point_year = self._parse_year(point.as_of)
@@ -908,12 +992,14 @@ class ProfitabilityReturnsGrowthCalculator:
                     as_of=latest_fy.as_of,
                 )
 
-        LOGGER.warning("%s: missing strict prior FY pair for %s", context, symbol)
+        LOGGER.warning(
+            "%s: missing strict prior FY pair for listing_id=%s", context, listing_id
+        )
         return None
 
     def _compute_ttm_amount(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         concepts: Sequence[str],
         *,
@@ -921,10 +1007,10 @@ class ProfitabilityReturnsGrowthCalculator:
         absolute: bool = False,
     ) -> Optional[_MoneySnapshot]:
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id=context
+            listing_id, repo, metric_id=context
         )
         for concept in concepts:
-            records = repo.monetary_facts_for_concept(symbol, concept)
+            records = repo.monetary_facts_for_concept(listing_id, concept)
             quarterly = self._filter_periods(records, QUARTERLY_PERIODS)
             if len(quarterly) < 4:
                 continue
@@ -933,6 +1019,7 @@ class ProfitabilityReturnsGrowthCalculator:
             monies = [
                 self._money(
                     record,
+                    listing_id=listing_id,
                     target_currency=target_currency,
                     context=context,
                     absolute=absolute,
@@ -944,7 +1031,7 @@ class ProfitabilityReturnsGrowthCalculator:
 
     def _latest_amount(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         concepts: Sequence[str],
         *,
@@ -953,10 +1040,10 @@ class ProfitabilityReturnsGrowthCalculator:
         absolute: bool = False,
     ) -> Optional[_MoneySnapshot]:
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id=context
+            listing_id, repo, metric_id=context
         )
         for concept in concepts:
-            record = repo.latest_monetary_fact(symbol, concept)
+            record = repo.latest_monetary_fact(listing_id, concept)
             if record is None:
                 continue
             if not is_recent_fact(record, max_age_days=max_age_days):
@@ -964,6 +1051,7 @@ class ProfitabilityReturnsGrowthCalculator:
             return _MoneySnapshot(
                 money=self._money(
                     record,
+                    listing_id=listing_id,
                     target_currency=target_currency,
                     context=context,
                     absolute=absolute,
@@ -971,25 +1059,28 @@ class ProfitabilityReturnsGrowthCalculator:
                 as_of=record.end_date,
             )
         LOGGER.warning(
-            "%s: missing recent %s for %s", context, ",".join(concepts), symbol
+            "%s: missing recent %s for listing_id=%s",
+            context,
+            ",".join(concepts),
+            listing_id,
         )
         return None
 
     def _build_fcf_fy_points(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         *,
         context: str,
     ) -> list[_MoneyFYPoint]:
         operating_map = self._build_fy_amount_map(
-            symbol,
+            listing_id,
             repo,
             OPERATING_CASH_FLOW_CONCEPTS,
             context=context,
         )
         capex_map = self._build_fy_amount_map(
-            symbol,
+            listing_id,
             repo,
             CAPEX_CONCEPTS,
             context=context,
@@ -1017,7 +1108,7 @@ class ProfitabilityReturnsGrowthCalculator:
 
     def _build_fy_amount_points(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         concepts: Sequence[str],
         *,
@@ -1025,7 +1116,7 @@ class ProfitabilityReturnsGrowthCalculator:
         absolute: bool = False,
     ) -> list[_MoneyFYPoint]:
         amount_map = self._build_fy_amount_map(
-            symbol,
+            listing_id,
             repo,
             concepts,
             context=context,
@@ -1036,18 +1127,20 @@ class ProfitabilityReturnsGrowthCalculator:
             for year, amount in sorted(amount_map.items(), reverse=True)
         ]
         if not points:
-            LOGGER.warning("%s: missing FY history for %s", context, symbol)
+            LOGGER.warning(
+                "%s: missing FY history for listing_id=%s", context, listing_id
+            )
         return points
 
     def _build_fy_share_count_map(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         concept: str,
     ) -> dict[int, float]:
         """Map FY year -> diluted share *count* (a scalar, currency-less, fact)."""
 
-        records = repo.scalar_facts_for_concept(symbol, concept, fiscal_period="FY")
+        records = repo.scalar_facts_for_concept(listing_id, concept, fiscal_period="FY")
         mapped: dict[int, float] = {}
         seen_end_dates: set[str] = set()
         for record in sorted(records, key=lambda item: item.end_date, reverse=True):
@@ -1064,7 +1157,7 @@ class ProfitabilityReturnsGrowthCalculator:
 
     def _build_fy_amount_map(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         concepts: Sequence[str],
         *,
@@ -1072,11 +1165,11 @@ class ProfitabilityReturnsGrowthCalculator:
         absolute: bool = False,
     ) -> dict[int, _MoneySnapshot]:
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id=context
+            listing_id, repo, metric_id=context
         )
         concept_maps = [
             self._fy_map(
-                symbol,
+                listing_id,
                 repo,
                 concept,
                 target_currency=target_currency,
@@ -1098,7 +1191,7 @@ class ProfitabilityReturnsGrowthCalculator:
 
     def _fy_map(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         concept: str,
         *,
@@ -1106,7 +1199,9 @@ class ProfitabilityReturnsGrowthCalculator:
         context: str,
         absolute: bool = False,
     ) -> dict[int, _MoneySnapshot]:
-        records = repo.monetary_facts_for_concept(symbol, concept, fiscal_period="FY")
+        records = repo.monetary_facts_for_concept(
+            listing_id, concept, fiscal_period="FY"
+        )
         ordered = self._filter_periods(records, FY_PERIODS)
         mapped: dict[int, _MoneySnapshot] = {}
         for record in ordered:
@@ -1116,6 +1211,7 @@ class ProfitabilityReturnsGrowthCalculator:
             mapped[year] = _MoneySnapshot(
                 money=self._money(
                     record,
+                    listing_id=listing_id,
                     target_currency=target_currency,
                     context=context,
                     absolute=absolute,
@@ -1130,15 +1226,20 @@ class ProfitabilityReturnsGrowthCalculator:
         *,
         years_back: int,
         context: str,
-        symbol: str,
+        listing_id: int,
     ) -> Optional[tuple[_MoneyFYPoint, _MoneyFYPoint]]:
         if not points:
-            LOGGER.warning("%s: missing FY history for %s", context, symbol)
+            LOGGER.warning(
+                "%s: missing FY history for listing_id=%s", context, listing_id
+            )
             return None
         latest = points[0]
         if not self._is_recent_as_of(latest.as_of, max_age_days=MAX_FY_FACT_AGE_DAYS):
             LOGGER.warning(
-                "%s: latest FY (%s) too old for %s", context, latest.as_of, symbol
+                "%s: latest FY (%s) too old for listing_id=%s",
+                context,
+                latest.as_of,
+                listing_id,
             )
             return None
         prior = next(
@@ -1147,10 +1248,10 @@ class ProfitabilityReturnsGrowthCalculator:
         )
         if prior is None:
             LOGGER.warning(
-                "%s: missing strict FY-%s pair for %s",
+                "%s: missing strict FY-%s pair for listing_id=%s",
                 context,
                 years_back,
-                symbol,
+                listing_id,
             )
             return None
         return latest, prior
@@ -1191,15 +1292,20 @@ class ProfitabilityReturnsGrowthCalculator:
         *,
         max_age_days: int,
         context: str,
-        symbol: str,
+        listing_id: int,
     ) -> Optional[_BalancePoint]:
         if not points:
-            LOGGER.warning("%s: missing denominator history for %s", context, symbol)
+            LOGGER.warning(
+                "%s: missing denominator history for listing_id=%s", context, listing_id
+            )
             return None
         latest = points[0]
         if not self._is_recent_as_of(latest.as_of, max_age_days=max_age_days):
             LOGGER.warning(
-                "%s: latest point (%s) too old for %s", context, latest.as_of, symbol
+                "%s: latest point (%s) too old for listing_id=%s",
+                context,
+                latest.as_of,
+                listing_id,
             )
             return None
         return latest
@@ -1208,6 +1314,7 @@ class ProfitabilityReturnsGrowthCalculator:
         self,
         fact: MonetaryFact,
         *,
+        listing_id: int,
         target_currency: str,
         context: str,
         absolute: bool = False,
@@ -1216,7 +1323,7 @@ class ProfitabilityReturnsGrowthCalculator:
             fact.money,
             target_currency=target_currency,
             metric_id=context,
-            symbol=fact.symbol,
+            listing_id=listing_id,
             input_name=fact.concept,
             as_of=fact.end_date,
         )
@@ -1244,15 +1351,18 @@ class GrossMarginTTMMetric:
     required_concepts = GROSS_MARGIN_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = ProfitabilityReturnsGrowthCalculator().compute_gross_margin_ttm(
-            symbol, repo
+            listing_id, repo
         )
         if snapshot is None:
             return None
         return MetricResult(
-            symbol=symbol, metric_id=self.id, value=snapshot.value, as_of=snapshot.as_of
+            listing_id=listing_id,
+            metric_id=self.id,
+            value=snapshot.value,
+            as_of=snapshot.as_of,
         )
 
 
@@ -1264,15 +1374,18 @@ class OperatingMarginTTMMetric:
     required_concepts = OPERATING_MARGIN_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = ProfitabilityReturnsGrowthCalculator().compute_operating_margin_ttm(
-            symbol, repo
+            listing_id, repo
         )
         if snapshot is None:
             return None
         return MetricResult(
-            symbol=symbol, metric_id=self.id, value=snapshot.value, as_of=snapshot.as_of
+            listing_id=listing_id,
+            metric_id=self.id,
+            value=snapshot.value,
+            as_of=snapshot.as_of,
         )
 
 
@@ -1284,15 +1397,18 @@ class FCFMarginTTMMetric:
     required_concepts = FCF_MARGIN_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = ProfitabilityReturnsGrowthCalculator().compute_fcf_margin_ttm(
-            symbol, repo
+            listing_id, repo
         )
         if snapshot is None:
             return None
         return MetricResult(
-            symbol=symbol, metric_id=self.id, value=snapshot.value, as_of=snapshot.as_of
+            listing_id=listing_id,
+            metric_id=self.id,
+            value=snapshot.value,
+            as_of=snapshot.as_of,
         )
 
 
@@ -1304,13 +1420,18 @@ class ROETTMMetric:
     required_concepts = ROE_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
-        snapshot = ProfitabilityReturnsGrowthCalculator().compute_roe_ttm(symbol, repo)
+        snapshot = ProfitabilityReturnsGrowthCalculator().compute_roe_ttm(
+            listing_id, repo
+        )
         if snapshot is None:
             return None
         return MetricResult(
-            symbol=symbol, metric_id=self.id, value=snapshot.value, as_of=snapshot.as_of
+            listing_id=listing_id,
+            metric_id=self.id,
+            value=snapshot.value,
+            as_of=snapshot.as_of,
         )
 
 
@@ -1322,13 +1443,18 @@ class ROATTMMetric:
     required_concepts = ROA_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
-        snapshot = ProfitabilityReturnsGrowthCalculator().compute_roa_ttm(symbol, repo)
+        snapshot = ProfitabilityReturnsGrowthCalculator().compute_roa_ttm(
+            listing_id, repo
+        )
         if snapshot is None:
             return None
         return MetricResult(
-            symbol=symbol, metric_id=self.id, value=snapshot.value, as_of=snapshot.as_of
+            listing_id=listing_id,
+            metric_id=self.id,
+            value=snapshot.value,
+            as_of=snapshot.as_of,
         )
 
 
@@ -1340,15 +1466,18 @@ class ROETangibleCommonEquityTTMMetric:
     required_concepts = ROETCE_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = ProfitabilityReturnsGrowthCalculator().compute_roetce_ttm(
-            symbol, repo
+            listing_id, repo
         )
         if snapshot is None:
             return None
         return MetricResult(
-            symbol=symbol, metric_id=self.id, value=snapshot.value, as_of=snapshot.as_of
+            listing_id=listing_id,
+            metric_id=self.id,
+            value=snapshot.value,
+            as_of=snapshot.as_of,
         )
 
 
@@ -1362,19 +1491,22 @@ class DividendYieldTTMMetric:
 
     def compute(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
         snapshot = ProfitabilityReturnsGrowthCalculator().compute_dividend_yield_ttm(
-            symbol,
+            listing_id,
             repo,
             market_repo,
         )
         if snapshot is None:
             return None
         return MetricResult(
-            symbol=symbol, metric_id=self.id, value=snapshot.value, as_of=snapshot.as_of
+            listing_id=listing_id,
+            metric_id=self.id,
+            value=snapshot.value,
+            as_of=snapshot.as_of,
         )
 
 
@@ -1388,24 +1520,26 @@ class ShareholderYieldTTMMetric:
 
     def compute(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
-        dividend_yield = DividendYieldTTMMetric().compute(symbol, repo, market_repo)
+        dividend_yield = DividendYieldTTMMetric().compute(listing_id, repo, market_repo)
         if dividend_yield is None:
             LOGGER.warning(
-                "shareholder_yield_ttm: missing dividend yield for %s", symbol
+                "shareholder_yield_ttm: missing dividend yield for listing_id=%s",
+                listing_id,
             )
             return None
-        buyback_yield = NetBuybackYieldMetric().compute(symbol, repo, market_repo)
+        buyback_yield = NetBuybackYieldMetric().compute(listing_id, repo, market_repo)
         if buyback_yield is None:
             LOGGER.warning(
-                "shareholder_yield_ttm: missing net buyback yield for %s", symbol
+                "shareholder_yield_ttm: missing net buyback yield for listing_id=%s",
+                listing_id,
             )
             return None
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=dividend_yield.value + buyback_yield.value,
             as_of=max(dividend_yield.as_of, buyback_yield.as_of),
@@ -1420,17 +1554,20 @@ class DividendPayoutRatioTTMMetric:
     required_concepts = DIVIDEND_PAYOUT_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = (
             ProfitabilityReturnsGrowthCalculator().compute_dividend_payout_ratio_ttm(
-                symbol, repo
+                listing_id, repo
             )
         )
         if snapshot is None:
             return None
         return MetricResult(
-            symbol=symbol, metric_id=self.id, value=snapshot.value, as_of=snapshot.as_of
+            listing_id=listing_id,
+            metric_id=self.id,
+            value=snapshot.value,
+            as_of=snapshot.as_of,
         )
 
 
@@ -1442,15 +1579,18 @@ class RevenueCAGR10YMetric:
     required_concepts = REVENUE_CAGR_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = ProfitabilityReturnsGrowthCalculator().compute_revenue_cagr_10y(
-            symbol, repo
+            listing_id, repo
         )
         if snapshot is None:
             return None
         return MetricResult(
-            symbol=symbol, metric_id=self.id, value=snapshot.value, as_of=snapshot.as_of
+            listing_id=listing_id,
+            metric_id=self.id,
+            value=snapshot.value,
+            as_of=snapshot.as_of,
         )
 
 
@@ -1462,17 +1602,20 @@ class FCFPerShareCAGR10YMetric:
     required_concepts = FCF_PER_SHARE_CAGR_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = (
             ProfitabilityReturnsGrowthCalculator().compute_fcf_per_share_cagr_10y(
-                symbol, repo
+                listing_id, repo
             )
         )
         if snapshot is None:
             return None
         return MetricResult(
-            symbol=symbol, metric_id=self.id, value=snapshot.value, as_of=snapshot.as_of
+            listing_id=listing_id,
+            metric_id=self.id,
+            value=snapshot.value,
+            as_of=snapshot.as_of,
         )
 
 
@@ -1484,13 +1627,18 @@ class OwnerEarningsCAGR10YMetric:
     required_concepts = OE_ENTERPRISE_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
-        snapshot = OwnerEarningsEnterpriseCalculator().compute_10y_cagr(symbol, repo)
+        snapshot = OwnerEarningsEnterpriseCalculator().compute_10y_cagr(
+            listing_id, repo
+        )
         if snapshot is None:
             return None
         return MetricResult(
-            symbol=symbol, metric_id=self.id, value=snapshot.value, as_of=snapshot.as_of
+            listing_id=listing_id,
+            metric_id=self.id,
+            value=snapshot.value,
+            as_of=snapshot.as_of,
         )
 
 
@@ -1502,17 +1650,20 @@ class GrossProfitToAssetsTTMMetric:
     required_concepts = GROSS_PROFIT_TO_ASSETS_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = (
             ProfitabilityReturnsGrowthCalculator().compute_gross_profit_to_assets_ttm(
-                symbol, repo
+                listing_id, repo
             )
         )
         if snapshot is None:
             return None
         return MetricResult(
-            symbol=symbol, metric_id=self.id, value=snapshot.value, as_of=snapshot.as_of
+            listing_id=listing_id,
+            metric_id=self.id,
+            value=snapshot.value,
+            as_of=snapshot.as_of,
         )
 
 

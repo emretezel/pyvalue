@@ -68,28 +68,28 @@ class OperatingMarginSeriesCalculator:
     series_years: int
 
     def compute_series(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[OperatingMarginSeriesSnapshot]:
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id=self.metric_context
+            listing_id, repo, metric_id=self.metric_context
         )
         operating_income_map = self._fy_map(
-            symbol, repo, OPERATING_INCOME_CONCEPT, target_currency
+            listing_id, repo, OPERATING_INCOME_CONCEPT, target_currency
         )
         if not operating_income_map:
             LOGGER.warning(
-                "%s: missing FY operating income history for %s",
+                "%s: missing FY operating income history for listing_id=%s",
                 self.metric_context,
-                symbol,
+                listing_id,
             )
             return None
 
-        revenue_map = self._fy_map(symbol, repo, REVENUE_CONCEPT, target_currency)
+        revenue_map = self._fy_map(listing_id, repo, REVENUE_CONCEPT, target_currency)
         if not revenue_map:
             LOGGER.warning(
-                "%s: missing FY revenues history for %s",
+                "%s: missing FY revenues history for listing_id=%s",
                 self.metric_context,
-                symbol,
+                listing_id,
             )
             return None
 
@@ -110,9 +110,9 @@ class OperatingMarginSeriesCalculator:
 
         if not margins_by_year:
             LOGGER.warning(
-                "%s: no FY operating-margin points for %s",
+                "%s: no FY operating-margin points for listing_id=%s",
                 self.metric_context,
-                symbol,
+                listing_id,
             )
             return None
 
@@ -122,9 +122,9 @@ class OperatingMarginSeriesCalculator:
             point = margins_by_year.get(year)
             if point is None:
                 LOGGER.warning(
-                    "%s: missing strict consecutive FY chain for %s",
+                    "%s: missing strict consecutive FY chain for listing_id=%s",
                     self.metric_context,
-                    symbol,
+                    listing_id,
                 )
                 return None
             selected.append(point)
@@ -133,9 +133,9 @@ class OperatingMarginSeriesCalculator:
             selected[0].as_of, max_age_days=MAX_FY_FACT_AGE_DAYS
         ):
             LOGGER.warning(
-                "%s: latest FY point too old for %s",
+                "%s: latest FY point too old for listing_id=%s",
                 self.metric_context,
-                symbol,
+                listing_id,
             )
             return None
 
@@ -147,12 +147,14 @@ class OperatingMarginSeriesCalculator:
 
     def _fy_map(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         concept: str,
         target_currency: str,
     ) -> dict[int, _MoneyResult]:
-        records = repo.monetary_facts_for_concept(symbol, concept, fiscal_period="FY")
+        records = repo.monetary_facts_for_concept(
+            listing_id, concept, fiscal_period="FY"
+        )
         ordered = self._filter_periods(records, FY_PERIODS)
         mapped: dict[int, _MoneyResult] = {}
         for record in ordered:
@@ -164,7 +166,7 @@ class OperatingMarginSeriesCalculator:
                     record.money,
                     target_currency=target_currency,
                     metric_id=self.metric_context,
-                    symbol=symbol,
+                    listing_id=listing_id,
                     input_name=concept,
                     as_of=record.end_date,
                 ),
@@ -209,12 +211,12 @@ class OperatingMarginTenYearStdMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = OperatingMarginSeriesCalculator(
             metric_context=self.id,
             series_years=TEN_YEAR_SERIES_YEARS,
-        ).compute_series(symbol, repo)
+        ).compute_series(listing_id, repo)
         if snapshot is None:
             return None
 
@@ -224,7 +226,7 @@ class OperatingMarginTenYearStdMetric:
         stddev = sqrt(variance)
 
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=stddev,
             as_of=snapshot.as_of,
@@ -240,18 +242,18 @@ class OperatingMarginTenYearMinMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = OperatingMarginSeriesCalculator(
             metric_context=self.id,
             series_years=TEN_YEAR_SERIES_YEARS,
-        ).compute_series(symbol, repo)
+        ).compute_series(listing_id, repo)
         if snapshot is None:
             return None
 
         minimum = min(point.value for point in snapshot.points)
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=minimum,
             as_of=snapshot.as_of,
@@ -267,18 +269,18 @@ class OperatingMarginSevenYearMinMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = OperatingMarginSeriesCalculator(
             metric_context=self.id,
             series_years=SEVEN_YEAR_SERIES_YEARS,
-        ).compute_series(symbol, repo)
+        ).compute_series(listing_id, repo)
         if snapshot is None:
             return None
 
         minimum = min(point.value for point in snapshot.points)
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=minimum,
             as_of=snapshot.as_of,

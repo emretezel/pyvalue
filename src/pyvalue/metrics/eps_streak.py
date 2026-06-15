@@ -29,22 +29,26 @@ class EPSStreakMetric:
     required_concepts = tuple(EPS_CONCEPTS)
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         records: List[MonetaryFact] = []
         for concept in EPS_CONCEPTS:
             records = repo.monetary_facts_for_concept(
-                symbol, concept, fiscal_period="FY"
+                listing_id, concept, fiscal_period="FY"
             )
             if records:
                 break
         if not records:
-            LOGGER.warning("eps_streak: no FY EPS records for %s", symbol)
+            LOGGER.warning(
+                "eps_streak: no FY EPS records for listing_id=%s", listing_id
+            )
             return None
         if not has_recent_fact(
-            repo, symbol, EPS_CONCEPTS, max_age_days=MAX_FY_FACT_AGE_DAYS
+            repo, listing_id, EPS_CONCEPTS, max_age_days=MAX_FY_FACT_AGE_DAYS
         ):
-            LOGGER.warning("eps_streak: no recent FY EPS fact for %s", symbol)
+            LOGGER.warning(
+                "eps_streak: no recent FY EPS fact for listing_id=%s", listing_id
+            )
             return None
 
         unique = filter_unique_fy(records)
@@ -59,5 +63,8 @@ class EPSStreakMetric:
                 break
             streak += 1
         return MetricResult(
-            symbol=symbol, metric_id=self.id, value=float(streak), as_of=latest_as_of
+            listing_id=listing_id,
+            metric_id=self.id,
+            value=float(streak),
+            as_of=latest_as_of,
         )

@@ -32,39 +32,45 @@ class EarningsPerShareTTM:
 
     def compute(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
     ) -> Optional[MetricResult]:
-        latest_records = self._fetch_quarters(symbol, repo)
+        latest_records = self._fetch_quarters(listing_id, repo)
         if len(latest_records) >= 4 and is_recent_fact(latest_records[0]):
-            ttm_value, currency = self._align_records(symbol, repo, latest_records[:4])
+            ttm_value, currency = self._align_records(
+                listing_id, repo, latest_records[:4]
+            )
             as_of = latest_records[0].end_date
             return MetricResult.per_share(
-                symbol=symbol,
+                listing_id=listing_id,
                 metric_id=self.id,
                 value=ttm_value,
                 as_of=as_of,
                 currency=currency,
             )
 
-        fy_record = self._latest_fy_eps(symbol, repo)
+        fy_record = self._latest_fy_eps(listing_id, repo)
         if fy_record is None:
             if len(latest_records) < 4:
-                LOGGER.warning("eps_ttm: missing EPS quarters for %s", symbol)
+                LOGGER.warning(
+                    "eps_ttm: missing EPS quarters for listing_id=%s", listing_id
+                )
             else:
                 LOGGER.warning(
-                    "eps_ttm: latest EPS quarter too old for %s (%s)",
-                    symbol,
+                    "eps_ttm: latest EPS quarter too old for listing_id=%s (%s)",
+                    listing_id,
                     latest_records[0].end_date,
                 )
             return None
         if not is_recent_fact(fy_record):
             LOGGER.warning(
-                "eps_ttm: latest FY EPS too old for %s (%s)", symbol, fy_record.end_date
+                "eps_ttm: latest FY EPS too old for listing_id=%s (%s)",
+                listing_id,
+                fy_record.end_date,
             )
             return None
         target_currency = require_metric_ticker_currency(
-            symbol,
+            listing_id,
             repo,
             metric_id=self.id,
             input_name="EarningsPerShare",
@@ -74,12 +80,12 @@ class EarningsPerShareTTM:
             fy_record.money,
             target_currency=target_currency,
             metric_id=self.id,
-            symbol=symbol,
+            listing_id=listing_id,
             input_name="EarningsPerShare",
             as_of=fy_record.end_date,
         )
         return MetricResult.per_share(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=money.amount,
             as_of=fy_record.end_date,
@@ -87,21 +93,21 @@ class EarningsPerShareTTM:
         )
 
     def _fetch_quarters(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> list[MonetaryFact]:
         for concept in EPS_CONCEPTS:
-            records = repo.monetary_facts_for_concept(symbol, concept)
+            records = repo.monetary_facts_for_concept(listing_id, concept)
             quarterly = self._filter_quarterly(records)
             if len(quarterly) >= 4:
                 return quarterly[:4]
         return []
 
     def _latest_fy_eps(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MonetaryFact]:
         for concept in EPS_CONCEPTS:
             records = repo.monetary_facts_for_concept(
-                symbol, concept, fiscal_period="FY", limit=1
+                listing_id, concept, fiscal_period="FY", limit=1
             )
             if records:
                 return records[0]
@@ -122,12 +128,12 @@ class EarningsPerShareTTM:
 
     def _align_records(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         records: list[MonetaryFact],
     ) -> tuple[float, str]:
         target_currency = require_metric_ticker_currency(
-            symbol,
+            listing_id,
             repo,
             metric_id=self.id,
             input_name="EarningsPerShare",
@@ -139,7 +145,7 @@ class EarningsPerShareTTM:
                     record.money,
                     target_currency=target_currency,
                     metric_id=self.id,
-                    symbol=symbol,
+                    listing_id=listing_id,
                     input_name="EarningsPerShare",
                     as_of=record.end_date,
                 )

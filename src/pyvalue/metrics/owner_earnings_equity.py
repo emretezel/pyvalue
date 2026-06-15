@@ -92,31 +92,35 @@ class OwnerEarningsEquityCalculator:
     """
 
     def compute_ttm(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[OwnerEarningsEquitySnapshot]:
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id=TTM_CONTEXT
+            listing_id, repo, metric_id=TTM_CONTEXT
         )
         delta_nwc_maint = self._delta_nwc_maint_money(
-            symbol, repo, target_currency=target_currency, context=TTM_CONTEXT
+            listing_id, repo, target_currency=target_currency, context=TTM_CONTEXT
         )
         if delta_nwc_maint is None:
-            LOGGER.warning("oe_equity_ttm: missing delta_nwc_maint for %s", symbol)
+            LOGGER.warning(
+                "oe_equity_ttm: missing delta_nwc_maint for listing_id=%s", listing_id
+            )
             return None
 
         ni = self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             NI_CONCEPTS,
             target_currency=target_currency,
             context=TTM_CONTEXT,
         )
         if ni is None:
-            LOGGER.warning("oe_equity_ttm: missing TTM net income for %s", symbol)
+            LOGGER.warning(
+                "oe_equity_ttm: missing TTM net income for listing_id=%s", listing_id
+            )
             return None
 
         da = self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             DA_PRIMARY_CONCEPTS,
             target_currency=target_currency,
@@ -124,16 +128,20 @@ class OwnerEarningsEquityCalculator:
         )
         if da is None:
             da = self._compute_ttm_amount(
-                symbol,
+                listing_id,
                 repo,
                 DA_FALLBACK_CONCEPTS,
                 target_currency=target_currency,
                 context=TTM_CONTEXT,
             )
 
-        mcapex = self._compute_mcapex_ttm(symbol, repo, target_currency=target_currency)
+        mcapex = self._compute_mcapex_ttm(
+            listing_id, repo, target_currency=target_currency
+        )
         if mcapex is None:
-            LOGGER.warning("oe_equity_ttm: missing TTM mcapex inputs for %s", symbol)
+            LOGGER.warning(
+                "oe_equity_ttm: missing TTM mcapex inputs for listing_id=%s", listing_id
+            )
             return None
 
         da_money = da.money if da is not None else Money.of(0.0, target_currency)
@@ -144,34 +152,37 @@ class OwnerEarningsEquityCalculator:
         return OwnerEarningsEquitySnapshot(money=value, as_of=max(as_of_dates))
 
     def compute_5y_average(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[OwnerEarningsEquitySnapshot]:
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id=FIVE_YEAR_CONTEXT
+            listing_id, repo, metric_id=FIVE_YEAR_CONTEXT
         )
         delta_nwc_maint = self._delta_nwc_maint_money(
-            symbol, repo, target_currency=target_currency, context=FIVE_YEAR_CONTEXT
+            listing_id, repo, target_currency=target_currency, context=FIVE_YEAR_CONTEXT
         )
         if delta_nwc_maint is None:
-            LOGGER.warning("oe_equity_5y_avg: missing delta_nwc_maint for %s", symbol)
+            LOGGER.warning(
+                "oe_equity_5y_avg: missing delta_nwc_maint for listing_id=%s",
+                listing_id,
+            )
             return None
 
         ni_map = self._build_fy_amount_map(
-            symbol,
+            listing_id,
             repo,
             NI_CONCEPTS,
             target_currency=target_currency,
             context=FIVE_YEAR_CONTEXT,
         )
         da_map = self._build_fy_amount_map(
-            symbol,
+            listing_id,
             repo,
             DA_PRIMARY_CONCEPTS + DA_FALLBACK_CONCEPTS,
             target_currency=target_currency,
             context=FIVE_YEAR_CONTEXT,
         )
         mcapex_map = self._build_mcapex_fy_map(
-            symbol, repo, target_currency=target_currency
+            listing_id, repo, target_currency=target_currency
         )
 
         candidate_dates = sorted(
@@ -189,8 +200,9 @@ class OwnerEarningsEquityCalculator:
 
         if len(points) < 5:
             LOGGER.warning(
-                "oe_equity_5y_avg: need 5 FY owner earnings values for %s, found %s",
-                symbol,
+                "oe_equity_5y_avg: need 5 FY owner earnings values "
+                "for listing_id=%s, found %s",
+                listing_id,
                 len(points),
             )
             return None
@@ -198,9 +210,9 @@ class OwnerEarningsEquityCalculator:
         latest = points[0]
         if not self._is_recent_as_of(latest.as_of, max_age_days=MAX_FY_FACT_AGE_DAYS):
             LOGGER.warning(
-                "oe_equity_5y_avg: latest FY (%s) too old for %s",
+                "oe_equity_5y_avg: latest FY (%s) too old for listing_id=%s",
                 latest.as_of,
-                symbol,
+                listing_id,
             )
             return None
 
@@ -213,13 +225,13 @@ class OwnerEarningsEquityCalculator:
 
     def _delta_nwc_maint_money(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         *,
         target_currency: str,
         context: str,
     ) -> Optional[_AmountResult]:
-        result = DeltaNWCMaintMetric().compute(symbol, repo)
+        result = DeltaNWCMaintMetric().compute(listing_id, repo)
         if result is None:
             return None
         money = require_metric_amount_money(
@@ -227,7 +239,7 @@ class OwnerEarningsEquityCalculator:
             result.currency,
             target_currency=target_currency,
             metric_id=context,
-            symbol=symbol,
+            listing_id=listing_id,
             input_name="delta_nwc_maint",
             as_of=result.as_of,
         )
@@ -235,7 +247,7 @@ class OwnerEarningsEquityCalculator:
 
     def _compute_ttm_amount(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         concepts: Sequence[str],
         *,
@@ -244,31 +256,31 @@ class OwnerEarningsEquityCalculator:
         absolute: bool = False,
     ) -> Optional[_AmountResult]:
         for concept in concepts:
-            records = repo.monetary_facts_for_concept(symbol, concept)
+            records = repo.monetary_facts_for_concept(listing_id, concept)
             quarterly = self._filter_periods(records, QUARTERLY_PERIODS)
             if len(quarterly) < 4:
                 LOGGER.warning(
-                    "%s: need 4 quarterly %s records for %s, found %s",
+                    "%s: need 4 quarterly %s records for listing_id=%s, found %s",
                     context,
                     concept,
-                    symbol,
+                    listing_id,
                     len(quarterly),
                 )
                 continue
             if not is_recent_fact(quarterly[0], max_age_days=MAX_FACT_AGE_DAYS):
                 LOGGER.warning(
-                    "%s: latest %s (%s) too old for %s",
+                    "%s: latest %s (%s) too old for listing_id=%s",
                     context,
                     concept,
                     quarterly[0].end_date,
-                    symbol,
+                    listing_id,
                 )
                 continue
             monies = [
                 self._money(
                     record,
                     target_currency=target_currency,
-                    symbol=symbol,
+                    listing_id=listing_id,
                     context=context,
                     absolute=absolute,
                 )
@@ -279,13 +291,13 @@ class OwnerEarningsEquityCalculator:
 
     def _compute_mcapex_ttm(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         *,
         target_currency: str,
     ) -> Optional[_AmountResult]:
         capex = self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             CAPEX_CONCEPTS,
             target_currency=target_currency,
@@ -293,7 +305,7 @@ class OwnerEarningsEquityCalculator:
             absolute=True,
         )
         da = self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             DA_PRIMARY_CONCEPTS,
             target_currency=target_currency,
@@ -302,7 +314,7 @@ class OwnerEarningsEquityCalculator:
         )
         if da is None:
             da = self._compute_ttm_amount(
-                symbol,
+                listing_id,
                 repo,
                 DA_FALLBACK_CONCEPTS,
                 target_currency=target_currency,
@@ -313,7 +325,7 @@ class OwnerEarningsEquityCalculator:
 
     def _build_fy_amount_map(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         concepts: Sequence[str],
         *,
@@ -323,7 +335,7 @@ class OwnerEarningsEquityCalculator:
     ) -> dict[str, _AmountResult]:
         maps = [
             self._fy_map(
-                symbol,
+                listing_id,
                 repo,
                 concept,
                 target_currency=target_currency,
@@ -346,13 +358,13 @@ class OwnerEarningsEquityCalculator:
 
     def _build_mcapex_fy_map(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         *,
         target_currency: str,
     ) -> dict[str, _AmountResult]:
         capex_map = self._fy_map(
-            symbol,
+            listing_id,
             repo,
             CAPEX_CONCEPT,
             target_currency=target_currency,
@@ -360,7 +372,7 @@ class OwnerEarningsEquityCalculator:
             absolute=True,
         )
         da_primary_map = self._fy_map(
-            symbol,
+            listing_id,
             repo,
             DA_PRIMARY_CONCEPT,
             target_currency=target_currency,
@@ -368,7 +380,7 @@ class OwnerEarningsEquityCalculator:
             absolute=True,
         )
         da_fallback_map = self._fy_map(
-            symbol,
+            listing_id,
             repo,
             DA_FALLBACK_CONCEPT,
             target_currency=target_currency,
@@ -417,7 +429,7 @@ class OwnerEarningsEquityCalculator:
 
     def _fy_map(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         concept: str,
         *,
@@ -425,7 +437,9 @@ class OwnerEarningsEquityCalculator:
         context: str,
         absolute: bool = False,
     ) -> dict[str, _AmountResult]:
-        records = repo.monetary_facts_for_concept(symbol, concept, fiscal_period="FY")
+        records = repo.monetary_facts_for_concept(
+            listing_id, concept, fiscal_period="FY"
+        )
         ordered = self._filter_periods(records, FY_PERIODS)
         mapped: dict[str, _AmountResult] = {}
         for record in ordered:
@@ -433,7 +447,7 @@ class OwnerEarningsEquityCalculator:
                 money=self._money(
                     record,
                     target_currency=target_currency,
-                    symbol=symbol,
+                    listing_id=listing_id,
                     context=context,
                     absolute=absolute,
                 ),
@@ -461,7 +475,7 @@ class OwnerEarningsEquityCalculator:
         fact: MonetaryFact,
         *,
         target_currency: str,
-        symbol: str,
+        listing_id: int,
         context: str,
         absolute: bool = False,
     ) -> Money:
@@ -469,7 +483,7 @@ class OwnerEarningsEquityCalculator:
             fact.money,
             target_currency=target_currency,
             metric_id=context,
-            symbol=symbol,
+            listing_id=listing_id,
             input_name=fact.concept,
             as_of=fact.end_date,
         )
@@ -491,13 +505,13 @@ class OwnerEarningsEquityTTMMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
-        snapshot = OwnerEarningsEquityCalculator().compute_ttm(symbol, repo)
+        snapshot = OwnerEarningsEquityCalculator().compute_ttm(listing_id, repo)
         if snapshot is None:
             return None
         return MetricResult.monetary(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=snapshot.money.amount,
             as_of=snapshot.as_of,
@@ -513,13 +527,13 @@ class OwnerEarningsEquityFiveYearAverageMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
-        snapshot = OwnerEarningsEquityCalculator().compute_5y_average(symbol, repo)
+        snapshot = OwnerEarningsEquityCalculator().compute_5y_average(listing_id, repo)
         if snapshot is None:
             return None
         return MetricResult.monetary(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=snapshot.money.amount,
             as_of=snapshot.as_of,

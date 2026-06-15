@@ -79,19 +79,19 @@ class FundamentalConsistencyCalculator:
     """
 
     def compute_fcf_5y_median(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[FundamentalConsistencySnapshot]:
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id="fcf_fy_median_5y"
+            listing_id, repo, metric_id="fcf_fy_median_5y"
         )
         latest_five = self._latest_available_five_points(
             self._build_fcf_points(
-                symbol,
+                listing_id,
                 repo,
                 context="fcf_fy_median_5y",
                 target_currency=target_currency,
             ),
-            symbol=symbol,
+            listing_id=listing_id,
             context="fcf_fy_median_5y",
         )
         if latest_five is None:
@@ -105,31 +105,31 @@ class FundamentalConsistencyCalculator:
         )
 
     def compute_fcf_10y_series(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[_FYSeriesSnapshot]:
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id="fcf_neg_years_10y"
+            listing_id, repo, metric_id="fcf_neg_years_10y"
         )
         return self._strict_ten_year_series(
             self._build_fcf_points(
-                symbol,
+                listing_id,
                 repo,
                 context="fcf_neg_years_10y",
                 target_currency=target_currency,
             ),
-            symbol=symbol,
+            listing_id=listing_id,
             context="fcf_neg_years_10y",
             target_currency=target_currency,
         )
 
     def compute_net_income_10y_series(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[_FYSeriesSnapshot]:
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id="ni_loss_years_10y"
+            listing_id, repo, metric_id="ni_loss_years_10y"
         )
         points = self._build_amount_points(
-            symbol,
+            listing_id,
             repo,
             NET_INCOME_CONCEPTS,
             context="ni_loss_years_10y",
@@ -137,28 +137,28 @@ class FundamentalConsistencyCalculator:
         )
         return self._strict_ten_year_series(
             points,
-            symbol=symbol,
+            listing_id=listing_id,
             context="ni_loss_years_10y",
             target_currency=target_currency,
         )
 
     def _build_fcf_points(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         *,
         context: str,
         target_currency: str,
     ) -> list[_FYPoint]:
         ocf_map = self._build_fy_amount_map(
-            symbol,
+            listing_id,
             repo,
             OPERATING_CASH_FLOW_CONCEPTS,
             context=context,
             target_currency=target_currency,
         )
         capex_map = self._build_fy_amount_map(
-            symbol,
+            listing_id,
             repo,
             CAPEX_CONCEPTS,
             context=context,
@@ -180,7 +180,7 @@ class FundamentalConsistencyCalculator:
 
     def _build_amount_points(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         concepts: Sequence[str],
         *,
@@ -188,7 +188,7 @@ class FundamentalConsistencyCalculator:
         target_currency: str,
     ) -> list[_FYPoint]:
         amount_map = self._build_fy_amount_map(
-            symbol,
+            listing_id,
             repo,
             concepts,
             context=context,
@@ -199,21 +199,23 @@ class FundamentalConsistencyCalculator:
             amount = amount_map[year]
             points.append(_FYPoint(year=year, money=amount.money, as_of=amount.as_of))
         if not points:
-            LOGGER.warning("%s: missing FY history for %s", context, symbol)
+            LOGGER.warning(
+                "%s: missing FY history for listing_id=%s", context, listing_id
+            )
         return points
 
     def _latest_available_five_points(
         self,
         points: list[_FYPoint],
         *,
-        symbol: str,
+        listing_id: int,
         context: str,
     ) -> Optional[list[_FYPoint]]:
         if len(points) < FIVE_YEAR_POINTS:
             LOGGER.warning(
-                "%s: need 5 FY values for %s, found %s",
+                "%s: need 5 FY values for listing_id=%s, found %s",
                 context,
-                symbol,
+                listing_id,
                 len(points),
             )
             return None
@@ -223,10 +225,10 @@ class FundamentalConsistencyCalculator:
             latest_five[0].as_of, max_age_days=MAX_FY_FACT_AGE_DAYS
         ):
             LOGGER.warning(
-                "%s: latest FY (%s) too old for %s",
+                "%s: latest FY (%s) too old for listing_id=%s",
                 context,
                 latest_five[0].as_of,
-                symbol,
+                listing_id,
             )
             return None
         return latest_five
@@ -235,12 +237,14 @@ class FundamentalConsistencyCalculator:
         self,
         points: list[_FYPoint],
         *,
-        symbol: str,
+        listing_id: int,
         context: str,
         target_currency: str,
     ) -> Optional[_FYSeriesSnapshot]:
         if not points:
-            LOGGER.warning("%s: missing FY history for %s", context, symbol)
+            LOGGER.warning(
+                "%s: missing FY history for listing_id=%s", context, listing_id
+            )
             return None
 
         latest_by_year: dict[int, _FYPoint] = {}
@@ -253,9 +257,9 @@ class FundamentalConsistencyCalculator:
             selected_point = latest_by_year.get(year)
             if selected_point is None:
                 LOGGER.warning(
-                    "%s: missing strict consecutive FY chain for %s",
+                    "%s: missing strict consecutive FY chain for listing_id=%s",
                     context,
-                    symbol,
+                    listing_id,
                 )
                 return None
             selected.append(selected_point)
@@ -264,10 +268,10 @@ class FundamentalConsistencyCalculator:
             selected[0].as_of, max_age_days=MAX_FY_FACT_AGE_DAYS
         ):
             LOGGER.warning(
-                "%s: latest FY (%s) too old for %s",
+                "%s: latest FY (%s) too old for listing_id=%s",
                 context,
                 selected[0].as_of,
-                symbol,
+                listing_id,
             )
             return None
 
@@ -279,7 +283,7 @@ class FundamentalConsistencyCalculator:
 
     def _build_fy_amount_map(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         concepts: Sequence[str],
         *,
@@ -288,7 +292,11 @@ class FundamentalConsistencyCalculator:
     ) -> dict[int, _MoneyResult]:
         concept_maps = [
             self._fy_map(
-                symbol, repo, concept, context=context, target_currency=target_currency
+                listing_id,
+                repo,
+                concept,
+                context=context,
+                target_currency=target_currency,
             )
             for concept in concepts
         ]
@@ -306,14 +314,16 @@ class FundamentalConsistencyCalculator:
 
     def _fy_map(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         concept: str,
         *,
         context: str,
         target_currency: str,
     ) -> dict[int, _MoneyResult]:
-        records = repo.monetary_facts_for_concept(symbol, concept, fiscal_period="FY")
+        records = repo.monetary_facts_for_concept(
+            listing_id, concept, fiscal_period="FY"
+        )
         ordered = self._filter_periods(records)
         mapped: dict[int, _MoneyResult] = {}
         for record in ordered:
@@ -325,7 +335,7 @@ class FundamentalConsistencyCalculator:
                     record.money,
                     target_currency=target_currency,
                     metric_id=context,
-                    symbol=symbol,
+                    listing_id=listing_id,
                     input_name=concept,
                     as_of=record.end_date,
                 ),
@@ -368,15 +378,15 @@ class FCFFiveYearMedianMetric:
     required_concepts = FCF_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = FundamentalConsistencyCalculator().compute_fcf_5y_median(
-            symbol, repo
+            listing_id, repo
         )
         if snapshot is None:
             return None
         return MetricResult.monetary(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=snapshot.value,
             as_of=snapshot.as_of,
@@ -392,15 +402,15 @@ class NetIncomeLossYearsTenYearMetric:
     required_concepts = NET_INCOME_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = FundamentalConsistencyCalculator().compute_net_income_10y_series(
-            symbol, repo
+            listing_id, repo
         )
         if snapshot is None:
             return None
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=float(sum(1 for point in snapshot.points if point.money.amount < 0)),
             as_of=snapshot.as_of,
@@ -415,15 +425,15 @@ class FCFNegativeYearsTenYearMetric:
     required_concepts = FCF_REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = FundamentalConsistencyCalculator().compute_fcf_10y_series(
-            symbol, repo
+            listing_id, repo
         )
         if snapshot is None:
             return None
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=float(sum(1 for point in snapshot.points if point.money.amount < 0)),
             as_of=snapshot.as_of,

@@ -52,49 +52,53 @@ class SBCLoadCalculator:
     """
 
     def compute_ttm_sbc(
-        self, symbol: str, repo: RegionFactsRepository, *, context: str
+        self, listing_id: int, repo: RegionFactsRepository, *, context: str
     ) -> Optional[_MoneyResult]:
         return self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             STOCK_BASED_COMPENSATION_CONCEPT,
             context=context,
         )
 
     def compute_ttm_revenue(
-        self, symbol: str, repo: RegionFactsRepository, *, context: str
+        self, listing_id: int, repo: RegionFactsRepository, *, context: str
     ) -> Optional[_MoneyResult]:
         return self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             REVENUE_CONCEPT,
             context=context,
         )
 
     def compute_ttm_fcf(
-        self, symbol: str, repo: RegionFactsRepository, *, context: str
+        self, listing_id: int, repo: RegionFactsRepository, *, context: str
     ) -> Optional[_MoneyResult]:
         operating = self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             OPERATING_CASH_FLOW_CONCEPT,
             context=context,
         )
         if operating is None:
             LOGGER.warning(
-                "%s: missing TTM operating cash flow for %s", context, symbol
+                "%s: missing TTM operating cash flow for listing_id=%s",
+                context,
+                listing_id,
             )
             return None
 
         capex = self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             CAPEX_CONCEPT,
             context=context,
         )
         if capex is None:
             LOGGER.warning(
-                "%s: missing/stale capex for %s; assuming zero", context, symbol
+                "%s: missing/stale capex for listing_id=%s; assuming zero",
+                context,
+                listing_id,
             )
             return operating
 
@@ -105,35 +109,35 @@ class SBCLoadCalculator:
 
     def _compute_ttm_amount(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         concept: str,
         *,
         context: str,
     ) -> Optional[_MoneyResult]:
-        records = repo.monetary_facts_for_concept(symbol, concept)
+        records = repo.monetary_facts_for_concept(listing_id, concept)
         quarterly = self._filter_quarterly(records)
         if len(quarterly) < 4:
             LOGGER.warning(
-                "%s: need 4 quarterly %s records for %s, found %s",
+                "%s: need 4 quarterly %s records for listing_id=%s, found %s",
                 context,
                 concept,
-                symbol,
+                listing_id,
                 len(quarterly),
             )
             return None
         if not is_recent_fact(quarterly[0], max_age_days=MAX_FACT_AGE_DAYS):
             LOGGER.warning(
-                "%s: latest %s (%s) too old for %s",
+                "%s: latest %s (%s) too old for listing_id=%s",
                 context,
                 concept,
                 quarterly[0].end_date,
-                symbol,
+                listing_id,
             )
             return None
 
         target_currency = require_metric_ticker_currency(
-            symbol,
+            listing_id,
             repo,
             metric_id=context,
             input_name=concept,
@@ -144,7 +148,7 @@ class SBCLoadCalculator:
                 record.money,
                 target_currency=target_currency,
                 metric_id=context,
-                symbol=symbol,
+                listing_id=listing_id,
                 input_name=concept,
                 as_of=record.end_date,
             )
@@ -172,23 +176,27 @@ class SBCToRevenueMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         calculator = SBCLoadCalculator()
-        sbc = calculator.compute_ttm_sbc(symbol, repo, context=self.id)
+        sbc = calculator.compute_ttm_sbc(listing_id, repo, context=self.id)
         if sbc is None:
-            LOGGER.warning("%s: missing TTM SBC for %s", self.id, symbol)
+            LOGGER.warning("%s: missing TTM SBC for listing_id=%s", self.id, listing_id)
             return None
 
-        revenue = calculator.compute_ttm_revenue(symbol, repo, context=self.id)
+        revenue = calculator.compute_ttm_revenue(listing_id, repo, context=self.id)
         if revenue is None:
-            LOGGER.warning("%s: missing TTM revenue for %s", self.id, symbol)
+            LOGGER.warning(
+                "%s: missing TTM revenue for listing_id=%s", self.id, listing_id
+            )
             return None
         if revenue.money.amount <= 0:
-            LOGGER.warning("%s: non-positive TTM revenue for %s", self.id, symbol)
+            LOGGER.warning(
+                "%s: non-positive TTM revenue for listing_id=%s", self.id, listing_id
+            )
             return None
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=sbc.money / revenue.money,
             as_of=max(sbc.as_of, revenue.as_of),
@@ -204,23 +212,25 @@ class SBCToFCFMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         calculator = SBCLoadCalculator()
-        sbc = calculator.compute_ttm_sbc(symbol, repo, context=self.id)
+        sbc = calculator.compute_ttm_sbc(listing_id, repo, context=self.id)
         if sbc is None:
-            LOGGER.warning("%s: missing TTM SBC for %s", self.id, symbol)
+            LOGGER.warning("%s: missing TTM SBC for listing_id=%s", self.id, listing_id)
             return None
 
-        fcf = calculator.compute_ttm_fcf(symbol, repo, context=self.id)
+        fcf = calculator.compute_ttm_fcf(listing_id, repo, context=self.id)
         if fcf is None:
-            LOGGER.warning("%s: missing TTM FCF for %s", self.id, symbol)
+            LOGGER.warning("%s: missing TTM FCF for listing_id=%s", self.id, listing_id)
             return None
         if fcf.money.amount <= 0:
-            LOGGER.warning("%s: non-positive TTM FCF for %s", self.id, symbol)
+            LOGGER.warning(
+                "%s: non-positive TTM FCF for listing_id=%s", self.id, listing_id
+            )
             return None
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=sbc.money / fcf.money,
             as_of=max(sbc.as_of, fcf.as_of),

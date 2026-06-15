@@ -48,7 +48,7 @@ class _MCapexBase:
         self,
         capex: Optional[_MoneyResult],
         da: Optional[_MoneyResult],
-        symbol: str,
+        listing_id: int,
         *,
         context: str,
     ) -> Optional[_MoneyResult]:
@@ -68,7 +68,7 @@ class _MCapexBase:
 
     def _compute_ttm_amount(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         concepts: Sequence[str],
         *,
@@ -76,28 +76,28 @@ class _MCapexBase:
         target_currency: str,
     ) -> Optional[_MoneyResult]:
         for concept in concepts:
-            records = repo.monetary_facts_for_concept(symbol, concept)
+            records = repo.monetary_facts_for_concept(listing_id, concept)
             quarterly = self._filter_periods(records, QUARTERLY_PERIODS)
             if len(quarterly) < 4:
                 LOGGER.warning(
-                    "%s: need 4 quarterly %s records for %s, found %s",
+                    "%s: need 4 quarterly %s records for listing_id=%s, found %s",
                     context,
                     concept,
-                    symbol,
+                    listing_id,
                     len(quarterly),
                 )
                 continue
             if not is_recent_fact(quarterly[0], max_age_days=MAX_FACT_AGE_DAYS):
                 LOGGER.warning(
-                    "%s: latest %s (%s) too old for %s",
+                    "%s: latest %s (%s) too old for listing_id=%s",
                     context,
                     concept,
                     quarterly[0].end_date,
-                    symbol,
+                    listing_id,
                 )
                 continue
             monies = [
-                self._money(record, target_currency, symbol, context)
+                self._money(record, target_currency, listing_id, context)
                 for record in quarterly[:4]
             ]
             return _MoneyResult(money=sum_money(monies), as_of=quarterly[0].end_date)
@@ -105,15 +105,15 @@ class _MCapexBase:
 
     def _build_fy_points(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         *,
         context: str,
         target_currency: str,
     ) -> list[_MoneyResult]:
-        capex_map = self._fy_map(symbol, repo, CAPEX_CONCEPT)
-        da_primary_map = self._fy_map(symbol, repo, DA_PRIMARY_CONCEPT)
-        da_fallback_map = self._fy_map(symbol, repo, DA_FALLBACK_CONCEPT)
+        capex_map = self._fy_map(listing_id, repo, CAPEX_CONCEPT)
+        da_primary_map = self._fy_map(listing_id, repo, DA_PRIMARY_CONCEPT)
+        da_fallback_map = self._fy_map(listing_id, repo, DA_FALLBACK_CONCEPT)
 
         candidate_dates = sorted(
             set(capex_map.keys())
@@ -125,18 +125,18 @@ class _MCapexBase:
         for end_date in candidate_dates:
             capex = self._amount_from_record(
                 capex_map.get(end_date),
-                symbol=symbol,
+                listing_id=listing_id,
                 context=context,
                 target_currency=target_currency,
             )
             da_record = da_primary_map.get(end_date) or da_fallback_map.get(end_date)
             da = self._amount_from_record(
                 da_record,
-                symbol=symbol,
+                listing_id=listing_id,
                 context=context,
                 target_currency=target_currency,
             )
-            value = self._compute_mcapex_value(capex, da, symbol, context=context)
+            value = self._compute_mcapex_value(capex, da, listing_id, context=context)
             if value is None:
                 continue
             points.append(value)
@@ -146,21 +146,23 @@ class _MCapexBase:
         self,
         record: Optional[MonetaryFact],
         *,
-        symbol: str,
+        listing_id: int,
         context: str,
         target_currency: str,
     ) -> Optional[_MoneyResult]:
         if record is None:
             return None
         return _MoneyResult(
-            money=self._money(record, target_currency, symbol, context),
+            money=self._money(record, target_currency, listing_id, context),
             as_of=record.end_date,
         )
 
     def _fy_map(
-        self, symbol: str, repo: RegionFactsRepository, concept: str
+        self, listing_id: int, repo: RegionFactsRepository, concept: str
     ) -> dict[str, MonetaryFact]:
-        records = repo.monetary_facts_for_concept(symbol, concept, fiscal_period="FY")
+        records = repo.monetary_facts_for_concept(
+            listing_id, concept, fiscal_period="FY"
+        )
         ordered = self._filter_periods(records, FY_PERIODS)
         return {record.end_date: record for record in ordered}
 
@@ -183,7 +185,7 @@ class _MCapexBase:
         self,
         fact: MonetaryFact,
         target_currency: str,
-        symbol: str,
+        listing_id: int,
         context: str,
     ) -> Money:
         # Capex is a negative cash outflow; the maintenance-capex proxy works in
@@ -193,7 +195,7 @@ class _MCapexBase:
                 fact.money,
                 target_currency=target_currency,
                 metric_id=context,
-                symbol=symbol,
+                listing_id=listing_id,
                 input_name=fact.concept,
                 as_of=fact.end_date,
             )
@@ -215,25 +217,30 @@ class MCapexFYMetric(_MCapexBase):
     required_concepts = ALL_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id=self.id, input_name="MaintenanceCapex"
+            listing_id, repo, metric_id=self.id, input_name="MaintenanceCapex"
         )
         points = self._build_fy_points(
-            symbol, repo, context=self.id, target_currency=target_currency
+            listing_id, repo, context=self.id, target_currency=target_currency
         )
         if not points:
-            LOGGER.warning("mcapex_fy: missing FY capex and D&A inputs for %s", symbol)
+            LOGGER.warning(
+                "mcapex_fy: missing FY capex and D&A inputs for listing_id=%s",
+                listing_id,
+            )
             return None
         latest = points[0]
         if not self._is_recent_as_of(latest.as_of, max_age_days=MAX_FY_FACT_AGE_DAYS):
             LOGGER.warning(
-                "mcapex_fy: latest FY (%s) too old for %s", latest.as_of, symbol
+                "mcapex_fy: latest FY (%s) too old for listing_id=%s",
+                latest.as_of,
+                listing_id,
             )
             return None
         return MetricResult.monetary(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=latest.money.amount,
             as_of=latest.as_of,
@@ -249,31 +256,33 @@ class MCapexFiveYearMetric(_MCapexBase):
     required_concepts = ALL_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id=self.id, input_name="MaintenanceCapex"
+            listing_id, repo, metric_id=self.id, input_name="MaintenanceCapex"
         )
         points = self._build_fy_points(
-            symbol, repo, context=self.id, target_currency=target_currency
+            listing_id, repo, context=self.id, target_currency=target_currency
         )
         if len(points) < 5:
             LOGGER.warning(
-                "mcapex_5y: need 5 FY maintenance capex values for %s, found %s",
-                symbol,
+                "mcapex_5y: need 5 FY maintenance capex values for listing_id=%s, found %s",
+                listing_id,
                 len(points),
             )
             return None
         latest = points[0]
         if not self._is_recent_as_of(latest.as_of, max_age_days=MAX_FY_FACT_AGE_DAYS):
             LOGGER.warning(
-                "mcapex_5y: latest FY (%s) too old for %s", latest.as_of, symbol
+                "mcapex_5y: latest FY (%s) too old for listing_id=%s",
+                latest.as_of,
+                listing_id,
             )
             return None
         latest_five = points[:5]
         average = sum_money([point.money for point in latest_five]) / 5.0
         return MetricResult.monetary(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=average.amount,
             as_of=latest_five[0].as_of,
@@ -289,20 +298,20 @@ class MCapexTTMMetric(_MCapexBase):
     required_concepts = ALL_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id=self.id, input_name="MaintenanceCapex"
+            listing_id, repo, metric_id=self.id, input_name="MaintenanceCapex"
         )
         capex = self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             CAPEX_CONCEPTS,
             context="mcapex_ttm",
             target_currency=target_currency,
         )
         da = self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             DA_PRIMARY_CONCEPTS,
             context="mcapex_ttm",
@@ -310,7 +319,7 @@ class MCapexTTMMetric(_MCapexBase):
         )
         if da is None:
             da = self._compute_ttm_amount(
-                symbol,
+                listing_id,
                 repo,
                 DA_FALLBACK_CONCEPTS,
                 context="mcapex_ttm",
@@ -318,14 +327,15 @@ class MCapexTTMMetric(_MCapexBase):
             )
         if capex is None and da is None:
             LOGGER.warning(
-                "mcapex_ttm: missing TTM capex and D&A inputs for %s", symbol
+                "mcapex_ttm: missing TTM capex and D&A inputs for listing_id=%s",
+                listing_id,
             )
             return None
-        value = self._compute_mcapex_value(capex, da, symbol, context="mcapex_ttm")
+        value = self._compute_mcapex_value(capex, da, listing_id, context="mcapex_ttm")
         if value is None:
             return None
         return MetricResult.monetary(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=value.money.amount,
             as_of=value.as_of,

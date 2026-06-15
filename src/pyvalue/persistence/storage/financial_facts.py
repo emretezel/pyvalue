@@ -32,6 +32,25 @@ from .records import (
 )
 
 
+def _fact_record_from_row(row: sqlite3.Row) -> FactRecord:
+    """Build a :class:`FactRecord` from an id-keyed fact row.
+
+    The natural-identity fact readers select by ``listing_id`` and do not project
+    the canonical symbol, so the resulting record carries no ``symbol`` (the
+    metric layer reads facts by ``listing_id`` and never reads that field).
+    """
+
+    return FactRecord(
+        concept=row["concept"],
+        fiscal_period=row["fiscal_period"],
+        end_date=row["end_date"],
+        unit_kind=row["unit_kind"],
+        value=row["value"],
+        filed=row["filed"],
+        currency=row["currency"],
+    )
+
+
 class FinancialFactsRefreshStateRepository(SQLiteStore):
     """Track the latest normalized financial-facts refresh per security."""
 
@@ -274,50 +293,41 @@ class FinancialFactsRepository(SQLiteStore):
 
     def latest_fact(
         self,
-        symbol: str,
+        listing_id: int,
         concept: str,
     ) -> Optional[FactRecord]:
         self.initialize_schema()
-        security_id = self._security_repo().resolve_id(symbol)
-        if security_id is None:
-            return None
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT s.canonical_symbol, ff.concept, ff.fiscal_period,
-                       ff.end_date, ff.unit_kind, ff.value, ff.filed,
-                       ff.currency
+                SELECT ff.concept, ff.fiscal_period, ff.end_date,
+                       ff.unit_kind, ff.value, ff.filed, ff.currency
                 FROM financial_facts ff
-                JOIN securities s ON s.security_id = ff.listing_id
                 WHERE ff.listing_id = ? AND ff.concept = ?
                 ORDER BY ff.end_date DESC, ff.filed DESC
                 LIMIT 1
                 """,
-                [security_id, concept],
+                (int(listing_id), concept),
             ).fetchone()
         if row is None:
             return None
-        return FactRecord(*row)
+        return _fact_record_from_row(row)
 
     def facts_for_concept(
         self,
-        symbol: str,
+        listing_id: int,
         concept: str,
         fiscal_period: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> List[FactRecord]:
         self.initialize_schema()
-        security_id = self._security_repo().resolve_id(symbol)
-        if security_id is None:
-            return []
         query = [
-            "SELECT s.canonical_symbol, ff.concept, ff.fiscal_period, ff.end_date,",
+            "SELECT ff.concept, ff.fiscal_period, ff.end_date,",
             "ff.unit_kind, ff.value, ff.filed, ff.currency",
             "FROM financial_facts ff",
-            "JOIN securities s ON s.security_id = ff.listing_id",
             "WHERE ff.listing_id = ? AND ff.concept = ?",
         ]
-        params: List[Any] = [security_id, concept]
+        params: List[Any] = [int(listing_id), concept]
         if fiscal_period:
             query.append("AND ff.fiscal_period = ?")
             params.append(fiscal_period)
@@ -327,27 +337,22 @@ class FinancialFactsRepository(SQLiteStore):
             params.append(limit)
         with self._connect() as conn:
             rows = conn.execute(" ".join(query), params).fetchall()
-        return [FactRecord(*row) for row in rows]
+        return [_fact_record_from_row(row) for row in rows]
 
-    def facts_for_symbol(self, symbol: str) -> List[FactRecord]:
+    def facts_for_id(self, listing_id: int) -> List[FactRecord]:
         self.initialize_schema()
-        security_id = self._security_repo().resolve_id(symbol)
-        if security_id is None:
-            return []
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT s.canonical_symbol, ff.concept, ff.fiscal_period,
-                       ff.end_date, ff.unit_kind, ff.value, ff.filed,
-                       ff.currency
+                SELECT ff.concept, ff.fiscal_period, ff.end_date,
+                       ff.unit_kind, ff.value, ff.filed, ff.currency
                 FROM financial_facts ff
-                JOIN securities s ON s.security_id = ff.listing_id
                 WHERE ff.listing_id = ?
                 ORDER BY ff.concept, ff.end_date DESC, ff.filed DESC
                 """,
-                (security_id,),
+                (int(listing_id),),
             ).fetchall()
-        return [FactRecord(*row) for row in rows]
+        return [_fact_record_from_row(row) for row in rows]
 
     def facts_for_symbols_many(
         self,
@@ -452,6 +457,79 @@ class FinancialFactsRepository(SQLiteStore):
                             currency=row["currency"],
                         )
                     )
+
+        if connection is not None:
+            _query(connection)
+        else:
+            with self._connect() as conn:
+                _query(conn)
+        return grouped
+
+    def facts_for_ids_many(
+        self,
+        listing_ids: Sequence[int],
+        chunk_size: int = 25,
+        *,
+        concepts: Optional[Sequence[str]] = None,
+        connection: Optional[sqlite3.Connection] = None,
+    ) -> Dict[int, List[FactRecord]]:
+        """Return all stored facts for many listings, grouped by ``listing_id``.
+
+        The natural-identity counterpart of :meth:`facts_for_symbols_many` (the
+        ``compute-metrics`` fact prefetch): chunked indexed reads over a bounded
+        set of ``listing_id`` values, no symbol resolution, no canonical-symbol
+        projection. ``concepts`` restricts the read to the requested set so the
+        ``(listing_id, concept, end_date DESC, filed DESC)`` index turns each
+        ``(listing_id, concept)`` pair into a direct seek.
+        """
+
+        self.initialize_schema()
+        normalized_ids = sorted({int(x) for x in listing_ids if x is not None})
+        if not normalized_ids:
+            return {}
+
+        concept_filter: Tuple[str, ...] = ()
+        if concepts:
+            seen_concepts: set[str] = set()
+            ordered_concepts: List[str] = []
+            for concept in concepts:
+                if concept and concept not in seen_concepts:
+                    seen_concepts.add(concept)
+                    ordered_concepts.append(concept)
+            concept_filter = tuple(ordered_concepts)
+
+        grouped: Dict[int, List[FactRecord]] = {
+            listing_id: [] for listing_id in normalized_ids
+        }
+
+        def _query(conn: sqlite3.Connection) -> None:
+            for chunk in _batched(normalized_ids, chunk_size):
+                placeholders = ", ".join("?" for _ in chunk)
+                params: List[Any] = list(chunk)
+                concept_clause = ""
+                if concept_filter:
+                    concept_placeholders = ", ".join("?" for _ in concept_filter)
+                    concept_clause = f" AND ff.concept IN ({concept_placeholders})"
+                    params.extend(concept_filter)
+                cursor = conn.execute(
+                    f"""
+                    SELECT
+                        ff.listing_id,
+                        ff.concept,
+                        ff.fiscal_period,
+                        ff.end_date,
+                        ff.unit_kind,
+                        ff.value,
+                        ff.filed,
+                        ff.currency
+                    FROM financial_facts ff INDEXED BY idx_fin_facts_security_concept_latest
+                    WHERE ff.listing_id IN ({placeholders}){concept_clause}
+                    ORDER BY ff.listing_id, ff.concept, ff.end_date DESC, ff.filed DESC
+                    """,
+                    params,
+                )
+                for row in cursor:
+                    grouped[int(row["listing_id"])].append(_fact_record_from_row(row))
 
         if connection is not None:
             _query(connection)

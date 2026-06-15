@@ -16,6 +16,7 @@ from pyvalue.persistence.storage import (
     FactRecord,
     FinancialFactsRepository,
     MarketDataRepository,
+    SecurityRepository,
     SupportedTickerRepository,
 )
 from pyvalue.universe import Listing
@@ -46,6 +47,19 @@ def _store_market_currency(
     market_repo.upsert_price(symbol, as_of, 10.0, currency=currency)
 
 
+def _listing_id(db_path: Path, symbol: str) -> int:
+    """Resolve a seeded symbol to the ``listing_id`` the metric layer keys on.
+
+    The metric ``compute`` API now takes a ``listing_id: int``, but these tests
+    seed facts and prices through the symbol-keyed writers. Those writers resolve
+    the same id internally via ``SecurityRepository.ensure_from_symbol``, so
+    resolving through the same path here yields exactly the id the seeded rows
+    were stored under.
+    """
+
+    return SecurityRepository(db_path).ensure_from_symbol(symbol).security_id
+
+
 def test_metric_skips_when_latest_fact_is_stale(tmp_path: Path) -> None:
     repo = FinancialFactsRepository(tmp_path / "facts.db")
     repo.initialize_schema()
@@ -71,7 +85,8 @@ def test_metric_skips_when_latest_fact_is_stale(tmp_path: Path) -> None:
 
     metric = LongTermDebtMetric()
 
-    assert metric.compute("AAPL.US", RegionFactsRepository(repo)) is None
+    listing_id = _listing_id(tmp_path / "facts.db", "AAPL.US")
+    assert metric.compute(listing_id, RegionFactsRepository(repo)) is None
 
 
 def test_ttm_metric_requires_recent_quarters(tmp_path: Path) -> None:
@@ -101,7 +116,8 @@ def test_ttm_metric_requires_recent_quarters(tmp_path: Path) -> None:
     repo.replace_facts("AAPL.US", records)
 
     metric = EarningsPerShareTTM()
-    result = metric.compute("AAPL.US", RegionFactsRepository(repo))
+    listing_id = _listing_id(tmp_path / "quarters.db", "AAPL.US")
+    result = metric.compute(listing_id, RegionFactsRepository(repo))
 
     assert result is not None
     assert result.value == sum(float(idx) for idx in range(1, 5))
@@ -143,7 +159,8 @@ def test_ttm_metric_skips_when_latest_quarter_is_stale(tmp_path: Path) -> None:
 
     metric = EarningsPerShareTTM()
 
-    assert metric.compute("AAPL.US", RegionFactsRepository(repo)) is None
+    listing_id = _listing_id(tmp_path / "stale_quarters.db", "AAPL.US")
+    assert metric.compute(listing_id, RegionFactsRepository(repo)) is None
 
 
 def test_fy_metric_accepts_when_recent_quarter_exists(tmp_path: Path) -> None:
@@ -185,7 +202,8 @@ def test_fy_metric_accepts_when_recent_quarter_exists(tmp_path: Path) -> None:
     repo.replace_facts("AAPL.US", fy_records)
 
     metric = EPSAverageSixYearMetric()
-    result = metric.compute("AAPL.US", RegionFactsRepository(repo))
+    listing_id = _listing_id(tmp_path / "epsavg.db", "AAPL.US")
+    result = metric.compute(listing_id, RegionFactsRepository(repo))
 
     assert result is not None
 
@@ -283,4 +301,5 @@ def test_roc_metric_uses_recent_concept_even_if_fy_old(tmp_path: Path) -> None:
 
     metric = ROCGreenblattMetric()
 
-    assert metric.compute("TEST.US", RegionFactsRepository(repo)) is not None
+    listing_id = _listing_id(tmp_path / "roc.db", "TEST.US")
+    assert metric.compute(listing_id, RegionFactsRepository(repo)) is not None

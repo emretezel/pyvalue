@@ -27,28 +27,33 @@ class CurrentRatioMetric:
     required_concepts = ("AssetsCurrent", "LiabilitiesCurrent")
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
-        assets = repo.latest_monetary_fact(symbol, "AssetsCurrent")
-        liabilities = repo.latest_monetary_fact(symbol, "LiabilitiesCurrent")
+        assets = repo.latest_monetary_fact(listing_id, "AssetsCurrent")
+        liabilities = repo.latest_monetary_fact(listing_id, "LiabilitiesCurrent")
         if assets is None or liabilities is None:
-            LOGGER.warning("current_ratio: missing assets/liabilities for %s", symbol)
+            LOGGER.warning(
+                "current_ratio: missing assets/liabilities for listing_id=%s",
+                listing_id,
+            )
             return None
         if liabilities.money.amount == 0:
-            LOGGER.warning("current_ratio: liabilities missing/zero for %s", symbol)
+            LOGGER.warning(
+                "current_ratio: liabilities missing/zero for listing_id=%s", listing_id
+            )
             return None
         as_of_record = (
             assets if assets.end_date >= liabilities.end_date else liabilities
         )
         if not is_recent_fact(as_of_record):
             LOGGER.warning(
-                "current_ratio: latest assets/liabilities too old for %s (%s)",
-                symbol,
+                "current_ratio: latest assets/liabilities too old for listing_id=%s (%s)",
+                listing_id,
                 as_of_record.end_date,
             )
             return None
         target_currency = require_metric_ticker_currency(
-            symbol,
+            listing_id,
             repo,
             metric_id=self.id,
             as_of=as_of_record.end_date,
@@ -59,7 +64,7 @@ class CurrentRatioMetric:
             assets.money,
             target_currency=target_currency,
             metric_id=self.id,
-            symbol=symbol,
+            listing_id=listing_id,
             input_name="AssetsCurrent",
             as_of=assets.end_date,
         )
@@ -67,13 +72,13 @@ class CurrentRatioMetric:
             liabilities.money,
             target_currency=target_currency,
             metric_id=self.id,
-            symbol=symbol,
+            listing_id=listing_id,
             input_name="LiabilitiesCurrent",
             as_of=liabilities.end_date,
         )
         ratio = assets_money / liabilities_money
         return MetricResult.ratio(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=ratio,
             as_of=as_of_record.end_date,

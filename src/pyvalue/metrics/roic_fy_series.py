@@ -144,7 +144,7 @@ class ROICFYYearDiagnostic:
 
 @dataclass(frozen=True)
 class ROICFYSeriesDiagnostic:
-    symbol: str
+    listing_id: int
     window_years: int
     ebit_years: tuple[int, ...]
     invested_capital_years: tuple[int, ...]
@@ -175,15 +175,15 @@ class ROICFYSeriesCalculator:
 
     def diagnose_series(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         window_years: int = DEFAULT_SERIES_YEARS,
     ) -> ROICFYSeriesDiagnostic:
-        ebit_map = self._fy_map(symbol, repo, EBIT_CONCEPT)
-        tax_map = self._fy_map(symbol, repo, TAX_EXPENSE_CONCEPT)
-        pretax_map = self._fy_map(symbol, repo, PRETAX_INCOME_CONCEPT)
+        ebit_map = self._fy_map(listing_id, repo, EBIT_CONCEPT)
+        tax_map = self._fy_map(listing_id, repo, TAX_EXPENSE_CONCEPT)
+        pretax_map = self._fy_map(listing_id, repo, PRETAX_INCOME_CONCEPT)
         latest_valid_tax_rate = self._latest_valid_fy_tax_rate(tax_map, pretax_map)
-        ic_map, ic_diagnostics = self._fy_invested_capital_diagnostics(symbol, repo)
+        ic_map, ic_diagnostics = self._fy_invested_capital_diagnostics(listing_id, repo)
 
         roic_by_year: dict[int, _ROICFYPoint] = {}
         roic_failure_by_year: dict[int, str] = {}
@@ -289,7 +289,7 @@ class ROICFYSeriesCalculator:
             snapshot=snapshot,
         )
         return ROICFYSeriesDiagnostic(
-            symbol=symbol,
+            listing_id=listing_id,
             window_years=window_years,
             ebit_years=tuple(sorted(ebit_map.keys(), reverse=True)),
             invested_capital_years=tuple(
@@ -317,42 +317,48 @@ class ROICFYSeriesCalculator:
 
     def compute_series(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         window_years: int = DEFAULT_SERIES_YEARS,
     ) -> Optional[ROICFYSeriesSnapshot]:
-        diagnostic = self.diagnose_series(symbol, repo, window_years=window_years)
+        diagnostic = self.diagnose_series(listing_id, repo, window_years=window_years)
         if diagnostic.snapshot is not None:
             return diagnostic.snapshot
         failure_reason = (
             diagnostic.failure_reason or FAILURE_MISSING_CURRENT_FY_INVESTED_CAPITAL
         )
         LOGGER.warning(
-            "%s: %s for %s",
+            "%s: %s for listing_id=%s",
             self._series_context(window_years),
             failure_reason,
-            symbol,
+            listing_id,
         )
         return None
 
     def compute_incremental_5y(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[IncrementalROICSnapshot]:
-        ebit_map = self._fy_map(symbol, repo, EBIT_CONCEPT)
+        ebit_map = self._fy_map(listing_id, repo, EBIT_CONCEPT)
         if not ebit_map:
-            LOGGER.warning("iroic_5y: missing FY EBIT history for %s", symbol)
+            LOGGER.warning(
+                "iroic_5y: missing FY EBIT history for listing_id=%s", listing_id
+            )
             return None
 
-        ic_map, _ = self._fy_invested_capital_diagnostics(symbol, repo)
+        ic_map, _ = self._fy_invested_capital_diagnostics(listing_id, repo)
         if not ic_map:
             LOGGER.warning(
-                "iroic_5y: missing FY invested capital history for %s", symbol
+                "iroic_5y: missing FY invested capital history for listing_id=%s",
+                listing_id,
             )
             return None
 
         latest_year = self._latest_incremental_year(ebit_map, ic_map)
         if latest_year is None:
-            LOGGER.warning("iroic_5y: missing strict t and t-5 FY pair for %s", symbol)
+            LOGGER.warning(
+                "iroic_5y: missing strict t and t-5 FY pair for listing_id=%s",
+                listing_id,
+            )
             return None
 
         prior_year = latest_year - IROIC_LOOKBACK_YEARS
@@ -365,11 +371,13 @@ class ROICFYSeriesCalculator:
         if not self._is_recent_as_of(
             latest_pair_as_of, max_age_days=MAX_FY_FACT_AGE_DAYS
         ):
-            LOGGER.warning("iroic_5y: latest FY point too old for %s", symbol)
+            LOGGER.warning(
+                "iroic_5y: latest FY point too old for listing_id=%s", listing_id
+            )
             return None
 
-        tax_map = self._fy_map(symbol, repo, TAX_EXPENSE_CONCEPT)
-        pretax_map = self._fy_map(symbol, repo, PRETAX_INCOME_CONCEPT)
+        tax_map = self._fy_map(listing_id, repo, TAX_EXPENSE_CONCEPT)
+        pretax_map = self._fy_map(listing_id, repo, PRETAX_INCOME_CONCEPT)
         latest_valid_tax_rate = self._latest_valid_fy_tax_rate(tax_map, pretax_map)
         latest_tax_rate = self._tax_rate_for_year(
             year=latest_year,
@@ -391,14 +399,17 @@ class ROICFYSeriesCalculator:
         delta_ic = latest_ic.money - prior_ic.money
         if delta_ic.amount <= 0:
             LOGGER.warning(
-                "iroic_5y: non-positive delta invested capital for %s", symbol
+                "iroic_5y: non-positive delta invested capital for listing_id=%s",
+                listing_id,
             )
             return None
 
         ic_scale = max(abs(latest_ic.money.amount), abs(prior_ic.money.amount), 1.0)
         relative_delta_ic = abs(delta_ic.amount) / ic_scale
         if relative_delta_ic < IROIC_MIN_RELATIVE_DELTA_IC:
-            LOGGER.warning("iroic_5y: tiny delta invested capital for %s", symbol)
+            LOGGER.warning(
+                "iroic_5y: tiny delta invested capital for listing_id=%s", listing_id
+            )
             return None
 
         as_of_values = [latest_ebit.as_of, latest_ic.as_of]
@@ -551,28 +562,28 @@ class ROICFYSeriesCalculator:
         return None
 
     def _fy_invested_capital_diagnostics(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> tuple[dict[int, _AmountResult], dict[int, _InvestedCapitalYearDiagnostic]]:
         short_map = self._fy_period_map(
-            repo.monetary_facts_for_concept(symbol, SHORT_TERM_DEBT_CONCEPT)
+            repo.monetary_facts_for_concept(listing_id, SHORT_TERM_DEBT_CONCEPT)
         )
         long_map = self._fy_period_map(
-            repo.monetary_facts_for_concept(symbol, LONG_TERM_DEBT_CONCEPT)
+            repo.monetary_facts_for_concept(listing_id, LONG_TERM_DEBT_CONCEPT)
         )
         total_map = self._fy_period_map(
-            repo.monetary_facts_for_concept(symbol, TOTAL_DEBT_CONCEPT)
+            repo.monetary_facts_for_concept(listing_id, TOTAL_DEBT_CONCEPT)
         )
         equity_map = self._fy_period_map(
-            repo.monetary_facts_for_concept(symbol, EQUITY_PRIMARY_CONCEPT)
+            repo.monetary_facts_for_concept(listing_id, EQUITY_PRIMARY_CONCEPT)
         )
         common_equity_map = self._fy_period_map(
-            repo.monetary_facts_for_concept(symbol, EQUITY_FALLBACK_CONCEPT)
+            repo.monetary_facts_for_concept(listing_id, EQUITY_FALLBACK_CONCEPT)
         )
         cash_primary_map = self._fy_period_map(
-            repo.monetary_facts_for_concept(symbol, CASH_PRIMARY_CONCEPT)
+            repo.monetary_facts_for_concept(listing_id, CASH_PRIMARY_CONCEPT)
         )
         cash_fallback_map = self._fy_period_map(
-            repo.monetary_facts_for_concept(symbol, CASH_FALLBACK_CONCEPT)
+            repo.monetary_facts_for_concept(listing_id, CASH_FALLBACK_CONCEPT)
         )
 
         candidate_keys = sorted(
@@ -595,7 +606,7 @@ class ROICFYSeriesCalculator:
                 continue
 
             debt, debt_failure = self._resolve_invested_capital_debt(
-                symbol=symbol,
+                listing_id=listing_id,
                 repo=repo,
                 short_debt=short_map.get(key),
                 long_debt=long_map.get(key),
@@ -615,7 +626,7 @@ class ROICFYSeriesCalculator:
                 continue
 
             equity, equity_failure = self._resolve_invested_capital_single_amount(
-                symbol=symbol,
+                listing_id=listing_id,
                 repo=repo,
                 primary=equity_map.get(key),
                 fallback=common_equity_map.get(key),
@@ -635,7 +646,7 @@ class ROICFYSeriesCalculator:
                 continue
 
             cash, cash_failure = self._resolve_invested_capital_single_amount(
-                symbol=symbol,
+                listing_id=listing_id,
                 repo=repo,
                 primary=cash_primary_map.get(key),
                 fallback=cash_fallback_map.get(key),
@@ -672,7 +683,7 @@ class ROICFYSeriesCalculator:
     def _resolve_invested_capital_debt(
         self,
         *,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         short_debt: Optional[MonetaryFact],
         long_debt: Optional[MonetaryFact],
@@ -681,8 +692,8 @@ class ROICFYSeriesCalculator:
         if short_debt is not None and long_debt is not None:
             return (
                 _AmountResult(
-                    money=self._money(short_debt, symbol, repo)
-                    + self._money(long_debt, symbol, repo),
+                    money=self._money(short_debt, listing_id, repo)
+                    + self._money(long_debt, listing_id, repo),
                     as_of=max(short_debt.end_date, long_debt.end_date),
                 ),
                 None,
@@ -691,7 +702,7 @@ class ROICFYSeriesCalculator:
         if total_debt is not None:
             return (
                 _AmountResult(
-                    money=self._money(total_debt, symbol, repo),
+                    money=self._money(total_debt, listing_id, repo),
                     as_of=total_debt.end_date,
                 ),
                 None,
@@ -703,7 +714,7 @@ class ROICFYSeriesCalculator:
 
         return (
             _AmountResult(
-                money=self._money(one_side, symbol, repo),
+                money=self._money(one_side, listing_id, repo),
                 as_of=one_side.end_date,
             ),
             None,
@@ -712,7 +723,7 @@ class ROICFYSeriesCalculator:
     def _resolve_invested_capital_single_amount(
         self,
         *,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         primary: Optional[MonetaryFact],
         fallback: Optional[MonetaryFact],
@@ -723,7 +734,7 @@ class ROICFYSeriesCalculator:
             return None, missing_failure
         return (
             _AmountResult(
-                money=self._money(record, symbol, repo),
+                money=self._money(record, listing_id, repo),
                 as_of=record.end_date,
             ),
             None,
@@ -744,11 +755,13 @@ class ROICFYSeriesCalculator:
 
     def _fy_map(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         concept: str,
     ) -> dict[int, _AmountResult]:
-        records = repo.monetary_facts_for_concept(symbol, concept, fiscal_period="FY")
+        records = repo.monetary_facts_for_concept(
+            listing_id, concept, fiscal_period="FY"
+        )
         ordered = self._filter_periods(records, FY_PERIODS)
         mapped: dict[int, _AmountResult] = {}
         for record in ordered:
@@ -756,7 +769,7 @@ class ROICFYSeriesCalculator:
             if year is None or year in mapped:
                 continue
             mapped[year] = _AmountResult(
-                money=self._money(record, symbol, repo),
+                money=self._money(record, listing_id, repo),
                 as_of=record.end_date,
             )
         return mapped
@@ -849,10 +862,10 @@ class ROICFYSeriesCalculator:
         return filtered
 
     def _money(
-        self, fact: MonetaryFact, symbol: str, repo: RegionFactsRepository
+        self, fact: MonetaryFact, listing_id: int, repo: RegionFactsRepository
     ) -> Money:
         target_currency = require_metric_ticker_currency(
-            symbol,
+            listing_id,
             repo,
             metric_id=_METRIC_ID,
             input_name=fact.concept,
@@ -862,7 +875,7 @@ class ROICFYSeriesCalculator:
             fact.money,
             target_currency=target_currency,
             metric_id=_METRIC_ID,
-            symbol=symbol,
+            listing_id=listing_id,
             input_name=fact.concept,
             as_of=fact.end_date,
         )
@@ -894,10 +907,10 @@ class ROIC10YMedianMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = ROICFYSeriesCalculator().compute_series(
-            symbol, repo, window_years=DEFAULT_SERIES_YEARS
+            listing_id, repo, window_years=DEFAULT_SERIES_YEARS
         )
         if snapshot is None:
             return None
@@ -905,7 +918,7 @@ class ROIC10YMedianMetric:
         midpoint = len(values) // 2
         median = (values[midpoint - 1] + values[midpoint]) / 2.0
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=median,
             as_of=snapshot.as_of,
@@ -920,17 +933,17 @@ class ROIC7YMedianMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = ROICFYSeriesCalculator().compute_series(
-            symbol, repo, window_years=STRICT_7Y_YEARS
+            listing_id, repo, window_years=STRICT_7Y_YEARS
         )
         if snapshot is None:
             return None
         values = sorted(point.value for point in snapshot.points)
         median = values[len(values) // 2]
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=median,
             as_of=snapshot.as_of,
@@ -945,16 +958,16 @@ class ROICYearsAbove12PctMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = ROICFYSeriesCalculator().compute_series(
-            symbol, repo, window_years=DEFAULT_SERIES_YEARS
+            listing_id, repo, window_years=DEFAULT_SERIES_YEARS
         )
         if snapshot is None:
             return None
         count = sum(1 for point in snapshot.points if point.value > ABOVE_THRESHOLD)
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=float(count),
             as_of=snapshot.as_of,
@@ -969,16 +982,16 @@ class ROIC10YMinMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = ROICFYSeriesCalculator().compute_series(
-            symbol, repo, window_years=DEFAULT_SERIES_YEARS
+            listing_id, repo, window_years=DEFAULT_SERIES_YEARS
         )
         if snapshot is None:
             return None
         minimum = min(point.value for point in snapshot.points)
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=minimum,
             as_of=snapshot.as_of,
@@ -993,16 +1006,16 @@ class ROIC7YMinMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         snapshot = ROICFYSeriesCalculator().compute_series(
-            symbol, repo, window_years=STRICT_7Y_YEARS
+            listing_id, repo, window_years=STRICT_7Y_YEARS
         )
         if snapshot is None:
             return None
         minimum = min(point.value for point in snapshot.points)
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=minimum,
             as_of=snapshot.as_of,
@@ -1017,13 +1030,13 @@ class IncrementalROICFiveYearMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
-        snapshot = ROICFYSeriesCalculator().compute_incremental_5y(symbol, repo)
+        snapshot = ROICFYSeriesCalculator().compute_incremental_5y(listing_id, repo)
         if snapshot is None:
             return None
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=snapshot.value,
             as_of=snapshot.as_of,

@@ -117,9 +117,9 @@ _METRIC_METADATA: dict[str, MetricMetadata] = {
 
 @dataclass
 class MetricResult:
-    """Represents the computed value of a metric for a symbol."""
+    """Represents the computed value of a metric for a listing."""
 
-    symbol: str
+    listing_id: int
     metric_id: str
     value: float
     as_of: str
@@ -134,7 +134,7 @@ class MetricResult:
     def monetary(
         cls,
         *,
-        symbol: str,
+        listing_id: int,
         metric_id: str,
         value: float,
         as_of: str,
@@ -142,7 +142,7 @@ class MetricResult:
         unit_label: Optional[str] = None,
     ) -> "MetricResult":
         return cls(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=metric_id,
             value=value,
             as_of=as_of,
@@ -155,7 +155,7 @@ class MetricResult:
     def per_share(
         cls,
         *,
-        symbol: str,
+        listing_id: int,
         metric_id: str,
         value: float,
         as_of: str,
@@ -163,7 +163,7 @@ class MetricResult:
         unit_label: Optional[str] = None,
     ) -> "MetricResult":
         return cls(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=metric_id,
             value=value,
             as_of=as_of,
@@ -176,7 +176,7 @@ class MetricResult:
     def ratio(
         cls,
         *,
-        symbol: str,
+        listing_id: int,
         metric_id: str,
         value: float,
         as_of: str,
@@ -184,7 +184,7 @@ class MetricResult:
         unit_label: Optional[str] = None,
     ) -> "MetricResult":
         return cls(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=metric_id,
             value=value,
             as_of=as_of,
@@ -198,7 +198,7 @@ class MetricCurrencyInvariantError(RuntimeError):
     """Structured metric failure for currency invariant violations."""
 
     metric_id: str
-    symbol: str
+    listing_id: int
     input_name: str
     reason_code: str
     expected_currency: Optional[str] = None
@@ -208,9 +208,10 @@ class MetricCurrencyInvariantError(RuntimeError):
     def __str__(self) -> str:
         return (
             "Metric currency invariant violated "
-            f"(metric={self.metric_id} symbol={self.symbol} input={self.input_name} "
-            f"reason={self.reason_code} expected={self.expected_currency} "
-            f"actual={self.actual_currency} as_of={self.as_of})"
+            f"(metric={self.metric_id} listing_id={self.listing_id} "
+            f"input={self.input_name} reason={self.reason_code} "
+            f"expected={self.expected_currency} actual={self.actual_currency} "
+            f"as_of={self.as_of})"
         )
 
     @property
@@ -242,7 +243,7 @@ class Metric(Protocol):
     unit_label: Optional[str]
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]: ...
 
 

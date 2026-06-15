@@ -64,38 +64,45 @@ class ReturnOnInvestedCapitalMetric:
     )
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         # Resolve the listing currency once; EBIT and every invested-capital
         # component are aligned to it before any Money arithmetic.
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id=self.id
+            listing_id, repo, metric_id=self.id
         )
 
-        ebit = self._ttm_sum(symbol, repo, EBIT_CONCEPTS, target_currency)
+        ebit = self._ttm_sum(listing_id, repo, EBIT_CONCEPTS, target_currency)
         if ebit is None:
-            LOGGER.warning("roic: missing TTM EBIT for %s", symbol)
+            LOGGER.warning("roic: missing TTM EBIT for listing_id=%s", listing_id)
             return None
 
-        tax_rate = self._effective_tax_rate(symbol, repo, target_currency)
+        tax_rate = self._effective_tax_rate(listing_id, repo, target_currency)
         nopat = ebit.money * (1.0 - tax_rate)
         if nopat.amount <= 0:
-            LOGGER.warning("roic: non-positive NOPAT for %s", symbol)
+            LOGGER.warning("roic: non-positive NOPAT for listing_id=%s", listing_id)
             return None
 
-        capital_points = self._invested_capital_points(symbol, repo, target_currency)
+        capital_points = self._invested_capital_points(
+            listing_id, repo, target_currency
+        )
         if len(capital_points) < 2:
-            LOGGER.warning("roic: insufficient invested capital history for %s", symbol)
+            LOGGER.warning(
+                "roic: insufficient invested capital history for listing_id=%s",
+                listing_id,
+            )
             return None
         latest = capital_points[0]
         previous = capital_points[1]
         avg_capital = (latest.money + previous.money) / 2.0
         if avg_capital.amount <= 0:
-            LOGGER.warning("roic: non-positive invested capital for %s", symbol)
+            LOGGER.warning(
+                "roic: non-positive invested capital for listing_id=%s", listing_id
+            )
             return None
 
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=nopat / avg_capital,
             as_of=max(ebit.as_of, latest.as_of),
@@ -104,12 +111,14 @@ class ReturnOnInvestedCapitalMetric:
 
     def _effective_tax_rate(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         target_currency: str,
     ) -> float:
-        tax = self._ttm_sum(symbol, repo, TAX_EXPENSE_CONCEPTS, target_currency)
-        pretax = self._ttm_sum(symbol, repo, PRETAX_INCOME_CONCEPTS, target_currency)
+        tax = self._ttm_sum(listing_id, repo, TAX_EXPENSE_CONCEPTS, target_currency)
+        pretax = self._ttm_sum(
+            listing_id, repo, PRETAX_INCOME_CONCEPTS, target_currency
+        )
         if tax is None or pretax is None or pretax.money.amount <= 0:
             return DEFAULT_TAX_RATE
         rate = tax.money / pretax.money
@@ -119,12 +128,12 @@ class ReturnOnInvestedCapitalMetric:
 
     def _invested_capital_points(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         target_currency: str,
     ) -> list[_CapitalPoint]:
         points = self._build_capital_points(
-            symbol,
+            listing_id,
             repo,
             QUARTERLY_PERIODS,
             max_age_days=MAX_FACT_AGE_DAYS,
@@ -132,7 +141,7 @@ class ReturnOnInvestedCapitalMetric:
         )
         if len(points) < 2:
             points = self._build_capital_points(
-                symbol,
+                listing_id,
                 repo,
                 FY_PERIODS,
                 max_age_days=MAX_FY_FACT_AGE_DAYS,
@@ -142,7 +151,7 @@ class ReturnOnInvestedCapitalMetric:
 
     def _build_capital_points(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         periods: set[str],
         *,
@@ -150,16 +159,16 @@ class ReturnOnInvestedCapitalMetric:
         target_currency: str,
     ) -> list[_CapitalPoint]:
         short_map = self._period_map(
-            repo.monetary_facts_for_concept(symbol, "ShortTermDebt"), periods
+            repo.monetary_facts_for_concept(listing_id, "ShortTermDebt"), periods
         )
         long_map = self._period_map(
-            repo.monetary_facts_for_concept(symbol, "LongTermDebt"), periods
+            repo.monetary_facts_for_concept(listing_id, "LongTermDebt"), periods
         )
         equity_map = self._period_map(
-            repo.monetary_facts_for_concept(symbol, "StockholdersEquity"), periods
+            repo.monetary_facts_for_concept(listing_id, "StockholdersEquity"), periods
         )
         cash_map = self._period_map(
-            repo.monetary_facts_for_concept(symbol, "CashAndShortTermInvestments"),
+            repo.monetary_facts_for_concept(listing_id, "CashAndShortTermInvestments"),
             periods,
         )
 
@@ -180,28 +189,29 @@ class ReturnOnInvestedCapitalMetric:
             ):
                 continue
             invested_capital = (
-                self._money(short, target_currency, symbol)
-                + self._money(long, target_currency, symbol)
-                + self._money(equity, target_currency, symbol)
-                - self._money(cash, target_currency, symbol)
+                self._money(short, target_currency, listing_id)
+                + self._money(long, target_currency, listing_id)
+                + self._money(equity, target_currency, listing_id)
+                - self._money(cash, target_currency, listing_id)
             )
             points.append(_CapitalPoint(money=invested_capital, as_of=date_str))
         return points
 
     def _ttm_sum(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         concepts: Sequence[str],
         target_currency: str,
     ) -> Optional[_MoneyResult]:
         for concept in concepts:
-            records = repo.monetary_facts_for_concept(symbol, concept)
+            records = repo.monetary_facts_for_concept(listing_id, concept)
             quarterly = self._filter_quarterly(records)
             if len(quarterly) < 4 or not is_recent_fact(quarterly[0]):
                 continue
             monies = [
-                self._money(record, target_currency, symbol) for record in quarterly[:4]
+                self._money(record, target_currency, listing_id)
+                for record in quarterly[:4]
             ]
             return _MoneyResult(money=sum_money(monies), as_of=quarterly[0].end_date)
         return None
@@ -228,12 +238,14 @@ class ReturnOnInvestedCapitalMetric:
             seen_end_dates.add(record.end_date)
         return filtered
 
-    def _money(self, fact: MonetaryFact, target_currency: str, symbol: str) -> Money:
+    def _money(
+        self, fact: MonetaryFact, target_currency: str, listing_id: int
+    ) -> Money:
         return require_metric_money(
             fact.money,
             target_currency=target_currency,
             metric_id=self.id,
-            symbol=symbol,
+            listing_id=listing_id,
             input_name=fact.concept,
             as_of=fact.end_date,
         )

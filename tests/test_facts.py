@@ -26,6 +26,10 @@ from pyvalue.facts import (
 from pyvalue.money import Money
 from pyvalue.persistence.storage import FactRecord
 
+# The typed read layer keys on ``listing_id: int``; the fake source ignores the
+# id (it serves a single in-memory concept map), so any positive int works.
+LISTING_ID = 1
+
 
 def _fact(
     concept: str,
@@ -38,7 +42,6 @@ def _fact(
     """Build a stored fact record for the fake source."""
 
     return FactRecord(
-        symbol="X.US",
         concept=concept,
         fiscal_period=fiscal_period,
         end_date=end_date,
@@ -54,13 +57,13 @@ class _FakeSource:
     def __init__(self, facts_by_concept: Dict[str, List[FactRecord]]) -> None:
         self._facts = facts_by_concept
 
-    def latest_fact(self, symbol: str, concept: str) -> Optional[FactRecord]:
+    def latest_fact(self, listing_id: int, concept: str) -> Optional[FactRecord]:
         records = self._facts.get(concept, [])
         return records[0] if records else None
 
     def facts_for_concept(
         self,
-        symbol: str,
+        listing_id: int,
         concept: str,
         fiscal_period: Optional[str] = None,
         limit: Optional[int] = None,
@@ -84,7 +87,7 @@ def test_region_repository_satisfies_fact_reader() -> None:
 
 def test_latest_monetary_fact_mints_money() -> None:
     region = _region({"Revenues": [_fact("Revenues", "monetary", 5_000_000.0, "USD")]})
-    fact = region.latest_monetary_fact("X.US", "Revenues")
+    fact = region.latest_monetary_fact(LISTING_ID, "Revenues")
     assert fact is not None
     assert fact.money == Money.of(5_000_000.0, "USD")
     assert fact.end_date == "2023-12-31"
@@ -97,7 +100,7 @@ def test_per_share_fact_is_monetary() -> None:
     region = _region(
         {"EarningsPerShare": [_fact("EarningsPerShare", "per_share", 3.5, "USD")]}
     )
-    fact = region.latest_monetary_fact("X.US", "EarningsPerShare")
+    fact = region.latest_monetary_fact(LISTING_ID, "EarningsPerShare")
     assert fact is not None
     assert fact.money == Money.of(3.5, "USD")
 
@@ -110,7 +113,7 @@ def test_latest_scalar_fact_keeps_float() -> None:
             ]
         }
     )
-    fact = region.latest_scalar_fact("X.US", "EntityCommonStockSharesOutstanding")
+    fact = region.latest_scalar_fact(LISTING_ID, "EntityCommonStockSharesOutstanding")
     assert fact is not None
     assert fact.value == 1_000.0
     assert fact.unit_kind == "count"
@@ -125,7 +128,7 @@ def test_monetary_facts_for_concept_maps_every_row() -> None:
             ]
         }
     )
-    facts = region.monetary_facts_for_concept("X.US", "Revenues")
+    facts = region.monetary_facts_for_concept(LISTING_ID, "Revenues")
     assert [f.money.amount for f in facts] == [3.0, 2.0]
     assert all(isinstance(f, MonetaryFact) for f in facts)
 
@@ -139,7 +142,7 @@ def test_scalar_facts_for_concept_maps_every_row() -> None:
             ]
         }
     )
-    facts = region.scalar_facts_for_concept("X.US", "Shares")
+    facts = region.scalar_facts_for_concept(LISTING_ID, "Shares")
     assert [f.value for f in facts] == [10.0, 20.0]
     assert all(isinstance(f, ScalarFact) for f in facts)
 
@@ -148,7 +151,7 @@ def test_subunit_currency_collapses_to_major_at_boundary() -> None:
     # Defensive: a subunit code should never reach a stored fact post-071, but if
     # it does the Money mint must collapse pence -> pounds, not inflate 100x.
     region = _region({"Revenues": [_fact("Revenues", "monetary", 2_500.0, "GBX")]})
-    fact = region.latest_monetary_fact("X.US", "Revenues")
+    fact = region.latest_monetary_fact(LISTING_ID, "Revenues")
     assert fact is not None
     assert fact.money == Money.of(25.0, "GBP")
 
@@ -156,13 +159,13 @@ def test_subunit_currency_collapses_to_major_at_boundary() -> None:
 def test_latest_monetary_fact_rejects_scalar_concept() -> None:
     region = _region({"Shares": [_fact("Shares", "count", 1_000.0)]})
     with pytest.raises(ValueError):
-        region.latest_monetary_fact("X.US", "Shares")
+        region.latest_monetary_fact(LISTING_ID, "Shares")
 
 
 def test_latest_scalar_fact_rejects_monetary_concept() -> None:
     region = _region({"Revenues": [_fact("Revenues", "monetary", 1.0, "USD")]})
     with pytest.raises(ValueError):
-        region.latest_scalar_fact("X.US", "Revenues")
+        region.latest_scalar_fact(LISTING_ID, "Revenues")
 
 
 def test_to_scalar_fact_rejects_monetary_record() -> None:
@@ -178,7 +181,7 @@ def test_to_monetary_fact_drops_currencyless_monetary_row() -> None:
 
 def test_missing_fact_returns_none_or_empty() -> None:
     region = _region({})
-    assert region.latest_monetary_fact("X.US", "Revenues") is None
-    assert region.latest_scalar_fact("X.US", "Shares") is None
-    assert region.monetary_facts_for_concept("X.US", "Revenues") == []
-    assert region.scalar_facts_for_concept("X.US", "Shares") == []
+    assert region.latest_monetary_fact(LISTING_ID, "Revenues") is None
+    assert region.latest_scalar_fact(LISTING_ID, "Shares") is None
+    assert region.monetary_facts_for_concept(LISTING_ID, "Revenues") == []
+    assert region.scalar_facts_for_concept(LISTING_ID, "Shares") == []

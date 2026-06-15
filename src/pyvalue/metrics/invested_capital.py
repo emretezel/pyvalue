@@ -70,35 +70,37 @@ class InvestedCapitalSnapshot:
 class _InvestedCapitalBase:
     def _build_points(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         periods: set[str],
     ) -> list[_ICPoint]:
         # Resolve the listing currency once; every component is aligned to it, so
         # invested capital (debt + equity - cash) is single-currency by build.
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id=_INVESTED_CAPITAL_METRIC_ID
+            listing_id, repo, metric_id=_INVESTED_CAPITAL_METRIC_ID
         )
         short_map = self._period_map(
-            repo.monetary_facts_for_concept(symbol, SHORT_TERM_DEBT_CONCEPT), periods
+            repo.monetary_facts_for_concept(listing_id, SHORT_TERM_DEBT_CONCEPT),
+            periods,
         )
         long_map = self._period_map(
-            repo.monetary_facts_for_concept(symbol, LONG_TERM_DEBT_CONCEPT), periods
+            repo.monetary_facts_for_concept(listing_id, LONG_TERM_DEBT_CONCEPT), periods
         )
         total_map = self._period_map(
-            repo.monetary_facts_for_concept(symbol, TOTAL_DEBT_CONCEPT), periods
+            repo.monetary_facts_for_concept(listing_id, TOTAL_DEBT_CONCEPT), periods
         )
         equity_map = self._period_map(
-            repo.monetary_facts_for_concept(symbol, EQUITY_PRIMARY_CONCEPT), periods
+            repo.monetary_facts_for_concept(listing_id, EQUITY_PRIMARY_CONCEPT), periods
         )
         common_equity_map = self._period_map(
-            repo.monetary_facts_for_concept(symbol, EQUITY_FALLBACK_CONCEPT), periods
+            repo.monetary_facts_for_concept(listing_id, EQUITY_FALLBACK_CONCEPT),
+            periods,
         )
         cash_primary_map = self._period_map(
-            repo.monetary_facts_for_concept(symbol, CASH_PRIMARY_CONCEPT), periods
+            repo.monetary_facts_for_concept(listing_id, CASH_PRIMARY_CONCEPT), periods
         )
         cash_fallback_map = self._period_map(
-            repo.monetary_facts_for_concept(symbol, CASH_FALLBACK_CONCEPT), periods
+            repo.monetary_facts_for_concept(listing_id, CASH_FALLBACK_CONCEPT), periods
         )
 
         candidate_keys = sorted(
@@ -116,7 +118,7 @@ class _InvestedCapitalBase:
         points: list[_ICPoint] = []
         for key in candidate_keys:
             debt = self._resolve_debt(
-                symbol=symbol,
+                listing_id=listing_id,
                 target_currency=target_currency,
                 key=key,
                 short_debt=short_map.get(key),
@@ -127,7 +129,7 @@ class _InvestedCapitalBase:
                 continue
 
             equity = self._resolve_equity(
-                symbol=symbol,
+                listing_id=listing_id,
                 target_currency=target_currency,
                 key=key,
                 primary=equity_map.get(key),
@@ -137,7 +139,7 @@ class _InvestedCapitalBase:
                 continue
 
             cash = self._resolve_cash(
-                symbol=symbol,
+                listing_id=listing_id,
                 target_currency=target_currency,
                 key=key,
                 primary=cash_primary_map.get(key),
@@ -158,7 +160,7 @@ class _InvestedCapitalBase:
     def _resolve_debt(
         self,
         *,
-        symbol: str,
+        listing_id: int,
         target_currency: str,
         key: tuple[str, str],
         short_debt: Optional[MonetaryFact],
@@ -167,35 +169,35 @@ class _InvestedCapitalBase:
     ) -> Optional[_Amount]:
         if short_debt is not None and long_debt is not None:
             return _Amount(
-                money=self._money(short_debt, target_currency, symbol)
-                + self._money(long_debt, target_currency, symbol),
+                money=self._money(short_debt, target_currency, listing_id)
+                + self._money(long_debt, target_currency, listing_id),
                 as_of=max(short_debt.end_date, long_debt.end_date),
             )
 
         if total_debt is not None:
             return _Amount(
-                money=self._money(total_debt, target_currency, symbol),
+                money=self._money(total_debt, target_currency, listing_id),
                 as_of=total_debt.end_date,
             )
 
         one_side = short_debt or long_debt
         if one_side is None:
             LOGGER.warning(
-                "invested_capital: missing debt inputs for %s on %s/%s",
-                symbol,
+                "invested_capital: missing debt inputs for listing_id=%s on %s/%s",
+                listing_id,
                 key[0],
                 key[1],
             )
             return None
         return _Amount(
-            money=self._money(one_side, target_currency, symbol),
+            money=self._money(one_side, target_currency, listing_id),
             as_of=one_side.end_date,
         )
 
     def _resolve_equity(
         self,
         *,
-        symbol: str,
+        listing_id: int,
         target_currency: str,
         key: tuple[str, str],
         primary: Optional[MonetaryFact],
@@ -204,21 +206,21 @@ class _InvestedCapitalBase:
         record = primary or fallback
         if record is None:
             LOGGER.warning(
-                "invested_capital: missing equity for %s on %s/%s",
-                symbol,
+                "invested_capital: missing equity for listing_id=%s on %s/%s",
+                listing_id,
                 key[0],
                 key[1],
             )
             return None
         return _Amount(
-            money=self._money(record, target_currency, symbol),
+            money=self._money(record, target_currency, listing_id),
             as_of=record.end_date,
         )
 
     def _resolve_cash(
         self,
         *,
-        symbol: str,
+        listing_id: int,
         target_currency: str,
         key: tuple[str, str],
         primary: Optional[MonetaryFact],
@@ -227,14 +229,14 @@ class _InvestedCapitalBase:
         record = primary or fallback
         if record is None:
             LOGGER.warning(
-                "invested_capital: missing cash for %s on %s/%s",
-                symbol,
+                "invested_capital: missing cash for listing_id=%s on %s/%s",
+                listing_id,
                 key[0],
                 key[1],
             )
             return None
         return _Amount(
-            money=self._money(record, target_currency, symbol),
+            money=self._money(record, target_currency, listing_id),
             as_of=record.end_date,
         )
 
@@ -251,12 +253,14 @@ class _InvestedCapitalBase:
                 mapped[key] = record
         return mapped
 
-    def _money(self, fact: MonetaryFact, target_currency: str, symbol: str) -> Money:
+    def _money(
+        self, fact: MonetaryFact, target_currency: str, listing_id: int
+    ) -> Money:
         return require_metric_money(
             fact.money,
             target_currency=target_currency,
             metric_id=_INVESTED_CAPITAL_METRIC_ID,
-            symbol=symbol,
+            listing_id=listing_id,
             input_name=fact.concept,
             as_of=fact.end_date,
         )
@@ -274,20 +278,22 @@ class _InvestedCapitalBase:
         *,
         max_age_days: int,
         context: str,
-        symbol: str,
+        listing_id: int,
     ) -> Optional[_ICPoint]:
         if not points:
             LOGGER.warning(
-                "%s: missing invested capital points for %s", context, symbol
+                "%s: missing invested capital points for listing_id=%s",
+                context,
+                listing_id,
             )
             return None
         latest = points[0]
         if not self._is_recent_as_of(latest.as_of, max_age_days=max_age_days):
             LOGGER.warning(
-                "%s: latest point (%s) too old for %s",
+                "%s: latest point (%s) too old for listing_id=%s",
                 context,
                 latest.as_of,
-                symbol,
+                listing_id,
             )
             return None
         return latest
@@ -305,47 +311,53 @@ class InvestedCapitalCalculator(_InvestedCapitalBase):
     """Shared calculator for invested-capital snapshots."""
 
     def compute_mqr(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[InvestedCapitalSnapshot]:
-        points = self._build_points(symbol, repo, QUARTERLY_PERIODS)
+        points = self._build_points(listing_id, repo, QUARTERLY_PERIODS)
         latest = self._select_latest_point(
-            points, max_age_days=MAX_FACT_AGE_DAYS, context="ic_mqr", symbol=symbol
+            points,
+            max_age_days=MAX_FACT_AGE_DAYS,
+            context="ic_mqr",
+            listing_id=listing_id,
         )
         if latest is None:
             return None
         return InvestedCapitalSnapshot(money=latest.money, as_of=latest.as_of)
 
     def compute_fy(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[InvestedCapitalSnapshot]:
-        points = self._build_points(symbol, repo, FY_PERIODS)
+        points = self._build_points(listing_id, repo, FY_PERIODS)
         latest = self._select_latest_point(
-            points, max_age_days=MAX_FY_FACT_AGE_DAYS, context="ic_fy", symbol=symbol
+            points,
+            max_age_days=MAX_FY_FACT_AGE_DAYS,
+            context="ic_fy",
+            listing_id=listing_id,
         )
         if latest is None:
             return None
         return InvestedCapitalSnapshot(money=latest.money, as_of=latest.as_of)
 
     def compute_fy_series(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> list[InvestedCapitalSnapshot]:
         """Return FY invested-capital points (latest first) without freshness gating."""
 
-        points = self._build_points(symbol, repo, FY_PERIODS)
+        points = self._build_points(listing_id, repo, FY_PERIODS)
         return [
             InvestedCapitalSnapshot(money=point.money, as_of=point.as_of)
             for point in points
         ]
 
     def compute_avg(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[InvestedCapitalSnapshot]:
-        quarterly_points = self._build_points(symbol, repo, QUARTERLY_PERIODS)
+        quarterly_points = self._build_points(listing_id, repo, QUARTERLY_PERIODS)
         latest_quarter = self._select_latest_point(
             quarterly_points,
             max_age_days=MAX_FACT_AGE_DAYS,
             context="avg_ic",
-            symbol=symbol,
+            listing_id=listing_id,
         )
         if latest_quarter is not None:
             latest_year = self._extract_year(latest_quarter.as_of)
@@ -362,19 +374,21 @@ class InvestedCapitalCalculator(_InvestedCapitalBase):
                             as_of=latest_quarter.as_of,
                         )
 
-        fy_points = self._build_points(symbol, repo, FY_PERIODS)
+        fy_points = self._build_points(listing_id, repo, FY_PERIODS)
         latest_fy = self._select_latest_point(
             fy_points,
             max_age_days=MAX_FY_FACT_AGE_DAYS,
             context="avg_ic",
-            symbol=symbol,
+            listing_id=listing_id,
         )
         if latest_fy is None:
             return None
 
         latest_year = self._extract_year(latest_fy.as_of)
         if latest_year is None:
-            LOGGER.warning("avg_ic: invalid latest FY date for %s", symbol)
+            LOGGER.warning(
+                "avg_ic: invalid latest FY date for listing_id=%s", listing_id
+            )
             return None
 
         prior_fy: Optional[_ICPoint] = None
@@ -385,7 +399,9 @@ class InvestedCapitalCalculator(_InvestedCapitalBase):
                 break
 
         if prior_fy is None:
-            LOGGER.warning("avg_ic: missing strict prior FY for %s", symbol)
+            LOGGER.warning(
+                "avg_ic: missing strict prior FY for listing_id=%s", listing_id
+            )
             return None
 
         return InvestedCapitalSnapshot(
@@ -402,13 +418,13 @@ class ICMostRecentQuarterMetric(_InvestedCapitalBase):
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
-        snapshot = InvestedCapitalCalculator().compute_mqr(symbol, repo)
+        snapshot = InvestedCapitalCalculator().compute_mqr(listing_id, repo)
         if snapshot is None:
             return None
         return MetricResult.monetary(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=snapshot.money.amount,
             as_of=snapshot.as_of,
@@ -424,13 +440,13 @@ class ICFYMetric(_InvestedCapitalBase):
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
-        snapshot = InvestedCapitalCalculator().compute_fy(symbol, repo)
+        snapshot = InvestedCapitalCalculator().compute_fy(listing_id, repo)
         if snapshot is None:
             return None
         return MetricResult.monetary(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=snapshot.money.amount,
             as_of=snapshot.as_of,
@@ -446,13 +462,13 @@ class AvgICMetric(_InvestedCapitalBase):
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
-        snapshot = InvestedCapitalCalculator().compute_avg(symbol, repo)
+        snapshot = InvestedCapitalCalculator().compute_avg(listing_id, repo)
         if snapshot is None:
             return None
         return MetricResult.monetary(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=snapshot.money.amount,
             as_of=snapshot.as_of,

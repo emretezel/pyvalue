@@ -68,32 +68,34 @@ class EnterpriseValueRatioCalculator:
     """Shared numerator calculators for EV-based valuation metrics."""
 
     def compute_ttm_ebit(
-        self, symbol: str, repo: RegionFactsRepository, *, context: str
+        self, listing_id: int, repo: RegionFactsRepository, *, context: str
     ) -> Optional[_TTMResult]:
-        return self._compute_ttm_amount(symbol, repo, EBIT_CONCEPT, context=context)
+        return self._compute_ttm_amount(listing_id, repo, EBIT_CONCEPT, context=context)
 
     def compute_ttm_fcf(
-        self, symbol: str, repo: RegionFactsRepository, *, context: str
+        self, listing_id: int, repo: RegionFactsRepository, *, context: str
     ) -> Optional[_TTMResult]:
         operating = self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             OPERATING_CASH_FLOW_CONCEPT,
             context=context,
         )
         if operating is None:
-            LOGGER.warning("%s: missing TTM FCF for %s", context, symbol)
+            LOGGER.warning("%s: missing TTM FCF for listing_id=%s", context, listing_id)
             return None
 
         capex = self._compute_ttm_amount(
-            symbol,
+            listing_id,
             repo,
             CAPEX_CONCEPT,
             context=context,
         )
         if capex is None:
             LOGGER.warning(
-                "%s: missing/stale capex for %s; assuming zero", context, symbol
+                "%s: missing/stale capex for listing_id=%s; assuming zero",
+                context,
+                listing_id,
             )
             return operating
 
@@ -103,32 +105,36 @@ class EnterpriseValueRatioCalculator:
         )
 
     def compute_ttm_ebitda(
-        self, symbol: str, repo: RegionFactsRepository, *, context: str
+        self, listing_id: int, repo: RegionFactsRepository, *, context: str
     ) -> Optional[_TTMResult]:
         ebit_records = self._filter_quarterly(
-            repo.monetary_facts_for_concept(symbol, EBIT_CONCEPT)
+            repo.monetary_facts_for_concept(listing_id, EBIT_CONCEPT)
         )
         if len(ebit_records) < 4:
-            LOGGER.warning("%s: need 4 quarterly EBIT records for %s", context, symbol)
+            LOGGER.warning(
+                "%s: need 4 quarterly EBIT records for listing_id=%s",
+                context,
+                listing_id,
+            )
             return None
         if not is_recent_fact(ebit_records[0], max_age_days=MAX_FACT_AGE_DAYS):
             LOGGER.warning(
-                "%s: latest EBIT (%s) too old for %s",
+                "%s: latest EBIT (%s) too old for listing_id=%s",
                 context,
                 ebit_records[0].end_date,
-                symbol,
+                listing_id,
             )
             return None
 
         da_primary = self._quarterly_map(
-            repo.monetary_facts_for_concept(symbol, DA_PRIMARY_CONCEPT)
+            repo.monetary_facts_for_concept(listing_id, DA_PRIMARY_CONCEPT)
         )
         da_fallback = self._quarterly_map(
-            repo.monetary_facts_for_concept(symbol, DA_FALLBACK_CONCEPT)
+            repo.monetary_facts_for_concept(listing_id, DA_FALLBACK_CONCEPT)
         )
 
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id=context
+            listing_id, repo, metric_id=context
         )
         quarter_totals: list[Money] = []
         for ebit_record in ebit_records[:4]:
@@ -137,16 +143,16 @@ class EnterpriseValueRatioCalculator:
             )
             if da_record is None:
                 LOGGER.warning(
-                    "%s: missing D&A for quarter %s (%s)",
+                    "%s: missing D&A for quarter %s (listing_id=%s)",
                     context,
                     ebit_record.end_date,
-                    symbol,
+                    listing_id,
                 )
                 return None
 
             quarter_totals.append(
-                self._money(ebit_record, target_currency, symbol, context)
-                + self._money(da_record, target_currency, symbol, context)
+                self._money(ebit_record, target_currency, listing_id, context)
+                + self._money(da_record, target_currency, listing_id, context)
             )
 
         return _TTMResult(
@@ -156,39 +162,39 @@ class EnterpriseValueRatioCalculator:
 
     def _compute_ttm_amount(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         concept: str,
         *,
         context: str,
     ) -> Optional[_TTMResult]:
         quarterly = self._filter_quarterly(
-            repo.monetary_facts_for_concept(symbol, concept)
+            repo.monetary_facts_for_concept(listing_id, concept)
         )
         if len(quarterly) < 4:
             LOGGER.warning(
-                "%s: need 4 quarterly %s records for %s, found %s",
+                "%s: need 4 quarterly %s records for listing_id=%s, found %s",
                 context,
                 concept,
-                symbol,
+                listing_id,
                 len(quarterly),
             )
             return None
         if not is_recent_fact(quarterly[0], max_age_days=MAX_FACT_AGE_DAYS):
             LOGGER.warning(
-                "%s: latest %s (%s) too old for %s",
+                "%s: latest %s (%s) too old for listing_id=%s",
                 context,
                 concept,
                 quarterly[0].end_date,
-                symbol,
+                listing_id,
             )
             return None
 
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id=context
+            listing_id, repo, metric_id=context
         )
         monies = [
-            self._money(record, target_currency, symbol, context)
+            self._money(record, target_currency, listing_id, context)
             for record in quarterly[:4]
         ]
         return _TTMResult(
@@ -216,13 +222,13 @@ class EnterpriseValueRatioCalculator:
         return {record.end_date: record for record in self._filter_quarterly(records)}
 
     def _money(
-        self, fact: MonetaryFact, target_currency: str, symbol: str, context: str
+        self, fact: MonetaryFact, target_currency: str, listing_id: int, context: str
     ) -> Money:
         return require_metric_money(
             fact.money,
             target_currency=target_currency,
             metric_id=context,
-            symbol=symbol,
+            listing_id=listing_id,
             input_name=fact.concept,
             as_of=fact.end_date,
         )
@@ -238,19 +244,21 @@ class EBITYieldEVMetric:
 
     def compute(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
         numerator = EnterpriseValueRatioCalculator().compute_ttm_ebit(
-            symbol, repo, context=self.id
+            listing_id, repo, context=self.id
         )
         if numerator is None:
-            LOGGER.warning("%s: missing numerator for %s", self.id, symbol)
+            LOGGER.warning(
+                "%s: missing numerator for listing_id=%s", self.id, listing_id
+            )
             return None
 
         enterprise_value = resolve_enterprise_value_denominator(
-            symbol=symbol,
+            listing_id=listing_id,
             repo=repo,
             market_repo=market_repo,
             target_currency=numerator.money.currency,
@@ -260,7 +268,7 @@ class EBITYieldEVMetric:
             return None
 
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=numerator.money / enterprise_value,
             as_of=numerator.as_of,
@@ -277,19 +285,21 @@ class FCFYieldEVMetric:
 
     def compute(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
         numerator = EnterpriseValueRatioCalculator().compute_ttm_fcf(
-            symbol, repo, context=self.id
+            listing_id, repo, context=self.id
         )
         if numerator is None:
-            LOGGER.warning("%s: missing numerator for %s", self.id, symbol)
+            LOGGER.warning(
+                "%s: missing numerator for listing_id=%s", self.id, listing_id
+            )
             return None
 
         enterprise_value = resolve_enterprise_value_denominator(
-            symbol=symbol,
+            listing_id=listing_id,
             repo=repo,
             market_repo=market_repo,
             target_currency=numerator.money.currency,
@@ -299,7 +309,7 @@ class FCFYieldEVMetric:
             return None
 
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=numerator.money / enterprise_value,
             as_of=numerator.as_of,
@@ -316,22 +326,26 @@ class EVToEBITMetric:
 
     def compute(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
         numerator = EnterpriseValueRatioCalculator().compute_ttm_ebit(
-            symbol, repo, context=self.id
+            listing_id, repo, context=self.id
         )
         if numerator is None:
-            LOGGER.warning("%s: missing denominator EBIT for %s", self.id, symbol)
+            LOGGER.warning(
+                "%s: missing denominator EBIT for listing_id=%s", self.id, listing_id
+            )
             return None
         if numerator.money.amount <= 0:
-            LOGGER.warning("%s: non-positive EBIT for %s", self.id, symbol)
+            LOGGER.warning(
+                "%s: non-positive EBIT for listing_id=%s", self.id, listing_id
+            )
             return None
 
         enterprise_value = resolve_enterprise_value_denominator(
-            symbol=symbol,
+            listing_id=listing_id,
             repo=repo,
             market_repo=market_repo,
             target_currency=numerator.money.currency,
@@ -341,7 +355,7 @@ class EVToEBITMetric:
             return None
 
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=enterprise_value / numerator.money,
             as_of=numerator.as_of,
@@ -358,22 +372,26 @@ class EVToEBITDAMetric:
 
     def compute(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
         numerator = EnterpriseValueRatioCalculator().compute_ttm_ebitda(
-            symbol, repo, context=self.id
+            listing_id, repo, context=self.id
         )
         if numerator is None:
-            LOGGER.warning("%s: missing denominator EBITDA for %s", self.id, symbol)
+            LOGGER.warning(
+                "%s: missing denominator EBITDA for listing_id=%s", self.id, listing_id
+            )
             return None
         if numerator.money.amount <= 0:
-            LOGGER.warning("%s: non-positive EBITDA for %s", self.id, symbol)
+            LOGGER.warning(
+                "%s: non-positive EBITDA for listing_id=%s", self.id, listing_id
+            )
             return None
 
         enterprise_value = resolve_enterprise_value_denominator(
-            symbol=symbol,
+            listing_id=listing_id,
             repo=repo,
             market_repo=market_repo,
             target_currency=numerator.money.currency,
@@ -383,7 +401,7 @@ class EVToEBITDAMetric:
             return None
 
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=enterprise_value / numerator.money,
             as_of=numerator.as_of,

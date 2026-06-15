@@ -38,16 +38,16 @@ class InterestCoverageMetric:
     )
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         ebit_quarters = self._quarterly_map(
-            repo.monetary_facts_for_concept(symbol, EBIT_CONCEPTS[0])
+            repo.monetary_facts_for_concept(listing_id, EBIT_CONCEPTS[0])
         )
         direct_interest_quarters = self._quarterly_map(
-            repo.monetary_facts_for_concept(symbol, INTEREST_CONCEPTS[0])
+            repo.monetary_facts_for_concept(listing_id, INTEREST_CONCEPTS[0])
         )
         result = self._compute_from_maps(
-            symbol=symbol,
+            listing_id=listing_id,
             ebit_quarters=ebit_quarters,
             interest_quarters=direct_interest_quarters,
             log_failures=False,
@@ -57,12 +57,12 @@ class InterestCoverageMetric:
             return result
 
         fallback_interest_quarters = self._quarterly_map(
-            repo.monetary_facts_for_concept(symbol, INTEREST_FALLBACK_CONCEPTS[0])
+            repo.monetary_facts_for_concept(listing_id, INTEREST_FALLBACK_CONCEPTS[0])
         )
         if not fallback_interest_quarters:
             LOGGER.warning(
-                "interest_coverage: missing direct and fallback interest expense for %s",
-                symbol,
+                "interest_coverage: missing direct and fallback interest expense for listing_id=%s",
+                listing_id,
             )
             return None
 
@@ -70,7 +70,7 @@ class InterestCoverageMetric:
         for end_date, record in fallback_interest_quarters.items():
             merged_interest_quarters.setdefault(end_date, record)
         return self._compute_from_maps(
-            symbol=symbol,
+            listing_id=listing_id,
             ebit_quarters=ebit_quarters,
             interest_quarters=merged_interest_quarters,
             log_failures=True,
@@ -80,7 +80,7 @@ class InterestCoverageMetric:
     def _compute_from_maps(
         self,
         *,
-        symbol: str,
+        listing_id: int,
         ebit_quarters: dict[str, MonetaryFact],
         interest_quarters: dict[str, MonetaryFact],
         log_failures: bool,
@@ -92,8 +92,8 @@ class InterestCoverageMetric:
         if len(common_dates) < 4:
             if log_failures:
                 LOGGER.warning(
-                    "interest_coverage: need 4 aligned quarterly records for %s",
-                    symbol,
+                    "interest_coverage: need 4 aligned quarterly records for listing_id=%s",
+                    listing_id,
                 )
             return None
         common_dates = common_dates[:4]
@@ -105,36 +105,40 @@ class InterestCoverageMetric:
         ):
             if log_failures:
                 LOGGER.warning(
-                    "interest_coverage: latest quarter too old for %s", symbol
+                    "interest_coverage: latest quarter too old for listing_id=%s",
+                    listing_id,
                 )
             return None
 
         # Align every quarter to the listing currency before summing, so the
         # EBIT/interest ratio (Money / Money) is currency-safe.
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id=self.id, input_name=EBIT_CONCEPTS[0]
+            listing_id, repo, metric_id=self.id, input_name=EBIT_CONCEPTS[0]
         )
         ebit_ttm = self._ttm_money(
-            ebit_records, EBIT_CONCEPTS[0], target_currency, symbol
+            ebit_records, EBIT_CONCEPTS[0], target_currency, listing_id
         )
         interest_ttm = self._ttm_money(
-            interest_records, INTEREST_CONCEPTS[0], target_currency, symbol
+            interest_records, INTEREST_CONCEPTS[0], target_currency, listing_id
         )
         if ebit_ttm.amount <= 0:
             if log_failures:
-                LOGGER.warning("interest_coverage: non-positive EBIT for %s", symbol)
+                LOGGER.warning(
+                    "interest_coverage: non-positive EBIT for listing_id=%s", listing_id
+                )
             return None
         if interest_ttm.amount <= 0:
             if log_failures:
                 LOGGER.warning(
-                    "interest_coverage: non-positive interest expense for %s", symbol
+                    "interest_coverage: non-positive interest expense for listing_id=%s",
+                    listing_id,
                 )
             return None
 
         ratio = ebit_ttm / interest_ttm
         as_of = max(ebit_records[0].end_date, interest_records[0].end_date)
         return MetricResult.ratio(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=ratio,
             as_of=as_of,
@@ -145,14 +149,14 @@ class InterestCoverageMetric:
         records: Sequence[MonetaryFact],
         concept: str,
         target_currency: str,
-        symbol: str,
+        listing_id: int,
     ) -> Money:
         monies = [
             require_metric_money(
                 record.money,
                 target_currency=target_currency,
                 metric_id=self.id,
-                symbol=symbol,
+                listing_id=listing_id,
                 input_name=concept,
                 as_of=record.end_date,
             )

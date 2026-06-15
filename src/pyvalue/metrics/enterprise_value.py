@@ -32,7 +32,7 @@ EV_REQUIRED_CONCEPTS = (
 
 
 def _money(
-    fact: MonetaryFact, *, target_currency: str, symbol: str, context: str
+    fact: MonetaryFact, *, target_currency: str, listing_id: int, context: str
 ) -> Money:
     """Align one EV component fact to the target (listing) currency via the seam."""
 
@@ -40,7 +40,7 @@ def _money(
         fact.money,
         target_currency=target_currency,
         metric_id=context,
-        symbol=symbol,
+        listing_id=listing_id,
         input_name=fact.concept,
         as_of=fact.end_date,
     )
@@ -48,7 +48,7 @@ def _money(
 
 def resolve_enterprise_value_denominator(
     *,
-    symbol: str,
+    listing_id: int,
     repo: RegionFactsRepository,
     market_repo: MarketDataRepository,
     target_currency: str,
@@ -66,7 +66,7 @@ def resolve_enterprise_value_denominator(
     """
 
     cap = market_cap_money(
-        symbol,
+        listing_id,
         repo=repo,
         market_repo=market_repo,
         metric_id=context,
@@ -74,28 +74,43 @@ def resolve_enterprise_value_denominator(
         contexts=(market_repo, repo),
     )
     if cap is None:
-        LOGGER.warning("%s: missing market cap for %s", context, symbol)
+        LOGGER.warning("%s: missing market cap for listing_id=%s", context, listing_id)
         return None
 
-    short_debt = repo.latest_monetary_fact(symbol, "ShortTermDebt")
-    long_debt = repo.latest_monetary_fact(symbol, "LongTermDebt")
-    cash = repo.latest_monetary_fact(symbol, "CashAndShortTermInvestments")
+    short_debt = repo.latest_monetary_fact(listing_id, "ShortTermDebt")
+    long_debt = repo.latest_monetary_fact(listing_id, "LongTermDebt")
+    cash = repo.latest_monetary_fact(listing_id, "CashAndShortTermInvestments")
     if short_debt is None or long_debt is None or cash is None:
-        LOGGER.warning("%s: missing EV debt/cash facts for %s", context, symbol)
+        LOGGER.warning(
+            "%s: missing EV debt/cash facts for listing_id=%s", context, listing_id
+        )
         return None
 
     enterprise_value = (
         cap.money
         + _money(
-            short_debt, target_currency=target_currency, symbol=symbol, context=context
+            short_debt,
+            target_currency=target_currency,
+            listing_id=listing_id,
+            context=context,
         )
         + _money(
-            long_debt, target_currency=target_currency, symbol=symbol, context=context
+            long_debt,
+            target_currency=target_currency,
+            listing_id=listing_id,
+            context=context,
         )
-        - _money(cash, target_currency=target_currency, symbol=symbol, context=context)
+        - _money(
+            cash,
+            target_currency=target_currency,
+            listing_id=listing_id,
+            context=context,
+        )
     )
     if enterprise_value.amount <= 0:
-        LOGGER.warning("%s: non-positive derived EV for %s", context, symbol)
+        LOGGER.warning(
+            "%s: non-positive derived EV for listing_id=%s", context, listing_id
+        )
         return None
 
     return enterprise_value

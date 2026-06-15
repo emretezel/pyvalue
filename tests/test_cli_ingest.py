@@ -58,6 +58,14 @@ from pyvalue.universe import Listing
 from pyvalue.marketdata import MarketDataUpdate, PriceData
 
 
+# Placeholder listing id for tests whose fake fact source ignores the id it is
+# given (it serves canned facts regardless): the metric layer keys on
+# ``listing_id: int``, so these call sites still need *an* int to pass through.
+# Tests that depend on the id matching a stored row resolve the real id via
+# ``SecurityRepository.resolve_id`` instead of using this constant.
+LISTING_ID = 1
+
+
 @dataclass
 class SymbolListingClientCalls:
     """Records construction + ``list_symbols`` calls made against a fake client.
@@ -267,11 +275,19 @@ def _seed_share_count(db_path: Path, symbol: str, as_of: str, shares: float) -> 
 
     repo = FinancialFactsRepository(db_path)
     repo.initialize_schema()
-    preserved = [
-        record
-        for record in repo.facts_for_symbol(symbol)
-        if record.concept != "CommonStockSharesOutstanding"
-    ]
+    # The fact readers key on ``listing_id`` now, so resolve the symbol to its
+    # listing id to read back the facts already stored for it. An unseeded symbol
+    # has no listing (and therefore no facts) -- treat it as an empty carry-over.
+    listing_id = SecurityRepository(db_path).resolve_id(symbol)
+    preserved = (
+        [
+            record
+            for record in repo.facts_for_id(listing_id)
+            if record.concept != "CommonStockSharesOutstanding"
+        ]
+        if listing_id is not None
+        else []
+    )
     repo.replace_facts(
         symbol,
         preserved
@@ -2706,32 +2722,38 @@ def test_compute_metrics_for_symbol_reuses_fact_and_market_cache(
     market_repo.initialize_schema()
     market_repo.upsert_price("AAA.US", "2024-12-31", price=25.0)
 
+    # The metric layer keys on ``listing_id`` now; resolve the seeded listing's
+    # id so the cached repos (constructed with this id) short-circuit the metric's
+    # reads to memory -- which is exactly what the call-count assertions verify.
+    listing_id = SecurityRepository(db_path).resolve_id("AAA.US")
+    assert listing_id is not None
+
     fact_calls: dict[str, int] = {"count": 0}
     market_calls: dict[str, int] = {"count": 0}
-    original_facts_for_symbol = FinancialFactsRepository.facts_for_symbol
-    original_latest_snapshot = MarketDataRepository.latest_snapshot
+    original_facts_for_id = FinancialFactsRepository.facts_for_id
+    original_latest_snapshot_by_id = MarketDataRepository.latest_snapshot_by_id
 
-    def counting_facts_for_symbol(
-        self: FinancialFactsRepository, symbol: str
+    def counting_facts_for_id(
+        self: FinancialFactsRepository, listing_id: int
     ) -> list[FactRecord]:
         fact_calls["count"] += 1
-        return original_facts_for_symbol(self, symbol)
+        return original_facts_for_id(self, listing_id)
 
-    def counting_latest_snapshot(
-        self: MarketDataRepository, symbol: str
+    def counting_latest_snapshot_by_id(
+        self: MarketDataRepository, listing_id: int
     ) -> PriceData | None:
         market_calls["count"] += 1
-        return original_latest_snapshot(self, symbol)
+        return original_latest_snapshot_by_id(self, listing_id)
 
     monkeypatch.setattr(
         FinancialFactsRepository,
-        "facts_for_symbol",
-        counting_facts_for_symbol,
+        "facts_for_id",
+        counting_facts_for_id,
     )
     monkeypatch.setattr(
         MarketDataRepository,
-        "latest_snapshot",
-        counting_latest_snapshot,
+        "latest_snapshot_by_id",
+        counting_latest_snapshot_by_id,
     )
 
     class RepeatedFactsMetric:
@@ -2740,17 +2762,17 @@ def test_compute_metrics_for_symbol_reuses_fact_and_market_cache(
         uses_market_data = False
 
         def compute(
-            self, symbol: str, repo: RegionFactsRepository
+            self, listing_id: int, repo: RegionFactsRepository
         ) -> MetricResult | None:
-            latest_a = repo.latest_fact(symbol, "AssetsCurrent")
-            latest_b = repo.latest_fact(symbol, "AssetsCurrent")
-            series_a = repo.facts_for_concept(symbol, "EarningsPerShare", "FY")
-            series_b = repo.facts_for_concept(symbol, "EarningsPerShare", "FY")
+            latest_a = repo.latest_fact(listing_id, "AssetsCurrent")
+            latest_b = repo.latest_fact(listing_id, "AssetsCurrent")
+            series_a = repo.facts_for_concept(listing_id, "EarningsPerShare", "FY")
+            series_b = repo.facts_for_concept(listing_id, "EarningsPerShare", "FY")
             # The test seeds the required facts, so both reads resolve; assert to
             # narrow the optional for the type checker.
             assert latest_a is not None and latest_b is not None
             return MetricResult(
-                symbol=symbol,
+                listing_id=listing_id,
                 metric_id=self.id,
                 value=latest_a.value + latest_b.value + len(series_a) + len(series_b),
                 as_of=latest_a.end_date,
@@ -2763,19 +2785,19 @@ def test_compute_metrics_for_symbol_reuses_fact_and_market_cache(
 
         def compute(
             self,
-            symbol: str,
+            listing_id: int,
             repo: RegionFactsRepository,
             market_repo: MarketDataRepository,
         ) -> MetricResult | None:
-            snapshot_a = market_repo.latest_snapshot(symbol)
-            snapshot_b = market_repo.latest_snapshot(symbol)
-            price = market_repo.latest_price(symbol)
+            snapshot_a = market_repo.latest_snapshot_by_id(listing_id)
+            snapshot_b = market_repo.latest_snapshot_by_id(listing_id)
+            price = market_repo.latest_price_by_id(listing_id)
             # The test seeds a price, so every read resolves; assert to narrow the
             # optionals (snapshots and the (currency, price) tuple) for mypy.
             assert snapshot_a is not None and snapshot_b is not None
             assert price is not None
             return MetricResult(
-                symbol=symbol,
+                listing_id=listing_id,
                 metric_id=self.id,
                 value=snapshot_a.price + snapshot_b.price + price[1],
                 as_of=snapshot_a.as_of,
@@ -2792,6 +2814,7 @@ def test_compute_metrics_for_symbol_reuses_fact_and_market_cache(
 
     result = cli._compute_metrics_for_symbol(
         "AAA.US",
+        listing_id,
         [RepeatedFactsMetric.id, RepeatedMarketMetric.id],
         FinancialFactsRepository(db_path),
         MarketDataRepository(db_path),
@@ -2873,6 +2896,10 @@ def test_compute_metrics_for_symbol_matches_real_metrics(tmp_path: Path) -> None
     market_repo.upsert_price("AAA.US", recent, price=25.0, currency="USD")
     _seed_share_count(db_path, "AAA.US", recent, 2500.0 / 25.0)
 
+    # Compute the reference values directly against the real metrics using the
+    # same ``listing_id`` the batch path threads, so the two must agree.
+    listing_id = SecurityRepository(db_path).resolve_id("AAA.US")
+    assert listing_id is not None
     metric_ids = ["working_capital", "market_cap", "eps_6y_avg"]
     expected: dict[str, tuple[float, str]] = {}
     plain_fact_repo = RegionFactsRepository(FinancialFactsRepository(db_path))
@@ -2880,13 +2907,14 @@ def test_compute_metrics_for_symbol_matches_real_metrics(tmp_path: Path) -> None
     for metric_id in metric_ids:
         metric = REGISTRY[metric_id]()
         if getattr(metric, "uses_market_data", False):
-            result = metric.compute("AAA.US", plain_fact_repo, plain_market_repo)
+            result = metric.compute(listing_id, plain_fact_repo, plain_market_repo)
         else:
-            result = metric.compute("AAA.US", plain_fact_repo)
+            result = metric.compute(listing_id, plain_fact_repo)
         expected[metric_id] = (result.value, result.as_of)
 
     computed = cli._compute_metrics_for_symbol(
         "AAA.US",
+        listing_id,
         metric_ids,
         FinancialFactsRepository(db_path),
         MarketDataRepository(db_path),
@@ -2908,10 +2936,10 @@ def test_compute_metrics_for_symbol_collects_currency_invariant_failures(
         uses_market_data = False
 
         def compute(
-            self, symbol: str, repo: RegionFactsRepository
+            self, listing_id: int, repo: RegionFactsRepository
         ) -> MetricResult | None:
             return MetricResult(
-                symbol=symbol,
+                listing_id=listing_id,
                 metric_id=self.id,
                 value=1.0,
                 as_of="2024-01-01",
@@ -2923,11 +2951,11 @@ def test_compute_metrics_for_symbol_collects_currency_invariant_failures(
         uses_market_data = False
 
         def compute(
-            self, symbol: str, repo: RegionFactsRepository
+            self, listing_id: int, repo: RegionFactsRepository
         ) -> MetricResult | None:
             raise MetricCurrencyInvariantError(
                 metric_id=self.id,
-                symbol=symbol,
+                listing_id=listing_id,
                 input_name="Assets",
                 reason_code="currency_mismatch",
                 expected_currency="USD",
@@ -2952,26 +2980,27 @@ def test_compute_metrics_for_symbol_collects_currency_invariant_failures(
         def __init__(self) -> None:
             pass
 
-        def facts_for_symbol(self, symbol: str) -> list[FactRecord]:
+        def facts_for_id(self, listing_id: int) -> list[FactRecord]:
             return []
 
-        def latest_fact(self, symbol: str, concept: str) -> FactRecord | None:
+        def latest_fact(self, listing_id: int, concept: str) -> FactRecord | None:
             return None
 
         def facts_for_concept(
             self,
-            symbol: str,
+            listing_id: int,
             concept: str,
             fiscal_period: str | None = None,
             limit: int | None = None,
         ) -> list[FactRecord]:
             return []
 
-        def ticker_currency(self, symbol: str) -> str | None:
+        def ticker_currency_by_id(self, listing_id: int) -> str | None:
             return "USD"
 
     result = cli._compute_metrics_for_symbol(
         "AAA.US",
+        LISTING_ID,
         [GoodMetric.id, BadMetric.id],
         _FakeFactsRepository(),
     )
@@ -3083,7 +3112,7 @@ def test_cmd_compute_metrics_stage_suppresses_metric_warnings_by_default(
         uses_market_data = False
 
         def compute(
-            self, symbol: str, repo: RegionFactsRepository
+            self, listing_id: int, repo: RegionFactsRepository
         ) -> MetricResult | None:
             return None
 
@@ -3131,7 +3160,7 @@ def test_cmd_compute_metrics_stage_can_show_metric_warnings_on_console(
         uses_market_data = False
 
         def compute(
-            self, symbol: str, repo: RegionFactsRepository
+            self, listing_id: int, repo: RegionFactsRepository
         ) -> MetricResult | None:
             return None
 
@@ -3176,11 +3205,11 @@ def test_cmd_compute_metrics_stage_prints_currency_invariant_summary_when_warnin
         uses_market_data = False
 
         def compute(
-            self, symbol: str, repo: RegionFactsRepository
+            self, listing_id: int, repo: RegionFactsRepository
         ) -> MetricResult | None:
             raise MetricCurrencyInvariantError(
                 metric_id=self.id,
-                symbol=symbol,
+                listing_id=listing_id,
                 input_name="listing_currency",
                 reason_code="missing_trading_currency",
             )
@@ -3232,7 +3261,7 @@ def test_compute_metrics_batch_worker_suppresses_metric_warnings_by_default(
         uses_market_data = False
 
         def compute(
-            self, symbol: str, repo: RegionFactsRepository
+            self, listing_id: int, repo: RegionFactsRepository
         ) -> MetricResult | None:
             return None
 
@@ -3753,12 +3782,16 @@ def test_cmd_compute_metrics_stage_symbol_scope(
         uses_market_data = False
 
         def compute(
-            self, symbol: str, repo: RegionFactsRepository
+            self, listing_id: int, repo: RegionFactsRepository
         ) -> MetricResult | None:
+            # ``compute`` keys on ``listing_id`` now and no longer sees the symbol;
+            # the seeded symbols (AAA.US / BBB.US) are both length 6, so the fixed
+            # 6.0 reproduces the value the prior ``len(symbol)`` produced and the
+            # scope/write assertions remain meaningful.
             return MetricResult(
-                symbol=symbol,
+                listing_id=listing_id,
                 metric_id=self.id,
-                value=float(len(symbol)),
+                value=6.0,
                 as_of="2024-01-01",
             )
 
@@ -3805,12 +3838,16 @@ def test_cmd_compute_metrics_stage_threads_listing_ids_without_resolving(
         uses_market_data = False
 
         def compute(
-            self, symbol: str, repo: RegionFactsRepository
+            self, listing_id: int, repo: RegionFactsRepository
         ) -> MetricResult | None:
+            # ``compute`` keys on ``listing_id`` now and no longer sees the symbol;
+            # the seeded symbols (AAA.US / BBB.US) are both length 6, so the fixed
+            # 6.0 reproduces the value the prior ``len(symbol)`` produced and the
+            # scope/write assertions remain meaningful.
             return MetricResult(
-                symbol=symbol,
+                listing_id=listing_id,
                 metric_id=self.id,
-                value=float(len(symbol)),
+                value=6.0,
                 as_of="2024-01-01",
             )
 
@@ -3875,10 +3912,10 @@ def test_cmd_compute_metrics_stage_exchange_scope(
         uses_market_data = False
 
         def compute(
-            self, symbol: str, repo: RegionFactsRepository
+            self, listing_id: int, repo: RegionFactsRepository
         ) -> MetricResult | None:
             return MetricResult(
-                symbol=symbol, metric_id=self.id, value=1.0, as_of="2024-01-01"
+                listing_id=listing_id, metric_id=self.id, value=1.0, as_of="2024-01-01"
             )
 
     patch_cli(monkeypatch, "REGISTRY", {DummyMetric.id: DummyMetric})
@@ -4044,10 +4081,10 @@ def test_cmd_compute_metrics_stage_parallel_with_inline_executor(
         uses_market_data = False
 
         def compute(
-            self, symbol: str, repo: RegionFactsRepository
+            self, listing_id: int, repo: RegionFactsRepository
         ) -> MetricResult | None:
             return MetricResult(
-                symbol=symbol, metric_id=self.id, value=1.0, as_of="2024-01-01"
+                listing_id=listing_id, metric_id=self.id, value=1.0, as_of="2024-01-01"
             )
 
     class InlineExecutor:
@@ -6898,7 +6935,11 @@ def test_cmd_report_metric_failures_surfaces_roic_specific_reason(
     assert rc == 0
     output = capsys.readouterr().out
     assert "roic_10y_median" in output
-    assert "roic_10y: missing invested capital debt input for <symbol>: 1" in output
+    # The metric layer now logs ``listing_id=%s`` (an int) rather than the symbol;
+    # the console reason-dedup collapses the int arg to ``<n>``.
+    assert (
+        "roic_10y: missing invested capital debt input for listing_id=<n>: 1" in output
+    )
 
 
 def test_cmd_report_metric_failures_reuses_persisted_failure_status_without_recompute(
@@ -6932,7 +6973,7 @@ def test_cmd_report_metric_failures_reuses_persisted_failure_status_without_reco
         uses_financial_facts = False
 
         def compute(
-            self, symbol: str, repo: RegionFactsRepository
+            self, listing_id: int, repo: RegionFactsRepository
         ) -> MetricResult | None:
             raise AssertionError("expected persisted failure status to skip recompute")
 
@@ -7083,7 +7124,7 @@ def test_cmd_report_screen_failures_reuses_persisted_failure_status_without_reco
         uses_financial_facts = False
 
         def compute(
-            self, symbol: str, repo: RegionFactsRepository
+            self, listing_id: int, repo: RegionFactsRepository
         ) -> MetricResult | None:
             raise AssertionError("expected persisted failure status to skip recompute")
 
@@ -7333,15 +7374,15 @@ def test_cmd_report_screen_failures_recompute_uses_symbol_caches(
 
     facts_many_calls = FactsManyCalls()
     snapshot_batch_calls: dict[str, int] = {"count": 0}
-    original_facts_for_symbol = FinancialFactsRepository.facts_for_symbol
+    original_facts_for_id = FinancialFactsRepository.facts_for_id
     original_facts_for_symbols_many = FinancialFactsRepository.facts_for_symbols_many
     original_latest_snapshots_many = MarketDataRepository.latest_snapshots_many
 
-    def counting_facts_for_symbol(
-        self: FinancialFactsRepository, symbol: str
+    def counting_facts_for_id(
+        self: FinancialFactsRepository, listing_id: int
     ) -> list[FactRecord]:
         fact_calls["count"] += 1
-        return original_facts_for_symbol(self, symbol)
+        return original_facts_for_id(self, listing_id)
 
     def counting_facts_for_symbols_many(
         self: FinancialFactsRepository,
@@ -7386,8 +7427,8 @@ def test_cmd_report_screen_failures_recompute_uses_symbol_caches(
 
     monkeypatch.setattr(
         FinancialFactsRepository,
-        "facts_for_symbol",
-        counting_facts_for_symbol,
+        "facts_for_id",
+        counting_facts_for_id,
     )
     monkeypatch.setattr(
         FinancialFactsRepository,
@@ -7407,17 +7448,17 @@ def test_cmd_report_screen_failures_recompute_uses_symbol_caches(
         uses_market_data = False
 
         def compute(
-            self, symbol: str, repo: RegionFactsRepository
+            self, listing_id: int, repo: RegionFactsRepository
         ) -> MetricResult | None:
-            latest_a = repo.latest_fact(symbol, "AssetsCurrent")
-            latest_b = repo.latest_fact(symbol, "AssetsCurrent")
-            series_a = repo.facts_for_concept(symbol, "EarningsPerShare", "FY")
-            series_b = repo.facts_for_concept(symbol, "EarningsPerShare", "FY")
+            latest_a = repo.latest_fact(listing_id, "AssetsCurrent")
+            latest_b = repo.latest_fact(listing_id, "AssetsCurrent")
+            series_a = repo.facts_for_concept(listing_id, "EarningsPerShare", "FY")
+            series_b = repo.facts_for_concept(listing_id, "EarningsPerShare", "FY")
             # The test seeds the required facts, so both reads resolve; assert to
             # narrow the optional for the type checker.
             assert latest_a is not None and latest_b is not None
             return MetricResult(
-                symbol=symbol,
+                listing_id=listing_id,
                 metric_id=self.id,
                 value=latest_a.value + latest_b.value + len(series_a) + len(series_b),
                 as_of=latest_a.end_date,
@@ -7431,19 +7472,19 @@ def test_cmd_report_screen_failures_recompute_uses_symbol_caches(
 
         def compute(
             self,
-            symbol: str,
+            listing_id: int,
             repo: RegionFactsRepository,
             market_repo: MarketDataRepository,
         ) -> MetricResult | None:
-            snapshot_a = market_repo.latest_snapshot(symbol)
-            snapshot_b = market_repo.latest_snapshot(symbol)
-            latest_price = market_repo.latest_price(symbol)
+            snapshot_a = market_repo.latest_snapshot_by_id(listing_id)
+            snapshot_b = market_repo.latest_snapshot_by_id(listing_id)
+            latest_price = market_repo.latest_price_by_id(listing_id)
             # The test seeds a price, so every read resolves; assert to narrow the
             # optionals (snapshots and the (currency, price) tuple) for mypy.
             assert snapshot_a is not None and snapshot_b is not None
             assert latest_price is not None
             return MetricResult(
-                symbol=symbol,
+                listing_id=listing_id,
                 metric_id=self.id,
                 value=snapshot_a.price + snapshot_b.price + latest_price[1],
                 as_of=snapshot_a.as_of,
@@ -7532,10 +7573,15 @@ criteria:
             required_concepts = ()
 
             def compute(
-                self, symbol: str, repo: RegionFactsRepository
+                self, listing_id: int, repo: RegionFactsRepository
             ) -> MetricResult | None:
+                # ``compute`` keys on ``listing_id`` and no longer sees the symbol,
+                # but this test exercises the console warning-dedup, which collapses
+                # the *scoped* symbol token to ``<symbol>``. The only seeded listing
+                # is AAA.US, so emit it literally as the warning arg so the file log
+                # carries the real symbol and the console summary collapses it.
                 logging.getLogger("pyvalue.metrics.noisy").warning(
-                    "Console-only warning for %s", symbol
+                    "Console-only warning for %s", "AAA.US"
                 )
                 return None
 
@@ -7590,7 +7636,7 @@ criteria:
         required_concepts = ()
 
         def compute(
-            self, symbol: str, repo: RegionFactsRepository
+            self, listing_id: int, repo: RegionFactsRepository
         ) -> MetricResult | None:
             raise RuntimeError("boom")
 

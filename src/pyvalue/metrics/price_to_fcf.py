@@ -48,22 +48,26 @@ class PriceToFCFMetric:
 
     def compute(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id=self.id, input_name="FreeCashFlow"
+            listing_id, repo, metric_id=self.id, input_name="FreeCashFlow"
         )
-        fcf_result = self._compute_ttm_fcf(symbol, repo, target_currency)
+        fcf_result = self._compute_ttm_fcf(listing_id, repo, target_currency)
         if fcf_result is None:
-            LOGGER.warning("price_to_fcf: missing TTM FCF for %s", symbol)
+            LOGGER.warning(
+                "price_to_fcf: missing TTM FCF for listing_id=%s", listing_id
+            )
             return None
         if fcf_result.money.amount <= 0:
-            LOGGER.warning("price_to_fcf: non-positive TTM FCF for %s", symbol)
+            LOGGER.warning(
+                "price_to_fcf: non-positive TTM FCF for listing_id=%s", listing_id
+            )
             return None
         cap = market_cap_money(
-            symbol,
+            listing_id,
             repo=repo,
             market_repo=market_repo,
             metric_id=self.id,
@@ -71,31 +75,37 @@ class PriceToFCFMetric:
             contexts=(market_repo, repo),
         )
         if cap is None:
-            LOGGER.warning("price_to_fcf: missing market cap for %s", symbol)
+            LOGGER.warning(
+                "price_to_fcf: missing market cap for listing_id=%s", listing_id
+            )
             return None
 
         # Market cap and FCF are both in the listing currency, so the multiple
         # (Money / Money) is currency-safe.
         ratio = cap.money / fcf_result.money
         return MetricResult(
-            symbol=symbol, metric_id=self.id, value=ratio, as_of=fcf_result.as_of
+            listing_id=listing_id,
+            metric_id=self.id,
+            value=ratio,
+            as_of=fcf_result.as_of,
         )
 
     def _compute_ttm_fcf(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         target_currency: str,
     ) -> Optional[_MoneyResult]:
         operating = self._ttm_sum(
-            symbol, repo, OPERATING_CASH_FLOW_CONCEPTS, target_currency
+            listing_id, repo, OPERATING_CASH_FLOW_CONCEPTS, target_currency
         )
         if operating is None:
             return None
-        capex = self._ttm_sum(symbol, repo, CAPEX_CONCEPTS, target_currency)
+        capex = self._ttm_sum(listing_id, repo, CAPEX_CONCEPTS, target_currency)
         if capex is None:
             LOGGER.warning(
-                "price_to_fcf: missing/stale capex for %s; assuming zero", symbol
+                "price_to_fcf: missing/stale capex for listing_id=%s; assuming zero",
+                listing_id,
             )
             return operating
         return _MoneyResult(
@@ -105,29 +115,30 @@ class PriceToFCFMetric:
 
     def _ttm_sum(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         concepts: Sequence[str],
         target_currency: str,
     ) -> Optional[_MoneyResult]:
         for concept in concepts:
-            records = repo.monetary_facts_for_concept(symbol, concept)
+            records = repo.monetary_facts_for_concept(listing_id, concept)
             quarterly = self._filter_quarterly(records)
             if len(quarterly) < 4:
                 LOGGER.warning(
-                    "price_to_fcf: need 4 quarterly %s records for %s, found %s",
+                    "price_to_fcf: need 4 quarterly %s records for listing_id=%s,"
+                    " found %s",
                     concept,
-                    symbol,
+                    listing_id,
                     len(quarterly),
                 )
                 continue
             values = quarterly[:4]
             if not is_recent_fact(values[0]):
                 LOGGER.warning(
-                    "price_to_fcf: latest %s (%s) too old for %s",
+                    "price_to_fcf: latest %s (%s) too old for listing_id=%s",
                     concept,
                     values[0].end_date,
-                    symbol,
+                    listing_id,
                 )
                 continue
             monies = [
@@ -135,7 +146,7 @@ class PriceToFCFMetric:
                     record.money,
                     target_currency=target_currency,
                     metric_id=self.id,
-                    symbol=symbol,
+                    listing_id=listing_id,
                     input_name="FreeCashFlow",
                     as_of=record.end_date,
                 )

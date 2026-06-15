@@ -55,34 +55,36 @@ class _NWCPoint:
 class _NWCBase:
     def _build_points(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         periods: set[str],
     ) -> list[_NWCPoint]:
         # Resolve the listing currency once; every component is aligned to it via
         # the shared Money seam, so each NWC point is single-currency by build.
         target_currency = require_metric_ticker_currency(
-            symbol, repo, metric_id=_NWC_METRIC_ID
+            listing_id, repo, metric_id=_NWC_METRIC_ID
         )
         assets_map = self._period_map(
-            repo.monetary_facts_for_concept(symbol, ASSETS_CURRENT_CONCEPT), periods
+            repo.monetary_facts_for_concept(listing_id, ASSETS_CURRENT_CONCEPT), periods
         )
         liabilities_map = self._period_map(
-            repo.monetary_facts_for_concept(symbol, LIABILITIES_CURRENT_CONCEPT),
+            repo.monetary_facts_for_concept(listing_id, LIABILITIES_CURRENT_CONCEPT),
             periods,
         )
         cash_primary_map = self._period_map(
-            repo.monetary_facts_for_concept(symbol, CASH_PRIMARY_CONCEPT), periods
+            repo.monetary_facts_for_concept(listing_id, CASH_PRIMARY_CONCEPT), periods
         )
         cash_eq_map = self._period_map(
-            repo.monetary_facts_for_concept(symbol, CASH_EQUIVALENTS_CONCEPT), periods
+            repo.monetary_facts_for_concept(listing_id, CASH_EQUIVALENTS_CONCEPT),
+            periods,
         )
         short_term_investments_map = self._period_map(
-            repo.monetary_facts_for_concept(symbol, SHORT_TERM_INVESTMENTS_CONCEPT),
+            repo.monetary_facts_for_concept(listing_id, SHORT_TERM_INVESTMENTS_CONCEPT),
             periods,
         )
         short_term_debt_map = self._period_map(
-            repo.monetary_facts_for_concept(symbol, SHORT_TERM_DEBT_CONCEPT), periods
+            repo.monetary_facts_for_concept(listing_id, SHORT_TERM_DEBT_CONCEPT),
+            periods,
         )
 
         candidate_keys = sorted(
@@ -93,7 +95,7 @@ class _NWCBase:
         points: list[_NWCPoint] = []
         for key in candidate_keys:
             point = self._compute_point_for_key(
-                symbol=symbol,
+                listing_id=listing_id,
                 target_currency=target_currency,
                 key=key,
                 assets=assets_map.get(key),
@@ -110,7 +112,7 @@ class _NWCBase:
     def _compute_point_for_key(
         self,
         *,
-        symbol: str,
+        listing_id: int,
         target_currency: str,
         key: tuple[str, str],
         assets: Optional[MonetaryFact],
@@ -123,11 +125,11 @@ class _NWCBase:
         if assets is None or liabilities is None:
             return None
 
-        assets_money = self._money(assets, target_currency, symbol)
-        liabilities_money = self._money(liabilities, target_currency, symbol)
+        assets_money = self._money(assets, target_currency, listing_id)
+        liabilities_money = self._money(liabilities, target_currency, listing_id)
 
         cash_money = self._cash_amount(
-            symbol=symbol,
+            listing_id=listing_id,
             target_currency=target_currency,
             key=key,
             cash_primary=cash_primary,
@@ -139,7 +141,7 @@ class _NWCBase:
 
         zero = Money.of(0.0, target_currency)
         short_term_debt_money = (
-            self._money(short_term_debt, target_currency, symbol)
+            self._money(short_term_debt, target_currency, listing_id)
             if short_term_debt is not None
             else zero
         )
@@ -157,7 +159,7 @@ class _NWCBase:
     def _cash_amount(
         self,
         *,
-        symbol: str,
+        listing_id: int,
         target_currency: str,
         key: tuple[str, str],
         cash_primary: Optional[MonetaryFact],
@@ -165,22 +167,25 @@ class _NWCBase:
         short_term_investments: Optional[MonetaryFact],
     ) -> Optional[Money]:
         if cash_primary is not None:
-            return self._money(cash_primary, target_currency, symbol)
+            return self._money(cash_primary, target_currency, listing_id)
 
         if cash_equivalents is None and short_term_investments is None:
             LOGGER.warning(
-                "nwc: missing cash inputs for %s on %s/%s", symbol, key[0], key[1]
+                "nwc: missing cash inputs for listing_id=%s on %s/%s",
+                listing_id,
+                key[0],
+                key[1],
             )
             return None
 
         cash_money = Money.of(0.0, target_currency)
         if cash_equivalents is not None:
             cash_money = cash_money + self._money(
-                cash_equivalents, target_currency, symbol
+                cash_equivalents, target_currency, listing_id
             )
         if short_term_investments is not None:
             cash_money = cash_money + self._money(
-                short_term_investments, target_currency, symbol
+                short_term_investments, target_currency, listing_id
             )
         return cash_money
 
@@ -197,12 +202,14 @@ class _NWCBase:
                 mapped[key] = record
         return mapped
 
-    def _money(self, fact: MonetaryFact, target_currency: str, symbol: str) -> Money:
+    def _money(
+        self, fact: MonetaryFact, target_currency: str, listing_id: int
+    ) -> Money:
         return require_metric_money(
             fact.money,
             target_currency=target_currency,
             metric_id=_NWC_METRIC_ID,
-            symbol=symbol,
+            listing_id=listing_id,
             input_name=fact.concept,
             as_of=fact.end_date,
         )
@@ -228,15 +235,20 @@ class _NWCBase:
         *,
         max_age_days: int,
         context: str,
-        symbol: str,
+        listing_id: int,
     ) -> Optional[_NWCPoint]:
         if not points:
-            LOGGER.warning("%s: missing NWC points for %s", context, symbol)
+            LOGGER.warning(
+                "%s: missing NWC points for listing_id=%s", context, listing_id
+            )
             return None
         latest = points[0]
         if not self._is_recent_as_of(latest.as_of, max_age_days=max_age_days):
             LOGGER.warning(
-                "%s: latest point (%s) too old for %s", context, latest.as_of, symbol
+                "%s: latest point (%s) too old for listing_id=%s",
+                context,
+                latest.as_of,
+                listing_id,
             )
             return None
         return latest
@@ -250,16 +262,19 @@ class NWCMostRecentQuarterMetric(_NWCBase):
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
-        points = self._build_points(symbol, repo, QUARTERLY_PERIODS)
+        points = self._build_points(listing_id, repo, QUARTERLY_PERIODS)
         latest = self._select_latest_point(
-            points, max_age_days=MAX_FACT_AGE_DAYS, context="nwc_mqr", symbol=symbol
+            points,
+            max_age_days=MAX_FACT_AGE_DAYS,
+            context="nwc_mqr",
+            listing_id=listing_id,
         )
         if latest is None:
             return None
         return MetricResult.monetary(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=latest.money.amount,
             as_of=latest.as_of,
@@ -275,16 +290,19 @@ class NWCFYMetric(_NWCBase):
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
-        points = self._build_points(symbol, repo, FY_PERIODS)
+        points = self._build_points(listing_id, repo, FY_PERIODS)
         latest = self._select_latest_point(
-            points, max_age_days=MAX_FY_FACT_AGE_DAYS, context="nwc_fy", symbol=symbol
+            points,
+            max_age_days=MAX_FY_FACT_AGE_DAYS,
+            context="nwc_fy",
+            listing_id=listing_id,
         )
         if latest is None:
             return None
         return MetricResult.monetary(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=latest.money.amount,
             as_of=latest.as_of,
@@ -300,20 +318,23 @@ class DeltaNWCTTMMetric(_NWCBase):
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
-        points = self._build_points(symbol, repo, QUARTERLY_PERIODS)
+        points = self._build_points(listing_id, repo, QUARTERLY_PERIODS)
         latest = self._select_latest_point(
             points,
             max_age_days=MAX_FACT_AGE_DAYS,
             context="delta_nwc_ttm",
-            symbol=symbol,
+            listing_id=listing_id,
         )
         if latest is None:
             return None
         latest_year = self._extract_year(latest.as_of)
         if latest_year is None:
-            LOGGER.warning("delta_nwc_ttm: invalid latest quarter date for %s", symbol)
+            LOGGER.warning(
+                "delta_nwc_ttm: invalid latest quarter date for listing_id=%s",
+                listing_id,
+            )
             return None
 
         prior: Optional[_NWCPoint] = None
@@ -328,14 +349,14 @@ class DeltaNWCTTMMetric(_NWCBase):
                 break
         if prior is None:
             LOGGER.warning(
-                "delta_nwc_ttm: missing prior-year %s for %s",
+                "delta_nwc_ttm: missing prior-year %s for listing_id=%s",
                 latest.fiscal_period,
-                symbol,
+                listing_id,
             )
             return None
         delta = latest.money - prior.money
         return MetricResult.monetary(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=delta.amount,
             as_of=latest.as_of,
@@ -351,20 +372,22 @@ class DeltaNWCFYMetric(_NWCBase):
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
-        points = self._build_points(symbol, repo, FY_PERIODS)
+        points = self._build_points(listing_id, repo, FY_PERIODS)
         latest = self._select_latest_point(
             points,
             max_age_days=MAX_FY_FACT_AGE_DAYS,
             context="delta_nwc_fy",
-            symbol=symbol,
+            listing_id=listing_id,
         )
         if latest is None:
             return None
         latest_year = self._extract_year(latest.as_of)
         if latest_year is None:
-            LOGGER.warning("delta_nwc_fy: invalid latest FY date for %s", symbol)
+            LOGGER.warning(
+                "delta_nwc_fy: invalid latest FY date for listing_id=%s", listing_id
+            )
             return None
 
         prior: Optional[_NWCPoint] = None
@@ -374,11 +397,13 @@ class DeltaNWCFYMetric(_NWCBase):
                 prior = point
                 break
         if prior is None:
-            LOGGER.warning("delta_nwc_fy: missing strict prior FY for %s", symbol)
+            LOGGER.warning(
+                "delta_nwc_fy: missing strict prior FY for listing_id=%s", listing_id
+            )
             return None
         delta = latest.money - prior.money
         return MetricResult.monetary(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=delta.amount,
             as_of=latest.as_of,
@@ -394,20 +419,22 @@ class DeltaNWCMaintMetric(_NWCBase):
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
-        points = self._build_points(symbol, repo, FY_PERIODS)
+        points = self._build_points(listing_id, repo, FY_PERIODS)
         latest = self._select_latest_point(
             points,
             max_age_days=MAX_FY_FACT_AGE_DAYS,
             context="delta_nwc_maint",
-            symbol=symbol,
+            listing_id=listing_id,
         )
         if latest is None:
             return None
         latest_year = self._extract_year(latest.as_of)
         if latest_year is None:
-            LOGGER.warning("delta_nwc_maint: invalid latest FY date for %s", symbol)
+            LOGGER.warning(
+                "delta_nwc_maint: invalid latest FY date for listing_id=%s", listing_id
+            )
             return None
 
         by_year: dict[int, _NWCPoint] = {}
@@ -426,8 +453,8 @@ class DeltaNWCMaintMetric(_NWCBase):
         ]
         if not all(year in by_year for year in required_years):
             LOGGER.warning(
-                "delta_nwc_maint: need 4 consecutive FY NWC points for %s",
-                symbol,
+                "delta_nwc_maint: need 4 consecutive FY NWC points for listing_id=%s",
+                listing_id,
             )
             return None
 
@@ -440,7 +467,7 @@ class DeltaNWCMaintMetric(_NWCBase):
         # cash rather than consuming it, so it does not reduce owner earnings.
         floored = max(average_delta, Money.of(0.0, average_delta.currency))
         return MetricResult.monetary(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=floored.amount,
             as_of=latest.as_of,

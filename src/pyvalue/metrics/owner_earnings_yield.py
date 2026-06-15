@@ -43,14 +43,14 @@ REQUIRED_EV_CONCEPTS = tuple(
 
 def _denominator_market_cap(
     *,
-    symbol: str,
+    listing_id: int,
     repo: RegionFactsRepository,
     market_repo: MarketDataRepository,
     target_currency: str,
     context: str,
 ) -> Optional[Money]:
     cap = market_cap_money(
-        symbol,
+        listing_id,
         repo=repo,
         market_repo=market_repo,
         metric_id=context,
@@ -64,14 +64,14 @@ def _denominator_market_cap(
 
 def _denominator_enterprise_value(
     *,
-    symbol: str,
+    listing_id: int,
     repo: RegionFactsRepository,
     market_repo: MarketDataRepository,
     target_currency: str,
     context: str,
 ) -> Optional[Money]:
     return resolve_enterprise_value_denominator(
-        symbol=symbol,
+        listing_id=listing_id,
         repo=repo,
         market_repo=market_repo,
         target_currency=target_currency,
@@ -89,17 +89,19 @@ class OwnerEarningsYieldEquityMetric:
 
     def compute(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
-        numerator = OwnerEarningsEquityCalculator().compute_ttm(symbol, repo)
+        numerator = OwnerEarningsEquityCalculator().compute_ttm(listing_id, repo)
         if numerator is None:
-            LOGGER.warning("oey_equity: missing numerator for %s", symbol)
+            LOGGER.warning(
+                "oey_equity: missing numerator for listing_id=%s", listing_id
+            )
             return None
 
         market_cap = _denominator_market_cap(
-            symbol=symbol,
+            listing_id=listing_id,
             repo=repo,
             market_repo=market_repo,
             target_currency=numerator.money.currency,
@@ -109,7 +111,7 @@ class OwnerEarningsYieldEquityMetric:
             return None
 
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=numerator.money / market_cap,
             as_of=numerator.as_of,
@@ -126,17 +128,19 @@ class OwnerEarningsYieldEquityFiveYearMetric:
 
     def compute(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
-        numerator = OwnerEarningsEquityCalculator().compute_5y_average(symbol, repo)
+        numerator = OwnerEarningsEquityCalculator().compute_5y_average(listing_id, repo)
         if numerator is None:
-            LOGGER.warning("oey_equity_5y: missing numerator for %s", symbol)
+            LOGGER.warning(
+                "oey_equity_5y: missing numerator for listing_id=%s", listing_id
+            )
             return None
 
         market_cap = _denominator_market_cap(
-            symbol=symbol,
+            listing_id=listing_id,
             repo=repo,
             market_repo=market_repo,
             target_currency=numerator.money.currency,
@@ -146,7 +150,7 @@ class OwnerEarningsYieldEquityFiveYearMetric:
             return None
 
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=numerator.money / market_cap,
             as_of=numerator.as_of,
@@ -163,17 +167,17 @@ class OwnerEarningsYieldEVMetric:
 
     def compute(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
-        numerator = OwnerEarningsEnterpriseCalculator().compute_ttm(symbol, repo)
+        numerator = OwnerEarningsEnterpriseCalculator().compute_ttm(listing_id, repo)
         if numerator is None:
-            LOGGER.warning("oey_ev: missing numerator for %s", symbol)
+            LOGGER.warning("oey_ev: missing numerator for listing_id=%s", listing_id)
             return None
 
         enterprise_value = _denominator_enterprise_value(
-            symbol=symbol,
+            listing_id=listing_id,
             repo=repo,
             market_repo=market_repo,
             target_currency=numerator.money.currency,
@@ -183,7 +187,7 @@ class OwnerEarningsYieldEVMetric:
             return None
 
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=numerator.money / enterprise_value,
             as_of=numerator.as_of,
@@ -200,17 +204,21 @@ class OwnerEarningsYieldEVNormalizedMetric:
 
     def compute(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         market_repo: MarketDataRepository,
     ) -> Optional[MetricResult]:
-        numerator = OwnerEarningsEnterpriseCalculator().compute_5y_median(symbol, repo)
+        numerator = OwnerEarningsEnterpriseCalculator().compute_5y_median(
+            listing_id, repo
+        )
         if numerator is None:
-            LOGGER.warning("oey_ev_norm: missing numerator for %s", symbol)
+            LOGGER.warning(
+                "oey_ev_norm: missing numerator for listing_id=%s", listing_id
+            )
             return None
 
         enterprise_value = _denominator_enterprise_value(
-            symbol=symbol,
+            listing_id=listing_id,
             repo=repo,
             market_repo=market_repo,
             target_currency=numerator.money.currency,
@@ -220,7 +228,7 @@ class OwnerEarningsYieldEVNormalizedMetric:
             return None
 
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=numerator.money / enterprise_value,
             as_of=numerator.as_of,

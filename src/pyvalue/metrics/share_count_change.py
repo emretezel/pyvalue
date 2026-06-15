@@ -57,10 +57,10 @@ class ShareCountChangeCalculator:
     """
 
     def compute_pair(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[ShareCountSnapshot]:
         return self.compute_pair_for_years(
-            symbol,
+            listing_id,
             repo,
             exact_years=TEN_YEAR_EXACT_YEARS,
             context="share_count_change",
@@ -68,22 +68,24 @@ class ShareCountChangeCalculator:
 
     def compute_pair_for_years(
         self,
-        symbol: str,
+        listing_id: int,
         repo: RegionFactsRepository,
         *,
         exact_years: int,
         context: str,
     ) -> Optional[ShareCountSnapshot]:
-        records = repo.scalar_facts_for_concept(symbol, SHARE_COUNT_CONCEPT)
+        records = repo.scalar_facts_for_concept(listing_id, SHARE_COUNT_CONCEPT)
         if not records:
             LOGGER.warning(
-                "%s: missing outstanding share history for %s", context, symbol
+                "%s: missing outstanding share history for listing_id=%s",
+                context,
+                listing_id,
             )
             return None
 
         quarterly = self._filter_periods(records, QUARTERLY_PERIODS)
         quarterly_snapshot = self._resolve_period_pair(
-            symbol,
+            listing_id,
             quarterly,
             max_age_days=MAX_FACT_AGE_DAYS,
             exact_years=exact_years,
@@ -95,7 +97,7 @@ class ShareCountChangeCalculator:
 
         fy = self._filter_periods(records, FY_PERIODS)
         fy_snapshot = self._resolve_period_pair(
-            symbol,
+            listing_id,
             fy,
             max_age_days=MAX_FY_FACT_AGE_DAYS,
             exact_years=exact_years,
@@ -106,16 +108,16 @@ class ShareCountChangeCalculator:
             return fy_snapshot
 
         LOGGER.warning(
-            "%s: no valid exact %s-year share-count pair for %s",
+            "%s: no valid exact %s-year share-count pair for listing_id=%s",
             context,
             exact_years,
-            symbol,
+            listing_id,
         )
         return None
 
     def _resolve_period_pair(
         self,
-        symbol: str,
+        listing_id: int,
         records: Sequence[ScalarFact],
         *,
         max_age_days: int,
@@ -131,19 +133,19 @@ class ShareCountChangeCalculator:
             return None
         if not is_recent_fact(records[0], max_age_days=max_age_days):
             LOGGER.warning(
-                "%s: latest %s share-count point (%s) too old for %s",
+                "%s: latest %s share-count point (%s) too old for listing_id=%s",
                 logger_context,
                 context,
                 records[0].end_date,
-                symbol,
+                listing_id,
             )
             return None
         if latest.shares <= 0:
             LOGGER.warning(
-                "%s: non-positive latest %s share count for %s",
+                "%s: non-positive latest %s share count for listing_id=%s",
                 logger_context,
                 context,
-                symbol,
+                listing_id,
             )
             return None
 
@@ -162,19 +164,19 @@ class ShareCountChangeCalculator:
 
         if prior is None:
             LOGGER.warning(
-                "%s: missing exact %s-year %s match for %s",
+                "%s: missing exact %s-year %s match for listing_id=%s",
                 logger_context,
                 exact_years,
                 context,
-                symbol,
+                listing_id,
             )
             return None
         if prior.shares <= 0:
             LOGGER.warning(
-                "%s: non-positive prior %s share count for %s",
+                "%s: non-positive prior %s share count for listing_id=%s",
                 logger_context,
                 context,
-                symbol,
+                listing_id,
             )
             return None
 
@@ -224,12 +226,12 @@ class ShareCountChangeCalculator:
 def _compute_share_count_cagr(
     *,
     metric_id: str,
-    symbol: str,
+    listing_id: int,
     repo: RegionFactsRepository,
     exact_years: int,
 ) -> Optional[MetricResult]:
     snapshot = ShareCountChangeCalculator().compute_pair_for_years(
-        symbol,
+        listing_id,
         repo,
         exact_years=exact_years,
         context=metric_id,
@@ -240,7 +242,7 @@ def _compute_share_count_cagr(
     ratio = snapshot.latest.shares / snapshot.prior.shares
     value = ratio ** (1.0 / exact_years) - 1.0
     return MetricResult(
-        symbol=symbol,
+        listing_id=listing_id,
         metric_id=metric_id,
         value=value,
         as_of=snapshot.as_of,
@@ -255,11 +257,11 @@ class ShareCountCAGR5YMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         return _compute_share_count_cagr(
             metric_id=self.id,
-            symbol=symbol,
+            listing_id=listing_id,
             repo=repo,
             exact_years=FIVE_YEAR_EXACT_YEARS,
         )
@@ -273,11 +275,11 @@ class ShareCountCAGR10YMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
         return _compute_share_count_cagr(
             metric_id=self.id,
-            symbol=symbol,
+            listing_id=listing_id,
             repo=repo,
             exact_years=TEN_YEAR_EXACT_YEARS,
         )
@@ -291,15 +293,15 @@ class Shares10YPctChangeMetric:
     required_concepts = REQUIRED_CONCEPTS
 
     def compute(
-        self, symbol: str, repo: RegionFactsRepository
+        self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
-        snapshot = ShareCountChangeCalculator().compute_pair(symbol, repo)
+        snapshot = ShareCountChangeCalculator().compute_pair(listing_id, repo)
         if snapshot is None:
             return None
 
         value = snapshot.latest.shares / snapshot.prior.shares - 1.0
         return MetricResult(
-            symbol=symbol,
+            listing_id=listing_id,
             metric_id=self.id,
             value=value,
             as_of=snapshot.as_of,

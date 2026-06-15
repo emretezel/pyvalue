@@ -46,11 +46,11 @@ class RawFactSource(Protocol):
     satisfy the layer without subclassing the SQLite DAO.
     """
 
-    def latest_fact(self, symbol: str, concept: str) -> Optional[FactRecord]: ...
+    def latest_fact(self, listing_id: int, concept: str) -> Optional[FactRecord]: ...
 
     def facts_for_concept(
         self,
-        symbol: str,
+        listing_id: int,
         concept: str,
         fiscal_period: Optional[str] = None,
         limit: Optional[int] = None,
@@ -103,10 +103,6 @@ class _TypedFact:
     @property
     def filed(self) -> Optional[str]:
         return self.record.filed
-
-    @property
-    def symbol(self) -> str:
-        return self.record.symbol
 
     @property
     def unit_kind(self) -> MetricUnitKind:
@@ -190,14 +186,16 @@ class FactReader(Protocol):
     """
 
     def latest_monetary_fact(
-        self, symbol: str, concept: str
+        self, listing_id: int, concept: str
     ) -> Optional[MonetaryFact]: ...
 
-    def latest_scalar_fact(self, symbol: str, concept: str) -> Optional[ScalarFact]: ...
+    def latest_scalar_fact(
+        self, listing_id: int, concept: str
+    ) -> Optional[ScalarFact]: ...
 
     def monetary_facts_for_concept(
         self,
-        symbol: str,
+        listing_id: int,
         concept: str,
         fiscal_period: Optional[str] = None,
         limit: Optional[int] = None,
@@ -205,7 +203,7 @@ class FactReader(Protocol):
 
     def scalar_facts_for_concept(
         self,
-        symbol: str,
+        listing_id: int,
         concept: str,
         fiscal_period: Optional[str] = None,
         limit: Optional[int] = None,
@@ -228,14 +226,14 @@ class TypedFactReaderMixin:
     subclass forgets.
     """
 
-    def latest_fact(self, symbol: str, concept: str) -> Optional[FactRecord]:
+    def latest_fact(self, listing_id: int, concept: str) -> Optional[FactRecord]:
         """Return the most recent raw record for ``concept`` (subclass hook)."""
 
         raise NotImplementedError
 
     def facts_for_concept(
         self,
-        symbol: str,
+        listing_id: int,
         concept: str,
         fiscal_period: Optional[str] = None,
         limit: Optional[int] = None,
@@ -246,24 +244,26 @@ class TypedFactReaderMixin:
 
     # -- kind-tagged accessors (the metric-facing read boundary) -----------
 
-    def latest_monetary_fact(self, symbol: str, concept: str) -> Optional[MonetaryFact]:
-        record = self.latest_fact(symbol, concept)
+    def latest_monetary_fact(
+        self, listing_id: int, concept: str
+    ) -> Optional[MonetaryFact]:
+        record = self.latest_fact(listing_id, concept)
         return to_monetary_fact(record) if record is not None else None
 
-    def latest_scalar_fact(self, symbol: str, concept: str) -> Optional[ScalarFact]:
-        record = self.latest_fact(symbol, concept)
+    def latest_scalar_fact(self, listing_id: int, concept: str) -> Optional[ScalarFact]:
+        record = self.latest_fact(listing_id, concept)
         return to_scalar_fact(record) if record is not None else None
 
     def monetary_facts_for_concept(
         self,
-        symbol: str,
+        listing_id: int,
         concept: str,
         fiscal_period: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> List[MonetaryFact]:
         facts: List[MonetaryFact] = []
         for record in self.facts_for_concept(
-            symbol, concept, fiscal_period=fiscal_period, limit=limit
+            listing_id, concept, fiscal_period=fiscal_period, limit=limit
         ):
             monetary = to_monetary_fact(record)
             if monetary is not None:
@@ -272,7 +272,7 @@ class TypedFactReaderMixin:
 
     def scalar_facts_for_concept(
         self,
-        symbol: str,
+        listing_id: int,
         concept: str,
         fiscal_period: Optional[str] = None,
         limit: Optional[int] = None,
@@ -280,7 +280,7 @@ class TypedFactReaderMixin:
         return [
             to_scalar_fact(record)
             for record in self.facts_for_concept(
-                symbol, concept, fiscal_period=fiscal_period, limit=limit
+                listing_id, concept, fiscal_period=fiscal_period, limit=limit
             )
         ]
 
@@ -299,20 +299,20 @@ class RegionFactsRepository(TypedFactReaderMixin):
 
     def latest_fact(
         self,
-        symbol: str,
+        listing_id: int,
         concept: str,
     ) -> Optional[FactRecord]:
-        return self._repo.latest_fact(symbol, concept)
+        return self._repo.latest_fact(listing_id, concept)
 
     def facts_for_concept(
         self,
-        symbol: str,
+        listing_id: int,
         concept: str,
         fiscal_period: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> list[FactRecord]:
         return self._repo.facts_for_concept(
-            symbol,
+            listing_id,
             concept,
             fiscal_period=fiscal_period,
             limit=limit,

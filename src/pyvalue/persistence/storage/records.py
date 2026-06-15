@@ -153,9 +153,16 @@ class IngestProgressFailure:
 
 @dataclass(frozen=True)
 class FactRecord:
-    """Normalized financial fact ready for storage."""
+    """Normalized financial fact ready for storage.
 
-    symbol: str
+    ``symbol`` is an optional display label retained for the symbol-keyed readers;
+    the natural-identity (``*_by_id``) readers omit it (the metric layer reads
+    facts by ``listing_id`` and never reads this field). It is slated for removal
+    once the symbol-keyed fact readers are retired (Stage 4 of the identity
+    refactor).
+    """
+
+    symbol: str = ""
     concept: str = ""
     # fiscal_period defaults to ``"INSTANT"`` (the convention for point-in-time
     # values) rather than ``None`` so the column can be NOT NULL at the schema
