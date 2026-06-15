@@ -15,6 +15,7 @@ from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Optional
 
 import pytest
 import requests
@@ -32,7 +33,6 @@ from pyvalue.metrics.base import MetricCurrencyInvariantError, MetricResult
 from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS
 from pyvalue.persistence.storage.base import SQLiteStore
 from pyvalue.persistence.storage import (
-    EntityMetadataRepository,
     ExchangeProviderRepository,
     FinancialFactsRefreshStateRecord,
     FinancialFactsRefreshStateRepository,
@@ -56,6 +56,26 @@ from pyvalue.persistence.storage import (
 )
 from pyvalue.universe import Listing
 from pyvalue.marketdata import MarketDataUpdate, PriceData
+
+
+def _security_name(db_path: Path, symbol: str) -> Optional[str]:
+    security = SecurityRepository(db_path).fetch_by_symbol(symbol)
+    return security.entity_name if security is not None else None
+
+
+def _security_description(db_path: Path, symbol: str) -> Optional[str]:
+    security = SecurityRepository(db_path).fetch_by_symbol(symbol)
+    return security.description if security is not None else None
+
+
+def _security_sector(db_path: Path, symbol: str) -> Optional[str]:
+    security = SecurityRepository(db_path).fetch_by_symbol(symbol)
+    return security.sector if security is not None else None
+
+
+def _security_industry(db_path: Path, symbol: str) -> Optional[str]:
+    security = SecurityRepository(db_path).fetch_by_symbol(symbol)
+    return security.industry if security is not None else None
 
 
 # Placeholder listing id for tests whose fake fact source ignores the id it is
@@ -5587,14 +5607,12 @@ def test_cmd_refresh_security_metadata_backfills_eodhd_fields_and_sec_name_fallb
     )
 
     assert rc == 0
-    entity_repo = EntityMetadataRepository(db_path)
-    entity_repo.initialize_schema()
-    assert entity_repo.fetch("AAA.US") == "AAA Holdings"
-    assert entity_repo.fetch_description("AAA.US") == "AAA business"
-    assert entity_repo.fetch_sector("AAA.US") == "Technology"
-    assert entity_repo.fetch_industry("AAA.US") == "Software"
-    assert entity_repo.fetch("BBB.US") == "BBB SEC Name"
-    assert entity_repo.fetch_sector("BBB.US") is None
+    assert _security_name(db_path, "AAA.US") == "AAA Holdings"
+    assert _security_description(db_path, "AAA.US") == "AAA business"
+    assert _security_sector(db_path, "AAA.US") == "Technology"
+    assert _security_industry(db_path, "AAA.US") == "Software"
+    assert _security_name(db_path, "BBB.US") == "BBB SEC Name"
+    assert _security_sector(db_path, "BBB.US") is None
     fact_count_after = (
         fact_repo._connect()
         .execute("SELECT COUNT(*) FROM financial_facts")
@@ -5670,10 +5688,8 @@ def test_cmd_refresh_security_metadata_respects_symbol_scope(
     )
 
     assert rc == 0
-    entity_repo = EntityMetadataRepository(db_path)
-    entity_repo.initialize_schema()
-    assert entity_repo.fetch_sector("AAA.US") == "Technology"
-    assert entity_repo.fetch_sector("BBB.US") is None
+    assert _security_sector(db_path, "AAA.US") == "Technology"
+    assert _security_sector(db_path, "BBB.US") is None
     assert capsys.readouterr().out.splitlines() == [
         "Progress: 1/1 symbols complete (100.0%)",
         "Scanned 1 symbols.",
@@ -5781,10 +5797,8 @@ def test_cmd_refresh_security_metadata_carries_scope_listing_ids(
     )
 
     assert rc == 0
-    entity_repo = EntityMetadataRepository(db_path)
-    entity_repo.initialize_schema()
-    assert entity_repo.fetch_sector("AAA.US") == "Technology"
-    assert entity_repo.fetch_sector("BBB.US") == "Industrials"
+    assert _security_sector(db_path, "AAA.US") == "Technology"
+    assert _security_sector(db_path, "BBB.US") == "Industrials"
     assert "Updated metadata for 2 symbols." in capsys.readouterr().out
 
 
@@ -5898,10 +5912,8 @@ def test_cmd_refresh_security_metadata_cancels_cleanly(
     )
 
     assert rc == 1
-    entity_repo = EntityMetadataRepository(db_path)
-    entity_repo.initialize_schema()
-    assert entity_repo.fetch_sector("AAA.US") == "Technology"
-    assert entity_repo.fetch_sector("BBB.US") is None
+    assert _security_sector(db_path, "AAA.US") == "Technology"
+    assert _security_sector(db_path, "BBB.US") is None
     output_lines = capsys.readouterr().out.splitlines()
     assert (
         "Security metadata refresh cancelled by user after 1 of 2 symbols."
@@ -5929,10 +5941,10 @@ def test_cmd_run_screen_stage_reports_progress_for_multi_symbol_scope(
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
     metrics_repo.upsert("AAA.US", "working_capital", 100.0, "2023-12-31")
-    entity_repo = EntityMetadataRepository(db_path)
-    entity_repo.initialize_schema()
-    entity_repo.upsert("AAA.US", "AAA Inc", description="AAA description")
-    entity_repo.upsert("BBB.US", "BBB Inc", description="BBB description")
+    security_repo = SecurityRepository(db_path)
+    security_repo.initialize_schema()
+    security_repo.upsert_metadata("AAA.US", "AAA Inc", description="AAA description")
+    security_repo.upsert_metadata("BBB.US", "BBB Inc", description="BBB description")
 
     screen_path = tmp_path / "screen.yml"
     screen_path.write_text(
@@ -5984,10 +5996,10 @@ def test_cmd_run_screen_stage_creates_output_csv_parent_dirs_for_passing_results
     metrics_repo.initialize_schema()
     metrics_repo.upsert("AAA.US", "working_capital", 100.0, "2023-12-31")
     metrics_repo.upsert("BBB.US", "working_capital", 50.0, "2023-12-31")
-    entity_repo = EntityMetadataRepository(db_path)
-    entity_repo.initialize_schema()
-    entity_repo.upsert("AAA.US", "AAA Inc", description="AAA description")
-    entity_repo.upsert("BBB.US", "BBB Inc", description="BBB description")
+    security_repo = SecurityRepository(db_path)
+    security_repo.initialize_schema()
+    security_repo.upsert_metadata("AAA.US", "AAA Inc", description="AAA description")
+    security_repo.upsert_metadata("BBB.US", "BBB Inc", description="BBB description")
 
     screen_path = tmp_path / "screen.yml"
     screen_path.write_text(
@@ -6054,11 +6066,11 @@ def test_cmd_run_screen_stage_adds_ranked_output_rows_and_sorts_passers(
     metrics_repo.upsert("AAA.US", "net_debt_to_ebitda", 1.5, "2023-12-31")
     metrics_repo.upsert("BBB.US", "net_debt_to_ebitda", 1.5, "2023-12-31")
     metrics_repo.upsert("CCC.US", "net_debt_to_ebitda", 0.5, "2023-12-31")
-    entity_repo = EntityMetadataRepository(db_path)
-    entity_repo.initialize_schema()
-    entity_repo.upsert("AAA.US", "AAA Inc", description="AAA description")
-    entity_repo.upsert("BBB.US", "BBB Inc", description="BBB description")
-    entity_repo.upsert("CCC.US", "CCC Inc", description="CCC description")
+    security_repo = SecurityRepository(db_path)
+    security_repo.initialize_schema()
+    security_repo.upsert_metadata("AAA.US", "AAA Inc", description="AAA description")
+    security_repo.upsert_metadata("BBB.US", "BBB Inc", description="BBB description")
+    security_repo.upsert_metadata("CCC.US", "CCC Inc", description="CCC description")
 
     screen_path = tmp_path / "ranked-screen.yml"
     screen_path.write_text(
@@ -6245,9 +6257,9 @@ def test_cmd_run_screen_stage_limits_console_preview_and_truncates_description(
     for symbol in ("AAA.US", "BBB.US", "CCC.US"):
         metrics_repo.upsert(symbol, "working_capital", 100.0, "2023-12-31")
 
-    entity_repo = EntityMetadataRepository(db_path)
-    entity_repo.initialize_schema()
-    entity_repo.upsert(
+    security_repo = SecurityRepository(db_path)
+    security_repo.initialize_schema()
+    security_repo.upsert_metadata(
         "AAA.US",
         "AAA Incorporated",
         description=(
@@ -6255,8 +6267,12 @@ def test_cmd_run_screen_stage_limits_console_preview_and_truncates_description(
             "critical end markets across aerospace, energy, and medical devices."
         ),
     )
-    entity_repo.upsert("BBB.US", "BBB Incorporated", description="BBB description")
-    entity_repo.upsert("CCC.US", "CCC Incorporated", description="CCC description")
+    security_repo.upsert_metadata(
+        "BBB.US", "BBB Incorporated", description="BBB description"
+    )
+    security_repo.upsert_metadata(
+        "CCC.US", "CCC Incorporated", description="CCC description"
+    )
 
     screen_path = tmp_path / "screen.yml"
     screen_path.write_text(

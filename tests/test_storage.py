@@ -7,7 +7,6 @@ import pytest
 
 import pyvalue.persistence.storage as storage
 from pyvalue.persistence.storage import (
-    EntityMetadataRepository,
     ExchangeProviderRepository,
     ExchangeRepository,
     FXRateRecord,
@@ -3339,23 +3338,28 @@ def test_security_repository_upserts_sector_and_industry_metadata(
     assert security.industry == "Software"
 
 
-def test_entity_metadata_repository_fetch_many_returns_security_records(
+def test_security_repository_fetch_many_by_id_returns_security_records(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "entity-metadata.db"
-    repo = EntityMetadataRepository(db_path)
-    repo.initialize_schema()
+    security_repo = SecurityRepository(db_path)
+    security_repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
     _seed_listing(db_path, "BBB.US")
-    repo.upsert("AAA.US", sector="Technology", industry="Software")
-    repo.upsert("BBB.US", sector="Industrials", industry="Machinery")
+    security_repo.upsert_metadata("AAA.US", sector="Technology", industry="Software")
+    security_repo.upsert_metadata("BBB.US", sector="Industrials", industry="Machinery")
 
-    rows = repo.fetch_many(["AAA.US", "BBB.US"])
+    id_aaa = security_repo.resolve_id("AAA.US")
+    id_bbb = security_repo.resolve_id("BBB.US")
+    assert id_aaa is not None
+    assert id_bbb is not None
 
-    assert rows["AAA.US"].sector == "Technology"
-    assert rows["AAA.US"].industry == "Software"
-    assert rows["BBB.US"].sector == "Industrials"
-    assert rows["BBB.US"].industry == "Machinery"
+    rows = security_repo.fetch_many_by_id([id_aaa, id_bbb])
+
+    assert rows[id_aaa].sector == "Technology"
+    assert rows[id_aaa].industry == "Software"
+    assert rows[id_bbb].sector == "Industrials"
+    assert rows[id_bbb].industry == "Machinery"
 
 
 def test_security_repository_upsert_metadata_many_updates_existing_rows(

@@ -37,8 +37,6 @@ from .records import (
     MarketSnapshotRecord,
     MetricComputeStatusRecord,
     MetricRecord,
-    Security,
-    SecurityMetadataUpdate,
     StoredMetricRow,
 )
 from ..migrations import apply_migrations
@@ -957,44 +955,3 @@ class MarketDataRepository(SQLiteStore):
             with self._connect() as conn:
                 _query(conn)
         return snapshots
-
-
-class EntityMetadataRepository(SQLiteStore):
-    """Compatibility wrapper backed by canonical securities metadata."""
-
-    def initialize_schema(self) -> None:
-        self._security_repo().initialize_schema()
-
-    def upsert(
-        self,
-        symbol: str,
-        entity_name: Optional[str] = None,
-        description: Optional[str] = None,
-        sector: Optional[str] = None,
-        industry: Optional[str] = None,
-    ) -> None:
-        self._security_repo().upsert_metadata(
-            symbol,
-            entity_name=entity_name,
-            description=description,
-            sector=sector,
-            industry=industry,
-        )
-
-    def upsert_many(self, updates: Sequence[SecurityMetadataUpdate]) -> int:
-        return self._security_repo().upsert_metadata_many(updates)
-
-    def fetch(self, symbol: str) -> Optional[str]:
-        return self._security_repo().fetch_name(symbol)
-
-    def fetch_description(self, symbol: str) -> Optional[str]:
-        return self._security_repo().fetch_description(symbol)
-
-    def fetch_sector(self, symbol: str) -> Optional[str]:
-        return self._security_repo().fetch_sector(symbol)
-
-    def fetch_industry(self, symbol: str) -> Optional[str]:
-        return self._security_repo().fetch_industry(symbol)
-
-    def fetch_many(self, symbols: Sequence[str]) -> Dict[str, Security]:
-        return self._security_repo().fetch_many_by_symbol(symbols)

@@ -29,13 +29,13 @@ from pyvalue.logging_utils import (
     suppress_console_missing_fx_warnings,
 )
 from pyvalue.persistence.storage import (
-    EntityMetadataRepository,
     FXRatesRepository,
     FundamentalsNormalizationCandidate,
     FundamentalsNormalizationStateRepository,
     FundamentalsRepository,
     FinancialFactsRepository,
     FactRecord,
+    SecurityRepository,
     StoredFactRow,
     SupportedTickerRepository,
 )
@@ -279,8 +279,8 @@ def _run_bulk_normalization(
 
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
-    entity_repo = EntityMetadataRepository(db_path)
-    entity_repo.initialize_schema()
+    security_repo = SecurityRepository(db_path)
+    security_repo.initialize_schema()
     state_repo = FundamentalsNormalizationStateRepository(db_path)
     state_repo.initialize_schema()
     # Pre-initialize schemas used by worker processes so that
@@ -322,7 +322,7 @@ def _run_bulk_normalization(
                     or result.entity_sector
                     or result.entity_industry
                 ):
-                    entity_repo.upsert(
+                    security_repo.upsert_metadata(
                         symbol,
                         result.entity_name,
                         description=result.entity_description,
@@ -381,7 +381,7 @@ def _run_bulk_normalization(
                         or result.entity_sector
                         or result.entity_industry
                     ):
-                        entity_repo.upsert(
+                        security_repo.upsert_metadata(
                             symbol,
                             result.entity_name,
                             description=result.entity_description,

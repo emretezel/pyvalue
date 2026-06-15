@@ -163,6 +163,30 @@ Metric rows also persist unit metadata:
 - `currency`: present only for currency-bearing metric kinds
 - `unit_label`: optional display/unit hint such as `x` or `per_share`
 
+## Identity: `listing_id` Is the Only Internal Key
+
+`listing_id` (the INTEGER PRIMARY KEY of the `listing` table) is the single
+internal identity for a security throughout pyvalue's pipeline. The canonical
+symbol string (`SYMBOL.EXCHANGE`, e.g. `AAPL.US`) is **not** an identity key; it
+appears in exactly three places and nowhere else:
+
+1. **CLI input** — a user-supplied `--symbols AAPL.US` is resolved to its
+   `listing_id` immediately at the command boundary
+   (`_resolve_canonical_scope_listings`).
+2. **EODHD `provider_symbol`** — the external API's own identifier, used only to
+   format an HTTP request and to map the response back to a `provider_listing_id`
+   through the `provider_listing (provider_exchange_id, provider_symbol)` UNIQUE
+   key.
+3. **Display / CSV output** — produced at the very end from the
+   `(listing_id, canonical_symbol)` pair the scope query already returns.
+
+Everything between those edges — every loop variable, dict key, identity
+function parameter, database read/write, and the entire metric layer
+(`Metric.compute(self, listing_id, repo)`) — keys by `listing_id`. Storage
+readers bind `listing_id IN (…)` and return id-keyed results (`Dict[int, …]`);
+they never re-key a result back to a symbol, so there is no `id → symbol → id`
+round-trip.
+
 ## Scope Resolution
 
 Every CLI command that works over the security universe — `compute-metrics`,
@@ -170,12 +194,11 @@ Every CLI command that works over the security universe — `compute-metrics`,
 `listing` table** and carries the natural `listing_id` down into every read and
 write. The single entry point is `_resolve_canonical_scope_listings`
 (`cli/_common.py`), which returns ordered `(listing_id, canonical_symbol)` pairs
-from `SecurityRepository.list_supported_listings`. Commands build a
-`{canonical_symbol: listing_id}` map once and thread it (as `security_ids_by_symbol`
-/ `ids_by_symbol`) through the fact, market, and metric reads/writes, so the id
-the scope join already holds is never re-derived. The canonical symbol
-(`symbol || '.' || exchange_code`) survives only as a display/CSV label and as
-result-dict keys — it is never used as a database selection, filter, join, or
+from `SecurityRepository.list_supported_listings`. Commands iterate those pairs,
+key every fact, market, and metric read/write by `listing_id`, and map an id back
+to its canonical symbol only when emitting a log line, a CSV row, or a ranking
+tie-break label. The canonical symbol (`symbol || '.' || exchange_code`) is never
+a result-dict key and is never used as a database selection, filter, join, or
 sort key. Downstream tables are filtered on `listing_id` (or a real PK such as
 `exchange_id`), never on a computed/concatenated symbol.
 
@@ -186,9 +209,10 @@ Two categories legitimately deviate:
   start from the provider catalog because they operate on provider symbols and
   `fundamentals_raw` keyed by `provider_listing_id`. Their scope rows already
   expose `security_id` (from `provider_listing_catalog`), which they carry into
-  the canonical writes (`replace_fact_rows(security_id=…)`,
-  `MarketDataUpdate(security_id=…)`); the only symbol matching is the inherent
-  provider-symbol → raw-payload intersection.
+  the canonical writes (`replace_fact_rows(…, security_id=…)`,
+  `MarketDataUpdate(security_id=…)`, `SecurityMetadataUpdate(security_id=…)`); the
+  only symbol matching is the inherent provider-symbol → raw-payload intersection
+  at the HTTP edge.
 - **Non-listing commands** — `refresh-fx-rates` (FX pairs), the `clear-*`
   maintenance commands (blanket `DELETE FROM`), and the `report-*-progress`
   commands (aggregated by the real `provider_exchange_code` column) — have no

@@ -71,7 +71,6 @@ from .fx import (
     FXSupportedPairsRepository,  # noqa: F401
 )
 from .metrics_market import (
-    EntityMetadataRepository,
     MarketDataRepository,
     MetricComputeStatusRepository,
     MetricsRepository,
@@ -118,7 +117,6 @@ __all__ = [
     "MetricComputeStatusRepository",
     "MetricRecord",
     "MetricsRepository",
-    "EntityMetadataRepository",
     "canonical_json_dumps",
     "fundamentals_payload_hash",
 ]

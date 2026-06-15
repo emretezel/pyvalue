@@ -553,76 +553,6 @@ class SecurityRepository(SQLiteStore):
                 _query(conn)
         return resolved
 
-    def fetch_many_by_symbol(
-        self,
-        symbols: Sequence[str],
-        chunk_size: int = 500,
-    ) -> Dict[str, Security]:
-        self.initialize_schema()
-        normalized = _normalized_codes(symbols)
-        if not normalized:
-            return {}
-
-        resolved: Dict[str, Security] = {}
-        uncached: List[str] = []
-        for symbol in normalized:
-            cached = self._by_symbol.get(symbol)
-            if cached is not None:
-                resolved[symbol] = cached
-            else:
-                uncached.append(symbol)
-        if not uncached:
-            return resolved
-
-        # Probe via two single-column INs (see _listing_pair_filter) so the
-        # UNIQUE indexes on exchange + listing drive the lookup instead of a
-        # full listing scan.
-        pairs: List[Tuple[str, str]] = []
-        for canonical in uncached:
-            ticker, exchange = _normalize_symbol_base(canonical)
-            if exchange is None:
-                continue
-            pairs.append((ticker, exchange))
-        if not pairs:
-            return resolved
-
-        effective_chunk = min(chunk_size, SQLITE_MAX_BOUND_PARAMETERS // 2)
-        with self._connect() as conn:
-            for chunk in _batched(pairs, effective_chunk):
-                clause, params, wanted = _listing_pair_filter(chunk)
-                rows = conn.execute(
-                    f"""
-                    SELECT
-                        l.listing_id AS security_id,
-                        l.symbol AS canonical_ticker,
-                        e.exchange_code AS canonical_exchange_code,
-                        l.symbol || '.' || e.exchange_code AS canonical_symbol,
-                        i.name AS entity_name,
-                        i.description,
-                        i.sector,
-                        i.industry,
-                        NULL AS created_at,
-                        NULL AS updated_at
-                    FROM listing l
-                    JOIN issuer i ON i.issuer_id = l.issuer_id
-                    JOIN "exchange" e ON e.exchange_id = l.exchange_id
-                    WHERE {clause}
-                    """,
-                    params,
-                ).fetchall()
-                for row in rows:
-                    # The two-IN predicate matches the cross product; keep only
-                    # the exact requested pairs.
-                    if (
-                        row["canonical_ticker"],
-                        row["canonical_exchange_code"],
-                    ) not in wanted:
-                        continue
-                    security = Security(*row)
-                    resolved[security.canonical_symbol] = security
-                    self._remember(security)
-        return resolved
-
     def fetch_many_by_id(
         self,
         security_ids: Sequence[int],
@@ -751,22 +681,6 @@ class SecurityRepository(SQLiteStore):
                 self._by_symbol.pop(cached.canonical_symbol, None)
         self.fetch_many_by_id(security_ids)
         return updated
-
-    def fetch_name(self, symbol: str) -> Optional[str]:
-        security = self.fetch_by_symbol(symbol)
-        return security.entity_name if security else None
-
-    def fetch_description(self, symbol: str) -> Optional[str]:
-        security = self.fetch_by_symbol(symbol)
-        return security.description if security else None
-
-    def fetch_sector(self, symbol: str) -> Optional[str]:
-        security = self.fetch_by_symbol(symbol)
-        return security.sector if security else None
-
-    def fetch_industry(self, symbol: str) -> Optional[str]:
-        security = self.fetch_by_symbol(symbol)
-        return security.industry if security else None
 
     def list_supported_listings(
         self,
