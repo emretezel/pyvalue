@@ -36,6 +36,7 @@ from .records import (
     MarketSnapshotRecord,
     MetricComputeStatusRecord,
     MetricRecord,
+    NormalizationUnit,  # noqa: F401
     Provider,  # noqa: F401
     Security,
     SecurityListingStatusRecord,  # noqa: F401

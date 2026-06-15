@@ -1365,6 +1365,167 @@ def test_fundamentals_repository_normalization_candidates_skip_facts_scan_withou
     assert not any("FROM financial_facts" in sql for sql in seen_sql)
 
 
+def test_normalization_units_keyed_by_id_with_freshness(tmp_path: Path) -> None:
+    """``normalization_units`` keys by ``provider_listing_id`` and carries the
+    ``listing_id``, label, currency, and freshness hashes; listings without a raw
+    payload are absent (the INNER JOIN to ``fundamentals_raw`` is the filter)."""
+    db_path = tmp_path / "normalization-units.db"
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    state_repo = FundamentalsNormalizationStateRepository(db_path)
+    # AAA + BBB carry raw payloads; CCC is a bare listing with no raw row.
+    _seed_listing(db_path, "AAA.US")
+    _seed_listing(db_path, "BBB.US")
+    _seed_listing(db_path, "CCC.US")
+    fund_repo.upsert("EODHD", "AAA.US", {"General": {"Name": "AAA"}}, exchange="US")
+    fund_repo.upsert("EODHD", "BBB.US", {"General": {"Name": "BBB"}}, exchange="US")
+    # Mark AAA already normalized so its freshness hash is populated.
+    state_repo.mark_success("EODHD", "AAA.US", "a" * 64)
+
+    units = fund_repo.normalization_units("EODHD", primary_only=True)
+
+    # CCC (no raw) is absent; every unit is keyed by its own provider_listing_id.
+    assert {unit.provider_symbol for unit in units.values()} == {"AAA.US", "BBB.US"}
+    for provider_listing_id, unit in units.items():
+        assert unit.provider_listing_id == provider_listing_id
+        assert unit.currency == "USD"
+        assert unit.listing_id > 0
+        assert len(unit.raw_payload_hash) == 64
+    aaa = next(u for u in units.values() if u.provider_symbol == "AAA.US")
+    bbb = next(u for u in units.values() if u.provider_symbol == "BBB.US")
+    assert aaa.normalized_payload_hash == "a" * 64
+    assert bbb.normalized_payload_hash is None
+
+
+def test_normalization_units_scoped_by_listing_ids(tmp_path: Path) -> None:
+    """The bounded ``listing_ids`` path returns only the requested listings."""
+    db_path = tmp_path / "normalization-units-scoped.db"
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    _seed_listing(db_path, "AAA.US")
+    _seed_listing(db_path, "BBB.US")
+    fund_repo.upsert("EODHD", "AAA.US", {"General": {"Name": "AAA"}}, exchange="US")
+    fund_repo.upsert("EODHD", "BBB.US", {"General": {"Name": "BBB"}}, exchange="US")
+    all_units = fund_repo.normalization_units("EODHD", primary_only=True)
+    aaa_listing_id = next(
+        u.listing_id for u in all_units.values() if u.provider_symbol == "AAA.US"
+    )
+
+    scoped = fund_repo.normalization_units(
+        "EODHD", primary_only=True, listing_ids=[aaa_listing_id]
+    )
+
+    assert {u.provider_symbol for u in scoped.values()} == {"AAA.US"}
+
+
+def test_normalization_units_normalizes_gbx_currency_to_gbp(tmp_path: Path) -> None:
+    """A GBX quote currency is collapsed to its base GBP in the unit, matching the
+    currency the worker would otherwise resolve via ``ticker_currency``."""
+    db_path = tmp_path / "normalization-units-gbx.db"
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    _seed_listing(db_path, "FOO.LSE", currency="GBX")
+    fund_repo.upsert("EODHD", "FOO.LSE", {"General": {"Name": "Foo"}}, exchange="LSE")
+
+    units = fund_repo.normalization_units("EODHD", primary_only=False)
+
+    assert {u.provider_symbol for u in units.values()} == {"FOO.LSE"}
+    assert next(iter(units.values())).currency == "GBP"
+
+
+def test_fetch_payload_with_hash_by_id_reads_by_pk(tmp_path: Path) -> None:
+    """``fetch_payload_with_hash_by_id`` returns the payload + hash by its PK and
+    ``None`` for an unknown id."""
+    db_path = tmp_path / "fetch-payload-by-id.db"
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    _seed_listing(db_path, "AAA.US")
+    fund_repo.upsert("EODHD", "AAA.US", {"General": {"Name": "AAA"}}, exchange="US")
+    unit = next(
+        iter(fund_repo.normalization_units("EODHD", primary_only=True).values())
+    )
+
+    fetched = fund_repo.fetch_payload_with_hash_by_id(unit.provider_listing_id)
+
+    assert fetched is not None
+    payload, payload_hash = fetched
+    assert payload["General"]["Name"] == "AAA"
+    assert payload_hash == unit.raw_payload_hash
+    assert fund_repo.fetch_payload_with_hash_by_id(999999) is None
+
+
+def test_mark_success_by_id_upserts_state(tmp_path: Path) -> None:
+    """``mark_success_by_id`` writes the watermark keyed by ``provider_listing_id``
+    and a second call overwrites it in place (idempotent upsert)."""
+    db_path = tmp_path / "mark-success-by-id.db"
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    state_repo = FundamentalsNormalizationStateRepository(db_path)
+    _seed_listing(db_path, "AAA.US")
+    fund_repo.upsert("EODHD", "AAA.US", {"General": {"Name": "AAA"}}, exchange="US")
+    unit = next(
+        iter(fund_repo.normalization_units("EODHD", primary_only=True).values())
+    )
+
+    state_repo.mark_success_by_id(unit.provider_listing_id, "b" * 64)
+    after_first = fund_repo.normalization_units("EODHD", primary_only=True)
+    assert after_first[unit.provider_listing_id].normalized_payload_hash == "b" * 64
+
+    state_repo.mark_success_by_id(unit.provider_listing_id, "c" * 64)
+    after_second = fund_repo.normalization_units("EODHD", primary_only=True)
+    assert after_second[unit.provider_listing_id].normalized_payload_hash == "c" * 64
+
+
+def test_normalization_units_is_view_free(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The unit query reads base tables only -- never the
+    ``provider_listing_catalog`` view (which would drag in issuer/exchange) and
+    never ``financial_facts``. Guards the 5-table base-join win."""
+    db_path = tmp_path / "normalization-units-view-free.db"
+    seen_sql: list[str] = []
+
+    class _LoggingConnection:
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self._conn = conn
+
+        def __enter__(self) -> "_LoggingConnection":
+            self._conn.__enter__()
+            return self
+
+        def __exit__(
+            self,
+            exc_type: Optional[Type[BaseException]],
+            exc_value: Optional[BaseException],
+            traceback: Optional[TracebackType],
+        ) -> bool:
+            return bool(self._conn.__exit__(exc_type, exc_value, traceback))
+
+        def execute(
+            self, sql: str, parameters: Sequence[object] = ()
+        ) -> sqlite3.Cursor:
+            seen_sql.append(" ".join(sql.split()))
+            return self._conn.execute(sql, parameters)
+
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    _seed_listing(db_path, "AAA.US")
+    fund_repo.upsert("EODHD", "AAA.US", {"General": {"Name": "AAA"}}, exchange="US")
+
+    real_connect = fund_repo._connect
+    monkeypatch.setattr(
+        fund_repo, "_connect", lambda: _LoggingConnection(real_connect())
+    )
+
+    units = fund_repo.normalization_units("EODHD", primary_only=True)
+
+    assert {u.provider_symbol for u in units.values()} == {"AAA.US"}
+    selects = [sql for sql in seen_sql if sql.lower().startswith("select")]
+    assert selects  # the unit query ran through the logging proxy
+    assert not any("provider_listing_catalog" in sql for sql in seen_sql)
+    assert not any("FROM financial_facts" in sql for sql in seen_sql)
+
+
 def test_resolve_provider_listing_id_natural_key_and_view_fallback(
     tmp_path: Path,
 ) -> None:

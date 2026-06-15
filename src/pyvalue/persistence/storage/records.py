@@ -402,6 +402,28 @@ class FundamentalsNormalizationCandidate:
 
 
 @dataclass(frozen=True)
+class NormalizationUnit:
+    """One stored raw payload to normalize, keyed by its natural ids.
+
+    The id-keyed unit of work for the ``normalize`` command. ``provider_listing_id``
+    is the key (the ``fundamentals_raw`` / normalization-state PK); ``listing_id`` is
+    the fact/metadata write target (``security_id == listing_id``). ``currency`` is the
+    base monetary currency already collapsed to its base unit (e.g. GBX->GBP), so the
+    worker needs no per-payload currency lookup. ``provider_symbol`` is carried for
+    display/logging only -- it is never used as a key. The freshness hashes drive the
+    skip-if-unchanged decision in the same way as the previous symbol-keyed candidate.
+    """
+
+    provider_listing_id: int
+    listing_id: int
+    provider_symbol: str
+    currency: Optional[str]
+    raw_payload_hash: str
+    normalized_payload_hash: Optional[str] = None
+    normalized_at: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class SupportedTickerRefreshResult:
     """Outcome of refreshing one provider/exchange supported-ticker slice.
 

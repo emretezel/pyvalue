@@ -33,9 +33,11 @@ from .base import (
 from .records import (
     FundamentalsNormalizationCandidate,
     FundamentalsUpdate,
+    NormalizationUnit,
     SecurityListingStatusRecord,
     SecurityMetadataCandidate,
 )
+from pyvalue.currency import normalize_currency_code
 from ..migrations import apply_migrations
 from .listing_status import SecurityListingStatusRepository
 
@@ -513,6 +515,143 @@ class FundamentalsRepository(SQLiteStore):
             return None
         return json.loads(row["data"]), str(row["payload_hash"])
 
+    def fetch_payload_with_hash_by_id(
+        self, provider_listing_id: int
+    ) -> Optional[Tuple[Dict[str, Any], str]]:
+        """Read a stored raw payload + hash by its ``provider_listing_id`` PK.
+
+        The id-keyed counterpart of :meth:`fetch_payload_with_hash`:
+        ``fundamentals_raw`` is PK'd on ``provider_listing_id``, so this is a single
+        primary-key seek with no symbol parse and no listing resolution. The normalize
+        worker carries the id end-to-end, so it never re-derives it from a symbol.
+        """
+
+        self.initialize_schema()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT data, payload_hash
+                FROM fundamentals_raw
+                WHERE provider_listing_id = ?
+                """,
+                (int(provider_listing_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row["data"]), str(row["payload_hash"])
+
+    def normalization_units(
+        self,
+        provider: str,
+        *,
+        primary_only: bool,
+        listing_ids: Optional[Sequence[int]] = None,
+        chunk_size: int = 500,
+    ) -> Dict[int, NormalizationUnit]:
+        """Return the id-keyed normalization work items for ``provider``.
+
+        Each unit is one stored raw payload (one ``provider_listing_id``) present in
+        ``fundamentals_raw``. Because the query INNER JOINs ``fundamentals_raw``, the
+        result is already "scope that has a raw payload" -- callers never intersect a
+        separate "has raw" symbol set. Each unit carries the ``listing_id`` (the
+        fact/metadata write target), the base ``currency`` (``listing.currency``
+        collapsed to its base via :func:`normalize_currency_code`, e.g. GBX->GBP), the
+        ``provider_symbol`` display label, and the freshness hashes from the
+        LEFT-JOINed normalization state.
+
+        Reads straight from the base tables, not the ``provider_listing_catalog``
+        view: the view drags in ``issuer`` and ``exchange``, neither of which this
+        needs (the label is built from ``provider_symbol``). ``listing_ids=None``
+        enumerates the whole provider in one scan; a bounded ``listing_ids`` is
+        chunked into ``IN`` seeks served by ``idx_provider_listing_listing``.
+        """
+
+        self.initialize_schema()
+        FundamentalsNormalizationStateRepository(self.db_path).initialize_schema()
+        provider_norm = provider.strip().upper()
+
+        units: Dict[int, NormalizationUnit] = {}
+        with self._connect() as conn:
+            if listing_ids is None:
+                for row in self._normalization_unit_rows(
+                    conn,
+                    provider_norm,
+                    primary_only=primary_only,
+                    listing_id_chunk=None,
+                ):
+                    unit = self._row_to_normalization_unit(row)
+                    units[unit.provider_listing_id] = unit
+                return units
+            normalized_ids = sorted({int(lid) for lid in listing_ids if lid})
+            for chunk in _batched(normalized_ids, chunk_size):
+                for row in self._normalization_unit_rows(
+                    conn,
+                    provider_norm,
+                    primary_only=primary_only,
+                    listing_id_chunk=chunk,
+                ):
+                    unit = self._row_to_normalization_unit(row)
+                    units[unit.provider_listing_id] = unit
+        return units
+
+    def _normalization_unit_rows(
+        self,
+        conn: sqlite3.Connection,
+        provider: str,
+        *,
+        primary_only: bool,
+        listing_id_chunk: Optional[Sequence[int]],
+    ) -> List[sqlite3.Row]:
+        clauses = ["p.provider_code = ?"]
+        params: List[object] = [provider]
+        if primary_only:
+            clauses.append("l.primary_listing_status <> 'secondary'")
+        if listing_id_chunk is not None:
+            placeholders = ", ".join("?" for _ in listing_id_chunk)
+            clauses.append(f"pl.listing_id IN ({placeholders})")
+            params.extend(int(lid) for lid in listing_id_chunk)
+        where = " AND ".join(clauses)
+        # ORDER BY the label keeps dispatch (and the [idx/total] progress lines)
+        # deterministic across runs, matching the old symbols() ORDER BY.
+        return conn.execute(
+            f"""
+            SELECT
+                pl.provider_listing_id,
+                pl.listing_id,
+                pl.provider_symbol || '.' || px.provider_exchange_code
+                    AS provider_symbol,
+                l.currency,
+                fr.payload_hash,
+                ns.normalized_payload_hash,
+                ns.normalized_at
+            FROM fundamentals_raw fr
+            JOIN provider_listing pl
+              ON pl.provider_listing_id = fr.provider_listing_id
+            JOIN provider_exchange px
+              ON px.provider_exchange_id = pl.provider_exchange_id
+            JOIN provider p ON p.provider_id = px.provider_id
+            JOIN listing l ON l.listing_id = pl.listing_id
+            LEFT JOIN fundamentals_normalization_state ns
+              ON ns.provider_listing_id = fr.provider_listing_id
+            WHERE {where}
+            ORDER BY provider_symbol
+            """,
+            params,
+        ).fetchall()
+
+    def _row_to_normalization_unit(self, row: sqlite3.Row) -> NormalizationUnit:
+        return NormalizationUnit(
+            provider_listing_id=int(row["provider_listing_id"]),
+            listing_id=int(row["listing_id"]),
+            provider_symbol=str(row["provider_symbol"]),
+            currency=normalize_currency_code(row["currency"]),
+            raw_payload_hash=str(row["payload_hash"]),
+            normalized_payload_hash=_normalize_optional_text(
+                row["normalized_payload_hash"]
+            ),
+            normalized_at=_normalize_optional_text(row["normalized_at"]),
+        )
+
     def symbols(self, provider: str) -> List[str]:
         self.initialize_schema()
         with self._connect() as conn:
@@ -726,11 +865,10 @@ class FundamentalsNormalizationStateRepository(SQLiteStore):
         normalized_payload_hash: str,
         normalized_at: Optional[str] = None,
     ) -> None:
-        # Resolve provider_listing_id via the natural key (covering-index seeks)
-        # instead of filtering the catalog view's computed provider_symbol, which
-        # forced a full catalog walk (~33 ms) per call. This method runs serially
-        # in the main process, once per normalized symbol, so the view-filter
-        # shape dominated wall-clock on a full-universe normalize.
+        # Symbol-keyed compatibility wrapper: resolve provider_listing_id via the
+        # natural key (covering-index seeks), then delegate to the id-keyed writer.
+        # The id-keyed normalize path calls mark_success_by_id directly and skips
+        # this resolution entirely.
         self.initialize_schema()
         provider_norm = provider.strip().upper()
         with self._connect() as conn:
@@ -740,8 +878,28 @@ class FundamentalsNormalizationStateRepository(SQLiteStore):
             provider_listing_id = _resolve_provider_listing_id(
                 conn, provider_id, provider_norm, symbol
             )
-            if provider_listing_id is None:
-                return
+        if provider_listing_id is None:
+            return
+        self.mark_success_by_id(
+            provider_listing_id, normalized_payload_hash, normalized_at
+        )
+
+    def mark_success_by_id(
+        self,
+        provider_listing_id: int,
+        normalized_payload_hash: str,
+        normalized_at: Optional[str] = None,
+    ) -> None:
+        """Record a normalization watermark keyed by ``provider_listing_id``.
+
+        The id-keyed writer for the normalize hot path.
+        ``fundamentals_normalization_state`` is PK'd on ``provider_listing_id``
+        (``ON CONFLICT`` upsert), so when the caller already holds the id this is a
+        single write with no symbol resolution.
+        """
+
+        self.initialize_schema()
+        with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO fundamentals_normalization_state (
@@ -754,7 +912,7 @@ class FundamentalsNormalizationStateRepository(SQLiteStore):
                     normalized_at = excluded.normalized_at
                 """,
                 (
-                    provider_listing_id,
+                    int(provider_listing_id),
                     normalized_payload_hash,
                     normalized_at or _utc_now_iso(),
                 ),
