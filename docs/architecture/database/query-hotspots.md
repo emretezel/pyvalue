@@ -92,12 +92,15 @@ This page maps the end-to-end pipeline to the tables and indexes that matter mos
 
 ## 8. Compute Metrics
 
-- Resolves canonical symbols through `listing` plus `exchange`
+- Resolves the canonical scope to `(listing_id, canonical_symbol)` pairs and carries the `listing_id` through every read and write (no symbol->id re-resolution):
+  - full / by-exchange scope scans the supported universe (`list_supported_listings`: `provider_listing -> listing -> exchange`)
+  - an explicit `--symbols` scope seeks only the requested tickers (`list_supported_listings_for_symbols`): `exchange` by `exchange_code`, then `listing` by `(exchange_id, symbol)` — never a whole-universe scan
 - Bulk-reads `financial_facts`
 - Bulk-reads latest `market_data` when required
 - Writes `metrics` and `metric_compute_status`
 - Critical structures:
-  - `listing` unique `(exchange_id, symbol)`
+  - `listing` unique `(exchange_id, symbol)` and `exchange` unique `exchange_code` (the targeted `--symbols` seek)
+  - `idx_provider_listing_listing` (scope joins back into provider rows)
   - `idx_fin_facts_security_concept_latest`
   - `market_data` primary key `(listing_id, as_of)`
   - `metrics` PK `(listing_id, metric_id)`
@@ -108,11 +111,11 @@ This page maps the end-to-end pipeline to the tables and indexes that matter mos
 
 ## 9. Screen And Report
 
-- Reads canonical symbol scope from `provider_listing`, `listing`, and `exchange`
+- Resolves the canonical scope to `(listing_id, canonical_symbol)` pairs from `provider_listing`, `listing`, and `exchange`, then carries the `listing_id` into the metric/fact/market reads (same two scope modes as Compute Metrics: full/by-exchange scan vs targeted `--symbols` seek via `list_supported_listings_for_symbols`)
 - Reads `metrics`
 - Reads `metric_compute_status` for diagnostics
 - Critical structures:
-  - `provider_listing` joins back to `listing`
+  - `provider_listing` joins back to `listing`; `listing (exchange_id, symbol)` + `exchange (exchange_code)` for the targeted `--symbols` seek
   - `metrics` PK `(listing_id, metric_id)` (migration 067 dropped the bare `metric_id` index since it was never picked)
   - `metric_compute_status` PK `(listing_id, metric_id)`
 - Review focus:

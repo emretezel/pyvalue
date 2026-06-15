@@ -56,7 +56,13 @@ One row per `(exchange_id, symbol)`.
 
 ## Main Read Paths
 
-- canonical symbol resolution through `listing.symbol || '.' || exchange.exchange_code`
+- canonical-scope resolution joins `listing` to `exchange` and projects the
+  canonical symbol `listing.symbol || '.' || exchange.exchange_code` as a display
+  label only — never a filter/join key. Full / by-exchange scope scans the
+  supported universe (`list_supported_listings`); an explicit `--symbols` request
+  seeks only the requested rows (`list_supported_listings_for_symbols`: split the
+  canonical symbol, seek `exchange` by `exchange_code`, then `listing` by the
+  `(exchange_id, symbol)` UNIQUE index)
 - downstream joins from facts, market data, metrics, and primary-listing status
 - FX currency discovery and currency-scoped data checks
 

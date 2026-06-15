@@ -9,6 +9,7 @@ This page lists the current secondary indexes from the post-refactor schema. Pri
 - `listing`
   - Migration 077 dropped `idx_listing_currency_nonnull (currency) WHERE currency IS NOT NULL` because migration 069 made `listing.currency` NOT NULL, so the partial predicate matched every row and the index never stayed partial. No read query filters `listing` by currency: symbol lookups use the `(exchange_id, symbol)` UNIQUE auto-index, and FX currency discovery reads `financial_facts`, not `listing`.
   - Migration 067 dropped `idx_listing_exchange (exchange_id)` because the existing `UNIQUE (exchange_id, symbol)` auto-index already leads with `exchange_id`.
+  - The `(exchange_id, symbol)` UNIQUE auto-index also serves the targeted `--symbols` scope resolution (`SecurityRepository.list_supported_listings_for_symbols`): each canonical symbol is split into `(ticker, exchange_code)`, `exchange` is seeked by its UNIQUE `exchange_code`, and `listing` is then seeked by `(exchange_id, symbol)` via the join, so an explicit `--symbols` request touches only the requested rows instead of scanning the supported universe. No standalone `listing.symbol` index is needed — the composite auto-index already covers `symbol` as its second column once the join supplies `exchange_id`.
 - `provider_listing`
   - `idx_provider_listing_listing (listing_id)`
     - supports canonical-listing joins back into provider rows
