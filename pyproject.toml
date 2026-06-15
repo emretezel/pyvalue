@@ -60,3 +60,4 @@ no_implicit_optional = true    # an implicit None default does not widen to Opti
 warn_unused_ignores = true     # a stale `# type: ignore` is itself an error
 warn_redundant_casts = true    # a cast() that does nothing is an error
 warn_unused_configs = true
+warn_unreachable = true         # dead branches (e.g. a narrowed-away Optional) are errors

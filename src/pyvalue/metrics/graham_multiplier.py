@@ -227,8 +227,6 @@ class GrahamMultiplierMetric:
                 return snapshot
         if hasattr(market_repo, "latest_price_by_id"):
             price_entry = market_repo.latest_price_by_id(listing_id)
-            if isinstance(price_entry, PriceData):
-                return price_entry
             if isinstance(price_entry, tuple) and len(price_entry) >= 2:
                 as_of, price = price_entry[0], price_entry[1]
                 return PriceData(symbol="", price=price, as_of=as_of)

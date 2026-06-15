@@ -1099,20 +1099,19 @@ class EODHDFactsNormalizer:
 
     def _normalize_eps_series(
         self,
-        entries: Dict,
+        entries: Dict | list,
         base_currency: Optional[str],
         implied_eps: Optional[Dict[str, float]] = None,
     ) -> List[tuple[str, float, Optional[str]]]:
         ordered: List[tuple[str, Dict]] = []
+        items: list[tuple[object, object]]
         if isinstance(entries, dict):
-            items = entries.items()
-        elif isinstance(entries, list):
+            items = list(entries.items())
+        else:
             items = [
                 (entry.get("date") or entry.get("Date") or entry.get("period"), entry)
                 for entry in entries
             ]
-        else:
-            items = []
         for key, entry in items:
             if not isinstance(entry, dict):
                 continue
@@ -1324,8 +1323,6 @@ class EODHDFactsNormalizer:
         derived_concept: str,
         symbol: str,
     ) -> Optional[float]:
-        if record.value is None:
-            return None
         return convert_money_value(
             amount=record.value,
             source_currency=record.currency,
@@ -1790,8 +1787,6 @@ class EODHDFactsNormalizer:
         for base in stockholders_equity.values():
             period_key = self._period_key(base)
             if period_key in existing_periods and not override:
-                continue
-            if base.value is None:
                 continue
             preferred = self._pick_period_record(indexed, "PreferredStock", period_key)
             noncontrolling_rec = self._pick_period_record(

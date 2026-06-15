@@ -119,8 +119,6 @@ def _refresh_supported_tickers_for_exchange(
     rows = client.list_symbols(exchange_norm)
     filtered_rows: List[Dict[str, object]] = []
     for row in rows:
-        if not isinstance(row, dict):
-            continue
         code = (row.get("Code") or "").strip()
         if not code:
             continue

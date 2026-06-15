@@ -707,7 +707,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 all_supported=args.all_supported,
             )
         parser.error(f"Unknown command: {args.command}")
-        return 2
     except KeyboardInterrupt:
         return _cancel_cli_command("Cancelled by user.")
 

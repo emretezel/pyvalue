@@ -207,12 +207,12 @@ class FinancialFactsRefreshStateRecord:
 class MetricComputeStatusRecord:
     """Latest persisted metric-computation attempt for one listing/metric.
 
-    ``symbol`` is an optional display label carried only by the symbol-keyed
-    readers and writer; the natural-identity (``*_by_id``) readers leave it
-    ``None`` because the availability logic never reads it (it consumes only the
-    status and the freshness watermarks). The field is slated for removal once
-    the write path is fully ``listing_id``-keyed (Stage 4 of the identity
-    refactor).
+    ``listing_id`` is the natural identity used by the id-keyed writer
+    (:meth:`MetricComputeStatusRepository.upsert_many_by_id`). ``symbol`` is an
+    optional display label carried only by the legacy symbol-keyed writer; the
+    natural-identity (``*_by_id``) readers leave both the symbol unset and the
+    listing id populated, because the availability logic reads neither (it
+    consumes only the status and the freshness watermarks).
     """
 
     metric_id: str
@@ -225,6 +225,7 @@ class MetricComputeStatusRecord:
     market_data_as_of: Optional[str] = None
     market_data_updated_at: Optional[str] = None
     symbol: Optional[str] = None
+    listing_id: Optional[int] = None
 
 
 # Row shape consumed by ``FinancialFactsRepository.replace_fact_rows`` in column
@@ -257,6 +258,18 @@ class MetricRecord(NamedTuple):
 
 StoredMetricRow = Tuple[
     str,
+    str,
+    float,
+    str,
+    MetricUnitKind,
+    Optional[str],
+    Optional[str],
+]
+
+# Natural-identity row shape consumed by ``MetricsRepository.upsert_many_by_id`` in
+# column order: listing_id, metric_id, value, as_of, unit_kind, currency, unit_label.
+IdKeyedStoredMetricRow = Tuple[
+    int,
     str,
     float,
     str,

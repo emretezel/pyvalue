@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from dataclasses import replace
 from typing import (
     Dict,
     Iterable,
@@ -32,6 +33,7 @@ from .base import (
     _utc_now_iso,
 )
 from .records import (
+    IdKeyedStoredMetricRow,
     MarketSnapshotRecord,
     MetricComputeStatusRecord,
     MetricRecord,
@@ -109,9 +111,16 @@ class MetricsRepository(SQLiteStore):
         connection: Optional[sqlite3.Connection] = None,
         commit: bool = True,
     ) -> int:
+        """Symbol-keyed wrapper over :meth:`upsert_many_by_id`.
+
+        Resolves each row's symbol to its ``listing_id`` (using a supplied
+        ``ids_by_symbol`` map when present, else the bulk resolver) and defers the
+        write to the natural-identity path. Catalog-read-only: a row for an
+        uncataloged symbol is skipped (never created); the issuer/listing catalog
+        is owned by refresh-supported-tickers.
+        """
+
         self.initialize_schema()
-        # Materialise the iterable once; it is scanned several times below
-        # (unique-symbol collection, security-id resolution, the executemany).
         metric_rows: List[StoredMetricRow] = list(rows)
         if not metric_rows:
             return 0
@@ -124,10 +133,6 @@ class MetricsRepository(SQLiteStore):
             seen_symbols.add(symbol)
             unique_symbols.append(symbol)
 
-        # Callers that already hold the listing_id (compute-metrics carries it
-        # from scope resolution) supply ``ids_by_symbol`` so this write performs
-        # no symbol->id resolution at all. Only symbols absent from the map fall
-        # through to the resolver, preserving the standalone-caller contract.
         security_ids: Dict[str, int] = dict(ids_by_symbol or {})
         unresolved = [symbol for symbol in unique_symbols if symbol not in security_ids]
         if unresolved:
@@ -137,18 +142,15 @@ class MetricsRepository(SQLiteStore):
                     connection=connection,
                 )
             )
-        # Catalog-read-only: a row for an uncataloged symbol is skipped (the
-        # comprehension below keeps only resolved symbols), never created. The
-        # issuer/listing catalog is owned by refresh-supported-tickers.
         _warn_uncataloged_symbols(unique_symbols, security_ids, "metric")
-        persisted_rows = [
+        id_rows: List[IdKeyedStoredMetricRow] = [
             (
                 security_ids[symbol],
                 metric_id,
                 value,
                 as_of,
                 unit_kind,
-                metric_currency_or_none(unit_kind, currency),
+                currency,
                 unit_label,
             )
             for (
@@ -161,6 +163,38 @@ class MetricsRepository(SQLiteStore):
                 unit_label,
             ) in metric_rows
             if symbol in security_ids
+        ]
+        return self.upsert_many_by_id(id_rows, connection=connection, commit=commit)
+
+    def upsert_many_by_id(
+        self,
+        rows: Iterable[IdKeyedStoredMetricRow],
+        *,
+        connection: Optional[sqlite3.Connection] = None,
+        commit: bool = True,
+    ) -> int:
+        """Persist metric values by natural ``listing_id`` identity (no resolution)."""
+
+        self.initialize_schema()
+        persisted_rows = [
+            (
+                int(listing_id),
+                metric_id,
+                value,
+                as_of,
+                unit_kind,
+                metric_currency_or_none(unit_kind, currency),
+                unit_label,
+            )
+            for (
+                listing_id,
+                metric_id,
+                value,
+                as_of,
+                unit_kind,
+                currency,
+                unit_label,
+            ) in rows
         ]
         if not persisted_rows:
             return 0
@@ -373,11 +407,10 @@ class MetricComputeStatusRepository(SQLiteStore):
         all_rows = list(rows)
         if not all_rows:
             return 0
-        # The symbol-keyed writer resolves the target listing from a display
-        # symbol, so it persists only rows that carry one. Natural-identity
-        # status rows (``symbol=None``, produced by the ``*_by_id`` readers) are
-        # never routed here; the id-keyed write path arrives with the compute
-        # worker flip (Stage 2b).
+        # The symbol-keyed wrapper resolves the target listing from a display
+        # symbol and defers to the natural-identity writer. Rows that carry no
+        # symbol are ignored here; emit those through ``upsert_many_by_id`` with
+        # ``listing_id`` set.
         symbol_rows: List[Tuple[str, MetricComputeStatusRecord]] = [
             (row.symbol.strip().upper(), row)
             for row in all_rows
@@ -409,13 +442,35 @@ class MetricComputeStatusRepository(SQLiteStore):
                 )
             )
         # Catalog-read-only, like the metric values writer: an uncataloged symbol
-        # is skipped (the payload below keeps only resolved symbols), never
-        # created.
+        # is skipped (never created).
         _warn_uncataloged_symbols(unique_symbols, security_ids, "metric-compute-status")
 
+        id_rows = [
+            replace(row, listing_id=security_ids[symbol])
+            for symbol, row in symbol_rows
+            if symbol in security_ids
+        ]
+        return self.upsert_many_by_id(id_rows, connection=connection, commit=commit)
+
+    def upsert_many_by_id(
+        self,
+        rows: Iterable[MetricComputeStatusRecord],
+        *,
+        connection: Optional[sqlite3.Connection] = None,
+        commit: bool = True,
+    ) -> int:
+        """Persist latest-attempt status rows by natural ``listing_id`` identity.
+
+        Rows must carry ``listing_id``; any with ``listing_id is None`` are
+        skipped (the symbol-keyed :meth:`upsert_many` is the path for symbol-only
+        rows).
+        """
+
+        if connection is None:
+            self.initialize_schema()
         payload = [
             (
-                security_ids[symbol],
+                int(row.listing_id),
                 row.metric_id,
                 row.status,
                 row.reason_code,
@@ -426,8 +481,8 @@ class MetricComputeStatusRepository(SQLiteStore):
                 row.market_data_as_of,
                 row.market_data_updated_at,
             )
-            for symbol, row in symbol_rows
-            if symbol in security_ids
+            for row in rows
+            if row.listing_id is not None
         ]
         if not payload:
             return 0
