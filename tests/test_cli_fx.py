@@ -24,6 +24,7 @@ from pyvalue.persistence.storage import (
     MetricsRepository,
     SupportedTickerRepository,
 )
+from pyvalue.persistence.storage.fx import _PAIR_COVERAGE_SQL
 
 from conftest import seed_exchange
 
@@ -507,3 +508,133 @@ def test_cmd_refresh_fx_rates_eodhd_marks_failure_when_initial_fetch_returns_no_
     assert "No FX history returned" in (state.last_error or "")
     output = capsys.readouterr().out
     assert "failed_pairs=1" in output
+
+
+def test_pair_coverage_query_uses_split_index_seeks(tmp_path: Path) -> None:
+    """Regression: ``pair_coverage`` must resolve MIN and MAX as two separate
+    single-aggregate index-endpoint seeks, not one combined ``MIN(),MAX()``
+    that scans the whole pair group in ``idx_fx_rates_pair_date``.
+
+    A combined two-aggregate statement defeats SQLite's min/max optimization
+    and degrades to a full covering-index scan of the pair (~500x slower on the
+    largest stored pair). The split form shows up in the query plan as two
+    independent SCALAR SUBQUERY nodes, each a covering-index search; the
+    combined form shows a single search and no scalar subqueries.
+    """
+
+    db_path = tmp_path / "fx_coverage_plan.db"
+    repo = FXRatesRepository(db_path)
+    repo.initialize_schema()
+    # Populate the pair so the planner is choosing over real rows.
+    repo.upsert_many(
+        [
+            FXRateRecord(
+                provider="EODHD",
+                rate_date="2024-01-01",
+                base_currency="EUR",
+                quote_currency="USD",
+                rate=1.09,
+                fetched_at="2024-01-01T00:00:00+00:00",
+                source_kind="provider",
+            ),
+            FXRateRecord(
+                provider="EODHD",
+                rate_date="2024-01-02",
+                base_currency="EUR",
+                quote_currency="USD",
+                rate=1.10,
+                fetched_at="2024-01-02T00:00:00+00:00",
+                source_kind="provider",
+            ),
+        ]
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        plan_rows = conn.execute(
+            "EXPLAIN QUERY PLAN " + _PAIR_COVERAGE_SQL,
+            ("EODHD", "EUR", "USD", "EODHD", "EUR", "USD"),
+        ).fetchall()
+    plan = " | ".join(str(row[-1]) for row in plan_rows)
+
+    assert plan.count("SCALAR SUBQUERY") == 2, plan
+    assert plan.count("USING COVERING INDEX idx_fx_rates_pair_date") == 2, plan
+    # And the split form still returns the correct coverage.
+    assert repo.pair_coverage("EODHD", "EUR", "USD") == ("2024-01-01", "2024-01-02")
+
+
+def test_refresh_fx_rates_widens_coverage_without_post_upsert_rescan(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression: the refresh loop must read coverage once per pair (to plan
+    ranges) and then widen it in-process from the upserted batch -- it must not
+    re-query ``fx_rates`` coverage after every upsert.
+
+    The post-upsert recompute was a redundant full-group MIN/MAX scan; a second
+    ``pair_coverage`` call per refreshable pair means it has returned.
+    """
+
+    db_path = tmp_path / "refresh_fx_no_rescan.db"
+
+    coverage_calls: list[tuple[str, str, str]] = []
+    original_pair_coverage = FXRatesRepository.pair_coverage
+
+    def counting_pair_coverage(
+        self: FXRatesRepository,
+        provider: str,
+        base_currency: str,
+        quote_currency: str,
+    ) -> tuple[str | None, str | None]:
+        coverage_calls.append((provider, base_currency, quote_currency))
+        return original_pair_coverage(self, provider, base_currency, quote_currency)
+
+    monkeypatch.setattr(FXRatesRepository, "pair_coverage", counting_pair_coverage)
+
+    class FakeProvider(_BaseFakeEODHDFXProvider):
+        def fetch_history(
+            self, *, canonical_symbol: str, start_date: date, end_date: date
+        ) -> list[FXRateRecord]:
+            # Two rows in one window: the old code would have rescanned coverage
+            # once after this single upsert; the new code derives it in-process.
+            return [
+                FXRateRecord(
+                    provider="EODHD",
+                    rate_date="2024-01-01",
+                    base_currency="EUR",
+                    quote_currency="USD",
+                    rate=1.09,
+                    fetched_at="2024-01-01T00:00:00+00:00",
+                    source_kind="provider",
+                ),
+                FXRateRecord(
+                    provider="EODHD",
+                    rate_date="2024-01-02",
+                    base_currency="EUR",
+                    quote_currency="USD",
+                    rate=1.10,
+                    fetched_at="2024-01-02T00:00:00+00:00",
+                    source_kind="provider",
+                ),
+            ]
+
+    patch_cli(monkeypatch, "EODHDFXProvider", FakeProvider)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "secret")
+
+    rc = cli.cmd_refresh_fx_rates(
+        database=str(db_path),
+        start_date="2024-01-01",
+        end_date="2024-01-02",
+    )
+
+    assert rc == 0
+    # Exactly one coverage read for the single refreshable pair (EURUSD): the
+    # pre-plan read. No post-upsert rescan.
+    assert coverage_calls == [("EODHD", "EUR", "USD")]
+
+    # Coverage widened in-process must match what a fresh DB read reports.
+    state = FXRefreshStateRepository(db_path).fetch("EODHD", "EURUSD")
+    assert state is not None
+    assert (state.min_rate_date, state.max_rate_date) == ("2024-01-01", "2024-01-02")
+    assert FXRatesRepository(db_path).pair_coverage("EODHD", "EUR", "USD") == (
+        "2024-01-01",
+        "2024-01-02",
+    )

@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import (
     Optional,
+    Sequence,
 )
 
 from pyvalue.currency import (
@@ -17,6 +18,7 @@ from pyvalue.money.fx import (
     EODHDFXProvider,
 )
 from pyvalue.persistence.storage import (
+    FXRateRecord,
     FXRefreshStateRepository,
     FXRatesRepository,
     FXSupportedPairRecord,
@@ -162,6 +164,31 @@ def _plan_eodhd_fx_refresh_ranges(
     return ranges, next_full
 
 
+def _extend_coverage(
+    current_min: Optional[str],
+    current_max: Optional[str],
+    rows: Sequence[FXRateRecord],
+) -> tuple[Optional[str], Optional[str]]:
+    """Widen stored min/max coverage by the dates in a freshly upserted batch.
+
+    Upserts only insert or refresh rows inside the fetched window -- they never
+    delete -- so a pair's new coverage is its prior coverage widened by the
+    batch's own dates. Deriving it here avoids re-querying ``fx_rates`` with a
+    second per-range ``pair_coverage`` MIN/MAX scan. ``rate_date`` values are
+    zero-padded ISO-8601 strings, so lexical min/max match chronological order
+    and reproduce exactly what ``pair_coverage`` would return after the upsert.
+    """
+
+    batch_dates = [record.rate_date for record in rows if record.rate_date]
+    if not batch_dates:
+        return current_min, current_max
+    batch_min = min(batch_dates)
+    batch_max = max(batch_dates)
+    new_min = batch_min if current_min is None else min(current_min, batch_min)
+    new_max = batch_max if current_max is None else max(current_max, batch_max)
+    return new_min, new_max
+
+
 def _cmd_refresh_fx_rates_eodhd(
     *,
     database: str,
@@ -304,11 +331,9 @@ def _cmd_refresh_fx_rates_eodhd(
                 pair_failed = True
                 break
             stored += fx_repo.upsert_many(rows)
-            current_min, current_max = fx_repo.pair_coverage(
-                provider.provider_name,
-                base_currency,
-                quote_currency,
-            )
+            # Widen coverage from the rows we just stored rather than issuing a
+            # second full-group MIN/MAX scan of fx_rates per range.
+            current_min, current_max = _extend_coverage(current_min, current_max, rows)
         if pair_failed:
             failed_pairs += 1
             completed_pairs += 1

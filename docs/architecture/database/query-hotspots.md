@@ -87,6 +87,11 @@ This page maps the end-to-end pipeline to the tables and indexes that matter mos
   - `idx_fx_supported_pairs_refreshable`
   - `fx_refresh_state` PK
   - `idx_fx_rates_pair_date`
+- Per-pair coverage cost:
+  - one `pair_coverage` read per refreshable pair (to plan missing ranges),
+    issued as split MIN/MAX index-endpoint seeks rather than a full-group scan
+  - after each range upsert, coverage is widened in-process from the upserted
+    batch's own dates, so there is no second coverage scan per range
 - Review focus:
   - check whether the separate FX state tables are justified by the refresh algorithm complexity
 

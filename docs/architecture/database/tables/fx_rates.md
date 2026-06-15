@@ -53,7 +53,11 @@ One row per `(provider, rate_date, base_currency, quote_currency)`.
 
 - direct pair/date lookups
 - inverse and triangulated FX lookup support
-- historical coverage checks
+- historical coverage checks (`pair_coverage`): MIN and MAX `rate_date` are
+  read as two separate single-aggregate subqueries so each resolves to one
+  index-endpoint seek on `idx_fx_rates_pair_date`. A combined `MIN(),MAX()` in
+  one statement would defeat SQLite's min/max optimization and scan the whole
+  pair group instead.
 
 ## Main Write Paths
 
