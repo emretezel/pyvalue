@@ -3779,6 +3779,41 @@ def test_list_supported_listings_returns_ids_matching_symbol_scope(
     assert [symbol for _, symbol in lse_only] == ["CCC.LSE"]
 
 
+def test_list_supported_listings_for_symbols_targeted_lookup(
+    tmp_path: Path,
+) -> None:
+    """Targeted ``--symbols`` resolve returns (listing_id, is_primary) per match.
+
+    Only supported listings appear; an unsupported symbol is simply absent, and a
+    secondary listing reports ``is_primary=False``. The ids agree with the
+    whole-universe ``list_supported_listings`` they replace for the ``--symbols``
+    scope path.
+    """
+    db_path = tmp_path / "supported-listings-for-symbols.db"
+    _seed_listing(db_path, "AAA.US")
+    _seed_listing(db_path, "BBB.US")
+    _seed_listing(db_path, "CCC.LSE")
+    # Mark BBB.US secondary so is_primary must reflect it.
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE listing SET primary_listing_status = 'secondary' WHERE symbol = ?",
+            ("BBB",),
+        )
+
+    repo = SecurityRepository(db_path)
+    resolved = repo.list_supported_listings_for_symbols(["AAA.US", "BBB.US", "ZZZ.US"])
+
+    # Unsupported symbol is absent; supported ones carry id + primary flag.
+    assert set(resolved) == {"AAA.US", "BBB.US"}
+    assert resolved["AAA.US"][1] is True
+    assert resolved["BBB.US"][1] is False
+
+    # Ids match the whole-universe scope read they replace.
+    full = {symbol: listing_id for listing_id, symbol in repo.list_supported_listings()}
+    assert resolved["AAA.US"][0] == full["AAA.US"]
+    assert resolved["BBB.US"][0] == full["BBB.US"]
+
+
 def test_metrics_upsert_many_uses_supplied_ids_without_resolving(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

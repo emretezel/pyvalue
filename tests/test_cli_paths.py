@@ -13,7 +13,7 @@ from pyvalue.cli import (
     _resolve_provider_scope,
     _validate_scope_selector,
 )
-from pyvalue.persistence.storage import SupportedTickerRepository
+from pyvalue.persistence.storage import SecurityRepository, SupportedTickerRepository
 from pyvalue.universe import Listing
 
 from conftest import seed_exchange
@@ -98,6 +98,62 @@ def test_resolve_canonical_scope_listings_defaults_to_all_supported(
     assert [symbol for _, symbol in listings] == ["AAA.US", "BBB.US"]
     assert all(isinstance(listing_id, int) for listing_id, _ in listings)
     assert explicit is None
+    assert exchanges is None
+
+
+def test_resolve_canonical_scope_listings_symbols_uses_targeted_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``--symbols`` scope seeks only the requested tickers.
+
+    The id-bearing scope already holds each listing_id; for an explicit
+    ``--symbols`` request it must do a targeted seek, not materialise the whole
+    supported universe. We make the whole-universe read raise and assert the
+    symbol scope still resolves -- proving it took the targeted path.
+
+    Author: Emre Tezel
+    """
+    db_path = tmp_path / "symbol-scope.db"
+    repo = SupportedTickerRepository(db_path)
+    repo.initialize_schema()
+    seed_exchange(db_path, "US")
+    repo.replace_from_listings(
+        "EODHD",
+        "US",
+        [
+            Listing(
+                symbol="AAA.US",
+                security_name="AAA Inc",
+                exchange="NYSE",
+                currency="USD",
+            ),
+            Listing(
+                symbol="BBB.US",
+                security_name="BBB Inc",
+                exchange="NYSE",
+                currency="USD",
+            ),
+        ],
+    )
+
+    monkeypatch.setattr(
+        SecurityRepository,
+        "list_supported_listings",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("--symbols scope must not load the whole supported universe")
+        ),
+    )
+
+    listings, explicit, exchanges = _resolve_canonical_scope_listings(
+        str(db_path),
+        symbols=["AAA.US"],
+        exchange_codes=None,
+        all_supported=False,
+    )
+
+    assert [symbol for _, symbol in listings] == ["AAA.US"]
+    assert all(isinstance(listing_id, int) for listing_id, _ in listings)
+    assert explicit == ["AAA.US"]
     assert exchanges is None
 
 

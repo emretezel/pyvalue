@@ -530,6 +530,19 @@ class SupportedTickerRepository(SQLiteStore):
             primary_only=primary_only,
         )
 
+    def list_canonical_listings_for_symbols(
+        self,
+        symbols: Sequence[str],
+    ) -> Dict[str, Tuple[int, bool]]:
+        """Targeted ``{canonical_symbol: (listing_id, is_primary)}`` for given symbols.
+
+        The ``--symbols`` counterpart of :meth:`list_canonical_listings`: it seeks
+        only the requested tickers (index-driven) instead of loading the whole
+        supported universe just to validate and resolve a handful.
+        """
+
+        return self._security_repo().list_supported_listings_for_symbols(symbols)
+
     def list_canonical_symbol_name_pairs(
         self,
         exchange_codes: Optional[Sequence[str]] = None,

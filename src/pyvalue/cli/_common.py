@@ -561,31 +561,21 @@ def _resolve_canonical_scope_listings(
         normalized_symbols = [
             _normalize_canonical_scope_symbol(symbol) for symbol in symbol_filters
         ]
-        # One pass over the supported universe validates membership and captures
-        # the listing_id in the same dict, so the id is kept rather than just a
-        # set() membership flag.
-        listing_id_by_symbol = {
-            symbol: listing_id
-            for listing_id, symbol in ticker_repo.list_canonical_listings()
-        }
-        missing = [
-            symbol
-            for symbol in normalized_symbols
-            if symbol not in listing_id_by_symbol
-        ]
+        # Targeted, index-driven resolve of only the requested tickers (seek
+        # exchange by exchange_code, then listing by the (exchange_id, symbol)
+        # composite index) -- never materialise the whole supported universe just
+        # to validate a handful. The map carries both the listing_id and whether
+        # the listing is primary, so membership and the primary check come from
+        # this single small result.
+        resolved = ticker_repo.list_canonical_listings_for_symbols(normalized_symbols)
+        missing = [symbol for symbol in normalized_symbols if symbol not in resolved]
         if missing:
             raise SystemExit(
                 f"Unsupported canonical tickers: {', '.join(missing)}. Populate provider_listing first."
             )
         if primary_only:
-            primary_supported = {
-                symbol
-                for _, symbol in ticker_repo.list_canonical_listings(primary_only=True)
-            }
             secondary = [
-                symbol
-                for symbol in normalized_symbols
-                if symbol not in primary_supported
+                symbol for symbol in normalized_symbols if not resolved[symbol][1]
             ]
             if secondary:
                 raise SystemExit(
@@ -593,7 +583,7 @@ def _resolve_canonical_scope_listings(
                     f"classification is available: {', '.join(secondary)}"
                 )
         return (
-            [(listing_id_by_symbol[symbol], symbol) for symbol in normalized_symbols],
+            [(resolved[symbol][0], symbol) for symbol in normalized_symbols],
             normalized_symbols,
             None,
         )

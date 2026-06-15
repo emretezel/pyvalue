@@ -808,6 +808,77 @@ class SecurityRepository(SQLiteStore):
             rows = conn.execute(" ".join(query), params).fetchall()
         return [(int(row["listing_id"]), row["canonical_symbol"]) for row in rows]
 
+    def list_supported_listings_for_symbols(
+        self,
+        symbols: Sequence[str],
+        chunk_size: int = 500,
+    ) -> Dict[str, Tuple[int, bool]]:
+        """Targeted ``{canonical_symbol: (listing_id, is_primary)}`` for given symbols.
+
+        The ``--symbols`` counterpart of :meth:`list_supported_listings`: rather
+        than materialising the whole supported universe to validate a handful of
+        requested tickers, it splits each canonical symbol into
+        ``(ticker, exchange_code)`` and seeks the supported listing directly --
+        an ``exchange_code`` index seek, then the ``(exchange_id, symbol)``
+        composite index seek via the join, then ``provider_listing`` by
+        ``listing_id``. Only supported matches appear in the map; a requested
+        symbol that is absent is not supported. ``is_primary`` reuses
+        :func:`_primary_listing_predicate`, so it is ``False`` only for explicitly
+        secondary listings.
+        """
+
+        self.initialize_schema()
+        normalized = _normalized_codes(symbols)
+        if not normalized:
+            return {}
+
+        # Split each canonical symbol once so the SQL probes (l.symbol,
+        # e.exchange_code) directly; concatenating the columns in the WHERE clause
+        # would defeat the UNIQUE (exchange_id, symbol) index.
+        pairs: List[Tuple[str, str]] = []
+        for canonical in normalized:
+            ticker, exchange = _normalize_symbol_base(canonical)
+            if exchange is None:
+                continue
+            pairs.append((ticker, exchange))
+        if not pairs:
+            return {}
+
+        effective_chunk = min(chunk_size, SQLITE_MAX_BOUND_PARAMETERS // 2)
+        resolved: Dict[str, Tuple[int, bool]] = {}
+
+        def _query(conn: sqlite3.Connection) -> None:
+            for chunk in _batched(pairs, effective_chunk):
+                clause, params, wanted = _listing_pair_filter(chunk)
+                rows = conn.execute(
+                    f"""
+                    SELECT DISTINCT
+                        l.listing_id AS listing_id,
+                        l.symbol AS ticker,
+                        e.exchange_code AS exchange_code,
+                        l.symbol || '.' || e.exchange_code AS canonical_symbol,
+                        CASE WHEN {_primary_listing_predicate("l")} THEN 1 ELSE 0 END
+                            AS is_primary
+                    FROM provider_listing pl
+                    JOIN listing l ON l.listing_id = pl.listing_id
+                    JOIN "exchange" e ON e.exchange_id = l.exchange_id
+                    WHERE {clause}
+                    """,
+                    params,
+                ).fetchall()
+                for row in rows:
+                    # The two-IN predicate matches the cross product, so keep only
+                    # the exact pairs that were requested.
+                    if (row["ticker"], row["exchange_code"]) in wanted:
+                        resolved[row["canonical_symbol"]] = (
+                            int(row["listing_id"]),
+                            bool(row["is_primary"]),
+                        )
+
+        with self._connect() as conn:
+            _query(conn)
+        return resolved
+
     def list_supported_symbol_name_pairs(
         self,
         exchange_codes: Optional[Sequence[str]] = None,
