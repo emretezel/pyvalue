@@ -1202,7 +1202,7 @@ def test_financial_facts_repository_replace_facts_updates_refresh_state(
     refresh_record = refresh_repo.fetch("AAA.US")
 
     assert refresh_record is not None
-    assert refresh_record.symbol == "AAA.US"
+    assert refresh_record.listing_id == SecurityRepository(db_path).resolve_id("AAA.US")
     assert refresh_record.refreshed_at
 
 
@@ -3991,3 +3991,111 @@ def test_metric_compute_status_upsert_many_skips_uncataloged_symbol(
     assert repo.fetch("AAA.US", "m1") is not None
     assert repo.fetch("ZZZ.US", "m1") is None
     assert SecurityRepository(db_path).resolve_id("ZZZ.US") is None
+
+
+def test_id_keyed_metric_and_market_reads_match_symbol_forms(tmp_path: Path) -> None:
+    """The new ``*_by_id(s)`` readers return the same data as the symbol forms.
+
+    Stage 1 of the listing_id-identity refactor adds natural-identity readers
+    next to the symbol-keyed ones (which now delegate to them). They must be
+    behaviour-preserving so the pipeline can migrate to ``listing_id`` without
+    changing results. This also pins the new market read to the latest ``as_of``
+    and to reconstructing the canonical display symbol from ``listing ⋈
+    exchange`` (no ``securities`` view / double-listing join).
+    """
+
+    db_path = tmp_path / "id-reads.db"
+    seed_exchange(db_path, "LSE", currency="GBP")
+    security_repo = SecurityRepository(db_path)
+    aaa = security_repo.ensure("AAA", "LSE", currency="GBP")
+    bbb = security_repo.ensure("BBB", "LSE", currency="GBP")
+
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.upsert(
+        "AAA.LSE",
+        "market_cap",
+        1000.0,
+        "2025-01-02",
+        unit_kind="monetary",
+        currency="GBP",
+    )
+    metrics_repo.upsert(
+        "AAA.LSE", "current_ratio", 1.5, "2025-01-02", unit_kind="ratio"
+    )
+    metrics_repo.upsert(
+        "BBB.LSE",
+        "market_cap",
+        2000.0,
+        "2025-01-02",
+        unit_kind="monetary",
+        currency="GBP",
+    )
+
+    market_repo = MarketDataRepository(db_path)
+    market_repo.upsert_prices(
+        [
+            MarketDataUpdate(
+                security_id=aaa.security_id,
+                symbol="AAA.LSE",
+                as_of="2025-01-02",
+                price=10.0,
+                volume=100,
+                currency="GBP",
+            ),
+            MarketDataUpdate(
+                security_id=aaa.security_id,
+                symbol="AAA.LSE",
+                as_of="2025-01-03",
+                price=11.0,
+                volume=120,
+                currency="GBP",
+            ),
+            MarketDataUpdate(
+                security_id=bbb.security_id,
+                symbol="BBB.LSE",
+                as_of="2025-01-02",
+                price=20.0,
+                volume=200,
+                currency="GBP",
+            ),
+        ]
+    )
+
+    # Single metric read: id form equals symbol form; unknown metric is None.
+    assert metrics_repo.fetch_by_id(
+        aaa.security_id, "market_cap"
+    ) == metrics_repo.fetch("AAA.LSE", "market_cap")
+    assert metrics_repo.fetch_by_id(aaa.security_id, "missing") is None
+
+    # Bulk metric read: the id-keyed map carries the same records, keyed by id.
+    by_id = metrics_repo.fetch_many_by_ids(
+        [aaa.security_id, bbb.security_id], ["market_cap", "current_ratio"]
+    )
+    by_symbol = metrics_repo.fetch_many_for_symbols(
+        ["AAA.LSE", "BBB.LSE"], ["market_cap", "current_ratio"]
+    )
+    assert by_id[aaa.security_id] == by_symbol["AAA.LSE"]
+    assert by_id[bbb.security_id] == by_symbol["BBB.LSE"]
+
+    # Latest snapshot: id form == symbol form, picks the most-recent as_of, and
+    # rebuilds the canonical symbol.
+    rec_by_id = market_repo.latest_snapshot_record_by_id(aaa.security_id)
+    assert rec_by_id == market_repo.latest_snapshot_record("AAA.LSE")
+    assert rec_by_id is not None
+    assert rec_by_id.as_of == "2025-01-03"
+    assert rec_by_id.symbol == "AAA.LSE"
+    assert rec_by_id.security_id == aaa.security_id
+
+    snaps_by_id = market_repo.latest_snapshots_many_by_ids(
+        [aaa.security_id, bbb.security_id]
+    )
+    snaps_by_symbol = market_repo.latest_snapshots_many(["AAA.LSE", "BBB.LSE"])
+    assert snaps_by_id[aaa.security_id] == snaps_by_symbol["AAA.LSE"]
+    assert snaps_by_id[bbb.security_id] == snaps_by_symbol["BBB.LSE"]
+    assert snaps_by_id[aaa.security_id].as_of == "2025-01-03"
+
+    # Listing currency: id form == symbol form.
+    assert market_repo.ticker_currency_by_id(
+        aaa.security_id
+    ) == market_repo.ticker_currency("AAA.LSE")
+    assert market_repo.ticker_currency_by_id(aaa.security_id) == "GBP"

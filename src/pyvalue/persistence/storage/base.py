@@ -368,6 +368,28 @@ class SQLiteStore:
             ).fetchone()
         return normalize_currency_code(row[0]) if row else None
 
+    def ticker_currency_by_id(self, listing_id: int) -> Optional[str]:
+        """Return the base monetary currency for ``listing_id``.
+
+        The natural-identity counterpart of :meth:`ticker_currency`: ``currency``
+        lives on ``listing`` itself, so this is a single PK lookup with no symbol
+        resolution and no exchange join. Like the symbol form it collapses a
+        configured subunit (GBX) to its base (GBP).
+        """
+
+        apply_migrations(self.db_path)
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT currency
+                FROM listing
+                WHERE listing_id = ?
+                LIMIT 1
+                """,
+                (int(listing_id),),
+            ).fetchone()
+        return normalize_currency_code(row[0]) if row else None
+
     def listing_quote_currency(self, symbol: str) -> Optional[str]:
         """Return the stored listing quote currency for ``symbol``."""
 

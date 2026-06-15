@@ -190,17 +190,24 @@ class MarketSnapshotRecord:
 
 @dataclass(frozen=True)
 class FinancialFactsRefreshStateRecord:
-    """Latest financial-facts refresh watermark for one symbol."""
+    """Latest financial-facts refresh watermark for one listing."""
 
-    symbol: str
+    listing_id: int
     refreshed_at: str
 
 
 @dataclass(frozen=True)
 class MetricComputeStatusRecord:
-    """Latest persisted metric-computation attempt for one symbol/metric."""
+    """Latest persisted metric-computation attempt for one listing/metric.
 
-    symbol: str
+    ``symbol`` is an optional display label carried only by the symbol-keyed
+    readers and writer; the natural-identity (``*_by_id``) readers leave it
+    ``None`` because the availability logic never reads it (it consumes only the
+    status and the freshness watermarks). The field is slated for removal once
+    the write path is fully ``listing_id``-keyed (Stage 4 of the identity
+    refactor).
+    """
+
     metric_id: str
     status: Literal["success", "failure"]
     attempted_at: str
@@ -210,6 +217,7 @@ class MetricComputeStatusRecord:
     facts_refreshed_at: Optional[str] = None
     market_data_as_of: Optional[str] = None
     market_data_updated_at: Optional[str] = None
+    symbol: Optional[str] = None
 
 
 # Row shape consumed by ``FinancialFactsRepository.replace_fact_rows`` in column

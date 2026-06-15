@@ -200,10 +200,23 @@ class MetricsRepository(SQLiteStore):
         return len(persisted_rows)
 
     def fetch(self, symbol: str, metric_id: str) -> Optional[MetricRecord]:
+        """Symbol-keyed convenience over :meth:`fetch_by_id`.
+
+        Resolves the canonical symbol to its ``listing_id`` once, then defers to
+        the natural-identity read. Internal pipelines hold the ``listing_id`` and
+        call :meth:`fetch_by_id` directly.
+        """
+
         self.initialize_schema()
         security_id = self._security_repo().resolve_id(symbol)
         if security_id is None:
             return None
+        return self.fetch_by_id(security_id, metric_id)
+
+    def fetch_by_id(self, listing_id: int, metric_id: str) -> Optional[MetricRecord]:
+        """Fetch one stored metric by its natural ``listing_id`` identity."""
+
+        self.initialize_schema()
         with self._connect() as conn:
             row = conn.execute(
                 """
@@ -211,7 +224,7 @@ class MetricsRepository(SQLiteStore):
                 FROM metrics
                 WHERE listing_id = ? AND metric_id = ?
                 """,
-                (security_id, metric_id),
+                (int(listing_id), metric_id),
             ).fetchone()
         if row is None:
             return None
@@ -223,6 +236,74 @@ class MetricsRepository(SQLiteStore):
             unit_label=row["unit_label"],
         )
 
+    def fetch_many_by_ids(
+        self,
+        listing_ids: Sequence[int],
+        metric_ids: Sequence[str],
+        chunk_size: int = 500,
+    ) -> Dict[int, Dict[str, MetricRecord]]:
+        """Fetch requested stored metrics for a ``listing_id`` scope.
+
+        The natural-identity read used across the pipeline: the ``metrics`` PK is
+        ``(listing_id, metric_id)`` so each chunk is a pure indexed seek with no
+        symbol resolution and no re-keying. Returns ``{listing_id: {metric_id:
+        record}}``.
+        """
+
+        self.initialize_schema()
+        normalized_ids = sorted({int(x) for x in listing_ids if x is not None})
+        requested_metric_ids = sorted(
+            {
+                str(metric_id).strip()
+                for metric_id in metric_ids
+                if str(metric_id).strip()
+            }
+        )
+        if not normalized_ids or not requested_metric_ids:
+            return {}
+
+        metric_rows_by_id: Dict[int, Dict[str, MetricRecord]] = {}
+        metric_chunk_size = max(
+            1,
+            min(len(requested_metric_ids), SQLITE_MAX_BOUND_PARAMETERS // 2),
+        )
+
+        with self._connect() as conn:
+            for metric_chunk in _batched(requested_metric_ids, metric_chunk_size):
+                # A single ``listing_id IN (...)`` predicate, so the id chunk may
+                # use the whole bound-parameter budget minus the metric chunk --
+                # no ``// 2`` halving (that is only needed by the two-column
+                # ``(ticker, exchange)`` pair filter the symbol resolver uses).
+                id_chunk_size = max(
+                    1,
+                    min(chunk_size, SQLITE_MAX_BOUND_PARAMETERS - len(metric_chunk)),
+                )
+                for id_chunk in _batched(normalized_ids, id_chunk_size):
+                    id_placeholders = ", ".join("?" for _ in id_chunk)
+                    metric_placeholders = ", ".join("?" for _ in metric_chunk)
+                    rows = conn.execute(
+                        f"""
+                        SELECT listing_id, metric_id, value, as_of, unit_kind, currency, unit_label
+                        FROM metrics
+                        WHERE listing_id IN ({id_placeholders})
+                          AND metric_id IN ({metric_placeholders})
+                        """,
+                        list(id_chunk) + list(metric_chunk),
+                    ).fetchall()
+                    for row in rows:
+                        metric_rows_by_id.setdefault(int(row["listing_id"]), {})[
+                            row["metric_id"]
+                        ] = MetricRecord(
+                            value=row["value"],
+                            as_of=row["as_of"],
+                            unit_kind=row["unit_kind"],
+                            currency=metric_currency_or_none(
+                                row["unit_kind"], row["currency"]
+                            ),
+                            unit_label=row["unit_label"],
+                        )
+        return metric_rows_by_id
+
     def fetch_many_for_symbols(
         self,
         symbols: Sequence[str],
@@ -231,25 +312,17 @@ class MetricsRepository(SQLiteStore):
         *,
         security_ids_by_symbol: Optional[Mapping[str, int]] = None,
     ) -> Dict[str, Dict[str, MetricRecord]]:
-        """Fetch requested stored metrics for a symbol scope with chunked indexed reads.
+        """Symbol-keyed wrapper over :meth:`fetch_many_by_ids`.
 
         ``security_ids_by_symbol`` lets callers that already resolved their scope
         (run-screen / report-* via ``_resolve_canonical_scope_listings``) carry the
         natural ``listing_id`` straight in, eliminating the symbol->id round trip.
-        A superset map is fine -- only the requested ``symbols`` are queried -- so
-        the ranking pass can reuse the full scope map for a subset of passers.
+        A superset map is fine -- only the requested ``symbols`` are queried.
         """
 
         self.initialize_schema()
         normalized_symbols = _normalized_codes(symbols)
-        requested_metric_ids = sorted(
-            {
-                str(metric_id).strip()
-                for metric_id in metric_ids
-                if str(metric_id).strip()
-            }
-        )
-        if not normalized_symbols or not requested_metric_ids:
+        if not normalized_symbols:
             return {}
 
         resolved_security_ids = (
@@ -268,50 +341,15 @@ class MetricsRepository(SQLiteStore):
         if not symbol_by_security_id:
             return {}
 
-        metric_rows_by_symbol: Dict[str, Dict[str, MetricRecord]] = {}
-
-        metric_chunk_size = max(
-            1,
-            min(len(requested_metric_ids), SQLITE_MAX_BOUND_PARAMETERS // 2),
+        rows_by_id = self.fetch_many_by_ids(
+            list(symbol_by_security_id),
+            metric_ids,
+            chunk_size=chunk_size,
         )
-        security_ids = sorted(symbol_by_security_id.keys())
-
-        with self._connect() as conn:
-            for metric_chunk in _batched(requested_metric_ids, metric_chunk_size):
-                security_chunk_size = max(
-                    1,
-                    min(
-                        chunk_size,
-                        SQLITE_MAX_BOUND_PARAMETERS - len(metric_chunk),
-                    ),
-                )
-                for security_chunk in _batched(security_ids, security_chunk_size):
-                    security_placeholders = ", ".join("?" for _ in security_chunk)
-                    metric_placeholders = ", ".join("?" for _ in metric_chunk)
-                    rows = conn.execute(
-                        f"""
-                        SELECT listing_id, metric_id, value, as_of, unit_kind, currency, unit_label
-                        FROM metrics
-                        WHERE listing_id IN ({security_placeholders})
-                          AND metric_id IN ({metric_placeholders})
-                        """,
-                        list(security_chunk) + list(metric_chunk),
-                    ).fetchall()
-                    for row in rows:
-                        symbol = symbol_by_security_id[row["listing_id"]]
-                        metric_rows_by_symbol.setdefault(symbol, {})[
-                            row["metric_id"]
-                        ] = MetricRecord(
-                            value=row["value"],
-                            as_of=row["as_of"],
-                            unit_kind=row["unit_kind"],
-                            currency=metric_currency_or_none(
-                                row["unit_kind"], row["currency"]
-                            ),
-                            unit_label=row["unit_label"],
-                        )
-
-        return metric_rows_by_symbol
+        return {
+            symbol_by_security_id[listing_id]: metric_rows
+            for listing_id, metric_rows in rows_by_id.items()
+        }
 
 
 class MetricComputeStatusRepository(SQLiteStore):
@@ -332,14 +370,25 @@ class MetricComputeStatusRepository(SQLiteStore):
         connection: Optional[sqlite3.Connection] = None,
         commit: bool = True,
     ) -> int:
-        status_rows = list(rows)
-        if not status_rows:
+        all_rows = list(rows)
+        if not all_rows:
+            return 0
+        # The symbol-keyed writer resolves the target listing from a display
+        # symbol, so it persists only rows that carry one. Natural-identity
+        # status rows (``symbol=None``, produced by the ``*_by_id`` readers) are
+        # never routed here; the id-keyed write path arrives with the compute
+        # worker flip (Stage 2b).
+        symbol_rows: List[Tuple[str, MetricComputeStatusRecord]] = [
+            (row.symbol.strip().upper(), row)
+            for row in all_rows
+            if row.symbol is not None
+        ]
+        if not symbol_rows:
             return 0
 
-        unique_symbols = []
-        seen_symbols = set()
-        for row in status_rows:
-            symbol = row.symbol.strip().upper()
+        unique_symbols: List[str] = []
+        seen_symbols: set[str] = set()
+        for symbol, _row in symbol_rows:
             if symbol in seen_symbols:
                 continue
             seen_symbols.add(symbol)
@@ -366,7 +415,7 @@ class MetricComputeStatusRepository(SQLiteStore):
 
         payload = [
             (
-                security_ids[row.symbol.strip().upper()],
+                security_ids[symbol],
                 row.metric_id,
                 row.status,
                 row.reason_code,
@@ -377,8 +426,8 @@ class MetricComputeStatusRepository(SQLiteStore):
                 row.market_data_as_of,
                 row.market_data_updated_at,
             )
-            for row in status_rows
-            if row.symbol.strip().upper() in security_ids
+            for symbol, row in symbol_rows
+            if symbol in security_ids
         ]
         if not payload:
             return 0
@@ -421,10 +470,25 @@ class MetricComputeStatusRepository(SQLiteStore):
         return len(payload)
 
     def fetch(self, symbol: str, metric_id: str) -> Optional[MetricComputeStatusRecord]:
+        """Symbol-keyed convenience over :meth:`fetch_by_id`."""
+
         self.initialize_schema()
         security_id = self._security_repo().resolve_id(symbol)
         if security_id is None:
             return None
+        return self.fetch_by_id(security_id, metric_id)
+
+    def fetch_by_id(
+        self, listing_id: int, metric_id: str
+    ) -> Optional[MetricComputeStatusRecord]:
+        """Fetch one latest-attempt status row by natural ``listing_id`` identity.
+
+        Returns a record with ``symbol=None``: the availability logic that
+        consumes status reads the status and freshness watermarks, never the
+        display symbol.
+        """
+
+        self.initialize_schema()
         with self._connect() as conn:
             row = conn.execute(
                 """
@@ -434,12 +498,11 @@ class MetricComputeStatusRepository(SQLiteStore):
                 FROM metric_compute_status
                 WHERE listing_id = ? AND metric_id = ?
                 """,
-                (security_id, metric_id),
+                (int(listing_id), metric_id),
             ).fetchone()
         if row is None:
             return None
         return MetricComputeStatusRecord(
-            symbol=symbol.strip().upper(),
             metric_id=metric_id,
             status=row["status"],
             attempted_at=row["attempted_at"],
@@ -451,6 +514,73 @@ class MetricComputeStatusRepository(SQLiteStore):
             market_data_updated_at=row["market_data_updated_at"],
         )
 
+    def fetch_many_by_ids(
+        self,
+        listing_ids: Sequence[int],
+        metric_ids: Sequence[str],
+        chunk_size: int = 500,
+    ) -> Dict[int, Dict[str, MetricComputeStatusRecord]]:
+        """Latest-attempt status rows for a ``listing_id`` scope, keyed by id.
+
+        Records carry ``symbol=None`` (see :meth:`fetch_by_id`). The
+        ``metric_compute_status`` PK ``(listing_id, metric_id)`` serves each chunk
+        as an indexed seek.
+        """
+
+        self.initialize_schema()
+        normalized_ids = sorted({int(x) for x in listing_ids if x is not None})
+        requested_metric_ids = sorted(
+            {
+                str(metric_id).strip()
+                for metric_id in metric_ids
+                if str(metric_id).strip()
+            }
+        )
+        if not normalized_ids or not requested_metric_ids:
+            return {}
+
+        rows_by_id: Dict[int, Dict[str, MetricComputeStatusRecord]] = {}
+        metric_chunk_size = max(
+            1,
+            min(len(requested_metric_ids), SQLITE_MAX_BOUND_PARAMETERS // 2),
+        )
+
+        with self._connect() as conn:
+            for metric_chunk in _batched(requested_metric_ids, metric_chunk_size):
+                id_chunk_size = max(
+                    1,
+                    min(chunk_size, SQLITE_MAX_BOUND_PARAMETERS - len(metric_chunk)),
+                )
+                for id_chunk in _batched(normalized_ids, id_chunk_size):
+                    id_placeholders = ", ".join("?" for _ in id_chunk)
+                    metric_placeholders = ", ".join("?" for _ in metric_chunk)
+                    rows = conn.execute(
+                        f"""
+                        SELECT listing_id, metric_id, status, reason_code, reason_detail,
+                               attempted_at, value_as_of, facts_refreshed_at,
+                               market_data_as_of, market_data_updated_at
+                        FROM metric_compute_status
+                        WHERE listing_id IN ({id_placeholders})
+                          AND metric_id IN ({metric_placeholders})
+                        """,
+                        list(id_chunk) + list(metric_chunk),
+                    ).fetchall()
+                    for row in rows:
+                        rows_by_id.setdefault(int(row["listing_id"]), {})[
+                            row["metric_id"]
+                        ] = MetricComputeStatusRecord(
+                            metric_id=row["metric_id"],
+                            status=row["status"],
+                            attempted_at=row["attempted_at"],
+                            reason_code=row["reason_code"],
+                            reason_detail=row["reason_detail"],
+                            value_as_of=row["value_as_of"],
+                            facts_refreshed_at=row["facts_refreshed_at"],
+                            market_data_as_of=row["market_data_as_of"],
+                            market_data_updated_at=row["market_data_updated_at"],
+                        )
+        return rows_by_id
+
     def fetch_many_for_symbols(
         self,
         symbols: Sequence[str],
@@ -459,24 +589,16 @@ class MetricComputeStatusRepository(SQLiteStore):
         *,
         security_ids_by_symbol: Optional[Mapping[str, int]] = None,
     ) -> Dict[str, Dict[str, MetricComputeStatusRecord]]:
-        """Fetch the latest compute-status rows for a symbol scope.
+        """Symbol-keyed wrapper over :meth:`fetch_many_by_ids`.
 
         ``security_ids_by_symbol`` carries scope-resolved ``listing_id`` values in
-        (see :meth:`MetricsRepository.fetch_many_for_symbols`) so report-* commands
-        avoid the symbol->id re-resolution; a superset map only queries the
-        requested ``symbols``.
+        so report-* commands avoid the symbol->id re-resolution; a superset map
+        only queries the requested ``symbols``.
         """
 
         self.initialize_schema()
         normalized_symbols = _normalized_codes(symbols)
-        requested_metric_ids = sorted(
-            {
-                str(metric_id).strip()
-                for metric_id in metric_ids
-                if str(metric_id).strip()
-            }
-        )
-        if not normalized_symbols or not requested_metric_ids:
+        if not normalized_symbols:
             return {}
 
         resolved_security_ids = (
@@ -495,50 +617,15 @@ class MetricComputeStatusRepository(SQLiteStore):
         if not symbol_by_security_id:
             return {}
 
-        rows_by_symbol: Dict[str, Dict[str, MetricComputeStatusRecord]] = {}
-        metric_chunk_size = max(
-            1,
-            min(len(requested_metric_ids), SQLITE_MAX_BOUND_PARAMETERS // 2),
+        rows_by_id = self.fetch_many_by_ids(
+            list(symbol_by_security_id),
+            metric_ids,
+            chunk_size=chunk_size,
         )
-        security_ids = sorted(symbol_by_security_id.keys())
-
-        with self._connect() as conn:
-            for metric_chunk in _batched(requested_metric_ids, metric_chunk_size):
-                security_chunk_size = max(
-                    1,
-                    min(chunk_size, SQLITE_MAX_BOUND_PARAMETERS - len(metric_chunk)),
-                )
-                for security_chunk in _batched(security_ids, security_chunk_size):
-                    security_placeholders = ", ".join("?" for _ in security_chunk)
-                    metric_placeholders = ", ".join("?" for _ in metric_chunk)
-                    rows = conn.execute(
-                        f"""
-                        SELECT listing_id, metric_id, status, reason_code, reason_detail,
-                               attempted_at, value_as_of, facts_refreshed_at,
-                               market_data_as_of, market_data_updated_at
-                        FROM metric_compute_status
-                        WHERE listing_id IN ({security_placeholders})
-                          AND metric_id IN ({metric_placeholders})
-                        """,
-                        list(security_chunk) + list(metric_chunk),
-                    ).fetchall()
-                    for row in rows:
-                        symbol = symbol_by_security_id[row["listing_id"]]
-                        rows_by_symbol.setdefault(symbol, {})[row["metric_id"]] = (
-                            MetricComputeStatusRecord(
-                                symbol=symbol,
-                                metric_id=row["metric_id"],
-                                status=row["status"],
-                                attempted_at=row["attempted_at"],
-                                reason_code=row["reason_code"],
-                                reason_detail=row["reason_detail"],
-                                value_as_of=row["value_as_of"],
-                                facts_refreshed_at=row["facts_refreshed_at"],
-                                market_data_as_of=row["market_data_as_of"],
-                                market_data_updated_at=row["market_data_updated_at"],
-                            )
-                        )
-        return rows_by_symbol
+        return {
+            symbol_by_security_id[listing_id]: rows
+            for listing_id, rows in rows_by_id.items()
+        }
 
 
 class MarketDataRepository(SQLiteStore):
@@ -611,7 +698,14 @@ class MarketDataRepository(SQLiteStore):
             )
 
     def latest_snapshot(self, symbol: str) -> Optional[PriceData]:
-        record = self.latest_snapshot_record(symbol)
+        self.initialize_schema()
+        security_id = self._security_repo().resolve_id(symbol)
+        if security_id is None:
+            return None
+        return self.latest_snapshot_by_id(security_id)
+
+    def latest_snapshot_by_id(self, listing_id: int) -> Optional[PriceData]:
+        record = self.latest_snapshot_record_by_id(listing_id)
         if record is None:
             return None
         return PriceData(
@@ -628,24 +722,50 @@ class MarketDataRepository(SQLiteStore):
             return None
         return snapshot.as_of, snapshot.price
 
+    def latest_price_by_id(self, listing_id: int) -> Optional[Tuple[str, float]]:
+        snapshot = self.latest_snapshot_by_id(listing_id)
+        if snapshot is None:
+            return None
+        return snapshot.as_of, snapshot.price
+
     def latest_snapshot_record(self, symbol: str) -> Optional[MarketSnapshotRecord]:
         self.initialize_schema()
         security_id = self._security_repo().resolve_id(symbol)
         if security_id is None:
             return None
+        return self.latest_snapshot_record_by_id(security_id)
+
+    def latest_snapshot_record_by_id(
+        self, listing_id: int
+    ) -> Optional[MarketSnapshotRecord]:
+        """Latest stored snapshot for one ``listing_id``.
+
+        Joins ``market_data ⋈ listing ⋈ exchange`` -- enough to rebuild the
+        canonical display symbol and read the listing currency -- without the
+        redundant ``securities`` view + second ``listing`` join the symbol path
+        historically carried.
+        """
+
+        self.initialize_schema()
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT s.canonical_symbol, md.listing_id AS security_id, md.as_of, md.price, md.volume,
-                       l.currency, md.updated_at
+                SELECT
+                    md.listing_id AS security_id,
+                    l.symbol || '.' || e.exchange_code AS canonical_symbol,
+                    md.as_of,
+                    md.price,
+                    md.volume,
+                    l.currency,
+                    md.updated_at
                 FROM market_data md
-                JOIN securities s ON s.security_id = md.listing_id
                 JOIN listing l ON l.listing_id = md.listing_id
+                JOIN "exchange" e ON e.exchange_id = l.exchange_id
                 WHERE md.listing_id = ?
                 ORDER BY md.as_of DESC
                 LIMIT 1
                 """,
-                (security_id,),
+                (int(listing_id),),
             ).fetchone()
         if row is None:
             return None
@@ -671,6 +791,13 @@ class MarketDataRepository(SQLiteStore):
         security_ids_by_symbol: Optional[Mapping[str, int]] = None,
         connection: Optional[sqlite3.Connection] = None,
     ) -> Dict[str, MarketSnapshotRecord]:
+        """Symbol-keyed wrapper over :meth:`latest_snapshots_many_by_ids`.
+
+        ``security_ids_by_symbol`` carries scope-resolved ``listing_id`` values in
+        so no symbol->id round trip is needed; a superset map only queries the
+        requested ``symbols``.
+        """
+
         self.initialize_schema()
         normalized = _normalized_codes(symbols)
         if not normalized:
@@ -685,20 +812,49 @@ class MarketDataRepository(SQLiteStore):
                 connection=connection,
             )
         )
-        resolved_symbols = [
-            symbol for symbol in normalized if symbol in resolved_security_ids
-        ]
-        if not resolved_symbols:
+        symbol_by_security_id = {
+            resolved_security_ids[symbol]: symbol
+            for symbol in normalized
+            if symbol in resolved_security_ids
+        }
+        if not symbol_by_security_id:
             return {}
 
-        snapshots: Dict[str, MarketSnapshotRecord] = {}
+        snapshots_by_id = self.latest_snapshots_many_by_ids(
+            list(symbol_by_security_id),
+            chunk_size=chunk_size,
+            connection=connection,
+        )
+        return {
+            symbol_by_security_id[listing_id]: record
+            for listing_id, record in snapshots_by_id.items()
+        }
+
+    def latest_snapshots_many_by_ids(
+        self,
+        listing_ids: Sequence[int],
+        chunk_size: int = 500,
+        *,
+        connection: Optional[sqlite3.Connection] = None,
+    ) -> Dict[int, MarketSnapshotRecord]:
+        """Latest snapshot per ``listing_id`` via one ``MAX(as_of)`` CTE per chunk.
+
+        The natural-identity bulk read: ``market_data`` PK ``(listing_id, as_of)``
+        serves the grouped seek; ``listing ⋈ exchange`` rebuilds the canonical
+        display symbol and currency. A single ``listing_id IN (...)`` predicate, so
+        the chunk may use the full bound-parameter budget.
+        """
+
+        self.initialize_schema()
+        normalized_ids = sorted({int(x) for x in listing_ids if x is not None})
+        if not normalized_ids:
+            return {}
+
+        snapshots: Dict[int, MarketSnapshotRecord] = {}
 
         def _query(conn: sqlite3.Connection) -> None:
-            for chunk in _batched(resolved_symbols, chunk_size):
-                symbol_by_security_id = {
-                    resolved_security_ids[symbol]: symbol for symbol in chunk
-                }
-                placeholders = ", ".join("?" for _ in symbol_by_security_id)
+            for chunk in _batched(normalized_ids, chunk_size):
+                placeholders = ", ".join("?" for _ in chunk)
                 cursor = conn.execute(
                     f"""
                     WITH latest AS (
@@ -711,6 +867,7 @@ class MarketDataRepository(SQLiteStore):
                     )
                     SELECT
                         md.listing_id AS security_id,
+                        l.symbol || '.' || e.exchange_code AS canonical_symbol,
                         md.as_of,
                         md.price,
                         md.volume,
@@ -721,15 +878,15 @@ class MarketDataRepository(SQLiteStore):
                       ON md.listing_id = latest.listing_id
                      AND md.as_of = latest.as_of
                     JOIN listing l ON l.listing_id = md.listing_id
+                    JOIN "exchange" e ON e.exchange_id = l.exchange_id
                     ORDER BY md.listing_id
                     """,
-                    list(symbol_by_security_id),
+                    list(chunk),
                 )
                 for row in cursor:
-                    symbol = symbol_by_security_id[row["security_id"]]
-                    snapshots[symbol] = MarketSnapshotRecord(
+                    snapshots[int(row["security_id"])] = MarketSnapshotRecord(
                         security_id=row["security_id"],
-                        symbol=symbol,
+                        symbol=row["canonical_symbol"],
                         as_of=row["as_of"],
                         price=row["price"],
                         volume=row["volume"],

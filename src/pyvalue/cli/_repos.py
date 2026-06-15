@@ -471,8 +471,115 @@ class _StatusAwareMetricsRepository(_SchemaReadyMetricsRepository):
             states[symbol_upper] = per_symbol_states
         return states
 
+    def state_by_id(self, listing_id: int, metric_id: str) -> _MetricAvailabilityState:
+        """Natural-identity counterpart of :meth:`state`.
+
+        Reads the raw metric, the latest-attempt status, and (only when the
+        metric declares it uses them) the facts-refresh / market watermarks via
+        the ``*_by_id`` readers, so no symbol resolution occurs.
+        """
+
+        record = self._raw_metrics_repo.fetch_by_id(listing_id, metric_id)
+        status_record = self._status_repo.fetch_by_id(listing_id, metric_id)
+        facts_refresh_record = None
+        market_snapshot_record = None
+        metric_cls = REGISTRY.get(metric_id)
+        if metric_cls is not None and getattr(metric_cls, "uses_financial_facts", True):
+            facts_refresh_record = self._facts_refresh_repo.fetch_by_id(listing_id)
+        if metric_cls is not None and getattr(metric_cls, "uses_market_data", False):
+            market_snapshot_record = self._market_repo.latest_snapshot_record_by_id(
+                listing_id
+            )
+        return _build_metric_availability_state(
+            metric_id,
+            record,
+            status_record,
+            facts_refresh_record,
+            market_snapshot_record,
+        )
+
+    def states_many_by_ids(
+        self,
+        listing_ids: Sequence[int],
+        metric_ids: Sequence[str],
+        *,
+        chunk_size: int = 500,
+    ) -> Dict[int, Dict[str, _MetricAvailabilityState]]:
+        """Natural-identity counterpart of :meth:`states_many`.
+
+        Facts-refresh and market watermarks are fetched only for listings that
+        have a status row (mirroring :meth:`states_many`): when a metric has no
+        prior status, :func:`_build_metric_availability_state` ignores those
+        watermarks, so reading them would be wasted work.
+        """
+
+        normalized_ids = [int(listing_id) for listing_id in listing_ids]
+        requested_metric_ids = [
+            metric_id.strip() for metric_id in metric_ids if str(metric_id).strip()
+        ]
+        if not normalized_ids or not requested_metric_ids:
+            return {}
+
+        raw_rows = self._raw_metrics_repo.fetch_many_by_ids(
+            normalized_ids, requested_metric_ids, chunk_size=chunk_size
+        )
+        status_rows = self._status_repo.fetch_many_by_ids(
+            normalized_ids, requested_metric_ids, chunk_size=chunk_size
+        )
+        facts_refresh_ids = sorted(
+            {
+                listing_id
+                for listing_id, per_listing_statuses in status_rows.items()
+                for metric_id in per_listing_statuses.keys()
+                if getattr(REGISTRY.get(metric_id), "uses_financial_facts", True)
+            }
+        )
+        facts_refresh_rows = (
+            self._facts_refresh_repo.fetch_many_by_ids(
+                facts_refresh_ids, chunk_size=chunk_size
+            )
+            if facts_refresh_ids
+            else {}
+        )
+        market_snapshot_ids = sorted(
+            {
+                listing_id
+                for listing_id, per_listing_statuses in status_rows.items()
+                for metric_id in per_listing_statuses.keys()
+                if getattr(REGISTRY.get(metric_id), "uses_market_data", False)
+            }
+        )
+        market_snapshot_rows = (
+            self._market_repo.latest_snapshots_many_by_ids(
+                market_snapshot_ids, chunk_size=chunk_size
+            )
+            if market_snapshot_ids
+            else {}
+        )
+
+        states: Dict[int, Dict[str, _MetricAvailabilityState]] = {}
+        for listing_id in normalized_ids:
+            per_listing_states: Dict[str, _MetricAvailabilityState] = {}
+            listing_metric_rows = raw_rows.get(listing_id, {})
+            listing_status_rows = status_rows.get(listing_id, {})
+            facts_refresh_record = facts_refresh_rows.get(listing_id)
+            market_snapshot_record = market_snapshot_rows.get(listing_id)
+            for metric_id in requested_metric_ids:
+                per_listing_states[metric_id] = _build_metric_availability_state(
+                    metric_id,
+                    listing_metric_rows.get(metric_id),
+                    listing_status_rows.get(metric_id),
+                    facts_refresh_record,
+                    market_snapshot_record,
+                )
+            states[listing_id] = per_listing_states
+        return states
+
     def fetch(self, symbol: str, metric_id: str) -> Optional[MetricRecord]:
         return self.state(symbol, metric_id).record
+
+    def fetch_by_id(self, listing_id: int, metric_id: str) -> Optional[MetricRecord]:
+        return self.state_by_id(listing_id, metric_id).record
 
     def fetch_many_for_symbols(
         self,
@@ -495,6 +602,25 @@ class _StatusAwareMetricsRepository(_SchemaReadyMetricsRepository):
                     continue
                 rows_by_symbol.setdefault(symbol, {})[metric_id] = state.record
         return rows_by_symbol
+
+    def fetch_many_by_ids(
+        self,
+        listing_ids: Sequence[int],
+        metric_ids: Sequence[str],
+        chunk_size: int = 500,
+    ) -> Dict[int, Dict[str, MetricRecord]]:
+        states = self.states_many_by_ids(
+            listing_ids,
+            metric_ids,
+            chunk_size=chunk_size,
+        )
+        rows_by_id: Dict[int, Dict[str, MetricRecord]] = {}
+        for listing_id, per_listing_states in states.items():
+            for metric_id, state in per_listing_states.items():
+                if state.record is None:
+                    continue
+                rows_by_id.setdefault(listing_id, {})[metric_id] = state.record
+        return rows_by_id
 
 
 class _CachedMarketDataRepository:

@@ -64,10 +64,20 @@ class FinancialFactsRefreshStateRepository(SQLiteStore):
             conn.execute(sql, (int(security_id), timestamp))
 
     def fetch(self, symbol: str) -> Optional[FinancialFactsRefreshStateRecord]:
+        """Symbol-keyed convenience over :meth:`fetch_by_id`."""
+
         self.initialize_schema()
         security_id = self._security_repo().resolve_id(symbol)
         if security_id is None:
             return None
+        return self.fetch_by_id(security_id)
+
+    def fetch_by_id(
+        self, listing_id: int
+    ) -> Optional[FinancialFactsRefreshStateRecord]:
+        """Latest refresh watermark for one ``listing_id`` (PK lookup)."""
+
+        self.initialize_schema()
         with self._connect() as conn:
             row = conn.execute(
                 """
@@ -75,14 +85,56 @@ class FinancialFactsRefreshStateRepository(SQLiteStore):
                 FROM financial_facts_refresh_state
                 WHERE listing_id = ?
                 """,
-                (security_id,),
+                (int(listing_id),),
             ).fetchone()
         if row is None:
             return None
         return FinancialFactsRefreshStateRecord(
-            symbol=symbol.strip().upper(),
+            listing_id=int(listing_id),
             refreshed_at=row["refreshed_at"],
         )
+
+    def fetch_many_by_ids(
+        self,
+        listing_ids: Sequence[int],
+        chunk_size: int = 500,
+        *,
+        connection: Optional[sqlite3.Connection] = None,
+    ) -> Dict[int, FinancialFactsRefreshStateRecord]:
+        """Refresh watermarks for a ``listing_id`` scope, keyed by ``listing_id``."""
+
+        self.initialize_schema()
+        normalized_ids = sorted({int(x) for x in listing_ids if x is not None})
+        if not normalized_ids:
+            return {}
+
+        rows_by_id: Dict[int, FinancialFactsRefreshStateRecord] = {}
+
+        def _query(conn: sqlite3.Connection) -> None:
+            for chunk in _batched(normalized_ids, chunk_size):
+                placeholders = ", ".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""
+                    SELECT listing_id, refreshed_at
+                    FROM financial_facts_refresh_state
+                    WHERE listing_id IN ({placeholders})
+                    """,
+                    list(chunk),
+                ).fetchall()
+                for row in rows:
+                    rows_by_id[int(row["listing_id"])] = (
+                        FinancialFactsRefreshStateRecord(
+                            listing_id=int(row["listing_id"]),
+                            refreshed_at=row["refreshed_at"],
+                        )
+                    )
+
+        if connection is not None:
+            _query(connection)
+        else:
+            with self._connect() as conn:
+                _query(conn)
+        return rows_by_id
 
     def fetch_many_for_symbols(
         self,
@@ -92,6 +144,8 @@ class FinancialFactsRefreshStateRepository(SQLiteStore):
         security_ids_by_symbol: Optional[Mapping[str, int]] = None,
         connection: Optional[sqlite3.Connection] = None,
     ) -> Dict[str, FinancialFactsRefreshStateRecord]:
+        """Symbol-keyed wrapper over :meth:`fetch_many_by_ids`."""
+
         self.initialize_schema()
         normalized_symbols = _normalized_codes(symbols)
         if not normalized_symbols:
@@ -106,39 +160,23 @@ class FinancialFactsRefreshStateRepository(SQLiteStore):
                 connection=connection,
             )
         )
-        if not resolved_security_ids:
+        symbol_by_security_id = {
+            resolved_security_ids[symbol]: symbol
+            for symbol in normalized_symbols
+            if symbol in resolved_security_ids
+        }
+        if not symbol_by_security_id:
             return {}
 
-        symbol_by_security_id = {
-            security_id: symbol for symbol, security_id in resolved_security_ids.items()
+        rows_by_id = self.fetch_many_by_ids(
+            list(symbol_by_security_id),
+            chunk_size=chunk_size,
+            connection=connection,
+        )
+        return {
+            symbol_by_security_id[listing_id]: record
+            for listing_id, record in rows_by_id.items()
         }
-        rows_by_symbol: Dict[str, FinancialFactsRefreshStateRecord] = {}
-        security_ids = sorted(symbol_by_security_id.keys())
-
-        def _query(conn: sqlite3.Connection) -> None:
-            for security_chunk in _batched(security_ids, chunk_size):
-                placeholders = ", ".join("?" for _ in security_chunk)
-                rows = conn.execute(
-                    f"""
-                    SELECT listing_id, refreshed_at
-                    FROM financial_facts_refresh_state
-                    WHERE listing_id IN ({placeholders})
-                    """,
-                    list(security_chunk),
-                ).fetchall()
-                for row in rows:
-                    symbol = symbol_by_security_id[row["listing_id"]]
-                    rows_by_symbol[symbol] = FinancialFactsRefreshStateRecord(
-                        symbol=symbol,
-                        refreshed_at=row["refreshed_at"],
-                    )
-
-        if connection is not None:
-            _query(connection)
-        else:
-            with self._connect() as conn:
-                _query(conn)
-        return rows_by_symbol
 
 
 class FinancialFactsRepository(SQLiteStore):
