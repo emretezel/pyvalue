@@ -21,7 +21,6 @@ from pyvalue.marketdata import (
 )
 from pyvalue.persistence.storage import (
     MarketDataRepository,
-    SupportedTickerRepository,
 )
 
 
@@ -37,8 +36,6 @@ class MarketDataService:
         self.config = config or Config()
         self.repo = MarketDataRepository(db_path)
         self.repo.initialize_schema()
-        self.supported_ticker_repo = SupportedTickerRepository(db_path)
-        self.supported_ticker_repo.initialize_schema()
         self.provider = provider or self._default_provider()
 
     def _default_provider(self) -> MarketDataProvider:
@@ -72,11 +69,10 @@ class MarketDataService:
         """
 
         normalized_symbol = symbol.upper()
-        quoted_currency = raw_currency_code(
-            data.currency
-            or currency_hint
-            or self.supported_ticker_repo.fetch_currency(normalized_symbol)
-        )
+        # Currency comes from the provider's own code, else the caller's hint (the
+        # listing's catalog currency, already id-resolved upstream from the
+        # SupportedTicker the update-market-data loop holds). No symbol lookup here.
+        quoted_currency = raw_currency_code(data.currency or currency_hint)
         major_amount, major_currency = normalize_monetary_amount(
             data.price, quoted_currency
         )

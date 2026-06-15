@@ -227,7 +227,11 @@ def test_market_data_service_stores_major_price_for_subunit_quote(
     # prepare_price_data collapses the subunit quote to its MAJOR currency; this
     # is the normalization the live update-market-data path relies on before
     # persisting, so we assert the prepared PriceData directly.
-    prepared = service.prepare_price_data(symbol, service.provider.latest_price(symbol))
+    prepared = service.prepare_price_data(
+        symbol,
+        service.provider.latest_price(symbol),
+        currency_hint=quote_currency,
+    )
     assert prepared.price == pytest.approx(major_price)
     assert prepared.currency == base_currency
 
@@ -351,7 +355,7 @@ def test_eodhd_provider_parses_bulk_exchange_response() -> None:
 
 
 def test_market_data_service_prepare_price_data_uses_currency_hint(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     class DummyProvider:
         def latest_price(self, symbol: str) -> PriceData:
@@ -369,17 +373,6 @@ def test_market_data_service_prepare_price_data_uses_currency_hint(
         db_path=db_path,
         provider=DummyProvider(),
         config=DummyConfig(),
-    )
-
-    def _fail_fetch_currency(symbol: str, provider: str | None = None) -> str | None:
-        raise AssertionError(
-            "fetch_currency should not be used when a currency hint exists"
-        )
-
-    # Replace the bound method so any accidental currency lookup fails loudly;
-    # monkeypatch keeps the override typed (no method-assign) and auto-reverts.
-    monkeypatch.setattr(
-        service.supported_ticker_repo, "fetch_currency", _fail_fetch_currency
     )
 
     prepared = service.prepare_price_data(
@@ -400,7 +393,7 @@ def test_market_data_service_prepare_price_data_uses_currency_hint(
 
 
 def test_market_data_service_prepare_price_data_uses_ila_currency_hint(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     class DummyProvider:
         def latest_price(self, symbol: str) -> PriceData:
@@ -416,16 +409,6 @@ def test_market_data_service_prepare_price_data_uses_ila_currency_hint(
         db_path=tmp_path / "ila-hint.db",
         provider=DummyProvider(),
         config=DummyConfig(),
-    )
-
-    def _fail_fetch_currency(symbol: str, provider: str | None = None) -> str | None:
-        raise AssertionError(
-            "fetch_currency should not be used when a currency hint exists"
-        )
-
-    # See the GBX variant: monkeypatch keeps the stubbed method properly typed.
-    monkeypatch.setattr(
-        service.supported_ticker_repo, "fetch_currency", _fail_fetch_currency
     )
 
     prepared = service.prepare_price_data(

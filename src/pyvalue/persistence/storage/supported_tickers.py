@@ -591,42 +591,6 @@ class SupportedTickerRepository(SQLiteStore):
             primary_only=primary_only,
         )
 
-    def fetch_currency(
-        self,
-        symbol: str,
-        provider: Optional[str] = None,
-    ) -> Optional[str]:
-        """Return the stored listing quote currency from catalog metadata."""
-
-        self.initialize_schema()
-        symbol_norm = symbol.strip().upper()
-        params: List[object] = []
-        query = [
-            "SELECT catalog.currency",
-            "FROM provider_listing_catalog catalog",
-            "JOIN listing l ON l.listing_id = catalog.security_id",
-            'JOIN "exchange" e ON e.exchange_id = l.exchange_id',
-            "WHERE catalog.currency IS NOT NULL",
-        ]
-        if provider:
-            params.append(provider.strip().upper())
-            query.append("AND catalog.provider = ?")
-        params.extend([symbol_norm, symbol_norm])
-        # The composite expression on l.symbol || '.' || e.exchange_code
-        # cannot use an index regardless of UPPER(); the underlying columns
-        # are already normalised via CHECK / Python-side .upper(), so the
-        # UPPER() wrapper is dead weight.
-        query.append(
-            "AND (catalog.provider_symbol = ? OR l.symbol || '.' || e.exchange_code = ?)"
-        )
-        query.append(
-            "ORDER BY CASE WHEN catalog.provider = 'EODHD' THEN 0 WHEN catalog.provider = 'SEC' THEN 1 ELSE 2 END"
-        )
-        query.append("LIMIT 1")
-        with self._connect() as conn:
-            row = conn.execute(" ".join(query), params).fetchone()
-        return raw_currency_code(row[0]) if row else None
-
     def list_all_exchanges(self, provider: str) -> List[str]:
         return self.available_exchanges(provider)
 

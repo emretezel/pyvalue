@@ -196,7 +196,6 @@ def test_supported_ticker_repository_normalizes_exchange_and_fetches_currency(
 
     assert repo.list_symbols_by_exchange("EODHD", "LSE") == ["FOO.LSE"]
     assert repo.list_symbols_by_exchange("eodhd", "lse") == ["FOO.LSE"]
-    assert repo.fetch_currency("FOO.LSE", provider="EODHD") == "GBP"
 
 
 def test_fundamentals_repository_classifies_and_purges_secondary_listings(
@@ -3553,7 +3552,7 @@ def test_replace_for_exchange_applies_currency_change_on_re_refresh(
         "LSE",
         [{"Code": "AAA", "Name": "AAA plc", "Type": "Common Stock", "Currency": "GBP"}],
     )
-    assert repo.fetch_currency("AAA.LSE", provider="EODHD") == "GBP"
+    assert repo.list_for_provider("EODHD", exchange_codes=["LSE"])[0].currency == "GBP"
 
     # Same ticker, different currency -> must fall through the skip check and
     # update rather than skip.
@@ -3562,7 +3561,7 @@ def test_replace_for_exchange_applies_currency_change_on_re_refresh(
         "LSE",
         [{"Code": "AAA", "Name": "AAA plc", "Type": "Common Stock", "Currency": "USD"}],
     )
-    assert repo.fetch_currency("AAA.LSE", provider="EODHD") == "USD"
+    assert repo.list_for_provider("EODHD", exchange_codes=["LSE"])[0].currency == "USD"
 
 
 def test_list_supported_listings_returns_ids_matching_symbol_scope(
