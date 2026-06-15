@@ -19,11 +19,8 @@ from pyvalue.currency import (
     is_monetary_unit_kind,
     normalize_currency_code,
 )
-from pyvalue.facts import RegionFactsRepository
 from pyvalue.money.fx import FXService
 from pyvalue.persistence.storage import (
-    FinancialFactsRepository,
-    MarketDataRepository,
     MetricRecord,
     MetricsRepository,
 )
@@ -161,55 +158,57 @@ def ranking_metric_ids(definition: ScreenDefinition) -> List[str]:
 
 def evaluate_criterion(
     criterion: Criterion,
-    symbol: str,
+    listing_id: int,
     metrics_repo: MetricsRepository,
-    fact_repo: FinancialFactsRepository | RegionFactsRepository,
-    market_repo: Optional[MarketDataRepository] = None,
+    *,
+    display_symbol: str,
 ) -> bool:
     passed, _ = evaluate_criterion_verbose(
-        criterion, symbol, metrics_repo, fact_repo, market_repo
+        criterion, listing_id, metrics_repo, display_symbol=display_symbol
     )
     return passed
 
 
 def evaluate_criterion_verbose(
     criterion: Criterion,
-    symbol: str,
+    listing_id: int,
     metrics_repo: MetricsRepository,
-    fact_repo: FinancialFactsRepository | RegionFactsRepository,
-    market_repo: Optional[MarketDataRepository] = None,
+    *,
+    display_symbol: str,
 ) -> tuple[bool, Optional[float]]:
     evaluation = evaluate_criterion_detail(
-        criterion, symbol, metrics_repo, fact_repo, market_repo
+        criterion, listing_id, metrics_repo, display_symbol=display_symbol
     )
     return evaluation.passed, evaluation.left_value
 
 
 def evaluate_criterion_detail(
     criterion: Criterion,
-    symbol: str,
+    listing_id: int,
     metrics_repo: MetricsRepository,
-    fact_repo: FinancialFactsRepository | RegionFactsRepository,
-    market_repo: Optional[MarketDataRepository] = None,
     *,
+    display_symbol: str,
     log_missing_metrics: bool = True,
 ) -> CriterionEvaluation:
-    """Return a detailed evaluation for one criterion."""
+    """Return a detailed evaluation for one criterion.
+
+    Identity is the ``listing_id`` (metric values are read by id). ``display_symbol``
+    is a label used only in diagnostic log lines (unit mismatch, missing FX,
+    missing metric) -- it never selects which entity's data is read.
+    """
 
     left = _resolve_term(
         criterion.left,
-        symbol,
+        listing_id,
         metrics_repo,
-        fact_repo,
-        market_repo,
+        display_symbol=display_symbol,
         log_missing_metrics=log_missing_metrics,
     )
     right = _resolve_term(
         criterion.right,
-        symbol,
+        listing_id,
         metrics_repo,
-        fact_repo,
-        market_repo,
+        display_symbol=display_symbol,
         log_missing_metrics=log_missing_metrics,
     )
     missing_metric_ids = _dedupe_missing_metric_ids(
@@ -240,7 +239,7 @@ def evaluate_criterion_detail(
     rhs: Optional[float]
     failure_kind: Optional[str]
     lhs, rhs, failure_kind = _align_comparison_values(
-        symbol,
+        display_symbol,
         criterion,
         left,
         right,
@@ -472,11 +471,10 @@ def _convert_term_to_anchor(
 
 def _resolve_term(
     term: Term,
-    symbol: str,
+    listing_id: int,
     metrics_repo: MetricsRepository,
-    fact_repo: FinancialFactsRepository | RegionFactsRepository,
-    market_repo: Optional[MarketDataRepository],
     *,
+    display_symbol: str,
     log_missing_metrics: bool,
 ) -> ResolvedTerm:
     if term.value is not None:
@@ -491,11 +489,10 @@ def _resolve_term(
     if not term.metric:
         return ResolvedTerm(metric_id=None, value=None)
     record = _ensure_metric_record(
-        symbol,
+        listing_id,
         term.metric,
         metrics_repo,
-        fact_repo,
-        market_repo,
+        display_symbol=display_symbol,
         log_missing_metric=log_missing_metrics,
     )
     if record is None:
@@ -511,21 +508,21 @@ def _resolve_term(
 
 
 def _ensure_metric_record(
-    symbol: str,
+    listing_id: int,
     metric_id: str,
     metrics_repo: MetricsRepository,
-    fact_repo: FinancialFactsRepository | RegionFactsRepository,
-    market_repo: Optional[MarketDataRepository],
     *,
+    display_symbol: str,
     log_missing_metric: bool = True,
 ) -> Optional[MetricRecord]:
-    del fact_repo, market_repo
-    record = metrics_repo.fetch(symbol, metric_id)
+    record = metrics_repo.fetch_by_id(listing_id, metric_id)
     if record is not None:
         return record
     if log_missing_metric:
         LOGGER.warning(
-            "Metric %s missing for %s; run compute-metrics first", metric_id, symbol
+            "Metric %s missing for %s; run compute-metrics first",
+            metric_id,
+            display_symbol,
         )
     return None
 

@@ -17,53 +17,67 @@ _ALL_PEERS = "__all__"
 
 @dataclass(frozen=True)
 class ScreenRankingResult:
-    """Computed ranking score and order for one screen run."""
+    """Computed ranking score and order for one screen run, keyed by ``listing_id``."""
 
-    ordered_symbols: tuple[str, ...]
-    scores: Dict[str, float]
-    ranks: Dict[str, int]
+    ordered_listing_ids: tuple[int, ...]
+    scores: Dict[int, float]
+    ranks: Dict[int, int]
 
 
 def compute_screen_ranking(
-    symbols: Sequence[str],
+    listing_ids: Sequence[int],
     ranking: RankingDefinition,
-    metric_values: Mapping[str, Mapping[str, float]],
-    sectors: Mapping[str, Optional[str]],
+    metric_values: Mapping[str, Mapping[int, float]],
+    sectors: Mapping[int, Optional[str]],
+    *,
+    display_symbols: Optional[Mapping[int, str]] = None,
 ) -> ScreenRankingResult:
-    """Rank passing symbols using percentile-based subscores."""
+    """Rank passing listings using percentile-based subscores.
 
-    ordered_symbols = tuple(symbol.upper() for symbol in symbols)
-    if not ordered_symbols:
-        return ScreenRankingResult(ordered_symbols=(), scores={}, ranks={})
+    Identity is the ``listing_id`` throughout. ``display_symbols`` supplies the
+    canonical symbol used *only* as the final deterministic tie-break key, so the
+    output order stays stable and matches the historical symbol-ordered result;
+    it never affects a score.
+    """
 
-    raw_values_by_metric: Dict[str, Dict[str, float]] = {
-        metric_id: {symbol.upper(): float(value) for symbol, value in values.items()}
+    ordered_listing_ids = tuple(int(listing_id) for listing_id in listing_ids)
+    if not ordered_listing_ids:
+        return ScreenRankingResult(ordered_listing_ids=(), scores={}, ranks={})
+
+    labels = dict(display_symbols or {})
+
+    raw_values_by_metric: Dict[str, Dict[int, float]] = {
+        metric_id: {
+            int(listing_id): float(value) for listing_id, value in values.items()
+        }
         for metric_id, values in metric_values.items()
     }
-    capped_values_by_metric: Dict[str, Dict[str, float]] = {
+    capped_values_by_metric: Dict[str, Dict[int, float]] = {
         metric.metric_id: {
-            symbol: _apply_cap(value, metric.cap)
-            for symbol, value in raw_values_by_metric.get(metric.metric_id, {}).items()
+            listing_id: _apply_cap(value, metric.cap)
+            for listing_id, value in raw_values_by_metric.get(
+                metric.metric_id, {}
+            ).items()
         }
         for metric in ranking.metrics
     }
-    sector_members = _sector_members(ordered_symbols, sectors)
+    sector_members = _sector_members(ordered_listing_ids, sectors)
     eligible_sectors = {
         sector
         for sector, members in sector_members.items()
         if len(members) >= ranking.min_sector_peers
     }
-    group_key_by_symbol = {
-        symbol: _group_key_for_symbol(
-            symbol,
+    group_key_by_listing_id = {
+        listing_id: _group_key_for_listing(
+            listing_id,
             ranking=ranking,
             sectors=sectors,
             eligible_sectors=eligible_sectors,
         )
-        for symbol in ordered_symbols
+        for listing_id in ordered_listing_ids
     }
-    group_symbols = {
-        _ALL_PEERS: ordered_symbols,
+    group_listings = {
+        _ALL_PEERS: ordered_listing_ids,
         **{
             sector: tuple(members)
             for sector, members in sector_members.items()
@@ -71,23 +85,23 @@ def compute_screen_ranking(
         },
     }
 
-    scores: Dict[str, float] = {}
-    for symbol in ordered_symbols:
+    scores: Dict[int, float] = {}
+    for listing_id in ordered_listing_ids:
         weighted_score = 0.0
         available_weight = 0.0
-        group_key = group_key_by_symbol[symbol]
-        peer_symbols = group_symbols[group_key]
+        group_key = group_key_by_listing_id[listing_id]
+        peer_listings = group_listings[group_key]
         for metric in ranking.metrics:
-            metric_values_for_symbols = capped_values_by_metric.get(
+            metric_values_for_listings = capped_values_by_metric.get(
                 metric.metric_id, {}
             )
-            value = metric_values_for_symbols.get(symbol)
+            value = metric_values_for_listings.get(listing_id)
             if value is None:
                 continue
             peer_values = [
-                metric_values_for_symbols[peer_symbol]
-                for peer_symbol in peer_symbols
-                if peer_symbol in metric_values_for_symbols
+                metric_values_for_listings[peer_listing]
+                for peer_listing in peer_listings
+                if peer_listing in metric_values_for_listings
             ]
             if not peer_values:
                 continue
@@ -112,48 +126,53 @@ def compute_screen_ranking(
             )
             weighted_score += metric.weight * subscore
             available_weight += metric.weight
-        scores[symbol] = weighted_score / available_weight if available_weight else 0.0
+        scores[listing_id] = (
+            weighted_score / available_weight if available_weight else 0.0
+        )
 
-    sorted_symbols = tuple(
+    sorted_listing_ids = tuple(
         sorted(
-            ordered_symbols,
-            key=lambda symbol: _sort_key(
-                symbol,
-                scores[symbol],
+            ordered_listing_ids,
+            key=lambda listing_id: _sort_key(
+                listing_id,
+                scores[listing_id],
                 ranking=ranking,
                 raw_values_by_metric=raw_values_by_metric,
+                label=labels.get(listing_id, ""),
             ),
         )
     )
-    ranks = {symbol: idx for idx, symbol in enumerate(sorted_symbols, start=1)}
+    ranks = {
+        listing_id: idx for idx, listing_id in enumerate(sorted_listing_ids, start=1)
+    }
     return ScreenRankingResult(
-        ordered_symbols=sorted_symbols,
+        ordered_listing_ids=sorted_listing_ids,
         scores=scores,
         ranks=ranks,
     )
 
 
 def _sector_members(
-    symbols: Sequence[str],
-    sectors: Mapping[str, Optional[str]],
-) -> Dict[str, list[str]]:
-    members: Dict[str, list[str]] = {}
-    for symbol in symbols:
-        sector = _normalized_sector(sectors.get(symbol))
+    listing_ids: Sequence[int],
+    sectors: Mapping[int, Optional[str]],
+) -> Dict[str, list[int]]:
+    members: Dict[str, list[int]] = {}
+    for listing_id in listing_ids:
+        sector = _normalized_sector(sectors.get(listing_id))
         if sector is None:
             continue
-        members.setdefault(sector, []).append(symbol)
+        members.setdefault(sector, []).append(listing_id)
     return members
 
 
-def _group_key_for_symbol(
-    symbol: str,
+def _group_key_for_listing(
+    listing_id: int,
     *,
     ranking: RankingDefinition,
-    sectors: Mapping[str, Optional[str]],
+    sectors: Mapping[int, Optional[str]],
     eligible_sectors: set[str],
 ) -> str:
-    sector = _normalized_sector(sectors.get(symbol))
+    sector = _normalized_sector(sectors.get(listing_id))
     if ranking.peer_group == "sector" and sector in eligible_sectors:
         return sector
     return _ALL_PEERS
@@ -205,20 +224,24 @@ def _midrank_percentile(values: Sequence[float], value: float) -> float:
 
 
 def _sort_key(
-    symbol: str,
+    listing_id: int,
     score: float,
     *,
     ranking: RankingDefinition,
-    raw_values_by_metric: Mapping[str, Mapping[str, float]],
+    raw_values_by_metric: Mapping[str, Mapping[int, float]],
+    label: str,
 ) -> tuple[object, ...]:
     key_parts: list[object] = [-score]
     for tie_breaker in ranking.tie_breakers:
         metric_id = tie_breaker.metric_id
         if metric_id in {"canonical_symbol", "symbol", "ticker", "id"}:
             continue
-        value = raw_values_by_metric.get(metric_id, {}).get(symbol)
+        value = raw_values_by_metric.get(metric_id, {}).get(listing_id)
         key_parts.extend(_numeric_sort_key(value, tie_breaker.direction))
-    key_parts.append(symbol)
+    # Final, fully-deterministic tie-break on the display symbol (label only) so
+    # the output order is stable and matches the historical symbol ordering --
+    # identity is the listing_id, but the alphabetical symbol order is preserved.
+    key_parts.append(label)
     return tuple(key_parts)
 
 

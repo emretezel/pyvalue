@@ -236,23 +236,21 @@ class _SchemaReadyFinancialFactsRefreshStateRepository(
 
 
 class _PreloadedMetricsRepository(_SchemaReadyMetricsRepository):
-    """Serve stored metric values from memory for a fixed symbol scope."""
+    """Serve stored metric values from memory for a fixed listing scope."""
 
     def __init__(
         self,
         db_path: Union[str, Path],
-        metric_rows_by_symbol: Mapping[str, Mapping[str, MetricRecord]],
+        metric_rows_by_id: Mapping[int, Mapping[str, MetricRecord]],
     ) -> None:
         super().__init__(db_path)
-        self._metric_rows_by_symbol = {
-            symbol.strip().upper(): dict(metric_rows)
-            for symbol, metric_rows in metric_rows_by_symbol.items()
+        self._metric_rows_by_id = {
+            int(listing_id): dict(metric_rows)
+            for listing_id, metric_rows in metric_rows_by_id.items()
         }
 
-    def fetch(self, symbol: str, metric_id: str) -> Optional[MetricRecord]:
-        return self._metric_rows_by_symbol.get(symbol.strip().upper(), {}).get(
-            metric_id
-        )
+    def fetch_by_id(self, listing_id: int, metric_id: str) -> Optional[MetricRecord]:
+        return self._metric_rows_by_id.get(int(listing_id), {}).get(metric_id)
 
 
 def _metric_status_current_facts_refresh(

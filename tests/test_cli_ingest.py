@@ -6145,29 +6145,32 @@ ranking:
 """
     )
 
+    security_repo = SecurityRepository(db_path)
+    aaa = security_repo.resolve_id("AAA.US")
+    bbb = security_repo.resolve_id("BBB.US")
+    ccc = security_repo.resolve_id("CCC.US")
+    assert aaa is not None and bbb is not None and ccc is not None
+
     calls = []
-    original_fetch_many = cli._StatusAwareMetricsRepository.fetch_many_for_symbols
+    original_fetch_many = cli._StatusAwareMetricsRepository.fetch_many_by_ids
 
     def wrapped_fetch_many(
         self: cli._StatusAwareMetricsRepository,
-        symbols: Sequence[str],
+        listing_ids: Sequence[int],
         metric_ids: Sequence[str],
         chunk_size: int = 500,
-        *,
-        security_ids_by_symbol: Mapping[str, int] | None = None,
-    ) -> dict[str, dict[str, MetricRecord]]:
-        calls.append((tuple(symbols), tuple(metric_ids)))
+    ) -> dict[int, dict[str, MetricRecord]]:
+        calls.append((tuple(listing_ids), tuple(metric_ids)))
         return original_fetch_many(
             self,
-            symbols,
+            listing_ids,
             metric_ids,
             chunk_size=chunk_size,
-            security_ids_by_symbol=security_ids_by_symbol,
         )
 
     monkeypatch.setattr(
         cli._StatusAwareMetricsRepository,
-        "fetch_many_for_symbols",
+        "fetch_many_by_ids",
         wrapped_fetch_many,
     )
 
@@ -6181,12 +6184,12 @@ ranking:
     )
 
     assert rc == 0
+    # Filter metrics load for the whole scope first; the ranking-extra metrics
+    # load only for the two passers (AAA, BBB; CCC fails working_capital) after
+    # filtering -- now keyed by listing_id.
     assert calls == [
-        (("AAA.US", "BBB.US", "CCC.US"), ("working_capital",)),
-        (
-            ("AAA.US", "BBB.US"),
-            ("primary_score", "oey_ev_norm", "net_debt_to_ebitda"),
-        ),
+        ((aaa, bbb, ccc), ("working_capital",)),
+        ((aaa, bbb), ("primary_score", "oey_ev_norm", "net_debt_to_ebitda")),
     ]
 
 

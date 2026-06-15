@@ -16,12 +16,12 @@ from cli_test_helpers import patch_cli
 from pyvalue.money.fx import FXCatalogEntry
 from pyvalue.screening import RankingDefinition, RankingMetric, ScreenDefinition
 from pyvalue.persistence.storage import (
-    EntityMetadataRepository,
     FXRateRecord,
     FXRatesRepository,
     FXRefreshStateRepository,
     FXSupportedPairsRepository,
     MetricsRepository,
+    SecurityRepository,
     SupportedTickerRepository,
 )
 from pyvalue.persistence.storage.fx import _PAIR_COVERAGE_SQL
@@ -84,10 +84,10 @@ def test_rank_screen_passers_skips_mixed_currency_metric_without_ranking_currenc
         unit_kind="monetary",
         currency="EUR",
     )
-    entity_repo = EntityMetadataRepository(db_path)
-    entity_repo.initialize_schema()
-    entity_repo.upsert("AAA.US", "AAA")
-    entity_repo.upsert("BBB.US", "BBB")
+    security_repo = SecurityRepository(db_path)
+    aaa = security_repo.resolve_id("AAA.US")
+    bbb = security_repo.resolve_id("BBB.US")
+    assert aaa is not None and bbb is not None
 
     definition = _ranking_definition(
         RankingMetric(metric_id="market_cap", weight=1.0, direction="higher")
@@ -96,12 +96,15 @@ def test_rank_screen_passers_skips_mixed_currency_metric_without_ranking_currenc
     with caplog.at_level("WARNING"):
         ordered, _ = cli._rank_screen_passers(
             definition,
-            ["AAA.US", "BBB.US"],
+            [(aaa, "AAA.US"), (bbb, "BBB.US")],
             metrics_repo,
-            entity_repo,
+            security_repo,
         )
 
-    assert ordered == ["AAA.US", "BBB.US"]
+    assert [{aaa: "AAA.US", bbb: "BBB.US"}[lid] for lid in ordered] == [
+        "AAA.US",
+        "BBB.US",
+    ]
     assert "mixed currencies without comparison currency" in caplog.text
 
 
@@ -142,10 +145,10 @@ def test_rank_screen_passers_normalizes_mixed_currency_metric_with_ranking_curre
             source_kind="provider",
         )
     )
-    entity_repo = EntityMetadataRepository(db_path)
-    entity_repo.initialize_schema()
-    entity_repo.upsert("AAA.US", "AAA")
-    entity_repo.upsert("BBB.US", "BBB")
+    security_repo = SecurityRepository(db_path)
+    aaa = security_repo.resolve_id("AAA.US")
+    bbb = security_repo.resolve_id("BBB.US")
+    assert aaa is not None and bbb is not None
 
     definition = _ranking_definition(
         RankingMetric(
@@ -158,12 +161,15 @@ def test_rank_screen_passers_normalizes_mixed_currency_metric_with_ranking_curre
 
     ordered, _ = cli._rank_screen_passers(
         definition,
-        ["AAA.US", "BBB.US"],
+        [(aaa, "AAA.US"), (bbb, "BBB.US")],
         metrics_repo,
-        entity_repo,
+        security_repo,
     )
 
-    assert ordered == ["BBB.US", "AAA.US"]
+    assert [{aaa: "AAA.US", bbb: "BBB.US"}[lid] for lid in ordered] == [
+        "BBB.US",
+        "AAA.US",
+    ]
 
 
 class _BaseFakeEODHDFXProvider:

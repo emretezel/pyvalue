@@ -954,13 +954,10 @@ def cmd_report_screen_failures(
         db_path,
         market_repo=market_repo,
     )
+    listing_ids = [listing_id for listing_id, _ in scope_listings]
     evaluation_metrics_repo = _PreloadedMetricsRepository(
         db_path,
-        metrics_repo.fetch_many_for_symbols(
-            selected_symbols,
-            metric_ids,
-            security_ids_by_symbol=security_ids_by_symbol,
-        ),
+        metrics_repo.fetch_many_by_ids(listing_ids, metric_ids),
     )
 
     criterion_summaries = [
@@ -974,15 +971,14 @@ def cmd_report_screen_failures(
     passed_all = 0
 
     with suppress_console_metric_warnings(True):
-        for symbol in selected_symbols:
+        for listing_id, symbol in scope_listings:
             symbol_passed = True
             for summary in criterion_summaries:
                 evaluation: CriterionEvaluation = evaluate_criterion_detail(
                     summary.criterion,
-                    symbol,
+                    listing_id,
                     evaluation_metrics_repo,
-                    fact_repo,
-                    market_repo,
+                    display_symbol=symbol,
                     log_missing_metrics=False,
                 )
                 if evaluation.passed:

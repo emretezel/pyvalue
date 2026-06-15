@@ -37,13 +37,11 @@ from pyvalue.screening import (
 from pyvalue.logging_utils import (
     suppress_console_metric_warnings,
 )
-from pyvalue.facts import RegionFactsRepository
 from pyvalue.persistence.storage import (
-    EntityMetadataRepository,
-    FinancialFactsRepository,
     MarketDataRepository,
     MetricRecord,
     MetricsRepository,
+    SecurityRepository,
     SupportedTickerRepository,
 )
 
@@ -117,32 +115,37 @@ def _screen_requested_metric_ids(definition: ScreenDefinition) -> List[str]:
     )
 
 
-def _merge_metric_rows_by_symbol(
-    existing_rows: Dict[str, Dict[str, MetricRecord]],
-    additional_rows: Mapping[str, Mapping[str, MetricRecord]],
+def _merge_metric_rows_by_id(
+    existing_rows: Dict[int, Dict[str, MetricRecord]],
+    additional_rows: Mapping[int, Mapping[str, MetricRecord]],
 ) -> None:
-    for symbol, metric_rows in additional_rows.items():
-        existing_rows.setdefault(symbol, {}).update(metric_rows)
+    for listing_id, metric_rows in additional_rows.items():
+        existing_rows.setdefault(listing_id, {}).update(metric_rows)
 
 
 def _evaluate_screen_scope(
     definition: ScreenDefinition,
-    symbols: Sequence[str],
+    listings: Sequence[tuple[int, str]],
     metrics_repo: MetricsRepository,
-    fact_repo: RegionFactsRepository,
-    market_repo: MarketDataRepository,
-    entity_repo: EntityMetadataRepository,
     universe_names: Mapping[str, Optional[str]],
     *,
     report_progress: bool,
-) -> tuple[List[str], Dict[str, Dict[str, float]], Dict[str, str]]:
-    entity_labels: Dict[str, str] = {}
-    passed_symbols: List[str] = []
-    criterion_values: Dict[str, Dict[str, float]] = {
+) -> tuple[List[int], Dict[str, Dict[int, float]], Dict[int, str]]:
+    """Evaluate every criterion per listing, keyed by ``listing_id``.
+
+    ``listings`` are the scope-resolved ``(listing_id, canonical_symbol)`` pairs.
+    The display label comes from ``universe_names`` (one batch query loaded by the
+    caller) rather than a per-listing identity lookup -- the canonical symbol is
+    used only as a metric log label and as the dict's display value.
+    """
+
+    entity_labels: Dict[int, str] = {}
+    passed_listing_ids: List[int] = []
+    criterion_values: Dict[str, Dict[int, float]] = {
         criterion.name: {} for criterion in definition.criteria
     }
-    completed_symbols = 0
-    total_symbols = len(symbols)
+    completed = 0
+    total = len(listings)
     last_progress_at = time.monotonic()
     last_reported_completed = -1
 
@@ -150,49 +153,54 @@ def _evaluate_screen_scope(
         nonlocal last_progress_at, last_reported_completed
         if not report_progress:
             return
-        if completed_symbols == last_reported_completed:
+        if completed == last_reported_completed:
             return
         elapsed = time.monotonic() - last_progress_at
         if not force and elapsed < SCREEN_PROGRESS_INTERVAL_SECONDS:
             return
-        _print_symbol_progress(completed_symbols, total_symbols)
-        last_reported_completed = completed_symbols
+        _print_symbol_progress(completed, total)
+        last_reported_completed = completed
         last_progress_at = time.monotonic()
 
-    for symbol in symbols:
-        symbol_passed = True
-        per_symbol_values: Dict[str, float] = {}
-        label = entity_repo.fetch(symbol) or universe_names.get(symbol) or symbol
-        entity_labels[symbol] = label
+    for listing_id, display_symbol in listings:
+        listing_passed = True
+        per_listing_values: Dict[str, float] = {}
+        entity_labels[listing_id] = universe_names.get(display_symbol) or display_symbol
         for criterion in definition.criteria:
             passed, left_value = evaluate_criterion_verbose(
-                criterion, symbol, metrics_repo, fact_repo, market_repo
+                criterion,
+                listing_id,
+                metrics_repo,
+                display_symbol=display_symbol,
             )
             if not passed or left_value is None:
-                symbol_passed = False
+                listing_passed = False
                 break
-            per_symbol_values[criterion.name] = left_value
-        if symbol_passed:
-            passed_symbols.append(symbol)
+            per_listing_values[criterion.name] = left_value
+        if listing_passed:
+            passed_listing_ids.append(listing_id)
             for criterion in definition.criteria:
-                criterion_values[criterion.name][symbol] = per_symbol_values[
+                criterion_values[criterion.name][listing_id] = per_listing_values[
                     criterion.name
                 ]
-        completed_symbols += 1
+        completed += 1
         maybe_report_progress()
 
     maybe_report_progress(force=True)
-    return passed_symbols, criterion_values, entity_labels
+    return passed_listing_ids, criterion_values, entity_labels
 
 
 def _rank_screen_passers(
     definition: ScreenDefinition,
-    passed_symbols: Sequence[str],
+    passed_listings: Sequence[tuple[int, str]],
     metrics_repo: MetricsRepository,
-    entity_repo: EntityMetadataRepository,
-) -> tuple[List[str], List[tuple[str, Dict[str, object]]]]:
-    if definition.ranking is None or not passed_symbols:
-        return list(passed_symbols), []
+    security_repo: SecurityRepository,
+) -> tuple[List[int], List[tuple[str, Dict[int, object]]]]:
+    passed_listing_ids = [listing_id for listing_id, _ in passed_listings]
+    if definition.ranking is None or not passed_listings:
+        return passed_listing_ids, []
+
+    display_symbols = {listing_id: symbol for listing_id, symbol in passed_listings}
 
     metric_ids = ranking_metric_ids(definition)
     for tie_breaker in definition.ranking.tie_breakers:
@@ -209,21 +217,21 @@ def _rank_screen_passers(
         if tie_breaker.metric_id not in _SCREEN_SYMBOL_TIE_BREAKER_IDS
     }
     fx_service = FXService(metrics_repo.db_path)
-    metric_values: Dict[str, Dict[str, float]] = {}
+    metric_values: Dict[str, Dict[int, float]] = {}
     for metric_id in metric_ids:
-        records_by_symbol: Dict[str, MetricRecord] = {}
+        records_by_id: Dict[int, MetricRecord] = {}
         unit_kinds = set()
         currencies = set()
-        for symbol in passed_symbols:
-            record = metrics_repo.fetch(symbol, metric_id)
+        for listing_id in passed_listing_ids:
+            record = metrics_repo.fetch_by_id(listing_id, metric_id)
             if record is None:
                 continue
-            records_by_symbol[symbol] = record
+            records_by_id[listing_id] = record
             unit_kinds.add(record.unit_kind)
             if record.currency:
                 currencies.add(record.currency)
 
-        if not records_by_symbol:
+        if not records_by_id:
             metric_values[metric_id] = {}
             continue
 
@@ -236,7 +244,7 @@ def _rank_screen_passers(
             metric_values[metric_id] = {}
             continue
 
-        sample = next(iter(records_by_symbol.values()))
+        sample = next(iter(records_by_id.values()))
         config_entry = ranking_metric_config.get(metric_id) or tie_breaker_config.get(
             metric_id
         )
@@ -254,19 +262,19 @@ def _rank_screen_passers(
                 metric_values[metric_id] = {}
                 continue
             target_currency = comparison_currency or next(iter(currencies), None)
-            converted_values: Dict[str, float] = {}
-            for symbol, record in records_by_symbol.items():
+            converted_values: Dict[int, float] = {}
+            for listing_id, record in records_by_id.items():
                 if target_currency is None:
                     continue
                 if record.currency is None:
                     LOGGER.warning(
                         "Ranking metric missing currency | metric=%s symbol=%s",
                         metric_id,
-                        symbol,
+                        display_symbols.get(listing_id, listing_id),
                     )
                     continue
                 if record.currency == target_currency:
-                    converted_values[symbol] = record.value
+                    converted_values[listing_id] = record.value
                     continue
                 converted = fx_service.convert_amount(
                     record.value,
@@ -278,46 +286,45 @@ def _rank_screen_passers(
                     LOGGER.warning(
                         "Ranking FX conversion failed | metric=%s symbol=%s from=%s to=%s as_of=%s",
                         metric_id,
-                        symbol,
+                        display_symbols.get(listing_id, listing_id),
                         record.currency,
                         target_currency,
                         record.as_of,
                     )
                     continue
-                converted_values[symbol] = float(converted)
+                converted_values[listing_id] = float(converted)
             metric_values[metric_id] = converted_values
             continue
 
         metric_values[metric_id] = {
-            symbol: record.value for symbol, record in records_by_symbol.items()
+            listing_id: record.value for listing_id, record in records_by_id.items()
         }
 
-    metadata = entity_repo.fetch_many(passed_symbols)
+    metadata = security_repo.fetch_many_by_id(passed_listing_ids)
     sectors = {
-        symbol: security.sector if security is not None else None
-        for symbol, security in (
-            (symbol, metadata.get(symbol)) for symbol in passed_symbols
-        )
+        listing_id: (metadata[listing_id].sector if listing_id in metadata else None)
+        for listing_id in passed_listing_ids
     }
     ranking_result = compute_screen_ranking(
-        passed_symbols,
+        passed_listing_ids,
         definition.ranking,
         metric_values,
         sectors,
+        display_symbols=display_symbols,
     )
-    return list(ranking_result.ordered_symbols), [
+    return list(ranking_result.ordered_listing_ids), [
         (
             "qarp_rank",
             {
-                symbol: ranking_result.ranks[symbol]
-                for symbol in ranking_result.ordered_symbols
+                listing_id: ranking_result.ranks[listing_id]
+                for listing_id in ranking_result.ordered_listing_ids
             },
         ),
         (
             "qarp_score",
             {
-                symbol: ranking_result.scores[symbol]
-                for symbol in ranking_result.ordered_symbols
+                listing_id: ranking_result.scores[listing_id]
+                for listing_id in ranking_result.ordered_listing_ids
             },
         ),
     ]
@@ -325,52 +332,88 @@ def _rank_screen_passers(
 
 def _emit_screen_results(
     criteria: Sequence[Criterion],
-    symbols: Sequence[str],
-    values: Dict[str, Dict[str, float]],
-    entity_labels: Mapping[str, str],
-    entity_repo: EntityMetadataRepository,
+    ordered_listings: Sequence[tuple[int, str]],
+    values: Dict[str, Dict[int, float]],
+    entity_labels: Mapping[int, str],
+    security_repo: SecurityRepository,
     market_repo: MarketDataRepository,
     output_csv: Optional[str],
-    extra_rows: Optional[Sequence[tuple[str, Dict[str, object]]]] = None,
+    extra_rows: Optional[Sequence[tuple[str, Dict[int, object]]]] = None,
 ) -> None:
-    selected_names = {symbol: entity_labels.get(symbol, symbol) for symbol in symbols}
+    """Render screen output: the single ``listing_id -> canonical_symbol`` boundary.
+
+    Identity stays ``listing_id`` up to here; the table / CSV layer below is keyed
+    by the canonical display symbol (the human-facing output identity). Description
+    and price are read in one batch each (by listing id), not per passing row.
+    """
+
+    listing_ids = [listing_id for listing_id, _ in ordered_listings]
+    symbols = [symbol for _, symbol in ordered_listings]
+    securities = security_repo.fetch_many_by_id(listing_ids)
+    snapshots = market_repo.latest_snapshots_many_by_ids(listing_ids)
+
+    selected_names: Dict[str, str] = {}
     selected_descriptions: Dict[str, str] = {}
     selected_prices: Dict[str, str] = {}
     selected_price_currencies: Dict[str, str] = {}
-    for symbol in symbols:
-        entity_description = entity_repo.fetch_description(symbol)
-        selected_descriptions[symbol] = (
-            entity_description if entity_description else "N/A"
-        )
-        snapshot = market_repo.latest_snapshot(symbol)
-        if snapshot:
+    for listing_id, symbol in ordered_listings:
+        selected_names[symbol] = entity_labels.get(listing_id, symbol)
+        security = securities.get(listing_id)
+        description = security.description if security is not None else None
+        selected_descriptions[symbol] = description if description else "N/A"
+        snapshot = snapshots.get(listing_id)
+        if snapshot is not None:
             selected_prices[symbol] = _format_value(snapshot.price)
             selected_price_currencies[symbol] = snapshot.currency or "N/A"
         else:
             selected_prices[symbol] = "N/A"
             selected_price_currencies[symbol] = "N/A"
+
+    # Remap the id-keyed criterion values and extra rows to the symbol-keyed
+    # output layer (the display boundary).
+    display_by_id = {listing_id: symbol for listing_id, symbol in ordered_listings}
+    symbol_values: Dict[str, Dict[str, float]] = {
+        criterion_name: {
+            display_by_id[listing_id]: value
+            for listing_id, value in by_id.items()
+            if listing_id in display_by_id
+        }
+        for criterion_name, by_id in values.items()
+    }
+    symbol_extra_rows: List[tuple[str, Dict[str, object]]] = [
+        (
+            row_name,
+            {
+                display_by_id[listing_id]: value
+                for listing_id, value in by_id.items()
+                if listing_id in display_by_id
+            },
+        )
+        for row_name, by_id in (extra_rows or ())
+    ]
+
     _print_screen_table(
         criteria,
         symbols,
-        values,
+        symbol_values,
         selected_names,
         selected_descriptions,
         selected_prices,
         selected_price_currencies,
         output_csv=output_csv,
-        extra_rows=extra_rows,
+        extra_rows=symbol_extra_rows,
     )
     if output_csv:
         _write_screen_csv(
             criteria,
             symbols,
-            values,
+            symbol_values,
             selected_names,
             selected_descriptions,
             selected_prices,
             selected_price_currencies,
             output_csv,
-            extra_rows=extra_rows,
+            extra_rows=symbol_extra_rows,
         )
 
 
@@ -394,15 +437,11 @@ def cmd_run_screen_stage(
             all_supported,
         )
     )
-    canonical_symbols = [symbol for _, symbol in scope_listings]
-    # Carry the scope-resolved listing ids into the scope-wide metric / fact /
-    # market reads so the screen never re-resolves symbol->listing_id from the
-    # DB. The per-symbol entity name / description / price lookups below stay
-    # symbol-keyed: they are display-only and served from the security cache via
-    # single-symbol resolution, not the bulk resolver.
-    security_ids_by_symbol = {
-        symbol: listing_id for listing_id, symbol in scope_listings
-    }
+    # The scope query already returns the (listing_id, canonical_symbol) pairs, so
+    # the natural listing_id is the identity end-to-end and the canonical symbol is
+    # carried alongside purely for display/log output -- the screen never
+    # re-resolves symbol->listing_id.
+    display_by_id = {listing_id: symbol for listing_id, symbol in scope_listings}
     definition = load_screen(config_path)
     filter_metric_ids = _screen_filter_metric_ids(definition)
     ranking_extra_metric_ids = _screen_ranking_extra_metric_ids(definition)
@@ -417,23 +456,26 @@ def cmd_run_screen_stage(
     )
     MetricsRepository(db_path).initialize_schema()
     _initialize_metric_read_schema(db_path, include_market_data)
-    base_fact_repo = FinancialFactsRepository(db_path)
-    fact_repo = RegionFactsRepository(base_fact_repo)
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
     metrics_repo = _StatusAwareMetricsRepository(
         db_path,
         market_repo=_SchemaReadyMarketDataRepository(db_path),
     )
-    entity_repo = EntityMetadataRepository(db_path)
-    entity_repo.initialize_schema()
+    security_repo = SecurityRepository(db_path)
+    security_repo.initialize_schema()
 
     with suppress_console_metric_warnings(not show_metric_warnings):
-        if len(canonical_symbols) == 1:
-            symbol = canonical_symbols[0]
-            entity_name = entity_repo.fetch(symbol) or symbol
-            description = entity_repo.fetch_description(symbol) or "N/A"
-            snapshot = market_repo.latest_snapshot(symbol)
+        if len(scope_listings) == 1:
+            listing_id, symbol = scope_listings[0]
+            security = security_repo.fetch(listing_id)
+            entity_name = (
+                security.entity_name if security and security.entity_name else symbol
+            )
+            description = (
+                security.description if security and security.description else "N/A"
+            )
+            snapshot = market_repo.latest_snapshot_record_by_id(listing_id)
             price_label = _format_value(snapshot.price) if snapshot else "N/A"
             print(f"Entity: {entity_name}")
             print(f"Description: {description}")
@@ -441,7 +483,7 @@ def cmd_run_screen_stage(
             results = []
             for criterion in definition.criteria:
                 passed, left_value = evaluate_criterion_verbose(
-                    criterion, symbol, metrics_repo, fact_repo, market_repo
+                    criterion, listing_id, metrics_repo, display_symbol=symbol
                 )
                 results.append((criterion.name, passed, left_value))
             passed_all = all(flag for _, flag, _ in results)
@@ -457,27 +499,24 @@ def cmd_run_screen_stage(
                 primary_only=True,
             )
         )
-        metric_rows_by_symbol = metrics_repo.fetch_many_for_symbols(
-            canonical_symbols,
+        listing_ids = [listing_id for listing_id, _ in scope_listings]
+        metric_rows_by_id = metrics_repo.fetch_many_by_ids(
+            listing_ids,
             filter_metric_ids,
-            security_ids_by_symbol=security_ids_by_symbol,
         )
         evaluation_metrics_repo = _PreloadedMetricsRepository(
             db_path,
-            metric_rows_by_symbol,
+            metric_rows_by_id,
         )
-        passed_symbols, criterion_values, entity_labels = _evaluate_screen_scope(
+        passed_listing_ids, criterion_values, entity_labels = _evaluate_screen_scope(
             definition,
-            canonical_symbols,
+            scope_listings,
             evaluation_metrics_repo,
-            fact_repo,
-            market_repo,
-            entity_repo,
             universe_names,
             report_progress=True,
         )
 
-        if not passed_symbols:
+        if not passed_listing_ids:
             print("No symbols satisfied all criteria.")
             if output_csv:
                 _write_screen_csv(
@@ -493,33 +532,39 @@ def cmd_run_screen_stage(
             return 1
 
         if ranking_extra_metric_ids:
-            ranking_metric_rows = metrics_repo.fetch_many_for_symbols(
-                passed_symbols,
+            ranking_metric_rows = metrics_repo.fetch_many_by_ids(
+                passed_listing_ids,
                 ranking_extra_metric_ids,
-                security_ids_by_symbol=security_ids_by_symbol,
             )
             if ranking_metric_rows:
-                _merge_metric_rows_by_symbol(
-                    metric_rows_by_symbol,
+                _merge_metric_rows_by_id(
+                    metric_rows_by_id,
                     ranking_metric_rows,
                 )
                 evaluation_metrics_repo = _PreloadedMetricsRepository(
                     db_path,
-                    metric_rows_by_symbol,
+                    metric_rows_by_id,
                 )
 
-        ordered_symbols, extra_rows = _rank_screen_passers(
+        passed_listings = [
+            (listing_id, display_by_id[listing_id]) for listing_id in passed_listing_ids
+        ]
+        ordered_listing_ids, extra_rows = _rank_screen_passers(
             definition,
-            passed_symbols,
+            passed_listings,
             evaluation_metrics_repo,
-            entity_repo,
+            security_repo,
         )
+        ordered_listings = [
+            (listing_id, display_by_id[listing_id])
+            for listing_id in ordered_listing_ids
+        ]
         _emit_screen_results(
             definition.criteria,
-            ordered_symbols,
+            ordered_listings,
             criterion_values,
             entity_labels,
-            entity_repo,
+            security_repo,
             market_repo,
             output_csv,
             extra_rows=extra_rows,

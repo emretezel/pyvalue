@@ -19,10 +19,31 @@ from pyvalue.persistence.storage import (
     FXRatesRepository,
     FinancialFactsRepository,
     MetricsRepository,
+    SecurityRepository,
     SupportedTickerRepository,
 )
 
 from conftest import seed_exchange
+
+
+def _evaluate(
+    criterion: Criterion,
+    db: Path,
+    symbol: str,
+    metrics_repo: MetricsRepository,
+) -> bool:
+    """Resolve ``symbol`` to its listing_id, then evaluate by natural identity.
+
+    The screen evaluator keys on listing_id; the canonical symbol is only a log
+    label. Tests address securities by symbol, so this resolves the id at the
+    boundary exactly as the CLI does before evaluating.
+    """
+
+    listing_id = SecurityRepository(db).resolve_id(symbol)
+    assert listing_id is not None
+    return evaluate_criterion(
+        criterion, listing_id, metrics_repo, display_symbol=symbol
+    )
 
 
 def _seed_listing(db_path: Path, symbol: str, *, currency: str = "USD") -> None:
@@ -63,7 +84,7 @@ def test_evaluate_criterion_uses_metrics_repo(tmp_path: Path) -> None:
         right=Term(metric="working_capital", multiplier=1.75),
     )
 
-    assert evaluate_criterion(criterion, "AAPL.US", metrics_repo, fact_repo) is True
+    assert _evaluate(criterion, db, "AAPL.US", metrics_repo) is True
 
 
 def test_evaluate_criterion_filters_when_metric_missing(tmp_path: Path) -> None:
@@ -72,6 +93,9 @@ def test_evaluate_criterion_filters_when_metric_missing(tmp_path: Path) -> None:
     fact_repo.initialize_schema()
     metrics_repo = MetricsRepository(db)
     metrics_repo.initialize_schema()
+    # Seed the listing (but not the metric) so the id resolves; the criterion
+    # still fails because the metric value is absent.
+    _seed_listing(db, "AAPL.US")
 
     criterion = Criterion(
         name="requires metric",
@@ -80,7 +104,7 @@ def test_evaluate_criterion_filters_when_metric_missing(tmp_path: Path) -> None:
         right=Term(value=0.0),
     )
 
-    assert evaluate_criterion(criterion, "AAPL.US", metrics_repo, fact_repo) is False
+    assert _evaluate(criterion, db, "AAPL.US", metrics_repo) is False
 
 
 def test_evaluate_criterion_supports_constant_terms(tmp_path: Path) -> None:
@@ -99,7 +123,7 @@ def test_evaluate_criterion_supports_constant_terms(tmp_path: Path) -> None:
         right=Term(value=0.0),
     )
 
-    assert evaluate_criterion(criterion, "AAPL.US", metrics_repo, fact_repo) is True
+    assert _evaluate(criterion, db, "AAPL.US", metrics_repo) is True
 
 
 def test_evaluate_criterion_converts_monetary_constant_currency(tmp_path: Path) -> None:
@@ -138,7 +162,7 @@ def test_evaluate_criterion_converts_monetary_constant_currency(tmp_path: Path) 
         right=Term(value=120.0, currency="USD"),
     )
 
-    assert evaluate_criterion(criterion, "AAPL.US", metrics_repo, fact_repo) is True
+    assert _evaluate(criterion, db, "AAPL.US", metrics_repo) is True
 
 
 def test_evaluate_criterion_converts_mixed_currency_metrics(tmp_path: Path) -> None:
@@ -185,7 +209,7 @@ def test_evaluate_criterion_converts_mixed_currency_metrics(tmp_path: Path) -> N
         right=Term(metric="working_capital"),
     )
 
-    assert evaluate_criterion(criterion, "AAPL.US", metrics_repo, fact_repo) is True
+    assert _evaluate(criterion, db, "AAPL.US", metrics_repo) is True
 
 
 def test_evaluate_criterion_normalizes_configured_subunit_metric_currencies(
@@ -234,7 +258,7 @@ def test_evaluate_criterion_normalizes_configured_subunit_metric_currencies(
         right=Term(metric="working_capital"),
     )
 
-    assert evaluate_criterion(criterion, "AAPL.US", metrics_repo, fact_repo) is True
+    assert _evaluate(criterion, db, "AAPL.US", metrics_repo) is True
 
 
 def test_evaluate_criterion_detail_reports_missing_metric_ids(tmp_path: Path) -> None:
@@ -243,6 +267,10 @@ def test_evaluate_criterion_detail_reports_missing_metric_ids(tmp_path: Path) ->
     fact_repo.initialize_schema()
     metrics_repo = MetricsRepository(db)
     metrics_repo.initialize_schema()
+
+    _seed_listing(db, "AAPL.US")
+    listing_id = SecurityRepository(db).resolve_id("AAPL.US")
+    assert listing_id is not None
 
     criterion = Criterion(
         name="requires two metrics",
@@ -253,9 +281,9 @@ def test_evaluate_criterion_detail_reports_missing_metric_ids(tmp_path: Path) ->
 
     result = evaluate_criterion_detail(
         criterion,
-        "AAPL.US",
+        listing_id,
         metrics_repo,
-        fact_repo,
+        display_symbol="AAPL.US",
         log_missing_metrics=False,
     )
 

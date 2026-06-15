@@ -3,7 +3,9 @@
 Author: Emre Tezel
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from types import SimpleNamespace
+from typing import Optional
 
 from pyvalue.screening import compute_screen_ranking
 from pyvalue.screening import RankingDefinition, RankingMetric, RankingTieBreaker
@@ -24,12 +26,49 @@ def _ranking_definition(
     )
 
 
+def _rank_by_symbol(
+    symbols: Sequence[str],
+    ranking: RankingDefinition,
+    metric_values: Mapping[str, Mapping[str, float]],
+    sectors: Mapping[str, Optional[str]],
+) -> SimpleNamespace:
+    """Adapt the ``listing_id``-keyed ranker to symbol-keyed test scenarios.
+
+    Identity is the ``listing_id``; tests express scenarios by symbol, so this
+    assigns each symbol a stable id, passes the symbols as the display labels (the
+    final deterministic tie-break key), and maps the result back to symbols. It
+    keeps the assertions readable and verifies that the id-keyed ranking preserves
+    the historical symbol-ordered output.
+    """
+
+    ids = {symbol: index for index, symbol in enumerate(symbols, start=1)}
+    reverse = {index: symbol for symbol, index in ids.items()}
+    listing_ids = [ids[symbol] for symbol in symbols]
+    metric_values_by_id = {
+        metric_id: {ids[symbol]: value for symbol, value in values.items()}
+        for metric_id, values in metric_values.items()
+    }
+    sectors_by_id = {ids[symbol]: sector for symbol, sector in sectors.items()}
+    result = compute_screen_ranking(
+        listing_ids,
+        ranking,
+        metric_values_by_id,
+        sectors_by_id,
+        display_symbols=reverse,
+    )
+    return SimpleNamespace(
+        ordered_symbols=tuple(reverse[lid] for lid in result.ordered_listing_ids),
+        scores={reverse[lid]: score for lid, score in result.scores.items()},
+        ranks={reverse[lid]: rank for lid, rank in result.ranks.items()},
+    )
+
+
 def test_compute_screen_ranking_single_passer_is_neutral() -> None:
     ranking = _ranking_definition(
         [RankingMetric(metric_id="oey_ev_norm", weight=1.0, direction="higher")]
     )
 
-    result = compute_screen_ranking(
+    result = _rank_by_symbol(
         ["AAA.US"],
         ranking,
         {"oey_ev_norm": {"AAA.US": 0.08}},
@@ -51,7 +90,7 @@ def test_compute_screen_ranking_caps_metric_before_winsorization() -> None:
     )
     symbols = ["AAA.US", "BBB.US", "CCC.US", "DDD.US"]
 
-    result = compute_screen_ranking(
+    result = _rank_by_symbol(
         symbols,
         ranking,
         {
@@ -90,7 +129,7 @@ def test_compute_screen_ranking_uses_sector_peers_when_group_is_large_enough() -
     sectors["O1.US"] = "Utilities"
     sectors["O2.US"] = "Utilities"
 
-    result = compute_screen_ranking(symbols, ranking, metric_values, sectors)
+    result = _rank_by_symbol(symbols, ranking, metric_values, sectors)
 
     assert result.ordered_symbols[0] == "O2.US"
     assert result.scores["T09.US"] == 95.0
@@ -117,7 +156,7 @@ def test_compute_screen_ranking_falls_back_to_full_universe_when_sector_too_smal
     sectors["O1.US"] = "Utilities"
     sectors["O2.US"] = "Utilities"
 
-    result = compute_screen_ranking(symbols, ranking, metric_values, sectors)
+    result = _rank_by_symbol(symbols, ranking, metric_values, sectors)
 
     assert result.scores["T08.US"] == 77.27272727272727
 
@@ -130,7 +169,7 @@ def test_compute_screen_ranking_normalizes_by_available_weight() -> None:
         ]
     )
 
-    result = compute_screen_ranking(
+    result = _rank_by_symbol(
         ["AAA.US", "BBB.US"],
         ranking,
         {
@@ -154,7 +193,7 @@ def test_compute_screen_ranking_uses_configured_tie_breakers() -> None:
         ),
     )
 
-    result = compute_screen_ranking(
+    result = _rank_by_symbol(
         ["AAA.US", "BBB.US", "CCC.US"],
         ranking,
         {
