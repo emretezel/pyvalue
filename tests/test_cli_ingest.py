@@ -1948,9 +1948,18 @@ def test_cmd_update_market_data_stage_skips_secondary_listings(
     assert fetch_state_row(state_repo, "EODHD", "BBB.LSE")["last_status"] == "ok"
     assert state_repo.fetch("EODHD", "AAA.LSE") is None
     market_repo = MarketDataRepository(db_path)
-    assert market_repo.latest_snapshot("AAA.US") is not None
-    assert market_repo.latest_snapshot("BBB.LSE") is not None
-    assert market_repo.latest_snapshot("AAA.LSE") is None
+    security_repo = SecurityRepository(db_path)
+    id_aaa_us = security_repo.resolve_id("AAA.US")
+    id_bbb_lse = security_repo.resolve_id("BBB.LSE")
+    id_aaa_lse = security_repo.resolve_id("AAA.LSE")
+    assert id_aaa_us is not None
+    assert id_bbb_lse is not None
+    assert id_aaa_lse is not None
+    assert market_repo.latest_snapshot_by_id(id_aaa_us) is not None
+    assert market_repo.latest_snapshot_by_id(id_bbb_lse) is not None
+    # AAA.LSE is a secondary listing (PrimaryTicker AAA.US), so it is never
+    # fetched and has no market_data row even though its listing exists.
+    assert market_repo.latest_snapshot_by_id(id_aaa_lse) is None
 
 
 def test_cmd_update_market_data_stage_does_not_reconcile_or_mutate_listing_status(
@@ -3713,7 +3722,7 @@ def test_cmd_run_screen_stage_carries_scope_listing_ids(
     screen's metric/fact/market reads must not re-resolve symbol->listing_id. We
     install a counter over the bulk resolver and assert a multi-symbol screen
     never calls it. This fails on the pre-fix code (which resolved the scope to
-    symbols and re-resolved them inside ``fetch_many_for_symbols``).
+    symbols and re-resolved them inside the scope-wide metric reads).
 
     Author: Emre Tezel
     """
@@ -3825,8 +3834,13 @@ def test_cmd_compute_metrics_stage_symbol_scope(
     assert rc == 0
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
-    assert repo.fetch("AAA.US", "dummy_metric") is None
-    assert repo.fetch("BBB.US", "dummy_metric") == (6.0, "2024-01-01")
+    security_repo = SecurityRepository(db_path)
+    id_aaa = security_repo.resolve_id("AAA.US")
+    assert id_aaa is not None
+    id_bbb = security_repo.resolve_id("BBB.US")
+    assert id_bbb is not None
+    assert repo.fetch_by_id(id_aaa, "dummy_metric") is None
+    assert repo.fetch_by_id(id_bbb, "dummy_metric") == (6.0, "2024-01-01")
 
 
 def test_cmd_compute_metrics_stage_threads_listing_ids_without_resolving(
@@ -3902,8 +3916,16 @@ def test_cmd_compute_metrics_stage_threads_listing_ids_without_resolving(
     assert calls == {"resolve_ids_many": 0}
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
-    assert repo.fetch("AAA.US", "dummy_metric") == (6.0, "2024-01-01")
-    assert repo.fetch("BBB.US", "dummy_metric") == (6.0, "2024-01-01")
+    # Resolve ids only after the zero-resolution assertion above. ``resolve_id``
+    # uses ``fetch_by_symbol`` (not the monkeypatched ``resolve_ids_many``), so
+    # these reads do not perturb the counter the test guards.
+    security_repo = SecurityRepository(db_path)
+    id_aaa = security_repo.resolve_id("AAA.US")
+    assert id_aaa is not None
+    id_bbb = security_repo.resolve_id("BBB.US")
+    assert id_bbb is not None
+    assert repo.fetch_by_id(id_aaa, "dummy_metric") == (6.0, "2024-01-01")
+    assert repo.fetch_by_id(id_bbb, "dummy_metric") == (6.0, "2024-01-01")
 
 
 def test_cmd_compute_metrics_stage_exchange_scope(
@@ -3948,8 +3970,13 @@ def test_cmd_compute_metrics_stage_exchange_scope(
     assert rc == 0
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
-    assert repo.fetch("AAA.US", "dummy_metric") is None
-    assert repo.fetch("BBB.LSE", "dummy_metric") == (1.0, "2024-01-01")
+    security_repo = SecurityRepository(db_path)
+    id_aaa = security_repo.resolve_id("AAA.US")
+    assert id_aaa is not None
+    id_bbb = security_repo.resolve_id("BBB.LSE")
+    assert id_bbb is not None
+    assert repo.fetch_by_id(id_aaa, "dummy_metric") is None
+    assert repo.fetch_by_id(id_bbb, "dummy_metric") == (1.0, "2024-01-01")
 
 
 def test_cmd_compute_metrics_stage_all_supported_scope(
@@ -3997,8 +4024,13 @@ def test_cmd_compute_metrics_stage_all_supported_scope(
     assert rc == 0
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
-    assert repo.fetch("AAA.US", "market_cap") == (120.0, "2024-01-01")
-    assert repo.fetch("BBB.LSE", "market_cap") == (210.0, "2024-01-01")
+    security_repo = SecurityRepository(db_path)
+    id_aaa = security_repo.resolve_id("AAA.US")
+    assert id_aaa is not None
+    id_bbb = security_repo.resolve_id("BBB.LSE")
+    assert id_bbb is not None
+    assert repo.fetch_by_id(id_aaa, "market_cap") == (120.0, "2024-01-01")
+    assert repo.fetch_by_id(id_bbb, "market_cap") == (210.0, "2024-01-01")
 
 
 def test_cmd_compute_metrics_stage_does_not_reconcile_or_mutate_listing_status(
@@ -4234,8 +4266,13 @@ def test_cmd_compute_metrics_stage_parallel_partial_failure(
     ]
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
-    assert repo.fetch("AAA.US", "dummy_metric") == (1.0, "2024-01-01")
-    assert repo.fetch("BBB.US", "dummy_metric") is None
+    security_repo = SecurityRepository(db_path)
+    id_aaa = security_repo.resolve_id("AAA.US")
+    assert id_aaa is not None
+    id_bbb = security_repo.resolve_id("BBB.US")
+    assert id_bbb is not None
+    assert repo.fetch_by_id(id_aaa, "dummy_metric") == (1.0, "2024-01-01")
+    assert repo.fetch_by_id(id_bbb, "dummy_metric") is None
 
 
 def test_run_metric_computation_interrupts_cleanly(
@@ -4325,8 +4362,13 @@ def test_run_metric_computation_interrupts_cleanly(
     assert executor.shutdown_calls == [(False, True)]
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
-    assert repo.fetch("AAA.US", "dummy_metric") == (1.0, "2024-01-01")
-    assert repo.fetch("BBB.US", "dummy_metric") is None
+    security_repo = SecurityRepository(db_path)
+    id_aaa = security_repo.resolve_id("AAA.US")
+    assert id_aaa is not None
+    id_bbb = security_repo.resolve_id("BBB.US")
+    assert id_bbb is not None
+    assert repo.fetch_by_id(id_aaa, "dummy_metric") == (1.0, "2024-01-01")
+    assert repo.fetch_by_id(id_bbb, "dummy_metric") is None
 
 
 def test_cmd_compute_metrics_stage_falls_back_to_serial_without_wal(
@@ -4411,8 +4453,13 @@ def test_cmd_compute_metrics_stage_falls_back_to_serial_without_wal(
     assert not any(line.startswith("[") for line in output_lines)
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
-    assert repo.fetch("AAA.US", "working_capital") == (7.0, recent_date)
-    assert repo.fetch("BBB.US", "working_capital") == (6.0, recent_date)
+    security_repo = SecurityRepository(db_path)
+    id_aaa = security_repo.resolve_id("AAA.US")
+    assert id_aaa is not None
+    id_bbb = security_repo.resolve_id("BBB.US")
+    assert id_bbb is not None
+    assert repo.fetch_by_id(id_aaa, "working_capital") == (7.0, recent_date)
+    assert repo.fetch_by_id(id_bbb, "working_capital") == (6.0, recent_date)
 
 
 def test_run_metric_computation_batches_metric_writes(
@@ -4604,8 +4651,9 @@ def test_flush_metric_write_batch_commits_external_connection_once(
 
     assert write_connection.commit_calls == 1
     assert write_connection.rollback_calls == 0
-    assert metrics_repo.fetch("AAA.US", "dummy_metric") == (1.0, "2024-01-01")
-    status_record = status_repo.fetch("AAA.US", "dummy_metric")
+    # Both repos key reads on the same AAA.US listing id resolved above.
+    assert metrics_repo.fetch_by_id(listing_id, "dummy_metric") == (1.0, "2024-01-01")
+    status_record = status_repo.fetch_by_id(listing_id, "dummy_metric")
     assert status_record is not None
     assert status_record.status == "success"
 
@@ -4708,9 +4756,16 @@ def test_run_metric_computation_parallel_profile_accumulates_worker_timings(
     assert "Profile: read=0.75s compute=1.50s" in output
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
-    assert repo.fetch("AAA.US", "dummy_metric") == (6.0, "2024-01-01")
-    assert repo.fetch("BBB.US", "dummy_metric") == (6.0, "2024-01-01")
-    assert repo.fetch("CCC.US", "dummy_metric") == (6.0, "2024-01-01")
+    security_repo = SecurityRepository(db_path)
+    id_aaa = security_repo.resolve_id("AAA.US")
+    assert id_aaa is not None
+    id_bbb = security_repo.resolve_id("BBB.US")
+    assert id_bbb is not None
+    id_ccc = security_repo.resolve_id("CCC.US")
+    assert id_ccc is not None
+    assert repo.fetch_by_id(id_aaa, "dummy_metric") == (6.0, "2024-01-01")
+    assert repo.fetch_by_id(id_bbb, "dummy_metric") == (6.0, "2024-01-01")
+    assert repo.fetch_by_id(id_ccc, "dummy_metric") == (6.0, "2024-01-01")
 
 
 def test_cmd_compute_metrics_stage_parallel_workers_skip_schema_init(
@@ -4819,10 +4874,15 @@ def test_cmd_compute_metrics_stage_parallel_workers_skip_schema_init(
     assert rc == 0
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
-    assert repo.fetch("AAA.US", "working_capital") == (7.0, recent_date)
-    assert repo.fetch("BBB.US", "working_capital") == (6.0, recent_date)
-    assert repo.fetch("AAA.US", "market_cap") == (120.0, recent_date)
-    assert repo.fetch("BBB.US", "market_cap") == (90.0, recent_date)
+    security_repo = SecurityRepository(db_path)
+    id_aaa = security_repo.resolve_id("AAA.US")
+    assert id_aaa is not None
+    id_bbb = security_repo.resolve_id("BBB.US")
+    assert id_bbb is not None
+    assert repo.fetch_by_id(id_aaa, "working_capital") == (7.0, recent_date)
+    assert repo.fetch_by_id(id_bbb, "working_capital") == (6.0, recent_date)
+    assert repo.fetch_by_id(id_aaa, "market_cap") == (120.0, recent_date)
+    assert repo.fetch_by_id(id_bbb, "market_cap") == (90.0, recent_date)
 
 
 def test_cmd_compute_metrics_stage_process_pool_smoke(
@@ -4873,8 +4933,13 @@ def test_cmd_compute_metrics_stage_process_pool_smoke(
     assert rc == 0
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
-    assert repo.fetch("AAA.US", "market_cap") == (120.0, "2024-01-01")
-    assert repo.fetch("BBB.US", "market_cap") == (90.0, "2024-01-01")
+    security_repo = SecurityRepository(db_path)
+    id_aaa = security_repo.resolve_id("AAA.US")
+    assert id_aaa is not None
+    id_bbb = security_repo.resolve_id("BBB.US")
+    assert id_bbb is not None
+    assert repo.fetch_by_id(id_aaa, "market_cap") == (120.0, "2024-01-01")
+    assert repo.fetch_by_id(id_bbb, "market_cap") == (90.0, "2024-01-01")
 
 
 def test_cmd_clear_fundamentals_raw(tmp_path: Path) -> None:
@@ -4943,7 +5008,10 @@ def test_cmd_clear_financial_facts_clears_normalization_state(tmp_path: Path) ->
         "AAA.US",
         normalized_payload_hash=raw_record[1],
     )
-    assert refresh_state_repo.fetch("AAA.US") is not None
+    security_repo = SecurityRepository(db_path)
+    id_aaa = security_repo.resolve_id("AAA.US")
+    assert id_aaa is not None
+    assert refresh_state_repo.fetch_by_id(id_aaa) is not None
     metric_status_repo.upsert_many(
         [
             MetricComputeStatusRecord(
@@ -6605,7 +6673,10 @@ def test_cmd_run_screen_stage_stale_success_status_hides_stored_metric_value(
         ],
     )
     refresh_repo = FinancialFactsRefreshStateRepository(db_path)
-    initial_refresh = refresh_repo.fetch("AAA.US")
+    security_repo = SecurityRepository(db_path)
+    id_aaa = security_repo.resolve_id("AAA.US")
+    assert id_aaa is not None
+    initial_refresh = refresh_repo.fetch_by_id(id_aaa)
     assert initial_refresh is not None
 
     metrics_repo = MetricsRepository(db_path)
@@ -7343,10 +7414,12 @@ criteria:
 """
     )
 
-    def fail_point_fetch(self: MetricsRepository, symbol: str, metric_id: str) -> None:
+    def fail_point_fetch(
+        self: MetricsRepository, listing_id: int, metric_id: str
+    ) -> None:
         raise AssertionError("point metric fetch should not be used")
 
-    monkeypatch.setattr(MetricsRepository, "fetch", fail_point_fetch)
+    monkeypatch.setattr(MetricsRepository, "fetch_by_id", fail_point_fetch)
 
     rc = cli.cmd_report_screen_failures(
         config_path=str(screen_path),
@@ -7460,9 +7533,6 @@ def test_cmd_report_screen_failures_recompute_uses_symbol_caches(
             connection=connection,
         )
 
-    def fail_latest_snapshot(self: MarketDataRepository, symbol: str) -> None:
-        raise AssertionError("expected report-screen-failures to use bulk snapshots")
-
     monkeypatch.setattr(
         FinancialFactsRepository,
         "facts_for_id",
@@ -7478,7 +7548,6 @@ def test_cmd_report_screen_failures_recompute_uses_symbol_caches(
         "latest_snapshots_many_by_ids",
         counting_latest_snapshots_many_by_ids,
     )
-    monkeypatch.setattr(MarketDataRepository, "latest_snapshot", fail_latest_snapshot)
 
     class RepeatedFactsMetric:
         id = "repeat_facts"

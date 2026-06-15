@@ -137,8 +137,8 @@ duplicate currency column.
 The derived `market_cap` column was removed (migration 072): market cap is
 shares-outstanding x price, so it is computed on demand as the latest share-count
 `financial_facts` row x the latest `market_data` price
-(`MarketDataRepository.latest_snapshot` via `metrics.utils.market_cap_money`), not
-persisted. Using the latest price means market cap (and every metric built on it)
+(`MarketDataRepository.latest_snapshot_by_id` via `metrics.utils.market_cap_money`),
+not persisted. Using the latest price means market cap (and every metric built on it)
 re-prices on every market-data refresh; shares outstanding move slowly, so a
 share count up to a quarter stale adds negligible error.
 

@@ -49,7 +49,7 @@ One row per `(listing_id, as_of)` snapshot date.
 
 - latest price lookup for price-based metrics, including market cap on demand
   (latest share-count fact x latest price via
-  `MarketDataRepository.latest_snapshot` / `metrics.utils.market_cap_money`)
+  `MarketDataRepository.latest_snapshot_by_id` / `metrics.utils.market_cap_money`)
 
 ## Main Write Paths
 

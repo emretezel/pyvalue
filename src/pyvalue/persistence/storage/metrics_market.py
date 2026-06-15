@@ -29,7 +29,6 @@ from .base import (
     SQLITE_MAX_BOUND_PARAMETERS,
     SQLiteStore,
     _batched,
-    _normalized_codes,
     _utc_now_iso,
 )
 from .records import (
@@ -231,20 +230,6 @@ class MetricsRepository(SQLiteStore):
             self._run_with_locked_retry(_persist)
         return len(persisted_rows)
 
-    def fetch(self, symbol: str, metric_id: str) -> Optional[MetricRecord]:
-        """Symbol-keyed convenience over :meth:`fetch_by_id`.
-
-        Resolves the canonical symbol to its ``listing_id`` once, then defers to
-        the natural-identity read. Internal pipelines hold the ``listing_id`` and
-        call :meth:`fetch_by_id` directly.
-        """
-
-        self.initialize_schema()
-        security_id = self._security_repo().resolve_id(symbol)
-        if security_id is None:
-            return None
-        return self.fetch_by_id(security_id, metric_id)
-
     def fetch_by_id(self, listing_id: int, metric_id: str) -> Optional[MetricRecord]:
         """Fetch one stored metric by its natural ``listing_id`` identity."""
 
@@ -335,53 +320,6 @@ class MetricsRepository(SQLiteStore):
                             unit_label=row["unit_label"],
                         )
         return metric_rows_by_id
-
-    def fetch_many_for_symbols(
-        self,
-        symbols: Sequence[str],
-        metric_ids: Sequence[str],
-        chunk_size: int = 500,
-        *,
-        security_ids_by_symbol: Optional[Mapping[str, int]] = None,
-    ) -> Dict[str, Dict[str, MetricRecord]]:
-        """Symbol-keyed wrapper over :meth:`fetch_many_by_ids`.
-
-        ``security_ids_by_symbol`` lets callers that already resolved their scope
-        (run-screen / report-* via ``_resolve_canonical_scope_listings``) carry the
-        natural ``listing_id`` straight in, eliminating the symbol->id round trip.
-        A superset map is fine -- only the requested ``symbols`` are queried.
-        """
-
-        self.initialize_schema()
-        normalized_symbols = _normalized_codes(symbols)
-        if not normalized_symbols:
-            return {}
-
-        resolved_security_ids = (
-            dict(security_ids_by_symbol)
-            if security_ids_by_symbol is not None
-            else self._security_repo().resolve_ids_many(
-                normalized_symbols,
-                chunk_size=chunk_size,
-            )
-        )
-        symbol_by_security_id = {
-            resolved_security_ids[symbol]: symbol
-            for symbol in normalized_symbols
-            if symbol in resolved_security_ids
-        }
-        if not symbol_by_security_id:
-            return {}
-
-        rows_by_id = self.fetch_many_by_ids(
-            list(symbol_by_security_id),
-            metric_ids,
-            chunk_size=chunk_size,
-        )
-        return {
-            symbol_by_security_id[listing_id]: metric_rows
-            for listing_id, metric_rows in rows_by_id.items()
-        }
 
 
 class MetricComputeStatusRepository(SQLiteStore):
@@ -522,15 +460,6 @@ class MetricComputeStatusRepository(SQLiteStore):
             self._run_with_locked_retry(_persist)
         return len(payload)
 
-    def fetch(self, symbol: str, metric_id: str) -> Optional[MetricComputeStatusRecord]:
-        """Symbol-keyed convenience over :meth:`fetch_by_id`."""
-
-        self.initialize_schema()
-        security_id = self._security_repo().resolve_id(symbol)
-        if security_id is None:
-            return None
-        return self.fetch_by_id(security_id, metric_id)
-
     def fetch_by_id(
         self, listing_id: int, metric_id: str
     ) -> Optional[MetricComputeStatusRecord]:
@@ -634,52 +563,6 @@ class MetricComputeStatusRepository(SQLiteStore):
                         )
         return rows_by_id
 
-    def fetch_many_for_symbols(
-        self,
-        symbols: Sequence[str],
-        metric_ids: Sequence[str],
-        chunk_size: int = 500,
-        *,
-        security_ids_by_symbol: Optional[Mapping[str, int]] = None,
-    ) -> Dict[str, Dict[str, MetricComputeStatusRecord]]:
-        """Symbol-keyed wrapper over :meth:`fetch_many_by_ids`.
-
-        ``security_ids_by_symbol`` carries scope-resolved ``listing_id`` values in
-        so report-* commands avoid the symbol->id re-resolution; a superset map
-        only queries the requested ``symbols``.
-        """
-
-        self.initialize_schema()
-        normalized_symbols = _normalized_codes(symbols)
-        if not normalized_symbols:
-            return {}
-
-        resolved_security_ids = (
-            dict(security_ids_by_symbol)
-            if security_ids_by_symbol is not None
-            else self._security_repo().resolve_ids_many(
-                normalized_symbols,
-                chunk_size=chunk_size,
-            )
-        )
-        symbol_by_security_id = {
-            resolved_security_ids[symbol]: symbol
-            for symbol in normalized_symbols
-            if symbol in resolved_security_ids
-        }
-        if not symbol_by_security_id:
-            return {}
-
-        rows_by_id = self.fetch_many_by_ids(
-            list(symbol_by_security_id),
-            metric_ids,
-            chunk_size=chunk_size,
-        )
-        return {
-            symbol_by_security_id[listing_id]: rows
-            for listing_id, rows in rows_by_id.items()
-        }
-
 
 class MarketDataRepository(SQLiteStore):
     """Persist canonical market data snapshots."""
@@ -750,13 +633,6 @@ class MarketDataRepository(SQLiteStore):
                 payload,
             )
 
-    def latest_snapshot(self, symbol: str) -> Optional[PriceData]:
-        self.initialize_schema()
-        security_id = self._security_repo().resolve_id(symbol)
-        if security_id is None:
-            return None
-        return self.latest_snapshot_by_id(security_id)
-
     def latest_snapshot_by_id(self, listing_id: int) -> Optional[PriceData]:
         record = self.latest_snapshot_record_by_id(listing_id)
         if record is None:
@@ -769,24 +645,11 @@ class MarketDataRepository(SQLiteStore):
             currency=record.currency,
         )
 
-    def latest_price(self, symbol: str) -> Optional[Tuple[str, float]]:
-        snapshot = self.latest_snapshot(symbol)
-        if snapshot is None:
-            return None
-        return snapshot.as_of, snapshot.price
-
     def latest_price_by_id(self, listing_id: int) -> Optional[Tuple[str, float]]:
         snapshot = self.latest_snapshot_by_id(listing_id)
         if snapshot is None:
             return None
         return snapshot.as_of, snapshot.price
-
-    def latest_snapshot_record(self, symbol: str) -> Optional[MarketSnapshotRecord]:
-        self.initialize_schema()
-        security_id = self._security_repo().resolve_id(symbol)
-        if security_id is None:
-            return None
-        return self.latest_snapshot_record_by_id(security_id)
 
     def latest_snapshot_record_by_id(
         self, listing_id: int
@@ -835,53 +698,6 @@ class MarketDataRepository(SQLiteStore):
             currency=canonical_trading_currency(row["currency"]),
             updated_at=row["updated_at"],
         )
-
-    def latest_snapshots_many(
-        self,
-        symbols: Sequence[str],
-        chunk_size: int = 500,
-        *,
-        security_ids_by_symbol: Optional[Mapping[str, int]] = None,
-        connection: Optional[sqlite3.Connection] = None,
-    ) -> Dict[str, MarketSnapshotRecord]:
-        """Symbol-keyed wrapper over :meth:`latest_snapshots_many_by_ids`.
-
-        ``security_ids_by_symbol`` carries scope-resolved ``listing_id`` values in
-        so no symbol->id round trip is needed; a superset map only queries the
-        requested ``symbols``.
-        """
-
-        self.initialize_schema()
-        normalized = _normalized_codes(symbols)
-        if not normalized:
-            return {}
-
-        resolved_security_ids = (
-            dict(security_ids_by_symbol)
-            if security_ids_by_symbol is not None
-            else self._security_repo().resolve_ids_many(
-                normalized,
-                chunk_size=chunk_size,
-                connection=connection,
-            )
-        )
-        symbol_by_security_id = {
-            resolved_security_ids[symbol]: symbol
-            for symbol in normalized
-            if symbol in resolved_security_ids
-        }
-        if not symbol_by_security_id:
-            return {}
-
-        snapshots_by_id = self.latest_snapshots_many_by_ids(
-            list(symbol_by_security_id),
-            chunk_size=chunk_size,
-            connection=connection,
-        )
-        return {
-            symbol_by_security_id[listing_id]: record
-            for listing_id, record in snapshots_by_id.items()
-        }
 
     def latest_snapshots_many_by_ids(
         self,

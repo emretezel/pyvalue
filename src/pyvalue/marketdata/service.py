@@ -5,7 +5,6 @@ Author: Emre Tezel
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import Optional, Union
 
@@ -20,34 +19,10 @@ from pyvalue.marketdata import (
     MarketDataUpdate,
     PriceData,
 )
-from pyvalue.facts import RegionFactsRepository
 from pyvalue.persistence.storage import (
-    FinancialFactsRepository,
     MarketDataRepository,
     SupportedTickerRepository,
 )
-
-LOGGER = logging.getLogger(__name__)
-
-
-def latest_share_count(
-    symbol: str, repo: FinancialFactsRepository | RegionFactsRepository
-) -> Optional[float]:
-    """Return the latest reported shares-outstanding count for ``symbol``.
-
-    A standalone helper (no service state) so any caller holding a facts
-    repository can resolve a share count without constructing a provider-backed
-    service -- used by the on-demand market-cap computation.
-    """
-
-    counts = repo.latest_share_counts_many([symbol], chunk_size=1)
-    value = counts.get(symbol.upper())
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 class MarketDataService:
@@ -117,24 +92,7 @@ class MarketDataService:
     def persist_updates(self, updates: list[MarketDataUpdate]) -> None:
         self.repo.upsert_prices(updates)
 
-    def refresh_symbol(
-        self, symbol: str, fetch_symbol: Optional[str] = None
-    ) -> PriceData:
-        fetch = fetch_symbol or symbol
-        data = self.provider.latest_price(fetch)
-        prepared = self.prepare_price_data(symbol, data)
-        self.repo.upsert_price(
-            symbol=prepared.symbol,
-            as_of=prepared.as_of,
-            price=prepared.price,
-            volume=prepared.volume,
-            currency=prepared.currency,
-        )
-        LOGGER.info("Stored market data for %s at %s", prepared.symbol, prepared.as_of)
-        return prepared
-
 
 __all__ = [
     "MarketDataService",
-    "latest_share_count",
 ]

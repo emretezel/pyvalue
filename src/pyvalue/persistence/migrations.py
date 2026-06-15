@@ -2068,7 +2068,7 @@ def _migration_028_add_fx_catalog_tables(
 def _migration_029_add_fin_facts_security_concept_latest_index(
     conn: sqlite3.Connection,
 ) -> None:
-    # The compute-metrics fact preload (storage.facts_for_symbols_many) issues
+    # The compute-metrics fact preload (storage.facts_for_ids_many) issues
     # a query that pins this exact composite ordering via INDEXED BY. Without
     # this index that query would either fail outright or fall back to a
     # slower path. The index used to be created opportunistically inside

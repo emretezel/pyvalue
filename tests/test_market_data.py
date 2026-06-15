@@ -11,7 +11,7 @@ import requests
 
 from pyvalue.config import Config
 from pyvalue.marketdata.eodhd import EODHDProvider
-from pyvalue.marketdata.base import PriceData
+from pyvalue.marketdata.base import MarketDataUpdate, PriceData
 from pyvalue.marketdata.service import MarketDataService
 from pyvalue.persistence.storage import (
     MarketDataRepository,
@@ -87,7 +87,7 @@ def _seed_listing(
 
     ``listing.currency`` is NOT NULL with no fallback, so every listing must be
     created from a provider payload that carries a currency. Tests that drive
-    ``refresh_symbol``/``upsert_price``/``replace_facts`` for an uncatalogued
+    ``persist_updates``/``upsert_price``/``replace_facts`` for an uncatalogued
     symbol seed the listing here first so the strict creation path is satisfied.
     """
 
@@ -133,19 +133,39 @@ def test_market_data_service_persists_prices(tmp_path: Path) -> None:
                 currency=None,
             )
 
-    _seed_listing(tmp_path / "data.db", "AAPL.US", currency="USD")
-    service = MarketDataService(db_path=tmp_path / "data.db", provider=DummyProvider())
+    db_path = tmp_path / "data.db"
+    ticker_repo = _seed_listing(db_path, "AAPL.US", currency="USD")
+    aapl = next(
+        row
+        for row in ticker_repo.list_for_exchange("EODHD", "US")
+        if row.symbol == "AAPL.US"
+    )
+    service = MarketDataService(db_path=db_path, provider=DummyProvider())
 
-    result = service.refresh_symbol("AAPL.US")
+    # Mirror the live update-market-data path: prepare the quoted price, build a
+    # natural-identity MarketDataUpdate, and persist the batch.
+    prepared = service.prepare_price_data("AAPL.US", service.provider.latest_price(""))
+    assert prepared.price == 150.0
+    service.persist_updates(
+        [
+            MarketDataUpdate(
+                security_id=aapl.security_id,
+                symbol="AAPL.US",
+                as_of=prepared.as_of,
+                price=prepared.price,
+                volume=prepared.volume,
+                currency=prepared.currency,
+                source_provider="EODHD",
+            )
+        ]
+    )
 
-    assert result.price == 150.0
-
-    repo = MarketDataRepository(tmp_path / "data.db")
-    latest_snapshot = repo.latest_snapshot("AAPL.US")
+    repo = MarketDataRepository(db_path)
+    latest_snapshot = repo.latest_snapshot_by_id(aapl.security_id)
     assert latest_snapshot is not None
     assert latest_snapshot.as_of == "2024-03-02"
     assert latest_snapshot.price == 150.0
-    latest = repo.latest_price("AAPL.US")
+    latest = repo.latest_price_by_id(aapl.security_id)
     assert latest is not None
     assert latest[0] == "2024-03-02"
     assert latest[1] == 150.0
@@ -204,12 +224,12 @@ def test_market_data_service_stores_major_price_for_subunit_quote(
         config=DummyConfig(),
     )
 
-    service.refresh_symbol(symbol)
-
-    snapshot = MarketDataRepository(db_path).latest_snapshot(symbol)
-    assert snapshot is not None
-    assert snapshot.price == pytest.approx(major_price)
-    assert snapshot.currency == base_currency
+    # prepare_price_data collapses the subunit quote to its MAJOR currency; this
+    # is the normalization the live update-market-data path relies on before
+    # persisting, so we assert the prepared PriceData directly.
+    prepared = service.prepare_price_data(symbol, service.provider.latest_price(symbol))
+    assert prepared.price == pytest.approx(major_price)
+    assert prepared.currency == base_currency
 
 
 def test_eodhd_provider_preserves_gbx_quote_price() -> None:
@@ -270,7 +290,12 @@ def test_market_data_service_stores_large_price_change_without_guard(
             )
 
     db_path = tmp_path / "no-guard.db"
-    _seed_listing(db_path, "ATXS.US", currency="USD")
+    ticker_repo = _seed_listing(db_path, "ATXS.US", currency="USD")
+    atxs = next(
+        row
+        for row in ticker_repo.list_for_exchange("EODHD", "US")
+        if row.symbol == "ATXS.US"
+    )
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
     market_repo.upsert_price("ATXS.US", "2025-12-22", 12.92, currency="USD")
@@ -278,10 +303,26 @@ def test_market_data_service_stores_large_price_change_without_guard(
     service = MarketDataService(
         db_path=db_path, provider=DummyProvider(), config=DummyConfig()
     )
-    prepared = service.refresh_symbol("ATXS.US")
+    # A large jump from the prior 12.92 to 5298.0 is persisted without error.
+    prepared = service.prepare_price_data(
+        "ATXS.US", service.provider.latest_price("ATXS.US")
+    )
     assert prepared.price == 5298.0
+    service.persist_updates(
+        [
+            MarketDataUpdate(
+                security_id=atxs.security_id,
+                symbol="ATXS.US",
+                as_of=prepared.as_of,
+                price=prepared.price,
+                volume=prepared.volume,
+                currency=prepared.currency,
+                source_provider="EODHD",
+            )
+        ]
+    )
 
-    latest_snapshot = market_repo.latest_snapshot("ATXS.US")
+    latest_snapshot = market_repo.latest_snapshot_by_id(atxs.security_id)
     assert latest_snapshot is not None
     assert latest_snapshot.as_of == "2026-03-20"
     assert latest_snapshot.price == 5298.0

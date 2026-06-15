@@ -272,7 +272,7 @@ phase assumes those co-dated prices exist and resolves market cap to `None` when
 they do not.
 
 > **Superseded by a later change.** Market cap now uses the **latest** price
-> (`MarketDataRepository.latest_snapshot`), not the price as of the share-count
+> (`MarketDataRepository.latest_snapshot_by_id`), not the price as of the share-count
 > date, and `price_as_of` is removed. A value screen refreshes prices far more
 > often than fundamentals, so co-dating froze market cap (and every metric built
 > on it) between fundamentals ingests and required a co-dated historical price the
@@ -350,7 +350,7 @@ listings are deleted (not backfilled), and the column is made NOT NULL.
 - Ingest (`marketdata/service.py`): `prepare_price_data` now collapses the
   quoted price to its major currency via `normalize_monetary_amount` and stores
   that; removed the inverse helper `_quote_unit_price`.
-- Read path (`persistence/storage/`): `latest_snapshot_record` / `latest_snapshots_many`
+- Read path (`persistence/storage/`): `latest_snapshot_record_by_id` / `latest_snapshots_many_by_ids`
   report `canonical_trading_currency(listing.currency)` so the (price, currency)
   pair is self-consistent and downstream normalization never divides twice.
 - Migration **070** divides existing `market_data.price` by 100 for listings

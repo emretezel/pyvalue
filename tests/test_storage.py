@@ -33,7 +33,6 @@ from pyvalue.persistence.storage import (
 )
 from pyvalue.persistence.storage.fundamentals import _resolve_provider_listing_id
 from pyvalue.marketdata import MarketDataUpdate
-from pyvalue.marketdata.service import latest_share_count
 from pyvalue.universe import Listing
 from collections.abc import Sequence
 from types import TracebackType
@@ -1198,10 +1197,12 @@ def test_financial_facts_repository_replace_facts_updates_refresh_state(
     )
 
     refresh_repo = FinancialFactsRefreshStateRepository(db_path)
-    refresh_record = refresh_repo.fetch("AAA.US")
+    id_aaa = SecurityRepository(db_path).resolve_id("AAA.US")
+    assert id_aaa is not None
+    refresh_record = refresh_repo.fetch_by_id(id_aaa)
 
     assert refresh_record is not None
-    assert refresh_record.listing_id == SecurityRepository(db_path).resolve_id("AAA.US")
+    assert refresh_record.listing_id == id_aaa
     assert refresh_record.refreshed_at
 
 
@@ -2162,8 +2163,8 @@ def test_market_data_repository_upsert_prices_batches_rows(tmp_path: Path) -> No
         ]
     )
 
-    aaa_snapshot = repo.latest_snapshot("AAA.US")
-    bbb_snapshot = repo.latest_snapshot("BBB.US")
+    aaa_snapshot = repo.latest_snapshot_by_id(by_symbol["AAA.US"].security_id)
+    bbb_snapshot = repo.latest_snapshot_by_id(by_symbol["BBB.US"].security_id)
     assert aaa_snapshot is not None
     assert bbb_snapshot is not None
     assert aaa_snapshot.price == 10.0
@@ -2339,188 +2340,6 @@ def test_fundamentals_fetch_state_writes_resolve_via_base_tables_in_one_query(
     assert repo.fetch("EODHD", "AAA.US") is not None
 
 
-def test_market_data_repository_latest_snapshots_many_matches_single_lookup(
-    tmp_path: Path,
-) -> None:
-    db_path = tmp_path / "market-snapshots-many.db"
-    ticker_repo = SupportedTickerRepository(db_path)
-    ticker_repo.initialize_schema()
-    seed_exchange(db_path, "US")
-    ticker_repo.replace_for_exchange(
-        "EODHD",
-        "US",
-        [
-            {
-                "Code": "AAA",
-                "Name": "AAA Inc",
-                "Type": "Common Stock",
-                "Currency": "USD",
-            },
-            {
-                "Code": "BBB",
-                "Name": "BBB Inc",
-                "Type": "Common Stock",
-                "Currency": "USD",
-            },
-        ],
-    )
-    rows = ticker_repo.list_for_exchange("EODHD", "US")
-    by_symbol = {row.symbol: row for row in rows}
-
-    repo = MarketDataRepository(db_path)
-    repo.initialize_schema()
-    repo.upsert_prices(
-        [
-            MarketDataUpdate(
-                security_id=by_symbol["AAA.US"].security_id,
-                symbol="AAA.US",
-                as_of="2026-03-28",
-                price=9.0,
-                volume=90,
-                currency="USD",
-            ),
-            MarketDataUpdate(
-                security_id=by_symbol["AAA.US"].security_id,
-                symbol="AAA.US",
-                as_of="2026-03-29",
-                price=10.0,
-                volume=100,
-                currency="USD",
-            ),
-            MarketDataUpdate(
-                security_id=by_symbol["BBB.US"].security_id,
-                symbol="BBB.US",
-                as_of="2026-03-29",
-                price=20.0,
-                volume=200,
-                currency="USD",
-            ),
-        ]
-    )
-
-    snapshots = repo.latest_snapshots_many(["AAA.US", "BBB.US", "CCC.US"])
-
-    aaa_single = repo.latest_snapshot("AAA.US")
-    bbb_single = repo.latest_snapshot("BBB.US")
-    assert aaa_single is not None
-    assert bbb_single is not None
-    assert set(snapshots) == {"AAA.US", "BBB.US"}
-    assert snapshots["AAA.US"].security_id == by_symbol["AAA.US"].security_id
-    assert snapshots["AAA.US"].as_of == aaa_single.as_of
-    assert snapshots["AAA.US"].price == aaa_single.price
-    assert snapshots["BBB.US"].as_of == bbb_single.as_of
-    assert snapshots["BBB.US"].price == bbb_single.price
-
-
-def test_metric_repositories_fetch_many_for_symbols_carry_scope_listing_ids(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Supplying scope-resolved listing ids skips the symbol->id re-resolution.
-
-    run-screen and the report-* commands resolve their scope to ``listing_id``
-    up front (``_resolve_canonical_scope_listings``) and thread the ids in via
-    ``security_ids_by_symbol``. With the map supplied neither the metric-value
-    nor the compute-status read may fall back to
-    ``SecurityRepository.resolve_ids_many`` -- we prove that by making it raise.
-    A superset map must still query only the requested subset, which is what the
-    run-screen ranking pass relies on.
-
-    Author: Emre Tezel
-    """
-    db_path = tmp_path / "metrics-fetch-many-ids.db"
-    ticker_repo = SupportedTickerRepository(db_path)
-    ticker_repo.initialize_schema()
-    seed_exchange(db_path, "US")
-    ticker_repo.replace_for_exchange(
-        "EODHD",
-        "US",
-        [
-            {
-                "Code": "AAA",
-                "Name": "AAA Inc",
-                "Type": "Common Stock",
-                "Currency": "USD",
-            },
-            {
-                "Code": "BBB",
-                "Name": "BBB Inc",
-                "Type": "Common Stock",
-                "Currency": "USD",
-            },
-        ],
-    )
-    rows = ticker_repo.list_for_exchange("EODHD", "US")
-    ids_by_symbol = {row.symbol: row.security_id for row in rows}
-
-    metrics_repo = MetricsRepository(db_path)
-    metrics_repo.upsert("AAA.US", "pe_ratio", 12.0, "2026-03-29", unit_kind="other")
-    metrics_repo.upsert("BBB.US", "pe_ratio", 20.0, "2026-03-29", unit_kind="other")
-    status_repo = MetricComputeStatusRepository(db_path)
-    status_repo.upsert_many(
-        [
-            MetricComputeStatusRecord(
-                symbol="AAA.US",
-                metric_id="pe_ratio",
-                status="success",
-                attempted_at="2026-03-29T00:00:00+00:00",
-                value_as_of="2026-03-29",
-            ),
-            MetricComputeStatusRecord(
-                symbol="BBB.US",
-                metric_id="pe_ratio",
-                status="success",
-                attempted_at="2026-03-29T00:00:00+00:00",
-                value_as_of="2026-03-29",
-            ),
-        ]
-    )
-
-    # Baseline reads resolve internally (no id map supplied).
-    baseline_metrics = metrics_repo.fetch_many_for_symbols(
-        ["AAA.US", "BBB.US"], ["pe_ratio"]
-    )
-    baseline_status = status_repo.fetch_many_for_symbols(
-        ["AAA.US", "BBB.US"], ["pe_ratio"]
-    )
-
-    def _explode(*args: object, **kwargs: object) -> NoReturn:
-        raise AssertionError("resolve_ids_many must not run when ids are supplied")
-
-    monkeypatch.setattr(SecurityRepository, "resolve_ids_many", _explode)
-
-    carried_metrics = metrics_repo.fetch_many_for_symbols(
-        ["AAA.US", "BBB.US"], ["pe_ratio"], security_ids_by_symbol=ids_by_symbol
-    )
-    carried_status = status_repo.fetch_many_for_symbols(
-        ["AAA.US", "BBB.US"], ["pe_ratio"], security_ids_by_symbol=ids_by_symbol
-    )
-
-    assert set(carried_metrics) == {"AAA.US", "BBB.US"}
-    assert (
-        carried_metrics["AAA.US"]["pe_ratio"].value
-        == baseline_metrics["AAA.US"]["pe_ratio"].value
-        == 12.0
-    )
-    assert (
-        carried_metrics["BBB.US"]["pe_ratio"].value
-        == baseline_metrics["BBB.US"]["pe_ratio"].value
-        == 20.0
-    )
-    assert set(carried_status) == {"AAA.US", "BBB.US"}
-    assert (
-        carried_status["AAA.US"]["pe_ratio"].status
-        == baseline_status["AAA.US"]["pe_ratio"].status
-        == "success"
-    )
-
-    # A superset map only queries the requested subset (run-screen ranking pass).
-    subset_metrics = metrics_repo.fetch_many_for_symbols(
-        ["AAA.US"], ["pe_ratio"], security_ids_by_symbol=ids_by_symbol
-    )
-    assert set(subset_metrics) == {"AAA.US"}
-
-
 def test_financial_facts_repository_latest_share_counts_many_matches_single_lookup(
     tmp_path: Path,
 ) -> None:
@@ -2572,29 +2391,21 @@ def test_financial_facts_repository_latest_share_counts_many_matches_single_look
         ],
     )
 
-    counts = repo.latest_share_counts_many(["AAA.US", "BBB.US", "CCC.US"])
-    security_ids = repo._security_repo().resolve_ids_many(
-        ["AAA.US", "BBB.US", "CCC.US"]
-    )
-    counts_with_security_ids = repo.latest_share_counts_many(
-        ["AAA.US", "BBB.US", "CCC.US"],
-        security_ids_by_symbol=security_ids,
-    )
+    security_repo = repo._security_repo()
+    id_aaa = security_repo.resolve_id("AAA.US")
+    id_bbb = security_repo.resolve_id("BBB.US")
+    assert id_aaa is not None
+    assert id_bbb is not None
 
-    assert counts["AAA.US"] == latest_share_count("AAA.US", repo)
-    assert counts["BBB.US"] == latest_share_count("BBB.US", repo)
-    assert counts["AAA.US"] == 222.0
-    assert counts["BBB.US"] == 333.0
-    assert counts_with_security_ids == counts
-    # The id-keyed reader returns the same values re-keyed by listing_id.
-    counts_by_ids = repo.latest_share_counts_many_by_ids(list(security_ids.values()))
-    assert counts_by_ids == {
-        security_ids[symbol]: value for symbol, value in counts.items()
-    }
-    assert "CCC.US" not in counts
+    # CCC.US is uncataloged (never seeded), so its id resolves to None and it is
+    # absent from the result. The id reader prefers the latest end_date and the
+    # ``CommonStockSharesOutstanding`` concept, so AAA picks 222.0 (its
+    # CommonStock fact) and BBB picks 333.0 (its 2024 fact over the 2023 one).
+    counts_by_ids = repo.latest_share_counts_many_by_ids([id_aaa, id_bbb])
+    assert counts_by_ids == {id_aaa: 222.0, id_bbb: 333.0}
 
 
-def test_financial_facts_repository_facts_for_symbols_many_matches_single_lookup(
+def test_financial_facts_repository_facts_for_ids_many_groups_by_listing(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "facts-many.db"
@@ -2658,20 +2469,25 @@ def test_financial_facts_repository_facts_for_symbols_many_matches_single_lookup
         ],
     )
 
-    facts = repo.facts_for_symbols_many(["AAA.US", "BBB.US", "CCC.US"], chunk_size=1)
+    security_repo = repo._security_repo()
+    id_aaa = security_repo.resolve_id("AAA.US")
+    id_bbb = security_repo.resolve_id("BBB.US")
+    assert id_aaa is not None
+    assert id_bbb is not None
 
-    assert {record.concept for record in facts["AAA.US"]} == {
+    facts = repo.facts_for_ids_many([id_aaa, id_bbb], chunk_size=1)
+
+    assert {record.concept for record in facts[id_aaa]} == {
         "AssetsCurrent",
         "LiabilitiesCurrent",
     }
-    assert {record.concept for record in facts["BBB.US"]} == {
+    assert {record.concept for record in facts[id_bbb]} == {
         "AssetsCurrent",
         "Revenue",
     }
-    assert "CCC.US" not in facts
 
 
-def test_financial_facts_repository_facts_for_symbols_many_concept_filter(
+def test_financial_facts_repository_facts_for_ids_many_concept_filter(
     tmp_path: Path,
 ) -> None:
     """A non-empty ``concepts`` argument restricts the preload to that subset."""
@@ -2713,16 +2529,19 @@ def test_financial_facts_repository_facts_for_symbols_many_concept_filter(
         ],
     )
 
-    filtered = repo.facts_for_symbols_many(
-        ["AAA.US"],
+    id_aaa = repo._security_repo().resolve_id("AAA.US")
+    assert id_aaa is not None
+
+    filtered = repo.facts_for_ids_many(
+        [id_aaa],
         concepts=["AssetsCurrent", "LiabilitiesCurrent"],
     )
-    concepts = {record.concept for record in filtered["AAA.US"]}
+    concepts = {record.concept for record in filtered[id_aaa]}
     assert concepts == {"AssetsCurrent", "LiabilitiesCurrent"}
 
     # Empty concepts list short-circuits to the unfiltered query.
-    unfiltered = repo.facts_for_symbols_many(["AAA.US"], concepts=[])
-    assert {r.concept for r in unfiltered["AAA.US"]} == {
+    unfiltered = repo.facts_for_ids_many([id_aaa], concepts=[])
+    assert {r.concept for r in unfiltered[id_aaa]} == {
         "AssetsCurrent",
         "LiabilitiesCurrent",
         "Revenues",
@@ -2900,10 +2719,11 @@ def test_latest_share_counts_many_prefers_best_same_date_share_fact(
         ],
     )
 
-    counts = repo.latest_share_counts_many(["AAA.US"])
+    id_aaa = repo._security_repo().resolve_id("AAA.US")
+    assert id_aaa is not None
+    counts = repo.latest_share_counts_many_by_ids([id_aaa])
 
-    assert counts == {"AAA.US": 1000.0}
-    assert latest_share_count("AAA.US", repo) == 1000.0
+    assert counts == {id_aaa: 1000.0}
 
 
 def test_sqlite_store_connect_context_closes_connection(tmp_path: Path) -> None:
@@ -2951,9 +2771,14 @@ def test_metrics_repository_upsert_many_matches_single_upsert(tmp_path: Path) ->
     updated = repo.upsert_many(rows)
 
     assert updated == 3
-    assert repo.fetch("AAA.US", "metric_one") == (2.0, "2024-02-01")
-    assert repo.fetch("AAA.US", "metric_two") == (3.0, "2024-02-01")
-    assert repo.fetch("BBB.US", "metric_one") == (4.0, "2024-02-01")
+    security_repo = repo._security_repo()
+    id_aaa = security_repo.resolve_id("AAA.US")
+    id_bbb = security_repo.resolve_id("BBB.US")
+    assert id_aaa is not None
+    assert id_bbb is not None
+    assert repo.fetch_by_id(id_aaa, "metric_one") == (2.0, "2024-02-01")
+    assert repo.fetch_by_id(id_aaa, "metric_two") == (3.0, "2024-02-01")
+    assert repo.fetch_by_id(id_bbb, "metric_one") == (4.0, "2024-02-01")
 
 
 def test_metrics_repository_upsert_many_retries_transient_locked_error(
@@ -2966,6 +2791,10 @@ def test_metrics_repository_upsert_many_retries_transient_locked_error(
     # finds it (rather than falling through to ensure_from_symbol, which would
     # open the locked/patched connection on the retry path).
     _seed_listing(db_path, "AAA.US")
+    # Resolve the id up front, before _connect is patched, so the post-write
+    # read-back is a pure id lookup that never re-resolves a symbol.
+    id_aaa = repo._security_repo().resolve_id("AAA.US")
+    assert id_aaa is not None
     monkeypatch.setattr(repo, "initialize_schema", lambda: None)
 
     original_connect = repo._connect
@@ -3004,10 +2833,10 @@ def test_metrics_repository_upsert_many_retries_transient_locked_error(
 
     assert attempts["count"] == 2
     assert updated == 1
-    assert repo.fetch("AAA.US", "metric_one") == (2.0, "2024-02-01")
+    assert repo.fetch_by_id(id_aaa, "metric_one") == (2.0, "2024-02-01")
 
 
-def test_metrics_repository_fetch_many_for_symbols_returns_requested_metrics(
+def test_metrics_repository_fetch_many_by_ids_returns_requested_metrics(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "metrics-fetch-many.db"
@@ -3024,18 +2853,29 @@ def test_metrics_repository_fetch_many_for_symbols_returns_requested_metrics(
     ]
     repo.upsert_many(rows)
 
-    fetched = repo.fetch_many_for_symbols(
-        ["AAA.US", "BBB.US", "CCC.US", "DDD.US"],
+    security_repo = repo._security_repo()
+    id_aaa = security_repo.resolve_id("AAA.US")
+    id_bbb = security_repo.resolve_id("BBB.US")
+    id_ccc = security_repo.resolve_id("CCC.US")
+    assert id_aaa is not None
+    assert id_bbb is not None
+    assert id_ccc is not None
+
+    # Only the requested metric ids are returned (metric_three is excluded), and
+    # only listings that actually have a row for one of them appear: CCC has only
+    # metric_three, so it is absent from the result entirely.
+    fetched = repo.fetch_many_by_ids(
+        [id_aaa, id_bbb, id_ccc],
         ["metric_one", "metric_two"],
         chunk_size=1,
     )
 
     assert fetched == {
-        "AAA.US": {
+        id_aaa: {
             "metric_one": (1.0, "2024-01-01"),
             "metric_two": (2.0, "2024-01-02"),
         },
-        "BBB.US": {
+        id_bbb: {
             "metric_one": (3.0, "2024-01-03"),
         },
     }
@@ -3070,20 +2910,26 @@ def test_metric_compute_status_repository_upsert_and_fetch_many(tmp_path: Path) 
     )
 
     assert updated == 2
-    single = repo.fetch("BBB.US", "metric_one")
+    security_repo = repo._security_repo()
+    id_aaa = security_repo.resolve_id("AAA.US")
+    id_bbb = security_repo.resolve_id("BBB.US")
+    assert id_aaa is not None
+    assert id_bbb is not None
+
+    single = repo.fetch_by_id(id_bbb, "metric_one")
     assert single is not None
     assert single.status == "failure"
     assert single.reason_code == "missing_data"
 
-    fetched = repo.fetch_many_for_symbols(
-        ["AAA.US", "BBB.US"],
+    fetched = repo.fetch_many_by_ids(
+        [id_aaa, id_bbb],
         ["metric_one"],
         chunk_size=1,
     )
 
-    assert fetched["AAA.US"]["metric_one"].status == "success"
-    assert fetched["AAA.US"]["metric_one"].value_as_of == "2024-01-01"
-    assert fetched["BBB.US"]["metric_one"].reason_detail == "Need more facts"
+    assert fetched[id_aaa]["metric_one"].status == "success"
+    assert fetched[id_aaa]["metric_one"].value_as_of == "2024-01-01"
+    assert fetched[id_bbb]["metric_one"].reason_detail == "Need more facts"
 
 
 def test_metrics_repository_persists_unit_metadata(tmp_path: Path) -> None:
@@ -3111,8 +2957,10 @@ def test_metrics_repository_persists_unit_metadata(tmp_path: Path) -> None:
         unit_label="pct",
     )
 
-    market_cap = repo.fetch("AAA.US", "market_cap")
-    earnings_yield = repo.fetch("AAA.US", "earnings_yield")
+    id_aaa = repo._security_repo().resolve_id("AAA.US")
+    assert id_aaa is not None
+    market_cap = repo.fetch_by_id(id_aaa, "market_cap")
+    earnings_yield = repo.fetch_by_id(id_aaa, "earnings_yield")
 
     assert market_cap is not None
     assert market_cap.unit_kind == "monetary"
@@ -3150,8 +2998,13 @@ def test_metrics_repository_normalizes_configured_subunit_currencies(
         currency="ILA",
     )
 
-    market_cap = repo.fetch("AAA.JSE", "market_cap")
-    eps_ttm = repo.fetch("BBB.TA", "eps_ttm")
+    security_repo = repo._security_repo()
+    id_aaa = security_repo.resolve_id("AAA.JSE")
+    id_bbb = security_repo.resolve_id("BBB.TA")
+    assert id_aaa is not None
+    assert id_bbb is not None
+    market_cap = repo.fetch_by_id(id_aaa, "market_cap")
+    eps_ttm = repo.fetch_by_id(id_bbb, "eps_ttm")
 
     assert market_cap is not None
     assert market_cap.currency == "ZAR"
@@ -3869,10 +3722,10 @@ def test_metrics_upsert_many_uses_supplied_ids_without_resolving(
 
     assert written == 2
     assert calls == {"resolve_ids_many": 0}
-    # Values landed under the supplied listing ids (fetch resolves each symbol
-    # independently, so a hit confirms the write used the right id).
-    assert repo.fetch("AAA.US", "m1") == (1.0, "2024-01-01")
-    assert repo.fetch("BBB.US", "m1") == (2.0, "2024-01-01")
+    # Values landed under the supplied listing ids (reading each back by its id
+    # confirms the write used the right id).
+    assert repo.fetch_by_id(ids_by_symbol["AAA.US"], "m1") == (1.0, "2024-01-01")
+    assert repo.fetch_by_id(ids_by_symbol["BBB.US"], "m1") == (2.0, "2024-01-01")
 
 
 def test_metrics_upsert_many_resolves_only_symbols_absent_from_ids_map(
@@ -3887,6 +3740,7 @@ def test_metrics_upsert_many_resolves_only_symbols_absent_from_ids_map(
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
     aaa_id = repo._security_repo().resolve_ids_many(["AAA.US"])["AAA.US"]
+    bbb_id = repo._security_repo().resolve_ids_many(["BBB.US"])["BBB.US"]
 
     calls: dict[str, int] = {"resolve_ids_many": 0}
     observed: list[tuple[str, ...]] = []
@@ -3918,8 +3772,8 @@ def test_metrics_upsert_many_resolves_only_symbols_absent_from_ids_map(
     # Only the unmapped symbol hits the resolver.
     assert calls == {"resolve_ids_many": 1}
     assert observed == [("BBB.US",)]
-    assert repo.fetch("AAA.US", "m1") == (1.0, "2024-01-01")
-    assert repo.fetch("BBB.US", "m1") == (2.0, "2024-01-01")
+    assert repo.fetch_by_id(aaa_id, "m1") == (1.0, "2024-01-01")
+    assert repo.fetch_by_id(bbb_id, "m1") == (2.0, "2024-01-01")
 
 
 def test_resolve_ids_many_does_not_cross_match_across_exchanges(
@@ -3971,10 +3825,13 @@ def test_metrics_upsert_many_skips_uncataloged_symbol_without_creating_listing(
         written = repo.upsert_many(rows)
 
     assert written == 1
-    assert repo.fetch("AAA.US", "m1") == (1.0, "2024-01-01")
-    assert repo.fetch("ZZZ.US", "m1") is None
-    # No catalog row was minted for the uncataloged symbol.
-    assert SecurityRepository(db_path).resolve_id("ZZZ.US") is None
+    security_repo = SecurityRepository(db_path)
+    id_aaa = security_repo.resolve_id("AAA.US")
+    assert id_aaa is not None
+    assert repo.fetch_by_id(id_aaa, "m1") == (1.0, "2024-01-01")
+    # No catalog row was minted for the uncataloged symbol, so it has no id and
+    # its skipped metric row never landed.
+    assert security_repo.resolve_id("ZZZ.US") is None
     assert "ZZZ.US" in caplog.text
 
 
@@ -4003,20 +3860,22 @@ def test_metric_compute_status_upsert_many_skips_uncataloged_symbol(
     written = repo.upsert_many(rows)
 
     assert written == 1
-    assert repo.fetch("AAA.US", "m1") is not None
-    assert repo.fetch("ZZZ.US", "m1") is None
-    assert SecurityRepository(db_path).resolve_id("ZZZ.US") is None
+    security_repo = SecurityRepository(db_path)
+    id_aaa = security_repo.resolve_id("AAA.US")
+    assert id_aaa is not None
+    assert repo.fetch_by_id(id_aaa, "m1") is not None
+    assert security_repo.resolve_id("ZZZ.US") is None
 
 
-def test_id_keyed_metric_and_market_reads_match_symbol_forms(tmp_path: Path) -> None:
-    """The new ``*_by_id(s)`` readers return the same data as the symbol forms.
+def test_id_keyed_metric_and_market_reads(tmp_path: Path) -> None:
+    """The ``*_by_id(s)`` readers return the seeded metric/market data.
 
-    Stage 1 of the listing_id-identity refactor adds natural-identity readers
-    next to the symbol-keyed ones (which now delegate to them). They must be
-    behaviour-preserving so the pipeline can migrate to ``listing_id`` without
-    changing results. This also pins the new market read to the latest ``as_of``
-    and to reconstructing the canonical display symbol from ``listing ⋈
-    exchange`` (no ``securities`` view / double-listing join).
+    Now that the symbol-keyed read wrappers have been removed, the pipeline reads
+    everything by ``listing_id``. This pins the metric reads to the seeded values,
+    the market read to the latest ``as_of`` and to reconstructing the canonical
+    display symbol from ``listing ⋈ exchange`` (no ``securities`` view /
+    double-listing join), and the listing-currency read (whose symbol form is a
+    kept resolver edge) to the seeded ``GBP``.
     """
 
     db_path = tmp_path / "id-reads.db"
@@ -4076,26 +3935,23 @@ def test_id_keyed_metric_and_market_reads_match_symbol_forms(tmp_path: Path) -> 
         ]
     )
 
-    # Single metric read: id form equals symbol form; unknown metric is None.
-    assert metrics_repo.fetch_by_id(
-        aaa.security_id, "market_cap"
-    ) == metrics_repo.fetch("AAA.LSE", "market_cap")
+    # Single metric read: the seeded value is returned; unknown metric is None.
+    aaa_market_cap = metrics_repo.fetch_by_id(aaa.security_id, "market_cap")
+    assert aaa_market_cap is not None
+    assert aaa_market_cap.value == 1000.0
     assert metrics_repo.fetch_by_id(aaa.security_id, "missing") is None
 
-    # Bulk metric read: the id-keyed map carries the same records, keyed by id.
+    # Bulk metric read: the id-keyed map carries the seeded records, keyed by id.
     by_id = metrics_repo.fetch_many_by_ids(
         [aaa.security_id, bbb.security_id], ["market_cap", "current_ratio"]
     )
-    by_symbol = metrics_repo.fetch_many_for_symbols(
-        ["AAA.LSE", "BBB.LSE"], ["market_cap", "current_ratio"]
-    )
-    assert by_id[aaa.security_id] == by_symbol["AAA.LSE"]
-    assert by_id[bbb.security_id] == by_symbol["BBB.LSE"]
+    assert by_id[aaa.security_id]["market_cap"].value == 1000.0
+    assert by_id[aaa.security_id]["current_ratio"].value == 1.5
+    assert by_id[bbb.security_id]["market_cap"].value == 2000.0
 
-    # Latest snapshot: id form == symbol form, picks the most-recent as_of, and
-    # rebuilds the canonical symbol.
+    # Latest snapshot: picks the most-recent as_of and rebuilds the canonical
+    # symbol from ``listing ⋈ exchange``.
     rec_by_id = market_repo.latest_snapshot_record_by_id(aaa.security_id)
-    assert rec_by_id == market_repo.latest_snapshot_record("AAA.LSE")
     assert rec_by_id is not None
     assert rec_by_id.as_of == "2025-01-03"
     assert rec_by_id.symbol == "AAA.LSE"
@@ -4104,12 +3960,10 @@ def test_id_keyed_metric_and_market_reads_match_symbol_forms(tmp_path: Path) -> 
     snaps_by_id = market_repo.latest_snapshots_many_by_ids(
         [aaa.security_id, bbb.security_id]
     )
-    snaps_by_symbol = market_repo.latest_snapshots_many(["AAA.LSE", "BBB.LSE"])
-    assert snaps_by_id[aaa.security_id] == snaps_by_symbol["AAA.LSE"]
-    assert snaps_by_id[bbb.security_id] == snaps_by_symbol["BBB.LSE"]
     assert snaps_by_id[aaa.security_id].as_of == "2025-01-03"
+    assert snaps_by_id[bbb.security_id].as_of == "2025-01-02"
 
-    # Listing currency: id form == symbol form.
+    # Listing currency: id form == symbol form (the symbol form is a kept edge).
     assert market_repo.ticker_currency_by_id(
         aaa.security_id
     ) == market_repo.ticker_currency("AAA.LSE")

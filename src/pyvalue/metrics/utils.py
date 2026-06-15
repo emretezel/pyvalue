@@ -39,8 +39,8 @@ MAX_FY_FACT_AGE_DAYS = 400
 FactT = TypeVar("FactT", bound=FactView)
 
 # Shares-outstanding concepts, in resolution priority. Mirrors the default order
-# in ``FinancialFactsRepository.latest_share_counts_many`` so the on-demand
-# market-cap share count matches the bulk reader.
+# in ``FinancialFactsRepository.latest_share_counts_many_by_ids`` so the
+# on-demand market-cap share count matches the bulk reader.
 SHARE_COUNT_CONCEPTS: tuple[str, ...] = (
     "EntityCommonStockSharesOutstanding",
     "CommonStockSharesOutstanding",
@@ -451,7 +451,7 @@ def market_cap_money(
     ``market_data.market_cap`` column, migration 072) duplicated derivable
     state. The amount is the latest positive shares-outstanding
     ``financial_facts`` row times the latest ``market_data`` price
-    (:meth:`MarketDataRepository.latest_snapshot`). Pairing the latest share
+    (:meth:`MarketDataRepository.latest_snapshot_by_id`). Pairing the latest share
     count with the latest price -- rather than the price as of the share-count
     date -- means every price refresh re-prices market cap (and every metric
     built on it), which is what a value screen that refreshes prices between
