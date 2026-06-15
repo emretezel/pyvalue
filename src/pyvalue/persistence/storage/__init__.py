@@ -27,7 +27,6 @@ from .records import (
     FXSupportedPairRecord,  # noqa: F401
     FactRecord,
     FinancialFactsRefreshStateRecord,
-    FundamentalsNormalizationCandidate,  # noqa: F401
     FundamentalsUpdate,  # noqa: F401
     IdKeyedStoredMetricRow,  # noqa: F401
     IngestProgressExchange,

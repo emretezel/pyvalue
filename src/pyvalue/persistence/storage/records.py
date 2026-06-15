@@ -391,17 +391,6 @@ class SecurityMetadataUpdate:
 
 
 @dataclass(frozen=True)
-class FundamentalsNormalizationCandidate:
-    """Normalization freshness inputs for one stored raw fundamentals payload."""
-
-    provider_symbol: str
-    security_id: int
-    raw_payload_hash: str
-    normalized_payload_hash: Optional[str] = None
-    normalized_at: Optional[str] = None
-
-
-@dataclass(frozen=True)
 class NormalizationUnit:
     """One stored raw payload to normalize, keyed by its natural ids.
 

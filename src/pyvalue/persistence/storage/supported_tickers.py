@@ -415,35 +415,6 @@ class SupportedTickerRepository(SQLiteStore):
             rows = conn.execute(" ".join(query), params).fetchall()
         return [SupportedTicker(*row) for row in rows]
 
-    def provider_symbols(
-        self,
-        provider: str,
-        *,
-        primary_only: bool = False,
-    ) -> List[str]:
-        """Return the qualified provider symbols for a provider.
-
-        Lighter than :meth:`list_for_provider`: it selects only
-        ``provider_symbol`` rather than hydrating a full ``SupportedTicker``
-        across the 6-table catalog view. Callers that only need the symbol set
-        (e.g. normalize's primary-vs-secondary filtering) use this to avoid both
-        the object hydration and a large ``IN (...)`` predicate. The result is
-        consumed as a set, so no ordering is imposed.
-        """
-        self.initialize_schema()
-        provider_norm = provider.strip().upper()
-        catalog_view = _provider_listing_catalog_view(primary_only=primary_only)
-        with self._connect() as conn:
-            rows = conn.execute(
-                f"""
-                SELECT catalog.provider_symbol
-                FROM {catalog_view} catalog
-                WHERE catalog.provider = ?
-                """,
-                (provider_norm,),
-            ).fetchall()
-        return [str(row[0]) for row in rows]
-
     def count_for_provider(
         self,
         provider: str,

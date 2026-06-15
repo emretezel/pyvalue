@@ -15,7 +15,6 @@ from pyvalue.persistence.storage import (
     FundamentalsUpdate,
     FundamentalsRepository,
     FundamentalsFetchStateRepository,
-    FundamentalsNormalizationCandidate,
     FinancialFactsRepository,
     FactRecord,
     IdKeyedStoredMetricRow,
@@ -198,17 +197,6 @@ def test_supported_ticker_repository_normalizes_exchange_and_fetches_currency(
     assert repo.list_symbols_by_exchange("EODHD", "LSE") == ["FOO.LSE"]
     assert repo.list_symbols_by_exchange("eodhd", "lse") == ["FOO.LSE"]
     assert repo.fetch_currency("FOO.LSE", provider="EODHD") == "GBP"
-
-
-def test_fundamentals_repository_normalizes_provider(tmp_path: Path) -> None:
-    db_path = tmp_path / "funds.db"
-    repo = FundamentalsRepository(db_path)
-    repo.initialize_schema()
-    _seed_listing(db_path, "FOO.LSE", currency="GBX")
-    repo.upsert("eodhd", "FOO.LSE", payload={"bar": 1})
-
-    assert repo.symbols("EODHD") == ["FOO.LSE"]
-    assert repo.symbols("eodhd") == ["FOO.LSE"]
 
 
 def test_fundamentals_repository_classifies_and_purges_secondary_listings(
@@ -1225,146 +1213,6 @@ def test_financial_facts_repository_replace_fact_rows_updates_refresh_state(
     assert refresh_record.refreshed_at
 
 
-def test_fundamentals_repository_normalization_candidates_match_state_and_facts(
-    tmp_path: Path,
-) -> None:
-    db_path = tmp_path / "normalization-candidates.db"
-    fund_repo = FundamentalsRepository(db_path)
-    fund_repo.initialize_schema()
-    state_repo = FundamentalsNormalizationStateRepository(db_path)
-    state_repo.initialize_schema()
-
-    _seed_listing(db_path, "AAA.US", provider="SEC")
-    _seed_listing(db_path, "BBB.US", provider="SEC")
-    _seed_listing(db_path, "CCC.US", provider="SEC")
-    fund_repo.upsert("SEC", "AAA.US", {"entityName": "AAA", "facts": {}})
-    fund_repo.upsert("SEC", "BBB.US", {"entityName": "BBB", "facts": {}})
-    fund_repo.upsert("SEC", "CCC.US", {"entityName": "CCC", "facts": {}})
-
-    aaa_security_id = (
-        fund_repo._security_repo().ensure_from_symbol("AAA.US").security_id
-    )
-
-    aaa_record = fund_repo.fetch_payload_with_hash("SEC", "AAA.US")
-    assert aaa_record is not None
-    _, aaa_payload_hash = aaa_record
-    bbb_record = fund_repo.fetch_payload_with_hash("SEC", "BBB.US")
-    assert bbb_record is not None
-    _, bbb_payload_hash = bbb_record
-
-    state_repo.mark_success("SEC", "AAA.US", aaa_payload_hash)
-    state_repo.mark_success("SEC", "BBB.US", bbb_payload_hash)
-    seed_facts(
-        db_path,
-        "AAA.US",
-        [
-            FactRecord(
-                symbol="AAA.US",
-                concept="Assets",
-                fiscal_period="FY",
-                end_date="2024-12-31",
-                unit_kind="monetary",
-                currency="USD",
-                value=100.0,
-            )
-        ],
-    )
-    seed_facts(
-        db_path,
-        "BBB.US",
-        [
-            FactRecord(
-                symbol="BBB.US",
-                concept="Assets",
-                fiscal_period="FY",
-                end_date="2024-12-31",
-                unit_kind="monetary",
-                currency="USD",
-                value=200.0,
-            )
-        ],
-    )
-
-    candidates = fund_repo.normalization_candidates(
-        "SEC",
-        ["AAA.US", "BBB.US", "CCC.US"],
-    )
-
-    assert candidates["AAA.US"] == FundamentalsNormalizationCandidate(
-        provider_symbol="AAA.US",
-        security_id=aaa_security_id,
-        raw_payload_hash=aaa_payload_hash,
-        normalized_payload_hash=aaa_payload_hash,
-        normalized_at=candidates["AAA.US"].normalized_at,
-    )
-    assert candidates["BBB.US"].normalized_payload_hash == bbb_payload_hash
-    assert candidates["CCC.US"].normalized_payload_hash is None
-
-
-def test_fundamentals_repository_normalization_candidates_skip_facts_scan_without_state(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    db_path = tmp_path / "normalization-candidates-no-state.db"
-    seen_sql: list[str] = []
-
-    class _LoggingConnection:
-        """Context-manager proxy that records each executed SQL statement.
-
-        It wraps the repository's real connection and is installed via
-        ``monkeypatch.setattr`` (not a method override) so there is no static
-        return-type contract to satisfy. The repository's
-        ``normalization_candidates`` path only uses the connection as a context
-        manager and calls ``execute`` on it, so those are the only members the
-        proxy needs to expose. The recorded statements back the assertion that
-        the no-state path never scans ``financial_facts``.
-        """
-
-        def __init__(self, conn: sqlite3.Connection) -> None:
-            self._conn = conn
-
-        def __enter__(self) -> "_LoggingConnection":
-            self._conn.__enter__()
-            return self
-
-        def __exit__(
-            self,
-            exc_type: Optional[Type[BaseException]],
-            exc_value: Optional[BaseException],
-            traceback: Optional[TracebackType],
-        ) -> bool:
-            return bool(self._conn.__exit__(exc_type, exc_value, traceback))
-
-        def execute(
-            self, sql: str, parameters: Sequence[object] = ()
-        ) -> sqlite3.Cursor:
-            seen_sql.append(" ".join(sql.split()))
-            return self._conn.execute(sql, parameters)
-
-    fund_repo = FundamentalsRepository(db_path)
-    fund_repo.initialize_schema()
-    _seed_listing(db_path, "AAA.US")
-    _seed_listing(db_path, "BBB.US")
-    fund_repo.upsert("EODHD", "AAA.US", {"General": {"Name": "AAA"}}, exchange="US")
-    fund_repo.upsert("EODHD", "BBB.US", {"General": {"Name": "BBB"}}, exchange="US")
-
-    # Only the candidate query's SQL is under test, so install the logging
-    # proxy after setup. That keeps the proxy's surface minimal (just the
-    # context-manager protocol and ``execute``) -- the write-heavy setup above
-    # still runs on the unwrapped connection.
-    real_connect = fund_repo._connect
-    monkeypatch.setattr(
-        fund_repo, "_connect", lambda: _LoggingConnection(real_connect())
-    )
-
-    candidates = fund_repo.normalization_candidates("EODHD", ["AAA.US", "BBB.US"])
-
-    assert sorted(candidates) == ["AAA.US", "BBB.US"]
-    assert all(
-        candidate.normalized_payload_hash is None for candidate in candidates.values()
-    )
-    assert not any("FROM financial_facts" in sql for sql in seen_sql)
-
-
 def test_normalization_units_keyed_by_id_with_freshness(tmp_path: Path) -> None:
     """``normalization_units`` keys by ``provider_listing_id`` and carries the
     ``listing_id``, label, currency, and freshness hashes; listings without a raw
@@ -1669,28 +1517,6 @@ def test_replace_fact_rows_writes_by_id_without_resolving_symbol(
             (security_id,),
         ).fetchone()[0]
     assert count == 1
-
-
-def test_supported_ticker_repository_provider_symbols_honours_primary_only(
-    tmp_path: Path,
-) -> None:
-    """``provider_symbols`` returns qualified symbols and honours
-    ``primary_only`` (excluding secondary listings)."""
-    db_path = tmp_path / "provider-symbols.db"
-    repo = SupportedTickerRepository(db_path)
-    repo.initialize_schema()
-    _seed_listing(db_path, "AAA.US")
-    _seed_listing(db_path, "BBB.US")
-    # Mark BBB secondary so it drops out of the primary-only projection.
-    with repo._connect() as conn:
-        conn.execute(
-            "UPDATE listing SET primary_listing_status = 'secondary' WHERE symbol = ?",
-            ("BBB",),
-        )
-        conn.commit()
-
-    assert sorted(repo.provider_symbols("EODHD")) == ["AAA.US", "BBB.US"]
-    assert repo.provider_symbols("EODHD", primary_only=True) == ["AAA.US"]
 
 
 def test_financial_facts_repository_replace_fact_rows_replaces_listing_slice(
