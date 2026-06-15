@@ -1,3 +1,4 @@
+import logging
 import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
@@ -3786,3 +3787,62 @@ def test_resolve_ids_many_does_not_cross_match_across_exchanges(
     assert resolved["BBB.LSE"] == full["BBB.LSE"]
     # All four listings are genuinely distinct ids.
     assert len(set(full.values())) == 4
+
+
+def test_metrics_upsert_many_skips_uncataloged_symbol_without_creating_listing(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The metric values writer is catalog-read-only.
+
+    A row for an uncataloged symbol is skipped (and surfaced) -- never minting an
+    issuer/listing row, never aborting the cataloged rows in the same batch.
+    Issuer/listing are owned by refresh-supported-tickers.
+    """
+    db_path = tmp_path / "metrics-uncataloged.db"
+    _seed_listing(db_path, "AAA.US")
+
+    repo = MetricsRepository(db_path)
+    rows: list[StoredMetricRow] = [
+        ("AAA.US", "m1", 1.0, "2024-01-01", "other", None, None),
+        ("ZZZ.US", "m1", 2.0, "2024-01-01", "other", None, None),
+    ]
+    with caplog.at_level(logging.WARNING):
+        written = repo.upsert_many(rows)
+
+    assert written == 1
+    assert repo.fetch("AAA.US", "m1") == (1.0, "2024-01-01")
+    assert repo.fetch("ZZZ.US", "m1") is None
+    # No catalog row was minted for the uncataloged symbol.
+    assert SecurityRepository(db_path).resolve_id("ZZZ.US") is None
+    assert "ZZZ.US" in caplog.text
+
+
+def test_metric_compute_status_upsert_many_skips_uncataloged_symbol(
+    tmp_path: Path,
+) -> None:
+    """The metric-compute-status writer is catalog-read-only too."""
+    db_path = tmp_path / "status-uncataloged.db"
+    _seed_listing(db_path, "AAA.US")
+
+    repo = MetricComputeStatusRepository(db_path)
+    rows = [
+        MetricComputeStatusRecord(
+            symbol="AAA.US",
+            metric_id="m1",
+            status="success",
+            attempted_at="2024-01-01T00:00:00Z",
+        ),
+        MetricComputeStatusRecord(
+            symbol="ZZZ.US",
+            metric_id="m1",
+            status="success",
+            attempted_at="2024-01-01T00:00:00Z",
+        ),
+    ]
+    written = repo.upsert_many(rows)
+
+    assert written == 1
+    assert repo.fetch("AAA.US", "m1") is not None
+    assert repo.fetch("ZZZ.US", "m1") is None
+    assert SecurityRepository(db_path).resolve_id("ZZZ.US") is None

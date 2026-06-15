@@ -5,6 +5,7 @@ Author: Emre Tezel
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from typing import (
     Dict,
@@ -39,6 +40,38 @@ from .records import (
     StoredMetricRow,
 )
 from ..migrations import apply_migrations
+
+
+logger = logging.getLogger(__name__)
+
+
+def _warn_uncataloged_symbols(
+    symbols: Sequence[str],
+    security_ids: Mapping[str, int],
+    row_kind: str,
+) -> None:
+    """Warn about symbols with no catalog listing; their rows are skipped.
+
+    The metrics and metric-compute-status writers are catalog-read-only: the
+    issuer/listing catalog is owned by refresh-supported-tickers, so a row that
+    references a symbol with no listing is dropped (the upsert payload keeps only
+    resolved symbols) rather than minting issuer/listing rows from a metric
+    write. In normal operation the compute scope is drawn from the catalog, so
+    nothing is dropped; this surfaces a genuinely uncataloged ticker instead of
+    losing it silently.
+    """
+
+    missing = sorted(symbol for symbol in symbols if symbol not in security_ids)
+    if not missing:
+        return
+    logger.warning(
+        "Skipping %s rows for %d uncataloged symbol(s); the writer is "
+        "catalog-read-only (issuer/listing are owned by refresh-supported-tickers). "
+        "Examples: %s",
+        row_kind,
+        len(missing),
+        ", ".join(missing[:5]),
+    )
 
 
 class MetricsRepository(SQLiteStore):
@@ -104,18 +137,10 @@ class MetricsRepository(SQLiteStore):
                     connection=connection,
                 )
             )
-            for symbol in unresolved:
-                if symbol in security_ids:
-                    continue
-                # Slow path: a metric row references a symbol that does not yet
-                # exist in the canonical listing table. When the caller supplied
-                # a write connection, create the row through that same
-                # transaction to avoid self-locking SQLite during batched writes.
-                security = self._security_repo().ensure_from_symbol(
-                    symbol,
-                    connection=connection,
-                )
-                security_ids[symbol] = security.security_id
+        # Catalog-read-only: a row for an uncataloged symbol is skipped (the
+        # comprehension below keeps only resolved symbols), never created. The
+        # issuer/listing catalog is owned by refresh-supported-tickers.
+        _warn_uncataloged_symbols(unique_symbols, security_ids, "metric")
         persisted_rows = [
             (
                 security_ids[symbol],
@@ -310,7 +335,7 @@ class MetricComputeStatusRepository(SQLiteStore):
             self.initialize_schema()
         # See MetricsRepository.upsert_many: a supplied ``ids_by_symbol`` (from
         # compute-metrics' scope-resolved listing ids) means zero resolution;
-        # only unmapped symbols hit the resolver / ensure fallback.
+        # only unmapped symbols hit the resolver.
         security_ids: Dict[str, int] = dict(ids_by_symbol or {})
         unresolved = [symbol for symbol in unique_symbols if symbol not in security_ids]
         if unresolved:
@@ -320,14 +345,10 @@ class MetricComputeStatusRepository(SQLiteStore):
                     connection=connection,
                 )
             )
-            for symbol in unresolved:
-                if symbol in security_ids:
-                    continue
-                security = self._security_repo().ensure_from_symbol(
-                    symbol,
-                    connection=connection,
-                )
-                security_ids[symbol] = security.security_id
+        # Catalog-read-only, like the metric values writer: an uncataloged symbol
+        # is skipped (the payload below keeps only resolved symbols), never
+        # created.
+        _warn_uncataloged_symbols(unique_symbols, security_ids, "metric-compute-status")
 
         payload = [
             (
