@@ -1060,6 +1060,70 @@ def test_purge_downstream_for_secondary_purges_only_secondary(tmp_path: Path) ->
     assert bbb_id not in listing_ids_with_facts
 
 
+def test_purge_secondary_state_deletes_by_id_without_view(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The secondary purge clears provider-listing state (normalization / fetch
+    state) by resolving provider_listing_id from listing_id via the provider_listing
+    FK -- never through the 6-table provider_listing_catalog view."""
+    db_path = tmp_path / "purge-secondary-view-free.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    seed_exchange(db_path, "US")
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [{"Code": "BBB", "Name": "BBB Inc", "Type": "Common Stock", "Currency": "USD"}],
+    )
+    bbb_id = next(
+        row.security_id
+        for row in ticker_repo.list_for_provider("EODHD")
+        if row.symbol == "BBB.US"
+    )
+    # Seed a normalization-state row for the (to-be-secondary) listing.
+    seed_normalization_success(db_path, "BBB.US")
+
+    repo = SecurityListingStatusRepository(db_path)
+    seen_sql: list[str] = []
+
+    class _LoggingConnection:
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self._conn = conn
+
+        def __enter__(self) -> "_LoggingConnection":
+            self._conn.__enter__()
+            return self
+
+        def __exit__(
+            self,
+            exc_type: Optional[Type[BaseException]],
+            exc_value: Optional[BaseException],
+            traceback: Optional[TracebackType],
+        ) -> bool:
+            return bool(self._conn.__exit__(exc_type, exc_value, traceback))
+
+        def execute(
+            self, sql: str, parameters: Sequence[object] = ()
+        ) -> sqlite3.Cursor:
+            seen_sql.append(" ".join(sql.split()))
+            return self._conn.execute(sql, parameters)
+
+    real_connect = repo._connect
+    monkeypatch.setattr(repo, "_connect", lambda: _LoggingConnection(real_connect()))
+
+    repo.purge_secondary_security_data(security_ids=[bbb_id])
+
+    with sqlite3.connect(db_path) as conn:
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM fundamentals_normalization_state"
+        ).fetchone()[0]
+    assert remaining == 0
+    deletes = [sql for sql in seen_sql if sql.lower().startswith("delete")]
+    assert deletes  # the purge ran through the logging proxy
+    assert not any("provider_listing_catalog" in sql for sql in seen_sql)
+    assert not any("provider_symbol" in sql for sql in seen_sql)
+
+
 def test_purge_downstream_for_secondary_noop_when_all_primary(tmp_path: Path) -> None:
     db_path = tmp_path / "purge-secondary-noop.db"
     ticker_repo = SupportedTickerRepository(db_path)

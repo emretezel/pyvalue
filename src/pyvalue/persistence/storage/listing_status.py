@@ -285,7 +285,6 @@ class SecurityListingStatusRepository(SQLiteStore):
         if secondary:
             self.purge_secondary_security_data(
                 security_ids=[record.security_id for record in secondary],
-                provider_symbols=[record.provider_symbol for record in secondary],
             )
         return secondary
 
@@ -293,16 +292,13 @@ class SecurityListingStatusRepository(SQLiteStore):
         self,
         *,
         security_ids: Sequence[int],
-        provider_symbols: Sequence[str],
     ) -> None:
         normalized_security_ids = sorted(
             {int(security_id) for security_id in security_ids if security_id}
         )
-        normalized_symbols = _normalized_codes(provider_symbols)
-        if not normalized_security_ids and not normalized_symbols:
+        if not normalized_security_ids:
             return
 
-        provider_norm = _PRIMARY_LISTING_SOURCE_PROVIDER
         FinancialFactsRepository(self.db_path).initialize_schema()
         FinancialFactsRefreshStateRepository(self.db_path).initialize_schema()
         MarketDataRepository(self.db_path).initialize_schema()
@@ -318,7 +314,7 @@ class SecurityListingStatusRepository(SQLiteStore):
         FundamentalsNormalizationStateRepository(self.db_path).initialize_schema()
         MarketDataFetchStateRepository(self.db_path).initialize_schema()
 
-        def _delete_security_rows(
+        def _delete_by_listing_id(
             conn: sqlite3.Connection,
             table_name: str,
         ) -> None:
@@ -329,40 +325,39 @@ class SecurityListingStatusRepository(SQLiteStore):
                     list(security_chunk),
                 )
 
+        def _delete_state_by_listing_id(
+            conn: sqlite3.Connection,
+            table_name: str,
+        ) -> None:
+            # These two state tables key on provider_listing_id; resolve it from
+            # listing_id through the provider_listing FK (served by
+            # idx_provider_listing_listing) instead of looking the symbol up via
+            # the 6-table catalog view. A secondary listing's state is purged for
+            # every provider_listing it has, matching the listing_id purge above.
+            for security_chunk in _batched(normalized_security_ids, 500):
+                placeholders = ", ".join("?" for _ in security_chunk)
+                conn.execute(
+                    f"""
+                    DELETE FROM {table_name}
+                    WHERE provider_listing_id IN (
+                        SELECT provider_listing_id FROM provider_listing
+                        WHERE listing_id IN ({placeholders})
+                    )
+                    """,
+                    list(security_chunk),
+                )
+
         with self._connect() as conn:
-            if normalized_security_ids:
-                for table_name in (
-                    "financial_facts",
-                    "financial_facts_refresh_state",
-                    "market_data",
-                    "metrics",
-                    "metric_compute_status",
-                ):
-                    _delete_security_rows(conn, table_name)
-            if normalized_symbols:
-                for symbol_chunk in _batched(normalized_symbols, 500):
-                    placeholders = ", ".join("?" for _ in symbol_chunk)
-                    conn.execute(
-                        f"""
-                        DELETE FROM fundamentals_normalization_state
-                        WHERE provider_listing_id IN (
-                            SELECT catalog.provider_listing_id
-                            FROM provider_listing_catalog catalog
-                            WHERE catalog.provider = ?
-                              AND catalog.provider_symbol IN ({placeholders})
-                        )
-                        """,
-                        [provider_norm, *symbol_chunk],
-                    )
-                    conn.execute(
-                        f"""
-                        DELETE FROM market_data_fetch_state
-                        WHERE provider_listing_id IN (
-                            SELECT catalog.provider_listing_id
-                            FROM provider_listing_catalog catalog
-                            WHERE catalog.provider = ?
-                              AND catalog.provider_symbol IN ({placeholders})
-                        )
-                        """,
-                        [provider_norm, *symbol_chunk],
-                    )
+            for table_name in (
+                "financial_facts",
+                "financial_facts_refresh_state",
+                "market_data",
+                "metrics",
+                "metric_compute_status",
+            ):
+                _delete_by_listing_id(conn, table_name)
+            for table_name in (
+                "fundamentals_normalization_state",
+                "market_data_fetch_state",
+            ):
+                _delete_state_by_listing_id(conn, table_name)
