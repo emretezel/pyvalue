@@ -609,25 +609,6 @@ class SecurityRepository(SQLiteStore):
         security = self.fetch(security_id)
         return security.canonical_symbol if security else None
 
-    def upsert_metadata(
-        self,
-        symbol: str,
-        entity_name: Optional[str] = None,
-        description: Optional[str] = None,
-        sector: Optional[str] = None,
-        industry: Optional[str] = None,
-    ) -> None:
-        if not entity_name and not description and not sector and not industry:
-            return
-        security = self.ensure_from_symbol(
-            symbol,
-            entity_name=entity_name,
-            description=description,
-            sector=sector,
-            industry=industry,
-        )
-        self._remember(security)
-
     def upsert_metadata_many(
         self,
         updates: Sequence[SecurityMetadataUpdate],

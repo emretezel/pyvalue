@@ -158,47 +158,25 @@ class FinancialFactsRepository(SQLiteStore):
         self._security_repo().initialize_schema()
         FinancialFactsRefreshStateRepository(self.db_path).initialize_schema()
 
-    def replace_facts(
-        self,
-        symbol: str,
-        records: Iterable[FactRecord],
-    ) -> int:
-        rows = [
-            (
-                record.concept,
-                record.fiscal_period,
-                record.end_date,
-                record.unit_kind,
-                record.value,
-                record.filed,
-                record.currency,
-            )
-            for record in records
-        ]
-        return self.replace_fact_rows(
-            symbol=symbol,
-            rows=rows,
-        )
-
     def replace_fact_rows(
         self,
-        symbol: str,
+        listing_id: int,
         rows: Iterable[StoredFactRow],
-        *,
-        security_id: Optional[int] = None,
     ) -> int:
-        # Callers that already hold the security_id (the bulk normalizer resolved
-        # it during its freshness scan) pass it in to skip ``ensure_from_symbol``.
-        # That path runs the full create-or-update routine -- including a no-op
-        # ``UPDATE issuer`` -- on every symbol, redundant work on the serialized
-        # writer when the listing is already known to exist. When omitted we fall
-        # back to ensuring the listing (back-compat for symbol-only callers).
+        """Replace all stored facts for one ``listing_id`` by natural identity.
+
+        The single fact write, keyed purely by ``listing_id``: there is no symbol
+        resolution and no listing creation. The listing must already exist in the
+        catalog (owned by refresh-supported-tickers); the canonical-scope callers
+        carry the ``listing_id`` they resolved during their freshness scan, so the
+        write is a direct DELETE-then-insert against that id.
+        """
+
         self.initialize_schema()
-        if security_id is None:
-            security_id = self._security_repo().ensure_from_symbol(symbol).security_id
+        listing_id = int(listing_id)
         prepared_rows = [
             (
-                security_id,
+                listing_id,
                 concept,
                 fiscal_period,
                 end_date,
@@ -220,7 +198,7 @@ class FinancialFactsRepository(SQLiteStore):
         with self._connect() as conn:
             conn.execute(
                 "DELETE FROM financial_facts WHERE listing_id = ?",
-                (security_id,),
+                (listing_id,),
             )
             if prepared_rows:
                 conn.executemany(
@@ -233,7 +211,7 @@ class FinancialFactsRepository(SQLiteStore):
                     prepared_rows,
                 )
             FinancialFactsRefreshStateRepository(self.db_path).mark_security_refreshed(
-                security_id,
+                listing_id,
                 connection=conn,
             )
         return len(prepared_rows)

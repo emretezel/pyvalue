@@ -209,10 +209,11 @@ Two categories legitimately deviate:
   start from the provider catalog because they operate on provider symbols and
   `fundamentals_raw` keyed by `provider_listing_id`. Their scope rows already
   expose `security_id` (from `provider_listing_catalog`), which they carry into
-  the canonical writes (`replace_fact_rows(…, security_id=…)`,
+  the canonical writes (`replace_fact_rows(listing_id, …)`,
   `MarketDataUpdate(security_id=…)`, `SecurityMetadataUpdate(security_id=…)`); the
   only symbol matching is the inherent provider-symbol → raw-payload intersection
-  at the HTTP edge.
+  at the HTTP edge. Production storage exposes no symbol-keyed write — every
+  metric/fact/price/metadata write keys by `listing_id`/`security_id`.
 - **Non-listing commands** — `refresh-fx-rates` (FX pairs), the `clear-*`
   maintenance commands (blanket `DELETE FROM`), and the `report-*-progress`
   commands (aggregated by the real `provider_exchange_code` column) — have no

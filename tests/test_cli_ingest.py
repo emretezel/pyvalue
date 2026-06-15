@@ -24,7 +24,14 @@ from pyvalue import cli
 from pyvalue.cli._common import _PreparedFundamentalsRun
 from pyvalue.cli.ingest import _run_eodhd_fundamentals_ingestion
 from cli_test_helpers import patch_cli
-from conftest import seed_exchange
+from conftest import (
+    seed_exchange,
+    seed_facts,
+    seed_metric,
+    seed_metric_status,
+    seed_price,
+    seed_security_metadata,
+)
 from pyvalue.currency import MetricUnitKind
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.marketdata.service import MarketDataService
@@ -308,7 +315,8 @@ def _seed_share_count(db_path: Path, symbol: str, as_of: str, shares: float) -> 
         if listing_id is not None
         else []
     )
-    repo.replace_facts(
+    seed_facts(
+        db_path,
         symbol,
         preserved
         + [
@@ -334,7 +342,8 @@ def store_market_data(
 ) -> MarketDataRepository:
     repo = MarketDataRepository(db_path)
     repo.initialize_schema()
-    repo.upsert_price(
+    seed_price(
+        db_path,
         symbol,
         as_of,
         price,
@@ -2120,7 +2129,8 @@ def test_cmd_reconcile_listing_status_backfills_from_raw_only(
 
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "AAA.LSE",
         [
             make_fact(
@@ -2135,7 +2145,8 @@ def test_cmd_reconcile_listing_status_backfills_from_raw_only(
     store_market_data(db_path, "AAA.LSE", "2025-01-02", currency="GBP")
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
-    metrics_repo.upsert(
+    seed_metric(
+        db_path,
         "AAA.LSE",
         "market_cap",
         1000.0,
@@ -2724,7 +2735,8 @@ def test_compute_metrics_for_symbol_reuses_fact_and_market_cache(
     _seed_listing(db_path, "AAA.US", currency="USD")
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "AAA.US",
         [
             make_fact(concept="AssetsCurrent", end_date="2024-12-31", value=500.0),
@@ -2749,7 +2761,7 @@ def test_compute_metrics_for_symbol_reuses_fact_and_market_cache(
     )
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    market_repo.upsert_price("AAA.US", "2024-12-31", price=25.0)
+    seed_price(db_path, "AAA.US", "2024-12-31", price=25.0)
 
     # The metric layer keys on ``listing_id`` now; resolve the seeded listing's
     # id so the cached repos (constructed with this id) short-circuit the metric's
@@ -2873,7 +2885,8 @@ def test_compute_metrics_for_symbol_matches_real_metrics(tmp_path: Path) -> None
     fact_repo.initialize_schema()
     recent = (date.today() - timedelta(days=15)).isoformat()
     current_year = date.today().year
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "AAA.US",
         [
             make_fact(concept="AssetsCurrent", end_date=recent, value=500.0),
@@ -2922,7 +2935,7 @@ def test_compute_metrics_for_symbol_matches_real_metrics(tmp_path: Path) -> None
     )
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    market_repo.upsert_price("AAA.US", recent, price=25.0, currency="USD")
+    seed_price(db_path, "AAA.US", recent, price=25.0, currency="USD")
     _seed_share_count(db_path, "AAA.US", recent, 2500.0 / 25.0)
 
     # Compute the reference values directly against the real metrics using the
@@ -3373,7 +3386,8 @@ def test_compute_metric_batch_results_reuses_shared_read_connection_per_batch(
     )
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "AAA.US",
         [
             make_fact(
@@ -3390,7 +3404,8 @@ def test_compute_metric_batch_results_reuses_shared_read_connection_per_batch(
             ),
         ],
     )
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "BBB.US",
         [
             make_fact(
@@ -3409,8 +3424,8 @@ def test_compute_metric_batch_results_reuses_shared_read_connection_per_batch(
     )
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    market_repo.upsert_price("AAA.US", recent_date, 12.0, currency="USD")
-    market_repo.upsert_price("BBB.US", recent_date, 9.0, currency="USD")
+    seed_price(db_path, "AAA.US", recent_date, 12.0, currency="USD")
+    seed_price(db_path, "BBB.US", recent_date, 9.0, currency="USD")
     _seed_share_count(db_path, "AAA.US", recent_date, 10.0)
     _seed_share_count(db_path, "BBB.US", recent_date, 10.0)
 
@@ -3544,7 +3559,8 @@ def test_compute_metric_batch_results_skips_resolution_when_ids_supplied(
     )
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "AAA.US",
         [
             make_fact(
@@ -3561,7 +3577,8 @@ def test_compute_metric_batch_results_skips_resolution_when_ids_supplied(
             ),
         ],
     )
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "BBB.US",
         [
             make_fact(
@@ -3736,9 +3753,12 @@ def test_cmd_run_screen_stage_carries_scope_listing_ids(
         ],
         provider="SEC",
     )
-    metrics_repo = MetricsRepository(db_path)
-    metrics_repo.upsert("AAA.US", "current_ratio", 2.0, "2026-03-29", unit_kind="ratio")
-    metrics_repo.upsert("BBB.US", "current_ratio", 1.5, "2026-03-29", unit_kind="ratio")
+    seed_metric(
+        db_path, "AAA.US", "current_ratio", 2.0, "2026-03-29", unit_kind="ratio"
+    )
+    seed_metric(
+        db_path, "BBB.US", "current_ratio", 1.5, "2026-03-29", unit_kind="ratio"
+    )
 
     screen_path = tmp_path / "screen.yml"
     screen_path.write_text(
@@ -4387,7 +4407,8 @@ def test_cmd_compute_metrics_stage_falls_back_to_serial_without_wal(
     )
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "AAA.US",
         [
             make_fact(
@@ -4404,7 +4425,8 @@ def test_cmd_compute_metrics_stage_falls_back_to_serial_without_wal(
             ),
         ],
     )
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "BBB.US",
         [
             make_fact(
@@ -4784,7 +4806,8 @@ def test_cmd_compute_metrics_stage_parallel_workers_skip_schema_init(
     )
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "AAA.US",
         [
             make_fact(
@@ -4801,7 +4824,8 @@ def test_cmd_compute_metrics_stage_parallel_workers_skip_schema_init(
             ),
         ],
     )
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "BBB.US",
         [
             make_fact(
@@ -4820,8 +4844,8 @@ def test_cmd_compute_metrics_stage_parallel_workers_skip_schema_init(
     )
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    market_repo.upsert_price("AAA.US", recent_date, 12.0, currency="USD")
-    market_repo.upsert_price("BBB.US", recent_date, 9.0, currency="USD")
+    seed_price(db_path, "AAA.US", recent_date, 12.0, currency="USD")
+    seed_price(db_path, "BBB.US", recent_date, 9.0, currency="USD")
     _seed_share_count(db_path, "AAA.US", recent_date, 10.0)
     _seed_share_count(db_path, "BBB.US", recent_date, 10.0)
 
@@ -4984,7 +5008,8 @@ def test_cmd_clear_financial_facts_clears_normalization_state(tmp_path: Path) ->
     _seed_listing(db_path, "AAA.US", currency="USD", provider="SEC")
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "AAA.US",
         [
             make_fact(
@@ -4997,7 +5022,6 @@ def test_cmd_clear_financial_facts_clears_normalization_state(tmp_path: Path) ->
     )
     state_repo = FundamentalsNormalizationStateRepository(db_path)
     refresh_state_repo = FinancialFactsRefreshStateRepository(db_path)
-    metric_status_repo = MetricComputeStatusRepository(db_path)
     FundamentalsRepository(db_path).upsert("SEC", "AAA.US", {"facts": {}})
     raw_record = FundamentalsRepository(db_path).fetch_payload_with_hash(
         "SEC", "AAA.US"
@@ -5012,16 +5036,15 @@ def test_cmd_clear_financial_facts_clears_normalization_state(tmp_path: Path) ->
     id_aaa = security_repo.resolve_id("AAA.US")
     assert id_aaa is not None
     assert refresh_state_repo.fetch_by_id(id_aaa) is not None
-    metric_status_repo.upsert_many(
-        [
-            MetricComputeStatusRecord(
-                symbol="AAA.US",
-                metric_id="working_capital",
-                status="failure",
-                attempted_at="2024-01-02T00:00:00+00:00",
-                reason_code="missing_data",
-            )
-        ]
+    seed_metric_status(
+        db_path,
+        MetricComputeStatusRecord(
+            symbol="AAA.US",
+            metric_id="working_capital",
+            status="failure",
+            attempted_at="2024-01-02T00:00:00+00:00",
+            reason_code="missing_data",
+        ),
     )
 
     rc = cli.cmd_clear_financial_facts(str(db_path))
@@ -5052,19 +5075,18 @@ def test_cmd_clear_metrics_clears_metric_compute_status(tmp_path: Path) -> None:
     _seed_listing(db_path, "AAA.US", currency="USD")
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
-    metrics_repo.upsert("AAA.US", "working_capital", 10.0, "2024-12-31")
+    seed_metric(db_path, "AAA.US", "working_capital", 10.0, "2024-12-31")
     status_repo = MetricComputeStatusRepository(db_path)
     status_repo.initialize_schema()
-    status_repo.upsert_many(
-        [
-            MetricComputeStatusRecord(
-                symbol="AAA.US",
-                metric_id="working_capital",
-                status="success",
-                attempted_at="2025-01-01T00:00:00+00:00",
-                value_as_of="2024-12-31",
-            )
-        ]
+    seed_metric_status(
+        db_path,
+        MetricComputeStatusRecord(
+            symbol="AAA.US",
+            metric_id="working_capital",
+            status="success",
+            attempted_at="2025-01-01T00:00:00+00:00",
+            value_as_of="2024-12-31",
+        ),
     )
 
     rc = cli.cmd_clear_metrics(str(db_path))
@@ -5175,7 +5197,8 @@ def test_ingest_run_reports_and_purges_secondary_reclassification(
     aaa_lse_id = by_symbol["AAA.LSE"].security_id
 
     # Seed downstream facts on the listing ingest will reclassify secondary.
-    FinancialFactsRepository(db_path).replace_facts(
+    seed_facts(
+        db_path,
         "AAA.LSE",
         [
             FactRecord(
@@ -5677,7 +5700,8 @@ def test_cmd_refresh_security_metadata_backfills_eodhd_fields_and_sec_name_fallb
 
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "AAA.US",
         [
             make_fact(
@@ -6032,11 +6056,11 @@ def test_cmd_run_screen_stage_reports_progress_for_multi_symbol_scope(
     )
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
-    metrics_repo.upsert("AAA.US", "working_capital", 100.0, "2023-12-31")
+    seed_metric(db_path, "AAA.US", "working_capital", 100.0, "2023-12-31")
     security_repo = SecurityRepository(db_path)
     security_repo.initialize_schema()
-    security_repo.upsert_metadata("AAA.US", "AAA Inc", description="AAA description")
-    security_repo.upsert_metadata("BBB.US", "BBB Inc", description="BBB description")
+    seed_security_metadata(db_path, "AAA.US", "AAA Inc", description="AAA description")
+    seed_security_metadata(db_path, "BBB.US", "BBB Inc", description="BBB description")
 
     screen_path = tmp_path / "screen.yml"
     screen_path.write_text(
@@ -6086,12 +6110,12 @@ def test_cmd_run_screen_stage_creates_output_csv_parent_dirs_for_passing_results
     )
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
-    metrics_repo.upsert("AAA.US", "working_capital", 100.0, "2023-12-31")
-    metrics_repo.upsert("BBB.US", "working_capital", 50.0, "2023-12-31")
+    seed_metric(db_path, "AAA.US", "working_capital", 100.0, "2023-12-31")
+    seed_metric(db_path, "BBB.US", "working_capital", 50.0, "2023-12-31")
     security_repo = SecurityRepository(db_path)
     security_repo.initialize_schema()
-    security_repo.upsert_metadata("AAA.US", "AAA Inc", description="AAA description")
-    security_repo.upsert_metadata("BBB.US", "BBB Inc", description="BBB description")
+    seed_security_metadata(db_path, "AAA.US", "AAA Inc", description="AAA description")
+    seed_security_metadata(db_path, "BBB.US", "BBB Inc", description="BBB description")
 
     screen_path = tmp_path / "screen.yml"
     screen_path.write_text(
@@ -6148,21 +6172,21 @@ def test_cmd_run_screen_stage_adds_ranked_output_rows_and_sorts_passers(
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
     for symbol in ("AAA.US", "BBB.US", "CCC.US"):
-        metrics_repo.upsert(symbol, "working_capital", 100.0, "2023-12-31")
-    metrics_repo.upsert("AAA.US", "primary_score", 10.0, "2023-12-31")
-    metrics_repo.upsert("BBB.US", "primary_score", 10.0, "2023-12-31")
-    metrics_repo.upsert("CCC.US", "primary_score", 5.0, "2023-12-31")
-    metrics_repo.upsert("AAA.US", "oey_ev_norm", 0.05, "2023-12-31")
-    metrics_repo.upsert("BBB.US", "oey_ev_norm", 0.07, "2023-12-31")
-    metrics_repo.upsert("CCC.US", "oey_ev_norm", 0.09, "2023-12-31")
-    metrics_repo.upsert("AAA.US", "net_debt_to_ebitda", 1.5, "2023-12-31")
-    metrics_repo.upsert("BBB.US", "net_debt_to_ebitda", 1.5, "2023-12-31")
-    metrics_repo.upsert("CCC.US", "net_debt_to_ebitda", 0.5, "2023-12-31")
+        seed_metric(db_path, symbol, "working_capital", 100.0, "2023-12-31")
+    seed_metric(db_path, "AAA.US", "primary_score", 10.0, "2023-12-31")
+    seed_metric(db_path, "BBB.US", "primary_score", 10.0, "2023-12-31")
+    seed_metric(db_path, "CCC.US", "primary_score", 5.0, "2023-12-31")
+    seed_metric(db_path, "AAA.US", "oey_ev_norm", 0.05, "2023-12-31")
+    seed_metric(db_path, "BBB.US", "oey_ev_norm", 0.07, "2023-12-31")
+    seed_metric(db_path, "CCC.US", "oey_ev_norm", 0.09, "2023-12-31")
+    seed_metric(db_path, "AAA.US", "net_debt_to_ebitda", 1.5, "2023-12-31")
+    seed_metric(db_path, "BBB.US", "net_debt_to_ebitda", 1.5, "2023-12-31")
+    seed_metric(db_path, "CCC.US", "net_debt_to_ebitda", 0.5, "2023-12-31")
     security_repo = SecurityRepository(db_path)
     security_repo.initialize_schema()
-    security_repo.upsert_metadata("AAA.US", "AAA Inc", description="AAA description")
-    security_repo.upsert_metadata("BBB.US", "BBB Inc", description="BBB description")
-    security_repo.upsert_metadata("CCC.US", "CCC Inc", description="CCC description")
+    seed_security_metadata(db_path, "AAA.US", "AAA Inc", description="AAA description")
+    seed_security_metadata(db_path, "BBB.US", "BBB Inc", description="BBB description")
+    seed_security_metadata(db_path, "CCC.US", "CCC Inc", description="CCC description")
 
     screen_path = tmp_path / "ranked-screen.yml"
     screen_path.write_text(
@@ -6243,18 +6267,18 @@ def test_cmd_run_screen_stage_defers_ranking_metric_loads_until_after_filtering(
     )
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
-    metrics_repo.upsert("AAA.US", "working_capital", 100.0, "2023-12-31")
-    metrics_repo.upsert("BBB.US", "working_capital", 100.0, "2023-12-31")
-    metrics_repo.upsert("CCC.US", "working_capital", 50.0, "2023-12-31")
-    metrics_repo.upsert("AAA.US", "primary_score", 10.0, "2023-12-31")
-    metrics_repo.upsert("BBB.US", "primary_score", 20.0, "2023-12-31")
-    metrics_repo.upsert("CCC.US", "primary_score", 30.0, "2023-12-31")
-    metrics_repo.upsert("AAA.US", "oey_ev_norm", 0.05, "2023-12-31")
-    metrics_repo.upsert("BBB.US", "oey_ev_norm", 0.07, "2023-12-31")
-    metrics_repo.upsert("CCC.US", "oey_ev_norm", 0.09, "2023-12-31")
-    metrics_repo.upsert("AAA.US", "net_debt_to_ebitda", 1.5, "2023-12-31")
-    metrics_repo.upsert("BBB.US", "net_debt_to_ebitda", 0.5, "2023-12-31")
-    metrics_repo.upsert("CCC.US", "net_debt_to_ebitda", 0.1, "2023-12-31")
+    seed_metric(db_path, "AAA.US", "working_capital", 100.0, "2023-12-31")
+    seed_metric(db_path, "BBB.US", "working_capital", 100.0, "2023-12-31")
+    seed_metric(db_path, "CCC.US", "working_capital", 50.0, "2023-12-31")
+    seed_metric(db_path, "AAA.US", "primary_score", 10.0, "2023-12-31")
+    seed_metric(db_path, "BBB.US", "primary_score", 20.0, "2023-12-31")
+    seed_metric(db_path, "CCC.US", "primary_score", 30.0, "2023-12-31")
+    seed_metric(db_path, "AAA.US", "oey_ev_norm", 0.05, "2023-12-31")
+    seed_metric(db_path, "BBB.US", "oey_ev_norm", 0.07, "2023-12-31")
+    seed_metric(db_path, "CCC.US", "oey_ev_norm", 0.09, "2023-12-31")
+    seed_metric(db_path, "AAA.US", "net_debt_to_ebitda", 1.5, "2023-12-31")
+    seed_metric(db_path, "BBB.US", "net_debt_to_ebitda", 0.5, "2023-12-31")
+    seed_metric(db_path, "CCC.US", "net_debt_to_ebitda", 0.1, "2023-12-31")
 
     screen_path = tmp_path / "ranked-screen.yml"
     screen_path.write_text(
@@ -6347,11 +6371,12 @@ def test_cmd_run_screen_stage_limits_console_preview_and_truncates_description(
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
     for symbol in ("AAA.US", "BBB.US", "CCC.US"):
-        metrics_repo.upsert(symbol, "working_capital", 100.0, "2023-12-31")
+        seed_metric(db_path, symbol, "working_capital", 100.0, "2023-12-31")
 
     security_repo = SecurityRepository(db_path)
     security_repo.initialize_schema()
-    security_repo.upsert_metadata(
+    seed_security_metadata(
+        db_path,
         "AAA.US",
         "AAA Incorporated",
         description=(
@@ -6359,11 +6384,11 @@ def test_cmd_run_screen_stage_limits_console_preview_and_truncates_description(
             "critical end markets across aerospace, energy, and medical devices."
         ),
     )
-    security_repo.upsert_metadata(
-        "BBB.US", "BBB Incorporated", description="BBB description"
+    seed_security_metadata(
+        db_path, "BBB.US", "BBB Incorporated", description="BBB description"
     )
-    security_repo.upsert_metadata(
-        "CCC.US", "CCC Incorporated", description="CCC description"
+    seed_security_metadata(
+        db_path, "CCC.US", "CCC Incorporated", description="CCC description"
     )
 
     screen_path = tmp_path / "screen.yml"
@@ -6415,8 +6440,8 @@ def test_cmd_run_screen_stage_reports_progress_when_no_symbols_pass(
     )
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
-    metrics_repo.upsert("AAA.US", "working_capital", 50.0, "2023-12-31")
-    metrics_repo.upsert("BBB.US", "working_capital", 60.0, "2023-12-31")
+    seed_metric(db_path, "AAA.US", "working_capital", 50.0, "2023-12-31")
+    seed_metric(db_path, "BBB.US", "working_capital", 60.0, "2023-12-31")
 
     screen_path = tmp_path / "screen.yml"
     screen_path.write_text(
@@ -6463,7 +6488,7 @@ def test_cmd_run_screen_stage_missing_status_falls_back_to_raw_metric_value(
     )
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
-    metrics_repo.upsert("AAA.US", "working_capital", 100.0, "2024-12-31")
+    seed_metric(db_path, "AAA.US", "working_capital", 100.0, "2024-12-31")
 
     screen_path = tmp_path / "screen.yml"
     screen_path.write_text(
@@ -6538,8 +6563,8 @@ def test_cmd_run_screen_stage_does_not_reconcile_or_mutate_listing_status(
 
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
-    metrics_repo.upsert("AAA.LSE", "working_capital", 100.0, "2024-12-31")
-    metrics_repo.upsert("BBB.LSE", "working_capital", 100.0, "2024-12-31")
+    seed_metric(db_path, "AAA.LSE", "working_capital", 100.0, "2024-12-31")
+    seed_metric(db_path, "BBB.LSE", "working_capital", 100.0, "2024-12-31")
 
     screen_path = tmp_path / "screen.yml"
     screen_path.write_text(
@@ -6609,19 +6634,18 @@ def test_cmd_run_screen_stage_failure_status_shadows_stored_metric_value(
     )
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
-    metrics_repo.upsert("AAA.US", "working_capital", 100.0, "2024-12-31")
+    seed_metric(db_path, "AAA.US", "working_capital", 100.0, "2024-12-31")
     status_repo = MetricComputeStatusRepository(db_path)
     status_repo.initialize_schema()
-    status_repo.upsert_many(
-        [
-            MetricComputeStatusRecord(
-                symbol="AAA.US",
-                metric_id="working_capital",
-                status="failure",
-                attempted_at="2025-01-01T00:00:00+00:00",
-                reason_code="missing_data",
-            )
-        ]
+    seed_metric_status(
+        db_path,
+        MetricComputeStatusRecord(
+            symbol="AAA.US",
+            metric_id="working_capital",
+            status="failure",
+            attempted_at="2025-01-01T00:00:00+00:00",
+            reason_code="missing_data",
+        ),
     )
 
     screen_path = tmp_path / "screen.yml"
@@ -6661,7 +6685,8 @@ def test_cmd_run_screen_stage_stale_success_status_hides_stored_metric_value(
     )
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "AAA.US",
         [
             make_fact(concept="AssetsCurrent", end_date="2024-12-31", value=150.0),
@@ -6681,24 +6706,24 @@ def test_cmd_run_screen_stage_stale_success_status_hides_stored_metric_value(
 
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
-    metrics_repo.upsert("AAA.US", "working_capital", 100.0, "2024-12-31")
+    seed_metric(db_path, "AAA.US", "working_capital", 100.0, "2024-12-31")
     status_repo = MetricComputeStatusRepository(db_path)
     status_repo.initialize_schema()
-    status_repo.upsert_many(
-        [
-            MetricComputeStatusRecord(
-                symbol="AAA.US",
-                metric_id="working_capital",
-                status="success",
-                attempted_at="2025-01-01T00:00:00+00:00",
-                value_as_of="2024-12-31",
-                facts_refreshed_at=initial_refresh.refreshed_at,
-            )
-        ]
+    seed_metric_status(
+        db_path,
+        MetricComputeStatusRecord(
+            symbol="AAA.US",
+            metric_id="working_capital",
+            status="success",
+            attempted_at="2025-01-01T00:00:00+00:00",
+            value_as_of="2024-12-31",
+            facts_refreshed_at=initial_refresh.refreshed_at,
+        ),
     )
 
     time.sleep(0.01)
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "AAA.US",
         [
             make_fact(concept="AssetsCurrent", end_date="2025-03-31", value=80.0),
@@ -6750,8 +6775,8 @@ def test_cmd_run_screen_stage_creates_output_csv_parent_dirs_when_no_symbols_pas
     )
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
-    metrics_repo.upsert("AAA.US", "working_capital", 50.0, "2023-12-31")
-    metrics_repo.upsert("BBB.US", "working_capital", 60.0, "2023-12-31")
+    seed_metric(db_path, "AAA.US", "working_capital", 50.0, "2023-12-31")
+    seed_metric(db_path, "BBB.US", "working_capital", 60.0, "2023-12-31")
 
     screen_path = tmp_path / "screen.yml"
     screen_path.write_text(
@@ -6803,8 +6828,8 @@ def test_cmd_report_metric_failures_uses_highest_market_cap_example(
     )
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    market_repo.upsert_price("AAA.US", "2024-01-01", price=10.0)
-    market_repo.upsert_price("BBB.US", "2024-01-01", price=10.0)
+    seed_price(db_path, "AAA.US", "2024-01-01", price=10.0)
+    seed_price(db_path, "BBB.US", "2024-01-01", price=10.0)
     # Market cap is estimated from shares x price for the report example; BBB's
     # larger share count makes it the higher-market-cap example.
     _seed_share_count(db_path, "AAA.US", "2024-01-01", 10.0)
@@ -6879,7 +6904,8 @@ def test_cmd_report_metric_failures_carries_scope_listing_ids(
     )
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "AAA.US",
         [
             make_fact(
@@ -7031,7 +7057,7 @@ def test_cmd_report_metric_failures_surfaces_roic_specific_reason(
             ),
         ]
     )
-    fact_repo.replace_facts(symbol, facts)
+    seed_facts(db_path, symbol, facts)
     store_market_data(db_path, symbol, f"{latest_year}-09-30", currency="USD")
 
     rc = cli.cmd_report_metric_failures(
@@ -7065,16 +7091,15 @@ def test_cmd_report_metric_failures_reuses_persisted_failure_status_without_reco
     )
     status_repo = MetricComputeStatusRepository(db_path)
     status_repo.initialize_schema()
-    status_repo.upsert_many(
-        [
-            MetricComputeStatusRecord(
-                symbol="AAA.US",
-                metric_id="cached_metric",
-                status="failure",
-                attempted_at="2025-01-01T00:00:00+00:00",
-                reason_code="cached_failure",
-            )
-        ]
+    seed_metric_status(
+        db_path,
+        MetricComputeStatusRecord(
+            symbol="AAA.US",
+            metric_id="cached_metric",
+            status="failure",
+            attempted_at="2025-01-01T00:00:00+00:00",
+            reason_code="cached_failure",
+        ),
     )
 
     class CachedMetric:
@@ -7121,7 +7146,8 @@ def test_cmd_report_screen_failures_dedupes_metric_na_counts(
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
     as_of = (date.today() - timedelta(days=5)).isoformat()
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "BBB.US",
         [
             make_fact(
@@ -7140,10 +7166,10 @@ def test_cmd_report_screen_failures_dedupes_metric_na_counts(
     )
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
-    metrics_repo.upsert("AAA.US", "working_capital", 10.0, as_of)
+    seed_metric(db_path, "AAA.US", "working_capital", 10.0, as_of)
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    market_repo.upsert_price("BBB.US", as_of, price=10.0, currency="USD")
+    seed_price(db_path, "BBB.US", as_of, price=10.0, currency="USD")
     _seed_share_count(db_path, "BBB.US", as_of, 25.0)
 
     screen_path = tmp_path / "screen.yml"
@@ -7216,16 +7242,15 @@ def test_cmd_report_screen_failures_reuses_persisted_failure_status_without_reco
     )
     status_repo = MetricComputeStatusRepository(db_path)
     status_repo.initialize_schema()
-    status_repo.upsert_many(
-        [
-            MetricComputeStatusRecord(
-                symbol="AAA.US",
-                metric_id="cached_metric",
-                status="failure",
-                attempted_at="2025-01-01T00:00:00+00:00",
-                reason_code="cached_failure",
-            )
-        ]
+    seed_metric_status(
+        db_path,
+        MetricComputeStatusRecord(
+            symbol="AAA.US",
+            metric_id="cached_metric",
+            status="failure",
+            attempted_at="2025-01-01T00:00:00+00:00",
+            reason_code="cached_failure",
+        ),
     )
 
     class CachedMetric:
@@ -7287,7 +7312,8 @@ def test_cmd_report_screen_failures_reports_progress_by_phase(
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
     as_of = (date.today() - timedelta(days=5)).isoformat()
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "BBB.US",
         [
             make_fact(
@@ -7306,10 +7332,10 @@ def test_cmd_report_screen_failures_reports_progress_by_phase(
     )
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
-    metrics_repo.upsert("AAA.US", "working_capital", 10.0, as_of)
+    seed_metric(db_path, "AAA.US", "working_capital", 10.0, as_of)
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    market_repo.upsert_price("BBB.US", as_of, price=10.0)
+    seed_price(db_path, "BBB.US", as_of, price=10.0)
     _seed_share_count(db_path, "BBB.US", as_of, 25.0)
 
     screen_path = tmp_path / "screen.yml"
@@ -7381,7 +7407,8 @@ def test_cmd_report_screen_failures_avoids_point_metric_fetches(
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
     as_of = (date.today() - timedelta(days=5)).isoformat()
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "BBB.US",
         [
             make_fact(
@@ -7400,7 +7427,7 @@ def test_cmd_report_screen_failures_avoids_point_metric_fetches(
     )
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
-    metrics_repo.upsert("AAA.US", "working_capital", 10.0, as_of)
+    seed_metric(db_path, "AAA.US", "working_capital", 10.0, as_of)
     screen_path = tmp_path / "screen.yml"
     screen_path.write_text(
         """
@@ -7449,7 +7476,8 @@ def test_cmd_report_screen_failures_recompute_uses_symbol_caches(
     )
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "AAA.US",
         [
             make_fact(concept="AssetsCurrent", end_date="2024-12-31", value=500.0),
@@ -7469,7 +7497,7 @@ def test_cmd_report_screen_failures_recompute_uses_symbol_caches(
     )
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    market_repo.upsert_price("AAA.US", "2024-12-31", price=25.0)
+    seed_price(db_path, "AAA.US", "2024-12-31", price=25.0)
     _seed_share_count(db_path, "AAA.US", "2024-12-31", 40.0)
 
     fact_calls: dict[str, int] = {"count": 0}

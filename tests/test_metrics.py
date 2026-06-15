@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import seed_exchange
+from conftest import seed_exchange, seed_facts, seed_price
 from pyvalue.currency import MetricUnitKind
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.marketdata.base import PriceData
@@ -492,7 +492,8 @@ def test_market_cap_money_uses_latest_price(tmp_path: Path) -> None:
     )
     facts = FinancialFactsRepository(db_path)
     facts.initialize_schema()
-    facts.replace_facts(
+    seed_facts(
+        db_path,
         "AAA.US",
         [
             FactRecord(
@@ -507,8 +508,8 @@ def test_market_cap_money_uses_latest_price(tmp_path: Path) -> None:
     )
     market = MarketDataRepository(db_path)
     market.initialize_schema()
-    market.upsert_price("AAA.US", "2026-01-31", 10.0, currency="USD")
-    market.upsert_price("AAA.US", "2026-03-31", 99.0, currency="USD")
+    seed_price(db_path, "AAA.US", "2026-01-31", 10.0, currency="USD")
+    seed_price(db_path, "AAA.US", "2026-03-31", 99.0, currency="USD")
 
     # Unlike the in-memory fakes, this exercises the real repos, which key on the
     # listing_id assigned by the catalog -- so resolve the actual id rather than
@@ -546,7 +547,7 @@ def test_market_cap_money_uses_latest_price(tmp_path: Path) -> None:
             },
         ],
     )
-    market.upsert_price("BBB.US", "2026-01-31", 10.0, currency="USD")
+    seed_price(db_path, "BBB.US", "2026-01-31", 10.0, currency="USD")
     bbb_id = SecurityRepository(db_path).ensure_from_symbol("BBB.US").security_id
     assert (
         market_cap_money(

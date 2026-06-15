@@ -5,21 +5,16 @@ Author: Emre Tezel
 
 from __future__ import annotations
 
-import logging
 import sqlite3
-from dataclasses import replace
 from typing import (
     Dict,
     Iterable,
-    List,
-    Mapping,
     Optional,
     Sequence,
     Tuple,
 )
 
 from pyvalue.currency import (
-    MetricUnitKind,
     canonical_trading_currency,
     metric_currency_or_none,
 )
@@ -36,41 +31,8 @@ from .records import (
     MarketSnapshotRecord,
     MetricComputeStatusRecord,
     MetricRecord,
-    StoredMetricRow,
 )
 from ..migrations import apply_migrations
-
-
-logger = logging.getLogger(__name__)
-
-
-def _warn_uncataloged_symbols(
-    symbols: Sequence[str],
-    security_ids: Mapping[str, int],
-    row_kind: str,
-) -> None:
-    """Warn about symbols with no catalog listing; their rows are skipped.
-
-    The metrics and metric-compute-status writers are catalog-read-only: the
-    issuer/listing catalog is owned by refresh-supported-tickers, so a row that
-    references a symbol with no listing is dropped (the upsert payload keeps only
-    resolved symbols) rather than minting issuer/listing rows from a metric
-    write. In normal operation the compute scope is drawn from the catalog, so
-    nothing is dropped; this surfaces a genuinely uncataloged ticker instead of
-    losing it silently.
-    """
-
-    missing = sorted(symbol for symbol in symbols if symbol not in security_ids)
-    if not missing:
-        return
-    logger.warning(
-        "Skipping %s rows for %d uncataloged symbol(s); the writer is "
-        "catalog-read-only (issuer/listing are owned by refresh-supported-tickers). "
-        "Examples: %s",
-        row_kind,
-        len(missing),
-        ", ".join(missing[:5]),
-    )
 
 
 class MetricsRepository(SQLiteStore):
@@ -85,83 +47,6 @@ class MetricsRepository(SQLiteStore):
         # silently strip migration 041's constraints.
         apply_migrations(self.db_path)
         self._security_repo().initialize_schema()
-
-    def upsert(
-        self,
-        symbol: str,
-        metric_id: str,
-        value: float,
-        as_of: str,
-        unit_kind: MetricUnitKind = "other",
-        currency: Optional[str] = None,
-        unit_label: Optional[str] = None,
-    ) -> None:
-        self.upsert_many(
-            [(symbol, metric_id, value, as_of, unit_kind, currency, unit_label)]
-        )
-
-    def upsert_many(
-        self,
-        rows: Iterable[StoredMetricRow],
-        *,
-        ids_by_symbol: Optional[Mapping[str, int]] = None,
-        connection: Optional[sqlite3.Connection] = None,
-        commit: bool = True,
-    ) -> int:
-        """Symbol-keyed wrapper over :meth:`upsert_many_by_id`.
-
-        Resolves each row's symbol to its ``listing_id`` (using a supplied
-        ``ids_by_symbol`` map when present, else the bulk resolver) and defers the
-        write to the natural-identity path. Catalog-read-only: a row for an
-        uncataloged symbol is skipped (never created); the issuer/listing catalog
-        is owned by refresh-supported-tickers.
-        """
-
-        self.initialize_schema()
-        metric_rows: List[StoredMetricRow] = list(rows)
-        if not metric_rows:
-            return 0
-
-        unique_symbols = []
-        seen_symbols = set()
-        for symbol, _, _, _, _, _, _ in metric_rows:
-            if symbol in seen_symbols:
-                continue
-            seen_symbols.add(symbol)
-            unique_symbols.append(symbol)
-
-        security_ids: Dict[str, int] = dict(ids_by_symbol or {})
-        unresolved = [symbol for symbol in unique_symbols if symbol not in security_ids]
-        if unresolved:
-            security_ids.update(
-                self._security_repo().resolve_ids_many(
-                    unresolved,
-                    connection=connection,
-                )
-            )
-        _warn_uncataloged_symbols(unique_symbols, security_ids, "metric")
-        id_rows: List[IdKeyedStoredMetricRow] = [
-            (
-                security_ids[symbol],
-                metric_id,
-                value,
-                as_of,
-                unit_kind,
-                currency,
-                unit_label,
-            )
-            for (
-                symbol,
-                metric_id,
-                value,
-                as_of,
-                unit_kind,
-                currency,
-                unit_label,
-            ) in metric_rows
-            if symbol in security_ids
-        ]
-        return self.upsert_many_by_id(id_rows, connection=connection, commit=commit)
 
     def upsert_many_by_id(
         self,
@@ -332,62 +217,6 @@ class MetricComputeStatusRepository(SQLiteStore):
         apply_migrations(self.db_path)
         self._security_repo().initialize_schema()
 
-    def upsert_many(
-        self,
-        rows: Iterable[MetricComputeStatusRecord],
-        *,
-        ids_by_symbol: Optional[Mapping[str, int]] = None,
-        connection: Optional[sqlite3.Connection] = None,
-        commit: bool = True,
-    ) -> int:
-        all_rows = list(rows)
-        if not all_rows:
-            return 0
-        # The symbol-keyed wrapper resolves the target listing from a display
-        # symbol and defers to the natural-identity writer. Rows that carry no
-        # symbol are ignored here; emit those through ``upsert_many_by_id`` with
-        # ``listing_id`` set.
-        symbol_rows: List[Tuple[str, MetricComputeStatusRecord]] = [
-            (row.symbol.strip().upper(), row)
-            for row in all_rows
-            if row.symbol is not None
-        ]
-        if not symbol_rows:
-            return 0
-
-        unique_symbols: List[str] = []
-        seen_symbols: set[str] = set()
-        for symbol, _row in symbol_rows:
-            if symbol in seen_symbols:
-                continue
-            seen_symbols.add(symbol)
-            unique_symbols.append(symbol)
-
-        if connection is None:
-            self.initialize_schema()
-        # See MetricsRepository.upsert_many: a supplied ``ids_by_symbol`` (from
-        # compute-metrics' scope-resolved listing ids) means zero resolution;
-        # only unmapped symbols hit the resolver.
-        security_ids: Dict[str, int] = dict(ids_by_symbol or {})
-        unresolved = [symbol for symbol in unique_symbols if symbol not in security_ids]
-        if unresolved:
-            security_ids.update(
-                self._security_repo().resolve_ids_many(
-                    unresolved,
-                    connection=connection,
-                )
-            )
-        # Catalog-read-only, like the metric values writer: an uncataloged symbol
-        # is skipped (never created).
-        _warn_uncataloged_symbols(unique_symbols, security_ids, "metric-compute-status")
-
-        id_rows = [
-            replace(row, listing_id=security_ids[symbol])
-            for symbol, row in symbol_rows
-            if symbol in security_ids
-        ]
-        return self.upsert_many_by_id(id_rows, connection=connection, commit=commit)
-
     def upsert_many_by_id(
         self,
         rows: Iterable[MetricComputeStatusRecord],
@@ -398,8 +227,8 @@ class MetricComputeStatusRepository(SQLiteStore):
         """Persist latest-attempt status rows by natural ``listing_id`` identity.
 
         Rows must carry ``listing_id``; any with ``listing_id is None`` are
-        skipped (the symbol-keyed :meth:`upsert_many` is the path for symbol-only
-        rows).
+        skipped. This is the single status write: the compute-metrics scope
+        resolves listing ids up front, so there is no symbol resolution here.
         """
 
         if connection is None:
@@ -571,31 +400,6 @@ class MarketDataRepository(SQLiteStore):
         # `market_data` is owned by migration 034.
         apply_migrations(self.db_path)
         self._security_repo().initialize_schema()
-
-    def upsert_price(
-        self,
-        symbol: str,
-        as_of: str,
-        price: float,
-        volume: Optional[int] = None,
-        currency: Optional[str] = None,
-        source_provider: Optional[str] = None,
-    ) -> None:
-        self.initialize_schema()
-        security = self._security_repo().ensure_from_symbol(symbol)
-        self.upsert_prices(
-            [
-                MarketDataUpdate(
-                    security_id=security.security_id,
-                    symbol=symbol.strip().upper(),
-                    as_of=as_of,
-                    price=price,
-                    volume=volume,
-                    currency=currency,
-                    source_provider=(source_provider or "EODHD").strip().upper(),
-                )
-            ]
-        )
 
     def upsert_prices(self, rows: Sequence[MarketDataUpdate]) -> None:
         self.initialize_schema()

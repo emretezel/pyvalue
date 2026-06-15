@@ -26,7 +26,7 @@ from pyvalue.persistence.storage import (
 )
 from pyvalue.persistence.storage.fx import _PAIR_COVERAGE_SQL
 
-from conftest import seed_exchange
+from conftest import seed_exchange, seed_metric
 
 
 def _ranking_definition(metric: RankingMetric) -> ScreenDefinition:
@@ -68,7 +68,8 @@ def test_rank_screen_passers_skips_mixed_currency_metric_without_ranking_currenc
     metrics_repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
     _seed_listing(db_path, "BBB.US")
-    metrics_repo.upsert(
+    seed_metric(
+        db_path,
         "AAA.US",
         "market_cap",
         100.0,
@@ -76,7 +77,8 @@ def test_rank_screen_passers_skips_mixed_currency_metric_without_ranking_currenc
         unit_kind="monetary",
         currency="USD",
     )
-    metrics_repo.upsert(
+    seed_metric(
+        db_path,
         "BBB.US",
         "market_cap",
         90.0,
@@ -116,7 +118,8 @@ def test_rank_screen_passers_normalizes_mixed_currency_metric_with_ranking_curre
     metrics_repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
     _seed_listing(db_path, "BBB.US")
-    metrics_repo.upsert(
+    seed_metric(
+        db_path,
         "AAA.US",
         "market_cap",
         100.0,
@@ -124,7 +127,8 @@ def test_rank_screen_passers_normalizes_mixed_currency_metric_with_ranking_curre
         unit_kind="monetary",
         currency="USD",
     )
-    metrics_repo.upsert(
+    seed_metric(
+        db_path,
         "BBB.US",
         "market_cap",
         90.0,

@@ -19,7 +19,7 @@ from pyvalue.persistence.storage import (
 )
 from pyvalue.universe import Listing
 
-from conftest import seed_exchange
+from conftest import seed_exchange, seed_facts, seed_price
 
 
 def _seed_universe(db_path: Path) -> None:
@@ -55,7 +55,8 @@ def test_metric_coverage_counts_symbols(
     repo.initialize_schema()
     recent = date.today().isoformat()
     # AAA has full facts; BBB missing liabilities.
-    repo.replace_facts(
+    seed_facts(
+        db_path,
         "AAA.US",
         [
             FactRecord(
@@ -78,7 +79,8 @@ def test_metric_coverage_counts_symbols(
             ),
         ],
     )
-    repo.replace_facts(
+    seed_facts(
+        db_path,
         "BBB.US",
         [
             FactRecord(
@@ -94,8 +96,8 @@ def test_metric_coverage_counts_symbols(
     )
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    market_repo.upsert_price("AAA.US", recent, 10.0, currency="USD")
-    market_repo.upsert_price("BBB.US", recent, 10.0, currency="USD")
+    seed_price(db_path, "AAA.US", recent, 10.0, currency="USD")
+    seed_price(db_path, "BBB.US", recent, 10.0, currency="USD")
 
     exit_code = cmd_report_metric_coverage(
         database=str(db_path),
@@ -128,7 +130,8 @@ def test_metric_coverage_carries_scope_listing_ids(
     repo.initialize_schema()
     recent = date.today().isoformat()
     for symbol in ("AAA.US", "BBB.US"):
-        repo.replace_facts(
+        seed_facts(
+            db_path,
             symbol,
             [
                 FactRecord(

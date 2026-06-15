@@ -21,7 +21,7 @@ from pyvalue.persistence.storage import (
 )
 from pyvalue.universe import Listing
 
-from conftest import seed_exchange
+from conftest import seed_exchange, seed_facts, seed_price
 
 
 def _store_market_currency(
@@ -44,7 +44,7 @@ def _store_market_currency(
     )
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    market_repo.upsert_price(symbol, as_of, 10.0, currency=currency)
+    seed_price(db_path, symbol, as_of, 10.0, currency=currency)
 
 
 def _listing_id(db_path: Path, symbol: str) -> int:
@@ -68,7 +68,8 @@ def test_metric_skips_when_latest_fact_is_stale(tmp_path: Path) -> None:
     # currency-bearing listing via the catalog before replace_facts (which
     # otherwise would implicitly create the listing without a currency).
     _store_market_currency(tmp_path / "facts.db", "AAPL.US", stale_date)
-    repo.replace_facts(
+    seed_facts(
+        tmp_path / "facts.db",
         "AAPL.US",
         [
             FactRecord(
@@ -113,7 +114,7 @@ def test_ttm_metric_requires_recent_quarters(tmp_path: Path) -> None:
         "AAPL.US",
         (today - timedelta(days=30)).isoformat(),
     )
-    repo.replace_facts("AAPL.US", records)
+    seed_facts(tmp_path / "quarters.db", "AAPL.US", records)
 
     metric = EarningsPerShareTTM()
     listing_id = _listing_id(tmp_path / "quarters.db", "AAPL.US")
@@ -155,7 +156,7 @@ def test_ttm_metric_skips_when_latest_quarter_is_stale(tmp_path: Path) -> None:
         "AAPL.US",
         (today - timedelta(days=MAX_FACT_AGE_DAYS + 10)).isoformat(),
     )
-    repo.replace_facts("AAPL.US", records)
+    seed_facts(tmp_path / "stale_quarters.db", "AAPL.US", records)
 
     metric = EarningsPerShareTTM()
 
@@ -199,7 +200,7 @@ def test_fy_metric_accepts_when_recent_quarter_exists(tmp_path: Path) -> None:
         "AAPL.US",
         (date.today() - timedelta(days=60)).isoformat(),
     )
-    repo.replace_facts("AAPL.US", fy_records)
+    seed_facts(tmp_path / "epsavg.db", "AAPL.US", fy_records)
 
     metric = EPSAverageSixYearMetric()
     listing_id = _listing_id(tmp_path / "epsavg.db", "AAPL.US")
@@ -221,7 +222,8 @@ def test_roc_metric_uses_recent_concept_even_if_fy_old(tmp_path: Path) -> None:
         (date.today() - timedelta(days=45)).isoformat(),
     )
     # Recent quarterly facts to satisfy freshness.
-    repo.replace_facts(
+    seed_facts(
+        tmp_path / "roc.db",
         "TEST.US",
         [
             FactRecord(

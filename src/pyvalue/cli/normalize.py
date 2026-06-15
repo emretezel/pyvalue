@@ -35,6 +35,7 @@ from pyvalue.persistence.storage import (
     FundamentalsRepository,
     FinancialFactsRepository,
     FactRecord,
+    SecurityMetadataUpdate,
     SecurityRepository,
     StoredFactRow,
     SupportedTickerRepository,
@@ -288,6 +289,23 @@ def _run_bulk_normalization(
     FXRatesRepository(db_path).initialize_schema()
     SupportedTickerRepository(db_path).initialize_schema()
 
+    # Normalize is catalog-read-only: the id-keyed metadata/fact writers need a
+    # ``listing_id`` and never mint catalog rows (the issuer/listing catalog is
+    # owned by refresh-supported-tickers). The freshness scan's candidate map
+    # already carries the resolved ``security_id`` for non-force runs; the force
+    # run skips that scan, so any symbol it does not cover is resolved here in one
+    # batched, read-only seek. A symbol that resolves to no listing is uncataloged
+    # and its writes are skipped below (its normalization state is still marked).
+    listing_ids_by_symbol: Dict[str, int] = {}
+    if candidate_map is not None:
+        for symbol, candidate in candidate_map.items():
+            listing_ids_by_symbol[symbol.upper()] = candidate.security_id
+    unresolved_symbols = [
+        symbol for symbol in selected_symbols if symbol not in listing_ids_by_symbol
+    ]
+    if unresolved_symbols:
+        listing_ids_by_symbol.update(security_repo.resolve_ids_many(unresolved_symbols))
+
     total = len(selected_symbols)
     requested = requested_total if requested_total is not None else total
     workers = _normalization_worker_count(total)
@@ -316,27 +334,35 @@ def _run_bulk_normalization(
                     )
                     failed += 1
                     continue
-                if (
-                    result.entity_name
-                    or result.entity_description
-                    or result.entity_sector
-                    or result.entity_industry
-                ):
-                    security_repo.upsert_metadata(
-                        symbol,
-                        result.entity_name,
-                        description=result.entity_description,
-                        sector=result.entity_sector,
-                        industry=result.entity_industry,
+                # Catalog-read-only: a symbol with no cataloged listing carries no
+                # ``listing_id`` to key the metadata/fact writes, so both writes
+                # are skipped (no canonical rows are minted from a normalization
+                # pass). The provider-edge normalization state below is still
+                # recorded.
+                listing_id = listing_ids_by_symbol.get(symbol)
+                stored = 0
+                if listing_id is not None:
+                    if (
+                        result.entity_name
+                        or result.entity_description
+                        or result.entity_sector
+                        or result.entity_industry
+                    ):
+                        security_repo.upsert_metadata_many(
+                            [
+                                SecurityMetadataUpdate(
+                                    security_id=listing_id,
+                                    entity_name=result.entity_name,
+                                    description=result.entity_description,
+                                    sector=result.entity_sector,
+                                    industry=result.entity_industry,
+                                )
+                            ]
+                        )
+                    stored = fact_repo.replace_fact_rows(
+                        listing_id,
+                        result.rows,
                     )
-                candidate = (
-                    candidate_map.get(symbol) if candidate_map is not None else None
-                )
-                stored = fact_repo.replace_fact_rows(
-                    symbol,
-                    result.rows,
-                    security_id=candidate.security_id if candidate else None,
-                )
                 state_repo.mark_success(
                     provider,
                     symbol,
@@ -375,27 +401,33 @@ def _run_bulk_normalization(
                         )
                         failed += 1
                         continue
-                    if (
-                        result.entity_name
-                        or result.entity_description
-                        or result.entity_sector
-                        or result.entity_industry
-                    ):
-                        security_repo.upsert_metadata(
-                            symbol,
-                            result.entity_name,
-                            description=result.entity_description,
-                            sector=result.entity_sector,
-                            industry=result.entity_industry,
+                    # Catalog-read-only: skip both writes for an uncataloged
+                    # symbol (no ``listing_id`` to key them). See the single-thread
+                    # path above for the full rationale.
+                    listing_id = listing_ids_by_symbol.get(symbol)
+                    stored = 0
+                    if listing_id is not None:
+                        if (
+                            result.entity_name
+                            or result.entity_description
+                            or result.entity_sector
+                            or result.entity_industry
+                        ):
+                            security_repo.upsert_metadata_many(
+                                [
+                                    SecurityMetadataUpdate(
+                                        security_id=listing_id,
+                                        entity_name=result.entity_name,
+                                        description=result.entity_description,
+                                        sector=result.entity_sector,
+                                        industry=result.entity_industry,
+                                    )
+                                ]
+                            )
+                        stored = fact_repo.replace_fact_rows(
+                            listing_id,
+                            result.rows,
                         )
-                    candidate = (
-                        candidate_map.get(symbol) if candidate_map is not None else None
-                    )
-                    stored = fact_repo.replace_fact_rows(
-                        symbol,
-                        result.rows,
-                        security_id=candidate.security_id if candidate else None,
-                    )
                     state_repo.mark_success(
                         provider,
                         symbol,

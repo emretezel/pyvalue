@@ -1,4 +1,3 @@
-import logging
 import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
@@ -19,6 +18,7 @@ from pyvalue.persistence.storage import (
     FundamentalsNormalizationCandidate,
     FinancialFactsRepository,
     FactRecord,
+    IdKeyedStoredMetricRow,
     MarketDataFetchStateRepository,
     MarketDataRepository,
     MetricComputeStatusRecord,
@@ -28,7 +28,6 @@ from pyvalue.persistence.storage import (
     SecurityRepository,
     SecurityListingStatusRecord,
     SecurityListingStatusRepository,
-    StoredMetricRow,
     SupportedTickerRepository,
 )
 from pyvalue.persistence.storage.fundamentals import _resolve_provider_listing_id
@@ -38,7 +37,14 @@ from collections.abc import Sequence
 from types import TracebackType
 from typing import Literal, NoReturn, Optional, Tuple, Type
 
-from conftest import seed_exchange
+from conftest import (
+    seed_exchange,
+    seed_facts,
+    seed_metric,
+    seed_metric_status,
+    seed_price,
+    seed_security_metadata,
+)
 
 
 def _listing(symbol: str, is_etf: bool = False, currency: str = "USD") -> Listing:
@@ -237,9 +243,8 @@ def test_fundamentals_repository_classifies_and_purges_secondary_listings(
     )
     by_symbol = {row.symbol: row for row in ticker_repo.list_for_provider("EODHD")}
 
-    fact_repo = FinancialFactsRepository(db_path)
-    fact_repo.initialize_schema()
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "AAA.LSE",
         [
             FactRecord(
@@ -269,7 +274,8 @@ def test_fundamentals_repository_classifies_and_purges_secondary_listings(
             )
         ]
     )
-    MetricsRepository(db_path).upsert(
+    seed_metric(
+        db_path,
         "AAA.LSE",
         "market_cap",
         1000.0,
@@ -277,16 +283,15 @@ def test_fundamentals_repository_classifies_and_purges_secondary_listings(
         unit_kind="monetary",
         currency="GBP",
     )
-    MetricComputeStatusRepository(db_path).upsert_many(
-        [
-            MetricComputeStatusRecord(
-                symbol="AAA.LSE",
-                metric_id="market_cap",
-                status="success",
-                attempted_at="2025-01-02T00:00:00+00:00",
-                value_as_of="2025-01-02",
-            )
-        ]
+    seed_metric_status(
+        db_path,
+        MetricComputeStatusRecord(
+            symbol="AAA.LSE",
+            metric_id="market_cap",
+            status="success",
+            attempted_at="2025-01-02T00:00:00+00:00",
+            value_as_of="2025-01-02",
+        ),
     )
     FundamentalsNormalizationStateRepository(db_path).mark_success(
         "EODHD",
@@ -462,7 +467,8 @@ def test_migration_078_backfills_unknown_status_and_purges_secondary(
     # become secondary so the migration's purge step has something to remove.
     with sqlite3.connect(db_path) as conn:
         conn.execute("UPDATE listing SET primary_listing_status = 'unknown'")
-    FinancialFactsRepository(db_path).replace_facts(
+    seed_facts(
+        db_path,
         "AAA.LSE",
         [
             FactRecord(
@@ -488,7 +494,8 @@ def test_migration_078_backfills_unknown_status_and_purges_secondary(
             )
         ]
     )
-    MetricsRepository(db_path).upsert(
+    seed_metric(
+        db_path,
         "AAA.LSE",
         "market_cap",
         1000.0,
@@ -1018,9 +1025,9 @@ def test_purge_downstream_for_secondary_purges_only_secondary(tmp_path: Path) ->
 
     # Seed downstream facts for both listings so we can prove the primary's
     # survive and only the secondary's are purged.
-    facts_repo = FinancialFactsRepository(db_path)
     for symbol in ("AAA.US", "BBB.US"):
-        facts_repo.replace_facts(
+        seed_facts(
+            db_path,
             symbol,
             [
                 FactRecord(
@@ -1081,7 +1088,8 @@ def test_purge_downstream_for_secondary_noop_when_all_primary(tmp_path: Path) ->
         [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock", "Currency": "USD"}],
     )
     aaa_id = next(iter(ticker_repo.list_for_provider("EODHD"))).security_id
-    FinancialFactsRepository(db_path).replace_facts(
+    seed_facts(
+        db_path,
         "AAA.US",
         [
             FactRecord(
@@ -1119,15 +1127,25 @@ def test_purge_downstream_for_secondary_noop_when_all_primary(tmp_path: Path) ->
     assert count == 1
 
 
-def test_financial_facts_repository_replace_fact_rows_matches_replace_facts(
+def test_financial_facts_repository_replace_fact_rows_replaces_by_id(
     tmp_path: Path,
 ) -> None:
+    """The id-keyed ``replace_fact_rows`` deletes the prior slice before insert.
+
+    Seeds an initial fact through the ``seed_facts`` helper (the ``FactRecord``
+    projection path), then replaces the listing's entire fact slice with a direct
+    ``replace_fact_rows(listing_id, rows)`` call -- proving the raw-tuple write is
+    keyed purely by ``listing_id`` and supersedes the earlier write.
+    """
     db_path = tmp_path / "financial-facts.db"
     repo = FinancialFactsRepository(db_path)
     repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
+    listing_id = repo._security_repo().resolve_id("AAA.US")
+    assert listing_id is not None
 
-    inserted = repo.replace_facts(
+    inserted = seed_facts(
+        db_path,
         "AAA.US",
         [
             FactRecord(
@@ -1145,7 +1163,7 @@ def test_financial_facts_repository_replace_fact_rows_matches_replace_facts(
     assert inserted == 1
 
     replaced = repo.replace_fact_rows(
-        "AAA.US",
+        listing_id,
         [
             (
                 "Liabilities",
@@ -1174,7 +1192,7 @@ def test_financial_facts_repository_replace_fact_rows_matches_replace_facts(
     assert rows == [("AAA.US", "Liabilities", 40.0)]
 
 
-def test_financial_facts_repository_replace_facts_updates_refresh_state(
+def test_financial_facts_repository_replace_fact_rows_updates_refresh_state(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "facts-refresh-state.db"
@@ -1182,7 +1200,8 @@ def test_financial_facts_repository_replace_facts_updates_refresh_state(
     repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
 
-    repo.replace_facts(
+    seed_facts(
+        db_path,
         "AAA.US",
         [
             FactRecord(
@@ -1212,8 +1231,6 @@ def test_fundamentals_repository_normalization_candidates_match_state_and_facts(
     db_path = tmp_path / "normalization-candidates.db"
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fact_repo = FinancialFactsRepository(db_path)
-    fact_repo.initialize_schema()
     state_repo = FundamentalsNormalizationStateRepository(db_path)
     state_repo.initialize_schema()
 
@@ -1237,7 +1254,8 @@ def test_fundamentals_repository_normalization_candidates_match_state_and_facts(
 
     state_repo.mark_success("SEC", "AAA.US", aaa_payload_hash)
     state_repo.mark_success("SEC", "BBB.US", bbb_payload_hash)
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "AAA.US",
         [
             FactRecord(
@@ -1251,7 +1269,8 @@ def test_fundamentals_repository_normalization_candidates_match_state_and_facts(
             )
         ],
     )
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "BBB.US",
         [
             FactRecord(
@@ -1453,29 +1472,33 @@ def test_fetch_payload_with_hash_resolves_without_scanning_catalog(
             assert "SCAN TABLE exchange" not in plan_text
 
 
-def test_replace_fact_rows_with_known_security_id_skips_ensure(
+def test_replace_fact_rows_writes_by_id_without_resolving_symbol(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A provided ``security_id`` writes facts directly and skips the
-    create-or-update ``ensure_from_symbol`` path (and its redundant issuer
-    UPDATE)."""
+    """``replace_fact_rows`` is keyed purely by ``listing_id``.
+
+    It never resolves a symbol and never falls through to the create-or-update
+    ``ensure_from_symbol`` path, so the write touches only ``financial_facts`` for
+    the given id. The monkeypatched ``ensure_from_symbol`` would raise if the
+    writer ever reached it.
+    """
     db_path = tmp_path / "replace-known-id.db"
     repo = FinancialFactsRepository(db_path)
     repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
-    security_id = repo._security_repo().ensure_from_symbol("AAA.US").security_id
+    security_id = repo._security_repo().resolve_id("AAA.US")
+    assert security_id is not None
 
     def _boom(*args: object, **kwargs: object) -> NoReturn:
         raise AssertionError(
-            "ensure_from_symbol must be skipped when security_id given"
+            "replace_fact_rows must not resolve/create a listing from a symbol"
         )
 
     monkeypatch.setattr(repo._security_repo(), "ensure_from_symbol", _boom)
 
     stored = repo.replace_fact_rows(
-        "AAA.US",
+        security_id,
         [("Assets", "FY", "2024-12-31", "monetary", 100.0, None, "USD")],
-        security_id=security_id,
     )
 
     assert stored == 1
@@ -1509,16 +1532,18 @@ def test_supported_ticker_repository_provider_symbols_honours_primary_only(
     assert repo.provider_symbols("EODHD", primary_only=True) == ["AAA.US"]
 
 
-def test_financial_facts_repository_replace_fact_rows_replaces_symbol_slice(
+def test_financial_facts_repository_replace_fact_rows_replaces_listing_slice(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "financial-facts-replace.db"
     repo = FinancialFactsRepository(db_path)
     repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
+    listing_id = repo._security_repo().resolve_id("AAA.US")
+    assert listing_id is not None
 
     repo.replace_fact_rows(
-        "AAA.US",
+        listing_id,
         [
             (
                 "Assets",
@@ -1542,7 +1567,7 @@ def test_financial_facts_repository_replace_fact_rows_replaces_symbol_slice(
     )
 
     repo.replace_fact_rows(
-        "AAA.US",
+        listing_id,
         [
             (
                 "StockholdersEquity",
@@ -1807,17 +1832,9 @@ def test_supported_ticker_repository_lists_market_data_symbols_missing_then_olde
         ],
     )
 
-    market_repo = MarketDataRepository(db_path)
-    market_repo.initialize_schema()
-    market_repo.upsert_price(
-        "BBB.US", (date.today() - timedelta(days=1)).isoformat(), 10.0
-    )
-    market_repo.upsert_price(
-        "CCC.US", (date.today() - timedelta(days=30)).isoformat(), 10.0
-    )
-    market_repo.upsert_price(
-        "DDD.US", (date.today() - timedelta(days=12)).isoformat(), 10.0
-    )
+    seed_price(db_path, "BBB.US", (date.today() - timedelta(days=1)).isoformat(), 10.0)
+    seed_price(db_path, "CCC.US", (date.today() - timedelta(days=30)).isoformat(), 10.0)
+    seed_price(db_path, "DDD.US", (date.today() - timedelta(days=12)).isoformat(), 10.0)
 
     rows = repo.list_eligible_for_market_data(
         "EODHD",
@@ -2348,7 +2365,8 @@ def test_financial_facts_repository_latest_share_counts_many_matches_single_look
     repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
     _seed_listing(db_path, "BBB.US")
-    repo.replace_facts(
+    seed_facts(
+        db_path,
         "AAA.US",
         [
             FactRecord(
@@ -2369,7 +2387,8 @@ def test_financial_facts_repository_latest_share_counts_many_matches_single_look
             ),
         ],
     )
-    repo.replace_facts(
+    seed_facts(
+        db_path,
         "BBB.US",
         [
             FactRecord(
@@ -2413,7 +2432,8 @@ def test_financial_facts_repository_facts_for_ids_many_groups_by_listing(
     repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
     _seed_listing(db_path, "BBB.US")
-    repo.replace_facts(
+    seed_facts(
+        db_path,
         "AAA.US",
         [
             FactRecord(
@@ -2445,7 +2465,8 @@ def test_financial_facts_repository_facts_for_ids_many_groups_by_listing(
             ),
         ],
     )
-    repo.replace_facts(
+    seed_facts(
+        db_path,
         "BBB.US",
         [
             FactRecord(
@@ -2496,7 +2517,8 @@ def test_financial_facts_repository_facts_for_ids_many_concept_filter(
     repo = FinancialFactsRepository(db_path)
     repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
-    repo.replace_facts(
+    seed_facts(
+        db_path,
         "AAA.US",
         [
             FactRecord(
@@ -2548,34 +2570,33 @@ def test_financial_facts_repository_facts_for_ids_many_concept_filter(
     }
 
 
-def test_metrics_repository_upsert_many_with_external_connection(
+def test_metrics_repository_upsert_many_by_id_with_external_connection(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """When a connection is supplied the persistence path reuses it."""
 
-    from pyvalue.persistence.storage import StoredMetricRow
-
     db_path = tmp_path / "metrics-external-conn.db"
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
-    # Pre-create the canonical securities so resolve_ids_many doesn't fall
-    # through to ensure_from_symbol (which always opens its own connection).
-    # Listings now require a currency at creation time, so seed cataloged
-    # listings (which carry one) before attaching the entity name.
+    # Seed cataloged listings (which carry a currency) and resolve their ids up
+    # front: the id-keyed writer takes ``listing_id`` directly and never resolves
+    # a symbol, so the write path opens no connection of its own.
     _seed_listing(db_path, "AAA.US")
     _seed_listing(db_path, "BBB.US")
     sec_repo = repo._security_repo()
-    sec_repo.ensure_from_symbol("AAA.US", entity_name="AAA Corp")
-    sec_repo.ensure_from_symbol("BBB.US", entity_name="BBB Corp")
+    id_aaa = sec_repo.resolve_id("AAA.US")
+    id_bbb = sec_repo.resolve_id("BBB.US")
+    assert id_aaa is not None
+    assert id_bbb is not None
 
-    rows: list[StoredMetricRow] = [
-        ("AAA.US", "dummy_metric", 1.0, "2024-01-01", "monetary", "USD", None),
-        ("BBB.US", "dummy_metric", 2.0, "2024-01-01", "monetary", "USD", None),
+    rows: list[IdKeyedStoredMetricRow] = [
+        (id_aaa, "dummy_metric", 1.0, "2024-01-01", "monetary", "USD", None),
+        (id_bbb, "dummy_metric", 2.0, "2024-01-01", "monetary", "USD", None),
     ]
 
-    # Stub initialize_schema on both repos -- the table+migrations are already
-    # in place from the warm-up above, so any further _connect() opens during
-    # upsert_many can only come from the persistence path itself.
+    # Stub initialize_schema -- the table+migrations are already in place from the
+    # warm-up above, so any further _connect() open during upsert_many_by_id can
+    # only come from the persistence path itself.
     monkeypatch.setattr(repo, "initialize_schema", lambda: None)
     monkeypatch.setattr(sec_repo, "initialize_schema", lambda: None)
 
@@ -2597,13 +2618,13 @@ def test_metrics_repository_upsert_many_with_external_connection(
 
         monkeypatch.setattr(repo, "_connect", tracking_connect)
         monkeypatch.setattr(sec_repo, "_connect", tracking_sec_connect)
-        persisted = repo.upsert_many(rows, connection=write_conn)
+        persisted = repo.upsert_many_by_id(rows, connection=write_conn)
     finally:
         write_conn.close()
 
     assert persisted == len(rows)
-    # With initialize_schema stubbed out, neither the upsert nor the resolve
-    # path should have opened any new connection -- both share write_conn.
+    # With initialize_schema stubbed out, the id-keyed write opens no new
+    # connection (it reuses write_conn) and never touches the security repo.
     assert opened == []
     assert sec_opened == []
 
@@ -2693,7 +2714,8 @@ def test_latest_share_counts_many_prefers_best_same_date_share_fact(
 
     repo = FinancialFactsRepository(db_path)
     repo.initialize_schema()
-    repo.replace_facts(
+    seed_facts(
+        db_path,
         "AAA.US",
         [
             FactRecord(
@@ -2752,47 +2774,45 @@ def test_sqlite_store_enable_wal_mode(tmp_path: Path) -> None:
     assert repo.current_journal_mode() == "wal"
 
 
-def test_metrics_repository_upsert_many_matches_single_upsert(tmp_path: Path) -> None:
+def test_metrics_repository_upsert_many_by_id_persists_and_overwrites(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "metrics-upsert-many.db"
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
     _seed_listing(db_path, "BBB.US")
-
-    repo.upsert("AAA.US", "metric_one", 1.0, "2024-01-01")
-    # ``upsert_many`` is typed to accept full ``StoredMetricRow`` tuples; spell
-    # out the unit-kind/currency/unit-label tail (the same defaults the compact
-    # four-tuple form would expand to) so the literals match that type exactly.
-    rows: list[StoredMetricRow] = [
-        ("AAA.US", "metric_one", 2.0, "2024-02-01", "other", None, None),
-        ("AAA.US", "metric_two", 3.0, "2024-02-01", "other", None, None),
-        ("BBB.US", "metric_one", 4.0, "2024-02-01", "other", None, None),
-    ]
-    updated = repo.upsert_many(rows)
-
-    assert updated == 3
     security_repo = repo._security_repo()
     id_aaa = security_repo.resolve_id("AAA.US")
     id_bbb = security_repo.resolve_id("BBB.US")
     assert id_aaa is not None
     assert id_bbb is not None
+
+    # Seed an initial value, then prove the batch write overwrites it (same
+    # listing_id + metric_id) and inserts the new rows.
+    seed_metric(db_path, "AAA.US", "metric_one", 1.0, "2024-01-01")
+    rows: list[IdKeyedStoredMetricRow] = [
+        (id_aaa, "metric_one", 2.0, "2024-02-01", "other", None, None),
+        (id_aaa, "metric_two", 3.0, "2024-02-01", "other", None, None),
+        (id_bbb, "metric_one", 4.0, "2024-02-01", "other", None, None),
+    ]
+    updated = repo.upsert_many_by_id(rows)
+
+    assert updated == 3
     assert repo.fetch_by_id(id_aaa, "metric_one") == (2.0, "2024-02-01")
     assert repo.fetch_by_id(id_aaa, "metric_two") == (3.0, "2024-02-01")
     assert repo.fetch_by_id(id_bbb, "metric_one") == (4.0, "2024-02-01")
 
 
-def test_metrics_repository_upsert_many_retries_transient_locked_error(
+def test_metrics_repository_upsert_many_by_id_retries_transient_locked_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     db_path = tmp_path / "metrics-upsert-retry.db"
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
-    # Seed the listing before monkeypatching _connect so resolve_ids_many
-    # finds it (rather than falling through to ensure_from_symbol, which would
-    # open the locked/patched connection on the retry path).
     _seed_listing(db_path, "AAA.US")
-    # Resolve the id up front, before _connect is patched, so the post-write
-    # read-back is a pure id lookup that never re-resolves a symbol.
+    # Resolve the id up front, before _connect is patched, so the write is a pure
+    # id-keyed write and the read-back never re-resolves a symbol.
     id_aaa = repo._security_repo().resolve_id("AAA.US")
     assert id_aaa is not None
     monkeypatch.setattr(repo, "initialize_schema", lambda: None)
@@ -2804,7 +2824,7 @@ def test_metrics_repository_upsert_many_retries_transient_locked_error(
         """Connection stub that raises ``database is locked`` on first entry.
 
         Installed via ``monkeypatch.setattr`` to drive the retry path of
-        ``upsert_many``; the second entry delegates to a real connection.
+        ``upsert_many_by_id``; the second entry delegates to a real connection.
         """
 
         _conn: sqlite3.Connection
@@ -2826,10 +2846,10 @@ def test_metrics_repository_upsert_many_retries_transient_locked_error(
 
     monkeypatch.setattr(repo, "_connect", lambda: LockedOnceConnection())
 
-    retry_rows: list[StoredMetricRow] = [
-        ("AAA.US", "metric_one", 2.0, "2024-02-01", "other", None, None),
+    retry_rows: list[IdKeyedStoredMetricRow] = [
+        (id_aaa, "metric_one", 2.0, "2024-02-01", "other", None, None),
     ]
-    updated = repo.upsert_many(retry_rows)
+    updated = repo.upsert_many_by_id(retry_rows)
 
     assert attempts["count"] == 2
     assert updated == 1
@@ -2845,13 +2865,10 @@ def test_metrics_repository_fetch_many_by_ids_returns_requested_metrics(
     _seed_listing(db_path, "AAA.US")
     _seed_listing(db_path, "BBB.US")
     _seed_listing(db_path, "CCC.US")
-    rows: list[StoredMetricRow] = [
-        ("AAA.US", "metric_one", 1.0, "2024-01-01", "other", None, None),
-        ("AAA.US", "metric_two", 2.0, "2024-01-02", "other", None, None),
-        ("BBB.US", "metric_one", 3.0, "2024-01-03", "other", None, None),
-        ("CCC.US", "metric_three", 4.0, "2024-01-04", "other", None, None),
-    ]
-    repo.upsert_many(rows)
+    seed_metric(db_path, "AAA.US", "metric_one", 1.0, "2024-01-01")
+    seed_metric(db_path, "AAA.US", "metric_two", 2.0, "2024-01-02")
+    seed_metric(db_path, "BBB.US", "metric_one", 3.0, "2024-01-03")
+    seed_metric(db_path, "CCC.US", "metric_three", 4.0, "2024-01-04")
 
     security_repo = repo._security_repo()
     id_aaa = security_repo.resolve_id("AAA.US")
@@ -2887,18 +2904,23 @@ def test_metric_compute_status_repository_upsert_and_fetch_many(tmp_path: Path) 
     repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
     _seed_listing(db_path, "BBB.US")
+    security_repo = repo._security_repo()
+    id_aaa = security_repo.resolve_id("AAA.US")
+    id_bbb = security_repo.resolve_id("BBB.US")
+    assert id_aaa is not None
+    assert id_bbb is not None
 
-    updated = repo.upsert_many(
+    updated = repo.upsert_many_by_id(
         [
             MetricComputeStatusRecord(
-                symbol="AAA.US",
+                listing_id=id_aaa,
                 metric_id="metric_one",
                 status="success",
                 attempted_at="2024-01-02T00:00:00+00:00",
                 value_as_of="2024-01-01",
             ),
             MetricComputeStatusRecord(
-                symbol="BBB.US",
+                listing_id=id_bbb,
                 metric_id="metric_one",
                 status="failure",
                 attempted_at="2024-01-02T00:00:00+00:00",
@@ -2910,11 +2932,6 @@ def test_metric_compute_status_repository_upsert_and_fetch_many(tmp_path: Path) 
     )
 
     assert updated == 2
-    security_repo = repo._security_repo()
-    id_aaa = security_repo.resolve_id("AAA.US")
-    id_bbb = security_repo.resolve_id("BBB.US")
-    assert id_aaa is not None
-    assert id_bbb is not None
 
     single = repo.fetch_by_id(id_bbb, "metric_one")
     assert single is not None
@@ -2938,7 +2955,8 @@ def test_metrics_repository_persists_unit_metadata(tmp_path: Path) -> None:
     repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
 
-    repo.upsert(
+    seed_metric(
+        db_path,
         "AAA.US",
         "market_cap",
         100.0,
@@ -2947,7 +2965,8 @@ def test_metrics_repository_persists_unit_metadata(tmp_path: Path) -> None:
         currency="GBX",
         unit_label="money",
     )
-    repo.upsert(
+    seed_metric(
+        db_path,
         "AAA.US",
         "earnings_yield",
         0.08,
@@ -2981,7 +3000,8 @@ def test_metrics_repository_normalizes_configured_subunit_currencies(
     _seed_listing(db_path, "AAA.JSE", currency="ZAC")
     _seed_listing(db_path, "BBB.TA", currency="ILA")
 
-    repo.upsert(
+    seed_metric(
+        db_path,
         "AAA.JSE",
         "market_cap",
         237.5,
@@ -2989,7 +3009,8 @@ def test_metrics_repository_normalizes_configured_subunit_currencies(
         unit_kind="monetary",
         currency="ZAC",
     )
-    repo.upsert(
+    seed_metric(
+        db_path,
         "BBB.TA",
         "eps_ttm",
         12.34,
@@ -3016,8 +3037,6 @@ def test_fx_rates_repository_latest_on_or_before_and_discover_currencies(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "fx-repo.db"
-    fact_repo = FinancialFactsRepository(db_path)
-    fact_repo.initialize_schema()
     _seed_listing(db_path, "AAA.LSE", currency="GBX")
     _seed_listing(db_path, "BBB.JSE", currency="ZAC")
     _seed_listing(db_path, "CCC.TA", currency="ILA")
@@ -3027,7 +3046,8 @@ def test_fx_rates_repository_latest_on_or_before_and_discover_currencies(
     # own listing because the PK (listing_id, concept, fiscal_period, end_date)
     # no longer includes the unit, so three facts under one listing would
     # collapse to a single row.
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "AAA.LSE",
         [
             FactRecord(
@@ -3041,7 +3061,8 @@ def test_fx_rates_repository_latest_on_or_before_and_discover_currencies(
             )
         ],
     )
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "BBB.JSE",
         [
             FactRecord(
@@ -3055,7 +3076,8 @@ def test_fx_rates_repository_latest_on_or_before_and_discover_currencies(
             )
         ],
     )
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "CCC.TA",
         [
             FactRecord(
@@ -3179,7 +3201,8 @@ def test_security_repository_upserts_sector_and_industry_metadata(
     repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
 
-    repo.upsert_metadata(
+    seed_security_metadata(
+        db_path,
         "AAA.US",
         entity_name="AAA Corp",
         description="AAA description",
@@ -3204,8 +3227,10 @@ def test_security_repository_fetch_many_by_id_returns_security_records(
     security_repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
     _seed_listing(db_path, "BBB.US")
-    security_repo.upsert_metadata("AAA.US", sector="Technology", industry="Software")
-    security_repo.upsert_metadata("BBB.US", sector="Industrials", industry="Machinery")
+    seed_security_metadata(db_path, "AAA.US", sector="Technology", industry="Software")
+    seed_security_metadata(
+        db_path, "BBB.US", sector="Industrials", industry="Machinery"
+    )
 
     id_aaa = security_repo.resolve_id("AAA.US")
     id_bbb = security_repo.resolve_id("BBB.US")
@@ -3682,100 +3707,6 @@ def test_list_supported_listings_for_symbols_targeted_lookup(
     assert resolved["BBB.US"][0] == full["BBB.US"]
 
 
-def test_metrics_upsert_many_uses_supplied_ids_without_resolving(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A complete ``ids_by_symbol`` short-circuits all symbol->id resolution."""
-    db_path = tmp_path / "metrics-upsert-ids.db"
-    _seed_listing(db_path, "AAA.US")
-    _seed_listing(db_path, "BBB.US")
-
-    repo = MetricsRepository(db_path)
-    repo.initialize_schema()
-    ids_by_symbol = repo._security_repo().resolve_ids_many(["AAA.US", "BBB.US"])
-
-    calls: dict[str, int] = {"resolve_ids_many": 0}
-    original_resolve_ids_many = SecurityRepository.resolve_ids_many
-
-    def counting_resolve_ids_many(
-        self: SecurityRepository,
-        symbols: Sequence[str],
-        chunk_size: int = 500,
-        *,
-        connection: "sqlite3.Connection | None" = None,
-    ) -> dict[str, int]:
-        calls["resolve_ids_many"] += 1
-        return original_resolve_ids_many(
-            self, symbols, chunk_size=chunk_size, connection=connection
-        )
-
-    monkeypatch.setattr(
-        SecurityRepository, "resolve_ids_many", counting_resolve_ids_many
-    )
-
-    rows: list[StoredMetricRow] = [
-        ("AAA.US", "m1", 1.0, "2024-01-01", "other", None, None),
-        ("BBB.US", "m1", 2.0, "2024-01-01", "other", None, None),
-    ]
-    written = repo.upsert_many(rows, ids_by_symbol=ids_by_symbol)
-
-    assert written == 2
-    assert calls == {"resolve_ids_many": 0}
-    # Values landed under the supplied listing ids (reading each back by its id
-    # confirms the write used the right id).
-    assert repo.fetch_by_id(ids_by_symbol["AAA.US"], "m1") == (1.0, "2024-01-01")
-    assert repo.fetch_by_id(ids_by_symbol["BBB.US"], "m1") == (2.0, "2024-01-01")
-
-
-def test_metrics_upsert_many_resolves_only_symbols_absent_from_ids_map(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A partial ``ids_by_symbol`` resolves only the unmapped symbols."""
-    db_path = tmp_path / "metrics-upsert-partial-ids.db"
-    _seed_listing(db_path, "AAA.US")
-    _seed_listing(db_path, "BBB.US")
-
-    repo = MetricsRepository(db_path)
-    repo.initialize_schema()
-    aaa_id = repo._security_repo().resolve_ids_many(["AAA.US"])["AAA.US"]
-    bbb_id = repo._security_repo().resolve_ids_many(["BBB.US"])["BBB.US"]
-
-    calls: dict[str, int] = {"resolve_ids_many": 0}
-    observed: list[tuple[str, ...]] = []
-    original_resolve_ids_many = SecurityRepository.resolve_ids_many
-
-    def counting_resolve_ids_many(
-        self: SecurityRepository,
-        symbols: Sequence[str],
-        chunk_size: int = 500,
-        *,
-        connection: "sqlite3.Connection | None" = None,
-    ) -> dict[str, int]:
-        calls["resolve_ids_many"] += 1
-        observed.append(tuple(symbols))
-        return original_resolve_ids_many(
-            self, symbols, chunk_size=chunk_size, connection=connection
-        )
-
-    monkeypatch.setattr(
-        SecurityRepository, "resolve_ids_many", counting_resolve_ids_many
-    )
-
-    rows: list[StoredMetricRow] = [
-        ("AAA.US", "m1", 1.0, "2024-01-01", "other", None, None),
-        ("BBB.US", "m1", 2.0, "2024-01-01", "other", None, None),
-    ]
-    repo.upsert_many(rows, ids_by_symbol={"AAA.US": aaa_id})
-
-    # Only the unmapped symbol hits the resolver.
-    assert calls == {"resolve_ids_many": 1}
-    assert observed == [("BBB.US",)]
-    assert repo.fetch_by_id(aaa_id, "m1") == (1.0, "2024-01-01")
-    assert repo.fetch_by_id(bbb_id, "m1") == (2.0, "2024-01-01")
-
-
 def test_resolve_ids_many_does_not_cross_match_across_exchanges(
     tmp_path: Path,
 ) -> None:
@@ -3803,70 +3734,6 @@ def test_resolve_ids_many_does_not_cross_match_across_exchanges(
     assert len(set(full.values())) == 4
 
 
-def test_metrics_upsert_many_skips_uncataloged_symbol_without_creating_listing(
-    tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """The metric values writer is catalog-read-only.
-
-    A row for an uncataloged symbol is skipped (and surfaced) -- never minting an
-    issuer/listing row, never aborting the cataloged rows in the same batch.
-    Issuer/listing are owned by refresh-supported-tickers.
-    """
-    db_path = tmp_path / "metrics-uncataloged.db"
-    _seed_listing(db_path, "AAA.US")
-
-    repo = MetricsRepository(db_path)
-    rows: list[StoredMetricRow] = [
-        ("AAA.US", "m1", 1.0, "2024-01-01", "other", None, None),
-        ("ZZZ.US", "m1", 2.0, "2024-01-01", "other", None, None),
-    ]
-    with caplog.at_level(logging.WARNING):
-        written = repo.upsert_many(rows)
-
-    assert written == 1
-    security_repo = SecurityRepository(db_path)
-    id_aaa = security_repo.resolve_id("AAA.US")
-    assert id_aaa is not None
-    assert repo.fetch_by_id(id_aaa, "m1") == (1.0, "2024-01-01")
-    # No catalog row was minted for the uncataloged symbol, so it has no id and
-    # its skipped metric row never landed.
-    assert security_repo.resolve_id("ZZZ.US") is None
-    assert "ZZZ.US" in caplog.text
-
-
-def test_metric_compute_status_upsert_many_skips_uncataloged_symbol(
-    tmp_path: Path,
-) -> None:
-    """The metric-compute-status writer is catalog-read-only too."""
-    db_path = tmp_path / "status-uncataloged.db"
-    _seed_listing(db_path, "AAA.US")
-
-    repo = MetricComputeStatusRepository(db_path)
-    rows = [
-        MetricComputeStatusRecord(
-            symbol="AAA.US",
-            metric_id="m1",
-            status="success",
-            attempted_at="2024-01-01T00:00:00Z",
-        ),
-        MetricComputeStatusRecord(
-            symbol="ZZZ.US",
-            metric_id="m1",
-            status="success",
-            attempted_at="2024-01-01T00:00:00Z",
-        ),
-    ]
-    written = repo.upsert_many(rows)
-
-    assert written == 1
-    security_repo = SecurityRepository(db_path)
-    id_aaa = security_repo.resolve_id("AAA.US")
-    assert id_aaa is not None
-    assert repo.fetch_by_id(id_aaa, "m1") is not None
-    assert security_repo.resolve_id("ZZZ.US") is None
-
-
 def test_id_keyed_metric_and_market_reads(tmp_path: Path) -> None:
     """The ``*_by_id(s)`` readers return the seeded metric/market data.
 
@@ -3885,7 +3752,8 @@ def test_id_keyed_metric_and_market_reads(tmp_path: Path) -> None:
     bbb = security_repo.ensure("BBB", "LSE", currency="GBP")
 
     metrics_repo = MetricsRepository(db_path)
-    metrics_repo.upsert(
+    seed_metric(
+        db_path,
         "AAA.LSE",
         "market_cap",
         1000.0,
@@ -3893,10 +3761,11 @@ def test_id_keyed_metric_and_market_reads(tmp_path: Path) -> None:
         unit_kind="monetary",
         currency="GBP",
     )
-    metrics_repo.upsert(
-        "AAA.LSE", "current_ratio", 1.5, "2025-01-02", unit_kind="ratio"
+    seed_metric(
+        db_path, "AAA.LSE", "current_ratio", 1.5, "2025-01-02", unit_kind="ratio"
     )
-    metrics_repo.upsert(
+    seed_metric(
+        db_path,
         "BBB.LSE",
         "market_cap",
         2000.0,

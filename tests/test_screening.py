@@ -23,7 +23,7 @@ from pyvalue.persistence.storage import (
     SupportedTickerRepository,
 )
 
-from conftest import seed_exchange
+from conftest import seed_exchange, seed_metric
 
 
 def _evaluate(
@@ -74,8 +74,8 @@ def test_evaluate_criterion_uses_metrics_repo(tmp_path: Path) -> None:
     metrics_repo = MetricsRepository(db)
     metrics_repo.initialize_schema()
     _seed_listing(db, "AAPL.US")
-    metrics_repo.upsert("AAPL.US", "working_capital", 100.0, "2023-09-30")
-    metrics_repo.upsert("AAPL.US", "long_term_debt", 150.0, "2023-09-30")
+    seed_metric(db, "AAPL.US", "working_capital", 100.0, "2023-09-30")
+    seed_metric(db, "AAPL.US", "long_term_debt", 150.0, "2023-09-30")
 
     criterion = Criterion(
         name="Debt vs WC",
@@ -114,7 +114,7 @@ def test_evaluate_criterion_supports_constant_terms(tmp_path: Path) -> None:
     metrics_repo = MetricsRepository(db)
     metrics_repo.initialize_schema()
     _seed_listing(db, "AAPL.US")
-    metrics_repo.upsert("AAPL.US", "earnings_yield", 0.05, "2023-09-30")
+    seed_metric(db, "AAPL.US", "earnings_yield", 0.05, "2023-09-30")
 
     criterion = Criterion(
         name="Positive earnings yield",
@@ -133,7 +133,8 @@ def test_evaluate_criterion_converts_monetary_constant_currency(tmp_path: Path) 
     metrics_repo = MetricsRepository(db)
     metrics_repo.initialize_schema()
     _seed_listing(db, "AAPL.US")
-    metrics_repo.upsert(
+    seed_metric(
+        db,
         "AAPL.US",
         "working_capital",
         100.0,
@@ -172,7 +173,8 @@ def test_evaluate_criterion_converts_mixed_currency_metrics(tmp_path: Path) -> N
     metrics_repo = MetricsRepository(db)
     metrics_repo.initialize_schema()
     _seed_listing(db, "AAPL.US")
-    metrics_repo.upsert(
+    seed_metric(
+        db,
         "AAPL.US",
         "long_term_debt",
         100.0,
@@ -180,7 +182,8 @@ def test_evaluate_criterion_converts_mixed_currency_metrics(tmp_path: Path) -> N
         unit_kind="monetary",
         currency="USD",
     )
-    metrics_repo.upsert(
+    seed_metric(
+        db,
         "AAPL.US",
         "working_capital",
         120.0,
@@ -221,7 +224,8 @@ def test_evaluate_criterion_normalizes_configured_subunit_metric_currencies(
     metrics_repo = MetricsRepository(db)
     metrics_repo.initialize_schema()
     _seed_listing(db, "AAPL.US")
-    metrics_repo.upsert(
+    seed_metric(
+        db,
         "AAPL.US",
         "long_term_debt",
         100.0,
@@ -229,7 +233,8 @@ def test_evaluate_criterion_normalizes_configured_subunit_metric_currencies(
         unit_kind="monetary",
         currency="ZAC",
     )
-    metrics_repo.upsert(
+    seed_metric(
+        db,
         "AAPL.US",
         "working_capital",
         120.0,

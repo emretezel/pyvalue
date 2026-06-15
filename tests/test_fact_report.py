@@ -22,7 +22,7 @@ from pyvalue.persistence.storage import (
 )
 from pyvalue.universe import Listing
 
-from conftest import seed_exchange
+from conftest import seed_exchange, seed_facts
 
 
 def _seed_universe(db_path: Path) -> None:
@@ -53,11 +53,12 @@ def _seed_universe(db_path: Path) -> None:
     )
 
 
-def _seed_facts(repo: FinancialFactsRepository) -> None:
+def _seed_facts(db_path: Path) -> None:
     today = date.today()
     fresh_date = today.isoformat()
     stale_date = (today - timedelta(days=MAX_FACT_AGE_DAYS + 1)).isoformat()
-    repo.replace_facts(
+    seed_facts(
+        db_path,
         "AAA.US",
         [
             FactRecord(
@@ -80,7 +81,8 @@ def _seed_facts(repo: FinancialFactsRepository) -> None:
             ),
         ],
     )
-    repo.replace_facts(
+    seed_facts(
+        db_path,
         "BBB.US",
         [
             FactRecord(
@@ -101,7 +103,7 @@ def test_compute_fact_coverage_counts_missing_and_stale(tmp_path: Path) -> None:
     _seed_universe(db_path)
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
-    _seed_facts(fact_repo)
+    _seed_facts(db_path)
 
     # compute_fact_coverage now keys on the scope's listing ids; resolve the
     # symbols the way _resolve_canonical_scope_listings would for the CLI.
@@ -133,7 +135,7 @@ def test_cmd_report_fact_freshness_outputs_counts(
     _seed_universe(db_path)
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
-    _seed_facts(fact_repo)
+    _seed_facts(db_path)
 
     exit_code = cmd_report_fact_freshness(
         database=str(db_path),
@@ -169,7 +171,7 @@ def test_cmd_report_fact_freshness_carries_scope_listing_ids(
     _seed_universe(db_path)
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
-    _seed_facts(fact_repo)
+    _seed_facts(db_path)
 
     calls = {"resolve_ids_many": 0}
     original_resolve_ids_many = SecurityRepository.resolve_ids_many
@@ -211,7 +213,8 @@ def test_fact_report_counts_assets_current_from_components(tmp_path: Path) -> No
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
     today = date.today().isoformat()
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "AAA.US",
         [
             FactRecord(
@@ -251,7 +254,8 @@ def test_fact_report_counts_liabilities_current_from_components(tmp_path: Path) 
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
     today = date.today().isoformat()
-    fact_repo.replace_facts(
+    seed_facts(
+        db_path,
         "AAA.US",
         [
             FactRecord(

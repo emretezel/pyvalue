@@ -18,7 +18,7 @@ from pyvalue.persistence.storage import (
     SupportedTickerRepository,
 )
 
-from conftest import seed_exchange
+from conftest import seed_exchange, seed_price
 
 
 class DummyEODSession(requests.Session):
@@ -298,7 +298,7 @@ def test_market_data_service_stores_large_price_change_without_guard(
     )
     market_repo = MarketDataRepository(db_path)
     market_repo.initialize_schema()
-    market_repo.upsert_price("ATXS.US", "2025-12-22", 12.92, currency="USD")
+    seed_price(db_path, "ATXS.US", "2025-12-22", 12.92, currency="USD")
 
     service = MarketDataService(
         db_path=db_path, provider=DummyProvider(), config=DummyConfig()
