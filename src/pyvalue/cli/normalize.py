@@ -12,9 +12,7 @@ import os
 from pathlib import Path
 from typing import (
     Callable,
-    Dict,
     List,
-    Mapping,
     Optional,
     Sequence,
     Tuple,
@@ -30,11 +28,11 @@ from pyvalue.logging_utils import (
 )
 from pyvalue.persistence.storage import (
     FXRatesRepository,
-    FundamentalsNormalizationCandidate,
     FundamentalsNormalizationStateRepository,
     FundamentalsRepository,
     FinancialFactsRepository,
     FactRecord,
+    NormalizationUnit,
     SecurityMetadataUpdate,
     SecurityRepository,
     StoredFactRow,
@@ -52,7 +50,6 @@ from ._common import (
     _normalize_provider,
     _resolve_database_path,
     _resolve_provider_scope,
-    _resolve_ticker_target_currency,
 )
 from ._batch import (
     _cancel_cli_command,
@@ -60,14 +57,11 @@ from ._batch import (
 )
 from ._repos import (
     _SchemaReadyFXRatesRepository,
-    _SchemaReadySupportedTickerRepository,
 )
 
 
 _process_local_fx_service: Optional[FXService] = None
 _process_local_fx_service_db: Optional[str] = None
-_process_local_ticker_repo: Optional[SupportedTickerRepository] = None
-_process_local_ticker_repo_db: Optional[str] = None
 
 
 def cmd_normalize_fundamentals_stage(
@@ -90,9 +84,17 @@ def cmd_normalize_fundamentals_stage(
         all_supported,
         primary_only=provider_norm == "EODHD",
     )
-    # Normalize genuinely needs the per-listing symbols (to intersect with the
-    # raw fundamentals it has on hand), so it fetches the rows itself from the
-    # resolved filters rather than forcing the scope resolver to hydrate them.
+    if all_supported:
+        # Whole provider: let the bulk path enumerate every unit via the id-keyed
+        # full scan -- no need to hydrate the supported-ticker rows here just to
+        # recover their symbols.
+        return cmd_normalize_eodhd_fundamentals_bulk(
+            database=str(db_path), symbols=None, force=force
+        )
+    # Scoped: resolve the requested scope to its (primary) provider symbols and hand
+    # them to the bulk path, which converts them to id-keyed units. The has-raw
+    # filter now lives in normalization_units, so the old symbols() intersection is
+    # gone -- a scoped listing with no raw payload is simply absent from the units.
     ticker_repo = SupportedTickerRepository(db_path)
     scope_rows = ticker_repo.list_for_provider(
         provider_norm,
@@ -100,14 +102,11 @@ def cmd_normalize_fundamentals_stage(
         provider_symbols=symbol_filters,
         primary_only=provider_norm == "EODHD",
     )
-    fund_repo = FundamentalsRepository(db_path)
-    fund_repo.initialize_schema()
-    raw_symbols = set(fund_repo.symbols(provider_norm))
-    selected_symbols = [row.symbol for row in scope_rows if row.symbol in raw_symbols]
+    selected_symbols = [row.symbol for row in scope_rows]
     if not selected_symbols:
         raise SystemExit(
-            f"No {provider_norm} raw fundamentals found in the requested scope. "
-            "Run ingest-fundamentals first."
+            f"No {provider_norm} supported tickers in the requested scope. "
+            "Run refresh-supported-tickers first."
         )
     return cmd_normalize_eodhd_fundamentals_bulk(
         database=str(db_path),
@@ -116,10 +115,8 @@ def cmd_normalize_fundamentals_stage(
     )
 
 
-def _normalization_required(
-    candidate: FundamentalsNormalizationCandidate,
-) -> bool:
-    """Return whether ``candidate`` needs (re-)normalization.
+def _normalization_required(unit: NormalizationUnit) -> bool:
+    """Return whether ``unit`` needs (re-)normalization.
 
     Re-normalize when nothing has been normalized yet, or when the cached raw
     payload hash differs from the hash that produced the stored facts. A former
@@ -127,40 +124,33 @@ def _normalization_required(
     ``financial_facts.source_provider`` now that EODHD is the only provider.
     """
 
-    if candidate.normalized_payload_hash is None:
+    if unit.normalized_payload_hash is None:
         return True
-    return candidate.raw_payload_hash != candidate.normalized_payload_hash
+    return unit.raw_payload_hash != unit.normalized_payload_hash
 
 
 def _plan_normalization_selection(
-    database: Union[str, Path],
-    provider: str,
-    symbols: Sequence[str],
+    units: Sequence[NormalizationUnit],
     force: bool = False,
-) -> Tuple[List[str], Dict[str, FundamentalsNormalizationCandidate], int]:
-    db_path = _resolve_database_path(str(database))
-    provider_norm = _normalize_provider(provider)
-    selected_symbols = [symbol.upper() for symbol in symbols]
-    fund_repo = FundamentalsRepository(db_path)
-    candidates = fund_repo.normalization_candidates(provider_norm, selected_symbols)
-    if force:
-        return (
-            [symbol for symbol in selected_symbols if symbol in candidates],
-            candidates,
-            0,
-        )
+) -> Tuple[List[NormalizationUnit], int]:
+    """Split ``units`` into those needing normalization and a skipped count.
 
-    to_normalize: List[str] = []
+    ``force`` selects every unit; otherwise a unit is skipped when the normalized
+    payload hash it carries already matches its raw payload hash. The units already
+    hold the freshness hashes (from the LEFT-JOINed normalization state), so this is
+    pure in-memory filtering with no extra query.
+    """
+
+    if force:
+        return list(units), 0
+    to_normalize: List[NormalizationUnit] = []
     skipped = 0
-    for symbol in selected_symbols:
-        candidate = candidates.get(symbol)
-        if candidate is None:
-            continue
-        if _normalization_required(candidate):
-            to_normalize.append(symbol)
+    for unit in units:
+        if _normalization_required(unit):
+            to_normalize.append(unit)
         else:
             skipped += 1
-    return to_normalize, candidates, skipped
+    return to_normalize, skipped
 
 
 def _print_normalization_up_to_date(
@@ -214,45 +204,39 @@ def _get_or_create_fx_service(database: Union[str, Path]) -> FXService:
     return _process_local_fx_service
 
 
-def _get_or_create_ticker_repo(
+def _normalize_eodhd_payload_worker(
     database: Union[str, Path],
-) -> SupportedTickerRepository:
-    """Return a process-local SupportedTickerRepository, creating it on first call."""
-
-    global _process_local_ticker_repo, _process_local_ticker_repo_db
-    db_key = str(database)
-    if _process_local_ticker_repo is None or _process_local_ticker_repo_db != db_key:
-        _process_local_ticker_repo = _SchemaReadySupportedTickerRepository(database)
-        _process_local_ticker_repo_db = db_key
-    return _process_local_ticker_repo
-
-
-def _normalize_eodhd_symbol_worker(
-    database: Union[str, Path], symbol: str
+    provider_listing_id: int,
+    currency: Optional[str],
+    label: str,
 ) -> Optional[_NormalizedFactsResult]:
-    """Normalize one stored EODHD payload and return facts plus metadata."""
+    """Normalize one stored EODHD payload, addressed by ``provider_listing_id``.
+
+    The id-keyed worker: it reads the raw payload by its ``provider_listing_id`` PK
+    and uses the ``currency`` already resolved from ``listing.currency`` by the scope
+    query, so it makes a single payload read and no symbol/currency lookups. ``label``
+    is the provider symbol, carried only for the normalizer's warnings and the
+    progress lines -- it never addresses data.
+    """
 
     fund_repo = FundamentalsRepository(database)
-    payload_record = fund_repo.fetch_payload_with_hash("EODHD", symbol)
+    payload_record = fund_repo.fetch_payload_with_hash_by_id(provider_listing_id)
     if payload_record is None:
         return None
     payload, payload_hash = payload_record
-    target_currency = _resolve_ticker_target_currency(
-        database, symbol, payload, ticker_repo=_get_or_create_ticker_repo(database)
-    )
-    if target_currency is None:
-        raise ValueError(f"Missing listing/provider-listing currency for {symbol}")
+    if currency is None:
+        raise ValueError(f"Missing listing currency for {label}")
     fx_service = _get_or_create_fx_service(database)
     normalizer = EODHDFactsNormalizer(fx_service=fx_service)
     with suppress_console_missing_fx_warnings(True):
         rows = tuple(
             _normalization_record_to_row(record)
             for record in normalizer.normalize(
-                payload, symbol=symbol, target_currency=target_currency
+                payload, symbol=label, target_currency=currency
             )
         )
     return _NormalizedFactsResult(
-        symbol=symbol,
+        symbol=label,
         rows=rows,
         payload_hash=payload_hash,
         entity_name=_extract_entity_name_from_eodhd(payload),
@@ -262,21 +246,66 @@ def _normalize_eodhd_symbol_worker(
     )
 
 
+def _persist_normalization_result(
+    fact_repo: FinancialFactsRepository,
+    security_repo: SecurityRepository,
+    state_repo: FundamentalsNormalizationStateRepository,
+    unit: NormalizationUnit,
+    result: _NormalizedFactsResult,
+) -> int:
+    """Persist one unit's metadata, facts, and watermark (all id-keyed).
+
+    Returns the number of fact rows stored. Metadata is written only when the payload
+    yielded at least one field (an empty payload mints no canonical rows); the
+    watermark is always recorded so a re-run can skip the unchanged payload. Every
+    unit carries a real ``listing_id`` (a NOT NULL FK on the raw row), so unlike the
+    old symbol path there is no "uncatalogued, skip the writes" branch.
+    """
+
+    if (
+        result.entity_name
+        or result.entity_description
+        or result.entity_sector
+        or result.entity_industry
+    ):
+        security_repo.upsert_metadata_many(
+            [
+                SecurityMetadataUpdate(
+                    security_id=unit.listing_id,
+                    entity_name=result.entity_name,
+                    description=result.entity_description,
+                    sector=result.entity_sector,
+                    industry=result.entity_industry,
+                )
+            ]
+        )
+    stored = fact_repo.replace_fact_rows(unit.listing_id, result.rows)
+    state_repo.mark_success_by_id(unit.provider_listing_id, result.payload_hash)
+    return stored
+
+
 def _run_bulk_normalization(
     database: Union[str, Path],
     provider: str,
-    symbols: Sequence[str],
-    worker: Callable[[Union[str, Path], str], Optional[_NormalizedFactsResult]],
-    candidate_map: Optional[Mapping[str, FundamentalsNormalizationCandidate]] = None,
+    units: Sequence[NormalizationUnit],
+    worker: Callable[
+        [Union[str, Path], int, Optional[str], str], Optional[_NormalizedFactsResult]
+    ],
     requested_total: Optional[int] = None,
     skipped: int = 0,
 ) -> int:
-    """Normalize many stored payloads while serializing SQLite writes."""
+    """Normalize many stored payloads while serializing SQLite writes.
+
+    The unit of work is a :class:`NormalizationUnit`: the worker is dispatched by
+    ``provider_listing_id`` and the writes are keyed by the ``listing_id`` /
+    ``provider_listing_id`` the unit carries, so no symbol is resolved to an id here.
+    The process-pool ``{future: unit}`` map carries the ids straight to the writes.
+    """
 
     db_path = _resolve_database_path(str(database))
-    selected_symbols = [symbol.upper() for symbol in symbols]
-    if not selected_symbols:
-        raise SystemExit(f"No symbols provided for {provider} normalization.")
+    selected_units = list(units)
+    if not selected_units:
+        raise SystemExit(f"No units provided for {provider} normalization.")
 
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
@@ -284,29 +313,13 @@ def _run_bulk_normalization(
     security_repo.initialize_schema()
     state_repo = FundamentalsNormalizationStateRepository(db_path)
     state_repo.initialize_schema()
-    # Pre-initialize schemas used by worker processes so that
-    # _SchemaReady* wrappers can safely skip redundant init calls.
+    # Pre-initialize the FX schema the worker processes read so the _SchemaReady
+    # wrapper can skip redundant init calls. The worker no longer touches the
+    # supported-ticker catalog (currency is carried on the unit), so that schema
+    # init is gone.
     FXRatesRepository(db_path).initialize_schema()
-    SupportedTickerRepository(db_path).initialize_schema()
 
-    # Normalize is catalog-read-only: the id-keyed metadata/fact writers need a
-    # ``listing_id`` and never mint catalog rows (the issuer/listing catalog is
-    # owned by refresh-supported-tickers). The freshness scan's candidate map
-    # already carries the resolved ``security_id`` for non-force runs; the force
-    # run skips that scan, so any symbol it does not cover is resolved here in one
-    # batched, read-only seek. A symbol that resolves to no listing is uncataloged
-    # and its writes are skipped below (its normalization state is still marked).
-    listing_ids_by_symbol: Dict[str, int] = {}
-    if candidate_map is not None:
-        for symbol, candidate in candidate_map.items():
-            listing_ids_by_symbol[symbol.upper()] = candidate.security_id
-    unresolved_symbols = [
-        symbol for symbol in selected_symbols if symbol not in listing_ids_by_symbol
-    ]
-    if unresolved_symbols:
-        listing_ids_by_symbol.update(security_repo.resolve_ids_many(unresolved_symbols))
-
-    total = len(selected_symbols)
+    total = len(selected_units)
     requested = requested_total if requested_total is not None else total
     workers = _normalization_worker_count(total)
     processed = 0
@@ -323,61 +336,36 @@ def _run_bulk_normalization(
         )
 
     if workers <= 1:
-        for idx, symbol in enumerate(selected_symbols, 1):
+        for idx, unit in enumerate(selected_units, 1):
             try:
-                result = worker(str(db_path), symbol)
+                result = worker(
+                    str(db_path),
+                    unit.provider_listing_id,
+                    unit.currency,
+                    unit.provider_symbol,
+                )
                 if result is None:
                     LOGGER.warning(
                         "Skipping %s due to missing raw %s fundamentals",
-                        symbol,
+                        unit.provider_symbol,
                         provider,
                     )
                     failed += 1
                     continue
-                # Catalog-read-only: a symbol with no cataloged listing carries no
-                # ``listing_id`` to key the metadata/fact writes, so both writes
-                # are skipped (no canonical rows are minted from a normalization
-                # pass). The provider-edge normalization state below is still
-                # recorded.
-                listing_id = listing_ids_by_symbol.get(symbol)
-                stored = 0
-                if listing_id is not None:
-                    if (
-                        result.entity_name
-                        or result.entity_description
-                        or result.entity_sector
-                        or result.entity_industry
-                    ):
-                        security_repo.upsert_metadata_many(
-                            [
-                                SecurityMetadataUpdate(
-                                    security_id=listing_id,
-                                    entity_name=result.entity_name,
-                                    description=result.entity_description,
-                                    sector=result.entity_sector,
-                                    industry=result.entity_industry,
-                                )
-                            ]
-                        )
-                    stored = fact_repo.replace_fact_rows(
-                        listing_id,
-                        result.rows,
-                    )
-                state_repo.mark_success(
-                    provider,
-                    symbol,
-                    result.payload_hash,
+                stored = _persist_normalization_result(
+                    fact_repo, security_repo, state_repo, unit, result
                 )
                 processed += 1
                 print(
-                    f"[{idx}/{total}] Stored {stored} normalized facts for {symbol}",
+                    f"[{idx}/{total}] Stored {stored} normalized facts for "
+                    f"{unit.provider_symbol}",
                     flush=True,
                 )
             except Exception as exc:
                 LOGGER.error(
                     "Failed to normalize %s fundamentals for %s: %s",
                     provider,
-                    symbol,
+                    unit.provider_symbol,
                     exc,
                 )
                 failed += 1
@@ -386,63 +374,41 @@ def _run_bulk_normalization(
         interrupted = False
         try:
             futures = {
-                executor.submit(worker, str(db_path), symbol): symbol
-                for symbol in selected_symbols
+                executor.submit(
+                    worker,
+                    str(db_path),
+                    unit.provider_listing_id,
+                    unit.currency,
+                    unit.provider_symbol,
+                ): unit
+                for unit in selected_units
             }
             for idx, future in enumerate(as_completed(futures), 1):
-                symbol = futures[future]
+                unit = futures[future]
                 try:
                     result = future.result()
                     if result is None:
                         LOGGER.warning(
                             "Skipping %s due to missing raw %s fundamentals",
-                            symbol,
+                            unit.provider_symbol,
                             provider,
                         )
                         failed += 1
                         continue
-                    # Catalog-read-only: skip both writes for an uncataloged
-                    # symbol (no ``listing_id`` to key them). See the single-thread
-                    # path above for the full rationale.
-                    listing_id = listing_ids_by_symbol.get(symbol)
-                    stored = 0
-                    if listing_id is not None:
-                        if (
-                            result.entity_name
-                            or result.entity_description
-                            or result.entity_sector
-                            or result.entity_industry
-                        ):
-                            security_repo.upsert_metadata_many(
-                                [
-                                    SecurityMetadataUpdate(
-                                        security_id=listing_id,
-                                        entity_name=result.entity_name,
-                                        description=result.entity_description,
-                                        sector=result.entity_sector,
-                                        industry=result.entity_industry,
-                                    )
-                                ]
-                            )
-                        stored = fact_repo.replace_fact_rows(
-                            listing_id,
-                            result.rows,
-                        )
-                    state_repo.mark_success(
-                        provider,
-                        symbol,
-                        result.payload_hash,
+                    stored = _persist_normalization_result(
+                        fact_repo, security_repo, state_repo, unit, result
                     )
                     processed += 1
                     print(
-                        f"[{idx}/{total}] Stored {stored} normalized facts for {symbol}",
+                        f"[{idx}/{total}] Stored {stored} normalized facts for "
+                        f"{unit.provider_symbol}",
                         flush=True,
                     )
                 except Exception as exc:
                     LOGGER.error(
                         "Failed to normalize %s fundamentals for %s: %s",
                         provider,
-                        symbol,
+                        unit.provider_symbol,
                         exc,
                     )
                     failed += 1
@@ -469,73 +435,65 @@ def cmd_normalize_eodhd_fundamentals_bulk(
     symbols: Optional[Sequence[str]] = None,
     force: bool = False,
 ) -> int:
-    """Normalize all stored EODHD fundamentals in parallel."""
+    """Normalize stored EODHD fundamentals in parallel, keyed by listing id.
 
-    fund_repo = FundamentalsRepository(database)
+    ``symbols`` is the public selector (users type provider symbols); ``None`` means
+    the whole provider. Either way the scope is resolved once to id-keyed
+    :class:`NormalizationUnit`s via ``normalization_units`` -- whose INNER JOIN to
+    ``fundamentals_raw`` already restricts to listings that have a raw payload, and
+    whose ``primary_only`` filter drops secondary listings -- so the old has-raw
+    intersection and the secondary symbol-set subtraction are both gone.
+    """
+
+    db_path = _resolve_database_path(database)
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+
     if symbols is None:
-        symbols = fund_repo.symbols("EODHD")
-        if not symbols:
-            raise SystemExit(
-                "No EODHD fundamentals found. Run ingest-fundamentals --provider EODHD first."
-            )
+        units_by_id = fund_repo.normalization_units("EODHD", primary_only=True)
     else:
-        symbols = [symbol.upper() for symbol in symbols]
-        if not symbols:
+        requested = [symbol.upper() for symbol in symbols]
+        if not requested:
             raise SystemExit("No symbols provided for EODHD normalization.")
-
-    # Listing classification is read-only here: ingest-fundamentals already wrote
-    # it (with reconcile-listing-status / migration 078 as the backstop), so the
-    # secondary-listing filter below trusts the cached primary_listing_status.
-    # Pull just the symbol sets (not full SupportedTicker rows) so this is two
-    # light single-column scans instead of two full 6-table catalog hydrations,
-    # and so we never pass the entire symbol list as a SQL IN (...) clause. A
-    # symbol is dropped iff it is supported but not primary (i.e. a secondary
-    # listing); symbols restricted to ``symbols`` make the provider-wide sets
-    # safe to subtract here.
-    ticker_repo = SupportedTickerRepository(database)
-    secondary_symbols = {
-        symbol.upper() for symbol in ticker_repo.provider_symbols("EODHD")
-    } - {
-        symbol.upper()
-        for symbol in ticker_repo.provider_symbols("EODHD", primary_only=True)
-    }
-    symbols = [symbol for symbol in symbols if symbol.upper() not in secondary_symbols]
-    if not symbols:
-        raise SystemExit(
-            "No primary EODHD symbols remain after secondary-listing filtering."
+        # Resolve the requested provider symbols to their listing ids, then fetch
+        # the units for those ids (primary-only, has-raw enforced by the query).
+        listing_ids = list(
+            SecurityRepository(db_path).resolve_ids_many(requested).values()
+        )
+        units_by_id = fund_repo.normalization_units(
+            "EODHD", primary_only=True, listing_ids=listing_ids
         )
 
-    requested_total = len(symbols)
+    units = list(units_by_id.values())
+    if not units:
+        raise SystemExit(
+            "No EODHD fundamentals found. Run ingest-fundamentals --provider EODHD first."
+        )
+
+    requested_total = len(units)
     if force:
         print(
             f"Force re-normalization requested for {requested_total} EODHD symbols; "
             "skipping freshness scan",
             flush=True,
         )
-        symbols_to_normalize = list(symbols)
-        candidates: Dict[str, FundamentalsNormalizationCandidate] = {}
+        units_to_normalize = list(units)
         skipped = 0
     else:
         print(
             f"Checking EODHD normalization freshness for {requested_total} symbols",
             flush=True,
         )
-        symbols_to_normalize, candidates, skipped = _plan_normalization_selection(
-            database=database,
-            provider="EODHD",
-            symbols=symbols,
-            force=False,
-        )
-    if not symbols_to_normalize:
-        _print_normalization_up_to_date("EODHD", database)
+        units_to_normalize, skipped = _plan_normalization_selection(units, force=False)
+    if not units_to_normalize:
+        _print_normalization_up_to_date("EODHD", db_path)
         return 0
 
     return _run_bulk_normalization(
-        database=database,
+        database=str(db_path),
         provider="EODHD",
-        symbols=symbols_to_normalize,
-        worker=_normalize_eodhd_symbol_worker,
-        candidate_map=candidates,
+        units=units_to_normalize,
+        worker=_normalize_eodhd_payload_worker,
         requested_total=requested_total,
         skipped=skipped,
     )

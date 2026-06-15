@@ -75,8 +75,6 @@ from .normalize import (
     _plan_normalization_selection,  # noqa: F401
     _process_local_fx_service,  # noqa: F401
     _process_local_fx_service_db,  # noqa: F401
-    _process_local_ticker_repo,  # noqa: F401
-    _process_local_ticker_repo_db,  # noqa: F401
     cmd_normalize_eodhd_fundamentals_bulk,
     cmd_normalize_fundamentals_stage,
 )

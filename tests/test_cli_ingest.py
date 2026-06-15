@@ -5100,7 +5100,7 @@ def test_cmd_clear_metrics_clears_metric_compute_status(tmp_path: Path) -> None:
         )
 
 
-def test_cmd_normalize_fundamentals_stage_all_supported_filters_to_raw_symbols(
+def test_cmd_normalize_fundamentals_stage_all_supported_normalizes_primary_with_raw(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     db_path = tmp_path / "normalize-stage-all.db"
@@ -5148,17 +5148,28 @@ def test_cmd_normalize_fundamentals_stage_all_supported_filters_to_raw_symbols(
         {"General": {"Name": "DDD"}, "Financials": {}},
         exchange="LSE",
     )
-    captured: dict[str, object] = {}
 
-    def fake_bulk(
-        database: str, symbols: Sequence[str] | None = None, force: bool = False
-    ) -> int:
-        captured["database"] = database
-        captured["symbols"] = list(symbols or [])
-        captured["force"] = force
-        return 0
+    # The has-raw + primary filtering now lives in normalization_units (reached via
+    # the bulk path), so this exercises the real stage->bulk->units pipeline rather
+    # than a mocked handoff. A trivial normalizer keeps the run inline and FX-free.
+    class FakeNormalizer:
+        def normalize(
+            self,
+            payload: dict[str, object],
+            symbol: str,
+            accounting_standard: str | None = None,
+            **kwargs: object,
+        ) -> list[FactRecord]:
+            return [
+                make_fact(
+                    symbol=symbol, concept="Dummy", end_date="2023-12-31", value=1.0
+                )
+            ]
 
-    patch_cli(monkeypatch, "cmd_normalize_eodhd_fundamentals_bulk", fake_bulk)
+    patch_cli(
+        monkeypatch, "EODHDFactsNormalizer", lambda fx_service=None: FakeNormalizer()
+    )
+    patch_cli(monkeypatch, "_normalization_worker_count", lambda total: 1)
 
     rc = cli.cmd_normalize_fundamentals_stage(
         provider="EODHD",
@@ -5169,11 +5180,18 @@ def test_cmd_normalize_fundamentals_stage_all_supported_filters_to_raw_symbols(
     )
 
     assert rc == 0
-    assert captured["database"] == str(db_path)
-    captured_symbols = captured["symbols"]
-    assert isinstance(captured_symbols, list)
-    assert sorted(captured_symbols) == ["AAA.US", "DDD.LSE"]
-    assert captured["force"] is False
+    # AAA.US + DDD.LSE are primary and have raw; BBB.US has no raw payload and
+    # CCC.LSE is a secondary listing -- both are excluded, so only the first two
+    # carry a normalization watermark.
+    units = FundamentalsRepository(db_path).normalization_units(
+        "EODHD", primary_only=True
+    )
+    normalized = {
+        unit.provider_symbol
+        for unit in units.values()
+        if unit.normalized_payload_hash is not None
+    }
+    assert normalized == {"AAA.US", "DDD.LSE"}
 
 
 def test_ingest_run_reports_and_purges_secondary_reclassification(
@@ -5270,7 +5288,7 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_reports_freshness_scan(
     patch_cli(
         monkeypatch,
         "_plan_normalization_selection",
-        lambda **kwargs: ([], {}, len(kwargs["symbols"])),
+        lambda units, force=False: ([], 0),
     )
 
     rc = cli.cmd_normalize_eodhd_fundamentals_bulk(
@@ -5385,8 +5403,6 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_suppresses_missing_fx_warnings_on
     patch_cli(monkeypatch, "_normalization_worker_count", lambda total: 2)
     patch_cli(monkeypatch, "_process_local_fx_service", None)
     patch_cli(monkeypatch, "_process_local_fx_service_db", None)
-    patch_cli(monkeypatch, "_process_local_ticker_repo", None)
-    patch_cli(monkeypatch, "_process_local_ticker_repo_db", None)
     patch_cli(
         monkeypatch,
         "_create_process_pool_executor",
