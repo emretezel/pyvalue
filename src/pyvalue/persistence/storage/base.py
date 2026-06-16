@@ -28,7 +28,7 @@ from pyvalue.currency import (
     normalize_currency_code,
     raw_currency_code,
 )
-from ..migrations import apply_migrations
+from .migrations import apply_migrations
 
 if TYPE_CHECKING:
     from .entities import (

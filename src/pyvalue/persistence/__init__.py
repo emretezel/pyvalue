@@ -1,8 +1,9 @@
 """Persistence layer: SQLite storage, schema migrations, and DB documentation.
 
 This package groups every database-facing concern of pyvalue:
-``storage`` (the SQLite DAO/repository layer), ``migrations`` (the ordered
-schema-migration runner), and ``database_review_docs`` (schema-doc generation).
+``storage`` -- the SQLite DAO/repository layer, which also houses the ordered
+schema-migration runner (``migrations``) and the schema-doc generator
+(``database_review_docs``); all database access lives under ``storage``.
 
 Consumers import the concrete sub-modules directly — e.g.
 ``from pyvalue.persistence.storage import FactRecord`` — mirroring the
@@ -13,6 +14,6 @@ primary verb (the storage layer calls it during schema initialisation).
 Author: Emre Tezel
 """
 
-from .migrations import apply_migrations
+from .storage.migrations import apply_migrations
 
 __all__ = ["apply_migrations"]

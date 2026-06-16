@@ -37,7 +37,7 @@ from .records import (
     SupportedTicker,
     SupportedTickerRefreshResult,
 )
-from ..migrations import apply_migrations
+from .migrations import apply_migrations
 from .fundamentals import FundamentalsRepository
 from .fetch_state import (
     FundamentalsFetchStateRepository,

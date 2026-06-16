@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from pyvalue.persistence.migrations import (
+from pyvalue.persistence.storage.migrations import (
     MIGRATIONS,
     _ensure_migrations_table,
     apply_migrations,
@@ -4382,7 +4382,9 @@ def test_migration_068_backfills_from_updated_at(tmp_path: Path) -> None:
     """Migration 068 maps empty-period rows to INSTANT/TTM and re-dates them
     from ``General.UpdatedAt`` in the cached fundamentals payload."""
 
-    from pyvalue.persistence.migrations import _migration_068_fiscal_period_check
+    from pyvalue.persistence.storage.migrations import (
+        _migration_068_fiscal_period_check,
+    )
 
     db_path = tmp_path / "fiscal-period-backfill.sqlite"
     applied = apply_migrations(db_path)
@@ -4461,7 +4463,9 @@ def test_migration_068_falls_back_to_last_fetched_at_when_updated_at_missing(
 ) -> None:
     """If General.UpdatedAt is absent we fall back to DATE(last_fetched_at)."""
 
-    from pyvalue.persistence.migrations import _migration_068_fiscal_period_check
+    from pyvalue.persistence.storage.migrations import (
+        _migration_068_fiscal_period_check,
+    )
 
     db_path = tmp_path / "fiscal-period-backfill-fallback.sqlite"
     apply_migrations(db_path)
@@ -4515,7 +4519,7 @@ def test_migration_070_divides_subunit_prices_to_major(tmp_path: Path) -> None:
     ``listing.currency`` and rewrites ``market_data.price``.
     """
 
-    from pyvalue.persistence.migrations import (
+    from pyvalue.persistence.storage.migrations import (
         _migration_070_market_data_price_major_currency,
     )
 
@@ -4575,7 +4579,7 @@ def test_migration_069_purges_currencyless_listings_and_dependents(
     ``currency TEXT NOT NULL``.
     """
 
-    from pyvalue.persistence.migrations import (
+    from pyvalue.persistence.storage.migrations import (
         _migration_069_purge_currencyless_listings,
     )
 
@@ -4807,7 +4811,7 @@ def test_migration_072_drops_market_cap_and_preserves_rows(tmp_path: Path) -> No
     """Migration 072 drops derived ``market_data.market_cap`` while copying every
     other column and row (market_data is not regenerated from raw)."""
 
-    from pyvalue.persistence.migrations import (
+    from pyvalue.persistence.storage.migrations import (
         _migration_072_drop_market_data_market_cap,
     )
 

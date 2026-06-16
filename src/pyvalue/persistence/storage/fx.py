@@ -27,7 +27,7 @@ from .records import (
     FXRefreshStateRecord,
     FXSupportedPairRecord,
 )
-from ..migrations import apply_migrations
+from .migrations import apply_migrations
 
 
 # A combined ``SELECT MIN(rate_date), MAX(rate_date)`` defeats SQLite's

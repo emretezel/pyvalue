@@ -22,7 +22,7 @@ from .base import (
     _normalized_codes,
     _utc_now_iso,
 )
-from ..migrations import apply_migrations
+from .migrations import apply_migrations
 
 
 def _resolve_provider_listing_ids(

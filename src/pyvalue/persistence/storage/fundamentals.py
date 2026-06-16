@@ -33,7 +33,7 @@ from .records import (
     SecurityMetadataCandidate,
 )
 from pyvalue.currency import normalize_currency_code
-from ..migrations import apply_migrations
+from .migrations import apply_migrations
 from .listing_status import SecurityListingStatusRepository
 
 logger = logging.getLogger(__name__)

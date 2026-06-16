@@ -31,7 +31,7 @@ from .records import (
     FundamentalsUpdate,
     SecurityListingStatusRecord,
 )
-from ..migrations import apply_migrations
+from .migrations import apply_migrations
 from .financial_facts import (
     FinancialFactsRefreshStateRepository,
     FinancialFactsRepository,

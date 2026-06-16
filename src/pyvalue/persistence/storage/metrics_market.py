@@ -32,7 +32,7 @@ from .records import (
     MetricComputeStatusRecord,
     MetricRecord,
 )
-from ..migrations import apply_migrations
+from .migrations import apply_migrations
 
 
 class MetricsRepository(SQLiteStore):

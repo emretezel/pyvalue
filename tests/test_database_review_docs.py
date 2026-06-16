@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-import pyvalue.persistence.database_review_docs as database_review_docs
-from pyvalue.persistence.database_review_docs import (
+import pyvalue.persistence.storage.database_review_docs as database_review_docs
+from pyvalue.persistence.storage.database_review_docs import (
     TableInventoryEntry,
     TableSchema,
     TableStats,

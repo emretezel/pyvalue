@@ -39,7 +39,7 @@ pyvalue is a Python toolkit for ingesting, normalizing, and screening fundamenta
 - Use views to pre-compose common joins or projections without duplicating data.
 
 ### Schema Evolution
-Whenever features are added or code is refactored, re-evaluate the schema. If the design can be improved, plan and apply the necessary migrations — do not silently preserve a bad design because it already exists. Migrations for this project live in `src/pyvalue/persistence/migrations.py`; add new migrations there in order, and call out any impact on `data/pyvalue.db`.
+Whenever features are added or code is refactored, re-evaluate the schema. If the design can be improved, plan and apply the necessary migrations — do not silently preserve a bad design because it already exists. Migrations for this project live in `src/pyvalue/persistence/storage/migrations.py`; add new migrations there in order, and call out any impact on `data/pyvalue.db`.
 
 ### SQL Style
 - Write correct SQL first; optimise second.
@@ -68,7 +68,7 @@ When proposing schema changes, always include:
 - Re-evaluate the structure after significant changes. If a better layout has become clear, reorganise — a clean structure is worth the churn.
 
 ### Current Layout
-- `src/pyvalue/`: core package. `ingestion/`, `normalization/`, `marketdata/`, `metrics/`, `money/`, `screening/`, and `universe/` hold domain logic; the `cli/` package wires the CLI; the `persistence/` package (`storage/`, `migrations.py`, `database_review_docs.py`) manages SQLite. Foundational modules (`currency.py`, `facts.py`, `config.py`, `logging_utils.py`, `reporting.py`) stay at the package root.
+- `src/pyvalue/`: core package. `ingestion/`, `normalization/`, `marketdata/`, `metrics/`, `money/`, `screening/`, and `universe/` hold domain logic; the `cli/` package wires the CLI; the `persistence/` package manages SQLite, with all database access confined to `storage/` (the repositories, plus the `migrations.py` schema runner and `database_review_docs.py` schema-doc generator). Foundational modules (`currency.py`, `facts.py`, `config.py`, `logging_utils.py`, `reporting.py`) stay at the package root.
 - `tests/`: pytest suite, mirroring the source tree. Use `tests/unit/`, `tests/regression/`, and `tests/integration/` subdirectories; the canonical layout is documented in `docs/architecture.md`.
 - `screeners/`: YAML screen definitions (e.g., `screeners/value.yml`).
 - `data/`: local artifacts (`data/pyvalue.db`, logs, `data/screen_results_*.csv`).
@@ -145,7 +145,7 @@ The whole codebase must be clean — "the file I touched is clean" is not enough
 ## Commit & Pull Request Guidelines
 - Commit messages in history are concise, imperative, and often scoped (e.g., `cli: add refresh-exchange pipeline command`, `eodhd: infer EPS unit...`). Keep subjects short and omit trailing periods.
 - PRs should include a clear description and relevant command output (e.g., `pytest`).
-- If you touch schema or persistence, call out changes in `src/pyvalue/persistence/migrations.py` and any impact on `data/pyvalue.db`.
+- If you touch schema or persistence, call out changes in `src/pyvalue/persistence/storage/migrations.py` and any impact on `data/pyvalue.db`.
 
 ## Documentation
 - **`README.md` stays short.** The repo-root `README.md` covers project purpose, installation instructions, and the two or three most common usage examples — nothing else. Promote longer material to `docs/` rather than letting `README.md` grow. Update `README.md` when the project's purpose, install steps, or headline examples change.

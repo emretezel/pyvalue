@@ -39,7 +39,7 @@ from .records import (
     Security,
     SecurityMetadataUpdate,
 )
-from ..migrations import apply_migrations
+from .migrations import apply_migrations
 
 
 class ProviderRepository(SQLiteStore):

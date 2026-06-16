@@ -394,7 +394,7 @@ def test_migration_078_backfills_unknown_status_and_purges_secondary(
     the derived data of any that turns out secondary is purged -- mirroring
     ``reconcile-listing-status`` and ``_build_status_record``.
     """
-    from pyvalue.persistence.migrations import (
+    from pyvalue.persistence.storage.migrations import (
         _migration_078_backfill_unknown_listing_status,
     )
 
@@ -2442,7 +2442,7 @@ def test_migration_029_creates_fin_facts_security_concept_latest_index(
 ) -> None:
     """Migration 029 ensures the composite preload index exists on existing DBs."""
 
-    from pyvalue.persistence.migrations import apply_migrations
+    from pyvalue.persistence.storage.migrations import apply_migrations
 
     db_path = tmp_path / "migration-029.db"
     repo = FinancialFactsRepository(db_path)

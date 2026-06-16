@@ -17,7 +17,7 @@ from typing import (
 )
 
 
-from ..migrations import apply_migrations
+from .migrations import apply_migrations
 from .base import (
     SQLiteStore,
     _batched,
