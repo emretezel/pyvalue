@@ -1213,7 +1213,7 @@ def test_normalization_units_scoped_by_listing_ids(tmp_path: Path) -> None:
 
 def test_normalization_units_normalizes_gbx_currency_to_gbp(tmp_path: Path) -> None:
     """A GBX quote currency is collapsed to its base GBP in the unit, matching the
-    currency the worker would otherwise resolve via ``ticker_currency``."""
+    currency the worker would otherwise resolve via ``ticker_currency_by_id``."""
     db_path = tmp_path / "normalization-units-gbx.db"
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
@@ -3679,8 +3679,5 @@ def test_id_keyed_metric_and_market_reads(tmp_path: Path) -> None:
     assert snaps_by_id[aaa.security_id].as_of == "2025-01-03"
     assert snaps_by_id[bbb.security_id].as_of == "2025-01-02"
 
-    # Listing currency: id form == symbol form (the symbol form is a kept edge).
-    assert market_repo.ticker_currency_by_id(
-        aaa.security_id
-    ) == market_repo.ticker_currency("AAA.LSE")
+    # Listing currency: the id-keyed lookup collapses the GBX subunit to GBP.
     assert market_repo.ticker_currency_by_id(aaa.security_id) == "GBP"

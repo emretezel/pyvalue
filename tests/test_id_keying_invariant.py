@@ -61,8 +61,6 @@ _ALLOWED_SYMBOL_METHODS = frozenset(
         "recent_market_data_failures",
         # dead-in-production symbol accessors (deleted in Phase 3; allowlisted
         # until then so this guard can land first).
-        "ticker_currency",
-        "listing_quote_currency",
         "fetch",
         "fetch_by_symbol",
         "fetch_for_symbol",

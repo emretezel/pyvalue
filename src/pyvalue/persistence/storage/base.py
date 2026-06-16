@@ -27,7 +27,6 @@ from typing import (
 
 from pyvalue.currency import (
     normalize_currency_code,
-    raw_currency_code,
 )
 from .migrations import apply_migrations
 
@@ -38,7 +37,6 @@ if TYPE_CHECKING:
         ProviderRepository,
         SecurityRepository,
     )
-    from .supported_tickers import SupportedTickerRepository
 
 
 SQLITE_BUSY_TIMEOUT_MS = 30000
@@ -210,7 +208,6 @@ class SQLiteStore:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._provider_repo_cache: Optional[ProviderRepository] = None
         self._security_repo_cache: Optional[SecurityRepository] = None
-        self._supported_ticker_repo_cache: Optional[SupportedTickerRepository] = None
         self._exchange_repo_cache: Optional[ExchangeRepository] = None
         self._exchange_provider_repo_cache: Optional[ExchangeProviderRepository] = None
 
@@ -357,45 +354,12 @@ class SQLiteStore:
             )
         return self._exchange_provider_repo_cache
 
-    def _supported_ticker_repo(self) -> SupportedTickerRepository:
-        if self._supported_ticker_repo_cache is None:
-            # Deferred import to avoid the base <-> supported_tickers cycle.
-            from .supported_tickers import SupportedTickerRepository
-
-            self._supported_ticker_repo_cache = SupportedTickerRepository(self.db_path)
-        return self._supported_ticker_repo_cache
-
-    def ticker_currency(self, symbol: str) -> Optional[str]:
-        """Return the base monetary currency for ``symbol``.
-
-        ``listing.currency`` stores the quote unit and may contain a configured
-        subunit such as GBX. Metrics and normalized facts use the base currency.
-        """
-
-        apply_migrations(self.db_path)
-        ticker, exchange = _normalize_symbol_base(symbol)
-        if exchange is None:
-            return None
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT l.currency
-                FROM listing l
-                JOIN "exchange" e ON e.exchange_id = l.exchange_id
-                WHERE l.symbol = ? AND e.exchange_code = ?
-                LIMIT 1
-                """,
-                (ticker, exchange),
-            ).fetchone()
-        return normalize_currency_code(row[0]) if row else None
-
     def ticker_currency_by_id(self, listing_id: int) -> Optional[str]:
         """Return the base monetary currency for ``listing_id``.
 
-        The natural-identity counterpart of :meth:`ticker_currency`: ``currency``
-        lives on ``listing`` itself, so this is a single PK lookup with no symbol
-        resolution and no exchange join. Like the symbol form it collapses a
-        configured subunit (GBX) to its base (GBP).
+        ``currency`` lives on ``listing`` itself, so this is a single PK lookup
+        with no symbol resolution and no exchange join. It collapses a configured
+        subunit (GBX) to its base (GBP).
         """
 
         apply_migrations(self.db_path)
@@ -410,26 +374,6 @@ class SQLiteStore:
                 (int(listing_id),),
             ).fetchone()
         return normalize_currency_code(row[0]) if row else None
-
-    def listing_quote_currency(self, symbol: str) -> Optional[str]:
-        """Return the stored listing quote currency for ``symbol``."""
-
-        apply_migrations(self.db_path)
-        ticker, exchange = _normalize_symbol_base(symbol)
-        if exchange is None:
-            return None
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT l.currency
-                FROM listing l
-                JOIN "exchange" e ON e.exchange_id = l.exchange_id
-                WHERE l.symbol = ? AND e.exchange_code = ?
-                LIMIT 1
-                """,
-                (ticker, exchange),
-            ).fetchone()
-        return raw_currency_code(row[0]) if row else None
 
 
 def _normalized_codes(values: Optional[Sequence[str]]) -> List[str]:

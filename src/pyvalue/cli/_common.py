@@ -17,7 +17,6 @@ from typing import (
     Optional,
     Sequence,
     Tuple,
-    Union,
     cast,
 )
 
@@ -84,23 +83,6 @@ SCREEN_FAILURE_PROGRESS_INTERVAL_SECONDS = 1.0
 METRICS_WRITE_BATCH_SIZE = 200
 METRICS_WRITE_BATCH_INTERVAL_SECONDS = 1.0
 NORMALIZATION_MAX_WORKERS = 16
-
-
-def _resolve_ticker_target_currency(
-    database: Union[str, Path],
-    symbol: str,
-    payload: Optional[Dict[str, object]] = None,
-    *,
-    ticker_repo: Optional[SupportedTickerRepository] = None,
-) -> Optional[str]:
-    """Resolve the listing currency from provider/catalog metadata only."""
-
-    del payload  # Listing currency must never fall back to fundamentals payloads.
-    repo = ticker_repo or SupportedTickerRepository(database)
-    resolver = getattr(repo, "ticker_currency", None)
-    if not callable(resolver):
-        return None
-    return resolver(symbol)
 
 
 def _batch_values(values: Sequence[str], size: int) -> List[List[str]]:
@@ -307,30 +289,6 @@ def _catalog_bootstrap_guidance(provider: str) -> str:
     if provider_norm == "EODHD":
         return "Run refresh-supported-exchanges --provider EODHD and refresh-supported-tickers --provider EODHD first."
     return "Populate provider_listing first."
-
-
-def _symbols_for_exchange_or_raise(
-    db_path: Path,
-    provider: str,
-    exchange_code: str,
-) -> List[str]:
-    """Return canonical catalog symbols for a provider/exchange or raise."""
-
-    provider_norm = _normalize_provider(provider)
-    exchange_norm = exchange_code.upper()
-    ticker_repo = SupportedTickerRepository(db_path)
-    ticker_repo.initialize_schema()
-    symbols = ticker_repo.list_symbols_by_exchange(provider_norm, exchange_norm)
-    if symbols:
-        return symbols
-
-    available_exchanges = ticker_repo.available_exchanges(provider_norm)
-    raise SystemExit(
-        f"No supported tickers found for provider {provider_norm} on exchange {exchange_norm}. "
-        f"{_catalog_bootstrap_guidance(provider_norm)} "
-        f"Available exchanges: {', '.join(available_exchanges) if available_exchanges else 'none'}. "
-        f"Database: {db_path}"
-    )
 
 
 def _select_metric_classes(metric_ids: Optional[Sequence[str]]) -> List[type]:

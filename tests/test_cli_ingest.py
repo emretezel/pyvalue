@@ -7628,68 +7628,6 @@ criteria:
     assert "exception: RuntimeError: 1" in output
 
 
-# ---------------------------------------------------------------------------
-# _resolve_ticker_target_currency
-# ---------------------------------------------------------------------------
-
-
-def test_resolve_ticker_target_currency_from_supported_tickers(tmp_path: Path) -> None:
-    """Listing currency resolves from provider-listing catalog metadata."""
-
-    db_path = tmp_path / "resolve.db"
-    ticker_repo = SupportedTickerRepository(db_path)
-    ticker_repo.initialize_schema()
-    seed_exchange(db_path, "LSE")
-    ticker_repo.replace_for_exchange(
-        "EODHD",
-        "LSE",
-        [
-            {
-                "Code": "TEST",
-                "Exchange": "LSE",
-                "Name": "Test PLC",
-                "Type": "Common Stock",
-                "Currency": "GBX",
-            },
-        ],
-    )
-    store_market_data(
-        db_path,
-        "TEST.LSE",
-        "2025-01-31",
-        price=10.0,
-        currency="USD",
-    )
-
-    result = cli._resolve_ticker_target_currency(str(db_path), "TEST.LSE")
-    assert result == "GBP"
-
-
-def test_resolve_ticker_target_currency_does_not_fall_back_to_payload(
-    tmp_path: Path,
-) -> None:
-    """Payload currency must not act as listing-currency fallback."""
-
-    db_path = tmp_path / "resolve.db"
-
-    payload: dict[str, object] = {"General": {"CurrencyCode": "ZAC"}}
-    result = cli._resolve_ticker_target_currency(str(db_path), "UNKNOWN.JSE", payload)
-    assert result is None
-
-
-def test_resolve_ticker_target_currency_returns_none_when_unresolvable(
-    tmp_path: Path,
-) -> None:
-    """Returns None when no listing/provider-listing currency exists."""
-
-    db_path = tmp_path / "resolve.db"
-    ticker_repo = SupportedTickerRepository(db_path)
-    ticker_repo.initialize_schema()
-
-    result = cli._resolve_ticker_target_currency(str(db_path), "UNKNOWN.XX")
-    assert result is None
-
-
 def test_report_skipped_no_currency_prints_count_and_preview(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

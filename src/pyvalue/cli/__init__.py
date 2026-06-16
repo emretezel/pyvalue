@@ -35,7 +35,6 @@ from ._common import (
     _resolve_canonical_scope_listings,
     _resolve_database_path,
     _resolve_provider_scope,
-    _resolve_ticker_target_currency,
     _validate_scope_selector,
 )
 from ._batch import (
@@ -136,7 +135,6 @@ __all__ = [
     "_resolve_canonical_scope_listings",
     "_resolve_database_path",
     "_resolve_provider_scope",
-    "_resolve_ticker_target_currency",
     "_validate_scope_selector",
     "_RateLimiter",
     "_create_interruptible_thread_executor",
