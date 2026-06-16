@@ -50,6 +50,12 @@ class FundamentalsRepository(SQLiteStore):
         apply_migrations(self.db_path)
         self._security_repo().initialize_schema()
 
+    def clear(self) -> None:
+        """Delete every ``fundamentals_raw`` row (DELETE FROM, keeps constraints)."""
+        self.initialize_schema()
+        with self._connect() as conn:
+            conn.execute("DELETE FROM fundamentals_raw")
+
     def upsert_many(
         self,
         provider: str,
@@ -447,6 +453,12 @@ class FundamentalsNormalizationStateRepository(SQLiteStore):
         # The legacy security/provider-symbol indexes were dropped there
         # too, so the runtime cleanup is no longer necessary.
         apply_migrations(self.db_path)
+
+    def clear(self) -> None:
+        """Delete every ``fundamentals_normalization_state`` row (keeps constraints)."""
+        self.initialize_schema()
+        with self._connect() as conn:
+            conn.execute("DELETE FROM fundamentals_normalization_state")
 
     def fetch(
         self, provider: str, symbol: str

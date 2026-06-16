@@ -48,6 +48,12 @@ class MetricsRepository(SQLiteStore):
         apply_migrations(self.db_path)
         self._security_repo().initialize_schema()
 
+    def clear(self) -> None:
+        """Delete every ``metrics`` row (DELETE FROM, keeps constraints)."""
+        self.initialize_schema()
+        with self._connect() as conn:
+            conn.execute("DELETE FROM metrics")
+
     def upsert_many_by_id(
         self,
         rows: Iterable[IdKeyedStoredMetricRow],
@@ -216,6 +222,12 @@ class MetricComputeStatusRepository(SQLiteStore):
         # the full rationale on why the runtime CREATE TABLE was removed.
         apply_migrations(self.db_path)
         self._security_repo().initialize_schema()
+
+    def clear(self) -> None:
+        """Delete every ``metric_compute_status`` row (keeps constraints)."""
+        self.initialize_schema()
+        with self._connect() as conn:
+            conn.execute("DELETE FROM metric_compute_status")
 
     def upsert_many_by_id(
         self,
@@ -400,6 +412,12 @@ class MarketDataRepository(SQLiteStore):
         # `market_data` is owned by migration 034.
         apply_migrations(self.db_path)
         self._security_repo().initialize_schema()
+
+    def clear(self) -> None:
+        """Delete every ``market_data`` row (DELETE FROM, keeps constraints)."""
+        self.initialize_schema()
+        with self._connect() as conn:
+            conn.execute("DELETE FROM market_data")
 
     def upsert_prices(self, rows: Sequence[MarketDataUpdate]) -> None:
         self.initialize_schema()

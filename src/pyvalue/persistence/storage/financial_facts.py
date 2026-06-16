@@ -57,6 +57,12 @@ class FinancialFactsRefreshStateRepository(SQLiteStore):
         apply_migrations(self.db_path)
         self._security_repo().initialize_schema()
 
+    def clear(self) -> None:
+        """Delete every ``financial_facts_refresh_state`` row (keeps constraints)."""
+        self.initialize_schema()
+        with self._connect() as conn:
+            conn.execute("DELETE FROM financial_facts_refresh_state")
+
     def mark_security_refreshed(
         self,
         security_id: int,
@@ -157,6 +163,16 @@ class FinancialFactsRepository(SQLiteStore):
         apply_migrations(self.db_path)
         self._security_repo().initialize_schema()
         FinancialFactsRefreshStateRepository(self.db_path).initialize_schema()
+
+    def clear(self) -> None:
+        """Delete every ``financial_facts`` row (DELETE FROM, keeps constraints).
+
+        Not DROP TABLE: dropping would force ``initialize_schema`` to recreate the
+        table from legacy DDL and silently strip migration-added FK/CHECK constraints.
+        """
+        self.initialize_schema()
+        with self._connect() as conn:
+            conn.execute("DELETE FROM financial_facts")
 
     def replace_fact_rows(
         self,
