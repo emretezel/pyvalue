@@ -64,12 +64,15 @@ class SupportedTickerRepository(SQLiteStore):
 
     @staticmethod
     def _catalog_select_columns(alias: str = "catalog") -> str:
+        # Column order matches the SupportedTicker field order (it is built via
+        # ``SupportedTicker(*row)``); provider_listing_id is the trailing field.
         return (
             f"{alias}.provider, {alias}.provider_exchange_code, "
             f"{alias}.provider_symbol, {alias}.provider_ticker, "
             f"{alias}.security_id, {alias}.listing_exchange, "
             f"{alias}.security_name, {alias}.security_type, "
-            f"{alias}.country, {alias}.currency, {alias}.isin, {alias}.updated_at"
+            f"{alias}.country, {alias}.currency, {alias}.isin, {alias}.updated_at, "
+            f"{alias}.provider_listing_id"
         )
 
     def _resolve_provider_exchange(
@@ -625,20 +628,24 @@ class SupportedTickerRepository(SQLiteStore):
             "px.provider_exchange_code AS provider_exchange_code, "
             f"{qualified_symbol} AS provider_symbol, "
             "pl.provider_symbol AS provider_ticker, "
-            "pl.listing_id AS security_id"
+            "pl.listing_id AS security_id, "
+            "pl.provider_listing_id AS provider_listing_id"
         )
 
         def _build_ticker(row: sqlite3.Row) -> SupportedTicker:
             # Project only the columns ingest consumes. The remaining
             # SupportedTicker fields (currency, name, country, ...) are catalog
             # metadata the fundamentals path never reads, so they default to
-            # None instead of dragging in extra joins.
+            # None instead of dragging in extra joins. provider_listing_id IS
+            # carried: ingest writes fundamentals_raw by it, so the write never
+            # re-resolves the provider symbol.
             return SupportedTicker(
                 provider=provider_norm,
                 provider_exchange_code=str(row["provider_exchange_code"]),
                 provider_symbol=str(row["provider_symbol"]),
                 provider_ticker=str(row["provider_ticker"]),
                 security_id=int(row["security_id"]),
+                provider_listing_id=int(row["provider_listing_id"]),
             )
 
         def _apply_scope_filters(query: List[str], params: List[object]) -> None:

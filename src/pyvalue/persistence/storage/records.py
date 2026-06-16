@@ -100,6 +100,10 @@ class SupportedTicker:
     currency: Optional[str] = None
     isin: Optional[str] = None
     updated_at: Optional[str] = None
+    # The provider_listing natural PK. Populated only where a caller needs to
+    # carry it (the fundamentals-ingest eligibility query); the view-projected
+    # constructions (``SupportedTicker(*row)``) leave it None.
+    provider_listing_id: Optional[int] = None
 
     @property
     def exchange_code(self) -> str:
@@ -329,9 +333,9 @@ class FXRefreshStateRecord:
 class FundamentalsUpdate:
     """Raw fundamentals payload prepared for batch persistence."""
 
+    provider_listing_id: int
     security_id: int
     provider_symbol: str
-    provider_exchange_code: Optional[str]
     data: str
     payload_hash: str
     last_fetched_at: str

@@ -243,10 +243,13 @@ def _build_fundamentals_update(
     payload: Dict[str, object],
 ) -> FundamentalsUpdate:
     data = canonical_json_dumps(payload)
+    # The eligibility query carries the provider_listing_id, so the write keys on
+    # it directly -- no symbol re-resolution. Eligible tickers always carry it.
+    assert ticker.provider_listing_id is not None
     return FundamentalsUpdate(
+        provider_listing_id=ticker.provider_listing_id,
         security_id=ticker.security_id,
         provider_symbol=ticker.symbol,
-        provider_exchange_code=ticker.exchange_code,
         data=data,
         payload_hash=fundamentals_payload_hash(data),
         last_fetched_at=datetime.now(timezone.utc).isoformat(),

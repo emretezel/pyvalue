@@ -31,6 +31,7 @@ from conftest import (
     seed_metric_status,
     seed_normalization_success,
     seed_price,
+    seed_raw_fundamentals,
     seed_security_metadata,
 )
 from pyvalue.currency import MetricUnitKind
@@ -1140,7 +1141,8 @@ def test_cmd_refresh_supported_tickers_filters_types_and_cleans_catalog(
 
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "OLD.LSE",
         {"General": {"CurrencyCode": "GBP", "Name": "Old plc"}},
@@ -1410,8 +1412,12 @@ def test_cmd_report_ingest_progress_reports_complete_with_quota_snapshot(
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     for symbol in ["AAA.US", "BBB.US"]:
-        fund_repo.upsert(
-            "EODHD", symbol, {"General": {"CurrencyCode": "USD"}}, exchange="US"
+        seed_raw_fundamentals(
+            db_path,
+            "EODHD",
+            symbol,
+            {"General": {"CurrencyCode": "USD"}},
+            exchange="US",
         )
 
     class FakeClient:
@@ -1501,8 +1507,8 @@ def test_cmd_report_ingest_progress_default_mode_treats_old_data_as_stale(
     )
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert(
-        "EODHD", "AAA.US", {"General": {"CurrencyCode": "USD"}}, exchange="US"
+    seed_raw_fundamentals(
+        db_path, "EODHD", "AAA.US", {"General": {"CurrencyCode": "USD"}}, exchange="US"
     )
     stale_at = (datetime.now(timezone.utc) - timedelta(days=45)).isoformat()
     with fund_repo._connect() as conn:
@@ -1554,8 +1560,8 @@ def test_cmd_report_ingest_progress_missing_only_ignores_staleness(
     )
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert(
-        "EODHD", "AAA.US", {"General": {"CurrencyCode": "USD"}}, exchange="US"
+    seed_raw_fundamentals(
+        db_path, "EODHD", "AAA.US", {"General": {"CurrencyCode": "USD"}}, exchange="US"
     )
     stale_at = (datetime.now(timezone.utc) - timedelta(days=120)).isoformat()
     with fund_repo._connect() as conn:
@@ -1607,8 +1613,8 @@ def test_cmd_report_ingest_progress_reports_blocked_by_backoff(
     )
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert(
-        "EODHD", "AAA.US", {"General": {"CurrencyCode": "USD"}}, exchange="US"
+    seed_raw_fundamentals(
+        db_path, "EODHD", "AAA.US", {"General": {"CurrencyCode": "USD"}}, exchange="US"
     )
     state_repo = FundamentalsFetchStateRepository(db_path)
     state_repo.initialize_schema()
@@ -1658,8 +1664,12 @@ def test_cmd_report_ingest_progress_filters_exchanges(
     )
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert(
-        "EODHD", "BBB.LSE", {"General": {"CurrencyCode": "GBP"}}, exchange="LSE"
+    seed_raw_fundamentals(
+        db_path,
+        "EODHD",
+        "BBB.LSE",
+        {"General": {"CurrencyCode": "GBP"}},
+        exchange="LSE",
     )
     patch_cli(
         monkeypatch,
@@ -1878,19 +1888,22 @@ def test_cmd_update_market_data_stage_skips_secondary_listings(
     )
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "AAA.US",
         {"General": {"Name": "AAA", "PrimaryTicker": "AAA.US"}},
         exchange="US",
     )
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "AAA.LSE",
         {"General": {"Name": "AAA plc", "PrimaryTicker": "AAA.US"}},
         exchange="LSE",
     )
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "BBB.LSE",
         {"General": {"Name": "BBB plc"}},
@@ -1995,13 +2008,15 @@ def test_cmd_update_market_data_stage_does_not_reconcile_or_mutate_listing_statu
     )
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "AAA.LSE",
         {"General": {"Name": "AAA plc", "PrimaryTicker": "AAA.US"}},
         exchange="LSE",
     )
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "BBB.LSE",
         {"General": {"Name": "BBB plc"}},
@@ -2109,19 +2124,22 @@ def test_cmd_reconcile_listing_status_backfills_from_raw_only(
 
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "AAA.US",
         {"General": {"Name": "AAA", "PrimaryTicker": "AAA.US"}},
         exchange="US",
     )
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "AAA.LSE",
         {"General": {"Name": "AAA plc", "PrimaryTicker": "AAA.US"}},
         exchange="LSE",
     )
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "BBB.LSE",
         {"General": {"Name": "BBB plc"}},
@@ -4077,13 +4095,15 @@ def test_cmd_compute_metrics_stage_does_not_reconcile_or_mutate_listing_status(
     )
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "AAA.LSE",
         {"General": {"Name": "AAA plc", "PrimaryTicker": "AAA.US"}},
         exchange="LSE",
     )
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "BBB.LSE",
         {"General": {"Name": "BBB plc"}},
@@ -4972,7 +4992,7 @@ def test_cmd_clear_fundamentals_raw(tmp_path: Path) -> None:
     _seed_listing(db_path, "AAA.US", currency="USD", provider="SEC")
     repo = FundamentalsRepository(db_path)
     repo.initialize_schema()
-    repo.upsert("SEC", "AAA.US", {"facts": {}})
+    seed_raw_fundamentals(db_path, "SEC", "AAA.US", {"facts": {}})
     seed_normalization_success(db_path, "AAA.US", provider="SEC")
 
     with repo._connect() as conn:
@@ -5015,7 +5035,7 @@ def test_cmd_clear_financial_facts_clears_normalization_state(tmp_path: Path) ->
         ],
     )
     refresh_state_repo = FinancialFactsRefreshStateRepository(db_path)
-    FundamentalsRepository(db_path).upsert("SEC", "AAA.US", {"facts": {}})
+    seed_raw_fundamentals(db_path, "SEC", "AAA.US", {"facts": {}})
     seed_normalization_success(db_path, "AAA.US", provider="SEC")
     security_repo = SecurityRepository(db_path)
     id_aaa = security_repo.resolve_id("AAA.US")
@@ -5109,7 +5129,8 @@ def test_cmd_normalize_fundamentals_stage_all_supported_normalizes_primary_with_
     )
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "AAA.US",
         {
@@ -5118,7 +5139,8 @@ def test_cmd_normalize_fundamentals_stage_all_supported_normalizes_primary_with_
         },
         exchange="US",
     )
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "CCC.LSE",
         {
@@ -5127,7 +5149,8 @@ def test_cmd_normalize_fundamentals_stage_all_supported_normalizes_primary_with_
         },
         exchange="LSE",
     )
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "DDD.LSE",
         {"General": {"Name": "DDD"}, "Financials": {}},
@@ -5261,7 +5284,8 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_reports_freshness_scan(
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     for symbol in ("AAA.US", "BBB.US"):
-        fund_repo.upsert(
+        seed_raw_fundamentals(
+            db_path,
             "EODHD",
             symbol,
             {"General": {"Name": symbol}, "Financials": {}},
@@ -5295,7 +5319,8 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_force_skips_freshness_scan(
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     for symbol in ("AAA.US", "BBB.US"):
-        fund_repo.upsert(
+        seed_raw_fundamentals(
+            db_path,
             "EODHD",
             symbol,
             {"General": {"Name": symbol}, "Financials": {}},
@@ -5356,7 +5381,8 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_suppresses_missing_fx_warnings_on
     _seed_listing(db_path, "AALB.AS", currency="EUR", provider="EODHD")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "AALB.AS",
         {
@@ -5423,7 +5449,8 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_continues_after_symbol_failure_wi
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     for symbol in ("AAA.US", "BBB.US", "CCC.US"):
-        fund_repo.upsert(
+        seed_raw_fundamentals(
+            db_path,
             "EODHD",
             symbol,
             {"General": {"Name": symbol}, "Financials": {}},
@@ -5509,7 +5536,8 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_interrupts_cleanly(
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     for symbol in ("AAA.US", "BBB.US"):
-        fund_repo.upsert(
+        seed_raw_fundamentals(
+            db_path,
             "EODHD",
             symbol,
             {"General": {"Name": symbol}, "Financials": {}},
@@ -5609,7 +5637,8 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_process_pool_smoke(
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     for symbol in ("AAA.US", "BBB.US"):
-        fund_repo.upsert(
+        seed_raw_fundamentals(
+            db_path,
             "EODHD",
             symbol,
             {
@@ -5684,7 +5713,8 @@ def test_cmd_refresh_security_metadata_backfills_eodhd_fields_and_sec_name_fallb
     _seed_listing(db_path, "AAA.US", currency="USD", provider="EODHD")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "AAA.US",
         {
@@ -5697,7 +5727,9 @@ def test_cmd_refresh_security_metadata_backfills_eodhd_fields_and_sec_name_fallb
         },
         exchange="US",
     )
-    fund_repo.upsert("SEC", "BBB.US", {"entityName": "BBB SEC Name", "facts": {}})
+    seed_raw_fundamentals(
+        db_path, "SEC", "BBB.US", {"entityName": "BBB SEC Name", "facts": {}}
+    )
 
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
@@ -5784,13 +5816,15 @@ def test_cmd_refresh_security_metadata_respects_symbol_scope(
     _seed_listing(db_path, ("AAA.US", "BBB.US"), currency="USD", provider="EODHD")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "AAA.US",
         {"General": {"Sector": "Technology", "Industry": "Software"}},
         exchange="US",
     )
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "BBB.US",
         {"General": {"Sector": "Industrials", "Industry": "Machinery"}},
@@ -5830,7 +5864,8 @@ def test_cmd_refresh_security_metadata_does_not_use_full_payload_fetch(
     _seed_listing(db_path, "AAA.US", currency="USD", provider="EODHD")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "AAA.US",
         {"General": {"Sector": "Technology", "Industry": "Software"}},
@@ -5882,13 +5917,15 @@ def test_cmd_refresh_security_metadata_carries_scope_listing_ids(
     _seed_listing(db_path, ("AAA.US", "BBB.US"), currency="USD", provider="EODHD")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "AAA.US",
         {"General": {"Sector": "Technology", "Industry": "Software"}},
         exchange="US",
     )
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "BBB.US",
         {"General": {"Sector": "Industrials", "Industry": "Machinery"}},
@@ -5935,13 +5972,15 @@ def test_cmd_refresh_security_metadata_reports_progress(
     _seed_listing(db_path, ("AAA.US", "BBB.US"), currency="USD", provider="EODHD")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "AAA.US",
         {"General": {"Sector": "Technology", "Industry": "Software"}},
         exchange="US",
     )
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "BBB.US",
         {"General": {"Sector": "Industrials", "Industry": "Machinery"}},
@@ -5987,13 +6026,15 @@ def test_cmd_refresh_security_metadata_cancels_cleanly(
     _seed_listing(db_path, ("AAA.US", "BBB.US"), currency="USD", provider="EODHD")
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "AAA.US",
         {"General": {"Sector": "Technology", "Industry": "Software"}},
         exchange="US",
     )
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "BBB.US",
         {"General": {"Sector": "Industrials", "Industry": "Machinery"}},
@@ -6542,13 +6583,15 @@ def test_cmd_run_screen_stage_does_not_reconcile_or_mutate_listing_status(
     )
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "AAA.LSE",
         {"General": {"Name": "AAA plc", "PrimaryTicker": "AAA.US"}},
         exchange="LSE",
     )
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "BBB.LSE",
         {"General": {"Name": "BBB plc"}},

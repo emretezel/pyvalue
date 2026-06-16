@@ -12,7 +12,6 @@ from pyvalue.persistence.storage import (
     FXRatesRepository,
     FinancialFactsRefreshStateRepository,
     FundamentalsNormalizationStateRepository,
-    FundamentalsUpdate,
     FundamentalsRepository,
     FundamentalsFetchStateRepository,
     FinancialFactsRepository,
@@ -33,7 +32,7 @@ from pyvalue.marketdata import MarketDataUpdate
 from pyvalue.universe import Listing
 from collections.abc import Sequence
 from types import TracebackType
-from typing import Literal, NoReturn, Optional, Tuple, Type
+from typing import Literal, NoReturn, Optional, Type
 
 from conftest import (
     seed_exchange,
@@ -42,6 +41,7 @@ from conftest import (
     seed_metric_status,
     seed_normalization_success,
     seed_price,
+    seed_raw_fundamentals,
     seed_security_metadata,
 )
 
@@ -287,20 +287,23 @@ def test_fundamentals_repository_classifies_and_purges_secondary_listings(
         fetched_at="2025-01-02T00:00:00+00:00",
     )
 
-    repo = FundamentalsRepository(db_path)
-    repo.upsert(
+    FundamentalsRepository(db_path)
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "AAA.US",
         {"General": {"Name": "AAA", "PrimaryTicker": "AAA.US"}},
         exchange="US",
     )
-    repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "AAA.LSE",
         {"General": {"Name": "AAA plc", "PrimaryTicker": "AAA.US"}},
         exchange="LSE",
     )
-    repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "BBB.LSE",
         {"General": {"Name": "BBB plc"}},
@@ -425,20 +428,23 @@ def test_migration_078_backfills_unknown_status_and_purges_secondary(
     by_symbol = {row.symbol: row for row in ticker_repo.list_for_provider("EODHD")}
     aaa_lse_id = by_symbol["AAA.LSE"].security_id
 
-    repo = FundamentalsRepository(db_path)
-    repo.upsert(
+    FundamentalsRepository(db_path)
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "AAA.US",
         {"General": {"Name": "AAA", "PrimaryTicker": "AAA.US"}},
         exchange="US",
     )
-    repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "AAA.LSE",
         {"General": {"Name": "AAA plc", "PrimaryTicker": "AAA.US"}},
         exchange="LSE",
     )
-    repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "BBB.LSE",
         {"General": {"Name": "BBB plc"}},
@@ -721,7 +727,9 @@ def test_supported_ticker_repository_lists_eligible_symbols(tmp_path: Path) -> N
 
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert("EODHD", "AAA.LSE", {"General": {"CurrencyCode": "GBP"}})
+    seed_raw_fundamentals(
+        db_path, "EODHD", "AAA.LSE", {"General": {"CurrencyCode": "GBP"}}
+    )
 
     rows = repo.list_eligible_for_fundamentals(
         "EODHD",
@@ -754,8 +762,8 @@ def test_list_eligible_orders_missing_then_stale(tmp_path: Path) -> None:
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     # BBB and CCC have stored fundamentals; AAA has none, so it is "missing".
-    fund_repo.upsert("EODHD", "BBB.LSE", {"General": {}})
-    fund_repo.upsert("EODHD", "CCC.LSE", {"General": {}})
+    seed_raw_fundamentals(db_path, "EODHD", "BBB.LSE", {"General": {}})
+    seed_raw_fundamentals(db_path, "EODHD", "CCC.LSE", {"General": {}})
     # Age BBB well past the freshness cutoff; CCC stays fresh (just upserted).
     with sqlite3.connect(db_path) as conn:
         conn.execute(
@@ -819,118 +827,6 @@ def test_list_eligible_reads_base_tables_not_catalog_view(
         assert "JOIN provider_exchange px" in sql
 
 
-def test_fundamentals_upsert_resolves_via_base_tables_not_catalog_view(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    db_path = tmp_path / "upsert-resolve-plan.db"
-    ticker_repo = SupportedTickerRepository(db_path)
-    ticker_repo.initialize_schema()
-    seed_exchange(db_path, "LSE")
-    # refresh-supported-tickers catalogs the listing the payload attaches to.
-    ticker_repo.replace_for_exchange(
-        "EODHD",
-        "LSE",
-        [{"Code": "AAA", "Name": "AAA plc", "Type": "Common Stock", "Currency": "GBP"}],
-    )
-
-    fund_repo = FundamentalsRepository(db_path)
-    fund_repo.initialize_schema()
-
-    # Capture the SQL the write path runs. Resolving provider_listing_id must hit
-    # the base tables by the provider_listing natural key: routing it back through
-    # provider_listing_catalog would filter on the view's *computed*
-    # provider_symbol, which no index can serve (the slow path this replaced).
-    captured: list[str] = []
-    original_connect = fund_repo._connect
-
-    def _tracing_connect() -> sqlite3.Connection:
-        conn = original_connect()
-        conn.set_trace_callback(captured.append)
-        return conn
-
-    monkeypatch.setattr(fund_repo, "_connect", _tracing_connect)
-
-    fund_repo.upsert("EODHD", "AAA.LSE", {"General": {"Name": "AAA plc"}})
-
-    resolution_sql = [
-        sql
-        for sql in captured
-        if "provider_listing_id" in sql
-        and "(provider_exchange_id, provider_symbol) IN" in sql
-    ]
-    assert resolution_sql, "expected the provider_listing_id resolution SELECT"
-    for sql in resolution_sql:
-        assert "provider_listing_catalog" not in sql
-        assert "FROM provider_listing" in sql
-
-    # The payload actually landed, proving the natural-key lookup matched the row
-    # (guards against the bare-symbol derivation regressing).
-    assert fund_repo.fetch("EODHD", "AAA.LSE") is not None
-
-
-def test_fundamentals_upsert_many_resolves_listing_ids_in_one_query(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    db_path = tmp_path / "fundamentals-upsert-bulk.db"
-    ticker_repo = SupportedTickerRepository(db_path)
-    ticker_repo.initialize_schema()
-    seed_exchange(db_path, "US")
-    ticker_repo.replace_for_exchange(
-        "EODHD",
-        "US",
-        [
-            {"Code": c, "Name": f"{c} Inc", "Type": "Common Stock", "Currency": "USD"}
-            for c in ("AAA", "BBB", "CCC")
-        ],
-    )
-    repo = FundamentalsRepository(db_path)
-    repo.initialize_schema()
-
-    # A whole ingest batch: provider_listing_id must be resolved for all three
-    # payloads in ONE row-value (provider_exchange_id, provider_symbol) IN query
-    # served by the natural-key index, not one indexed seek per payload (the
-    # per-update round-trip this replaced) and never the catalog view.
-    updates = [
-        FundamentalsUpdate(
-            security_id=0,
-            provider_symbol=f"{c}.US",
-            provider_exchange_code="US",
-            data="{}",
-            payload_hash=f"{i:064x}",  # fundamentals_raw.payload_hash CHECK len == 64
-            last_fetched_at="2026-01-01T00:00:00+00:00",
-        )
-        for i, c in enumerate(("AAA", "BBB", "CCC"))
-    ]
-
-    captured: list[str] = []
-    original_connect = repo._connect
-
-    def _tracing_connect() -> sqlite3.Connection:
-        conn = original_connect()
-        conn.set_trace_callback(captured.append)
-        return conn
-
-    monkeypatch.setattr(repo, "_connect", _tracing_connect)
-
-    repo.upsert_many("EODHD", updates)
-
-    resolution_sql = [
-        sql
-        for sql in captured
-        if "provider_listing_id" in sql
-        and "(provider_exchange_id, provider_symbol) IN" in sql
-    ]
-    assert len(resolution_sql) == 1, (
-        f"expected one bulk resolution query, got {len(resolution_sql)}"
-    )
-    assert "provider_listing_catalog" not in resolution_sql[0]
-
-    # All three payloads resolved and landed via the bulk path.
-    assert all(
-        repo.fetch("EODHD", f"{c}.US") is not None for c in ("AAA", "BBB", "CCC")
-    )
-
-
 def test_fundamentals_upsert_never_overwrites_listing_currency(tmp_path: Path) -> None:
     db_path = tmp_path / "fundamentals-currency-owner.db"
     repo = SupportedTickerRepository(db_path)
@@ -947,7 +843,9 @@ def test_fundamentals_upsert_never_overwrites_listing_currency(tmp_path: Path) -
     fund_repo.initialize_schema()
     # The payload reports a *different* currency; fundamentals ingest must not
     # let it leak into the listing.
-    fund_repo.upsert("EODHD", "AAA.LSE", {"General": {"CurrencyCode": "USD"}})
+    seed_raw_fundamentals(
+        db_path, "EODHD", "AAA.LSE", {"General": {"CurrencyCode": "USD"}}
+    )
 
     assert fund_repo.fetch("EODHD", "AAA.LSE") is not None
     with sqlite3.connect(db_path) as conn:
@@ -958,25 +856,6 @@ def test_fundamentals_upsert_never_overwrites_listing_currency(tmp_path: Path) -
             """
         ).fetchone()[0]
     assert currency == "GBP"
-
-
-def test_fundamentals_upsert_skips_uncatalogued_listing(tmp_path: Path) -> None:
-    db_path = tmp_path / "fundamentals-uncatalogued.db"
-    fund_repo = FundamentalsRepository(db_path)
-    fund_repo.initialize_schema()
-    # No catalog refresh has run, so NEW.LSE is unknown. Fundamentals ingest must
-    # not create it (that would require writing listing.currency, owned solely by
-    # refresh-supported-tickers); the payload is skipped instead.
-    fund_repo.upsert(
-        "EODHD", "NEW.LSE", {"General": {"CurrencyCode": "GBP"}}, exchange="LSE"
-    )
-
-    assert fund_repo.fetch("EODHD", "NEW.LSE") is None
-    with sqlite3.connect(db_path) as conn:
-        raw_count = conn.execute("SELECT COUNT(*) FROM fundamentals_raw").fetchone()[0]
-        listing_count = conn.execute("SELECT COUNT(*) FROM listing").fetchone()[0]
-    assert raw_count == 0
-    assert listing_count == 0
 
 
 def test_purge_downstream_for_secondary_purges_only_secondary(tmp_path: Path) -> None:
@@ -1283,8 +1162,12 @@ def test_normalization_units_keyed_by_id_with_freshness(tmp_path: Path) -> None:
     _seed_listing(db_path, "AAA.US")
     _seed_listing(db_path, "BBB.US")
     _seed_listing(db_path, "CCC.US")
-    fund_repo.upsert("EODHD", "AAA.US", {"General": {"Name": "AAA"}}, exchange="US")
-    fund_repo.upsert("EODHD", "BBB.US", {"General": {"Name": "BBB"}}, exchange="US")
+    seed_raw_fundamentals(
+        db_path, "EODHD", "AAA.US", {"General": {"Name": "AAA"}}, exchange="US"
+    )
+    seed_raw_fundamentals(
+        db_path, "EODHD", "BBB.US", {"General": {"Name": "BBB"}}, exchange="US"
+    )
     # Mark AAA already normalized so its freshness hash is populated.
     seed_normalization_success(db_path, "AAA.US", payload_hash="a" * 64)
 
@@ -1310,8 +1193,12 @@ def test_normalization_units_scoped_by_listing_ids(tmp_path: Path) -> None:
     fund_repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
     _seed_listing(db_path, "BBB.US")
-    fund_repo.upsert("EODHD", "AAA.US", {"General": {"Name": "AAA"}}, exchange="US")
-    fund_repo.upsert("EODHD", "BBB.US", {"General": {"Name": "BBB"}}, exchange="US")
+    seed_raw_fundamentals(
+        db_path, "EODHD", "AAA.US", {"General": {"Name": "AAA"}}, exchange="US"
+    )
+    seed_raw_fundamentals(
+        db_path, "EODHD", "BBB.US", {"General": {"Name": "BBB"}}, exchange="US"
+    )
     all_units = fund_repo.normalization_units("EODHD", primary_only=True)
     aaa_listing_id = next(
         u.listing_id for u in all_units.values() if u.provider_symbol == "AAA.US"
@@ -1331,7 +1218,9 @@ def test_normalization_units_normalizes_gbx_currency_to_gbp(tmp_path: Path) -> N
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     _seed_listing(db_path, "FOO.LSE", currency="GBX")
-    fund_repo.upsert("EODHD", "FOO.LSE", {"General": {"Name": "Foo"}}, exchange="LSE")
+    seed_raw_fundamentals(
+        db_path, "EODHD", "FOO.LSE", {"General": {"Name": "Foo"}}, exchange="LSE"
+    )
 
     units = fund_repo.normalization_units("EODHD", primary_only=False)
 
@@ -1346,7 +1235,9 @@ def test_fetch_payload_with_hash_by_id_reads_by_pk(tmp_path: Path) -> None:
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
-    fund_repo.upsert("EODHD", "AAA.US", {"General": {"Name": "AAA"}}, exchange="US")
+    seed_raw_fundamentals(
+        db_path, "EODHD", "AAA.US", {"General": {"Name": "AAA"}}, exchange="US"
+    )
     unit = next(
         iter(fund_repo.normalization_units("EODHD", primary_only=True).values())
     )
@@ -1368,7 +1259,9 @@ def test_mark_success_by_id_upserts_state(tmp_path: Path) -> None:
     fund_repo.initialize_schema()
     state_repo = FundamentalsNormalizationStateRepository(db_path)
     _seed_listing(db_path, "AAA.US")
-    fund_repo.upsert("EODHD", "AAA.US", {"General": {"Name": "AAA"}}, exchange="US")
+    seed_raw_fundamentals(
+        db_path, "EODHD", "AAA.US", {"General": {"Name": "AAA"}}, exchange="US"
+    )
     unit = next(
         iter(fund_repo.normalization_units("EODHD", primary_only=True).values())
     )
@@ -1416,7 +1309,9 @@ def test_normalization_units_is_view_free(
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
-    fund_repo.upsert("EODHD", "AAA.US", {"General": {"Name": "AAA"}}, exchange="US")
+    seed_raw_fundamentals(
+        db_path, "EODHD", "AAA.US", {"General": {"Name": "AAA"}}, exchange="US"
+    )
 
     real_connect = fund_repo._connect
     monkeypatch.setattr(
@@ -1592,15 +1487,16 @@ def test_fundamentals_repository_upsert_clears_active_fetch_failure(
     state_repo.mark_failure("EODHD", "AAA.US", "boom", base_backoff_seconds=60)
     assert state_repo.fetch("EODHD", "AAA.US") is not None
 
-    repo.upsert("EODHD", "AAA.US", {"General": {"CurrencyCode": "USD"}}, exchange="US")
+    seed_raw_fundamentals(
+        db_path, "EODHD", "AAA.US", {"General": {"CurrencyCode": "USD"}}, exchange="US"
+    )
 
     assert state_repo.fetch("EODHD", "AAA.US") is None
 
 
-def test_fundamentals_repository_upsert_many_uses_resolved_metadata_and_overwrites(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+def test_fundamentals_repository_upsert_many_overwrites_by_id(tmp_path: Path) -> None:
+    """upsert_many writes payloads keyed by provider_listing_id and overwrites a
+    listing's prior payload on re-upsert (rather than inserting a duplicate row)."""
     db_path = tmp_path / "fundamentals-batch.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
@@ -1623,113 +1519,31 @@ def test_fundamentals_repository_upsert_many_uses_resolved_metadata_and_overwrit
             },
         ],
     )
-    tickers = {row.symbol: row for row in ticker_repo.list_for_exchange("EODHD", "US")}
 
-    repo = FundamentalsRepository(db_path)
-    repo.initialize_schema()
-
-    # ``upsert_many`` must resolve metadata in bulk, never per symbol. Patch
-    # ``_resolve_security`` (via monkeypatch, which auto-restores after the
-    # test) to explode if the per-symbol slow path is ever taken. The stub
-    # mirrors the real signature so the substitution stays type-correct.
-    def _fail_resolve(
-        provider: str,
-        symbol: str,
-        exchange: Optional[str],
-    ) -> Tuple[Optional[str], Optional[str], Optional[int]]:
-        raise AssertionError("upsert_many should not resolve securities per symbol")
-
-    monkeypatch.setattr(repo, "_resolve_security", _fail_resolve)
-    aaa_data = '{"General":{"CurrencyCode":"USD","Name":"AAA"}}'
-    bbb_data = '{"General":{"CurrencyCode":"USD","Name":"BBB"}}'
-    aaa_updated_data = '{"General":{"CurrencyCode":"USD","Name":"AAA Updated"}}'
-
-    repo.upsert_many(
-        "EODHD",
-        [
-            FundamentalsUpdate(
-                security_id=tickers["AAA.US"].security_id,
-                provider_symbol="AAA.US",
-                provider_exchange_code="US",
-                data=aaa_data,
-                payload_hash=storage.fundamentals_payload_hash(aaa_data),
-                last_fetched_at="2026-03-30T00:00:00+00:00",
-            ),
-            FundamentalsUpdate(
-                security_id=tickers["BBB.US"].security_id,
-                provider_symbol="BBB.US",
-                provider_exchange_code="US",
-                data=bbb_data,
-                payload_hash=storage.fundamentals_payload_hash(bbb_data),
-                last_fetched_at="2026-03-30T00:00:00+00:00",
-            ),
-        ],
+    seed_raw_fundamentals(db_path, "EODHD", "AAA.US", {"General": {"Name": "AAA"}})
+    seed_raw_fundamentals(db_path, "EODHD", "BBB.US", {"General": {"Name": "BBB"}})
+    # Re-upsert AAA with new data: must overwrite, not insert a second row.
+    seed_raw_fundamentals(
+        db_path, "EODHD", "AAA.US", {"General": {"Name": "AAA Updated"}}
     )
-    repo.upsert_many(
-        "EODHD",
-        [
-            FundamentalsUpdate(
-                security_id=tickers["AAA.US"].security_id,
-                provider_symbol="AAA.US",
-                provider_exchange_code="US",
-                data=aaa_updated_data,
-                payload_hash=storage.fundamentals_payload_hash(aaa_updated_data),
-                last_fetched_at="2026-03-31T00:00:00+00:00",
-            )
-        ],
+
+    fund_repo = FundamentalsRepository(db_path)
+    by_symbol = {
+        unit.provider_symbol: unit
+        for unit in fund_repo.normalization_units("EODHD", primary_only=False).values()
+    }
+    aaa = fund_repo.fetch_payload_with_hash_by_id(
+        by_symbol["AAA.US"].provider_listing_id
     )
+    bbb = fund_repo.fetch_payload_with_hash_by_id(
+        by_symbol["BBB.US"].provider_listing_id
+    )
+    assert aaa is not None and aaa[0]["General"]["Name"] == "AAA Updated"
+    assert bbb is not None and bbb[0]["General"]["Name"] == "BBB"
 
     with sqlite3.connect(db_path) as conn:
-        raw_columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(fundamentals_raw)")
-        }
-        rows = conn.execute(
-            """
-            SELECT
-                catalog.provider_symbol,
-                catalog.security_id,
-                catalog.provider_exchange_code,
-                catalog.currency,
-                fr.payload_hash,
-                fr.last_fetched_at
-            FROM fundamentals_raw fr
-            JOIN provider_listing_catalog catalog
-              ON catalog.provider_listing_id = fr.provider_listing_id
-            ORDER BY catalog.provider_symbol
-            """
-        ).fetchall()
-
-    assert "listing_id" not in raw_columns
-    assert "security_id" not in raw_columns
-    assert "currency" not in raw_columns
-    assert "payload_id" not in raw_columns
-    assert rows == [
-        (
-            "AAA.US",
-            tickers["AAA.US"].security_id,
-            "US",
-            "USD",
-            storage.fundamentals_payload_hash(aaa_updated_data),
-            "2026-03-31T00:00:00+00:00",
-        ),
-        (
-            "BBB.US",
-            tickers["BBB.US"].security_id,
-            "US",
-            "USD",
-            storage.fundamentals_payload_hash(bbb_data),
-            "2026-03-30T00:00:00+00:00",
-        ),
-    ]
-    # Reads go through a fresh resolution path, so undo the failing stub before
-    # asserting the persisted payloads round-trip.
-    monkeypatch.undo()
-    aaa_payload = repo.fetch("EODHD", "AAA.US")
-    bbb_payload = repo.fetch("EODHD", "BBB.US")
-    assert aaa_payload is not None
-    assert bbb_payload is not None
-    assert aaa_payload["General"]["Name"] == "AAA Updated"
-    assert bbb_payload["General"]["Name"] == "BBB"
+        count = conn.execute("SELECT COUNT(*) FROM fundamentals_raw").fetchone()[0]
+    assert count == 2  # overwrite, not duplicate insert
 
 
 def test_supported_ticker_repository_lists_market_data_symbols_missing_then_oldest(
@@ -1861,14 +1675,22 @@ def test_list_eligible_for_market_data_primary_only_excludes_secondary(
     # primary. (Same setup the primary_only catalog test relies on below.)
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert(
-        "EODHD", "AAA.US", {"General": {"PrimaryTicker": "AAA.US"}}, exchange="US"
+    seed_raw_fundamentals(
+        db_path,
+        "EODHD",
+        "AAA.US",
+        {"General": {"PrimaryTicker": "AAA.US"}},
+        exchange="US",
     )
-    fund_repo.upsert(
-        "EODHD", "AAA.LSE", {"General": {"PrimaryTicker": "AAA.US"}}, exchange="LSE"
+    seed_raw_fundamentals(
+        db_path,
+        "EODHD",
+        "AAA.LSE",
+        {"General": {"PrimaryTicker": "AAA.US"}},
+        exchange="LSE",
     )
-    fund_repo.upsert(
-        "EODHD", "BBB.LSE", {"General": {"Name": "BBB plc"}}, exchange="LSE"
+    seed_raw_fundamentals(
+        db_path, "EODHD", "BBB.LSE", {"General": {"Name": "BBB plc"}}, exchange="LSE"
     )
 
     # No market_data rows -> every listing is "missing" and thus eligible, so the
@@ -1917,19 +1739,22 @@ def test_supported_ticker_repository_primary_only_filters_secondary_listings(
 
     repo = FundamentalsRepository(db_path)
     repo.initialize_schema()
-    repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "AAA.US",
         {"General": {"PrimaryTicker": "AAA.US"}},
         exchange="US",
     )
-    repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "AAA.LSE",
         {"General": {"PrimaryTicker": "AAA.US"}},
         exchange="LSE",
     )
-    repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "BBB.LSE",
         {"General": {"Name": "BBB plc"}},
@@ -1995,14 +1820,22 @@ def test_supported_ticker_repository_count_for_provider_matches_list(
 
     fundamentals = FundamentalsRepository(db_path)
     fundamentals.initialize_schema()
-    fundamentals.upsert(
-        "EODHD", "AAA.US", {"General": {"PrimaryTicker": "AAA.US"}}, exchange="US"
+    seed_raw_fundamentals(
+        db_path,
+        "EODHD",
+        "AAA.US",
+        {"General": {"PrimaryTicker": "AAA.US"}},
+        exchange="US",
     )
-    fundamentals.upsert(
-        "EODHD", "AAA.LSE", {"General": {"PrimaryTicker": "AAA.US"}}, exchange="LSE"
+    seed_raw_fundamentals(
+        db_path,
+        "EODHD",
+        "AAA.LSE",
+        {"General": {"PrimaryTicker": "AAA.US"}},
+        exchange="LSE",
     )
-    fundamentals.upsert(
-        "EODHD", "BBB.LSE", {"General": {"Name": "BBB plc"}}, exchange="LSE"
+    seed_raw_fundamentals(
+        db_path, "EODHD", "BBB.LSE", {"General": {"Name": "BBB plc"}}, exchange="LSE"
     )
 
     # Equivalence with the row-hydrating method across every scope shape.
@@ -3103,19 +2936,22 @@ def test_fx_rates_repository_discover_currencies_excludes_secondary_supported_ti
 
     fund_repo = FundamentalsRepository(db_path)
     fund_repo.initialize_schema()
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "AAA.US",
         {"General": {"PrimaryTicker": "AAA.US"}},
         exchange="US",
     )
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "AAA.LSE",
         {"General": {"PrimaryTicker": "AAA.US"}},
         exchange="LSE",
     )
-    fund_repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "BBB.JSE",
         {"General": {"Name": "BBB Ltd"}},
@@ -3238,7 +3074,8 @@ def test_fundamentals_repository_fetch_metadata_candidates_extracts_fields(
     _seed_listing(db_path, "AAA.US", provider="SEC")
     _seed_listing(db_path, "BBB.US", provider="SEC")
     _seed_listing(db_path, "CCC.US")
-    repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "AAA.US",
         {
@@ -3251,8 +3088,12 @@ def test_fundamentals_repository_fetch_metadata_candidates_extracts_fields(
         },
         exchange="US",
     )
-    repo.upsert("SEC", "AAA.US", {"entityName": "AAA SEC Name", "facts": {}})
-    repo.upsert("SEC", "BBB.US", {"entityName": "BBB SEC Name", "facts": {}})
+    seed_raw_fundamentals(
+        db_path, "SEC", "AAA.US", {"entityName": "AAA SEC Name", "facts": {}}
+    )
+    seed_raw_fundamentals(
+        db_path, "SEC", "BBB.US", {"entityName": "BBB SEC Name", "facts": {}}
+    )
 
     security_repo = SecurityRepository(db_path)
     security_repo.ensure_from_symbol("CCC.US")
@@ -3283,7 +3124,8 @@ def test_fetch_metadata_candidates_reads_raw_payload_not_canonical_issuer(
     repo = FundamentalsRepository(db_path)
     repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
-    repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "AAA.US",
         {
@@ -3324,13 +3166,15 @@ def test_fundamentals_repository_fetch_many_returns_payloads_by_symbol(
     repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
     _seed_listing(db_path, "BBB.US")
-    repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "AAA.US",
         {"General": {"Name": "AAA", "Sector": "Technology"}},
         exchange="US",
     )
-    repo.upsert(
+    seed_raw_fundamentals(
+        db_path,
         "EODHD",
         "BBB.US",
         {"General": {"Name": "BBB", "Sector": "Industrials"}},
@@ -3452,9 +3296,9 @@ def test_replace_for_exchange_cascade_purges_both_fetch_states(tmp_path: Path) -
 
     # Give AAA and BBB downstream rows. upsert clears fundamentals fetch-state, so
     # mark the fundamentals failure AFTER upserting the raw payloads.
-    fund_repo = FundamentalsRepository(db_path)
-    fund_repo.upsert("EODHD", "AAA.US", {"General": {}}, exchange="US")
-    fund_repo.upsert("EODHD", "BBB.US", {"General": {}}, exchange="US")
+    FundamentalsRepository(db_path)
+    seed_raw_fundamentals(db_path, "EODHD", "AAA.US", {"General": {}}, exchange="US")
+    seed_raw_fundamentals(db_path, "EODHD", "BBB.US", {"General": {}}, exchange="US")
     storage.FundamentalsFetchStateRepository(db_path).mark_failure(
         "EODHD", "BBB.US", "boom"
     )

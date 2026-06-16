@@ -276,3 +276,49 @@ def seed_normalization_success(
         provider_listing_id, payload_hash
     )
     return provider_listing_id
+
+
+def seed_raw_fundamentals(
+    db_path: Path,
+    provider: str,
+    symbol: str,
+    payload: dict[str, object],
+    exchange: Optional[str] = None,
+) -> None:
+    """Store a raw fundamentals payload for an already-catalogued ``symbol`` (id-keyed).
+
+    Resolves the listing's ``provider_listing_id`` and ``listing_id`` and writes
+    through the id-keyed :meth:`FundamentalsRepository.upsert_many` -- the production
+    batch writer -- replacing the deleted single-payload ``upsert`` convenience. The
+    ``provider_symbol`` carried on the update mirrors the qualified symbol the ingest
+    path threads (the listing-status reconciliation reads it as data, not as a lookup).
+
+    The argument order mirrors the old ``upsert(provider, symbol, payload, exchange)``
+    with ``db_path`` prepended, so call sites convert by a prefix swap. ``exchange`` is
+    accepted for that compatibility but ignored -- it is derived from ``symbol``.
+    """
+    del exchange
+    # Imported lazily so the src/ path insert above has already run.
+    from pyvalue.persistence.storage import FundamentalsRepository, FundamentalsUpdate
+    from pyvalue.persistence.storage.base import (
+        _utc_now_iso,
+        canonical_json_dumps,
+        fundamentals_payload_hash,
+    )
+
+    provider_listing_id = _resolve_seeded_provider_listing_id(db_path, provider, symbol)
+    listing_id = _resolve_seeded_listing_id(db_path, symbol)
+    data = canonical_json_dumps(payload)
+    FundamentalsRepository(db_path).upsert_many(
+        provider.strip().upper(),
+        [
+            FundamentalsUpdate(
+                provider_listing_id=provider_listing_id,
+                security_id=listing_id,
+                provider_symbol=symbol.strip().upper(),
+                data=data,
+                payload_hash=fundamentals_payload_hash(data),
+                last_fetched_at=_utc_now_iso(),
+            )
+        ],
+    )
