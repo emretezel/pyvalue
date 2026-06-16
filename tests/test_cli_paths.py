@@ -13,10 +13,10 @@ from pyvalue.cli import (
     _resolve_provider_scope,
     _validate_scope_selector,
 )
-from pyvalue.persistence.storage import SecurityRepository, SupportedTickerRepository
+from pyvalue.persistence.storage import SecurityRepository
 from pyvalue.universe import Listing
 
-from conftest import seed_exchange
+from conftest import seed_exchange, seed_supported_listings
 
 
 def test_resolve_database_path_falls_back_to_repo_data(
@@ -50,10 +50,9 @@ def test_validate_scope_selector_rejects_multiple_explicit_selectors() -> None:
 def test_resolve_canonical_scope_listings_defaults_to_all_supported(
     tmp_path: Path,
 ) -> None:
-    repo = SupportedTickerRepository(tmp_path / "scope.db")
-    repo.initialize_schema()
     seed_exchange(tmp_path / "scope.db", "US")
-    repo.replace_from_listings(
+    seed_supported_listings(
+        tmp_path / "scope.db",
         "EODHD",
         "US",
         [
@@ -114,10 +113,9 @@ def test_resolve_canonical_scope_listings_symbols_uses_targeted_lookup(
     Author: Emre Tezel
     """
     db_path = tmp_path / "symbol-scope.db"
-    repo = SupportedTickerRepository(db_path)
-    repo.initialize_schema()
     seed_exchange(db_path, "US")
-    repo.replace_from_listings(
+    seed_supported_listings(
+        db_path,
         "EODHD",
         "US",
         [
@@ -158,10 +156,9 @@ def test_resolve_canonical_scope_listings_symbols_uses_targeted_lookup(
 
 
 def test_resolve_provider_scope_defaults_to_all_supported(tmp_path: Path) -> None:
-    repo = SupportedTickerRepository(tmp_path / "provider-scope.db")
-    repo.initialize_schema()
     seed_exchange(tmp_path / "provider-scope.db", "US")
-    repo.replace_from_listings(
+    seed_supported_listings(
+        tmp_path / "provider-scope.db",
         "EODHD",
         "US",
         [

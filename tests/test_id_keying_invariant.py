@@ -57,15 +57,12 @@ _ALLOWED_SYMBOL_METHODS = frozenset(
         "progress_by_exchange",
         "recent_failures",
         "market_data_progress_by_exchange",
-        "market_data_progress_summary",
         "recent_market_data_failures",
         # dead-in-production symbol accessors (deleted in Phase 3; allowlisted
         # until then so this guard can land first).
         "fetch",
         "fetch_by_symbol",
-        "fetch_for_symbol",
-        "delete_symbols",
-        "clear",
+        "delete_symbols",  # FundamentalsNormalizationStateRepository (P3-3)
     }
 )
 

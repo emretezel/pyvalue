@@ -43,6 +43,7 @@ from conftest import (
     seed_price,
     seed_raw_fundamentals,
     seed_security_metadata,
+    seed_supported_listings,
 )
 
 
@@ -100,83 +101,16 @@ def _seed_listing(
             "Type": "Common Stock",
             "Currency": existing.currency,
         }
-        for existing in repo.list_for_exchange(provider, exchange)
+        for existing in repo.list_for_provider(provider, exchange_codes=[exchange])
     }
     rows[ticker] = {"Code": ticker, "Type": "Common Stock", "Currency": currency}
     repo.replace_for_exchange(provider, exchange, list(rows.values()))
 
 
-def test_supported_ticker_repository_replace_from_listings_persists_rows(
+def test_supported_ticker_repository_normalizes_exchange_case(
     tmp_path: Path,
 ) -> None:
-    repo = SupportedTickerRepository(tmp_path / "universe.db")
-    repo.initialize_schema()
-
-    seed_exchange(tmp_path / "universe.db", "US", provider="SEC")
-    result = repo.replace_from_listings(
-        "SEC",
-        "US",
-        [_listing("AAA"), _listing("BBB", is_etf=True)],
-    )
-
-    assert result.inserted == 2
-    assert result.skipped_no_currency == ()
-
-    with sqlite3.connect(tmp_path / "universe.db") as conn:
-        rows = conn.execute(
-            """
-            SELECT p.provider_code, px.provider_exchange_code, pl.provider_symbol,
-                   e.exchange_code, l.currency
-            FROM provider_listing pl
-            JOIN provider_exchange px
-              ON px.provider_exchange_id = pl.provider_exchange_id
-            JOIN provider p ON p.provider_id = px.provider_id
-            JOIN listing l ON l.listing_id = pl.listing_id
-            JOIN "exchange" e ON e.exchange_id = l.exchange_id
-            ORDER BY pl.provider_symbol
-            """
-        ).fetchall()
-        provider_listing_columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(provider_listing)")
-        }
-
-    assert rows == [
-        ("SEC", "US", "AAA", "US", "USD"),
-        ("SEC", "US", "BBB", "US", "USD"),
-    ]
-    assert "security_type" not in provider_listing_columns
-    assert "currency" not in provider_listing_columns
-
-
-def test_supported_ticker_repository_replace_from_listings_overwrites_exchange_slice(
-    tmp_path: Path,
-) -> None:
-    repo = SupportedTickerRepository(tmp_path / "universe.db")
-    repo.initialize_schema()
-
-    seed_exchange(tmp_path / "universe.db", "US", provider="SEC")
-    repo.replace_from_listings("SEC", "US", [_listing("AAA")])
-    repo.replace_from_listings("SEC", "US", [_listing("CCC")])
-
-    with sqlite3.connect(tmp_path / "universe.db") as conn:
-        rows = conn.execute(
-            "SELECT provider_symbol FROM supported_tickers ORDER BY provider_symbol"
-        ).fetchall()
-
-    assert rows == [("CCC.US",)]
-
-
-def test_supported_ticker_repository_list_symbols_initializes_schema(
-    tmp_path: Path,
-) -> None:
-    repo = SupportedTickerRepository(tmp_path / "universe.db")
-
-    assert repo.list_symbols_by_exchange("SEC", "US") == []
-
-
-def test_supported_ticker_repository_normalizes_exchange_and_fetches_currency(
-    tmp_path: Path,
-) -> None:
+    """``list_for_provider`` normalises provider/exchange case before matching."""
     repo = SupportedTickerRepository(tmp_path / "universe.db")
     repo.initialize_schema()
     listing = Listing(
@@ -192,10 +126,16 @@ def test_supported_ticker_repository_normalizes_exchange_and_fetches_currency(
         currency="GBP",
     )
     seed_exchange(tmp_path / "universe.db", "LSE")
-    repo.replace_from_listings("EODHD", "LSE", [listing])
+    seed_supported_listings(tmp_path / "universe.db", "EODHD", "LSE", [listing])
 
-    assert repo.list_symbols_by_exchange("EODHD", "LSE") == ["FOO.LSE"]
-    assert repo.list_symbols_by_exchange("eodhd", "lse") == ["FOO.LSE"]
+    assert [
+        t.provider_symbol
+        for t in repo.list_for_provider("EODHD", exchange_codes=["LSE"])
+    ] == ["FOO.LSE"]
+    assert [
+        t.provider_symbol
+        for t in repo.list_for_provider("eodhd", exchange_codes=["lse"])
+    ] == ["FOO.LSE"]
 
 
 def test_fundamentals_repository_classifies_and_purges_secondary_listings(
@@ -637,8 +577,8 @@ def test_supported_ticker_repository_replaces_rows_per_exchange(tmp_path: Path) 
 
     assert result.inserted == 1
     assert result.skipped_no_currency == ()
-    lse = repo.list_for_exchange("EODHD", "LSE")
-    us = repo.list_for_exchange("EODHD", "US")
+    lse = repo.list_for_provider("EODHD", exchange_codes=["LSE"])
+    us = repo.list_for_provider("EODHD", exchange_codes=["US"])
     assert [(row.symbol, row.security_name) for row in lse] == [
         ("AAA.LSE", "AAA plc refreshed")
     ]
@@ -657,7 +597,7 @@ def test_supported_ticker_repository_replaces_rows_per_exchange(tmp_path: Path) 
         ],
     )
 
-    us = repo.list_for_exchange("EODHD", "US")
+    us = repo.list_for_provider("EODHD", exchange_codes=["US"])
     assert [(row.symbol, row.code) for row in us] == [("BRK.B.US", "BRK.B")]
 
 
@@ -698,7 +638,9 @@ def test_supported_ticker_repository_reports_skipped_no_currency(
     assert result.inserted == 1
     assert result.skipped_no_currency == ("BBB", "CCC")
     # Only the currency-bearing ticker is catalogued.
-    assert [row.symbol for row in repo.list_for_exchange("EODHD", "LSE")] == ["AAA.LSE"]
+    assert [
+        row.symbol for row in repo.list_for_provider("EODHD", exchange_codes=["LSE"])
+    ] == ["AAA.LSE"]
 
 
 def test_supported_ticker_repository_lists_eligible_symbols(tmp_path: Path) -> None:
@@ -1761,15 +1703,19 @@ def test_supported_ticker_repository_primary_only_filters_secondary_listings(
         exchange="LSE",
     )
 
-    assert ticker_repo.list_symbols_by_exchange("EODHD", "LSE") == [
+    assert [
+        t.provider_symbol
+        for t in ticker_repo.list_for_provider("EODHD", exchange_codes=["LSE"])
+    ] == [
         "AAA.LSE",
         "BBB.LSE",
     ]
-    assert ticker_repo.list_symbols_by_exchange(
-        "EODHD",
-        "LSE",
-        primary_only=True,
-    ) == ["BBB.LSE"]
+    assert [
+        t.provider_symbol
+        for t in ticker_repo.list_for_provider(
+            "EODHD", exchange_codes=["LSE"], primary_only=True
+        )
+    ] == ["BBB.LSE"]
     assert [
         symbol for _, symbol in ticker_repo.list_canonical_listings(primary_only=True)
     ] == [
@@ -1925,7 +1871,7 @@ def test_market_data_repository_upsert_prices_batches_rows(tmp_path: Path) -> No
             },
         ],
     )
-    rows = ticker_repo.list_for_exchange("EODHD", "US")
+    rows = ticker_repo.list_for_provider("EODHD", exchange_codes=["US"])
     by_symbol = {row.symbol: row for row in rows}
 
     repo = MarketDataRepository(db_path)
@@ -2478,10 +2424,8 @@ def test_latest_share_counts_many_prefers_best_same_date_share_fact(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "share-count-selection.db"
-    ticker_repo = SupportedTickerRepository(db_path)
-    ticker_repo.initialize_schema()
     seed_exchange(db_path, "US")
-    ticker_repo.replace_from_listings("EODHD", "US", [_listing("AAA")])
+    seed_supported_listings(db_path, "EODHD", "US", [_listing("AAA")])
 
     repo = FinancialFactsRepository(db_path)
     repo.initialize_schema()
@@ -3191,10 +3135,9 @@ def test_fundamentals_repository_fetch_many_returns_payloads_by_symbol(
 def test_replace_for_exchange_requires_seeded_exchange(tmp_path: Path) -> None:
     """The exchange catalog is owned by refresh-supported-exchanges.
 
-    ``replace_for_exchange`` / ``replace_from_listings`` resolve the
-    provider_exchange read-only and raise a clear error (rather than fabricating
-    a stub) when the exchange has not been seeded -- the operator must run
-    refresh-supported-exchanges first.
+    ``replace_for_exchange`` resolves the provider_exchange read-only and raises
+    a clear error (rather than fabricating a stub) when the exchange has not been
+    seeded -- the operator must run refresh-supported-exchanges first.
     """
     repo = SupportedTickerRepository(tmp_path / "needs-exchange.db")
     repo.initialize_schema()
@@ -3211,8 +3154,6 @@ def test_replace_for_exchange_requires_seeded_exchange(tmp_path: Path) -> None:
                 }
             ],
         )
-    with pytest.raises(ValueError, match="refresh-supported-exchanges"):
-        repo.replace_from_listings("EODHD", "US", [_listing("AAA")])
 
 
 def test_replace_for_exchange_does_not_write_exchange_metadata(tmp_path: Path) -> None:
@@ -3267,9 +3208,9 @@ def test_replace_for_exchange_cascade_purges_both_fetch_states(tmp_path: Path) -
 
     A ticker absent from the refreshed payload is removed, and
     ``_delete_provider_listing_ids`` purges its fundamentals_raw,
-    fundamentals_fetch_state, and market_data_fetch_state rows. This is why the
-    CLI no longer calls ``delete_symbols`` separately; the dropped count is
-    reported via ``SupportedTickerRefreshResult.removed``.
+    fundamentals_fetch_state, and market_data_fetch_state rows. The refresh
+    handles removals via this cascade rather than a separate delete; the dropped
+    count is reported via ``SupportedTickerRefreshResult.removed``.
     """
     db_path = tmp_path / "refresh-cascade.db"
     seed_exchange(db_path, "US")
@@ -3320,7 +3261,9 @@ def test_replace_for_exchange_cascade_purges_both_fetch_states(tmp_path: Path) -
     )
 
     assert result.removed == 1
-    assert [row.symbol for row in repo.list_for_exchange("EODHD", "US")] == ["AAA.US"]
+    assert [
+        row.symbol for row in repo.list_for_provider("EODHD", exchange_codes=["US"])
+    ] == ["AAA.US"]
     with sqlite3.connect(db_path) as conn:
         assert (
             conn.execute(
@@ -3441,7 +3384,9 @@ def test_replace_for_exchange_skips_writes_when_unchanged(
     # The catalog is intact and the tickers are still reported as retained.
     assert result.inserted == 2
     assert result.removed == 0
-    assert [row.symbol for row in repo.list_for_exchange("EODHD", "US")] == [
+    assert [
+        row.symbol for row in repo.list_for_provider("EODHD", exchange_codes=["US"])
+    ] == [
         "AAA.US",
         "BBB.US",
     ]

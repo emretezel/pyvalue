@@ -15,18 +15,16 @@ from pyvalue.persistence.storage import (
     FinancialFactsRepository,
     MarketDataRepository,
     SecurityRepository,
-    SupportedTickerRepository,
 )
 from pyvalue.universe import Listing
 
-from conftest import seed_exchange, seed_facts, seed_price
+from conftest import seed_exchange, seed_facts, seed_price, seed_supported_listings
 
 
 def _seed_universe(db_path: Path) -> None:
-    universe = SupportedTickerRepository(db_path)
-    universe.initialize_schema()
     seed_exchange(db_path, "US", provider="SEC")
-    universe.replace_from_listings(
+    seed_supported_listings(
+        db_path,
         "SEC",
         "US",
         [

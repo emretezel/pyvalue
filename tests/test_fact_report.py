@@ -18,22 +18,20 @@ from pyvalue.persistence.storage import (
     FactRecord,
     FinancialFactsRepository,
     SecurityRepository,
-    SupportedTickerRepository,
 )
 from pyvalue.universe import Listing
 
-from conftest import seed_exchange, seed_facts
+from conftest import seed_exchange, seed_facts, seed_supported_listings
 
 
 def _seed_universe(db_path: Path) -> None:
-    universe = SupportedTickerRepository(db_path)
-    universe.initialize_schema()
     seed_exchange(db_path, "US", provider="SEC")
     # Listings are non-nullable on currency and have no fallback; a Listing
     # without a currency is skipped entirely by the catalog, so the implicit
     # listing creation inside replace_facts would later raise. Seed both
     # ".US" listings with USD (US exchange convention) up front.
-    universe.replace_from_listings(
+    seed_supported_listings(
+        db_path,
         "SEC",
         "US",
         [

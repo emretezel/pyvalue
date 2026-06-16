@@ -8,7 +8,7 @@ from __future__ import annotations
 import sys
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable, Optional
+from typing import TYPE_CHECKING, Iterable, Optional, Sequence
 
 # Ensure the src/ directory is importable when running tests without installation.
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,7 +23,12 @@ if TYPE_CHECKING:
     # these never execute at import time -- they exist purely so mypy can resolve
     # the annotations.
     from pyvalue.currency import MetricUnitKind
-    from pyvalue.persistence.storage import FactRecord, MetricComputeStatusRecord
+    from pyvalue.persistence.storage import (
+        FactRecord,
+        MetricComputeStatusRecord,
+        SupportedTickerRefreshResult,
+    )
+    from pyvalue.universe import Listing
 
 
 def seed_exchange(
@@ -35,10 +40,10 @@ def seed_exchange(
     """Seed one or more existing provider_exchange rows for tests.
 
     The exchange catalog (``exchange`` + ``provider_exchange``) is owned by
-    ``refresh-supported-exchanges``. ``replace_for_exchange`` /
-    ``replace_from_listings`` now resolve the provider_exchange read-only and
-    raise if it is absent, so any test that catalogs listings must seed the
-    exchange first. Each upsert is non-destructive (it never prunes siblings),
+    ``refresh-supported-exchanges``. ``replace_for_exchange`` resolves the
+    provider_exchange read-only and raises if it is absent, so any test that
+    catalogs listings must seed the exchange first. Each upsert is
+    non-destructive (it never prunes siblings),
     so a test can seed every exchange code it uses in a single call. Defaults to
     ``"US"`` when no code is given; the canonical exchange code mirrors the
     provider exchange code.
@@ -49,6 +54,36 @@ def seed_exchange(
     repo = ExchangeProviderRepository(db_path)
     for code in codes or ("US",):
         repo.ensure_fixed_exchange(provider, code, code, currency=currency)
+
+
+def seed_supported_listings(
+    db_path: Path,
+    provider: str,
+    exchange_code: str,
+    listings: Sequence[Listing],
+) -> SupportedTickerRefreshResult:
+    """Catalog supported listings for tests via production ``replace_for_exchange``.
+
+    Mirrors the (now-deleted) ``replace_from_listings`` test seam: tests build
+    ``Listing`` DTOs; this converts each to the EODHD provider-row shape the
+    production writer consumes (a bare ``Code`` with the exchange suffix stripped,
+    plus ``Name``/``Currency``) and replaces the whole (provider, exchange) slice.
+    The provider_exchange must already be seeded (e.g. via :func:`seed_exchange`).
+    """
+    # Imported lazily so the src/ path insert above has already run.
+    from pyvalue.persistence.storage import SupportedTickerRepository
+
+    rows = [
+        {
+            "Code": listing.symbol.strip().upper().split(".")[0],
+            "Name": listing.security_name,
+            "Currency": listing.currency,
+        }
+        for listing in listings
+    ]
+    return SupportedTickerRepository(db_path).replace_for_exchange(
+        provider, exchange_code, rows
+    )
 
 
 def _resolve_seeded_listing_id(db_path: Path, symbol: str) -> int:

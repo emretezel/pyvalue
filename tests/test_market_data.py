@@ -137,7 +137,7 @@ def test_market_data_service_persists_prices(tmp_path: Path) -> None:
     ticker_repo = _seed_listing(db_path, "AAPL.US", currency="USD")
     aapl = next(
         row
-        for row in ticker_repo.list_for_exchange("EODHD", "US")
+        for row in ticker_repo.list_for_provider("EODHD", exchange_codes=["US"])
         if row.symbol == "AAPL.US"
     )
     service = MarketDataService(db_path=db_path, provider=DummyProvider())
@@ -297,7 +297,7 @@ def test_market_data_service_stores_large_price_change_without_guard(
     ticker_repo = _seed_listing(db_path, "ATXS.US", currency="USD")
     atxs = next(
         row
-        for row in ticker_repo.list_for_exchange("EODHD", "US")
+        for row in ticker_repo.list_for_provider("EODHD", exchange_codes=["US"])
         if row.symbol == "ATXS.US"
     )
     market_repo = MarketDataRepository(db_path)

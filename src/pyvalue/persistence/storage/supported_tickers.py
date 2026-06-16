@@ -19,21 +19,18 @@ from typing import (
 from pyvalue.currency import (
     raw_currency_code,
 )
-from pyvalue.universe import Listing
 
 from .base import (
     SQLiteStore,
     _batched,
     _coerce_int,
     _normalize_optional_text,
-    _normalize_symbol_base,
     _normalized_codes,
     _provider_listing_catalog_view,
 )
 from .records import (
     IngestProgressExchange,
     IngestProgressFailure,
-    IngestProgressSummary,
     SupportedTicker,
     SupportedTickerRefreshResult,
 )
@@ -253,62 +250,6 @@ class SupportedTickerRepository(SQLiteStore):
                 list(chunk),
             )
 
-    def replace_from_listings(
-        self,
-        provider: str,
-        exchange_code: str,
-        listings: Sequence[Listing],
-    ) -> SupportedTickerRefreshResult:
-        self.initialize_schema()
-        provider_norm = provider.strip().upper()
-        provider_exchange_code = exchange_code.strip().upper()
-        retained_tickers: List[str] = []
-        skipped_no_currency: List[str] = []
-        with self._connect() as conn:
-            provider_exchange_id, exchange_id, canonical_exchange_code = (
-                self._resolve_provider_exchange(
-                    conn, provider_norm, provider_exchange_code
-                )
-            )
-            for listing in listings:
-                symbol = listing.symbol.strip().upper()
-                bare_symbol, _ = _normalize_symbol_base(symbol)
-                if not bare_symbol:
-                    continue
-                cataloged = self._ensure_provider_listing(
-                    conn,
-                    provider_exchange_id=provider_exchange_id,
-                    exchange_id=exchange_id,
-                    canonical_exchange_code=canonical_exchange_code,
-                    bare_symbol=bare_symbol,
-                    currency=listing.currency,
-                    entity_name=listing.security_name,
-                )
-                if not cataloged:
-                    skipped_no_currency.append(bare_symbol)
-                    continue
-                retained_tickers.append(bare_symbol)
-            retained = set(retained_tickers)
-            existing_rows = conn.execute(
-                """
-                SELECT provider_listing_id, provider_symbol
-                FROM provider_listing
-                WHERE provider_exchange_id = ?
-                """,
-                (provider_exchange_id,),
-            ).fetchall()
-            to_delete = [
-                int(row["provider_listing_id"])
-                for row in existing_rows
-                if str(row["provider_symbol"]) not in retained
-            ]
-            self._delete_provider_listing_ids(conn, to_delete)
-        return SupportedTickerRefreshResult(
-            inserted=len(retained_tickers),
-            removed=len(to_delete),
-            skipped_no_currency=tuple(skipped_no_currency),
-        )
-
     def replace_for_exchange(
         self,
         provider: str,
@@ -368,23 +309,6 @@ class SupportedTickerRepository(SQLiteStore):
             removed=len(to_delete),
             skipped_no_currency=tuple(skipped_no_currency),
         )
-
-    def fetch_for_symbol(self, provider: str, symbol: str) -> Optional[SupportedTicker]:
-        self.initialize_schema()
-        provider_norm = provider.strip().upper()
-        symbol_norm = symbol.strip().upper()
-        with self._connect() as conn:
-            row = conn.execute(
-                f"""
-                SELECT {self._catalog_select_columns()}
-                FROM provider_listing_catalog catalog
-                WHERE catalog.provider = ? AND catalog.provider_symbol = ?
-                """,
-                (provider_norm, symbol_norm),
-            ).fetchone()
-        if row is None:
-            return None
-        return SupportedTicker(*row)
 
     def list_for_provider(
         self,
@@ -457,34 +381,6 @@ class SupportedTickerRepository(SQLiteStore):
             row = conn.execute(" ".join(query), params).fetchone()
         return int(row[0]) if row is not None else 0
 
-    def list_symbols_by_exchange(
-        self,
-        provider: str,
-        exchange_code: str,
-        *,
-        primary_only: bool = False,
-    ) -> List[str]:
-        rows = self.list_for_provider(
-            provider,
-            exchange_codes=[exchange_code],
-            primary_only=primary_only,
-        )
-        return [row.provider_symbol for row in rows]
-
-    def list_symbol_name_pairs_by_exchange(
-        self,
-        provider: str,
-        exchange_code: str,
-        *,
-        primary_only: bool = False,
-    ) -> List[Tuple[str, Optional[str]]]:
-        rows = self.list_for_provider(
-            provider,
-            exchange_codes=[exchange_code],
-            primary_only=primary_only,
-        )
-        return [(row.provider_symbol, row.security_name) for row in rows]
-
     def list_canonical_listings(
         self,
         exchange_codes: Optional[Sequence[str]] = None,
@@ -528,63 +424,6 @@ class SupportedTickerRepository(SQLiteStore):
         with self._connect() as conn:
             rows = conn.execute(" ".join(query), params).fetchall()
         return [row[0] for row in rows]
-
-    def clear(
-        self,
-        provider: Optional[str] = None,
-        exchange_code: Optional[str] = None,
-    ) -> int:
-        self.initialize_schema()
-        with self._connect() as conn:
-            params: List[object] = []
-            query = [
-                "SELECT provider_listing_id FROM provider_listing_catalog WHERE 1 = 1"
-            ]
-            if provider:
-                query.append("AND provider = ?")
-                params.append(provider.strip().upper())
-            if exchange_code:
-                query.append("AND provider_exchange_code = ?")
-                params.append(exchange_code.strip().upper())
-            rows = conn.execute(" ".join(query), params).fetchall()
-            provider_listing_ids = [int(row["provider_listing_id"]) for row in rows]
-            self._delete_provider_listing_ids(conn, provider_listing_ids)
-        return len(provider_listing_ids)
-
-    def delete_symbols(self, provider: str, symbols: Sequence[str]) -> int:
-        self.initialize_schema()
-        normalized = _normalized_codes(symbols)
-        if not normalized:
-            return 0
-        placeholders = ", ".join("?" for _ in normalized)
-        with self._connect() as conn:
-            rows = conn.execute(
-                f"""
-                SELECT provider_listing_id
-                FROM provider_listing_catalog
-                WHERE provider = ? AND provider_symbol IN ({placeholders})
-                """,
-                [provider.strip().upper(), *normalized],
-            ).fetchall()
-            provider_listing_ids = [int(row["provider_listing_id"]) for row in rows]
-            self._delete_provider_listing_ids(conn, provider_listing_ids)
-        return len(provider_listing_ids)
-
-    def list_for_exchange(
-        self,
-        provider: str,
-        exchange_code: str,
-        *,
-        primary_only: bool = False,
-    ) -> List[SupportedTicker]:
-        return self.list_for_provider(
-            provider,
-            exchange_codes=[exchange_code],
-            primary_only=primary_only,
-        )
-
-    def list_all_exchanges(self, provider: str) -> List[str]:
-        return self.available_exchanges(provider)
 
     def list_eligible_for_fundamentals(
         self,
@@ -752,28 +591,6 @@ class SupportedTickerRepository(SQLiteStore):
             return missing_rows
         stale_rows = _fetch_stale(remaining, cutoff)
         return [*missing_rows, *stale_rows]
-
-    def progress_summary(
-        self,
-        provider: str,
-        exchange_codes: Optional[Sequence[str]] = None,
-        max_age_days: Optional[int] = None,
-        missing_only: bool = False,
-    ) -> IngestProgressSummary:
-        rows = self.progress_by_exchange(
-            provider=provider,
-            exchange_codes=exchange_codes,
-            max_age_days=max_age_days,
-            missing_only=missing_only,
-        )
-        return IngestProgressSummary(
-            total_supported=sum(row.total_supported for row in rows),
-            stored=sum(row.stored for row in rows),
-            missing=sum(row.missing for row in rows),
-            stale=sum(row.stale for row in rows),
-            blocked=sum(row.blocked for row in rows),
-            error_rows=sum(row.error_rows for row in rows),
-        )
 
     def progress_by_exchange(
         self,
@@ -999,56 +816,6 @@ class SupportedTickerRepository(SQLiteStore):
             )
             for row in rows
         ]
-
-    def market_data_progress_summary(
-        self,
-        provider: str,
-        exchange_codes: Optional[Sequence[str]] = None,
-        max_age_days: int = 7,
-        *,
-        primary_only: bool = False,
-    ) -> IngestProgressSummary:
-        self.initialize_schema()
-        provider_norm = provider.strip().upper()
-        now = datetime.now(timezone.utc).isoformat()
-        cutoff = (
-            datetime.now(timezone.utc).date() - timedelta(days=max_age_days)
-        ).isoformat()
-        params: List[object] = [cutoff, now, provider_norm]
-        catalog_view = _provider_listing_catalog_view(primary_only=primary_only)
-        query = [
-            "SELECT",
-            "COUNT(*) AS total_supported,",
-            "SUM(CASE WHEN md.latest_as_of IS NOT NULL THEN 1 ELSE 0 END) AS stored,",
-            "SUM(CASE WHEN md.latest_as_of IS NULL THEN 1 ELSE 0 END) AS missing,",
-            "SUM(CASE WHEN md.latest_as_of IS NOT NULL AND md.latest_as_of <= ? THEN 1 ELSE 0 END) AS stale,",
-            "SUM(CASE WHEN ms.next_eligible_at IS NOT NULL AND ms.next_eligible_at > ? THEN 1 ELSE 0 END) AS blocked,",
-            "SUM(CASE WHEN ms.last_status = 'error' THEN 1 ELSE 0 END) AS error_rows",
-            f"FROM {catalog_view} catalog",
-            "LEFT JOIN (",
-            "    SELECT listing_id, MAX(as_of) AS latest_as_of",
-            "    FROM market_data",
-            "    GROUP BY listing_id",
-            ") md ON md.listing_id = catalog.security_id",
-            "LEFT JOIN market_data_fetch_state ms "
-            "ON ms.provider_listing_id = catalog.provider_listing_id",
-            "WHERE catalog.provider = ?",
-        ]
-        normalized_codes = _normalized_codes(exchange_codes)
-        if normalized_codes:
-            placeholders = ", ".join("?" for _ in normalized_codes)
-            query.append(f"AND catalog.provider_exchange_code IN ({placeholders})")
-            params.extend(normalized_codes)
-        with self._connect() as conn:
-            row = conn.execute(" ".join(query), params).fetchone()
-        return IngestProgressSummary(
-            total_supported=_coerce_int(row["total_supported"] if row else 0),
-            stored=_coerce_int(row["stored"] if row else 0),
-            missing=_coerce_int(row["missing"] if row else 0),
-            stale=_coerce_int(row["stale"] if row else 0),
-            blocked=_coerce_int(row["blocked"] if row else 0),
-            error_rows=_coerce_int(row["error_rows"] if row else 0),
-        )
 
     def market_data_progress_by_exchange(
         self,

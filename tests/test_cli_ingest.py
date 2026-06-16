@@ -33,6 +33,7 @@ from conftest import (
     seed_price,
     seed_raw_fundamentals,
     seed_security_metadata,
+    seed_supported_listings,
 )
 from pyvalue.currency import MetricUnitKind
 from pyvalue.facts import RegionFactsRepository
@@ -253,7 +254,7 @@ def store_catalog_listings(
         for listing in listings
     ]
     seed_exchange(db_path, exchange_code, provider=provider)
-    repo.replace_from_listings(provider, exchange_code, listings_with_currency)
+    seed_supported_listings(db_path, provider, exchange_code, listings_with_currency)
     return repo
 
 
@@ -1201,7 +1202,7 @@ def test_cmd_refresh_supported_tickers_filters_types_and_cleans_catalog(
     assert calls == SymbolListingClientCalls(api_key="TOKEN", listed=["LSE"])
 
     ticker_repo = SupportedTickerRepository(db_path)
-    rows = ticker_repo.list_for_exchange("EODHD", "LSE")
+    rows = ticker_repo.list_for_provider("EODHD", exchange_codes=["LSE"])
     assert [row.symbol for row in rows] == ["KEEP.LSE", "PREF.LSE"]
     assert [row.security_type for row in rows] == [None, None]
     with ticker_repo._connect() as conn:
@@ -1287,7 +1288,7 @@ def test_cmd_refresh_supported_tickers_all_exchanges_in_code_order(
     assert calls.listed == ["LSE", "TSX", "US"]
 
     repo = SupportedTickerRepository(db_path)
-    assert repo.list_all_exchanges("EODHD") == ["LSE", "TSX", "US"]
+    assert repo.available_exchanges("EODHD") == ["LSE", "TSX", "US"]
 
 
 def test_cmd_refresh_supported_tickers_defaults_to_all_supported(

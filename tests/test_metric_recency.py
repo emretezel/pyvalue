@@ -17,20 +17,18 @@ from pyvalue.persistence.storage import (
     FinancialFactsRepository,
     MarketDataRepository,
     SecurityRepository,
-    SupportedTickerRepository,
 )
 from pyvalue.universe import Listing
 
-from conftest import seed_exchange, seed_facts, seed_price
+from conftest import seed_exchange, seed_facts, seed_price, seed_supported_listings
 
 
 def _store_market_currency(
     db_path: Path, symbol: str, as_of: str, currency: str = "USD"
 ) -> None:
-    ticker_repo = SupportedTickerRepository(db_path)
-    ticker_repo.initialize_schema()
     seed_exchange(db_path, "US", provider="SEC")
-    ticker_repo.replace_from_listings(
+    seed_supported_listings(
+        db_path,
         "SEC",
         "US",
         [
