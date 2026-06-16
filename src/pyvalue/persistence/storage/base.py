@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
 import json
+import logging
 import sqlite3
 import time
 from types import TracebackType
@@ -277,6 +278,26 @@ class SQLiteStore:
             return str(row[0]).lower() if row is not None else ""
 
         return self._run_with_locked_retry(_enable)
+
+    def ensure_wal_mode(self) -> str:
+        """Best-effort switch to WAL; return the resulting (or current) journal mode.
+
+        Encapsulates the OperationalError handling the metrics-compute path needs:
+        WAL lets metric workers read while the parent writes, but a locked or
+        read-only database must not abort the run -- fall back to the current mode
+        (or ``"unknown"``). Keeping the ``sqlite3`` exception handling here means the
+        CLI never imports ``sqlite3``.
+        """
+        try:
+            return self.enable_wal_mode()
+        except sqlite3.OperationalError as exc:
+            logging.getLogger(__name__).warning(
+                "Could not enable WAL mode on %s: %s", self.db_path, exc
+            )
+            try:
+                return self.current_journal_mode()
+            except sqlite3.OperationalError:
+                return "unknown"
 
     @staticmethod
     def _is_locked_error(exc: sqlite3.OperationalError) -> bool:

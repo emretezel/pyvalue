@@ -89,7 +89,6 @@ from .metrics import (
     _compute_metrics_for_symbol_batch_worker_profiled,  # noqa: F401
     _compute_metrics_for_symbol_worker,  # noqa: F401
     _create_process_pool_executor,  # noqa: F401
-    _ensure_metrics_wal_mode,  # noqa: F401
     _flush_metric_write_batch,
     _initialize_metric_read_schema,
     _metric_worker_count,  # noqa: F401

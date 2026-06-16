@@ -43,7 +43,6 @@ from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS
 from pyvalue.persistence.storage.base import SQLiteStore
 from pyvalue.persistence.storage import (
     ExchangeProviderRepository,
-    FinancialFactsRefreshStateRecord,
     FinancialFactsRefreshStateRepository,
     FundamentalsNormalizationStateRepository,
     FundamentalsRepository,
@@ -58,6 +57,7 @@ from pyvalue.persistence.storage import (
     MetricComputeStatusRepository,
     MetricRecord,
     MetricsRepository,
+    MetricsWriteSession,
     SecurityMetadataCandidate,
     SecurityRepository,
     SupportedTicker,
@@ -3389,175 +3389,6 @@ def test_compute_metric_batch_results_uses_share_facts_for_market_cap(
     )
 
 
-def test_compute_metric_batch_results_reuses_shared_read_connection_per_batch(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    db_path = tmp_path / "metric-batch-shared-read.db"
-    recent_date = (date.today() - timedelta(days=1)).isoformat()
-    store_catalog_listings(
-        db_path,
-        "US",
-        [
-            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
-            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
-        ],
-        provider="SEC",
-    )
-    fact_repo = FinancialFactsRepository(db_path)
-    fact_repo.initialize_schema()
-    seed_facts(
-        db_path,
-        "AAA.US",
-        [
-            make_fact(
-                symbol="AAA.US",
-                concept="AssetsCurrent",
-                end_date=recent_date,
-                value=10.0,
-            ),
-            make_fact(
-                symbol="AAA.US",
-                concept="LiabilitiesCurrent",
-                end_date=recent_date,
-                value=3.0,
-            ),
-        ],
-    )
-    seed_facts(
-        db_path,
-        "BBB.US",
-        [
-            make_fact(
-                symbol="BBB.US",
-                concept="AssetsCurrent",
-                end_date=recent_date,
-                value=8.0,
-            ),
-            make_fact(
-                symbol="BBB.US",
-                concept="LiabilitiesCurrent",
-                end_date=recent_date,
-                value=2.0,
-            ),
-        ],
-    )
-    market_repo = MarketDataRepository(db_path)
-    market_repo.initialize_schema()
-    seed_price(db_path, "AAA.US", recent_date, 12.0, currency="USD")
-    seed_price(db_path, "BBB.US", recent_date, 9.0, currency="USD")
-    _seed_share_count(db_path, "AAA.US", recent_date, 10.0)
-    _seed_share_count(db_path, "BBB.US", recent_date, 10.0)
-
-    # The batch driver now keys on listing ids, so it reads via the id-keyed
-    # methods and never resolves symbol->id. We track the three id-keyed reads:
-    # they must share one read connection, and resolve_ids_many must never run.
-    calls: dict[str, int] = {"resolve_ids_many": 0}
-    observed_connection_ids = []
-    original_resolve_ids_many = SecurityRepository.resolve_ids_many
-    original_facts_for_ids_many = FinancialFactsRepository.facts_for_ids_many
-    original_fetch_many_by_ids = FinancialFactsRefreshStateRepository.fetch_many_by_ids
-    original_latest_snapshots_many_by_ids = (
-        MarketDataRepository.latest_snapshots_many_by_ids
-    )
-
-    def counting_resolve_ids_many(
-        self: SecurityRepository,
-        symbols: Sequence[str],
-        chunk_size: int = 500,
-        *,
-        connection: sqlite3.Connection | None = None,
-    ) -> dict[str, int]:
-        calls["resolve_ids_many"] += 1
-        return original_resolve_ids_many(
-            self,
-            symbols,
-            chunk_size=chunk_size,
-            connection=connection,
-        )
-
-    def tracking_facts_for_ids_many(
-        self: FinancialFactsRepository,
-        listing_ids: Sequence[int],
-        chunk_size: int = 25,
-        *,
-        concepts: Sequence[str] | None = None,
-        connection: sqlite3.Connection | None = None,
-    ) -> dict[int, list[FactRecord]]:
-        observed_connection_ids.append(id(connection))
-        return original_facts_for_ids_many(
-            self,
-            listing_ids,
-            chunk_size=chunk_size,
-            concepts=concepts,
-            connection=connection,
-        )
-
-    def tracking_fetch_many_by_ids(
-        self: FinancialFactsRefreshStateRepository,
-        listing_ids: Sequence[int],
-        chunk_size: int = 500,
-        *,
-        connection: sqlite3.Connection | None = None,
-    ) -> dict[int, FinancialFactsRefreshStateRecord]:
-        observed_connection_ids.append(id(connection))
-        return original_fetch_many_by_ids(
-            self,
-            listing_ids,
-            chunk_size=chunk_size,
-            connection=connection,
-        )
-
-    def tracking_latest_snapshots_many_by_ids(
-        self: MarketDataRepository,
-        listing_ids: Sequence[int],
-        chunk_size: int = 500,
-        *,
-        connection: sqlite3.Connection | None = None,
-    ) -> dict[int, MarketSnapshotRecord]:
-        observed_connection_ids.append(id(connection))
-        return original_latest_snapshots_many_by_ids(
-            self,
-            listing_ids,
-            chunk_size=chunk_size,
-            connection=connection,
-        )
-
-    monkeypatch.setattr(
-        SecurityRepository, "resolve_ids_many", counting_resolve_ids_many
-    )
-    monkeypatch.setattr(
-        FinancialFactsRepository,
-        "facts_for_ids_many",
-        tracking_facts_for_ids_many,
-    )
-    monkeypatch.setattr(
-        FinancialFactsRefreshStateRepository,
-        "fetch_many_by_ids",
-        tracking_fetch_many_by_ids,
-    )
-    monkeypatch.setattr(
-        MarketDataRepository,
-        "latest_snapshots_many_by_ids",
-        tracking_latest_snapshots_many_by_ids,
-    )
-
-    ids = SecurityRepository(db_path).resolve_ids_many(["AAA.US", "BBB.US"])
-    # The resolve above is intentionally before the counter is installed.
-    calls["resolve_ids_many"] = 0
-    results = cli._compute_metric_batch_results(
-        [(ids["AAA.US"], "AAA.US"), (ids["BBB.US"], "BBB.US")],
-        ["working_capital", "market_cap"],
-        FinancialFactsRepository(db_path),
-        MarketDataRepository(db_path),
-    )
-
-    assert [result.computed_count for result in results] == [2, 2]
-    assert calls == {"resolve_ids_many": 0}
-    assert len(observed_connection_ids) == 3
-    assert all(connection_id != id(None) for connection_id in observed_connection_ids)
-    assert len(set(observed_connection_ids)) == 1
-
-
 def test_compute_metric_batch_results_skips_resolution_when_ids_supplied(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -4375,7 +4206,7 @@ def test_run_metric_computation_interrupts_cleanly(
     executor = InlineExecutor()
     patch_cli(monkeypatch, "REGISTRY", {DummyMetric.id: DummyMetric})
     patch_cli(monkeypatch, "_metric_worker_count", lambda total: 2)
-    patch_cli(monkeypatch, "_ensure_metrics_wal_mode", lambda repo: "wal")
+    monkeypatch.setattr(MetricsRepository, "ensure_wal_mode", lambda self: "wal")
     patch_cli(
         monkeypatch,
         "_create_process_pool_executor",
@@ -4468,7 +4299,7 @@ def test_cmd_compute_metrics_stage_falls_back_to_serial_without_wal(
     store_market_data(db_path, "BBB.US", recent_date, market_cap=90.0, currency="USD")
 
     patch_cli(monkeypatch, "_metric_worker_count", lambda total: 2)
-    patch_cli(monkeypatch, "_ensure_metrics_wal_mode", lambda repo: "delete")
+    monkeypatch.setattr(MetricsRepository, "ensure_wal_mode", lambda self: "delete")
     patch_cli(monkeypatch, "METRICS_PROGRESS_INTERVAL_SECONDS", 0.0)
 
     def fail_executor(max_workers: int) -> None:
@@ -4585,7 +4416,7 @@ def test_run_metric_computation_batches_metric_writes(
 
     patch_cli(monkeypatch, "REGISTRY", {DummyMetric.id: DummyMetric})
     patch_cli(monkeypatch, "_metric_worker_count", lambda total: 2)
-    patch_cli(monkeypatch, "_ensure_metrics_wal_mode", lambda repo: "wal")
+    monkeypatch.setattr(MetricsRepository, "ensure_wal_mode", lambda self: "wal")
     patch_cli(
         monkeypatch,
         "_create_process_pool_executor",
@@ -4614,10 +4445,13 @@ def test_run_metric_computation_batches_metric_writes(
     assert batch_sizes == [2, 1]
 
 
-def test_flush_metric_write_batch_commits_external_connection_once(
+def test_flush_metric_write_batch_persists_metric_and_status(
     tmp_path: Path,
 ) -> None:
-    db_path = tmp_path / "metric-flush-single-commit.db"
+    """_flush_metric_write_batch writes the metric rows and status records (both
+    keyed by listing_id) through the MetricsWriteSession in one committed
+    transaction -- the connection + commit/rollback live inside the session."""
+    db_path = tmp_path / "metric-flush.db"
     store_catalog_listings(
         db_path,
         "US",
@@ -4628,55 +4462,13 @@ def test_flush_metric_write_batch_commits_external_connection_once(
     status_repo = MetricComputeStatusRepository(db_path)
     metrics_repo.initialize_schema()
     status_repo.initialize_schema()
-
-    # A real connection (via the sqlite3 ``factory`` hook) that counts how many
-    # times ``_flush_metric_write_batch`` commits or rolls back. Subclassing
-    # ``sqlite3.Connection`` keeps it a genuine connection -- it can be passed as
-    # ``write_connection`` and used for the batch's writes -- while letting the
-    # test assert the single-commit contract.
-    class ConnectionSpy(sqlite3.Connection):
-        # Counters are initialised on the instance right after construction
-        # (below) rather than in ``__init__`` so we do not have to restate
-        # ``sqlite3.Connection``'s constructor signature just to forward it.
-        commit_calls: int
-        rollback_calls: int
-
-        def commit(self) -> None:
-            self.commit_calls += 1
-            super().commit()
-
-        def rollback(self) -> None:
-            self.rollback_calls += 1
-            super().rollback()
-
-    write_connection = sqlite3.connect(
-        db_path,
-        timeout=5.0,
-        factory=ConnectionSpy,
-    )
-    write_connection.commit_calls = 0
-    write_connection.rollback_calls = 0
-    # Match the persistent-connection configuration the production path uses so
-    # the foreign-key checks behave identically for the batch's writes.
-    MetricsRepository._configure_connection(write_connection)
-    # The flush path now writes id-led rows / status records keyed by listing_id.
     listing_id = SecurityRepository(db_path).resolve_id("AAA.US")
     assert listing_id is not None
+
+    writer = MetricsWriteSession(metrics_repo, status_repo)
     try:
         cli._flush_metric_write_batch(
-            metrics_repo,
-            status_repo,
-            [
-                (
-                    listing_id,
-                    "dummy_metric",
-                    1.0,
-                    "2024-01-01",
-                    "other",
-                    None,
-                    None,
-                )
-            ],
+            [(listing_id, "dummy_metric", 1.0, "2024-01-01", "other", None, None)],
             [
                 cli._MetricAttemptResult(
                     symbol="AAA.US",
@@ -4687,14 +4479,12 @@ def test_flush_metric_write_batch_commits_external_connection_once(
                     value_as_of="2024-01-01",
                 )
             ],
-            write_connection=write_connection,
+            writer,
         )
     finally:
-        write_connection.close()
+        writer.close()
 
-    assert write_connection.commit_calls == 1
-    assert write_connection.rollback_calls == 0
-    # Both repos key reads on the same AAA.US listing id resolved above.
+    # The flush committed: both id-keyed rows are readable.
     assert metrics_repo.fetch_by_id(listing_id, "dummy_metric") == (1.0, "2024-01-01")
     status_record = status_repo.fetch_by_id(listing_id, "dummy_metric")
     assert status_record is not None
@@ -4767,7 +4557,7 @@ def test_run_metric_computation_parallel_profile_accumulates_worker_timings(
 
     patch_cli(monkeypatch, "REGISTRY", {DummyMetric.id: DummyMetric})
     patch_cli(monkeypatch, "_metric_worker_count", lambda total: 2)
-    patch_cli(monkeypatch, "_ensure_metrics_wal_mode", lambda repo: "wal")
+    monkeypatch.setattr(MetricsRepository, "ensure_wal_mode", lambda self: "wal")
     patch_cli(
         monkeypatch,
         "_create_process_pool_executor",

@@ -15,7 +15,6 @@ from functools import lru_cache
 import logging
 import os
 import re
-import sqlite3
 import time
 from collections import Counter
 from pathlib import Path
@@ -56,6 +55,7 @@ from pyvalue.persistence.storage import (
     MarketSnapshotRecord,
     MetricComputeStatusRepository,
     MetricsRepository,
+    MetricsWriteSession,
 )
 
 from ._common import (
@@ -139,7 +139,6 @@ def _prefetch_metric_facts_for_ids(
     metric_ids: Sequence[str],
     *,
     chunk_size: int,
-    connection: Optional[sqlite3.Connection] = None,
 ) -> Dict[int, List[FactRecord]]:
     """Bulk-load only the facts required by the requested metrics, keyed by id.
 
@@ -160,7 +159,6 @@ def _prefetch_metric_facts_for_ids(
         listing_ids,
         concepts=required_concepts or None,
         chunk_size=chunk_size,
-        connection=connection,
     )
 
 
@@ -222,36 +220,19 @@ def _initialize_metric_read_schema(
         MarketDataRepository(db_path).initialize_schema()
 
 
-def _ensure_metrics_wal_mode(metrics_repo: MetricsRepository) -> str:
-    """Best-effort switch to WAL so metric workers can read during parent writes."""
-
-    try:
-        return metrics_repo.enable_wal_mode()
-    except sqlite3.OperationalError as exc:
-        LOGGER.warning(
-            "Could not enable WAL mode for metric computation on %s: %s",
-            metrics_repo.db_path,
-            exc,
-        )
-        try:
-            return metrics_repo.current_journal_mode()
-        except sqlite3.OperationalError:
-            return "unknown"
-
-
 def _flush_metric_write_batch(
-    metrics_repo: MetricsRepository,
-    status_repo: MetricComputeStatusRepository,
     pending_rows: List[IdKeyedStoredMetricRow],
     pending_attempts: List[_MetricAttemptResult],
+    writer: MetricsWriteSession,
     profile_state: Optional["_MetricComputationProfile"] = None,
-    write_connection: Optional[sqlite3.Connection] = None,
 ) -> None:
     """Persist one buffered metric batch by natural ``listing_id`` identity.
 
     Rows are id-led (``IdKeyedStoredMetricRow``) and the status records carry
-    their ``listing_id``, so the writers select on the id the scope already
-    resolved -- no symbol->id resolution happens here.
+    their ``listing_id``, so the writer selects on the id the scope already
+    resolved -- no symbol->id resolution happens here. The persistent connection
+    and the metrics+status transaction live inside ``MetricsWriteSession``; this
+    only times the flush for the profiler.
     """
 
     if not pending_rows and not pending_attempts:
@@ -259,46 +240,14 @@ def _flush_metric_write_batch(
     status_rows = _metric_status_rows_from_attempts(pending_attempts)
     row_count = len(pending_rows)
 
-    def _persist_with_external_connection() -> None:
-        assert write_connection is not None
-        try:
-            if pending_rows:
-                metrics_repo.upsert_many_by_id(
-                    pending_rows,
-                    connection=write_connection,
-                    commit=False,
-                )
-            if status_rows:
-                status_repo.upsert_many_by_id(
-                    status_rows,
-                    connection=write_connection,
-                    commit=False,
-                )
-            write_connection.commit()
-        except Exception:
-            write_connection.rollback()
-            raise
-
     if profile_state is not None and profile_state.enabled:
         flush_start = time.perf_counter()
-        if write_connection is not None:
-            _persist_with_external_connection()
-        else:
-            if pending_rows:
-                metrics_repo.upsert_many_by_id(pending_rows)
-            if status_rows:
-                status_repo.upsert_many_by_id(status_rows)
+        writer.flush(pending_rows, status_rows)
         profile_state.write_seconds += time.perf_counter() - flush_start
         profile_state.write_flush_count += 1
         profile_state.write_row_count += row_count
     else:
-        if write_connection is not None:
-            _persist_with_external_connection()
-        else:
-            if pending_rows:
-                metrics_repo.upsert_many_by_id(pending_rows)
-            if status_rows:
-                status_repo.upsert_many_by_id(status_rows)
+        writer.flush(pending_rows, status_rows)
     pending_rows.clear()
     pending_attempts.clear()
 
@@ -684,35 +633,32 @@ def _compute_metric_batch_results(
             if listing_id in selected_id_set
         }
     needs_market_snapshot_load = uses_market_data and preloaded_snapshots_by_id is None
-    needs_shared_read_connection = uses_financial_facts or needs_market_snapshot_load
-    if needs_shared_read_connection:
+    needs_read_prefetch = uses_financial_facts or needs_market_snapshot_load
+    if needs_read_prefetch:
         read_start = time.perf_counter() if profile_enabled else 0.0
-        with fact_repo._connect() as read_connection:
-            if uses_financial_facts:
-                facts_by_id = _prefetch_metric_facts_for_ids(
-                    fact_repo,
-                    selected_ids,
-                    known_metric_ids,
-                    chunk_size=METRICS_COMPUTE_BATCH_SIZE,
-                    connection=read_connection,
-                )
-                if not facts_refresh_rows:
-                    facts_refresh_rows = (
-                        _SchemaReadyFinancialFactsRefreshStateRepository(
-                            fact_repo.db_path
-                        ).fetch_many_by_ids(
-                            selected_ids,
-                            chunk_size=METRICS_COMPUTE_BATCH_SIZE,
-                            connection=read_connection,
-                        )
-                    )
-            if needs_market_snapshot_load:
-                assert market_repo is not None
-                snapshots_by_id = market_repo.latest_snapshots_many_by_ids(
+        # Each prefetch opens its own short-lived connection inside the repo --
+        # the compute phase is CPU-bound per symbol, so a few connection opens per
+        # batch are negligible and the CLI never holds a sqlite connection.
+        if uses_financial_facts:
+            facts_by_id = _prefetch_metric_facts_for_ids(
+                fact_repo,
+                selected_ids,
+                known_metric_ids,
+                chunk_size=METRICS_COMPUTE_BATCH_SIZE,
+            )
+            if not facts_refresh_rows:
+                facts_refresh_rows = _SchemaReadyFinancialFactsRefreshStateRepository(
+                    fact_repo.db_path
+                ).fetch_many_by_ids(
                     selected_ids,
                     chunk_size=METRICS_COMPUTE_BATCH_SIZE,
-                    connection=read_connection,
                 )
+        if needs_market_snapshot_load:
+            assert market_repo is not None
+            snapshots_by_id = market_repo.latest_snapshots_many_by_ids(
+                selected_ids,
+                chunk_size=METRICS_COMPUTE_BATCH_SIZE,
+            )
         if profile_enabled:
             assert profile_state is not None
             profile_state.read_seconds += time.perf_counter() - read_start
@@ -884,14 +830,14 @@ def _run_metric_computation(
     base_metrics_repo = MetricsRepository(db_path)
     base_metrics_repo.initialize_schema()
     _initialize_metric_read_schema(db_path, include_market_data)
-    journal_mode = _ensure_metrics_wal_mode(base_metrics_repo)
+    journal_mode = base_metrics_repo.ensure_wal_mode()
     metrics_repo = _SchemaReadyMetricsRepository(db_path)
     status_repo = _SchemaReadyMetricComputeStatusRepository(db_path)
-    # One persistent writer connection drives every flush in this run, so
-    # pragma setup happens once and the SQLite page cache stays warm across
-    # the ~tens of flushes a large universe produces. Close it on every exit
-    # path via the outer try/finally below.
-    write_connection: sqlite3.Connection = metrics_repo.open_persistent_connection()
+    # One persistent writer session drives every flush in this run, so pragma
+    # setup happens once and the SQLite page cache stays warm across the ~tens of
+    # flushes a large universe produces. The session owns the connection +
+    # per-flush transaction; close it on every exit path below.
+    writer = MetricsWriteSession(metrics_repo, status_repo)
 
     print(
         f"Computing metrics for {total_symbols} symbols ({len(metric_ids)} metrics each)"
@@ -927,12 +873,10 @@ def _run_metric_computation(
         ):
             return
         _flush_metric_write_batch(
-            metrics_repo,
-            status_repo,
             pending_rows,
             pending_attempts,
+            writer,
             profile_state,
-            write_connection=write_connection,
         )
         buffered_symbols = 0
         last_flush_at = time.monotonic()
@@ -949,12 +893,10 @@ def _run_metric_computation(
             ):
                 return
         _flush_metric_write_batch(
-            metrics_repo,
-            status_repo,
             pending_rows,
             pending_attempts,
+            writer,
             profile_state,
-            write_connection=write_connection,
         )
         buffered_symbols = 0
         last_flush_at = time.monotonic()
@@ -1017,7 +959,7 @@ def _run_metric_computation(
                 flushers=[
                     lambda: flush_pending(force=True),
                     lambda: maybe_report_progress(force=True),
-                    write_connection.close,
+                    writer.close,
                 ],
             )
         flush_pending(force=True)
@@ -1027,7 +969,7 @@ def _run_metric_computation(
         if profile_state.enabled:
             profile_state.total_seconds = time.perf_counter() - run_start_at
             _print_metric_computation_profile(profile_state)
-        write_connection.close()
+        writer.close()
         return 0
 
     executor = _create_process_pool_executor(workers)
@@ -1173,7 +1115,7 @@ def _run_metric_computation(
             flushers=[
                 lambda: flush_pending(force=True),
                 lambda: maybe_report_progress(force=True),
-                write_connection.close,
+                writer.close,
             ],
         )
     finally:
@@ -1187,7 +1129,7 @@ def _run_metric_computation(
     if profile_state.enabled:
         profile_state.total_seconds = time.perf_counter() - run_start_at
         _print_metric_computation_profile(profile_state)
-    write_connection.close()
+    writer.close()
     return 0
 
 

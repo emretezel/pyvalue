@@ -593,3 +593,65 @@ class MarketDataRepository(SQLiteStore):
             with self._connect() as conn:
                 _query(conn)
         return snapshots
+
+
+class MetricsWriteSession:
+    """Persistent-connection writer for a compute-metrics run.
+
+    Owns one long-lived connection so pragma setup happens once and the SQLite
+    page cache stays warm across the ~tens of per-batch flushes a large universe
+    produces. Each :meth:`flush` writes the metric rows and the status rows in one
+    transaction (rolling back on error). The caller orchestrates through this
+    object and never holds the sqlite connection itself -- connection lifecycle and
+    transaction control stay inside the persistence package.
+
+    The two repositories are injected (the compute path passes schema-ready
+    wrappers whose ``initialize_schema`` is a no-op after the first call, so the
+    persistent connection is not re-pragma'd per flush).
+    """
+
+    def __init__(
+        self,
+        metrics_repo: MetricsRepository,
+        status_repo: MetricComputeStatusRepository,
+    ) -> None:
+        self._metrics = metrics_repo
+        self._status = status_repo
+        self._connection = metrics_repo.open_persistent_connection()
+
+    def flush(
+        self,
+        metric_rows: Sequence[IdKeyedStoredMetricRow],
+        status_rows: Sequence[MetricComputeStatusRecord],
+    ) -> None:
+        """Write one buffered batch (metrics + status) in a single transaction."""
+        if not metric_rows and not status_rows:
+            return
+        try:
+            if metric_rows:
+                self._metrics.upsert_many_by_id(
+                    metric_rows, connection=self._connection, commit=False
+                )
+            if status_rows:
+                self._status.upsert_many_by_id(
+                    status_rows, connection=self._connection, commit=False
+                )
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
+
+    def close(self) -> None:
+        """Close the persistent connection (idempotent across exit paths)."""
+        self._connection.close()
+
+    def __enter__(self) -> "MetricsWriteSession":
+        return self
+
+    def __exit__(
+        self,
+        exc_type: Optional[type],
+        exc_value: Optional[BaseException],
+        traceback: Optional[object],
+    ) -> None:
+        self.close()

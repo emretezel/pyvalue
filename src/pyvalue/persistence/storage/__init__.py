@@ -75,6 +75,7 @@ from .metrics_market import (
     MarketDataRepository,
     MetricComputeStatusRepository,
     MetricsRepository,
+    MetricsWriteSession,
 )
 
 # Backwards-compatible aliases (verbatim from the original module tail). These
@@ -118,6 +119,7 @@ __all__ = [
     "MetricComputeStatusRepository",
     "MetricRecord",
     "MetricsRepository",
+    "MetricsWriteSession",
     "canonical_json_dumps",
     "fundamentals_payload_hash",
 ]
