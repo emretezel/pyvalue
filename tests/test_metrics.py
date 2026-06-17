@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import seed_exchange, seed_facts, seed_price
+from conftest import resolve_listing_id, seed_exchange, seed_facts, seed_price
 from pyvalue.currency import MetricUnitKind
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.marketdata.base import PriceData
@@ -477,7 +477,6 @@ def test_market_cap_money_uses_latest_price(tmp_path: Path) -> None:
     from pyvalue.metrics.utils import market_cap_money
     from pyvalue.persistence.storage import (
         FinancialFactsRepository,
-        SecurityRepository,
         SupportedTickerRepository,
     )
 
@@ -514,7 +513,7 @@ def test_market_cap_money_uses_latest_price(tmp_path: Path) -> None:
     # Unlike the in-memory fakes, this exercises the real repos, which key on the
     # listing_id assigned by the catalog -- so resolve the actual id rather than
     # the LISTING_ID placeholder.
-    aaa_id = SecurityRepository(db_path).ensure_from_symbol("AAA.US").security_id
+    aaa_id = resolve_listing_id(db_path, "AAA.US")
     cap = market_cap_money(
         aaa_id,
         repo=facts,
@@ -548,7 +547,7 @@ def test_market_cap_money_uses_latest_price(tmp_path: Path) -> None:
         ],
     )
     seed_price(db_path, "BBB.US", "2026-01-31", 10.0, currency="USD")
-    bbb_id = SecurityRepository(db_path).ensure_from_symbol("BBB.US").security_id
+    bbb_id = resolve_listing_id(db_path, "BBB.US")
     assert (
         market_cap_money(
             bbb_id,

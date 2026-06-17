@@ -318,59 +318,6 @@ class SecurityRepository(SQLiteStore):
             )
         return self._load_by_exchange_and_symbol(conn, exchange_id, ticker)
 
-    def ensure(
-        self,
-        canonical_ticker: str,
-        canonical_exchange_code: str,
-        entity_name: Optional[str] = None,
-        description: Optional[str] = None,
-        sector: Optional[str] = None,
-        industry: Optional[str] = None,
-        *,
-        currency: Optional[str] = None,
-        connection: Optional[sqlite3.Connection] = None,
-    ) -> Security:
-        if connection is None:
-            self.initialize_schema()
-        ticker = _normalize_required_text(canonical_ticker, "canonical_ticker").upper()
-        exchange_code = _normalize_required_text(
-            canonical_exchange_code, "canonical_exchange_code"
-        ).upper()
-        canonical_symbol = f"{ticker}.{exchange_code}"
-        entity_name = _normalize_optional_text(entity_name)
-        description = _normalize_optional_text(description)
-        sector = _normalize_optional_text(sector)
-        industry = _normalize_optional_text(industry)
-        # Listings carry a currency from the provider payload only -- there is
-        # no fallback or derivation. Creating a listing without one is refused.
-        listing_currency = raw_currency_code(currency)
-
-        def _ensure(conn: sqlite3.Connection) -> Optional[Security]:
-            # ``ensure`` resolves (and, if absent, creates) the exchange by code.
-            # Callers that already hold a resolved exchange_id and must NOT write
-            # the exchange catalog use ``ensure_with_exchange_id`` instead.
-            exchange = self._exchange_repo().ensure(exchange_code, connection=conn)
-            return self._ensure_listing_for_exchange_id(
-                conn,
-                exchange.exchange_id,
-                ticker,
-                canonical_symbol,
-                entity_name,
-                description,
-                sector,
-                industry,
-                listing_currency,
-            )
-
-        if connection is not None:
-            loaded = _ensure(connection)
-        else:
-            with self._connect() as conn:
-                loaded = _ensure(conn)
-        if loaded is None:  # pragma: no cover - defensive
-            raise RuntimeError(f"Failed to create or load security {canonical_symbol}")
-        return loaded
-
     def ensure_with_exchange_id(
         self,
         exchange_id: int,
@@ -412,35 +359,6 @@ class SecurityRepository(SQLiteStore):
         if loaded is None:  # pragma: no cover - defensive
             raise RuntimeError(f"Failed to create or load security {canonical_symbol}")
         return loaded
-
-    def ensure_from_symbol(
-        self,
-        symbol: str,
-        exchange_code: Optional[str] = None,
-        entity_name: Optional[str] = None,
-        description: Optional[str] = None,
-        sector: Optional[str] = None,
-        industry: Optional[str] = None,
-        *,
-        currency: Optional[str] = None,
-        connection: Optional[sqlite3.Connection] = None,
-    ) -> Security:
-        ticker, suffix = _normalize_symbol_base(symbol)
-        canonical_exchange = (exchange_code or suffix or "").strip().upper()
-        if not canonical_exchange:
-            raise ValueError(
-                f"Could not infer canonical exchange code for security symbol {symbol}"
-            )
-        return self.ensure(
-            ticker,
-            canonical_exchange,
-            entity_name=entity_name,
-            description=description,
-            sector=sector,
-            industry=industry,
-            currency=currency,
-            connection=connection,
-        )
 
     def fetch(self, security_id: int) -> Optional[Security]:
         self.initialize_schema()

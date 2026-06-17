@@ -1272,10 +1272,9 @@ def test_replace_fact_rows_writes_by_id_without_resolving_symbol(
 ) -> None:
     """``replace_fact_rows`` is keyed purely by ``listing_id``.
 
-    It never resolves a symbol and never falls through to the create-or-update
-    ``ensure_from_symbol`` path, so the write touches only ``financial_facts`` for
-    the given id. The monkeypatched ``ensure_from_symbol`` would raise if the
-    writer ever reached it.
+    It never resolves a symbol to an id, so the write touches only
+    ``financial_facts`` for the given id. The monkeypatched ``resolve_ids_many``
+    (the sole symbol->id resolver) would raise if the writer ever reached it.
     """
     db_path = tmp_path / "replace-known-id.db"
     repo = FinancialFactsRepository(db_path)
@@ -1289,7 +1288,7 @@ def test_replace_fact_rows_writes_by_id_without_resolving_symbol(
             "replace_fact_rows must not resolve/create a listing from a symbol"
         )
 
-    monkeypatch.setattr(repo._security_repo(), "ensure_from_symbol", _boom)
+    monkeypatch.setattr(SecurityRepository, "resolve_ids_many", _boom)
 
     stored = repo.replace_fact_rows(
         security_id,
@@ -2969,22 +2968,22 @@ def test_security_repository_upsert_metadata_many_updates_existing_rows(
     repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
     _seed_listing(db_path, "BBB.US")
-    aaa = repo.ensure_from_symbol("AAA.US", entity_name="AAA Corp")
-    bbb = repo.ensure_from_symbol(
-        "BBB.US",
-        entity_name="BBB Corp",
-        description="BBB description",
+    seed_security_metadata(db_path, "AAA.US", entity_name="AAA Corp")
+    seed_security_metadata(
+        db_path, "BBB.US", entity_name="BBB Corp", description="BBB description"
     )
+    aaa_id = resolve_listing_id(db_path, "AAA.US")
+    bbb_id = resolve_listing_id(db_path, "BBB.US")
 
     updated = repo.upsert_metadata_many(
         [
             SecurityMetadataUpdate(
-                security_id=aaa.security_id,
+                security_id=aaa_id,
                 sector="Technology",
                 industry="Software",
             ),
             SecurityMetadataUpdate(
-                security_id=bbb.security_id,
+                security_id=bbb_id,
                 description="BBB refreshed",
                 sector="Industrials",
             ),
@@ -3038,7 +3037,6 @@ def test_fundamentals_repository_fetch_metadata_candidates_extracts_fields(
     )
 
     security_repo = SecurityRepository(db_path)
-    security_repo.ensure_from_symbol("CCC.US")
     security_ids = security_repo.resolve_ids_many(["AAA.US", "BBB.US", "CCC.US"])
     rows = repo.fetch_metadata_candidates(list(security_ids.values()))
 
@@ -3506,9 +3504,21 @@ def test_id_keyed_metric_and_market_reads(tmp_path: Path) -> None:
 
     db_path = tmp_path / "id-reads.db"
     seed_exchange(db_path, "LSE", currency="GBP")
-    security_repo = SecurityRepository(db_path)
-    aaa = security_repo.ensure("AAA", "LSE", currency="GBP")
-    bbb = security_repo.ensure("BBB", "LSE", currency="GBP")
+    seed_supported_listings(
+        db_path,
+        "EODHD",
+        "LSE",
+        [
+            Listing(
+                symbol="AAA.LSE", security_name="AAA", exchange="LSE", currency="GBP"
+            ),
+            Listing(
+                symbol="BBB.LSE", security_name="BBB", exchange="LSE", currency="GBP"
+            ),
+        ],
+    )
+    aaa_id = resolve_listing_id(db_path, "AAA.LSE")
+    bbb_id = resolve_listing_id(db_path, "BBB.LSE")
 
     metrics_repo = MetricsRepository(db_path)
     seed_metric(
@@ -3537,7 +3547,7 @@ def test_id_keyed_metric_and_market_reads(tmp_path: Path) -> None:
     market_repo.upsert_prices(
         [
             MarketDataUpdate(
-                security_id=aaa.security_id,
+                security_id=aaa_id,
                 symbol="AAA.LSE",
                 as_of="2025-01-02",
                 price=10.0,
@@ -3545,7 +3555,7 @@ def test_id_keyed_metric_and_market_reads(tmp_path: Path) -> None:
                 currency="GBP",
             ),
             MarketDataUpdate(
-                security_id=aaa.security_id,
+                security_id=aaa_id,
                 symbol="AAA.LSE",
                 as_of="2025-01-03",
                 price=11.0,
@@ -3553,7 +3563,7 @@ def test_id_keyed_metric_and_market_reads(tmp_path: Path) -> None:
                 currency="GBP",
             ),
             MarketDataUpdate(
-                security_id=bbb.security_id,
+                security_id=bbb_id,
                 symbol="BBB.LSE",
                 as_of="2025-01-02",
                 price=20.0,
@@ -3564,32 +3574,30 @@ def test_id_keyed_metric_and_market_reads(tmp_path: Path) -> None:
     )
 
     # Single metric read: the seeded value is returned; unknown metric is None.
-    aaa_market_cap = metrics_repo.fetch_by_id(aaa.security_id, "market_cap")
+    aaa_market_cap = metrics_repo.fetch_by_id(aaa_id, "market_cap")
     assert aaa_market_cap is not None
     assert aaa_market_cap.value == 1000.0
-    assert metrics_repo.fetch_by_id(aaa.security_id, "missing") is None
+    assert metrics_repo.fetch_by_id(aaa_id, "missing") is None
 
     # Bulk metric read: the id-keyed map carries the seeded records, keyed by id.
     by_id = metrics_repo.fetch_many_by_ids(
-        [aaa.security_id, bbb.security_id], ["market_cap", "current_ratio"]
+        [aaa_id, bbb_id], ["market_cap", "current_ratio"]
     )
-    assert by_id[aaa.security_id]["market_cap"].value == 1000.0
-    assert by_id[aaa.security_id]["current_ratio"].value == 1.5
-    assert by_id[bbb.security_id]["market_cap"].value == 2000.0
+    assert by_id[aaa_id]["market_cap"].value == 1000.0
+    assert by_id[aaa_id]["current_ratio"].value == 1.5
+    assert by_id[bbb_id]["market_cap"].value == 2000.0
 
     # Latest snapshot: picks the most-recent as_of and rebuilds the canonical
     # symbol from ``listing ⋈ exchange``.
-    rec_by_id = market_repo.latest_snapshot_record_by_id(aaa.security_id)
+    rec_by_id = market_repo.latest_snapshot_record_by_id(aaa_id)
     assert rec_by_id is not None
     assert rec_by_id.as_of == "2025-01-03"
     assert rec_by_id.symbol == "AAA.LSE"
-    assert rec_by_id.security_id == aaa.security_id
+    assert rec_by_id.security_id == aaa_id
 
-    snaps_by_id = market_repo.latest_snapshots_many_by_ids(
-        [aaa.security_id, bbb.security_id]
-    )
-    assert snaps_by_id[aaa.security_id].as_of == "2025-01-03"
-    assert snaps_by_id[bbb.security_id].as_of == "2025-01-02"
+    snaps_by_id = market_repo.latest_snapshots_many_by_ids([aaa_id, bbb_id])
+    assert snaps_by_id[aaa_id].as_of == "2025-01-03"
+    assert snaps_by_id[bbb_id].as_of == "2025-01-02"
 
     # Listing currency: the id-keyed lookup collapses the GBX subunit to GBP.
-    assert market_repo.ticker_currency_by_id(aaa.security_id) == "GBP"
+    assert market_repo.ticker_currency_by_id(aaa_id) == "GBP"
