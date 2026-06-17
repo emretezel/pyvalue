@@ -45,13 +45,13 @@ _ALLOWED_SYMBOL_METHODS = frozenset(
         "_ensure_provider_listing",
         "_ensure",
         "_load_by_exchange_and_symbol",
-        # CLI scope resolution + ingest/market-data eligibility selection
+        # CLI scope resolution (canonical, listing grain) + the two provider-scope
+        # predicate helpers: catalog-view reads (list_for_provider /
+        # count_for_provider) and the ingest/market-data eligibility scans.
         "_listing_pair_filter",
         "list_supported_listings",
-        "list_for_provider",
-        "count_for_provider",
-        "list_eligible_for_market_data",
-        "_apply_scope_filters",
+        "_apply_catalog_scope",
+        "_apply_provider_listing_scope",
         # reconcile (listing-status) + reporting grouped by exchange
         "_select_rows",
         "progress_by_exchange",

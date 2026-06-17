@@ -43,6 +43,64 @@ from .fetch_state import (
 from .metrics_market import MarketDataRepository
 
 
+def _apply_catalog_scope(
+    query: List[str],
+    params: List[object],
+    exchange_codes: Optional[Sequence[str]],
+    provider_symbols: Optional[Sequence[str]],
+) -> None:
+    """Append the provider-scope WHERE clauses to a ``provider_listing_catalog`` read.
+
+    The single site that narrows a catalog-view query (``list_for_provider`` /
+    ``count_for_provider``) to the operator's ``--exchange-codes`` / ``--symbols``
+    selection -- the scope-resolution boundary for the canonical catalog reads.
+    Each filter is an optional IN-list over the already-normalised codes/symbols;
+    an empty selection adds no clause (the whole provider is in scope). The query
+    must alias the catalog view ``catalog``.
+    """
+    normalized_codes = _normalized_codes(exchange_codes)
+    if normalized_codes:
+        placeholders = ", ".join("?" for _ in normalized_codes)
+        query.append(f"AND catalog.provider_exchange_code IN ({placeholders})")
+        params.extend(normalized_codes)
+    normalized_symbols = _normalized_codes(provider_symbols)
+    if normalized_symbols:
+        placeholders = ", ".join("?" for _ in normalized_symbols)
+        query.append(f"AND catalog.provider_symbol IN ({placeholders})")
+        params.extend(normalized_symbols)
+
+
+def _apply_provider_listing_scope(
+    query: List[str],
+    params: List[object],
+    exchange_codes: Optional[Sequence[str]],
+    provider_symbols: Optional[Sequence[str]],
+    *,
+    symbol_expr: str,
+) -> None:
+    """Append the provider-scope WHERE clauses to a base-table eligibility query.
+
+    The eligibility scans (``list_eligible_for_fundamentals`` /
+    ``list_eligible_for_market_data``) read straight from ``provider_listing`` /
+    ``provider_exchange`` rather than the catalog view, so the exchange filter
+    keys on ``px.provider_exchange_code`` and the symbol filter on the caller's
+    reconstructed qualified-symbol expression (``symbol_expr``, which varies by
+    provider). This is the ingest/market-data scope-resolution boundary: the
+    operator's selection narrows the streaming freshness scan server-side, paired
+    with the query's own ``ORDER BY`` / ``LIMIT``.
+    """
+    normalized_codes = _normalized_codes(exchange_codes)
+    if normalized_codes:
+        placeholders = ", ".join("?" for _ in normalized_codes)
+        query.append(f"AND px.provider_exchange_code IN ({placeholders})")
+        params.extend(normalized_codes)
+    normalized_symbols = _normalized_codes(provider_symbols)
+    if normalized_symbols:
+        placeholders = ", ".join("?" for _ in normalized_symbols)
+        query.append(f"AND {symbol_expr} IN ({placeholders})")
+        params.extend(normalized_symbols)
+
+
 class SupportedTickerRepository(SQLiteStore):
     """Store provider-supported ticker catalogs by exchange."""
 
@@ -327,16 +385,7 @@ class SupportedTickerRepository(SQLiteStore):
             f"FROM {catalog_view} catalog",
         ]
         query.append("WHERE catalog.provider = ?")
-        normalized_codes = _normalized_codes(exchange_codes)
-        if normalized_codes:
-            placeholders = ", ".join("?" for _ in normalized_codes)
-            query.append(f"AND catalog.provider_exchange_code IN ({placeholders})")
-            params.extend(normalized_codes)
-        normalized_symbols = _normalized_codes(provider_symbols)
-        if normalized_symbols:
-            placeholders = ", ".join("?" for _ in normalized_symbols)
-            query.append(f"AND catalog.provider_symbol IN ({placeholders})")
-            params.extend(normalized_symbols)
+        _apply_catalog_scope(query, params, exchange_codes, provider_symbols)
         query.append("ORDER BY catalog.provider_exchange_code, catalog.provider_symbol")
         with self._connect() as conn:
             rows = conn.execute(" ".join(query), params).fetchall()
@@ -367,16 +416,7 @@ class SupportedTickerRepository(SQLiteStore):
             f"FROM {catalog_view} catalog",
             "WHERE catalog.provider = ?",
         ]
-        normalized_codes = _normalized_codes(exchange_codes)
-        if normalized_codes:
-            placeholders = ", ".join("?" for _ in normalized_codes)
-            query.append(f"AND catalog.provider_exchange_code IN ({placeholders})")
-            params.extend(normalized_codes)
-        normalized_symbols = _normalized_codes(provider_symbols)
-        if normalized_symbols:
-            placeholders = ", ".join("?" for _ in normalized_symbols)
-            query.append(f"AND catalog.provider_symbol IN ({placeholders})")
-            params.extend(normalized_symbols)
+        _apply_catalog_scope(query, params, exchange_codes, provider_symbols)
         with self._connect() as conn:
             row = conn.execute(" ".join(query), params).fetchone()
         return int(row[0]) if row is not None else 0
@@ -438,8 +478,6 @@ class SupportedTickerRepository(SQLiteStore):
         self.initialize_schema()
         provider_norm = provider.strip().upper()
         now = datetime.now(timezone.utc)
-        normalized_codes = _normalized_codes(exchange_codes)
-        normalized_symbols = _normalized_codes(provider_symbols)
 
         # Resolve the provider once so the eligibility queries can filter on
         # provider_exchange.provider_id and read straight from the base tables
@@ -488,14 +526,13 @@ class SupportedTickerRepository(SQLiteStore):
             )
 
         def _apply_scope_filters(query: List[str], params: List[object]) -> None:
-            if normalized_codes:
-                placeholders = ", ".join("?" for _ in normalized_codes)
-                query.append(f"AND px.provider_exchange_code IN ({placeholders})")
-                params.extend(normalized_codes)
-            if normalized_symbols:
-                placeholders = ", ".join("?" for _ in normalized_symbols)
-                query.append(f"AND {qualified_symbol} IN ({placeholders})")
-                params.extend(normalized_symbols)
+            _apply_provider_listing_scope(
+                query,
+                params,
+                exchange_codes,
+                provider_symbols,
+                symbol_expr=qualified_symbol,
+            )
 
         def _fetch_missing(limit: Optional[int]) -> List[SupportedTicker]:
             params: List[object] = [provider_id]
@@ -734,8 +771,6 @@ class SupportedTickerRepository(SQLiteStore):
             return []
         now = datetime.now(timezone.utc)
         cutoff = (now.date() - timedelta(days=max_age_days)).isoformat()
-        normalized_codes = _normalized_codes(exchange_codes)
-        normalized_symbols = _normalized_codes(provider_symbols)
 
         # Rebuild the catalog's qualified provider_symbol from base columns so
         # scope filtering and ordering stay identical to the view. SEC symbols
@@ -771,14 +806,13 @@ class SupportedTickerRepository(SQLiteStore):
             # primary_listing_status lives on the listing, so the secondary
             # exclusion needs no view (matches primary_provider_listing_catalog).
             inner.append("AND l.primary_listing_status != 'secondary'")
-        if normalized_codes:
-            placeholders = ", ".join("?" for _ in normalized_codes)
-            inner.append(f"AND px.provider_exchange_code IN ({placeholders})")
-            params.extend(normalized_codes)
-        if normalized_symbols:
-            placeholders = ", ".join("?" for _ in normalized_symbols)
-            inner.append(f"AND {qualified_symbol} IN ({placeholders})")
-            params.extend(normalized_symbols)
+        _apply_provider_listing_scope(
+            inner,
+            params,
+            exchange_codes,
+            provider_symbols,
+            symbol_expr=qualified_symbol,
+        )
 
         outer = [
             "WITH eligible AS MATERIALIZED (",
