@@ -35,6 +35,8 @@ from types import TracebackType
 from typing import Literal, NoReturn, Optional, Type
 
 from conftest import (
+    fundamentals_payload_exists,
+    resolve_listing_id,
     seed_exchange,
     seed_facts,
     seed_metric,
@@ -227,7 +229,6 @@ def test_fundamentals_repository_classifies_and_purges_secondary_listings(
         fetched_at="2025-01-02T00:00:00+00:00",
     )
 
-    FundamentalsRepository(db_path)
     seed_raw_fundamentals(
         db_path,
         "EODHD",
@@ -368,7 +369,6 @@ def test_migration_078_backfills_unknown_status_and_purges_secondary(
     by_symbol = {row.symbol: row for row in ticker_repo.list_for_provider("EODHD")}
     aaa_lse_id = by_symbol["AAA.LSE"].security_id
 
-    FundamentalsRepository(db_path)
     seed_raw_fundamentals(
         db_path,
         "EODHD",
@@ -781,15 +781,13 @@ def test_fundamentals_upsert_never_overwrites_listing_currency(tmp_path: Path) -
         [{"Code": "AAA", "Name": "AAA plc", "Type": "Common Stock", "Currency": "GBP"}],
     )
 
-    fund_repo = FundamentalsRepository(db_path)
-    fund_repo.initialize_schema()
     # The payload reports a *different* currency; fundamentals ingest must not
     # let it leak into the listing.
     seed_raw_fundamentals(
         db_path, "EODHD", "AAA.LSE", {"General": {"CurrencyCode": "USD"}}
     )
 
-    assert fund_repo.fetch("EODHD", "AAA.LSE") is not None
+    assert fundamentals_payload_exists(db_path, "EODHD", "AAA.LSE")
     with sqlite3.connect(db_path) as conn:
         currency = conn.execute(
             """
@@ -1009,7 +1007,7 @@ def test_financial_facts_repository_replace_fact_rows_replaces_by_id(
     repo = FinancialFactsRepository(db_path)
     repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
-    listing_id = repo._security_repo().resolve_id("AAA.US")
+    listing_id = resolve_listing_id(db_path, "AAA.US")
     assert listing_id is not None
 
     inserted = seed_facts(
@@ -1084,7 +1082,7 @@ def test_financial_facts_repository_replace_fact_rows_updates_refresh_state(
     )
 
     refresh_repo = FinancialFactsRefreshStateRepository(db_path)
-    id_aaa = SecurityRepository(db_path).resolve_id("AAA.US")
+    id_aaa = resolve_listing_id(db_path, "AAA.US")
     assert id_aaa is not None
     refresh_record = refresh_repo.fetch_by_id(id_aaa)
 
@@ -1283,7 +1281,7 @@ def test_replace_fact_rows_writes_by_id_without_resolving_symbol(
     repo = FinancialFactsRepository(db_path)
     repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
-    security_id = repo._security_repo().resolve_id("AAA.US")
+    security_id = resolve_listing_id(db_path, "AAA.US")
     assert security_id is not None
 
     def _boom(*args: object, **kwargs: object) -> NoReturn:
@@ -1314,7 +1312,7 @@ def test_financial_facts_repository_replace_fact_rows_replaces_listing_slice(
     repo = FinancialFactsRepository(db_path)
     repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
-    listing_id = repo._security_repo().resolve_id("AAA.US")
+    listing_id = resolve_listing_id(db_path, "AAA.US")
     assert listing_id is not None
 
     repo.replace_fact_rows(
@@ -2127,9 +2125,9 @@ def test_financial_facts_repository_latest_share_counts_many_matches_single_look
         ],
     )
 
-    security_repo = repo._security_repo()
-    id_aaa = security_repo.resolve_id("AAA.US")
-    id_bbb = security_repo.resolve_id("BBB.US")
+    repo._security_repo()
+    id_aaa = resolve_listing_id(db_path, "AAA.US")
+    id_bbb = resolve_listing_id(db_path, "BBB.US")
     assert id_aaa is not None
     assert id_bbb is not None
 
@@ -2207,9 +2205,9 @@ def test_financial_facts_repository_facts_for_ids_many_groups_by_listing(
         ],
     )
 
-    security_repo = repo._security_repo()
-    id_aaa = security_repo.resolve_id("AAA.US")
-    id_bbb = security_repo.resolve_id("BBB.US")
+    repo._security_repo()
+    id_aaa = resolve_listing_id(db_path, "AAA.US")
+    id_bbb = resolve_listing_id(db_path, "BBB.US")
     assert id_aaa is not None
     assert id_bbb is not None
 
@@ -2268,7 +2266,7 @@ def test_financial_facts_repository_facts_for_ids_many_concept_filter(
         ],
     )
 
-    id_aaa = repo._security_repo().resolve_id("AAA.US")
+    id_aaa = resolve_listing_id(db_path, "AAA.US")
     assert id_aaa is not None
 
     filtered = repo.facts_for_ids_many(
@@ -2301,8 +2299,8 @@ def test_metrics_repository_upsert_many_by_id_with_external_connection(
     _seed_listing(db_path, "AAA.US")
     _seed_listing(db_path, "BBB.US")
     sec_repo = repo._security_repo()
-    id_aaa = sec_repo.resolve_id("AAA.US")
-    id_bbb = sec_repo.resolve_id("BBB.US")
+    id_aaa = resolve_listing_id(db_path, "AAA.US")
+    id_bbb = resolve_listing_id(db_path, "BBB.US")
     assert id_aaa is not None
     assert id_bbb is not None
 
@@ -2456,7 +2454,7 @@ def test_latest_share_counts_many_prefers_best_same_date_share_fact(
         ],
     )
 
-    id_aaa = repo._security_repo().resolve_id("AAA.US")
+    id_aaa = resolve_listing_id(db_path, "AAA.US")
     assert id_aaa is not None
     counts = repo.latest_share_counts_many_by_ids([id_aaa])
 
@@ -2497,9 +2495,9 @@ def test_metrics_repository_upsert_many_by_id_persists_and_overwrites(
     repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
     _seed_listing(db_path, "BBB.US")
-    security_repo = repo._security_repo()
-    id_aaa = security_repo.resolve_id("AAA.US")
-    id_bbb = security_repo.resolve_id("BBB.US")
+    repo._security_repo()
+    id_aaa = resolve_listing_id(db_path, "AAA.US")
+    id_bbb = resolve_listing_id(db_path, "BBB.US")
     assert id_aaa is not None
     assert id_bbb is not None
 
@@ -2528,7 +2526,7 @@ def test_metrics_repository_upsert_many_by_id_retries_transient_locked_error(
     _seed_listing(db_path, "AAA.US")
     # Resolve the id up front, before _connect is patched, so the write is a pure
     # id-keyed write and the read-back never re-resolves a symbol.
-    id_aaa = repo._security_repo().resolve_id("AAA.US")
+    id_aaa = resolve_listing_id(db_path, "AAA.US")
     assert id_aaa is not None
     monkeypatch.setattr(repo, "initialize_schema", lambda: None)
 
@@ -2585,10 +2583,10 @@ def test_metrics_repository_fetch_many_by_ids_returns_requested_metrics(
     seed_metric(db_path, "BBB.US", "metric_one", 3.0, "2024-01-03")
     seed_metric(db_path, "CCC.US", "metric_three", 4.0, "2024-01-04")
 
-    security_repo = repo._security_repo()
-    id_aaa = security_repo.resolve_id("AAA.US")
-    id_bbb = security_repo.resolve_id("BBB.US")
-    id_ccc = security_repo.resolve_id("CCC.US")
+    repo._security_repo()
+    id_aaa = resolve_listing_id(db_path, "AAA.US")
+    id_bbb = resolve_listing_id(db_path, "BBB.US")
+    id_ccc = resolve_listing_id(db_path, "CCC.US")
     assert id_aaa is not None
     assert id_bbb is not None
     assert id_ccc is not None
@@ -2619,9 +2617,9 @@ def test_metric_compute_status_repository_upsert_and_fetch_many(tmp_path: Path) 
     repo.initialize_schema()
     _seed_listing(db_path, "AAA.US")
     _seed_listing(db_path, "BBB.US")
-    security_repo = repo._security_repo()
-    id_aaa = security_repo.resolve_id("AAA.US")
-    id_bbb = security_repo.resolve_id("BBB.US")
+    repo._security_repo()
+    id_aaa = resolve_listing_id(db_path, "AAA.US")
+    id_bbb = resolve_listing_id(db_path, "BBB.US")
     assert id_aaa is not None
     assert id_bbb is not None
 
@@ -2691,7 +2689,7 @@ def test_metrics_repository_persists_unit_metadata(tmp_path: Path) -> None:
         unit_label="pct",
     )
 
-    id_aaa = repo._security_repo().resolve_id("AAA.US")
+    id_aaa = resolve_listing_id(db_path, "AAA.US")
     assert id_aaa is not None
     market_cap = repo.fetch_by_id(id_aaa, "market_cap")
     earnings_yield = repo.fetch_by_id(id_aaa, "earnings_yield")
@@ -2734,9 +2732,9 @@ def test_metrics_repository_normalizes_configured_subunit_currencies(
         currency="ILA",
     )
 
-    security_repo = repo._security_repo()
-    id_aaa = security_repo.resolve_id("AAA.JSE")
-    id_bbb = security_repo.resolve_id("BBB.TA")
+    repo._security_repo()
+    id_aaa = resolve_listing_id(db_path, "AAA.JSE")
+    id_bbb = resolve_listing_id(db_path, "BBB.TA")
     assert id_aaa is not None
     assert id_bbb is not None
     market_cap = repo.fetch_by_id(id_aaa, "market_cap")
@@ -2928,7 +2926,7 @@ def test_security_repository_upserts_sector_and_industry_metadata(
         industry="Software",
     )
 
-    security = repo.fetch_by_symbol("AAA.US")
+    security = repo.fetch(resolve_listing_id(db_path, "AAA.US"))
 
     assert security is not None
     assert security.entity_name == "AAA Corp"
@@ -2950,8 +2948,8 @@ def test_security_repository_fetch_many_by_id_returns_security_records(
         db_path, "BBB.US", sector="Industrials", industry="Machinery"
     )
 
-    id_aaa = security_repo.resolve_id("AAA.US")
-    id_bbb = security_repo.resolve_id("BBB.US")
+    id_aaa = resolve_listing_id(db_path, "AAA.US")
+    id_bbb = resolve_listing_id(db_path, "BBB.US")
     assert id_aaa is not None
     assert id_bbb is not None
 
@@ -2994,8 +2992,8 @@ def test_security_repository_upsert_metadata_many_updates_existing_rows(
     )
 
     assert updated == 2
-    aaa_row = repo.fetch_by_symbol("AAA.US")
-    bbb_row = repo.fetch_by_symbol("BBB.US")
+    aaa_row = repo.fetch(resolve_listing_id(db_path, "AAA.US"))
+    bbb_row = repo.fetch(resolve_listing_id(db_path, "BBB.US"))
     assert aaa_row is not None
     assert aaa_row.entity_name == "AAA Corp"
     assert aaa_row.sector == "Technology"
@@ -3100,36 +3098,6 @@ def test_fetch_metadata_candidates_reads_raw_payload_not_canonical_issuer(
     assert candidate.description == "Raw description"
     assert candidate.sector == "Technology"
     assert candidate.industry == "Software"
-
-
-def test_fundamentals_repository_fetch_many_returns_payloads_by_symbol(
-    tmp_path: Path,
-) -> None:
-    db_path = tmp_path / "fundamentals-fetch-many.db"
-    repo = FundamentalsRepository(db_path)
-    repo.initialize_schema()
-    _seed_listing(db_path, "AAA.US")
-    _seed_listing(db_path, "BBB.US")
-    seed_raw_fundamentals(
-        db_path,
-        "EODHD",
-        "AAA.US",
-        {"General": {"Name": "AAA", "Sector": "Technology"}},
-        exchange="US",
-    )
-    seed_raw_fundamentals(
-        db_path,
-        "EODHD",
-        "BBB.US",
-        {"General": {"Name": "BBB", "Sector": "Industrials"}},
-        exchange="US",
-    )
-
-    rows = repo.fetch_many("EODHD", ["AAA.US", "BBB.US", "CCC.US"])
-
-    assert rows["AAA.US"]["General"]["Sector"] == "Technology"
-    assert rows["BBB.US"]["General"]["Sector"] == "Industrials"
-    assert "CCC.US" not in rows
 
 
 def test_replace_for_exchange_requires_seeded_exchange(tmp_path: Path) -> None:
@@ -3237,7 +3205,6 @@ def test_replace_for_exchange_cascade_purges_both_fetch_states(tmp_path: Path) -
 
     # Give AAA and BBB downstream rows. upsert clears fundamentals fetch-state, so
     # mark the fundamentals failure AFTER upserting the raw payloads.
-    FundamentalsRepository(db_path)
     seed_raw_fundamentals(db_path, "EODHD", "AAA.US", {"General": {}}, exchange="US")
     seed_raw_fundamentals(db_path, "EODHD", "BBB.US", {"General": {}}, exchange="US")
     storage.FundamentalsFetchStateRepository(db_path).mark_failure(

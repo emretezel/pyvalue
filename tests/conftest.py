@@ -86,11 +86,12 @@ def seed_supported_listings(
     )
 
 
-def _resolve_seeded_listing_id(db_path: Path, symbol: str) -> int:
-    """Resolve a canonical ``symbol`` to its listing id for the id-keyed seeders.
+def resolve_listing_id(db_path: Path, symbol: str) -> int:
+    """Resolve a canonical ``symbol`` to its listing id for id-keyed tests.
 
-    Production storage exposes only id-keyed writers, so these test seeders must
-    resolve the symbol to its ``listing_id`` first. The listing must already be
+    Production storage exposes only id-keyed writers and a single batch
+    symbol->id resolver (``resolve_ids_many``), so these tests resolve the symbol
+    to its ``listing_id`` through that same resolver. The listing must already be
     catalogued (e.g. via ``seed_exchange`` + a supported-ticker write); a missing
     listing is a test-setup bug, surfaced here as an ``AssertionError`` rather
     than silently minting a row.
@@ -98,7 +99,8 @@ def _resolve_seeded_listing_id(db_path: Path, symbol: str) -> int:
     # Imported lazily so the src/ path insert above has already run.
     from pyvalue.persistence.storage import SecurityRepository
 
-    listing_id = SecurityRepository(db_path).resolve_id(symbol)
+    resolved = SecurityRepository(db_path).resolve_ids_many([symbol])
+    listing_id = next(iter(resolved.values()), None)
     assert listing_id is not None, (
         f"listing {symbol!r} must be seeded before id-keyed test writes "
         "(seed the catalog first, e.g. via seed_exchange + a supported-ticker write)"
@@ -124,7 +126,7 @@ def seed_metric(
     # Imported lazily so the src/ path insert above has already run.
     from pyvalue.persistence.storage import MetricsRepository
 
-    listing_id = _resolve_seeded_listing_id(db_path, symbol)
+    listing_id = resolve_listing_id(db_path, symbol)
     MetricsRepository(db_path).upsert_many_by_id(
         [(listing_id, metric_id, value, as_of, unit_kind, currency, unit_label)]
     )
@@ -147,7 +149,7 @@ def seed_metric_status(
     id_records = []
     for record in records:
         assert record.symbol is not None, "seed_metric_status requires record.symbol"
-        listing_id = _resolve_seeded_listing_id(db_path, record.symbol)
+        listing_id = resolve_listing_id(db_path, record.symbol)
         id_records.append(replace(record, listing_id=listing_id, symbol=None))
     MetricComputeStatusRepository(db_path).upsert_many_by_id(id_records)
 
@@ -169,7 +171,7 @@ def seed_price(
     from pyvalue.marketdata import MarketDataUpdate
     from pyvalue.persistence.storage import MarketDataRepository
 
-    listing_id = _resolve_seeded_listing_id(db_path, symbol)
+    listing_id = resolve_listing_id(db_path, symbol)
     MarketDataRepository(db_path).upsert_prices(
         [
             MarketDataUpdate(
@@ -182,6 +184,55 @@ def seed_price(
             )
         ]
     )
+
+
+def fundamentals_payload_exists(db_path: Path, provider: str, symbol: str) -> bool:
+    """True if a raw fundamentals payload is stored for ``symbol``.
+
+    A test-side existence probe: it resolves the symbol through the
+    ``provider_listing_catalog`` view (provider_symbol -> provider_listing_id) and
+    checks ``fundamentals_raw`` (PK'd on provider_listing_id). Production reads
+    payloads only by id; tests assert by symbol. The provider_listing FK cascade
+    means a removed listing leaves no orphaned payload, so a missing catalog row
+    and a missing payload coincide -- matching the deleted symbol-keyed fetch.
+    """
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM fundamentals_raw fr
+            JOIN provider_listing_catalog c
+              ON c.provider_listing_id = fr.provider_listing_id
+            WHERE c.provider = ? AND c.provider_symbol = ?
+            """,
+            (provider.strip().upper(), symbol.strip().upper()),
+        ).fetchone()
+    return row is not None
+
+
+def normalization_state_exists(db_path: Path, provider: str, symbol: str) -> bool:
+    """True if a fundamentals normalization-state row exists for ``symbol``.
+
+    The norm-state counterpart of :func:`fundamentals_payload_exists`; see its
+    docstring for why this test-side probe resolves by symbol through the catalog
+    view while production keys ``fundamentals_normalization_state`` by id.
+    """
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM fundamentals_normalization_state s
+            JOIN provider_listing_catalog c
+              ON c.provider_listing_id = s.provider_listing_id
+            WHERE c.provider = ? AND c.provider_symbol = ?
+            """,
+            (provider.strip().upper(), symbol.strip().upper()),
+        ).fetchone()
+    return row is not None
 
 
 def seed_facts(
@@ -199,7 +250,7 @@ def seed_facts(
     # Imported lazily so the src/ path insert above has already run.
     from pyvalue.persistence.storage import FinancialFactsRepository
 
-    listing_id = _resolve_seeded_listing_id(db_path, symbol)
+    listing_id = resolve_listing_id(db_path, symbol)
     return FinancialFactsRepository(db_path).replace_fact_rows(
         listing_id,
         [
@@ -233,7 +284,7 @@ def seed_security_metadata(
     # Imported lazily so the src/ path insert above has already run.
     from pyvalue.persistence.storage import SecurityMetadataUpdate, SecurityRepository
 
-    listing_id = _resolve_seeded_listing_id(db_path, symbol)
+    listing_id = resolve_listing_id(db_path, symbol)
     SecurityRepository(db_path).upsert_metadata_many(
         [
             SecurityMetadataUpdate(
@@ -252,7 +303,7 @@ def _resolve_seeded_provider_listing_id(
 ) -> int:
     """Resolve a catalogued ``(provider, symbol)`` to its ``provider_listing_id``.
 
-    The provider-edge counterpart of :func:`_resolve_seeded_listing_id`: the
+    The provider-edge counterpart of :func:`resolve_listing_id`: the
     id-keyed normalization-state writer keys on ``provider_listing_id``, so this
     resolves it via the ``provider_listing`` natural key (provider code + bare
     provider symbol + provider exchange code). Splits on the *last* dot so multi-dot
@@ -342,7 +393,7 @@ def seed_raw_fundamentals(
     )
 
     provider_listing_id = _resolve_seeded_provider_listing_id(db_path, provider, symbol)
-    listing_id = _resolve_seeded_listing_id(db_path, symbol)
+    listing_id = resolve_listing_id(db_path, symbol)
     data = canonical_json_dumps(payload)
     FundamentalsRepository(db_path).upsert_many(
         provider.strip().upper(),

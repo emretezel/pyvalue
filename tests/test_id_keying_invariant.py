@@ -58,11 +58,8 @@ _ALLOWED_SYMBOL_METHODS = frozenset(
         "recent_failures",
         "market_data_progress_by_exchange",
         "recent_market_data_failures",
-        # dead-in-production symbol accessors (deleted in Phase 3; allowlisted
-        # until then so this guard can land first).
+        # provider/catalog identity reads keyed by provider or exchange code.
         "fetch",
-        "fetch_by_symbol",
-        "delete_symbols",  # FundamentalsNormalizationStateRepository (P3-3)
     }
 )
 

@@ -26,7 +26,7 @@ from pyvalue.persistence.storage import (
 )
 from pyvalue.persistence.storage.fx import _PAIR_COVERAGE_SQL
 
-from conftest import seed_exchange, seed_metric
+from conftest import resolve_listing_id, seed_exchange, seed_metric
 
 
 def _ranking_definition(metric: RankingMetric) -> ScreenDefinition:
@@ -87,8 +87,8 @@ def test_rank_screen_passers_skips_mixed_currency_metric_without_ranking_currenc
         currency="EUR",
     )
     security_repo = SecurityRepository(db_path)
-    aaa = security_repo.resolve_id("AAA.US")
-    bbb = security_repo.resolve_id("BBB.US")
+    aaa = resolve_listing_id(db_path, "AAA.US")
+    bbb = resolve_listing_id(db_path, "BBB.US")
     assert aaa is not None and bbb is not None
 
     definition = _ranking_definition(
@@ -150,8 +150,8 @@ def test_rank_screen_passers_normalizes_mixed_currency_metric_with_ranking_curre
         )
     )
     security_repo = SecurityRepository(db_path)
-    aaa = security_repo.resolve_id("AAA.US")
-    bbb = security_repo.resolve_id("BBB.US")
+    aaa = resolve_listing_id(db_path, "AAA.US")
+    bbb = resolve_listing_id(db_path, "BBB.US")
     assert aaa is not None and bbb is not None
 
     definition = _ranking_definition(

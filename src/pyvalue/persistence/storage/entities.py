@@ -442,26 +442,6 @@ class SecurityRepository(SQLiteStore):
             connection=connection,
         )
 
-    def fetch_by_symbol(self, symbol: str) -> Optional[Security]:
-        self.initialize_schema()
-        normalized = symbol.strip().upper()
-        cached = self._by_symbol.get(normalized)
-        if cached is not None:
-            return cached
-        ticker, exchange = _normalize_symbol_base(symbol)
-        if exchange is None:
-            return None
-        with self._connect() as conn:
-            row = conn.execute(
-                self._select_identity_sql("l.symbol = ? AND e.exchange_code = ?"),
-                (ticker, exchange),
-            ).fetchone()
-        if row is None:
-            return None
-        security = Security(*row)
-        self._remember(security)
-        return security
-
     def fetch(self, security_id: int) -> Optional[Security]:
         self.initialize_schema()
         cached = self._by_id.get(security_id)
@@ -477,10 +457,6 @@ class SecurityRepository(SQLiteStore):
         security = Security(*row)
         self._remember(security)
         return security
-
-    def resolve_id(self, symbol: str) -> Optional[int]:
-        security = self.fetch_by_symbol(symbol)
-        return security.security_id if security else None
 
     def resolve_ids_many(
         self,
@@ -864,20 +840,6 @@ class ExchangeRepository(SQLiteStore):
         with self._connect() as conn:
             return _ensure(conn)
 
-    def fetch(self, exchange_code: str) -> Optional[Exchange]:
-        self.initialize_schema()
-        code_norm = exchange_code.strip().upper()
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT exchange_id, exchange_code, created_at, updated_at
-                FROM "exchange"
-                WHERE exchange_code = ?
-                """,
-                (code_norm,),
-            ).fetchone()
-        return Exchange(*row) if row else None
-
     def list_all(self) -> List[Exchange]:
         self.initialize_schema()
         with self._connect() as conn:
@@ -1125,9 +1087,3 @@ class ExchangeProviderRepository(SQLiteStore):
         with self._connect() as conn:
             rows = conn.execute(" ".join(query), params).fetchall()
         return [ExchangeProvider(*row) for row in rows]
-
-    def resolve_canonical_code(self, provider: str, provider_exchange_code: str) -> str:
-        record = self.fetch(provider, provider_exchange_code)
-        if record is not None:
-            return record.exchange_code
-        return provider_exchange_code.strip().upper()

@@ -22,8 +22,6 @@ from .base import (
     SQLiteStore,
     _batched,
     _normalize_optional_text,
-    _normalize_provider_identity,
-    _normalized_codes,
     _utc_now_iso,
 )
 from .records import (
@@ -128,72 +126,6 @@ class FundamentalsRepository(SQLiteStore):
         # reconcile route secondary reclassifications through this one method.
         secondary_updates = listing_repo.purge_downstream_for_secondary(listing_updates)
         return len(secondary_updates)
-
-    def fetch(self, provider: str, symbol: str) -> Optional[Dict[str, Any]]:
-        self.initialize_schema()
-        provider_symbol, _, _ = self._resolve_security(provider, symbol, None)
-        if provider_symbol is None:
-            return None
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT fr.data
-                FROM fundamentals_raw fr
-                JOIN provider_listing_catalog catalog
-                  ON catalog.provider_listing_id = fr.provider_listing_id
-                WHERE catalog.provider = ? AND catalog.provider_symbol = ?
-                """,
-                (provider.strip().upper(), provider_symbol),
-            ).fetchone()
-        if row is None:
-            return None
-        return json.loads(row[0])
-
-    def fetch_many(
-        self,
-        provider: str,
-        symbols: Sequence[str],
-        chunk_size: int = 500,
-    ) -> Dict[str, Dict[str, Any]]:
-        self.initialize_schema()
-        normalized = _normalized_codes(symbols)
-        if not normalized:
-            return {}
-        security_ids_by_symbol = self._security_repo().resolve_ids_many(
-            normalized,
-            chunk_size=chunk_size,
-        )
-        results: Dict[str, Dict[str, Any]] = {}
-        provider_norm = provider.strip().upper()
-        with self._connect() as conn:
-            for chunk in _batched(list(security_ids_by_symbol.items()), chunk_size):
-                rows = [
-                    (symbol, security_id)
-                    for symbol, security_id in chunk
-                    if security_id
-                ]
-                if not rows:
-                    continue
-                placeholders = ", ".join("?" for _ in rows)
-                query_params: List[object] = [
-                    provider_norm,
-                    *[security_id for _, security_id in rows],
-                ]
-                query_rows = conn.execute(
-                    f"""
-                    SELECT s.canonical_symbol, fr.data
-                    FROM fundamentals_raw fr
-                    JOIN provider_listing_catalog catalog
-                      ON catalog.provider_listing_id = fr.provider_listing_id
-                    JOIN securities s ON s.security_id = catalog.security_id
-                    WHERE catalog.provider = ?
-                      AND catalog.security_id IN ({placeholders})
-                    """,
-                    query_params,
-                ).fetchall()
-                for row in query_rows:
-                    results[row["canonical_symbol"]] = json.loads(row["data"])
-        return results
 
     def fetch_metadata_candidates(
         self,
@@ -413,37 +345,6 @@ class FundamentalsRepository(SQLiteStore):
             normalized_at=_normalize_optional_text(row["normalized_at"]),
         )
 
-    def _resolve_security(
-        self,
-        provider: str,
-        symbol: str,
-        exchange: Optional[str],
-    ) -> Tuple[Optional[str], Optional[str], Optional[int]]:
-        # Read-only: ingest never creates catalog rows. Securities/listings are
-        # owned by refresh-supported-tickers (exchanges by
-        # refresh-supported-exchanges); an uncatalogued symbol resolves to a
-        # None security_id and the caller skips it.
-        try:
-            (
-                provider_norm,
-                provider_ticker,
-                provider_exchange_code,
-                provider_symbol,
-            ) = _normalize_provider_identity(provider, symbol, exchange)
-        except ValueError:
-            return None, None, None
-        canonical_exchange = self._exchange_provider_repo().resolve_canonical_code(
-            provider_norm, provider_exchange_code
-        )
-        existing_security = self._security_repo().fetch_by_symbol(
-            f"{provider_ticker}.{canonical_exchange}"
-        )
-        return (
-            provider_symbol,
-            provider_exchange_code,
-            existing_security.security_id if existing_security else None,
-        )
-
 
 class FundamentalsNormalizationStateRepository(SQLiteStore):
     """Track successful normalization watermarks for stored raw fundamentals."""
@@ -459,32 +360,6 @@ class FundamentalsNormalizationStateRepository(SQLiteStore):
         self.initialize_schema()
         with self._connect() as conn:
             conn.execute("DELETE FROM fundamentals_normalization_state")
-
-    def fetch(
-        self, provider: str, symbol: str
-    ) -> Optional[Dict[str, Optional[str] | int]]:
-        self.initialize_schema()
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT
-                    catalog.security_id,
-                    ns.normalized_payload_hash,
-                    ns.normalized_at
-                FROM fundamentals_normalization_state ns
-                JOIN provider_listing_catalog catalog
-                  ON catalog.provider_listing_id = ns.provider_listing_id
-                WHERE catalog.provider = ? AND catalog.provider_symbol = ?
-                """,
-                (provider.strip().upper(), symbol.strip().upper()),
-            ).fetchone()
-        if row is None:
-            return None
-        return {
-            "security_id": int(row["security_id"]),
-            "normalized_payload_hash": row["normalized_payload_hash"],
-            "normalized_at": row["normalized_at"],
-        }
 
     def mark_success_by_id(
         self,
@@ -519,34 +394,3 @@ class FundamentalsNormalizationStateRepository(SQLiteStore):
                     normalized_at or _utc_now_iso(),
                 ),
             )
-
-    def delete_symbols(self, provider: str, symbols: Sequence[str]) -> int:
-        self.initialize_schema()
-        normalized = _normalized_codes(symbols)
-        if not normalized:
-            return 0
-        provider_norm = provider.strip().upper()
-        with self._connect() as conn:
-            provider_listing_ids = []
-            for symbol in normalized:
-                row = conn.execute(
-                    """
-                    SELECT provider_listing_id
-                    FROM provider_listing_catalog
-                    WHERE provider = ? AND provider_symbol = ?
-                    """,
-                    (provider_norm, symbol),
-                ).fetchone()
-                if row is not None:
-                    provider_listing_ids.append(int(row["provider_listing_id"]))
-            if not provider_listing_ids:
-                return 0
-            placeholders = ", ".join("?" for _ in provider_listing_ids)
-            cursor = conn.execute(
-                f"""
-                DELETE FROM fundamentals_normalization_state
-                WHERE provider_listing_id IN ({placeholders})
-                """,
-                provider_listing_ids,
-            )
-        return int(cursor.rowcount or 0)

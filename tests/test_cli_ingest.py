@@ -25,6 +25,9 @@ from pyvalue.cli._common import _PreparedFundamentalsRun
 from pyvalue.cli.ingest import _run_eodhd_fundamentals_ingestion
 from cli_test_helpers import patch_cli
 from conftest import (
+    fundamentals_payload_exists,
+    normalization_state_exists,
+    resolve_listing_id,
     seed_exchange,
     seed_facts,
     seed_metric,
@@ -45,7 +48,6 @@ from pyvalue.persistence.storage.base import SQLiteStore
 from pyvalue.persistence.storage import (
     ExchangeProviderRepository,
     FinancialFactsRefreshStateRepository,
-    FundamentalsNormalizationStateRepository,
     FundamentalsRepository,
     FundamentalsFetchStateRepository,
     FinancialFactsRepository,
@@ -69,22 +71,22 @@ from pyvalue.marketdata import MarketDataUpdate, PriceData
 
 
 def _security_name(db_path: Path, symbol: str) -> Optional[str]:
-    security = SecurityRepository(db_path).fetch_by_symbol(symbol)
+    security = SecurityRepository(db_path).fetch(resolve_listing_id(db_path, symbol))
     return security.entity_name if security is not None else None
 
 
 def _security_description(db_path: Path, symbol: str) -> Optional[str]:
-    security = SecurityRepository(db_path).fetch_by_symbol(symbol)
+    security = SecurityRepository(db_path).fetch(resolve_listing_id(db_path, symbol))
     return security.description if security is not None else None
 
 
 def _security_sector(db_path: Path, symbol: str) -> Optional[str]:
-    security = SecurityRepository(db_path).fetch_by_symbol(symbol)
+    security = SecurityRepository(db_path).fetch(resolve_listing_id(db_path, symbol))
     return security.sector if security is not None else None
 
 
 def _security_industry(db_path: Path, symbol: str) -> Optional[str]:
-    security = SecurityRepository(db_path).fetch_by_symbol(symbol)
+    security = SecurityRepository(db_path).fetch(resolve_listing_id(db_path, symbol))
     return security.industry if security is not None else None
 
 
@@ -308,7 +310,7 @@ def _seed_share_count(db_path: Path, symbol: str, as_of: str, shares: float) -> 
     # The fact readers key on ``listing_id`` now, so resolve the symbol to its
     # listing id to read back the facts already stored for it. An unseeded symbol
     # has no listing (and therefore no facts) -- treat it as an empty carry-over.
-    listing_id = SecurityRepository(db_path).resolve_id(symbol)
+    listing_id = resolve_listing_id(db_path, symbol)
     preserved = (
         [
             record
@@ -1140,8 +1142,6 @@ def test_cmd_refresh_supported_tickers_filters_types_and_cleans_catalog(
     state_repo.mark_failure("EODHD", "OLD.LSE", "stale")
     state_repo.mark_failure("EODHD", "KEEP.LSE", "still-listed")
 
-    fund_repo = FundamentalsRepository(db_path)
-    fund_repo.initialize_schema()
     seed_raw_fundamentals(
         db_path,
         "EODHD",
@@ -1212,7 +1212,7 @@ def test_cmd_refresh_supported_tickers_filters_types_and_cleans_catalog(
 
     assert state_repo.fetch("EODHD", "OLD.LSE") is None
     assert state_repo.fetch("EODHD", "KEEP.LSE") is not None
-    assert fund_repo.fetch("EODHD", "OLD.LSE") is None
+    assert not fundamentals_payload_exists(db_path, "EODHD", "OLD.LSE")
     assert listings_table is None
 
 
@@ -1972,10 +1972,9 @@ def test_cmd_update_market_data_stage_skips_secondary_listings(
     assert fetch_state_row(state_repo, "EODHD", "BBB.LSE")["last_status"] == "ok"
     assert state_repo.fetch("EODHD", "AAA.LSE") is None
     market_repo = MarketDataRepository(db_path)
-    security_repo = SecurityRepository(db_path)
-    id_aaa_us = security_repo.resolve_id("AAA.US")
-    id_bbb_lse = security_repo.resolve_id("BBB.LSE")
-    id_aaa_lse = security_repo.resolve_id("AAA.LSE")
+    id_aaa_us = resolve_listing_id(db_path, "AAA.US")
+    id_bbb_lse = resolve_listing_id(db_path, "BBB.LSE")
+    id_aaa_lse = resolve_listing_id(db_path, "AAA.LSE")
     assert id_aaa_us is not None
     assert id_bbb_lse is not None
     assert id_aaa_lse is not None
@@ -2786,7 +2785,7 @@ def test_compute_metrics_for_symbol_reuses_fact_and_market_cache(
     # The metric layer keys on ``listing_id`` now; resolve the seeded listing's
     # id so the cached repos (constructed with this id) short-circuit the metric's
     # reads to memory -- which is exactly what the call-count assertions verify.
-    listing_id = SecurityRepository(db_path).resolve_id("AAA.US")
+    listing_id = resolve_listing_id(db_path, "AAA.US")
     assert listing_id is not None
 
     fact_calls: dict[str, int] = {"count": 0}
@@ -2960,7 +2959,7 @@ def test_compute_metrics_for_symbol_matches_real_metrics(tmp_path: Path) -> None
 
     # Compute the reference values directly against the real metrics using the
     # same ``listing_id`` the batch path threads, so the two must agree.
-    listing_id = SecurityRepository(db_path).resolve_id("AAA.US")
+    listing_id = resolve_listing_id(db_path, "AAA.US")
     assert listing_id is not None
     metric_ids = ["working_capital", "market_cap", "eps_6y_avg"]
     expected: dict[str, tuple[float, str]] = {}
@@ -3375,7 +3374,7 @@ def test_compute_metric_batch_results_uses_share_facts_for_market_cap(
 
     # The batch driver is keyed by (listing_id, display_symbol) pairs and writes
     # id-led rows; resolve the listing id the scope would have carried.
-    listing_id = SecurityRepository(db_path).resolve_id("AAA.US")
+    listing_id = resolve_listing_id(db_path, "AAA.US")
     assert listing_id is not None
     results = cli._compute_metric_batch_results(
         [(listing_id, "AAA.US")],
@@ -3705,10 +3704,9 @@ def test_cmd_compute_metrics_stage_symbol_scope(
     assert rc == 0
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
-    security_repo = SecurityRepository(db_path)
-    id_aaa = security_repo.resolve_id("AAA.US")
+    id_aaa = resolve_listing_id(db_path, "AAA.US")
     assert id_aaa is not None
-    id_bbb = security_repo.resolve_id("BBB.US")
+    id_bbb = resolve_listing_id(db_path, "BBB.US")
     assert id_bbb is not None
     assert repo.fetch_by_id(id_aaa, "dummy_metric") is None
     assert repo.fetch_by_id(id_bbb, "dummy_metric") == (6.0, "2024-01-01")
@@ -3787,14 +3785,10 @@ def test_cmd_compute_metrics_stage_threads_listing_ids_without_resolving(
     assert calls == {"resolve_ids_many": 0}
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
-    # Resolve ids only after the zero-resolution assertion above. ``resolve_id``
-    # uses ``fetch_by_symbol`` (not the monkeypatched ``resolve_ids_many``), so
-    # these reads do not perturb the counter the test guards.
-    security_repo = SecurityRepository(db_path)
-    id_aaa = security_repo.resolve_id("AAA.US")
-    assert id_aaa is not None
-    id_bbb = security_repo.resolve_id("BBB.US")
-    assert id_bbb is not None
+    # Resolve ids only after the zero-resolution assertion above: these test-side
+    # lookups run after the counter is checked, so they do not affect the guard.
+    id_aaa = resolve_listing_id(db_path, "AAA.US")
+    id_bbb = resolve_listing_id(db_path, "BBB.US")
     assert repo.fetch_by_id(id_aaa, "dummy_metric") == (6.0, "2024-01-01")
     assert repo.fetch_by_id(id_bbb, "dummy_metric") == (6.0, "2024-01-01")
 
@@ -3841,10 +3835,9 @@ def test_cmd_compute_metrics_stage_exchange_scope(
     assert rc == 0
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
-    security_repo = SecurityRepository(db_path)
-    id_aaa = security_repo.resolve_id("AAA.US")
+    id_aaa = resolve_listing_id(db_path, "AAA.US")
     assert id_aaa is not None
-    id_bbb = security_repo.resolve_id("BBB.LSE")
+    id_bbb = resolve_listing_id(db_path, "BBB.LSE")
     assert id_bbb is not None
     assert repo.fetch_by_id(id_aaa, "dummy_metric") is None
     assert repo.fetch_by_id(id_bbb, "dummy_metric") == (1.0, "2024-01-01")
@@ -3895,10 +3888,9 @@ def test_cmd_compute_metrics_stage_all_supported_scope(
     assert rc == 0
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
-    security_repo = SecurityRepository(db_path)
-    id_aaa = security_repo.resolve_id("AAA.US")
+    id_aaa = resolve_listing_id(db_path, "AAA.US")
     assert id_aaa is not None
-    id_bbb = security_repo.resolve_id("BBB.LSE")
+    id_bbb = resolve_listing_id(db_path, "BBB.LSE")
     assert id_bbb is not None
     assert repo.fetch_by_id(id_aaa, "market_cap") == (120.0, "2024-01-01")
     assert repo.fetch_by_id(id_bbb, "market_cap") == (210.0, "2024-01-01")
@@ -4139,10 +4131,9 @@ def test_cmd_compute_metrics_stage_parallel_partial_failure(
     ]
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
-    security_repo = SecurityRepository(db_path)
-    id_aaa = security_repo.resolve_id("AAA.US")
+    id_aaa = resolve_listing_id(db_path, "AAA.US")
     assert id_aaa is not None
-    id_bbb = security_repo.resolve_id("BBB.US")
+    id_bbb = resolve_listing_id(db_path, "BBB.US")
     assert id_bbb is not None
     assert repo.fetch_by_id(id_aaa, "dummy_metric") == (1.0, "2024-01-01")
     assert repo.fetch_by_id(id_bbb, "dummy_metric") is None
@@ -4235,10 +4226,9 @@ def test_run_metric_computation_interrupts_cleanly(
     assert executor.shutdown_calls == [(False, True)]
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
-    security_repo = SecurityRepository(db_path)
-    id_aaa = security_repo.resolve_id("AAA.US")
+    id_aaa = resolve_listing_id(db_path, "AAA.US")
     assert id_aaa is not None
-    id_bbb = security_repo.resolve_id("BBB.US")
+    id_bbb = resolve_listing_id(db_path, "BBB.US")
     assert id_bbb is not None
     assert repo.fetch_by_id(id_aaa, "dummy_metric") == (1.0, "2024-01-01")
     assert repo.fetch_by_id(id_bbb, "dummy_metric") is None
@@ -4328,10 +4318,9 @@ def test_cmd_compute_metrics_stage_falls_back_to_serial_without_wal(
     assert not any(line.startswith("[") for line in output_lines)
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
-    security_repo = SecurityRepository(db_path)
-    id_aaa = security_repo.resolve_id("AAA.US")
+    id_aaa = resolve_listing_id(db_path, "AAA.US")
     assert id_aaa is not None
-    id_bbb = security_repo.resolve_id("BBB.US")
+    id_bbb = resolve_listing_id(db_path, "BBB.US")
     assert id_bbb is not None
     assert repo.fetch_by_id(id_aaa, "working_capital") == (7.0, recent_date)
     assert repo.fetch_by_id(id_bbb, "working_capital") == (6.0, recent_date)
@@ -4463,7 +4452,7 @@ def test_flush_metric_write_batch_persists_metric_and_status(
     status_repo = MetricComputeStatusRepository(db_path)
     metrics_repo.initialize_schema()
     status_repo.initialize_schema()
-    listing_id = SecurityRepository(db_path).resolve_id("AAA.US")
+    listing_id = resolve_listing_id(db_path, "AAA.US")
     assert listing_id is not None
 
     writer = MetricsWriteSession(metrics_repo, status_repo)
@@ -4590,12 +4579,11 @@ def test_run_metric_computation_parallel_profile_accumulates_worker_timings(
     assert "Profile: read=0.75s compute=1.50s" in output
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
-    security_repo = SecurityRepository(db_path)
-    id_aaa = security_repo.resolve_id("AAA.US")
+    id_aaa = resolve_listing_id(db_path, "AAA.US")
     assert id_aaa is not None
-    id_bbb = security_repo.resolve_id("BBB.US")
+    id_bbb = resolve_listing_id(db_path, "BBB.US")
     assert id_bbb is not None
-    id_ccc = security_repo.resolve_id("CCC.US")
+    id_ccc = resolve_listing_id(db_path, "CCC.US")
     assert id_ccc is not None
     assert repo.fetch_by_id(id_aaa, "dummy_metric") == (6.0, "2024-01-01")
     assert repo.fetch_by_id(id_bbb, "dummy_metric") == (6.0, "2024-01-01")
@@ -4710,10 +4698,9 @@ def test_cmd_compute_metrics_stage_parallel_workers_skip_schema_init(
     assert rc == 0
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
-    security_repo = SecurityRepository(db_path)
-    id_aaa = security_repo.resolve_id("AAA.US")
+    id_aaa = resolve_listing_id(db_path, "AAA.US")
     assert id_aaa is not None
-    id_bbb = security_repo.resolve_id("BBB.US")
+    id_bbb = resolve_listing_id(db_path, "BBB.US")
     assert id_bbb is not None
     assert repo.fetch_by_id(id_aaa, "working_capital") == (7.0, recent_date)
     assert repo.fetch_by_id(id_bbb, "working_capital") == (6.0, recent_date)
@@ -4769,10 +4756,9 @@ def test_cmd_compute_metrics_stage_process_pool_smoke(
     assert rc == 0
     repo = MetricsRepository(db_path)
     repo.initialize_schema()
-    security_repo = SecurityRepository(db_path)
-    id_aaa = security_repo.resolve_id("AAA.US")
+    id_aaa = resolve_listing_id(db_path, "AAA.US")
     assert id_aaa is not None
-    id_bbb = security_repo.resolve_id("BBB.US")
+    id_bbb = resolve_listing_id(db_path, "BBB.US")
     assert id_bbb is not None
     assert repo.fetch_by_id(id_aaa, "market_cap") == (120.0, "2024-01-01")
     assert repo.fetch_by_id(id_bbb, "market_cap") == (90.0, "2024-01-01")
@@ -4828,8 +4814,7 @@ def test_cmd_clear_financial_facts_clears_normalization_state(tmp_path: Path) ->
     refresh_state_repo = FinancialFactsRefreshStateRepository(db_path)
     seed_raw_fundamentals(db_path, "SEC", "AAA.US", {"facts": {}})
     seed_normalization_success(db_path, "AAA.US", provider="SEC")
-    security_repo = SecurityRepository(db_path)
-    id_aaa = security_repo.resolve_id("AAA.US")
+    id_aaa = resolve_listing_id(db_path, "AAA.US")
     assert id_aaa is not None
     assert refresh_state_repo.fetch_by_id(id_aaa) is not None
     seed_metric_status(
@@ -5157,9 +5142,8 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_force_skips_freshness_scan(
         output_lines[0]
         == "Force re-normalization requested for 2 EODHD symbols; skipping freshness scan"
     )
-    state_repo = FundamentalsNormalizationStateRepository(db_path)
-    assert state_repo.fetch("EODHD", "AAA.US") is not None
-    assert state_repo.fetch("EODHD", "BBB.US") is not None
+    assert normalization_state_exists(db_path, "EODHD", "AAA.US")
+    assert normalization_state_exists(db_path, "EODHD", "BBB.US")
 
 
 def test_cmd_normalize_eodhd_fundamentals_bulk_suppresses_missing_fx_warnings_on_console(
@@ -5642,46 +5626,6 @@ def test_cmd_refresh_security_metadata_respects_symbol_scope(
     ]
 
 
-def test_cmd_refresh_security_metadata_does_not_use_full_payload_fetch(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    db_path = tmp_path / "refresh-security-metadata-no-fetch-many.db"
-    store_catalog_listings(
-        db_path,
-        "US",
-        [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
-        provider="SEC",
-    )
-    _seed_listing(db_path, "AAA.US", currency="USD", provider="EODHD")
-    fund_repo = FundamentalsRepository(db_path)
-    fund_repo.initialize_schema()
-    seed_raw_fundamentals(
-        db_path,
-        "EODHD",
-        "AAA.US",
-        {"General": {"Sector": "Technology", "Industry": "Software"}},
-        exchange="US",
-    )
-
-    monkeypatch.setattr(
-        FundamentalsRepository,
-        "fetch_many",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("refresh-security-metadata should not call fetch_many")
-        ),
-    )
-
-    rc = cli.cmd_refresh_security_metadata(
-        database=str(db_path),
-        symbols=["AAA.US"],
-        exchange_codes=None,
-        all_supported=False,
-    )
-
-    assert rc == 0
-    assert "Updated metadata for 1 symbols." in capsys.readouterr().out
-
-
 def test_cmd_refresh_security_metadata_carries_scope_listing_ids(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -5742,6 +5686,9 @@ def test_cmd_refresh_security_metadata_carries_scope_listing_ids(
     )
 
     assert rc == 0
+    # The no-re-resolution guard above scopes to the command run; lift it before
+    # the test-side metadata reads, which legitimately resolve symbols to ids.
+    monkeypatch.undo()
     assert _security_sector(db_path, "AAA.US") == "Technology"
     assert _security_sector(db_path, "BBB.US") == "Industrials"
     assert "Updated metadata for 2 symbols." in capsys.readouterr().out
@@ -6143,10 +6090,9 @@ ranking:
 """
     )
 
-    security_repo = SecurityRepository(db_path)
-    aaa = security_repo.resolve_id("AAA.US")
-    bbb = security_repo.resolve_id("BBB.US")
-    ccc = security_repo.resolve_id("CCC.US")
+    aaa = resolve_listing_id(db_path, "AAA.US")
+    bbb = resolve_listing_id(db_path, "BBB.US")
+    ccc = resolve_listing_id(db_path, "CCC.US")
     assert aaa is not None and bbb is not None and ccc is not None
 
     calls = []
@@ -6533,8 +6479,7 @@ def test_cmd_run_screen_stage_stale_success_status_hides_stored_metric_value(
         ],
     )
     refresh_repo = FinancialFactsRefreshStateRepository(db_path)
-    security_repo = SecurityRepository(db_path)
-    id_aaa = security_repo.resolve_id("AAA.US")
+    id_aaa = resolve_listing_id(db_path, "AAA.US")
     assert id_aaa is not None
     initial_refresh = refresh_repo.fetch_by_id(id_aaa)
     assert initial_refresh is not None
@@ -7504,7 +7449,7 @@ criteria:
     assert "- repeat_market: missing=1 symbols, affects=1 criteria" in output
     assert "stored_missing_but_computable_now: 1 (example=AAA.US" in output
     assert fact_calls["count"] == 0
-    listing_id = SecurityRepository(db_path).resolve_id("AAA.US")
+    listing_id = resolve_listing_id(db_path, "AAA.US")
     assert listing_id is not None
     assert facts_many_calls.count == 1
     assert facts_many_calls.listing_ids == [(listing_id,)]

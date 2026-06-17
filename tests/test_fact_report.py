@@ -21,7 +21,12 @@ from pyvalue.persistence.storage import (
 )
 from pyvalue.universe import Listing
 
-from conftest import seed_exchange, seed_facts, seed_supported_listings
+from conftest import (
+    resolve_listing_id,
+    seed_exchange,
+    seed_facts,
+    seed_supported_listings,
+)
 
 
 def _seed_universe(db_path: Path) -> None:
@@ -236,7 +241,7 @@ def test_fact_report_counts_assets_current_from_components(tmp_path: Path) -> No
         ],
     )
 
-    listing_id = SecurityRepository(db_path).resolve_id("AAA.US")
+    listing_id = resolve_listing_id(db_path, "AAA.US")
     assert listing_id is not None
     report = compute_fact_coverage(fact_repo, [listing_id], [WorkingCapitalMetric])
     entry = report[0]
@@ -286,7 +291,7 @@ def test_fact_report_counts_liabilities_current_from_components(tmp_path: Path) 
         ],
     )
 
-    listing_id = SecurityRepository(db_path).resolve_id("AAA.US")
+    listing_id = resolve_listing_id(db_path, "AAA.US")
     assert listing_id is not None
     report = compute_fact_coverage(fact_repo, [listing_id], [WorkingCapitalMetric])
     entry = report[0]

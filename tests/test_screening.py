@@ -19,11 +19,10 @@ from pyvalue.persistence.storage import (
     FXRatesRepository,
     FinancialFactsRepository,
     MetricsRepository,
-    SecurityRepository,
     SupportedTickerRepository,
 )
 
-from conftest import seed_exchange, seed_metric
+from conftest import resolve_listing_id, seed_exchange, seed_metric
 
 
 def _evaluate(
@@ -39,7 +38,7 @@ def _evaluate(
     boundary exactly as the CLI does before evaluating.
     """
 
-    listing_id = SecurityRepository(db).resolve_id(symbol)
+    listing_id = resolve_listing_id(db, symbol)
     assert listing_id is not None
     return evaluate_criterion(
         criterion, listing_id, metrics_repo, display_symbol=symbol
@@ -274,7 +273,7 @@ def test_evaluate_criterion_detail_reports_missing_metric_ids(tmp_path: Path) ->
     metrics_repo.initialize_schema()
 
     _seed_listing(db, "AAPL.US")
-    listing_id = SecurityRepository(db).resolve_id("AAPL.US")
+    listing_id = resolve_listing_id(db, "AAPL.US")
     assert listing_id is not None
 
     criterion = Criterion(
