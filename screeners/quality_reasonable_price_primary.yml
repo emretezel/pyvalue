@@ -1,0 +1,163 @@
+criteria:
+  - name: "ROIC median (7Y) >= 12% (Greenblatt/Akre high return on capital)"
+    left:
+      metric: roic_7y_median
+    operator: ">="
+    right:
+      value: 0.12
+
+  - name: "ROIC years above 12% >= 7 (persistence, not just average level)"
+    left:
+      metric: roic_years_above_12pct
+    operator: ">="
+    right:
+      value: 7
+
+  - name: "ROIC minimum (10Y) >= 7% (resilience across a bad year)"
+    left:
+      metric: roic_10y_min
+    operator: ">="
+    right:
+      value: 0.07
+
+  - name: "Gross margin (TTM) >= 35% (pricing power)"
+    left:
+      metric: gross_margin_ttm
+    operator: ">="
+    right:
+      value: 0.35
+
+  - name: "Gross margin stability (10Y std) <= 7pp (durable pricing power)"
+    left:
+      metric: gm_10y_std
+    operator: "<="
+    right:
+      value: 0.07
+
+  - name: "Operating margin minimum (7Y) >= 5% (margin floor)"
+    left:
+      metric: opm_7y_min
+    operator: ">="
+    right:
+      value: 0.05
+
+  - name: "Cash conversion (CFO / NI TTM) >= 0.90 (earnings quality)"
+    left:
+      metric: cfo_to_ni_ttm
+    operator: ">="
+    right:
+      value: 0.90
+
+  - name: "Cash conversion median (CFO / NI 10Y) >= 0.90 (full-cycle earnings quality)"
+    left:
+      metric: cfo_to_ni_10y_median
+    operator: ">="
+    right:
+      value: 0.90
+
+  - name: "Accruals ratio <= 10% (clean, cash-backed earnings)"
+    left:
+      metric: accruals_ratio
+    operator: "<="
+    right:
+      value: 0.10
+
+  - name: "Net debt / EBITDA <= 2.5x (unleveraged returns)"
+    left:
+      metric: net_debt_to_ebitda
+    operator: "<="
+    right:
+      value: 2.5
+
+  - name: "Interest coverage >= 6x (debt-service capacity)"
+    left:
+      metric: interest_coverage
+    operator: ">="
+    right:
+      value: 6
+
+  - name: "No loss years (10Y net income) (Graham earnings stability)"
+    left:
+      metric: ni_loss_years_10y
+    operator: "=="
+    right:
+      value: 0
+
+  - name: "EPS streak >= 7 (modernized Graham stability)"
+    left:
+      metric: eps_streak
+    operator: ">="
+    right:
+      value: 7
+
+  - name: "SBC / FCF <= 20% (stock comp not masking weak cash)"
+    left:
+      metric: sbc_to_fcf
+    operator: "<="
+    right:
+      value: 0.20
+
+  - name: "Share count CAGR (5Y) <= +1% (no net dilution)"
+    left:
+      metric: share_count_cagr_5y
+    operator: "<="
+    right:
+      value: 0.01
+
+  - name: "Owner earnings yield on EV (normalised) >= 5% (reasonable price anchor)"
+    left:
+      metric: oey_ev_norm
+    operator: ">="
+    right:
+      value: 0.05
+
+  - name: "Incremental ROIC (5Y) >= 12% (Akre/Gayner reinvestment leg)"
+    left:
+      metric: iroic_5y
+    operator: ">="
+    right:
+      value: 0.12
+
+  - name: "Owner earnings CAGR (10Y) >= 7% (Nomad/Akre compounding test)"
+    left:
+      metric: owner_earnings_cagr_10y
+    operator: ">="
+    right:
+      value: 0.07
+
+ranking:
+  peer_group: sector
+  min_sector_peers: 10
+  winsorize:
+    lower_percentile: 5
+    upper_percentile: 95
+  metrics:
+    - metric: roic_7y_median
+      weight: 0.15
+      direction: higher
+    - metric: iroic_5y
+      weight: 0.12
+      direction: higher
+      cap: 0.50
+    - metric: gross_profit_to_assets_ttm
+      weight: 0.08
+      direction: higher
+    - metric: oey_ev_norm
+      weight: 0.13
+      direction: higher
+    - metric: ev_to_ebit
+      weight: 0.12
+      direction: lower
+    - metric: shareholder_yield_ttm
+      weight: 0.20
+      direction: higher
+    - metric: opm_10y_std
+      weight: 0.20
+      direction: lower
+  tie_breakers:
+    - metric: oey_ev_norm
+      direction: descending
+    - metric: roic_7y_median
+      direction: descending
+    - metric: canonical_symbol
+      direction: ascending

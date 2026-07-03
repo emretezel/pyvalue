@@ -387,6 +387,68 @@ def test_load_screen_parses_quality_reasonable_price_example() -> None:
     assert definition.ranking.tie_breakers[2].metric_id == "canonical_symbol"
 
 
+def test_load_screen_parses_quality_reasonable_price_primary_example() -> None:
+    screen_path = (
+        Path(__file__).resolve().parents[1]
+        / "screeners"
+        / "quality_reasonable_price_primary.yml"
+    )
+
+    definition = load_screen(screen_path)
+
+    # 18 hard filters: the 6-filter draft plus the reinvestment, gross-margin,
+    # and full-cycle earnings-quality legs. The "==" operator is exercised by the
+    # zero-loss-years criterion, which the original draft did not use.
+    assert len(definition.criteria) == 18
+    assert {criterion.operator for criterion in definition.criteria} == {
+        ">=",
+        "<=",
+        "==",
+    }
+    # Spot-check a percent bound, a count bound, and the equality criterion.
+    assert definition.criteria[0].left.metric == "roic_7y_median"
+    assert definition.criteria[0].right.value == 0.12
+    assert definition.criteria[1].left.metric == "roic_years_above_12pct"
+    assert definition.criteria[1].right.value == 7
+    assert definition.criteria[11].left.metric == "ni_loss_years_10y"
+    assert definition.criteria[11].operator == "=="
+    assert definition.criteria[11].right.value == 0
+    assert definition.criteria[16].left.metric == "iroic_5y"
+    assert definition.criteria[17].left.metric == "owner_earnings_cagr_10y"
+
+    # Ranking block: same sector-relative shape as the draft, but a seven-metric
+    # blend grouped by bucket -- quality/capital-efficiency 35% (roic_7y_median,
+    # iroic_5y, gross_profit_to_assets_ttm), valuation 25% (oey_ev_norm,
+    # ev_to_ebit), capital allocation 20% (shareholder_yield_ttm), earnings
+    # stability 20% (opm_10y_std) -- with an iroic_5y cap.
+    assert definition.ranking is not None
+    assert definition.ranking.peer_group == "sector"
+    assert definition.ranking.min_sector_peers == 10
+    assert definition.ranking.winsor_lower_percentile == 0.05
+    assert definition.ranking.winsor_upper_percentile == 0.95
+    assert len(definition.ranking.metrics) == 7
+    assert definition.ranking.metrics[0].metric_id == "roic_7y_median"
+    assert definition.ranking.metrics[0].weight == 0.15
+    assert definition.ranking.metrics[0].direction == "higher"
+    assert definition.ranking.metrics[1].metric_id == "iroic_5y"
+    assert definition.ranking.metrics[1].weight == 0.12
+    assert definition.ranking.metrics[1].direction == "higher"
+    assert definition.ranking.metrics[1].cap == 0.50
+    assert definition.ranking.metrics[4].metric_id == "ev_to_ebit"
+    assert definition.ranking.metrics[4].direction == "lower"
+    assert definition.ranking.metrics[5].metric_id == "shareholder_yield_ttm"
+    assert definition.ranking.metrics[5].weight == 0.20
+    assert definition.ranking.metrics[6].metric_id == "opm_10y_std"
+    assert definition.ranking.metrics[6].weight == 0.20
+    assert definition.ranking.metrics[6].direction == "lower"
+    # Weights sum to 1.00 across the four buckets (float-safe comparison).
+    assert abs(sum(m.weight for m in definition.ranking.metrics) - 1.0) < 1e-9
+    assert len(definition.ranking.tie_breakers) == 3
+    assert definition.ranking.tie_breakers[0].metric_id == "oey_ev_norm"
+    assert definition.ranking.tie_breakers[0].direction == "descending"
+    assert definition.ranking.tie_breakers[2].metric_id == "canonical_symbol"
+
+
 def test_ranking_metric_ids_preserve_first_seen_order() -> None:
     definition = load_screen(
         Path(__file__).resolve().parents[1]

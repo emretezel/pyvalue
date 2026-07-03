@@ -87,6 +87,7 @@ This repo ships several example screens:
 - [`screeners/value_normalized.yml`](../../screeners/value_normalized.yml): compact value screen using normalized owner earnings and EV/EBIT
 - [`screeners/quality.yml`](../../screeners/quality.yml): quality-focused screen with durability and balance-sheet checks
 - [`screeners/quality_reasonable_price.yml`](../../screeners/quality_reasonable_price.yml): quality at a reasonable price screen combining durability with valuation discipline, plus post-screen `qarp_score` and `qarp_rank` output for passing symbols
+- [`screeners/quality_reasonable_price_primary.yml`](../../screeners/quality_reasonable_price_primary.yml): the primary, stricter QARP screen; extends the above with reinvestment (`iroic_5y`), gross-margin level and stability, full-cycle earnings quality (`cfo_to_ni_10y_median`, `accruals_ratio`), and modernized Graham earnings stability, ranked sector-relative on a blend spanning quality/capital-efficiency, valuation, capital allocation, and earnings stability
 
 The beginner example looks like this:
 
