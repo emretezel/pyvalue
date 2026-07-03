@@ -88,6 +88,7 @@ This repo ships several example screens:
 - [`screeners/quality.yml`](../../screeners/quality.yml): quality-focused screen with durability and balance-sheet checks
 - [`screeners/quality_reasonable_price.yml`](../../screeners/quality_reasonable_price.yml): quality at a reasonable price screen combining durability with valuation discipline, plus post-screen `qarp_score` and `qarp_rank` output for passing symbols
 - [`screeners/quality_reasonable_price_primary.yml`](../../screeners/quality_reasonable_price_primary.yml): the primary, stricter QARP screen; extends the above with reinvestment (`iroic_5y`), gross-margin level and stability, full-cycle earnings quality (`cfo_to_ni_10y_median`, `accruals_ratio`), and modernized Graham earnings stability, ranked sector-relative on a blend spanning quality/capital-efficiency, valuation, capital allocation, and earnings stability
+- [`screeners/deep_value_graham.yml`](../../screeners/deep_value_graham.yml): deep-value Graham screen; deliberately loose structural gates (positive 7Y ROIC, Piotroski F-Score >= 5, Altman Z >= 1.81, P/B <= 3, a USD 150M market-cap investability floor) that exclude broken businesses rather than demand quality, ranked sector-relative on a cheapness-weighted blend of valuation (`price_to_book`, `ev_to_sales`, `ev_to_ebit`), capped capital efficiency (`croic`, `roce`), and composite health (`piotroski_f_score`, `altman_z`)
 
 The beginner example looks like this:
 

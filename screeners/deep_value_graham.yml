@@ -1,0 +1,114 @@
+criteria:
+  # --- Baseline quality gate: existing metrics, deliberately loosened vs
+  # quality_reasonable_price_primary.yml. Purpose is excluding structurally
+  # broken businesses, not demanding quality on Screen A's terms.
+  - name: "ROIC median (7Y) > 0% (excludes structural capital destroyers only)"
+    left:
+      metric: roic_7y_median
+    operator: ">"
+    right:
+      value: 0
+
+  - name: "Cash conversion median (CFO/NI 10Y) >= 0.60 (loose full-cycle earnings quality floor)"
+    left:
+      metric: cfo_to_ni_10y_median
+    operator: ">="
+    right:
+      value: 0.60
+
+  - name: "Net debt / EBITDA <= 5.0x (loose leverage ceiling)"
+    left:
+      metric: net_debt_to_ebitda
+    operator: "<="
+    right:
+      value: 5.0
+
+  - name: "Interest coverage >= 1.5x (going-concern check, not a strength bar)"
+    left:
+      metric: interest_coverage
+    operator: ">="
+    right:
+      value: 1.5
+
+  - name: "Net income loss years (10Y) <= 4 (tolerates cyclicality, excludes chronic loss-makers only)"
+    left:
+      metric: ni_loss_years_10y
+    operator: "<="
+    right:
+      value: 4
+
+  # --- New metric gates
+  - name: "Piotroski F-Score >= 5 of 9 (deliberately looser than the docs' canonical >=7)"
+    left:
+      metric: piotroski_f_score
+    operator: ">="
+    right:
+      value: 5
+
+  - name: "Altman Z-Score >= 1.81 (classic formula; excludes only the distress zone, safe zone not required)"
+    left:
+      metric: altman_z
+    operator: ">="
+    right:
+      value: 1.81
+
+  - name: "Price to book <= 3.0x (loose valuation sanity check; deeper cheapness lives in ranking, not here)"
+    left:
+      metric: price_to_book
+    operator: "<="
+    right:
+      value: 3.0
+
+  - name: "FCF / EBITDA > 0 (excludes cash-burning businesses; very loose, not an efficiency bar)"
+    left:
+      metric: fcf_to_ebitda
+    operator: ">"
+    right:
+      value: 0
+
+  # --- Practical investability floor
+  - name: "Market cap >= $150M (excludes micro/nano caps that are hard to actually transact)"
+    left:
+      metric: market_cap
+    operator: ">="
+    right:
+      value: 150_000_000
+      currency: USD
+
+ranking:
+  peer_group: sector
+  min_sector_peers: 10
+  winsorize:
+    lower_percentile: 5
+    upper_percentile: 95
+  metrics:
+    - metric: price_to_book
+      weight: 0.15
+      direction: lower
+    - metric: ev_to_sales
+      weight: 0.15
+      direction: lower
+    - metric: ev_to_ebit
+      weight: 0.15
+      direction: lower
+    - metric: croic
+      weight: 0.13
+      direction: higher
+      cap: 0.75
+    - metric: roce
+      weight: 0.12
+      direction: higher
+      cap: 0.75
+    - metric: piotroski_f_score
+      weight: 0.10
+      direction: higher
+    - metric: altman_z
+      weight: 0.20
+      direction: higher
+  tie_breakers:
+    - metric: altman_z
+      direction: descending
+    - metric: price_to_book
+      direction: ascending
+    - metric: canonical_symbol
+      direction: ascending

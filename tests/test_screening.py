@@ -449,6 +449,66 @@ def test_load_screen_parses_quality_reasonable_price_primary_example() -> None:
     assert definition.ranking.tie_breakers[2].metric_id == "canonical_symbol"
 
 
+def test_load_screen_parses_deep_value_graham_example() -> None:
+    screen_path = (
+        Path(__file__).resolve().parents[1] / "screeners" / "deep_value_graham.yml"
+    )
+
+    definition = load_screen(screen_path)
+
+    # 10 loose gates: structural-quality floors plus the composite-score and
+    # investability criteria. Strict ">" is exercised here, which the QARP
+    # screens do not use.
+    assert len(definition.criteria) == 10
+    assert {criterion.operator for criterion in definition.criteria} == {
+        ">",
+        ">=",
+        "<=",
+    }
+    # Spot-check the composite-score gates and the monetary constant. The
+    # market-cap floor is the first currency-tagged constant used by a shipped
+    # screener, so pin both the value and the currency.
+    assert definition.criteria[0].left.metric == "roic_7y_median"
+    assert definition.criteria[0].operator == ">"
+    assert definition.criteria[0].right.value == 0
+    assert definition.criteria[5].left.metric == "piotroski_f_score"
+    assert definition.criteria[5].right.value == 5
+    assert definition.criteria[6].left.metric == "altman_z"
+    assert definition.criteria[6].right.value == 1.81
+    assert definition.criteria[9].left.metric == "market_cap"
+    assert definition.criteria[9].right.value == 150_000_000
+    assert definition.criteria[9].right.currency == "USD"
+
+    # Ranking block: cheapness-weighted blend -- valuation 45% (price_to_book,
+    # ev_to_sales, ev_to_ebit), capital efficiency 25% (croic, roce, both
+    # capped), composite health 30% (piotroski_f_score, altman_z).
+    assert definition.ranking is not None
+    assert definition.ranking.peer_group == "sector"
+    assert definition.ranking.min_sector_peers == 10
+    assert definition.ranking.winsor_lower_percentile == 0.05
+    assert definition.ranking.winsor_upper_percentile == 0.95
+    assert len(definition.ranking.metrics) == 7
+    assert definition.ranking.metrics[0].metric_id == "price_to_book"
+    assert definition.ranking.metrics[0].weight == 0.15
+    assert definition.ranking.metrics[0].direction == "lower"
+    assert definition.ranking.metrics[3].metric_id == "croic"
+    assert definition.ranking.metrics[3].direction == "higher"
+    assert definition.ranking.metrics[3].cap == 0.75
+    assert definition.ranking.metrics[4].metric_id == "roce"
+    assert definition.ranking.metrics[4].cap == 0.75
+    assert definition.ranking.metrics[6].metric_id == "altman_z"
+    assert definition.ranking.metrics[6].weight == 0.20
+    assert definition.ranking.metrics[6].direction == "higher"
+    # Weights sum to 1.00 across the three buckets (float-safe comparison).
+    assert abs(sum(m.weight for m in definition.ranking.metrics) - 1.0) < 1e-9
+    assert len(definition.ranking.tie_breakers) == 3
+    assert definition.ranking.tie_breakers[0].metric_id == "altman_z"
+    assert definition.ranking.tie_breakers[0].direction == "descending"
+    assert definition.ranking.tie_breakers[1].metric_id == "price_to_book"
+    assert definition.ranking.tie_breakers[1].direction == "ascending"
+    assert definition.ranking.tie_breakers[2].metric_id == "canonical_symbol"
+
+
 def test_ranking_metric_ids_preserve_first_seen_order() -> None:
     definition = load_screen(
         Path(__file__).resolve().parents[1]
