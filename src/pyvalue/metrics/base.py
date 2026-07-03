@@ -51,6 +51,8 @@ _METRIC_METADATA: dict[str, MetricMetadata] = {
     "earnings_yield": MetricMetadata("percent"),
     "interest_coverage": MetricMetadata("ratio"),
     "market_cap": MetricMetadata("monetary"),
+    "price_to_book": MetricMetadata("multiple", "x"),
+    "price_to_tangible_book": MetricMetadata("multiple", "x"),
     "price_to_fcf": MetricMetadata("multiple", "x"),
     "roc_greenblatt_5y_avg": MetricMetadata("percent"),
     "roe_greenblatt_5y_avg": MetricMetadata("percent"),

@@ -89,6 +89,10 @@ from pyvalue.metrics.operating_margin_stability import (
     OperatingMarginTenYearMinMetric,
     OperatingMarginTenYearStdMetric,
 )
+from pyvalue.metrics.price_to_book import (
+    PriceToBookMetric,
+    PriceToTangibleBookMetric,
+)
 from pyvalue.metrics.price_to_fcf import PriceToFCFMetric
 from pyvalue.metrics.profitability_returns_growth import (
     DividendPayoutRatioTTMMetric,
@@ -1529,6 +1533,224 @@ def test_graham_multiplier_falls_back_to_fy_eps() -> None:
     market_repo = DummyMarketRepo()
     result = metric.compute(LISTING_ID, repo, market_repo)
     assert result is not None
+
+
+def _book_value_repo(values: dict[str, float], *, recent: str) -> RegionFactsRepository:
+    # Serves each concept in ``values`` as a single latest INSTANT-style fact
+    # dated ``recent``; share-count concepts resolve to scalar count facts via
+    # the fact() helper defaults.
+    class DummyRepo(_USDTickerCurrencyRepo):
+        def latest_fact(self, listing_id: int, concept: str) -> FactRecord | None:
+            if concept in values:
+                return fact(concept=concept, end_date=recent, value=values[concept])
+            return super().latest_fact(listing_id, concept)
+
+    return DummyRepo()
+
+
+def test_price_to_book_metric_prefers_common_equity() -> None:
+    metric = PriceToBookMetric()
+    recent = (date.today() - timedelta(days=20)).isoformat()
+    repo = _book_value_repo(
+        {
+            "CommonStockholdersEquity": 800.0,
+            "StockholdersEquity": 1000.0,
+            "CommonStockSharesOutstanding": 100.0,
+        },
+        recent=recent,
+    )
+
+    result = metric.compute(
+        LISTING_ID, repo, _build_market_repo(market_cap=40.0, as_of=recent)
+    )
+
+    # BVPS = 800 / 100 = 8 from the *common* equity concept -> 40 / 8 = 5x
+    # (total StockholdersEquity would have given 4x).
+    assert result is not None
+    assert result.value == 5.0
+    assert result.as_of == recent
+
+
+def test_price_to_book_metric_falls_back_to_stockholders_equity() -> None:
+    metric = PriceToBookMetric()
+    recent = (date.today() - timedelta(days=20)).isoformat()
+    repo = _book_value_repo(
+        {
+            "StockholdersEquity": 1000.0,
+            "CommonStockSharesOutstanding": 100.0,
+        },
+        recent=recent,
+    )
+
+    result = metric.compute(
+        LISTING_ID, repo, _build_market_repo(market_cap=40.0, as_of=recent)
+    )
+
+    assert result is not None
+    assert result.value == 4.0
+
+
+def test_price_to_book_metric_returns_none_when_equity_non_positive() -> None:
+    metric = PriceToBookMetric()
+    recent = (date.today() - timedelta(days=20)).isoformat()
+    # Present-but-negative common equity must fail the guard, not silently
+    # fall through to the positive StockholdersEquity total.
+    repo = _book_value_repo(
+        {
+            "CommonStockholdersEquity": -100.0,
+            "StockholdersEquity": 1000.0,
+            "CommonStockSharesOutstanding": 100.0,
+        },
+        recent=recent,
+    )
+
+    assert (
+        metric.compute(
+            LISTING_ID, repo, _build_market_repo(market_cap=40.0, as_of=recent)
+        )
+        is None
+    )
+
+
+def test_price_to_book_metric_returns_none_when_price_missing() -> None:
+    metric = PriceToBookMetric()
+    recent = (date.today() - timedelta(days=20)).isoformat()
+    repo = _book_value_repo(
+        {
+            "CommonStockholdersEquity": 800.0,
+            "CommonStockSharesOutstanding": 100.0,
+        },
+        recent=recent,
+    )
+
+    assert (
+        metric.compute(
+            LISTING_ID, repo, _build_market_repo(market_cap=None, as_of=recent)
+        )
+        is None
+    )
+
+
+def test_price_to_book_metric_returns_none_when_shares_non_positive() -> None:
+    metric = PriceToBookMetric()
+    recent = (date.today() - timedelta(days=20)).isoformat()
+    repo = _book_value_repo(
+        {
+            "CommonStockholdersEquity": 800.0,
+            "CommonStockSharesOutstanding": 0.0,
+        },
+        recent=recent,
+    )
+
+    assert (
+        metric.compute(
+            LISTING_ID, repo, _build_market_repo(market_cap=40.0, as_of=recent)
+        )
+        is None
+    )
+
+
+def test_price_to_tangible_book_metric_subtracts_goodwill_and_intangibles() -> None:
+    metric = PriceToTangibleBookMetric()
+    recent = (date.today() - timedelta(days=20)).isoformat()
+    repo = _book_value_repo(
+        {
+            "StockholdersEquity": 1000.0,
+            "Goodwill": 200.0,
+            "IntangibleAssetsNetExcludingGoodwill": 300.0,
+            "CommonStockSharesOutstanding": 100.0,
+        },
+        recent=recent,
+    )
+
+    result = metric.compute(
+        LISTING_ID, repo, _build_market_repo(market_cap=40.0, as_of=recent)
+    )
+
+    # TBVPS = (1000 - 200 - 300) / 100 = 5 -> 40 / 5 = 8x.
+    assert result is not None
+    assert result.value == 8.0
+
+
+def test_price_to_tangible_book_none_while_price_to_book_present() -> None:
+    recent = (date.today() - timedelta(days=20)).isoformat()
+    repo = _book_value_repo(
+        {
+            "CommonStockholdersEquity": 400.0,
+            "Goodwill": 300.0,
+            "IntangibleAssetsNetExcludingGoodwill": 200.0,
+            "CommonStockSharesOutstanding": 100.0,
+        },
+        recent=recent,
+    )
+    market_repo = _build_market_repo(market_cap=40.0, as_of=recent)
+
+    # Goodwill + intangibles exceed equity: tangible book is negative, so P/TB
+    # is suppressed while plain P/B (40 / 4 = 10x) still prices the equity.
+    assert PriceToTangibleBookMetric().compute(LISTING_ID, repo, market_repo) is None
+    book_result = PriceToBookMetric().compute(LISTING_ID, repo, market_repo)
+    assert book_result is not None
+    assert book_result.value == 10.0
+
+
+@given(
+    equity=st.floats(min_value=1.0, max_value=1e12, allow_nan=False),
+    shares=st.floats(min_value=1.0, max_value=1e10, allow_nan=False),
+    price=st.floats(min_value=0.01, max_value=1e5, allow_nan=False),
+)
+def test_price_to_book_metric_matches_formula_property(
+    equity: float, shares: float, price: float
+) -> None:
+    metric = PriceToBookMetric()
+    recent = (date.today() - timedelta(days=20)).isoformat()
+    repo = _book_value_repo(
+        {
+            "CommonStockholdersEquity": equity,
+            "CommonStockSharesOutstanding": shares,
+        },
+        recent=recent,
+    )
+
+    result = metric.compute(
+        LISTING_ID, repo, _build_market_repo(market_cap=price, as_of=recent)
+    )
+
+    assert result is not None
+    assert result.value == pytest.approx(price * shares / equity, rel=1e-9)
+
+
+@given(
+    equity=st.floats(min_value=1.0, max_value=1e9, allow_nan=False),
+    goodwill=st.floats(min_value=0.0, max_value=1e8, allow_nan=False),
+    intangibles=st.floats(min_value=0.0, max_value=1e8, allow_nan=False),
+    shares=st.floats(min_value=1.0, max_value=1e10, allow_nan=False),
+    price=st.floats(min_value=0.01, max_value=1e5, allow_nan=False),
+)
+def test_price_to_tangible_book_metric_matches_formula_property(
+    equity: float, goodwill: float, intangibles: float, shares: float, price: float
+) -> None:
+    # The >= 1.0 tangible floor keeps the property away from catastrophic
+    # cancellation, which would test float noise rather than the formula.
+    tangible = equity - goodwill - intangibles
+    assume(tangible >= 1.0)
+    metric = PriceToTangibleBookMetric()
+    recent = (date.today() - timedelta(days=20)).isoformat()
+    repo = _book_value_repo(
+        {
+            "CommonStockholdersEquity": equity,
+            "Goodwill": goodwill,
+            "IntangibleAssetsNetExcludingGoodwill": intangibles,
+            "CommonStockSharesOutstanding": shares,
+        },
+        recent=recent,
+    )
+
+    result = metric.compute(
+        LISTING_ID, repo, _build_market_repo(market_cap=price, as_of=recent)
+    )
+
+    assert result is not None
+    assert result.value == pytest.approx(price * shares / tangible, rel=1e-6)
 
 
 def test_net_debt_to_ebitda_metric() -> None:
@@ -12886,3 +13108,5 @@ def test_registry_contains_all_ids() -> None:
     assert "oey_ev_norm" in REGISTRY
     assert "fcf_to_ebitda" in REGISTRY
     assert "ev_to_sales" in REGISTRY
+    assert "price_to_book" in REGISTRY
+    assert "price_to_tangible_book" in REGISTRY
