@@ -35,6 +35,7 @@ OPERATING_CASH_FLOW_CONCEPT = "NetCashProvidedByUsedInOperatingActivities"
 CAPEX_CONCEPT = "CapitalExpenditures"
 DA_PRIMARY_CONCEPT = "DepreciationDepletionAndAmortization"
 DA_FALLBACK_CONCEPT = "DepreciationFromCashFlow"
+REVENUE_CONCEPT = "Revenues"
 
 EBIT_REQUIRED_CONCEPTS = tuple(dict.fromkeys((EBIT_CONCEPT,) + EV_REQUIRED_CONCEPTS))
 FCF_REQUIRED_CONCEPTS = tuple(
@@ -55,6 +56,9 @@ EBITDA_REQUIRED_CONCEPTS = tuple(
         )
         + EV_REQUIRED_CONCEPTS
     )
+)
+SALES_REQUIRED_CONCEPTS = tuple(
+    dict.fromkeys((REVENUE_CONCEPT,) + EV_REQUIRED_CONCEPTS)
 )
 
 
@@ -158,6 +162,13 @@ class EnterpriseValueRatioCalculator:
         return _TTMResult(
             money=sum_money(quarter_totals),
             as_of=ebit_records[0].end_date,
+        )
+
+    def compute_ttm_revenue(
+        self, listing_id: int, repo: RegionFactsRepository, *, context: str
+    ) -> Optional[_TTMResult]:
+        return self._compute_ttm_amount(
+            listing_id, repo, REVENUE_CONCEPT, context=context
         )
 
     def _compute_ttm_amount(
@@ -408,9 +419,62 @@ class EVToEBITDAMetric:
         )
 
 
+@dataclass
+class EVToSalesMetric:
+    """Compute enterprise value divided by trailing revenue.
+
+    Stays usable for margin-trough cyclicals and temporarily unprofitable
+    businesses where EV/EBIT and EV/EBITDA are undefined.
+    """
+
+    id: str = "ev_to_sales"
+    required_concepts = SALES_REQUIRED_CONCEPTS
+    uses_market_data = True
+
+    def compute(
+        self,
+        listing_id: int,
+        repo: RegionFactsRepository,
+        market_repo: MarketDataRepository,
+    ) -> Optional[MetricResult]:
+        revenue = EnterpriseValueRatioCalculator().compute_ttm_revenue(
+            listing_id, repo, context=self.id
+        )
+        if revenue is None:
+            LOGGER.warning(
+                "%s: missing denominator revenue for listing_id=%s",
+                self.id,
+                listing_id,
+            )
+            return None
+        if revenue.money.amount <= 0:
+            LOGGER.warning(
+                "%s: non-positive revenue for listing_id=%s", self.id, listing_id
+            )
+            return None
+
+        enterprise_value = resolve_enterprise_value_denominator(
+            listing_id=listing_id,
+            repo=repo,
+            market_repo=market_repo,
+            target_currency=revenue.money.currency,
+            context=self.id,
+        )
+        if enterprise_value is None:
+            return None
+
+        return MetricResult(
+            listing_id=listing_id,
+            metric_id=self.id,
+            value=enterprise_value / revenue.money,
+            as_of=revenue.as_of,
+        )
+
+
 __all__ = [
     "EBITYieldEVMetric",
     "FCFYieldEVMetric",
     "EVToEBITMetric",
     "EVToEBITDAMetric",
+    "EVToSalesMetric",
 ]

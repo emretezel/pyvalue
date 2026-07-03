@@ -80,6 +80,7 @@ from .enterprise_value_ratios import (
     FCFYieldEVMetric,
     EVToEBITMetric,
     EVToEBITDAMetric,
+    EVToSalesMetric,
 )
 from .fcf_to_ebitda import FCFToEBITDAMetric
 from .sbc_load import SBCToFCFMetric, SBCToRevenueMetric
@@ -144,6 +145,7 @@ REGISTRY = {
     FCFYieldEVMetric.id: FCFYieldEVMetric,
     EVToEBITMetric.id: EVToEBITMetric,
     EVToEBITDAMetric.id: EVToEBITDAMetric,
+    EVToSalesMetric.id: EVToSalesMetric,
     FCFToEBITDAMetric.id: FCFToEBITDAMetric,
     SBCToRevenueMetric.id: SBCToRevenueMetric,
     SBCToFCFMetric.id: SBCToFCFMetric,
@@ -233,6 +235,7 @@ __all__ = [
     "FCFYieldEVMetric",
     "EVToEBITMetric",
     "EVToEBITDAMetric",
+    "EVToSalesMetric",
     "FCFToEBITDAMetric",
     "SBCToRevenueMetric",
     "SBCToFCFMetric",

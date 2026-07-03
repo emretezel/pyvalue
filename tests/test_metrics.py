@@ -38,6 +38,7 @@ from pyvalue.metrics.enterprise_value_ratios import (
     EBITYieldEVMetric,
     EVToEBITDAMetric,
     EVToEBITMetric,
+    EVToSalesMetric,
     FCFYieldEVMetric,
 )
 from pyvalue.metrics.eps_average import EPSAverageSixYearMetric
@@ -10086,6 +10087,77 @@ def test_ev_to_ebitda_metric_returns_none_when_ebitda_non_positive() -> None:
     )
 
 
+def test_ev_to_sales_metric_computes_multiple() -> None:
+    metric = EVToSalesMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    records = _build_ev_ratio_records(symbol=symbol, q4=q4, q3=q3, q2=q2, q1=q1)
+    records["Revenues"] = _quarterly_records(
+        "Revenues", (q4, q3, q2, q1), (250.0, 250.0, 250.0, 250.0), currency="USD"
+    )
+    repo = _OwnerEarningsRepo(records)
+
+    result = metric.compute(
+        LISTING_ID, repo, _build_market_repo(market_cap=820.0, as_of=q4)
+    )
+
+    # EV = 820 + 50 + 150 - 20 = 1000; Revenues_TTM = 1000 -> 1.0x.
+    assert result is not None
+    assert result.value == 1.0
+    assert result.as_of == q4
+
+
+def test_ev_to_sales_metric_returns_none_when_revenue_missing() -> None:
+    metric = EVToSalesMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        _build_ev_ratio_records(symbol=symbol, q4=q4, q3=q3, q2=q2, q1=q1)
+    )
+
+    assert (
+        metric.compute(LISTING_ID, repo, _build_market_repo(market_cap=820.0, as_of=q4))
+        is None
+    )
+
+
+def test_ev_to_sales_metric_returns_none_when_revenue_non_positive() -> None:
+    metric = EVToSalesMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    records = _build_ev_ratio_records(symbol=symbol, q4=q4, q3=q3, q2=q2, q1=q1)
+    records["Revenues"] = _quarterly_records(
+        "Revenues", (q4, q3, q2, q1), (0.0, 0.0, 0.0, 0.0), currency="USD"
+    )
+    repo = _OwnerEarningsRepo(records)
+
+    assert (
+        metric.compute(LISTING_ID, repo, _build_market_repo(market_cap=820.0, as_of=q4))
+        is None
+    )
+
+
+@given(revenue_quarter=st.floats(min_value=0.01, max_value=1e9, allow_nan=False))
+def test_ev_to_sales_metric_matches_formula_property(revenue_quarter: float) -> None:
+    # Property: with EV pinned at 1000 (820 cap + 200 debt - 20 cash), the
+    # multiple equals EV / (4 * quarterly revenue) for any positive revenue.
+    metric = EVToSalesMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    records = _build_ev_ratio_records(symbol=symbol, q4=q4, q3=q3, q2=q2, q1=q1)
+    records["Revenues"] = _quarterly_records(
+        "Revenues", (q4, q3, q2, q1), (revenue_quarter,) * 4, currency="USD"
+    )
+    repo = _OwnerEarningsRepo(records)
+
+    result = metric.compute(
+        LISTING_ID, repo, _build_market_repo(market_cap=820.0, as_of=q4)
+    )
+
+    assert result is not None
+    assert result.value == pytest.approx(1000.0 / (4 * revenue_quarter), rel=1e-9)
+
+
 def test_fcf_to_ebitda_metric_computes_conversion_ratio() -> None:
     metric = FCFToEBITDAMetric()
     symbol = "AAPL.US"
@@ -12813,3 +12885,4 @@ def test_registry_contains_all_ids() -> None:
     assert "worst_oe_ev_fy_10y" in REGISTRY
     assert "oey_ev_norm" in REGISTRY
     assert "fcf_to_ebitda" in REGISTRY
+    assert "ev_to_sales" in REGISTRY

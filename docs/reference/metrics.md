@@ -84,6 +84,7 @@ Columns:
 | Free Cash Flow Yield on EV | `fcf_yield_ev` | EODHD-oriented: `FCF_TTM / EV`. | Shows how much enterprise value is backed by trailing free cash flow. |
 | EV to EBIT | `ev_to_ebit` | EODHD-oriented: `EV / EBIT_TTM`, only when `EBIT_TTM > 0`. | A practical operating multiple that compares companies independent of capital structure. |
 | EV to EBITDA | `ev_to_ebitda` | EODHD-oriented: `EV / EBITDA_TTM`, where `EBITDA_TTM = EBIT_TTM + D&A_TTM`, only when positive. | A common acquisition-style multiple that uses operating cash-earnings proxy. |
+| EV to Sales | `ev_to_sales` | EODHD-oriented: `EV / Revenues_TTM`, only when revenue is positive. | Values the enterprise against top-line output, staying usable for margin-trough cyclicals and temporarily unprofitable businesses where EV/EBIT is undefined. |
 
 ## ROIC / Capital Efficiency
 
