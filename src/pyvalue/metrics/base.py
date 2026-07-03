@@ -44,6 +44,8 @@ _METRIC_METADATA: dict[str, MetricMetadata] = {
     "fcf_neg_years_10y": MetricMetadata("count"),
     "ni_loss_years_10y": MetricMetadata("count"),
     "accruals_ratio": MetricMetadata("ratio"),
+    # A weighted discriminant score, not a ratio/percent of anything: "other".
+    "altman_z": MetricMetadata("other"),
     "long_term_debt": MetricMetadata("monetary"),
     "eps_streak": MetricMetadata("count"),
     "eps_ttm": MetricMetadata("per_share", "per_share"),

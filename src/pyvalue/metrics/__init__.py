@@ -14,6 +14,7 @@ from .fundamental_consistency import (
     NetIncomeLossYearsTenYearMetric,
 )
 from .accruals_ratio import AccrualsRatioMetric
+from .altman_z import AltmanZMetric
 from .long_term_debt import LongTermDebtMetric
 from .eps_streak import EPSStreakMetric
 from .eps_quarterly import EarningsPerShareTTM
@@ -116,6 +117,7 @@ REGISTRY = {
     FCFNegativeYearsTenYearMetric.id: FCFNegativeYearsTenYearMetric,
     NetIncomeLossYearsTenYearMetric.id: NetIncomeLossYearsTenYearMetric,
     AccrualsRatioMetric.id: AccrualsRatioMetric,
+    AltmanZMetric.id: AltmanZMetric,
     LongTermDebtMetric.id: LongTermDebtMetric,
     EPSStreakMetric.id: EPSStreakMetric,
     EarningsPerShareTTM.id: EarningsPerShareTTM,
@@ -214,6 +216,7 @@ __all__ = [
     "FCFNegativeYearsTenYearMetric",
     "NetIncomeLossYearsTenYearMetric",
     "AccrualsRatioMetric",
+    "AltmanZMetric",
     "LongTermDebtMetric",
     "EPSStreakMetric",
     "EarningsPerShareTTM",

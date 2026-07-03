@@ -13782,3 +13782,4 @@ def test_registry_contains_all_ids() -> None:
     assert "croic" in REGISTRY
     assert "peg_ratio" in REGISTRY
     assert "peg_ratio_div_adj" in REGISTRY
+    assert "altman_z" in REGISTRY

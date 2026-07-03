@@ -19,9 +19,8 @@ pruned payloads for **MSFT**, **GOOGL**, and **ADBE** pulled from `fundamentals_
 
 > EODHD is the only provider, so every distinct `concept` in `financial_facts` came from
 > this normalizer. The authoritative concept set is therefore whatever
-> `SELECT DISTINCT concept FROM financial_facts` returns — **44 concepts** as of
-> 2026-06-13 (the live DB currently holds one fully normalized symbol, **AAPL/USD**;
-> MSFT/GOOGL/ADBE appear only as raw input payloads).
+> `SELECT DISTINCT concept FROM financial_facts` returns — **46 concepts** as of
+> 2026-07-03 (the full supported universe is normalized locally).
 
 ## Normalized fact shape
 
@@ -80,7 +79,7 @@ tables below.
    behavior; see [Normalization and Facts](../architecture/normalization-and-facts.md) for the
    broader FX policy.
 
-## Concept inventory (45)
+## Concept inventory (46)
 
 `F` = directly read from a statement field, `D` = derived/aliased, `S` = snapshot.
 "Periods" are the `fiscal_period` values actually observed in the live table.
@@ -102,6 +101,7 @@ tables below.
 | NoncontrollingInterestInConsolidatedEntity | Balance Sheet | monetary | FY, Q1–Q4 | F |
 | PreferredStock | Balance Sheet | monetary | FY, Q1–Q4 | F |
 | PropertyPlantAndEquipmentNet | Balance Sheet | monetary | FY, Q1–Q4 | F (+subtraction fallback) |
+| RetainedEarnings | Balance Sheet | monetary | FY, Q1–Q4 | F |
 | ShortTermDebt | Balance Sheet | monetary | FY, Q1–Q4 | F |
 | ShortTermInvestments | Balance Sheet | monetary | FY, Q1–Q4 | F |
 | StockholdersEquity | Balance Sheet | monetary | FY, Q1–Q4 | F + D |

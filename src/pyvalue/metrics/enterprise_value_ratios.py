@@ -63,7 +63,7 @@ SALES_REQUIRED_CONCEPTS = tuple(
 
 
 @dataclass(frozen=True)
-class _TTMResult:
+class TTMResult:
     money: Money
     as_of: str
 
@@ -73,12 +73,12 @@ class EnterpriseValueRatioCalculator:
 
     def compute_ttm_ebit(
         self, listing_id: int, repo: RegionFactsRepository, *, context: str
-    ) -> Optional[_TTMResult]:
+    ) -> Optional[TTMResult]:
         return self._compute_ttm_amount(listing_id, repo, EBIT_CONCEPT, context=context)
 
     def compute_ttm_fcf(
         self, listing_id: int, repo: RegionFactsRepository, *, context: str
-    ) -> Optional[_TTMResult]:
+    ) -> Optional[TTMResult]:
         operating = self._compute_ttm_amount(
             listing_id,
             repo,
@@ -103,14 +103,14 @@ class EnterpriseValueRatioCalculator:
             )
             return operating
 
-        return _TTMResult(
+        return TTMResult(
             money=operating.money - capex.money,
             as_of=max(operating.as_of, capex.as_of),
         )
 
     def compute_ttm_ebitda(
         self, listing_id: int, repo: RegionFactsRepository, *, context: str
-    ) -> Optional[_TTMResult]:
+    ) -> Optional[TTMResult]:
         ebit_records = self._filter_quarterly(
             repo.monetary_facts_for_concept(listing_id, EBIT_CONCEPT)
         )
@@ -159,14 +159,14 @@ class EnterpriseValueRatioCalculator:
                 + self._money(da_record, target_currency, listing_id, context)
             )
 
-        return _TTMResult(
+        return TTMResult(
             money=sum_money(quarter_totals),
             as_of=ebit_records[0].end_date,
         )
 
     def compute_ttm_revenue(
         self, listing_id: int, repo: RegionFactsRepository, *, context: str
-    ) -> Optional[_TTMResult]:
+    ) -> Optional[TTMResult]:
         return self._compute_ttm_amount(
             listing_id, repo, REVENUE_CONCEPT, context=context
         )
@@ -178,7 +178,7 @@ class EnterpriseValueRatioCalculator:
         concept: str,
         *,
         context: str,
-    ) -> Optional[_TTMResult]:
+    ) -> Optional[TTMResult]:
         quarterly = self._filter_quarterly(
             repo.monetary_facts_for_concept(listing_id, concept)
         )
@@ -208,7 +208,7 @@ class EnterpriseValueRatioCalculator:
             self._money(record, target_currency, listing_id, context)
             for record in quarterly[:4]
         ]
-        return _TTMResult(
+        return TTMResult(
             money=sum_money(monies),
             as_of=quarterly[0].end_date,
         )
@@ -472,6 +472,7 @@ class EVToSalesMetric:
 
 
 __all__ = [
+    "TTMResult",
     "EBITYieldEVMetric",
     "FCFYieldEVMetric",
     "EVToEBITMetric",

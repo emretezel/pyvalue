@@ -96,6 +96,13 @@ EODHD_STATEMENT_FIELDS = {
         "NoncontrollingInterestInConsolidatedEntity": [
             "noncontrollingInterestInConsolidatedEntity"
         ],
+        # Accumulated retained earnings (deficit). Feeds the Altman Z-Score's
+        # RE/TA term; the TotalEquity variant is a rarely-populated EODHD
+        # alias kept as a rescue fallback.
+        "RetainedEarnings": [
+            "retainedEarnings",
+            "retainedEarningsTotalEquity",
+        ],
         "CashAndShortTermInvestments": ["cashAndShortTermInvestments"],
         "CashAndCashEquivalents": ["cashAndEquivalents", "cash"],
         "ShortTermInvestments": ["shortTermInvestments"],
