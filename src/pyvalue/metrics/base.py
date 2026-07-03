@@ -51,6 +51,8 @@ _METRIC_METADATA: dict[str, MetricMetadata] = {
     "graham_eps_10y_cagr_3y_avg": MetricMetadata("percent"),
     "graham_multiplier": MetricMetadata("multiple", "x"),
     "earnings_yield": MetricMetadata("percent"),
+    "peg_ratio": MetricMetadata("ratio"),
+    "peg_ratio_div_adj": MetricMetadata("ratio"),
     "interest_coverage": MetricMetadata("ratio"),
     "market_cap": MetricMetadata("monetary"),
     "price_to_book": MetricMetadata("multiple", "x"),

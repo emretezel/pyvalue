@@ -91,6 +91,10 @@ from pyvalue.metrics.operating_margin_stability import (
     OperatingMarginTenYearMinMetric,
     OperatingMarginTenYearStdMetric,
 )
+from pyvalue.metrics.peg_ratio import (
+    PEGRatioDividendAdjustedMetric,
+    PEGRatioMetric,
+)
 from pyvalue.metrics.price_to_book import (
     PriceToBookMetric,
     PriceToTangibleBookMetric,
@@ -2199,6 +2203,220 @@ def test_croic_metric_matches_formula_property(
     assert result is not None
     expected = 4 * (ocf_quarter - capex_quarter) / avg_ic
     assert result.value == pytest.approx(expected, rel=1e-6, abs=1e-9)
+
+
+def _peg_records(
+    *,
+    q4: str,
+    q3: str,
+    q2: str,
+    q1: str,
+    eps_quarters: tuple[float, float, float, float] = (0.5, 0.5, 0.5, 0.5),
+    fy_eps_newest_first: tuple[float, ...] = (
+        2.0,
+        2.0,
+        2.0,
+        1.8,
+        1.6,
+        1.4,
+        1.2,
+        1.0,
+        1.0,
+        1.0,
+    ),
+    dividends_paid_quarters: tuple[float, float, float, float] | None = None,
+) -> dict[str, list[FactRecord]]:
+    # Quarterly EPS feed the P/E leg (TTM = 2.0 by default); the FY series
+    # feeds the Graham CAGR (default: 1.0 start-avg to 2.0 end-avg over the
+    # 10-year window, i.e. g = 2**(1/7) - 1).
+    year = int(q4[:4])
+    suffix = q4[4:]
+    records: dict[str, list[FactRecord]] = {
+        "EarningsPerShare": _quarterly_records(
+            "EarningsPerShare", (q4, q3, q2, q1), eps_quarters
+        )
+        + [
+            fact(
+                concept="EarningsPerShare",
+                fiscal_period="FY",
+                end_date=f"{year - offset}{suffix}",
+                value=value,
+            )
+            for offset, value in enumerate(fy_eps_newest_first)
+        ],
+    }
+    if dividends_paid_quarters is not None:
+        records["CommonStockDividendsPaid"] = _quarterly_records(
+            "CommonStockDividendsPaid", (q4, q3, q2, q1), dividends_paid_quarters
+        )
+    return records
+
+
+def test_peg_ratio_computes_pe_over_graham_growth() -> None:
+    metric = PEGRatioMetric()
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(_peg_records(q4=q4, q3=q3, q2=q2, q1=q1))
+
+    result = metric.compute(
+        LISTING_ID, repo, _build_market_repo(market_cap=40.0, as_of=q4)
+    )
+
+    # P/E = 40 / 2.0 = 20; g = 2**(1/7) - 1 (~10.4%) -> PEG ~ 1.92.
+    assert result is not None
+    assert result.value == pytest.approx(20.0 / (100.0 * (2 ** (1 / 7) - 1)), rel=1e-12)
+    assert result.as_of == q4
+
+
+def test_peg_ratio_returns_none_when_growth_non_positive() -> None:
+    metric = PEGRatioMetric()
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        _peg_records(
+            q4=q4,
+            q3=q3,
+            q2=q2,
+            q1=q1,
+            # Newest-first declining series: start-avg 2.0, end-avg 1.0.
+            fy_eps_newest_first=(1.0, 1.0, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.0, 2.0),
+        )
+    )
+
+    assert (
+        metric.compute(LISTING_ID, repo, _build_market_repo(market_cap=40.0, as_of=q4))
+        is None
+    )
+
+
+def test_peg_ratio_returns_none_when_ttm_eps_non_positive() -> None:
+    metric = PEGRatioMetric()
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        _peg_records(q4=q4, q3=q3, q2=q2, q1=q1, eps_quarters=(-0.5, -0.5, -0.5, -0.5))
+    )
+
+    assert (
+        metric.compute(LISTING_ID, repo, _build_market_repo(market_cap=40.0, as_of=q4))
+        is None
+    )
+
+
+def test_peg_ratio_returns_none_without_ten_fy_years() -> None:
+    metric = PEGRatioMetric()
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        _peg_records(
+            q4=q4,
+            q3=q3,
+            q2=q2,
+            q1=q1,
+            fy_eps_newest_first=(2.0, 2.0, 2.0, 1.8, 1.6, 1.4, 1.2, 1.0, 1.0),
+        )
+    )
+
+    assert (
+        metric.compute(LISTING_ID, repo, _build_market_repo(market_cap=40.0, as_of=q4))
+        is None
+    )
+
+
+def test_peg_ratio_div_adj_credits_dividend_yield() -> None:
+    metric = PEGRatioDividendAdjustedMetric()
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        _peg_records(
+            q4=q4,
+            q3=q3,
+            q2=q2,
+            q1=q1,
+            dividends_paid_quarters=(-0.2, -0.2, -0.2, -0.2),
+        )
+    )
+
+    result = metric.compute(
+        LISTING_ID, repo, _build_market_repo(market_cap=40.0, as_of=q4)
+    )
+
+    # Cash dividends TTM = 0.8 over market cap 40 -> yield 2%; the denominator
+    # becomes 100 * (g + 0.02), so the adjusted PEG sits below the plain one.
+    assert result is not None
+    assert result.value == pytest.approx(
+        20.0 / (100.0 * ((2 ** (1 / 7) - 1) + 0.02)), rel=1e-12
+    )
+
+
+def test_peg_ratio_div_adj_equals_plain_peg_without_dividends() -> None:
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(_peg_records(q4=q4, q3=q3, q2=q2, q1=q1))
+    market_repo = _build_market_repo(market_cap=40.0, as_of=q4)
+
+    plain = PEGRatioMetric().compute(LISTING_ID, repo, market_repo)
+    adjusted = PEGRatioDividendAdjustedMetric().compute(LISTING_ID, repo, market_repo)
+
+    # A non-payer credits zero yield: the variant degrades to the plain PEG.
+    assert plain is not None
+    assert adjusted is not None
+    assert adjusted.value == plain.value
+
+
+def test_peg_ratio_div_adj_survives_zero_growth_with_yield() -> None:
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        _peg_records(
+            q4=q4,
+            q3=q3,
+            q2=q2,
+            q1=q1,
+            fy_eps_newest_first=(2.0,) * 10,
+            dividends_paid_quarters=(-0.2, -0.2, -0.2, -0.2),
+        )
+    )
+    market_repo = _build_market_repo(market_cap=40.0, as_of=q4)
+
+    # Flat EPS: g = 0, so the plain PEG is suppressed while the dividend
+    # variant prices the multiple against the 2% yield alone: 20 / 2 = 10.
+    assert PEGRatioMetric().compute(LISTING_ID, repo, market_repo) is None
+    adjusted = PEGRatioDividendAdjustedMetric().compute(LISTING_ID, repo, market_repo)
+    assert adjusted is not None
+    assert adjusted.value == pytest.approx(10.0, rel=1e-12)
+
+
+@given(
+    eps_quarter=st.floats(min_value=0.01, max_value=100.0, allow_nan=False),
+    price=st.floats(min_value=1.0, max_value=1e4, allow_nan=False),
+    start_eps=st.floats(min_value=0.1, max_value=100.0, allow_nan=False),
+    growth_mult=st.floats(min_value=1.05, max_value=10.0, allow_nan=False),
+)
+def test_peg_ratio_matches_formula_property(
+    eps_quarter: float, price: float, start_eps: float, growth_mult: float
+) -> None:
+    # Expected mirrors _compute_cagr's endpoint averaging exactly; only the
+    # TTM EPS sum (vs multiply) rounding differs.
+    end_eps = start_eps * growth_mult
+    mid_eps = (start_eps + end_eps) / 2
+    fy_newest_first = (end_eps,) * 3 + (mid_eps,) * 4 + (start_eps,) * 3
+    metric = PEGRatioMetric()
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        _peg_records(
+            q4=q4,
+            q3=q3,
+            q2=q2,
+            q1=q1,
+            eps_quarters=(eps_quarter,) * 4,
+            fy_eps_newest_first=fy_newest_first,
+        )
+    )
+
+    result = metric.compute(
+        LISTING_ID, repo, _build_market_repo(market_cap=price, as_of=q4)
+    )
+
+    assert result is not None
+    start_avg = (start_eps + start_eps + start_eps) / 3
+    end_avg = (end_eps + end_eps + end_eps) / 3
+    growth = (end_avg / start_avg) ** (1 / 7) - 1
+    expected = (1.0 / ((4 * eps_quarter) / price)) / (100.0 * growth)
+    assert result.value == pytest.approx(expected, rel=1e-9)
 
 
 def test_net_debt_to_ebitda_metric() -> None:
@@ -13562,3 +13780,5 @@ def test_registry_contains_all_ids() -> None:
     assert "price_to_ncav" in REGISTRY
     assert "roce" in REGISTRY
     assert "croic" in REGISTRY
+    assert "peg_ratio" in REGISTRY
+    assert "peg_ratio_div_adj" in REGISTRY

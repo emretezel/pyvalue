@@ -21,6 +21,7 @@ from .eps_average import EPSAverageSixYearMetric
 from .graham_eps_cagr import GrahamEPSCAGRMetric
 from .graham_multiplier import GrahamMultiplierMetric
 from .earnings_yield import EarningsYieldMetric
+from .peg_ratio import PEGRatioDividendAdjustedMetric, PEGRatioMetric
 from .interest_coverage import InterestCoverageMetric
 from .market_capitalization import MarketCapitalizationMetric
 from .ncav import NCAVMetric, PriceToNCAVMetric
@@ -122,6 +123,8 @@ REGISTRY = {
     GrahamEPSCAGRMetric.id: GrahamEPSCAGRMetric,
     GrahamMultiplierMetric.id: GrahamMultiplierMetric,
     EarningsYieldMetric.id: EarningsYieldMetric,
+    PEGRatioMetric.id: PEGRatioMetric,
+    PEGRatioDividendAdjustedMetric.id: PEGRatioDividendAdjustedMetric,
     InterestCoverageMetric.id: InterestCoverageMetric,
     MarketCapitalizationMetric.id: MarketCapitalizationMetric,
     NCAVMetric.id: NCAVMetric,
@@ -218,6 +221,8 @@ __all__ = [
     "GrahamEPSCAGRMetric",
     "GrahamMultiplierMetric",
     "EarningsYieldMetric",
+    "PEGRatioMetric",
+    "PEGRatioDividendAdjustedMetric",
     "InterestCoverageMetric",
     "MarketCapitalizationMetric",
     "NCAVMetric",
