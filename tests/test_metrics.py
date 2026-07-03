@@ -9,6 +9,8 @@ from datetime import date, timedelta
 import io
 from pathlib import Path
 
+from hypothesis import assume, given
+from hypothesis import strategies as st
 import pytest
 
 from conftest import resolve_listing_id, seed_exchange, seed_facts, seed_price
@@ -39,6 +41,7 @@ from pyvalue.metrics.enterprise_value_ratios import (
     FCFYieldEVMetric,
 )
 from pyvalue.metrics.eps_average import EPSAverageSixYearMetric
+from pyvalue.metrics.fcf_to_ebitda import FCFToEBITDAMetric
 from pyvalue.metrics.eps_quarterly import EarningsPerShareTTM
 from pyvalue.metrics.eps_streak import EPSStreakMetric
 from pyvalue.metrics.graham_eps_cagr import GrahamEPSCAGRMetric
@@ -10083,6 +10086,141 @@ def test_ev_to_ebitda_metric_returns_none_when_ebitda_non_positive() -> None:
     )
 
 
+def test_fcf_to_ebitda_metric_computes_conversion_ratio() -> None:
+    metric = FCFToEBITDAMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        _build_ev_ratio_records(symbol=symbol, q4=q4, q3=q3, q2=q2, q1=q1)
+    )
+
+    result = metric.compute(LISTING_ID, repo)
+
+    # FCF = 4*(125-25) = 400; component EBITDA = 4*(100+25) = 500.
+    assert result is not None
+    assert result.value == 0.8
+    assert result.as_of == q4
+
+
+def test_fcf_to_ebitda_metric_treats_missing_capex_as_zero() -> None:
+    metric = FCFToEBITDAMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        _build_ev_ratio_records(
+            symbol=symbol, q4=q4, q3=q3, q2=q2, q1=q1, capex_values=None
+        )
+    )
+
+    result = metric.compute(LISTING_ID, repo)
+
+    # FCF falls back to OCF alone (500); EBITDA stays 500.
+    assert result is not None
+    assert result.value == 1.0
+
+
+def test_fcf_to_ebitda_metric_allows_negative_fcf() -> None:
+    metric = FCFToEBITDAMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        _build_ev_ratio_records(
+            symbol=symbol,
+            q4=q4,
+            q3=q3,
+            q2=q2,
+            q1=q1,
+            ocf_values=(20.0, 20.0, 20.0, 20.0),
+            capex_values=(30.0, 30.0, 30.0, 30.0),
+        )
+    )
+
+    result = metric.compute(LISTING_ID, repo)
+
+    # FCF = 4*(20-30) = -40; EBITDA = 500 -> negative conversion is emitted.
+    assert result is not None
+    assert result.value == -0.08
+
+
+def test_fcf_to_ebitda_metric_returns_none_when_ebitda_non_positive() -> None:
+    metric = FCFToEBITDAMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        _build_ev_ratio_records(
+            symbol=symbol,
+            q4=q4,
+            q3=q3,
+            q2=q2,
+            q1=q1,
+            ebit_values=(-20.0, -20.0, -20.0, -20.0),
+            da_primary_values=(10.0, 10.0, 10.0, 10.0),
+        )
+    )
+
+    assert metric.compute(LISTING_ID, repo) is None
+
+
+def test_fcf_to_ebitda_metric_uses_da_fallback_for_component_ebitda() -> None:
+    metric = FCFToEBITDAMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        _build_ev_ratio_records(
+            symbol=symbol,
+            q4=q4,
+            q3=q3,
+            q2=q2,
+            q1=q1,
+            da_primary_values=None,
+            da_fallback_values=(25.0, 25.0, 25.0, 25.0),
+        )
+    )
+
+    result = metric.compute(LISTING_ID, repo)
+
+    assert result is not None
+    assert result.value == 0.8
+
+
+@given(
+    ocf_quarter=st.floats(min_value=-1e6, max_value=1e6, allow_nan=False),
+    capex_quarter=st.floats(min_value=-1e6, max_value=1e6, allow_nan=False),
+    ebit_quarter=st.floats(min_value=-1e5, max_value=1e6, allow_nan=False),
+    da_quarter=st.floats(min_value=0.0, max_value=1e5, allow_nan=False),
+)
+def test_fcf_to_ebitda_metric_matches_formula_property(
+    ocf_quarter: float, capex_quarter: float, ebit_quarter: float, da_quarter: float
+) -> None:
+    # Property: with 4 identical quarters and a non-degenerate positive EBITDA,
+    # the metric equals (OCF - capex) / (EBIT + D&A) computed per quarter. The
+    # >= 1.0 floor avoids catastrophic-cancellation denominators that would
+    # only test float noise, not the formula.
+    assume(ebit_quarter + da_quarter >= 1.0)
+    metric = FCFToEBITDAMetric()
+    symbol = "AAPL.US"
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    repo = _OwnerEarningsRepo(
+        _build_ev_ratio_records(
+            symbol=symbol,
+            q4=q4,
+            q3=q3,
+            q2=q2,
+            q1=q1,
+            ocf_values=(ocf_quarter,) * 4,
+            capex_values=(capex_quarter,) * 4,
+            ebit_values=(ebit_quarter,) * 4,
+            da_primary_values=(da_quarter,) * 4,
+        )
+    )
+
+    result = metric.compute(LISTING_ID, repo)
+
+    assert result is not None
+    expected = (ocf_quarter - capex_quarter) / (ebit_quarter + da_quarter)
+    assert result.value == pytest.approx(expected, rel=1e-6, abs=1e-9)
+
+
 def test_cfo_to_ni_ttm_metric() -> None:
     metric = CFOToNITTMMetric()
     quarter_dates = _net_debt_quarter_dates()
@@ -12674,3 +12812,4 @@ def test_registry_contains_all_ids() -> None:
     assert "oe_ev_fy_median_5y" in REGISTRY
     assert "worst_oe_ev_fy_10y" in REGISTRY
     assert "oey_ev_norm" in REGISTRY
+    assert "fcf_to_ebitda" in REGISTRY

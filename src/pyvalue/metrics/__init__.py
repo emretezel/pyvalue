@@ -81,6 +81,7 @@ from .enterprise_value_ratios import (
     EVToEBITMetric,
     EVToEBITDAMetric,
 )
+from .fcf_to_ebitda import FCFToEBITDAMetric
 from .sbc_load import SBCToFCFMetric, SBCToRevenueMetric
 from .profitability_returns_growth import (
     DividendPayoutRatioTTMMetric,
@@ -143,6 +144,7 @@ REGISTRY = {
     FCFYieldEVMetric.id: FCFYieldEVMetric,
     EVToEBITMetric.id: EVToEBITMetric,
     EVToEBITDAMetric.id: EVToEBITDAMetric,
+    FCFToEBITDAMetric.id: FCFToEBITDAMetric,
     SBCToRevenueMetric.id: SBCToRevenueMetric,
     SBCToFCFMetric.id: SBCToFCFMetric,
     GrossMarginTTMMetric.id: GrossMarginTTMMetric,
@@ -231,6 +233,7 @@ __all__ = [
     "FCFYieldEVMetric",
     "EVToEBITMetric",
     "EVToEBITDAMetric",
+    "FCFToEBITDAMetric",
     "SBCToRevenueMetric",
     "SBCToFCFMetric",
     "GrossMarginTTMMetric",

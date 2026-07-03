@@ -43,6 +43,7 @@ Columns:
 | Accruals Ratio | `accruals_ratio` | EODHD-oriented: `(NetIncome_TTM - CFO_TTM) / AvgTotalAssets`, where `AvgTotalAssets` uses strict same-quarter prior-year averaging. | Lower or negative accruals usually indicate cleaner, cash-backed earnings. |
 | Stock-Based Compensation to Revenue | `sbc_to_revenue` | EODHD-oriented: `StockBasedCompensation_TTM / Revenues_TTM`. | Shows how much top-line output is offset by equity compensation and potential dilution. |
 | Stock-Based Compensation to Free Cash Flow | `sbc_to_fcf` | EODHD-oriented: `StockBasedCompensation_TTM / FCF_TTM`, with `FCF_TTM = OCF_TTM - Capex_TTM` and capex missing treated as `0`. | Helps judge whether apparent cash generation is being offset by large stock comp. |
+| Free Cash Flow to EBITDA | `fcf_to_ebitda` | EODHD-oriented: `FCF_TTM / EBITDA_TTM`, where `FCF_TTM = OCF_TTM - Capex_TTM` (missing capex treated as `0`) and `EBITDA_TTM = EBIT_TTM + D&A_TTM`; only when `EBITDA_TTM > 0`, negative FCF allowed. | Operationalizes Buffett's critique that EBITDA ignores capex: high conversion shows EBITDA is backed by real free cash flow, low or negative conversion flags capital-hungry earnings. |
 
 ## Profitability / Returns
 

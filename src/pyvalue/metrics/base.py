@@ -78,6 +78,7 @@ _METRIC_METADATA: dict[str, MetricMetadata] = {
     "fcf_yield_ev": MetricMetadata("percent"),
     "ev_to_ebit": MetricMetadata("multiple", "x"),
     "ev_to_ebitda": MetricMetadata("multiple", "x"),
+    "fcf_to_ebitda": MetricMetadata("ratio"),
     "sbc_to_revenue": MetricMetadata("percent"),
     "sbc_to_fcf": MetricMetadata("percent"),
     "gross_margin_ttm": MetricMetadata("percent"),
