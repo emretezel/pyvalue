@@ -46,6 +46,7 @@ _METRIC_METADATA: dict[str, MetricMetadata] = {
     "accruals_ratio": MetricMetadata("ratio"),
     # A weighted discriminant score, not a ratio/percent of anything: "other".
     "altman_z": MetricMetadata("other"),
+    "piotroski_f_score": MetricMetadata("count"),
     "long_term_debt": MetricMetadata("monetary"),
     "eps_streak": MetricMetadata("count"),
     "eps_ttm": MetricMetadata("per_share", "per_share"),

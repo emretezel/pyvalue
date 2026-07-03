@@ -6,7 +6,6 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, timedelta
 from typing import Optional, Sequence
 
 import logging
@@ -16,6 +15,8 @@ from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     MAX_FY_FACT_AGE_DAYS,
+    extract_year,
+    is_recent_date,
     require_metric_money,
     require_metric_ticker_currency,
 )
@@ -266,11 +267,7 @@ class _InvestedCapitalBase:
         )
 
     def _is_recent_as_of(self, as_of: str, *, max_age_days: int) -> bool:
-        try:
-            end_date = date.fromisoformat(as_of)
-        except ValueError:
-            return False
-        return end_date >= (date.today() - timedelta(days=max_age_days))
+        return is_recent_date(as_of, max_age_days=max_age_days)
 
     def _select_latest_point(
         self,
@@ -299,12 +296,7 @@ class _InvestedCapitalBase:
         return latest
 
     def _extract_year(self, value: str) -> Optional[int]:
-        if len(value) < 4:
-            return None
-        year = value[:4]
-        if not year.isdigit():
-            return None
-        return int(year)
+        return extract_year(value)
 
 
 class InvestedCapitalCalculator(_InvestedCapitalBase):

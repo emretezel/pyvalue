@@ -15,6 +15,7 @@ from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     MAX_FY_FACT_AGE_DAYS,
+    extract_year,
     is_recent_fact,
 )
 
@@ -215,12 +216,7 @@ class ShareCountChangeCalculator:
         )
 
     def _extract_year(self, value: str) -> Optional[int]:
-        if len(value) < 4:
-            return None
-        prefix = value[:4]
-        if not prefix.isdigit():
-            return None
-        return int(prefix)
+        return extract_year(value)
 
 
 def _compute_share_count_cagr(

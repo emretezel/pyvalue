@@ -62,6 +62,30 @@ class MarketCap:
     as_of: str
 
 
+def is_recent_date(
+    value: str | None,
+    *,
+    max_age_days: int = MAX_FACT_AGE_DAYS,
+    reference_date: date | None = None,
+) -> bool:
+    """Return True if the ISO date string is within ``max_age_days`` of today.
+
+    The bare-string sibling of :func:`is_recent_fact`, for callers that hold a
+    derived ``as_of`` (an averaged point, a composite component) rather than a
+    fact object.
+    """
+
+    if not value:
+        return False
+    try:
+        end_date = date.fromisoformat(value)
+    except ValueError:
+        return False
+    today = reference_date or date.today()
+    cutoff = today - timedelta(days=max_age_days)
+    return end_date >= cutoff
+
+
 def is_recent_fact(
     record: FactView | None,
     *,
@@ -70,15 +94,23 @@ def is_recent_fact(
 ) -> bool:
     """Return True if the fact's end_date is within ``max_age_days`` of today."""
 
-    if record is None or not record.end_date:
+    if record is None:
         return False
-    try:
-        end_date = date.fromisoformat(record.end_date)
-    except ValueError:
-        return False
-    today = reference_date or date.today()
-    cutoff = today - timedelta(days=max_age_days)
-    return end_date >= cutoff
+    return is_recent_date(
+        record.end_date, max_age_days=max_age_days, reference_date=reference_date
+    )
+
+
+def extract_year(value: str) -> Optional[int]:
+    """Return the 4-digit year prefix of an ISO date string, or None.
+
+    Year-over-year metrics pair facts by calendar year of their ``end_date``;
+    this is the single shared parser for that convention.
+    """
+
+    if len(value) < 4 or not value[:4].isdigit():
+        return None
+    return int(value[:4])
 
 
 def has_recent_fact(

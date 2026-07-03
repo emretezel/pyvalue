@@ -17,7 +17,6 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, timedelta
 from typing import Optional, Sequence
 
 import logging
@@ -31,6 +30,8 @@ from pyvalue.metrics.enterprise_value_ratios import (
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     MAX_FY_FACT_AGE_DAYS,
+    extract_year,
+    is_recent_date,
     require_metric_money,
     require_metric_ticker_currency,
 )
@@ -60,20 +61,6 @@ class CapitalEmployedSnapshot:
     as_of: str
 
 
-def _extract_year(value: str) -> Optional[int]:
-    if len(value) < 4 or not value[:4].isdigit():
-        return None
-    return int(value[:4])
-
-
-def _is_recent_as_of(as_of: str, *, max_age_days: int) -> bool:
-    try:
-        end_date = date.fromisoformat(as_of)
-    except ValueError:
-        return False
-    return end_date >= (date.today() - timedelta(days=max_age_days))
-
-
 class CapitalEmployedCalculator:
     """Averaged capital-employed (Assets - LiabilitiesCurrent) denominators.
 
@@ -95,10 +82,10 @@ class CapitalEmployedCalculator:
             listing_id=listing_id,
         )
         if latest_quarter is not None:
-            latest_year = _extract_year(latest_quarter.as_of)
+            latest_year = extract_year(latest_quarter.as_of)
             if latest_year is not None:
                 for point in quarterly_points[1:]:
-                    point_year = _extract_year(point.as_of)
+                    point_year = extract_year(point.as_of)
                     if (
                         point_year == latest_year - 1
                         and point.fiscal_period == latest_quarter.fiscal_period
@@ -117,11 +104,11 @@ class CapitalEmployedCalculator:
         )
         if latest_fy is None:
             return None
-        latest_year = _extract_year(latest_fy.as_of)
+        latest_year = extract_year(latest_fy.as_of)
         if latest_year is None:
             return None
         for point in fy_points[1:]:
-            if _extract_year(point.as_of) == latest_year - 1:
+            if extract_year(point.as_of) == latest_year - 1:
                 return CapitalEmployedSnapshot(
                     money=(latest_fy.money + point.money) / 2.0,
                     as_of=latest_fy.as_of,
@@ -212,7 +199,7 @@ class CapitalEmployedCalculator:
             )
             return None
         latest = points[0]
-        if not _is_recent_as_of(latest.as_of, max_age_days=max_age_days):
+        if not is_recent_date(latest.as_of, max_age_days=max_age_days):
             LOGGER.warning(
                 "%s: latest capital employed (%s) too old for listing_id=%s",
                 context,

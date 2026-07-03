@@ -23,6 +23,7 @@ from .graham_eps_cagr import GrahamEPSCAGRMetric
 from .graham_multiplier import GrahamMultiplierMetric
 from .earnings_yield import EarningsYieldMetric
 from .peg_ratio import PEGRatioDividendAdjustedMetric, PEGRatioMetric
+from .piotroski import PiotroskiFScoreMetric
 from .interest_coverage import InterestCoverageMetric
 from .market_capitalization import MarketCapitalizationMetric
 from .ncav import NCAVMetric, PriceToNCAVMetric
@@ -118,6 +119,7 @@ REGISTRY = {
     NetIncomeLossYearsTenYearMetric.id: NetIncomeLossYearsTenYearMetric,
     AccrualsRatioMetric.id: AccrualsRatioMetric,
     AltmanZMetric.id: AltmanZMetric,
+    PiotroskiFScoreMetric.id: PiotroskiFScoreMetric,
     LongTermDebtMetric.id: LongTermDebtMetric,
     EPSStreakMetric.id: EPSStreakMetric,
     EarningsPerShareTTM.id: EarningsPerShareTTM,
@@ -217,6 +219,7 @@ __all__ = [
     "NetIncomeLossYearsTenYearMetric",
     "AccrualsRatioMetric",
     "AltmanZMetric",
+    "PiotroskiFScoreMetric",
     "LongTermDebtMetric",
     "EPSStreakMetric",
     "EarningsPerShareTTM",
