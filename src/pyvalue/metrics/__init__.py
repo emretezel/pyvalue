@@ -27,6 +27,7 @@ from .ncav import NCAVMetric, PriceToNCAVMetric
 from .price_to_book import PriceToBookMetric, PriceToTangibleBookMetric
 from .price_to_fcf import PriceToFCFMetric
 from .roc_greenblatt import ROCGreenblattMetric
+from .roce import ROCEMetric
 from .roe_greenblatt import ROEGreenblattMetric
 from .net_debt_to_ebitda import NetDebtToEBITDAMetric
 from .short_term_debt_share import ShortTermDebtShareMetric
@@ -133,6 +134,7 @@ REGISTRY = {
     ICFYMetric.id: ICFYMetric,
     AvgICMetric.id: AvgICMetric,
     RoicTTMMetric.id: RoicTTMMetric,
+    ROCEMetric.id: ROCEMetric,
     ROIC10YMedianMetric.id: ROIC10YMedianMetric,
     ROIC7YMedianMetric.id: ROIC7YMedianMetric,
     ROICYearsAbove12PctMetric.id: ROICYearsAbove12PctMetric,
@@ -227,6 +229,7 @@ __all__ = [
     "ICFYMetric",
     "AvgICMetric",
     "RoicTTMMetric",
+    "ROCEMetric",
     "ROIC10YMedianMetric",
     "ROIC7YMedianMetric",
     "ROICYearsAbove12PctMetric",

@@ -64,6 +64,7 @@ _METRIC_METADATA: dict[str, MetricMetadata] = {
     "ic_fy": MetricMetadata("monetary"),
     "avg_ic": MetricMetadata("monetary"),
     "roic_ttm": MetricMetadata("percent"),
+    "roce": MetricMetadata("percent"),
     "roic_10y_median": MetricMetadata("percent"),
     "roic_7y_median": MetricMetadata("percent"),
     "roic_years_above_12pct": MetricMetadata("count"),

@@ -111,6 +111,7 @@ from pyvalue.metrics.profitability_returns_growth import (
     ShareholderYieldTTMMetric,
 )
 from pyvalue.metrics.roc_greenblatt import ROCGreenblattMetric
+from pyvalue.metrics.roce import ROCEMetric
 from pyvalue.metrics.roic_fy_series import (
     IncrementalROICFiveYearMetric,
     ROIC10YMedianMetric,
@@ -1850,6 +1851,203 @@ def test_price_to_ncav_metric_matches_formula_property(
 
     assert result is not None
     assert result.value == pytest.approx(price / ncav, rel=1e-6)
+
+
+def _roce_balance_records(
+    *,
+    q_latest: str,
+    q_prior: str,
+    fiscal_period: str,
+    assets: tuple[float, float],
+    liabilities: tuple[float, float],
+) -> dict[str, list[FactRecord]]:
+    # Two balance-sheet points (latest, one year prior) with the same fiscal
+    # period label, as the same-quarter-prior-year averaging requires.
+    return {
+        "Assets": [
+            fact(
+                concept="Assets",
+                fiscal_period=fiscal_period,
+                end_date=q_latest,
+                value=assets[0],
+            ),
+            fact(
+                concept="Assets",
+                fiscal_period=fiscal_period,
+                end_date=q_prior,
+                value=assets[1],
+            ),
+        ],
+        "LiabilitiesCurrent": [
+            fact(
+                concept="LiabilitiesCurrent",
+                fiscal_period=fiscal_period,
+                end_date=q_latest,
+                value=liabilities[0],
+            ),
+            fact(
+                concept="LiabilitiesCurrent",
+                fiscal_period=fiscal_period,
+                end_date=q_prior,
+                value=liabilities[1],
+            ),
+        ],
+    }
+
+
+def test_roce_metric_uses_same_quarter_prior_year_average() -> None:
+    metric = ROCEMetric()
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    prior_q4 = f"{int(q4[:4]) - 1}{q4[4:]}"
+    records = _roce_balance_records(
+        q_latest=q4,
+        q_prior=prior_q4,
+        fiscal_period="Q4",
+        assets=(1200.0, 800.0),
+        liabilities=(200.0, 200.0),
+    )
+    records["OperatingIncomeLoss"] = _quarterly_records(
+        "OperatingIncomeLoss", (q4, q3, q2, q1), (50.0, 50.0, 50.0, 50.0)
+    )
+    repo = _OwnerEarningsRepo(records)
+
+    result = metric.compute(LISTING_ID, repo)
+
+    # TTM EBIT = 200; CE_t = 1000, CE_(t-1y) = 600 -> avg 800 -> 25%.
+    assert result is not None
+    assert result.value == 0.25
+    assert result.unit_kind == "percent"
+    assert result.as_of == q4
+
+
+def test_roce_metric_falls_back_to_strict_prior_fy_pair() -> None:
+    metric = ROCEMetric()
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    prior_fy = f"{int(q4[:4]) - 1}{q4[4:]}"
+    records = _roce_balance_records(
+        q_latest=q4,
+        q_prior=prior_fy,
+        fiscal_period="FY",
+        assets=(1200.0, 800.0),
+        liabilities=(200.0, 200.0),
+    )
+    records["OperatingIncomeLoss"] = _quarterly_records(
+        "OperatingIncomeLoss", (q4, q3, q2, q1), (50.0, 50.0, 50.0, 50.0)
+    )
+    repo = _OwnerEarningsRepo(records)
+
+    result = metric.compute(LISTING_ID, repo)
+
+    assert result is not None
+    assert result.value == 0.25
+
+
+def test_roce_metric_emits_negative_return_on_negative_ebit() -> None:
+    metric = ROCEMetric()
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    prior_q4 = f"{int(q4[:4]) - 1}{q4[4:]}"
+    records = _roce_balance_records(
+        q_latest=q4,
+        q_prior=prior_q4,
+        fiscal_period="Q4",
+        assets=(1200.0, 800.0),
+        liabilities=(200.0, 200.0),
+    )
+    records["OperatingIncomeLoss"] = _quarterly_records(
+        "OperatingIncomeLoss", (q4, q3, q2, q1), (-50.0, -50.0, -50.0, -50.0)
+    )
+    repo = _OwnerEarningsRepo(records)
+
+    result = metric.compute(LISTING_ID, repo)
+
+    # Unlike roic_ttm (whose tax-rate model breaks on losses), ROCE reports
+    # the loss period as a negative return.
+    assert result is not None
+    assert result.value == -0.25
+
+
+def test_roce_metric_returns_none_without_prior_year_pair() -> None:
+    metric = ROCEMetric()
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    records = {
+        "Assets": [
+            fact(concept="Assets", fiscal_period="Q4", end_date=q4, value=1200.0)
+        ],
+        "LiabilitiesCurrent": [
+            fact(
+                concept="LiabilitiesCurrent",
+                fiscal_period="Q4",
+                end_date=q4,
+                value=200.0,
+            )
+        ],
+        "OperatingIncomeLoss": _quarterly_records(
+            "OperatingIncomeLoss", (q4, q3, q2, q1), (50.0, 50.0, 50.0, 50.0)
+        ),
+    }
+    repo = _OwnerEarningsRepo(records)
+
+    assert metric.compute(LISTING_ID, repo) is None
+
+
+def test_roce_metric_returns_none_when_capital_employed_non_positive() -> None:
+    metric = ROCEMetric()
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    prior_q4 = f"{int(q4[:4]) - 1}{q4[4:]}"
+    records = _roce_balance_records(
+        q_latest=q4,
+        q_prior=prior_q4,
+        fiscal_period="Q4",
+        assets=(200.0, 200.0),
+        liabilities=(400.0, 400.0),
+    )
+    records["OperatingIncomeLoss"] = _quarterly_records(
+        "OperatingIncomeLoss", (q4, q3, q2, q1), (50.0, 50.0, 50.0, 50.0)
+    )
+    repo = _OwnerEarningsRepo(records)
+
+    assert metric.compute(LISTING_ID, repo) is None
+
+
+@given(
+    ebit_quarter=st.floats(min_value=-1e5, max_value=1e6, allow_nan=False),
+    assets_latest=st.floats(min_value=0.0, max_value=1e12, allow_nan=False),
+    assets_prior=st.floats(min_value=0.0, max_value=1e12, allow_nan=False),
+    liabilities_latest=st.floats(min_value=0.0, max_value=1e12, allow_nan=False),
+    liabilities_prior=st.floats(min_value=0.0, max_value=1e12, allow_nan=False),
+)
+def test_roce_metric_matches_formula_property(
+    ebit_quarter: float,
+    assets_latest: float,
+    assets_prior: float,
+    liabilities_latest: float,
+    liabilities_prior: float,
+) -> None:
+    # Expected mirrors the metric's operation order (per-point subtraction,
+    # then two-point average), so only the TTM sum rounding differs.
+    avg_ce = (
+        (assets_latest - liabilities_latest) + (assets_prior - liabilities_prior)
+    ) / 2.0
+    assume(avg_ce >= 1.0)
+    metric = ROCEMetric()
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    prior_q4 = f"{int(q4[:4]) - 1}{q4[4:]}"
+    records = _roce_balance_records(
+        q_latest=q4,
+        q_prior=prior_q4,
+        fiscal_period="Q4",
+        assets=(assets_latest, assets_prior),
+        liabilities=(liabilities_latest, liabilities_prior),
+    )
+    records["OperatingIncomeLoss"] = _quarterly_records(
+        "OperatingIncomeLoss", (q4, q3, q2, q1), (ebit_quarter,) * 4
+    )
+    repo = _OwnerEarningsRepo(records)
+
+    result = metric.compute(LISTING_ID, repo)
+
+    assert result is not None
+    assert result.value == pytest.approx(4 * ebit_quarter / avg_ce, rel=1e-9, abs=1e-12)
 
 
 def test_net_debt_to_ebitda_metric() -> None:
@@ -13211,3 +13409,4 @@ def test_registry_contains_all_ids() -> None:
     assert "price_to_tangible_book" in REGISTRY
     assert "ncav" in REGISTRY
     assert "price_to_ncav" in REGISTRY
+    assert "roce" in REGISTRY
