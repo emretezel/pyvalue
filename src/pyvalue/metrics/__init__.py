@@ -26,6 +26,7 @@ from .market_capitalization import MarketCapitalizationMetric
 from .ncav import NCAVMetric, PriceToNCAVMetric
 from .price_to_book import PriceToBookMetric, PriceToTangibleBookMetric
 from .price_to_fcf import PriceToFCFMetric
+from .croic import CROICMetric
 from .roc_greenblatt import ROCGreenblattMetric
 from .roce import ROCEMetric
 from .roe_greenblatt import ROEGreenblattMetric
@@ -135,6 +136,7 @@ REGISTRY = {
     AvgICMetric.id: AvgICMetric,
     RoicTTMMetric.id: RoicTTMMetric,
     ROCEMetric.id: ROCEMetric,
+    CROICMetric.id: CROICMetric,
     ROIC10YMedianMetric.id: ROIC10YMedianMetric,
     ROIC7YMedianMetric.id: ROIC7YMedianMetric,
     ROICYearsAbove12PctMetric.id: ROICYearsAbove12PctMetric,
@@ -230,6 +232,7 @@ __all__ = [
     "AvgICMetric",
     "RoicTTMMetric",
     "ROCEMetric",
+    "CROICMetric",
     "ROIC10YMedianMetric",
     "ROIC7YMedianMetric",
     "ROICYearsAbove12PctMetric",

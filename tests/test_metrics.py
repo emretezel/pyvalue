@@ -31,6 +31,7 @@ from pyvalue.metrics.fundamental_consistency import (
     NetIncomeLossYearsTenYearMetric,
 )
 from pyvalue.metrics.sbc_load import SBCToFCFMetric, SBCToRevenueMetric
+from pyvalue.metrics.croic import CROICMetric
 from pyvalue.metrics.current_ratio import CurrentRatioMetric
 from pyvalue.metrics.debt_paydown_years import DebtPaydownYearsMetric, FCFToDebtMetric
 from pyvalue.metrics.earnings_yield import EarningsYieldMetric
@@ -2048,6 +2049,156 @@ def test_roce_metric_matches_formula_property(
 
     assert result is not None
     assert result.value == pytest.approx(4 * ebit_quarter / avg_ce, rel=1e-9, abs=1e-12)
+
+
+def _croic_records(
+    *,
+    q4: str,
+    q3: str,
+    q2: str,
+    q1: str,
+    prior_q4: str,
+    ocf_values: tuple[float, float, float, float] = (125.0, 125.0, 125.0, 125.0),
+    capex_values: tuple[float, float, float, float] = (25.0, 25.0, 25.0, 25.0),
+    equity: tuple[float, float] = (900.0, 500.0),
+    cash: tuple[float, float] = (100.0, 100.0),
+) -> dict[str, list[FactRecord]]:
+    # Invested capital = (short + long debt) + equity - cash per quarter point;
+    # the defaults give IC_t = 1000 and IC_(t-1y) = 600, i.e. avg_ic = 800.
+    def _pair(concept: str, values: tuple[float, float]) -> list[FactRecord]:
+        return [
+            fact(concept=concept, fiscal_period="Q4", end_date=q4, value=values[0]),
+            fact(
+                concept=concept,
+                fiscal_period="Q4",
+                end_date=prior_q4,
+                value=values[1],
+            ),
+        ]
+
+    return {
+        "NetCashProvidedByUsedInOperatingActivities": _quarterly_records(
+            "NetCashProvidedByUsedInOperatingActivities",
+            (q4, q3, q2, q1),
+            ocf_values,
+        ),
+        "CapitalExpenditures": _quarterly_records(
+            "CapitalExpenditures", (q4, q3, q2, q1), capex_values
+        ),
+        "ShortTermDebt": _pair("ShortTermDebt", (50.0, 50.0)),
+        "LongTermDebt": _pair("LongTermDebt", (150.0, 150.0)),
+        "StockholdersEquity": _pair("StockholdersEquity", equity),
+        "CashAndCashEquivalents": _pair("CashAndCashEquivalents", cash),
+    }
+
+
+def test_croic_metric_computes_cash_return_on_avg_ic() -> None:
+    metric = CROICMetric()
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    prior_q4 = f"{int(q4[:4]) - 1}{q4[4:]}"
+    repo = _OwnerEarningsRepo(
+        _croic_records(q4=q4, q3=q3, q2=q2, q1=q1, prior_q4=prior_q4)
+    )
+
+    result = metric.compute(LISTING_ID, repo)
+
+    # FCF = 4*(125-25) = 400 over avg_ic 800 -> 50%.
+    assert result is not None
+    assert result.value == 0.5
+    assert result.unit_kind == "percent"
+    assert result.as_of == q4
+
+
+def test_croic_metric_emits_negative_cash_return() -> None:
+    metric = CROICMetric()
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    prior_q4 = f"{int(q4[:4]) - 1}{q4[4:]}"
+    repo = _OwnerEarningsRepo(
+        _croic_records(
+            q4=q4,
+            q3=q3,
+            q2=q2,
+            q1=q1,
+            prior_q4=prior_q4,
+            ocf_values=(20.0, 20.0, 20.0, 20.0),
+            capex_values=(30.0, 30.0, 30.0, 30.0),
+        )
+    )
+
+    result = metric.compute(LISTING_ID, repo)
+
+    # FCF = -40 over avg_ic 800: cash burn is reported, not suppressed.
+    assert result is not None
+    assert result.value == -0.05
+
+
+def test_croic_metric_returns_none_when_avg_ic_non_positive() -> None:
+    metric = CROICMetric()
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    prior_q4 = f"{int(q4[:4]) - 1}{q4[4:]}"
+    repo = _OwnerEarningsRepo(
+        _croic_records(
+            q4=q4,
+            q3=q3,
+            q2=q2,
+            q1=q1,
+            prior_q4=prior_q4,
+            equity=(100.0, 100.0),
+            cash=(400.0, 400.0),
+        )
+    )
+
+    assert metric.compute(LISTING_ID, repo) is None
+
+
+def test_croic_metric_returns_none_when_fcf_missing() -> None:
+    metric = CROICMetric()
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    prior_q4 = f"{int(q4[:4]) - 1}{q4[4:]}"
+    records = _croic_records(q4=q4, q3=q3, q2=q2, q1=q1, prior_q4=prior_q4)
+    records.pop("NetCashProvidedByUsedInOperatingActivities")
+    repo = _OwnerEarningsRepo(records)
+
+    assert metric.compute(LISTING_ID, repo) is None
+
+
+@given(
+    ocf_quarter=st.floats(min_value=-1e6, max_value=1e6, allow_nan=False),
+    capex_quarter=st.floats(min_value=-1e6, max_value=1e6, allow_nan=False),
+    equity_latest=st.floats(min_value=0.0, max_value=1e9, allow_nan=False),
+    equity_prior=st.floats(min_value=0.0, max_value=1e9, allow_nan=False),
+)
+def test_croic_metric_matches_formula_property(
+    ocf_quarter: float,
+    capex_quarter: float,
+    equity_latest: float,
+    equity_prior: float,
+) -> None:
+    # Expected mirrors the metric's operation order for invested capital
+    # ((debt + equity) - cash per point, then two-point average); with the
+    # fixed debt/cash the denominator stays >= 100, so no assume() is needed.
+    avg_ic = ((200.0 + equity_latest - 100.0) + (200.0 + equity_prior - 100.0)) / 2.0
+    metric = CROICMetric()
+    q4, q3, q2, q1 = _net_debt_quarter_dates()
+    prior_q4 = f"{int(q4[:4]) - 1}{q4[4:]}"
+    repo = _OwnerEarningsRepo(
+        _croic_records(
+            q4=q4,
+            q3=q3,
+            q2=q2,
+            q1=q1,
+            prior_q4=prior_q4,
+            ocf_values=(ocf_quarter,) * 4,
+            capex_values=(capex_quarter,) * 4,
+            equity=(equity_latest, equity_prior),
+        )
+    )
+
+    result = metric.compute(LISTING_ID, repo)
+
+    assert result is not None
+    expected = 4 * (ocf_quarter - capex_quarter) / avg_ic
+    assert result.value == pytest.approx(expected, rel=1e-6, abs=1e-9)
 
 
 def test_net_debt_to_ebitda_metric() -> None:
@@ -13410,3 +13561,4 @@ def test_registry_contains_all_ids() -> None:
     assert "ncav" in REGISTRY
     assert "price_to_ncav" in REGISTRY
     assert "roce" in REGISTRY
+    assert "croic" in REGISTRY
