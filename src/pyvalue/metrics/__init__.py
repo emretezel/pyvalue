@@ -23,6 +23,7 @@ from .graham_multiplier import GrahamMultiplierMetric
 from .earnings_yield import EarningsYieldMetric
 from .interest_coverage import InterestCoverageMetric
 from .market_capitalization import MarketCapitalizationMetric
+from .ncav import NCAVMetric, PriceToNCAVMetric
 from .price_to_book import PriceToBookMetric, PriceToTangibleBookMetric
 from .price_to_fcf import PriceToFCFMetric
 from .roc_greenblatt import ROCGreenblattMetric
@@ -121,6 +122,8 @@ REGISTRY = {
     EarningsYieldMetric.id: EarningsYieldMetric,
     InterestCoverageMetric.id: InterestCoverageMetric,
     MarketCapitalizationMetric.id: MarketCapitalizationMetric,
+    NCAVMetric.id: NCAVMetric,
+    PriceToNCAVMetric.id: PriceToNCAVMetric,
     PriceToBookMetric.id: PriceToBookMetric,
     PriceToTangibleBookMetric.id: PriceToTangibleBookMetric,
     PriceToFCFMetric.id: PriceToFCFMetric,
@@ -213,6 +216,8 @@ __all__ = [
     "EarningsYieldMetric",
     "InterestCoverageMetric",
     "MarketCapitalizationMetric",
+    "NCAVMetric",
+    "PriceToNCAVMetric",
     "PriceToBookMetric",
     "PriceToTangibleBookMetric",
     "PriceToFCFMetric",

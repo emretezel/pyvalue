@@ -55,6 +55,7 @@ from pyvalue.metrics.invested_capital import (
     ICMostRecentQuarterMetric,
 )
 from pyvalue.metrics.market_capitalization import MarketCapitalizationMetric
+from pyvalue.metrics.ncav import NCAVMetric, PriceToNCAVMetric
 from pyvalue.metrics.mcapex import (
     MCapexFYMetric,
     MCapexFiveYearMetric,
@@ -1751,6 +1752,104 @@ def test_price_to_tangible_book_metric_matches_formula_property(
 
     assert result is not None
     assert result.value == pytest.approx(price * shares / tangible, rel=1e-6)
+
+
+def test_ncav_metric_computes_current_assets_minus_total_liabilities() -> None:
+    metric = NCAVMetric()
+    recent = (date.today() - timedelta(days=20)).isoformat()
+    repo = _book_value_repo(
+        {"AssetsCurrent": 500.0, "Liabilities": 300.0}, recent=recent
+    )
+
+    result = metric.compute(LISTING_ID, repo)
+
+    assert result is not None
+    assert result.value == 200.0
+    assert result.as_of == recent
+    assert result.unit_kind == "monetary"
+    assert result.currency == "USD"
+
+
+def test_ncav_metric_emits_negative_values() -> None:
+    metric = NCAVMetric()
+    recent = (date.today() - timedelta(days=20)).isoformat()
+    # Most going concerns have negative NCAV; the metric must report it rather
+    # than suppress it.
+    repo = _book_value_repo(
+        {"AssetsCurrent": 300.0, "Liabilities": 500.0}, recent=recent
+    )
+
+    result = metric.compute(LISTING_ID, repo)
+
+    assert result is not None
+    assert result.value == -200.0
+
+
+def test_ncav_metric_returns_none_when_liabilities_missing() -> None:
+    metric = NCAVMetric()
+    recent = (date.today() - timedelta(days=20)).isoformat()
+    repo = _book_value_repo({"AssetsCurrent": 500.0}, recent=recent)
+
+    assert metric.compute(LISTING_ID, repo) is None
+
+
+def test_price_to_ncav_metric_flags_net_net_pricing() -> None:
+    metric = PriceToNCAVMetric()
+    recent = (date.today() - timedelta(days=20)).isoformat()
+    repo = _book_value_repo(
+        {"AssetsCurrent": 500.0, "Liabilities": 300.0}, recent=recent
+    )
+
+    # Market cap pinned at 100 (price 100 x 1.0 base-repo share) over NCAV 200:
+    # 0.5x is below Graham's two-thirds threshold.
+    result = metric.compute(
+        LISTING_ID, repo, _build_market_repo(market_cap=100.0, as_of=recent)
+    )
+
+    assert result is not None
+    assert result.value == 0.5
+    assert result.as_of == recent
+
+
+def test_price_to_ncav_metric_returns_none_when_ncav_non_positive() -> None:
+    metric = PriceToNCAVMetric()
+    recent = (date.today() - timedelta(days=20)).isoformat()
+    repo = _book_value_repo(
+        {"AssetsCurrent": 300.0, "Liabilities": 500.0}, recent=recent
+    )
+
+    assert (
+        metric.compute(
+            LISTING_ID, repo, _build_market_repo(market_cap=100.0, as_of=recent)
+        )
+        is None
+    )
+
+
+@given(
+    assets=st.floats(min_value=0.0, max_value=1e12, allow_nan=False),
+    liabilities=st.floats(min_value=0.0, max_value=1e12, allow_nan=False),
+    price=st.floats(min_value=0.01, max_value=1e9, allow_nan=False),
+)
+def test_price_to_ncav_metric_matches_formula_property(
+    assets: float, liabilities: float, price: float
+) -> None:
+    # The >= 1.0 NCAV floor keeps the property away from catastrophic
+    # cancellation, which would test float noise rather than the formula.
+    ncav = assets - liabilities
+    assume(ncav >= 1.0)
+    metric = PriceToNCAVMetric()
+    recent = (date.today() - timedelta(days=20)).isoformat()
+    repo = _book_value_repo(
+        {"AssetsCurrent": assets, "Liabilities": liabilities}, recent=recent
+    )
+
+    result = metric.compute(
+        LISTING_ID, repo, _build_market_repo(market_cap=price, as_of=recent)
+    )
+
+    assert result is not None
+    assert result.value == pytest.approx(price / ncav, rel=1e-6)
 
 
 def test_net_debt_to_ebitda_metric() -> None:
@@ -13110,3 +13209,5 @@ def test_registry_contains_all_ids() -> None:
     assert "ev_to_sales" in REGISTRY
     assert "price_to_book" in REGISTRY
     assert "price_to_tangible_book" in REGISTRY
+    assert "ncav" in REGISTRY
+    assert "price_to_ncav" in REGISTRY

@@ -14,6 +14,8 @@ Columns:
 | --- | --- | --- | --- |
 | Working Capital | `working_capital` | Latest `AssetsCurrent - LiabilitiesCurrent`. | Positive working capital helps a business absorb near-term shocks without forced financing. |
 | Current Ratio | `current_ratio` | Latest `AssetsCurrent / LiabilitiesCurrent`. | A business that can comfortably cover short-term obligations is less fragile. |
+| Net Current Asset Value | `ncav` | Latest `AssetsCurrent - Liabilities` (total liabilities, not just current); negative values are emitted. | Graham's crudest liquidation proxy: what remains for shareholders after every claim is settled from current assets alone. |
+| Price to NCAV | `price_to_ncav` | EODHD-oriented: `market_cap / ncav`, only when `ncav > 0`. | The Graham net-net test: `price_to_ncav <= 0.67` flags stocks trading below two-thirds of liquidation value, the classic deep-value margin of safety. |
 | Net Working Capital (Most Recent Quarter) | `nwc_mqr` | EODHD-oriented: `(AssetsCurrent - Cash) - (LiabilitiesCurrent - ShortTermDebt)` using cash and short-debt fallbacks. | Focuses on operating working capital rather than cash hoards or financing noise. |
 | Net Working Capital (Fiscal Year) | `nwc_fy` | EODHD-oriented FY version of the same adjusted NWC formula used by `nwc_mqr`. | Gives an annual baseline for working-capital intensity. |
 | Delta Net Working Capital (TTM Style) | `delta_nwc_ttm` | EODHD-oriented: `NWC(MRQ) - NWC(same fiscal quarter last year)` with strict quarter matching. | Highlights whether the business is tying up more capital in operations year over year. |

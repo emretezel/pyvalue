@@ -33,6 +33,8 @@ class MetricMetadata:
 
 _METRIC_METADATA: dict[str, MetricMetadata] = {
     "working_capital": MetricMetadata("monetary"),
+    "ncav": MetricMetadata("monetary"),
+    "price_to_ncav": MetricMetadata("multiple", "x"),
     "current_ratio": MetricMetadata("ratio"),
     "debt_paydown_years": MetricMetadata("multiple", "years"),
     "fcf_to_debt": MetricMetadata("ratio"),
