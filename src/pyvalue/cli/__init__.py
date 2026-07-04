@@ -100,6 +100,9 @@ from .screen import (
     _rank_screen_passers,
     cmd_run_screen_stage,
 )
+from .explain import (
+    cmd_explain_metric,
+)
 from .reports import (
     SCREEN_PROGRESS_INTERVAL_SECONDS,  # noqa: F401
     cmd_report_fact_freshness,
@@ -160,6 +163,7 @@ __all__ = [
     "cmd_compute_metrics_stage",
     "_rank_screen_passers",
     "cmd_run_screen_stage",
+    "cmd_explain_metric",
     "cmd_report_fact_freshness",
     "cmd_report_metric_coverage",
     "cmd_report_metric_failures",

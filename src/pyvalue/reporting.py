@@ -6,11 +6,15 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Sequence, Tuple, Type
+from typing import Dict, List, Optional, Sequence, Tuple, Type
 
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS, is_recent_fact
 from pyvalue.persistence.storage import FactRecord, FinancialFactsRepository
+
+# fiscal_period values that count as quarterly history when sizing a concept's
+# depth (TTM metrics need four consecutive quarters of these).
+QUARTERLY_FISCAL_PERIODS = ("Q1", "Q2", "Q3", "Q4")
 
 
 @dataclass
@@ -137,8 +141,115 @@ def compute_fact_coverage(
     return coverage
 
 
+@dataclass(frozen=True)
+class ConceptDetail:
+    """What one listing actually holds for one required fact concept.
+
+    The per-listing sibling of :class:`ConceptCoverage`: instead of aggregate
+    missing/stale counts over a scope, it describes the latest stored point
+    (end date, fiscal period, filing date, value, currency), a freshness
+    verdict against the metric window, and how deep the FY/quarterly history
+    is -- the inputs a per-symbol "why is this metric NA" explanation needs.
+    """
+
+    concept: str
+    present: bool
+    fresh: bool
+    latest_end_date: Optional[str]
+    latest_fiscal_period: Optional[str]
+    latest_filed: Optional[str]
+    latest_value: Optional[float]
+    latest_currency: Optional[str]
+    fy_rows: int
+    quarterly_rows: int
+    total_rows: int
+
+
+def compute_fact_detail(
+    fact_repo: FinancialFactsRepository | RegionFactsRepository,
+    listing_id: int,
+    metric_cls: Type,
+    *,
+    max_age_days: int = MAX_FACT_AGE_DAYS,
+) -> List[ConceptDetail]:
+    """Per-concept presence/freshness/history detail for one listing.
+
+    Returns one :class:`ConceptDetail` per ``required_concepts`` entry of
+    ``metric_cls`` (first-seen order, duplicates dropped). A concept with no
+    stored rows comes back ``present=False`` with ``None`` latest fields, so
+    callers can render "MISSING" without special-casing.
+    """
+
+    if isinstance(fact_repo, RegionFactsRepository):
+        fact_repo_wrapped = fact_repo
+    else:
+        fact_repo.initialize_schema()
+        fact_repo_wrapped = RegionFactsRepository(fact_repo)
+
+    ordered_concepts: List[str] = []
+    seen: set[str] = set()
+    for concept in getattr(metric_cls, "required_concepts", ()) or ():
+        if concept not in seen:
+            seen.add(concept)
+            ordered_concepts.append(concept)
+    if not ordered_concepts:
+        return []
+
+    facts_by_id = fact_repo_wrapped.facts_for_ids_many(
+        [int(listing_id)],
+        concepts=ordered_concepts,
+    )
+    records_by_concept: Dict[str, List[FactRecord]] = {}
+    for record in facts_by_id.get(int(listing_id), []):
+        records_by_concept.setdefault(record.concept, []).append(record)
+
+    details: List[ConceptDetail] = []
+    for concept in ordered_concepts:
+        records = records_by_concept.get(concept, [])
+        if not records:
+            details.append(
+                ConceptDetail(
+                    concept=concept,
+                    present=False,
+                    fresh=False,
+                    latest_end_date=None,
+                    latest_fiscal_period=None,
+                    latest_filed=None,
+                    latest_value=None,
+                    latest_currency=None,
+                    fy_rows=0,
+                    quarterly_rows=0,
+                    total_rows=0,
+                )
+            )
+            continue
+        # Rows arrive (end_date DESC, filed DESC) per concept, so the first
+        # record is exactly the "latest fact" the metric seam would read.
+        latest = records[0]
+        details.append(
+            ConceptDetail(
+                concept=concept,
+                present=True,
+                fresh=is_recent_fact(latest, max_age_days=max_age_days),
+                latest_end_date=latest.end_date,
+                latest_fiscal_period=latest.fiscal_period,
+                latest_filed=latest.filed,
+                latest_value=latest.value,
+                latest_currency=latest.currency,
+                fy_rows=sum(1 for r in records if r.fiscal_period == "FY"),
+                quarterly_rows=sum(
+                    1 for r in records if r.fiscal_period in QUARTERLY_FISCAL_PERIODS
+                ),
+                total_rows=len(records),
+            )
+        )
+    return details
+
+
 __all__ = [
     "ConceptCoverage",
+    "ConceptDetail",
     "MetricCoverage",
     "compute_fact_coverage",
+    "compute_fact_detail",
 ]

@@ -51,16 +51,13 @@ pyvalue report-fact-freshness --symbols <WL9> --metrics <na metric ids>
 Note `report-screen-failures` recomputes NA screen metrics and backfills
 `metrics`/`metric_compute_status` — intended here.
 
-Per-(symbol, metric) root cause with untemplated reasons: `pyvalue explain-metric`
-(added by this investigation). Until it exists, the ad-hoc read-only equivalent:
+Per-(symbol, metric) root cause — persisted state incl. `reason_detail`,
+per-concept input depth, market seam, and a write-free live recompute with
+untemplated warnings:
 
-```sql
--- sqlite3 "file:data/pyvalue.db?mode=ro"
-SELECT l.symbol, s.metric_id, s.status, s.reason_code, s.reason_detail, s.attempted_at
-FROM metric_compute_status s JOIN listing l USING (listing_id)
-WHERE l.listing_id IN (65235,61081,53407,66246,54072,56282,67393,71610,24625)
-  AND s.status = 'failure'
-ORDER BY l.symbol, s.metric_id;
+```
+pyvalue explain-metric --symbols 000660.KO --metrics oey_ev_norm sbc_to_fcf
+pyvalue explain-metric --symbols <symbol> --screen screeners/quality_reasonable_price_primary.yml
 ```
 
 ### (c) Universe-scale NA ranking (persisted state, read-only)

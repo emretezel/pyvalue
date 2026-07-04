@@ -385,6 +385,37 @@ Notes:
 - `reason_code` is the first templated warning of the last failed attempt; use
   `report-metric-failures` for a live recomputed reason survey
 
+### `explain-metric`
+
+Explain per (symbol, metric) why the metric computes or comes out NA — the
+microscope next to the scope-wide report commands.
+
+Key options:
+
+- `--symbols <symbols...>` required (deliberately symbol-scoped; exchange and
+  all-supported scopes are not accepted)
+- `--metrics <metric-ids...>` or `--screen <path>` (exactly one); `--screen`
+  expands to the screen's criteria metrics
+- `--max-age-days <int>` default `400`
+- `--database <path>`
+
+Each (symbol, metric) block prints:
+
+- the persisted attempt state — stored value or failure `reason_code` plus the
+  otherwise-buried `reason_detail`, with a staleness verdict
+- per required concept: latest stored point (end date, fiscal period, filing
+  date, value, currency), fresh/STALE, and FY/quarterly/total row depth
+- the market-data seam (latest price snapshot or its absence) for
+  `uses_market_data` metrics
+- a **write-free** live recompute: SUCCESS with the would-be value, or FAILURE
+  with the templated `reason_code` plus every guard warning **untemplated**
+  (real listing ids, dates, and counts)
+
+Notes:
+
+- never persists recomputed attempts, so it is safe to run mid-investigation
+  without changing what screens or the report commands see
+
 ### `report-screen-failures`
 
 Rank which screen criteria and missing metrics exclude the most symbols for the

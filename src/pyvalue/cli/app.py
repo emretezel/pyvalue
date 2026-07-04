@@ -41,6 +41,9 @@ from .metrics import (
 from .screen import (
     cmd_run_screen_stage,
 )
+from .explain import (
+    cmd_explain_metric,
+)
 from .reports import (
     cmd_report_fact_freshness,
     cmd_report_metric_coverage,
@@ -524,6 +527,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional CSV path for the metric status summary.",
     )
 
+    explain_metric = subparsers.add_parser(
+        "explain-metric",
+        help="Explain per symbol why a metric computes or comes out NA: persisted state, fact inputs, market seam, and a write-free live recompute with untemplated warnings.",
+    )
+    explain_metric.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
+    )
+    explain_metric.add_argument(
+        "--symbols",
+        nargs="+",
+        required=True,
+        help="Fully qualified symbols to explain (this command is deliberately symbol-scoped; use the report-* commands for scope-wide surveys).",
+    )
+    explain_metric.add_argument(
+        "--metrics",
+        nargs="+",
+        default=None,
+        help="Metric identifiers to explain (mutually exclusive with --screen).",
+    )
+    explain_metric.add_argument(
+        "--screen",
+        default=None,
+        help="Screening config (YAML); explains the screen's criteria metrics (mutually exclusive with --metrics).",
+    )
+    explain_metric.add_argument(
+        "--max-age-days",
+        type=int,
+        default=MAX_FACT_AGE_DAYS,
+        help="Fact freshness window in days (default: %(default)s)",
+    )
+
     screen_failure_report = subparsers.add_parser(
         "report-screen-failures",
         help="Rank which screen criteria and missing metrics exclude the most symbols for the requested canonical scope.",
@@ -712,6 +748,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 exchange_codes=args.exchange_codes,
                 all_supported=args.all_supported,
                 output_csv=args.output_csv,
+            )
+        if args.command == "explain-metric":
+            return cmd_explain_metric(
+                database=args.database,
+                symbols=args.symbols,
+                metric_ids=args.metrics,
+                screen_config=args.screen,
+                max_age_days=args.max_age_days,
             )
         if args.command == "report-metric-status":
             return cmd_report_metric_status(
