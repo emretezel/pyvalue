@@ -20,6 +20,7 @@ from typing import (
 )
 
 from pyvalue.metrics import REGISTRY
+from pyvalue.metrics.utils import is_recent_date
 from pyvalue.reporting import MetricCoverage, compute_fact_coverage
 from pyvalue.screening import (
     CriterionEvaluation,
@@ -199,6 +200,37 @@ def cmd_report_fact_freshness(
             print(
                 f"    {concept.concept}: fresh={fresh}, stale={concept.stale}, missing={concept.missing}"
             )
+
+    # Concept coverage alone misses NAs caused by the market-data seam: any
+    # uses_market_data metric also needs a stored price snapshot. Summarize that
+    # side in one line whenever the selection includes such a metric.
+    market_metric_count = sum(
+        1
+        for metric_cls in metric_classes
+        if getattr(metric_cls, "uses_market_data", False)
+    )
+    if market_metric_count:
+        snapshots_by_id = MarketDataRepository(db_path).latest_snapshots_many_by_ids(
+            listing_ids
+        )
+        missing_snapshots = sum(
+            1 for listing_id in listing_ids if listing_id not in snapshots_by_id
+        )
+        stale_snapshots = sum(
+            1
+            for listing_id in listing_ids
+            if listing_id in snapshots_by_id
+            and not is_recent_date(
+                snapshots_by_id[listing_id].as_of, max_age_days=max_age_days
+            )
+        )
+        fresh_snapshots = len(listing_ids) - missing_snapshots - stale_snapshots
+        print(
+            f"Market-data seam ({market_metric_count} selected metrics use price "
+            f"snapshots): fresh={fresh_snapshots}/{len(listing_ids)}, "
+            f"stale={stale_snapshots}, missing={missing_snapshots}"
+        )
+
     if output_csv:
         _write_fact_report_csv(coverage, output_csv)
         print(f"Wrote concept-level coverage to {output_csv}")

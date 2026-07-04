@@ -316,6 +316,13 @@ Key options:
 - `--show-all`
 - `--database <path>`
 
+Notes:
+
+- when the selection includes any `uses_market_data` metric, the report ends
+  with a one-line market-data seam summary (fresh/stale/missing price
+  snapshots over the scope) — concept coverage alone cannot explain NAs caused
+  by a missing or stale price
+
 ### `report-metric-coverage`
 
 Count how many symbols can compute all requested metrics without writing results.
@@ -477,7 +484,10 @@ Notes:
   status or stale success status hides older raw metric rows until the metric is
   recomputed
 - when the scope is a single symbol, output includes entity details and
-  criterion-by-criterion pass/fail rows
+  criterion-by-criterion pass/fail rows; every `value=N/A` criterion is
+  followed by the missing metric's persisted NA reason (`reason_code`,
+  never-attempted, or stale-state note) and the output ends with a paste-ready
+  `hint: pyvalue explain-metric --symbols <symbol> --metrics <ids>` line
 - when the scope contains multiple symbols, output lists only passing symbols
 - the multi-symbol console view is a compact preview with one passing symbol per
   row, a truncated description, and ranking columns when present

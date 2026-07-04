@@ -29,6 +29,7 @@ from pyvalue.screening import (
     Criterion,
     ScreenDefinition,
     compute_screen_ranking,
+    evaluate_criterion_detail,
     evaluate_criterion_verbose,
     load_screen,
     ranking_metric_ids,
@@ -479,16 +480,53 @@ def cmd_run_screen_stage(
             print(f"Entity: {entity_name}")
             print(f"Description: {description}")
             print(f"Price: {price_label}")
-            results = []
-            for criterion in definition.criteria:
-                passed, left_value = evaluate_criterion_verbose(
+            evaluations = [
+                evaluate_criterion_detail(
                     criterion, listing_id, metrics_repo, display_symbol=symbol
                 )
-                results.append((criterion.name, passed, left_value))
-            passed_all = all(flag for _, flag, _ in results)
-            for name, passed, value in results:
-                value_display = _format_value(value) if value is not None else "N/A"
-                print(f"{name}: {'PASS' if passed else 'FAIL'} (value={value_display})")
+                for criterion in definition.criteria
+            ]
+            passed_all = all(evaluation.passed for evaluation in evaluations)
+            missing_metric_ids: List[str] = []
+            for criterion, evaluation in zip(definition.criteria, evaluations):
+                value_display = (
+                    _format_value(evaluation.left_value)
+                    if evaluation.left_value is not None
+                    else "N/A"
+                )
+                print(
+                    f"{criterion.name}: "
+                    f"{'PASS' if evaluation.passed else 'FAIL'} (value={value_display})"
+                )
+                # A missing metric is why the criterion shows value=N/A; say why
+                # the metric itself is unavailable straight from its persisted
+                # attempt state instead of leaving the user to dig.
+                for metric_id in evaluation.missing_metric_ids:
+                    state = metrics_repo.state_by_id(listing_id, metric_id)
+                    status_record = state.status_record
+                    if status_record is None:
+                        na_reason = "never attempted; run compute-metrics"
+                    elif state.stale:
+                        na_reason = (
+                            f"stale persisted state (last: {status_record.status}"
+                            + (
+                                f", {status_record.reason_code}"
+                                if status_record.status == "failure"
+                                and status_record.reason_code
+                                else ""
+                            )
+                            + "); run compute-metrics"
+                        )
+                    else:
+                        na_reason = status_record.reason_code or "no warning emitted"
+                    print(f"    {metric_id} NA: {na_reason}")
+                    if metric_id not in missing_metric_ids:
+                        missing_metric_ids.append(metric_id)
+            if missing_metric_ids:
+                print(
+                    "hint: pyvalue explain-metric "
+                    f"--symbols {symbol} --metrics {' '.join(missing_metric_ids)}"
+                )
             return 0 if passed_all else 1
 
         listing_ids = [listing_id for listing_id, _ in scope_listings]
