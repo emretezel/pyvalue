@@ -42,7 +42,6 @@ from pyvalue.persistence.storage import (
 LOGGER = logging.getLogger("pyvalue.cli")
 
 
-DEFAULT_SCREEN_RESULTS_PREFIX = "data/screen_results"
 EODHD_ALLOWED_TICKER_TYPES = {"COMMON STOCK", "PREFERRED STOCK", "STOCK"}
 EODHD_FUNDAMENTALS_CALL_COST = 10
 EODHD_MARKET_DATA_CALL_COST = 1
@@ -234,18 +233,6 @@ def _resolve_database_path(database: str) -> Path:
         if repo_path.exists():
             return repo_path
     return db_path
-
-
-def _default_screen_results_path(
-    provider: str,
-    exchange_code: str,
-    as_of: Optional[date] = None,
-) -> str:
-    date_label = (as_of or date.today()).strftime("%Y%m%d")
-    return (
-        f"{DEFAULT_SCREEN_RESULTS_PREFIX}_{provider.upper()}_"
-        f"{exchange_code.upper()}_{date_label}.csv"
-    )
 
 
 def _qualify_symbol(symbol: str, exchange: Optional[str] = None) -> str:

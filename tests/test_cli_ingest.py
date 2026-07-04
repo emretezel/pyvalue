@@ -7004,7 +7004,8 @@ criteria:
     csv_lines = csv_path.read_text().strip().splitlines()
     assert csv_lines[0] == (
         "metric_id,missing_symbols,affected_criteria_count,"
-        "affected_criteria,root_cause,root_cause_count,example_symbol,example_market_cap"
+        "affected_criteria,root_cause,root_cause_count,"
+        "example_symbol,example_market_cap,example_reason_detail"
     )
     assert "working_capital,1,2," in csv_lines[1]
     assert "stored_missing_but_computable_now,1,BBB.US,250.0" in csv_lines[1]

@@ -348,7 +348,12 @@ Notes:
   inputs, currency conflict, zero average invested capital, and latest FY point
   too old.
 - the command reads fresh persisted metric failure status first and only
-  recomputes pairs whose status is missing or stale for the current inputs
+  recomputes pairs whose status is missing or stale for the current inputs —
+  recomputed attempts are written back to `metrics`/`metric_compute_status`
+  (this "report" intentionally backfills the DB)
+- each reason's example line appends `detail=<reason_detail>` (truncated on the
+  console) when the example's attempt carried an untemplated detail; the CSV
+  ends with the full text in an `example_reason_detail` column
 
 ### `report-metric-status`
 
@@ -414,6 +419,9 @@ Notes:
   - `unknown_metric_id` when the screen references an unregistered metric
 - for ROIC FY-series metrics, those warning-driven `None` results now retain the
   same standardized root-cause buckets shown by `report-metric-failures`
+- recomputed attempts are persisted back to `metrics`/`metric_compute_status`
+  (this "report" intentionally backfills the DB), and example lines/CSV rows
+  carry the same `example_reason_detail` column as `report-metric-failures`
 
 ## Screening Commands
 
