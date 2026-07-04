@@ -34,7 +34,9 @@ from .records import (
     IngestProgressSummary,
     MarketSnapshotRecord,
     MetricComputeStatusRecord,
+    MetricFailureReasonAggregate,
     MetricRecord,
+    MetricStatusAggregate,
     NormalizationUnit,  # noqa: F401
     Provider,  # noqa: F401
     Security,
@@ -117,7 +119,9 @@ __all__ = [
     "MarketSnapshotRecord",
     "MetricComputeStatusRecord",
     "MetricComputeStatusRepository",
+    "MetricFailureReasonAggregate",
     "MetricRecord",
+    "MetricStatusAggregate",
     "MetricsRepository",
     "MetricsWriteSession",
     "canonical_json_dumps",

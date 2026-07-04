@@ -105,6 +105,7 @@ from .reports import (
     cmd_report_fact_freshness,
     cmd_report_metric_coverage,
     cmd_report_metric_failures,
+    cmd_report_metric_status,
     cmd_report_screen_failures,
 )
 from .fx import (
@@ -162,6 +163,7 @@ __all__ = [
     "cmd_report_fact_freshness",
     "cmd_report_metric_coverage",
     "cmd_report_metric_failures",
+    "cmd_report_metric_status",
     "cmd_report_screen_failures",
     "cmd_refresh_fx_rates",
     "cmd_clear_financial_facts",

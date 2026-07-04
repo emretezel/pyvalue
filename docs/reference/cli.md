@@ -350,6 +350,36 @@ Notes:
 - the command reads fresh persisted metric failure status first and only
   recomputes pairs whose status is missing or stale for the current inputs
 
+### `report-metric-status`
+
+Rank metrics by persisted NA share (failed or never-attempted) for the
+requested canonical scope, without recomputing anything.
+
+Key options:
+
+- optional scope selector: `--symbols`, `--exchange-codes`, or
+  `--all-supported` (defaults to the full supported universe)
+- `--metrics <metric-ids...>` or `--config <path>` (mutually exclusive);
+  `--config` restricts the report to the screen's criteria metrics — the set
+  whose NA excludes a symbol from that screen
+- `--reasons` breaks each metric's failures down by persisted `reason_code`
+  with a stable example symbol
+- `--output-csv <path>`
+- `--database <path>`
+
+Notes:
+
+- a pure read of `metric_compute_status`: nothing is recomputed and nothing is
+  written, so a full-universe ranking finishes in seconds — but the numbers are
+  only as fresh as the last `compute-metrics` run or report backfill
+- `na_share = (failures + never_attempted) / total_symbols`, i.e. the share of
+  the scope with no usable persisted value — what a screen effectively sees
+- `never_attempted` counts scope listings with no persisted attempt at all for
+  the metric (how a newly registered metric looks before its first
+  `compute-metrics` run)
+- `reason_code` is the first templated warning of the last failed attempt; use
+  `report-metric-failures` for a live recomputed reason survey
+
 ### `report-screen-failures`
 
 Rank which screen criteria and missing metrics exclude the most symbols for the

@@ -6,9 +6,11 @@ Author: Emre Tezel
 from __future__ import annotations
 
 import sqlite3
+from collections import Counter
 from typing import (
     Dict,
     Iterable,
+    List,
     Optional,
     Sequence,
     Tuple,
@@ -30,7 +32,9 @@ from .records import (
     IdKeyedStoredMetricRow,
     MarketSnapshotRecord,
     MetricComputeStatusRecord,
+    MetricFailureReasonAggregate,
     MetricRecord,
+    MetricStatusAggregate,
 )
 from .migrations import apply_migrations
 
@@ -403,6 +407,154 @@ class MetricComputeStatusRepository(SQLiteStore):
                             market_data_updated_at=row["market_data_updated_at"],
                         )
         return rows_by_id
+
+    def count_statuses_by_metric(
+        self,
+        listing_ids: Sequence[int],
+        metric_ids: Sequence[str],
+        chunk_size: int = 500,
+    ) -> Dict[str, MetricStatusAggregate]:
+        """Aggregate persisted success/failure counts per metric over a scope.
+
+        Powers ``report-metric-status``: a pure ``GROUP BY`` over the persisted
+        latest-attempt rows -- no recomputation -- so even a full-universe scope
+        aggregates in seconds. Chunked like :meth:`fetch_many_by_ids` to respect
+        the bound-parameter budget; per-chunk counts are summed. Metrics with no
+        persisted attempt in the scope are absent from the result -- callers
+        derive the "never attempted" bucket from the scope size.
+        """
+
+        self.initialize_schema()
+        normalized_ids = sorted({int(x) for x in listing_ids if x is not None})
+        requested_metric_ids = sorted(
+            {
+                str(metric_id).strip()
+                for metric_id in metric_ids
+                if str(metric_id).strip()
+            }
+        )
+        if not normalized_ids or not requested_metric_ids:
+            return {}
+
+        successes: Counter[str] = Counter()
+        failures: Counter[str] = Counter()
+        metric_chunk_size = max(
+            1,
+            min(len(requested_metric_ids), SQLITE_MAX_BOUND_PARAMETERS // 2),
+        )
+        with self._connect() as conn:
+            for metric_chunk in _batched(requested_metric_ids, metric_chunk_size):
+                id_chunk_size = max(
+                    1,
+                    min(chunk_size, SQLITE_MAX_BOUND_PARAMETERS - len(metric_chunk)),
+                )
+                for id_chunk in _batched(normalized_ids, id_chunk_size):
+                    id_placeholders = ", ".join("?" for _ in id_chunk)
+                    metric_placeholders = ", ".join("?" for _ in metric_chunk)
+                    rows = conn.execute(
+                        f"""
+                        SELECT metric_id, status, COUNT(*) AS row_count
+                        FROM metric_compute_status
+                        WHERE listing_id IN ({id_placeholders})
+                          AND metric_id IN ({metric_placeholders})
+                        GROUP BY metric_id, status
+                        """,
+                        list(id_chunk) + list(metric_chunk),
+                    ).fetchall()
+                    for row in rows:
+                        bucket = successes if row["status"] == "success" else failures
+                        bucket[row["metric_id"]] += int(row["row_count"])
+
+        return {
+            metric_id: MetricStatusAggregate(
+                metric_id=metric_id,
+                successes=successes.get(metric_id, 0),
+                failures=failures.get(metric_id, 0),
+            )
+            for metric_id in requested_metric_ids
+            if metric_id in successes or metric_id in failures
+        }
+
+    def count_failure_reasons_by_metric(
+        self,
+        listing_ids: Sequence[int],
+        metric_ids: Sequence[str],
+        chunk_size: int = 500,
+    ) -> Dict[str, List[MetricFailureReasonAggregate]]:
+        """Per-metric persisted failure ``reason_code`` counts with an example.
+
+        Same chunked ``GROUP BY`` shape as :meth:`count_statuses_by_metric`,
+        restricted to ``status = 'failure'``. The example listing is the
+        smallest ``listing_id`` per (metric, reason) group so repeated runs
+        surface a stable example. Each metric's reasons come back sorted by
+        descending count (ties broken by reason text) ready for display.
+        """
+
+        self.initialize_schema()
+        normalized_ids = sorted({int(x) for x in listing_ids if x is not None})
+        requested_metric_ids = sorted(
+            {
+                str(metric_id).strip()
+                for metric_id in metric_ids
+                if str(metric_id).strip()
+            }
+        )
+        if not normalized_ids or not requested_metric_ids:
+            return {}
+
+        # (metric_id, reason_code) -> [count, example_listing_id], merged across
+        # chunks: counts add, the example keeps the minimum listing id.
+        merged: Dict[Tuple[str, Optional[str]], List[int]] = {}
+        metric_chunk_size = max(
+            1,
+            min(len(requested_metric_ids), SQLITE_MAX_BOUND_PARAMETERS // 2),
+        )
+        with self._connect() as conn:
+            for metric_chunk in _batched(requested_metric_ids, metric_chunk_size):
+                id_chunk_size = max(
+                    1,
+                    min(chunk_size, SQLITE_MAX_BOUND_PARAMETERS - len(metric_chunk)),
+                )
+                for id_chunk in _batched(normalized_ids, id_chunk_size):
+                    id_placeholders = ", ".join("?" for _ in id_chunk)
+                    metric_placeholders = ", ".join("?" for _ in metric_chunk)
+                    rows = conn.execute(
+                        f"""
+                        SELECT metric_id, reason_code, COUNT(*) AS row_count,
+                               MIN(listing_id) AS example_listing_id
+                        FROM metric_compute_status
+                        WHERE listing_id IN ({id_placeholders})
+                          AND metric_id IN ({metric_placeholders})
+                          AND status = 'failure'
+                        GROUP BY metric_id, reason_code
+                        """,
+                        list(id_chunk) + list(metric_chunk),
+                    ).fetchall()
+                    for row in rows:
+                        key = (row["metric_id"], row["reason_code"])
+                        entry = merged.get(key)
+                        if entry is None:
+                            merged[key] = [
+                                int(row["row_count"]),
+                                int(row["example_listing_id"]),
+                            ]
+                        else:
+                            entry[0] += int(row["row_count"])
+                            entry[1] = min(entry[1], int(row["example_listing_id"]))
+
+        reasons_by_metric: Dict[str, List[MetricFailureReasonAggregate]] = {}
+        for (metric_id, reason_code), (count, example_listing_id) in merged.items():
+            reasons_by_metric.setdefault(metric_id, []).append(
+                MetricFailureReasonAggregate(
+                    metric_id=metric_id,
+                    reason_code=reason_code,
+                    count=count,
+                    example_listing_id=example_listing_id,
+                )
+            )
+        for reasons in reasons_by_metric.values():
+            reasons.sort(key=lambda item: (-item.count, item.reason_code or ""))
+        return reasons_by_metric
 
 
 class MarketDataRepository(SQLiteStore):

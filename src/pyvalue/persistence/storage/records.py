@@ -232,6 +232,38 @@ class MetricComputeStatusRecord:
     listing_id: Optional[int] = None
 
 
+@dataclass(frozen=True)
+class MetricStatusAggregate:
+    """Persisted success/failure counts for one metric over a listing scope.
+
+    Aggregated straight from ``metric_compute_status`` (no recomputation), so
+    the numbers are only as fresh as the last compute/backfill that touched
+    each (listing, metric) pair. Listings with no persisted attempt are not
+    represented here at all -- callers derive that "never attempted" bucket
+    from the scope size.
+    """
+
+    metric_id: str
+    successes: int
+    failures: int
+
+
+@dataclass(frozen=True)
+class MetricFailureReasonAggregate:
+    """Count of one persisted failure ``reason_code`` for one metric.
+
+    ``reason_code`` is the first templated warning of the *last* failed
+    attempt; ``None`` groups legacy rows persisted before reason capture.
+    ``example_listing_id`` is the smallest listing id in the group so repeated
+    runs surface a stable example.
+    """
+
+    metric_id: str
+    reason_code: Optional[str]
+    count: int
+    example_listing_id: int
+
+
 # Row shape consumed by ``FinancialFactsRepository.replace_fact_rows`` in column
 # order: concept, fiscal_period, end_date, unit_kind, value, filed, currency.
 StoredFactRow = Tuple[

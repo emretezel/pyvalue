@@ -45,6 +45,7 @@ from .reports import (
     cmd_report_fact_freshness,
     cmd_report_metric_coverage,
     cmd_report_metric_failures,
+    cmd_report_metric_status,
     cmd_report_screen_failures,
 )
 from .fx import (
@@ -491,6 +492,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional CSV path for metric failure reasons.",
     )
 
+    metric_status_report = subparsers.add_parser(
+        "report-metric-status",
+        help="Rank metrics by persisted NA share (failed or never-attempted) for the requested canonical scope without recomputing.",
+    )
+    metric_status_report.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
+    )
+    add_scope_args(metric_status_report)
+    metric_status_report.add_argument(
+        "--metrics",
+        nargs="+",
+        default=None,
+        help="Metric identifiers to include (default: all registered metrics; mutually exclusive with --config)",
+    )
+    metric_status_report.add_argument(
+        "--config",
+        default=None,
+        help="Optional screening config (YAML); restricts the report to the screen's criteria metrics.",
+    )
+    metric_status_report.add_argument(
+        "--reasons",
+        action="store_true",
+        help="Break each metric's failures down by persisted reason code with an example symbol.",
+    )
+    metric_status_report.add_argument(
+        "--output-csv",
+        default=None,
+        help="Optional CSV path for the metric status summary.",
+    )
+
     screen_failure_report = subparsers.add_parser(
         "report-screen-failures",
         help="Rank which screen criteria and missing metrics exclude the most symbols for the requested canonical scope.",
@@ -678,6 +711,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 symbols=args.symbols,
                 exchange_codes=args.exchange_codes,
                 all_supported=args.all_supported,
+                output_csv=args.output_csv,
+            )
+        if args.command == "report-metric-status":
+            return cmd_report_metric_status(
+                database=args.database,
+                symbols=args.symbols,
+                exchange_codes=args.exchange_codes,
+                all_supported=args.all_supported,
+                metric_ids=args.metrics,
+                config_path=args.config,
+                show_reasons=args.reasons,
                 output_csv=args.output_csv,
             )
         if args.command == "report-screen-failures":

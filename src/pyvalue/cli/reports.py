@@ -8,6 +8,7 @@ from __future__ import annotations
 import csv
 import time
 from collections import Counter
+from dataclasses import dataclass
 from typing import (
     Callable,
     Dict,
@@ -35,6 +36,7 @@ from pyvalue.persistence.storage import (
     MarketDataRepository,
     MarketSnapshotRecord,
     MetricComputeStatusRepository,
+    MetricFailureReasonAggregate,
     MetricsRepository,
 )
 
@@ -285,6 +287,201 @@ def cmd_report_metric_coverage(
     ordered = sorted(per_metric_success.items(), key=lambda item: (item[1], item[0]))
     for metric_id, count in ordered:
         print(f"- {metric_id}: {count}/{total_symbols} symbols")
+    return 0
+
+
+@dataclass(frozen=True)
+class _MetricStatusSummary:
+    """One metric's persisted-status tallies over the requested scope."""
+
+    metric_id: str
+    successes: int
+    failures: int
+    never_attempted: int
+    na_share: float
+
+
+def _write_metric_status_report_csv(
+    summaries: Sequence[_MetricStatusSummary],
+    reasons_by_metric: Mapping[str, Sequence[MetricFailureReasonAggregate]],
+    symbol_by_id: Mapping[int, str],
+    total_symbols: int,
+    path: str,
+) -> None:
+    """Write metric status rows; with reasons, one row per (metric, reason).
+
+    A single column schema for both verbosities: without ``--reasons`` each
+    metric gets one row with empty reason cells; with ``--reasons`` the summary
+    cells repeat on every reason row (mirroring the failure-report CSV style)
+    so the file stays trivially filterable per metric.
+    """
+
+    target = _prepare_output_csv_path(path)
+    with target.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "metric_id",
+                "total_symbols",
+                "successes",
+                "failures",
+                "never_attempted",
+                "na_share",
+                "reason",
+                "reason_count",
+                "example_symbol",
+            ]
+        )
+        for summary in summaries:
+            base = [
+                summary.metric_id,
+                str(total_symbols),
+                str(summary.successes),
+                str(summary.failures),
+                str(summary.never_attempted),
+                f"{summary.na_share:.4f}",
+            ]
+            reasons = reasons_by_metric.get(summary.metric_id, [])
+            if not reasons:
+                writer.writerow(base + ["", "", ""])
+                continue
+            for reason in reasons:
+                example_symbol = symbol_by_id.get(
+                    reason.example_listing_id,
+                    f"listing_id={reason.example_listing_id}",
+                )
+                writer.writerow(
+                    base
+                    + [
+                        reason.reason_code or "(no reason recorded)",
+                        str(reason.count),
+                        example_symbol,
+                    ]
+                )
+
+
+def cmd_report_metric_status(
+    database: str,
+    symbols: Optional[Sequence[str]],
+    exchange_codes: Optional[Sequence[str]],
+    all_supported: bool,
+    metric_ids: Optional[Sequence[str]],
+    config_path: Optional[str],
+    show_reasons: bool,
+    output_csv: Optional[str],
+) -> int:
+    """Summarize persisted metric compute status (NA rates, reasons) for a scope.
+
+    A pure read of ``metric_compute_status`` -- nothing is recomputed and
+    nothing is written -- so ranking a screen's metrics by NA share is cheap
+    even at full-universe scale, but only as fresh as the last compute or
+    report backfill. ``never_attempted`` counts scope listings with no
+    persisted attempt at all for the metric, which is how a newly registered
+    metric looks before its first ``compute-metrics`` run.
+    """
+
+    # --metrics and --config both select the metric set; accepting both would
+    # silently prefer one, so reject the ambiguity outright.
+    if metric_ids and config_path:
+        raise SystemExit("Pass either --metrics or --config, not both.")
+
+    db_path = _resolve_database_path(database)
+    scope_listings, explicit_symbols, resolved_exchange_codes = (
+        _resolve_canonical_scope_listings(
+            str(db_path),
+            symbols,
+            exchange_codes,
+            all_supported,
+        )
+    )
+    listing_ids = [listing_id for listing_id, _ in scope_listings]
+    # The scope resolver already pairs each listing_id with its canonical
+    # symbol, so failure examples resolve to display symbols with no DB lookup.
+    symbol_by_id = {listing_id: symbol for listing_id, symbol in scope_listings}
+
+    if config_path:
+        # Screen scope: the criteria metrics are exactly the ones whose NA
+        # excludes a symbol from the screen, so they are the set worth ranking.
+        definition = load_screen(config_path)
+        selected_metric_ids = screen_metric_ids(definition)
+        # Fail loudly on a YAML typo: every screen metric must be registered.
+        _select_metric_classes(selected_metric_ids)
+    else:
+        selected_metric_ids = [
+            getattr(cls, "id", cls.__name__)
+            for cls in _select_metric_classes(metric_ids)
+        ]
+
+    status_repo = MetricComputeStatusRepository(db_path)
+    aggregates = status_repo.count_statuses_by_metric(listing_ids, selected_metric_ids)
+    reasons_by_metric: Dict[str, List[MetricFailureReasonAggregate]] = {}
+    if show_reasons:
+        reasons_by_metric = status_repo.count_failure_reasons_by_metric(
+            listing_ids, selected_metric_ids
+        )
+
+    total_symbols = len(scope_listings)
+    summaries: List[_MetricStatusSummary] = []
+    for metric_id in selected_metric_ids:
+        aggregate = aggregates.get(metric_id)
+        successes = aggregate.successes if aggregate else 0
+        failures = aggregate.failures if aggregate else 0
+        never_attempted = max(total_symbols - successes - failures, 0)
+        # NA share is what a screen effectively sees: every scope listing whose
+        # last attempt failed or that was never attempted has no usable value.
+        na_share = (
+            (failures + never_attempted) / total_symbols if total_symbols else 0.0
+        )
+        summaries.append(
+            _MetricStatusSummary(
+                metric_id=metric_id,
+                successes=successes,
+                failures=failures,
+                never_attempted=never_attempted,
+                na_share=na_share,
+            )
+        )
+    # Worst NA share first so the screen-killing metrics lead the report.
+    summaries.sort(key=lambda s: (-s.na_share, -s.failures, s.metric_id))
+
+    scope_label = _scope_label(
+        explicit_symbols,
+        resolved_exchange_codes,
+        "all supported tickers",
+    )
+    print(
+        f"Metric status for {scope_label} "
+        f"(symbols={total_symbols}, metrics={len(selected_metric_ids)}; "
+        "persisted state only)"
+    )
+    for summary in summaries:
+        print(
+            f"- {summary.metric_id}: na_share={summary.na_share * 100:.1f}% "
+            f"(failures={summary.failures}, "
+            f"never_attempted={summary.never_attempted}, "
+            f"successes={summary.successes} of {total_symbols})"
+        )
+        for reason in reasons_by_metric.get(summary.metric_id, []):
+            example_symbol = symbol_by_id.get(
+                reason.example_listing_id,
+                f"listing_id={reason.example_listing_id}",
+            )
+            reason_label = reason.reason_code or "(no reason recorded)"
+            print(f"    {reason_label}: {reason.count} (example={example_symbol})")
+    if any(summary.never_attempted for summary in summaries):
+        print(
+            "Note: never_attempted = no persisted attempt for the metric; "
+            "run compute-metrics to populate."
+        )
+    if output_csv:
+        _write_metric_status_report_csv(
+            summaries,
+            reasons_by_metric,
+            symbol_by_id,
+            total_symbols,
+            output_csv,
+        )
+        print(f"Wrote metric status summary to {output_csv}")
     return 0
 
 
