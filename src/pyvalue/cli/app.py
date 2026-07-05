@@ -46,7 +46,6 @@ from .explain import (
 )
 from .reports import (
     cmd_report_fact_freshness,
-    cmd_report_metric_failures,
     cmd_report_metric_status,
     cmd_report_screen_failures,
 )
@@ -455,28 +454,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show concepts even when all symbols are fresh.",
     )
 
-    failure_report = subparsers.add_parser(
-        "report-metric-failures",
-        help="Summarize warning reasons for metric computation failures on the requested canonical scope.",
-    )
-    failure_report.add_argument(
-        "--database",
-        default="data/pyvalue.db",
-        help="SQLite database file used for storage (default: %(default)s)",
-    )
-    add_scope_args(failure_report)
-    failure_report.add_argument(
-        "--metrics",
-        nargs="+",
-        default=None,
-        help="Metric identifiers to include (default: all registered metrics)",
-    )
-    failure_report.add_argument(
-        "--output-csv",
-        default=None,
-        help="Optional CSV path for metric failure reasons.",
-    )
-
     metric_status_report = subparsers.add_parser(
         "report-metric-status",
         help="Rank metrics by persisted NA share (failed or never-attempted) for the requested canonical scope without recomputing.",
@@ -713,15 +690,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 max_age_days=args.max_age_days,
                 output_csv=args.output_csv,
                 show_all=args.show_all,
-            )
-        if args.command == "report-metric-failures":
-            return cmd_report_metric_failures(
-                database=args.database,
-                metric_ids=args.metrics,
-                symbols=args.symbols,
-                exchange_codes=args.exchange_codes,
-                all_supported=args.all_supported,
-                output_csv=args.output_csv,
             )
         if args.command == "explain-metric":
             return cmd_explain_metric(

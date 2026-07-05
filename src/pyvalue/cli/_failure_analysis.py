@@ -1,12 +1,11 @@
-"""Shared failure-analysis engine for the metric/screen failure reports.
+"""Failure analysis over persisted metric attempt state.
 
-``report-metric-failures`` and ``report-screen-failures`` iterate differently
-(per metric over the whole scope vs per listing over a screen's missing
-metrics), but everything downstream of the iteration is identical: deciding
-whether a persisted status can be trusted, bucketing failures by reason,
-choosing a representative example, persisting recomputed attempts, and
-rendering the example cells. That shared core lives here exactly once so the
-two commands stay thin front-ends and cannot drift apart again.
+This is the read-only engine behind ``report-metric-status --reasons``: it
+classifies each (listing, metric) pair's persisted state, buckets the
+non-usable ones by reason, and picks a representative (largest-market-cap)
+example per bucket. Nothing here recomputes metrics or writes to the database
+-- ``compute-metrics`` is the only writer of metric state, and these
+diagnostics simply explain what it last stored.
 
 Author: Emre Tezel
 """
@@ -15,25 +14,27 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Literal, Mapping, Optional, Sequence
+from typing import Dict, Iterable, List, Literal, Mapping, Optional, Tuple
 
 from pyvalue.persistence.storage import (
     FinancialFactsRepository,
     MarketSnapshotRecord,
-    MetricComputeStatusRepository,
-    MetricsRepository,
 )
 
 from ._common import (
-    _MetricAttemptResult,
     _MetricAvailabilityState,
     _format_value,
-    _metric_status_rows_from_attempts,
 )
 
 # Long ``reason_detail`` payloads (currency-invariant dumps, exception text)
 # would drown the console report; the CSV keeps the full text.
 REASON_DETAIL_CONSOLE_MAX_CHARS = 120
+
+# Bucket labels for pairs with no trustworthy persisted failure reason. Both
+# carry the remedy in the label because the report is read-only by design: the
+# user reruns the pipeline command instead of the report recomputing anything.
+STALE_INPUTS_REASON = "stale_inputs (run compute-metrics)"
+NEVER_ATTEMPTED_REASON = "never_attempted (run compute-metrics)"
 
 
 @dataclass(frozen=True)
@@ -101,28 +102,88 @@ class FailureTally:
 
 def classify_availability_state(
     state: Optional[_MetricAvailabilityState],
-) -> Literal["fresh_failure", "usable", "pending"]:
+) -> Literal["fresh_failure", "usable", "stale", "never_attempted"]:
     """Decide how a persisted availability state feeds the failure analysis.
 
     - ``fresh_failure``: the last attempt failed and its freshness watermarks
-      still match the current inputs -- count it directly, no recompute.
+      still match the current inputs -- its reason_code is trustworthy.
     - ``usable``: a fresh stored value exists (with or without a status row) --
       nothing to report for this pair.
-    - ``pending``: no state, stale state, or fresh success whose stored row is
-      gone -- the pair must be recomputed to learn its current outcome.
+    - ``stale``: persisted state exists but no longer matches the current
+      inputs (moved watermarks, or a fresh success whose stored row vanished)
+      -- only ``compute-metrics`` can refresh the verdict.
+    - ``never_attempted``: no persisted state at all for the pair.
     """
 
     if state is None:
-        return "pending"
+        return "never_attempted"
     if state.status_record is not None and not state.stale:
         if state.status_record.status == "failure":
             return "fresh_failure"
         if state.record is not None:
             return "usable"
-        return "pending"
+        # A fresh success whose stored metric row is gone: the status no
+        # longer describes reality, so treat it like moved inputs.
+        return "stale"
+    if state.status_record is None and state.record is None:
+        return "never_attempted"
     if state.status_record is None and state.record is not None and not state.stale:
         return "usable"
-    return "pending"
+    return "stale"
+
+
+def tally_persisted_states(
+    tally: FailureTally,
+    metric_id: str,
+    scope_listings: Iterable[Tuple[int, str]],
+    states_by_id: Mapping[int, Mapping[str, _MetricAvailabilityState]],
+) -> None:
+    """Bucket every non-usable (listing, metric) persisted state into ``tally``.
+
+    Fresh failures bucket under their persisted ``reason_code`` and carry the
+    untemplated ``reason_detail`` on the example; stale and never-attempted
+    pairs land in explicit remedy buckets, with the stale example's detail
+    summarizing the last (now untrustworthy) attempt so the console still says
+    what the pair looked like before its inputs moved.
+    """
+
+    for listing_id, symbol in scope_listings:
+        state = states_by_id.get(listing_id, {}).get(metric_id)
+        verdict = classify_availability_state(state)
+        if verdict == "usable":
+            continue
+        if verdict == "fresh_failure":
+            assert state is not None and state.status_record is not None
+            tally.record(
+                metric_id=metric_id,
+                reason=state.status_record.reason_code or "no warning emitted",
+                listing_id=listing_id,
+                symbol=symbol,
+                reason_detail=state.status_record.reason_detail,
+            )
+            continue
+        if verdict == "never_attempted":
+            tally.record(
+                metric_id=metric_id,
+                reason=NEVER_ATTEMPTED_REASON,
+                listing_id=listing_id,
+                symbol=symbol,
+            )
+            continue
+        detail: Optional[str] = None
+        if state is not None and state.status_record is not None:
+            detail = f"last attempt: {state.status_record.status}"
+            if state.status_record.reason_code:
+                detail += f", {state.status_record.reason_code}"
+        elif state is not None and state.record is not None:
+            detail = f"stored value as_of {state.record.as_of}, no status row"
+        tally.record(
+            metric_id=metric_id,
+            reason=STALE_INPUTS_REASON,
+            listing_id=listing_id,
+            symbol=symbol,
+            reason_detail=detail,
+        )
 
 
 def _estimate_market_caps(
@@ -156,24 +217,6 @@ def _estimate_market_caps(
             continue
         estimates[listing_id] = snapshot.price * shares
     return estimates
-
-
-def _persist_metric_attempts(
-    metrics_repo: MetricsRepository,
-    status_repo: MetricComputeStatusRepository,
-    attempts: Sequence[_MetricAttemptResult],
-) -> None:
-    # The recomputed attempts carry the scope-resolved listing_id, so the writers
-    # select by id with no symbol->id resolution. ``stored_row`` is already the
-    # id-led row shape consumed by ``upsert_many_by_id``.
-    metric_rows = [
-        attempt.stored_row for attempt in attempts if attempt.stored_row is not None
-    ]
-    if metric_rows:
-        metrics_repo.upsert_many_by_id(metric_rows)
-    status_rows = _metric_status_rows_from_attempts(attempts)
-    if status_rows:
-        status_repo.upsert_many_by_id(status_rows)
 
 
 def failure_example_console_suffix(example: Optional[_FailureExample]) -> str:

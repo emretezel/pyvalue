@@ -16,9 +16,10 @@ A criterion whose metric is NA **fails** — the symbol is excluded from the scr
 - **No EODHD API calls.** All analysis works with the facts, FX rates, and price
   snapshots already in `data/pyvalue.db`. Stale or missing source data is
   *documented* as a data gap, never fixed by re-ingesting.
-- **Universe numbers are persisted-state numbers.** They are as fresh as the last
-  `compute-metrics` / report backfill that touched each (listing, metric) pair,
-  and `reason_code` is the *first* templated warning of the last failed attempt.
+- **Universe numbers are persisted-state numbers.** They are as fresh as the
+  last `compute-metrics` run that touched each (listing, metric) pair (since
+  2026-07-05 the diagnostics are read-only — nothing backfills), and
+  `reason_code` is the *first* templated warning of the last failed attempt.
 - Scratch outputs (CSVs) go to `data/output/na_investigation/` (gitignored);
   durable conclusions are distilled into the findings tables below.
 
@@ -260,19 +261,39 @@ net_debt_to_ebitda; its NAs are the generic ones.
 
 ### Diagnostic CLI verdict (the user's question 4)
 
-All five existing commands stay — none is a strict subset: coverage is the
-only write-free joint "all metrics computable" gate; fact-freshness the only
-recompute-free concept view (now with the market-data seam line);
-metric-failures the reason survey over arbitrary metric sets; screen-failures
-adds criterion attribution; run-screen is the product (single-symbol mode now
-prints NA reasons + an explain-metric hint). The redundancy that did exist —
-twin recompute/bucket/example/CSV cores inside the two failure reports — was
+**2026-07-04 verdict (superseded, kept for the record):** all five existing
+commands stay — none is a strict subset: coverage is the only write-free joint
+"all metrics computable" gate; fact-freshness the only recompute-free concept
+view (now with the market-data seam line); metric-failures the reason survey
+over arbitrary metric sets; screen-failures adds criterion attribution;
+run-screen is the product (single-symbol mode now prints NA reasons + an
+explain-metric hint). The redundancy that did exist — twin
+recompute/bucket/example/CSV cores inside the two failure reports — was
 consolidated into `cli/_failure_analysis.py` rather than deleting a command.
 Two genuine gaps were closed with new commands: **report-metric-status**
 (persisted NA-share ranking + unique reason listing, seconds at 61k scale,
 zero writes — the "sort a screen's metrics by universe NA%" ask) and
 **explain-metric** (per-symbol root cause with untemplated warnings and
 `reason_detail`, write-free).
+
+**2026-07-05 verdict (author decision, current):** the diagnostics family was
+consolidated around a strict read-only contract — only `normalize-fundamentals`,
+`compute-metrics`, market-data refresh, and `clear-*` mutate the database:
+
+- **report-metric-coverage deleted** (never used; its success counts are the
+  complement of the status survey's failure counts).
+- **report-metric-failures merged into `report-metric-status --reasons`**,
+  which now classifies persisted state against current input watermarks:
+  fresh-failure buckets by `reason_code` with biggest-cap examples and
+  `reason_detail`, plus explicit `stale_inputs` / `never_attempted`
+  run-compute-metrics buckets. No recompute, no backfill.
+- **report-screen-failures slimmed to criterion fallout** (pass/fail,
+  threshold-vs-NA split, metric→criteria NA impact counts) and prints a
+  `report-metric-status --config <screen> --reasons` hint instead of inlining
+  root causes.
+- **explain-metric keeps its live recompute** — it was already write-free and
+  its untemplated warnings are the microscope's core value; its screen flag
+  was renamed `--screen` → `--config` for CLI-wide consistency.
 
 ### Follow-up queue (each its own commit, author sign-off per item)
 

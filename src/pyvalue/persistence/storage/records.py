@@ -248,22 +248,6 @@ class MetricStatusAggregate:
     failures: int
 
 
-@dataclass(frozen=True)
-class MetricFailureReasonAggregate:
-    """Count of one persisted failure ``reason_code`` for one metric.
-
-    ``reason_code`` is the first templated warning of the *last* failed
-    attempt; ``None`` groups legacy rows persisted before reason capture.
-    ``example_listing_id`` is the smallest listing id in the group so repeated
-    runs surface a stable example.
-    """
-
-    metric_id: str
-    reason_code: Optional[str]
-    count: int
-    example_listing_id: int
-
-
 # Row shape consumed by ``FinancialFactsRepository.replace_fact_rows`` in column
 # order: concept, fiscal_period, end_date, unit_kind, value, filed, currency.
 StoredFactRow = Tuple[

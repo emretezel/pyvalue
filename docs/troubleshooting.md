@@ -28,7 +28,7 @@ Useful commands:
 
 ```bash
 pyvalue report-fact-freshness --exchange-codes US
-pyvalue report-metric-failures --exchange-codes US
+pyvalue report-metric-status --exchange-codes US --reasons
 pyvalue report-screen-failures --config screeners/value.yml --exchange-codes US
 ```
 

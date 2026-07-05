@@ -9,12 +9,15 @@ import pytest
 
 from pyvalue.cli._common import _MetricAvailabilityState
 from pyvalue.cli._failure_analysis import (
+    NEVER_ATTEMPTED_REASON,
     REASON_DETAIL_CONSOLE_MAX_CHARS,
+    STALE_INPUTS_REASON,
     FailureTally,
     _FailureExample,
     classify_availability_state,
     failure_example_console_suffix,
     failure_example_csv_cells,
+    tally_persisted_states,
 )
 from pyvalue.persistence.storage import MetricComputeStatusRecord, MetricRecord
 
@@ -77,9 +80,9 @@ def test_tally_accepts_unseeded_metric_ids() -> None:
 @pytest.mark.parametrize(
     ("state", "expected"),
     [
-        # No persisted knowledge at all -> recompute.
-        (None, "pending"),
-        # Fresh persisted failure -> count directly.
+        # No persisted knowledge at all.
+        (None, "never_attempted"),
+        # Fresh persisted failure -> its reason_code is trustworthy.
         (
             _MetricAvailabilityState(
                 metric_id="m",
@@ -89,7 +92,7 @@ def test_tally_accepts_unseeded_metric_ids() -> None:
             ),
             "fresh_failure",
         ),
-        # Stale persisted failure -> recompute.
+        # Stale persisted failure -> only compute-metrics can refresh it.
         (
             _MetricAvailabilityState(
                 metric_id="m",
@@ -97,7 +100,7 @@ def test_tally_accepts_unseeded_metric_ids() -> None:
                 status_record=_status("failure"),
                 stale=True,
             ),
-            "pending",
+            "stale",
         ),
         # Fresh success with its stored row -> nothing to report.
         (
@@ -109,7 +112,7 @@ def test_tally_accepts_unseeded_metric_ids() -> None:
             ),
             "usable",
         ),
-        # Fresh success whose stored row vanished -> recompute.
+        # Fresh success whose stored row vanished -> status no longer real.
         (
             _MetricAvailabilityState(
                 metric_id="m",
@@ -117,7 +120,7 @@ def test_tally_accepts_unseeded_metric_ids() -> None:
                 status_record=_status("success", value_as_of="2026-03-31"),
                 stale=False,
             ),
-            "pending",
+            "stale",
         ),
         # Legacy stored row without any status -> usable as-is.
         (
@@ -126,12 +129,19 @@ def test_tally_accepts_unseeded_metric_ids() -> None:
             ),
             "usable",
         ),
-        # Nothing but a stale marker -> recompute.
+        # Legacy stored row whose inputs moved -> stale.
+        (
+            _MetricAvailabilityState(
+                metric_id="m", record=_record(), status_record=None, stale=True
+            ),
+            "stale",
+        ),
+        # An empty state object (no row, no status) -> never attempted.
         (
             _MetricAvailabilityState(
                 metric_id="m", record=None, status_record=None, stale=False
             ),
-            "pending",
+            "never_attempted",
         ),
     ],
 )
@@ -139,6 +149,62 @@ def test_classify_availability_state(
     state: _MetricAvailabilityState | None, expected: str
 ) -> None:
     assert classify_availability_state(state) == expected
+
+
+def test_tally_persisted_states_buckets_by_verdict() -> None:
+    """Fresh failures keep reason_code; stale/never-attempted get remedy buckets."""
+
+    tally = FailureTally(["m"], {})
+    states = {
+        1: {
+            "m": _MetricAvailabilityState(
+                metric_id="m",
+                record=None,
+                status_record=_status("failure"),
+                stale=False,
+            )
+        },
+        2: {
+            "m": _MetricAvailabilityState(
+                metric_id="m",
+                record=None,
+                status_record=_status("failure"),
+                stale=True,
+            )
+        },
+        # Listing 3 has no state at all -> never attempted.
+        4: {
+            "m": _MetricAvailabilityState(
+                metric_id="m",
+                record=_record(),
+                status_record=_status("success", value_as_of="2026-03-31"),
+                stale=False,
+            )
+        },
+        # Legacy stale stored row without a status row.
+        5: {
+            "m": _MetricAvailabilityState(
+                metric_id="m", record=_record(), status_record=None, stale=True
+            )
+        },
+    }
+    scope = [(1, "AAA.US"), (2, "BBB.US"), (3, "CCC.US"), (4, "DDD.US"), (5, "EEE.US")]
+
+    tally_persisted_states(tally, "m", scope, states)
+
+    assert tally.failures["m"]["m: guard tripped"] == 1
+    assert tally.failures["m"][STALE_INPUTS_REASON] == 2
+    assert tally.failures["m"][NEVER_ATTEMPTED_REASON] == 1
+    # The usable pair (listing 4) contributes nothing.
+    assert sum(tally.failures["m"].values()) == 4
+    # Fresh failures surface their untemplated persisted detail...
+    assert tally.examples["m"]["m: guard tripped"].reason_detail == "inputs: a=1 b=0"
+    # ...while stale examples summarize the last, now untrustworthy, attempt
+    # (first stale listing wins the example: no market caps were supplied).
+    assert tally.examples["m"][STALE_INPUTS_REASON].reason_detail == (
+        "last attempt: failure, m: guard tripped"
+    )
+    assert tally.examples["m"][NEVER_ATTEMPTED_REASON].symbol == "CCC.US"
 
 
 def test_console_suffix_formats_example_and_truncates_detail() -> None:

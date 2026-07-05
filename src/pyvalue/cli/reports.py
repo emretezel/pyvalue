@@ -7,15 +7,12 @@ from __future__ import annotations
 
 import csv
 import time
-from collections import Counter
 from dataclasses import dataclass
 from typing import (
     Dict,
     List,
-    Mapping,
     Optional,
     Sequence,
-    Tuple,
 )
 
 from pyvalue.metrics import REGISTRY
@@ -35,7 +32,6 @@ from pyvalue.persistence.storage import (
     FinancialFactsRepository,
     MarketDataRepository,
     MetricComputeStatusRepository,
-    MetricFailureReasonAggregate,
     MetricsRepository,
 )
 
@@ -43,7 +39,6 @@ from ._common import (
     METRICS_COMPUTE_BATCH_SIZE,
     SCREEN_PROGRESS_INTERVAL_SECONDS,
     _CriterionFailureSummary,
-    _MetricAttemptResult,
     _ScreenMetricImpactSummary,
     _prepare_output_csv_path,
     _resolve_canonical_scope_listings,
@@ -53,25 +48,18 @@ from ._common import (
 )
 from ._failure_analysis import (
     FailureTally,
-    _FailureExample,
     _estimate_market_caps,
-    _persist_metric_attempts,
-    classify_availability_state,
     failure_example_console_suffix,
     failure_example_csv_cells,
+    tally_persisted_states,
 )
 from ._repos import (
     _PreloadedMetricsRepository,
-    _SchemaReadyFinancialFactsRefreshStateRepository,
     _SchemaReadyFinancialFactsRepository,
     _SchemaReadyMarketDataRepository,
-    _SchemaReadyMetricComputeStatusRepository,
-    _SchemaReadyMetricsRepository,
     _StatusAwareMetricsRepository,
 )
 from .metrics import (
-    _batch_listings,
-    _compute_metric_batch_results,
     _initialize_metric_read_schema,
 )
 
@@ -200,8 +188,7 @@ class _MetricStatusSummary:
 
 def _write_metric_status_report_csv(
     summaries: Sequence[_MetricStatusSummary],
-    reasons_by_metric: Mapping[str, Sequence[MetricFailureReasonAggregate]],
-    symbol_by_id: Mapping[int, str],
+    tally: Optional[FailureTally],
     total_symbols: int,
     path: str,
 ) -> None:
@@ -209,8 +196,9 @@ def _write_metric_status_report_csv(
 
     A single column schema for both verbosities: without ``--reasons`` each
     metric gets one row with empty reason cells; with ``--reasons`` the summary
-    cells repeat on every reason row (mirroring the failure-report CSV style)
-    so the file stays trivially filterable per metric.
+    cells repeat on every reason row so the file stays trivially filterable per
+    metric. The trailing cells are the shared failure-example columns, so the
+    biggest-market-cap example and its full ``reason_detail`` ride along.
     """
 
     target = _prepare_output_csv_path(path)
@@ -227,6 +215,8 @@ def _write_metric_status_report_csv(
                 "reason",
                 "reason_count",
                 "example_symbol",
+                "example_market_cap",
+                "example_reason_detail",
             ]
         )
         for summary in summaries:
@@ -238,22 +228,14 @@ def _write_metric_status_report_csv(
                 str(summary.never_attempted),
                 f"{summary.na_share:.4f}",
             ]
-            reasons = reasons_by_metric.get(summary.metric_id, [])
-            if not reasons:
-                writer.writerow(base + ["", "", ""])
+            counter = tally.failures.get(summary.metric_id) if tally else None
+            if tally is None or not counter:
+                writer.writerow(base + ["", ""] + failure_example_csv_cells(None))
                 continue
-            for reason in reasons:
-                example_symbol = symbol_by_id.get(
-                    reason.example_listing_id,
-                    f"listing_id={reason.example_listing_id}",
-                )
+            for reason, count in counter.most_common():
+                example = tally.examples.get(summary.metric_id, {}).get(reason)
                 writer.writerow(
-                    base
-                    + [
-                        reason.reason_code or "(no reason recorded)",
-                        str(reason.count),
-                        example_symbol,
-                    ]
+                    base + [reason, str(count)] + failure_example_csv_cells(example)
                 )
 
 
@@ -269,12 +251,18 @@ def cmd_report_metric_status(
 ) -> int:
     """Summarize persisted metric compute status (NA rates, reasons) for a scope.
 
-    A pure read of ``metric_compute_status`` -- nothing is recomputed and
-    nothing is written -- so ranking a screen's metrics by NA share is cheap
-    even at full-universe scale, but only as fresh as the last compute or
-    report backfill. ``never_attempted`` counts scope listings with no
-    persisted attempt at all for the metric, which is how a newly registered
-    metric looks before its first ``compute-metrics`` run.
+    A pure read -- nothing is recomputed and nothing is written; run
+    ``compute-metrics`` first to refresh the underlying state. The summary
+    counts persisted rows via SQL aggregates, so ranking a screen's metrics by
+    NA share stays cheap even at full-universe scale. ``--reasons`` goes
+    deeper: it classifies every (listing, metric) persisted state against the
+    current input watermarks (the same staleness lens run-screen applies
+    before trusting a stored value), bucketing fresh failures by their
+    ``reason_code`` -- with the biggest-market-cap example and its untemplated
+    ``reason_detail`` -- and stale or never-attempted pairs into explicit
+    run-compute-metrics buckets. ``never_attempted`` counts scope listings
+    with no persisted attempt at all for the metric, which is how a newly
+    registered metric looks before its first ``compute-metrics`` run.
     """
 
     # --metrics and --config both select the metric set; accepting both would
@@ -292,9 +280,6 @@ def cmd_report_metric_status(
         )
     )
     listing_ids = [listing_id for listing_id, _ in scope_listings]
-    # The scope resolver already pairs each listing_id with its canonical
-    # symbol, so failure examples resolve to display symbols with no DB lookup.
-    symbol_by_id = {listing_id: symbol for listing_id, symbol in scope_listings}
 
     if config_path:
         # Screen scope: the criteria metrics are exactly the ones whose NA
@@ -302,20 +287,53 @@ def cmd_report_metric_status(
         definition = load_screen(config_path)
         selected_metric_ids = screen_metric_ids(definition)
         # Fail loudly on a YAML typo: every screen metric must be registered.
-        _select_metric_classes(selected_metric_ids)
+        metric_classes = _select_metric_classes(selected_metric_ids)
     else:
+        metric_classes = _select_metric_classes(metric_ids)
         selected_metric_ids = [
-            getattr(cls, "id", cls.__name__)
-            for cls in _select_metric_classes(metric_ids)
+            getattr(cls, "id", cls.__name__) for cls in metric_classes
         ]
 
     status_repo = MetricComputeStatusRepository(db_path)
     aggregates = status_repo.count_statuses_by_metric(listing_ids, selected_metric_ids)
-    reasons_by_metric: Dict[str, List[MetricFailureReasonAggregate]] = {}
+
+    tally: Optional[FailureTally] = None
     if show_reasons:
-        reasons_by_metric = status_repo.count_failure_reasons_by_metric(
-            listing_ids, selected_metric_ids
+        # The read-side schema init only ensures the tables the states read
+        # touches exist on a fresh database -- idempotent DDL, no data writes.
+        include_market_data = any(
+            getattr(metric_cls, "uses_market_data", False)
+            for metric_cls in metric_classes
         )
+        MetricsRepository(db_path).initialize_schema()
+        _initialize_metric_read_schema(db_path, include_market_data)
+        fact_repo = _SchemaReadyFinancialFactsRepository(db_path)
+        market_repo = _SchemaReadyMarketDataRepository(db_path)
+        availability_repo = _StatusAwareMetricsRepository(
+            db_path,
+            market_repo=market_repo,
+        )
+        # Examples read better anchored to a well-known name, so buckets keep
+        # their largest-market-cap listing (diagnostic sizing heuristic only).
+        tally = FailureTally(
+            selected_metric_ids,
+            _estimate_market_caps(
+                fact_repo,
+                market_repo.latest_snapshots_many_by_ids(
+                    listing_ids,
+                    chunk_size=METRICS_COMPUTE_BATCH_SIZE,
+                ),
+            ),
+        )
+        # One metric at a time bounds memory: at universe scale the full
+        # (listing, metric) state matrix would not fit comfortably in one map.
+        for metric_id in selected_metric_ids:
+            states_by_id = availability_repo.states_many_by_ids(
+                listing_ids,
+                [metric_id],
+                chunk_size=METRICS_COMPUTE_BATCH_SIZE,
+            )
+            tally_persisted_states(tally, metric_id, scope_listings, states_by_id)
 
     total_symbols = len(scope_listings)
     summaries: List[_MetricStatusSummary] = []
@@ -358,13 +376,14 @@ def cmd_report_metric_status(
             f"never_attempted={summary.never_attempted}, "
             f"successes={summary.successes} of {total_symbols})"
         )
-        for reason in reasons_by_metric.get(summary.metric_id, []):
-            example_symbol = symbol_by_id.get(
-                reason.example_listing_id,
-                f"listing_id={reason.example_listing_id}",
-            )
-            reason_label = reason.reason_code or "(no reason recorded)"
-            print(f"    {reason_label}: {reason.count} (example={example_symbol})")
+        counter = tally.failures.get(summary.metric_id) if tally else None
+        if not counter:
+            continue
+        for reason, count in counter.most_common():
+            assert tally is not None  # counter came from the tally
+            example = tally.examples.get(summary.metric_id, {}).get(reason)
+            suffix = failure_example_console_suffix(example)
+            print(f"    {reason}: {count}{suffix}")
     if any(summary.never_attempted for summary in summaries):
         print(
             "Note: never_attempted = no persisted attempt for the metric; "
@@ -373,52 +392,12 @@ def cmd_report_metric_status(
     if output_csv:
         _write_metric_status_report_csv(
             summaries,
-            reasons_by_metric,
-            symbol_by_id,
+            tally,
             total_symbols,
             output_csv,
         )
         print(f"Wrote metric status summary to {output_csv}")
     return 0
-
-
-def _write_metric_failure_report_csv(
-    failures: Dict[str, Counter],
-    examples: Dict[str, Dict[str, _FailureExample]],
-    total_symbols: int,
-    metric_order: Sequence[str],
-    path: str,
-) -> None:
-    output_path = _prepare_output_csv_path(path)
-    with output_path.open("w", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(
-            [
-                "metric_id",
-                "reason",
-                "count",
-                "total_symbols",
-                "failure_rate",
-                "example_symbol",
-                "example_market_cap",
-                "example_reason_detail",
-            ]
-        )
-        for metric_id in metric_order:
-            counter = failures.get(metric_id, Counter())
-            if not counter:
-                writer.writerow(
-                    [metric_id, "", 0, total_symbols, 0.0]
-                    + failure_example_csv_cells(None)
-                )
-                continue
-            for reason, count in counter.most_common():
-                rate = (count / total_symbols) if total_symbols else 0.0
-                example = examples.get(metric_id, {}).get(reason)
-                writer.writerow(
-                    [metric_id, reason, count, total_symbols, rate]
-                    + failure_example_csv_cells(example)
-                )
 
 
 def _write_screen_failure_report_csv(
@@ -500,159 +479,6 @@ def _print_screen_criterion_fallout(
                 f"{metric_id}={count}" for metric_id, count in missing_counts
             )
             print(f"    missing_metrics: {display}")
-
-
-def cmd_report_metric_failures(
-    database: str,
-    metric_ids: Optional[Sequence[str]],
-    symbols: Optional[Sequence[str]],
-    exchange_codes: Optional[Sequence[str]],
-    all_supported: bool,
-    output_csv: Optional[str],
-) -> int:
-    """Summarize warning reasons for metric computation failures in a canonical scope."""
-
-    db_path = _resolve_database_path(database)
-    scope_listings, explicit_symbols, resolved_exchange_codes = (
-        _resolve_canonical_scope_listings(
-            str(db_path),
-            symbols,
-            exchange_codes,
-            all_supported,
-        )
-    )
-    # Keep the scope's (listing_id, symbol) pairs: reads/writes/market-cap key on
-    # the listing_id, the display symbol feeds the failure-example output only.
-    listing_ids = [listing_id for listing_id, _ in scope_listings]
-
-    metric_classes = _select_metric_classes(metric_ids)
-    metric_id_order = [getattr(cls, "id", cls.__name__) for cls in metric_classes]
-    include_market_data = any(
-        getattr(metric_cls, "uses_market_data", False) for metric_cls in metric_classes
-    )
-    MetricsRepository(db_path).initialize_schema()
-    _initialize_metric_read_schema(db_path, include_market_data)
-    fact_repo = _SchemaReadyFinancialFactsRepository(db_path)
-    market_repo = _SchemaReadyMarketDataRepository(db_path)
-    metrics_repo = _SchemaReadyMetricsRepository(db_path)
-    status_repo = _SchemaReadyMetricComputeStatusRepository(db_path)
-    availability_repo = _StatusAwareMetricsRepository(
-        db_path,
-        raw_metrics_repo=metrics_repo,
-        status_repo=status_repo,
-        facts_refresh_repo=_SchemaReadyFinancialFactsRefreshStateRepository(db_path),
-        market_repo=market_repo,
-    )
-
-    metric_id_set = [getattr(cls, "id", cls.__name__) for cls in metric_classes]
-    totals: Dict[str, int] = {metric_id: 0 for metric_id in metric_id_set}
-    tally = FailureTally(
-        metric_id_set,
-        _estimate_market_caps(
-            fact_repo,
-            market_repo.latest_snapshots_many_by_ids(
-                listing_ids,
-                chunk_size=METRICS_COMPUTE_BATCH_SIZE,
-            ),
-        ),
-    )
-
-    for metric_cls in metric_classes:
-        metric_id = getattr(metric_cls, "id", metric_cls.__name__)
-        states_by_id = availability_repo.states_many_by_ids(
-            listing_ids,
-            [metric_id],
-            chunk_size=METRICS_COMPUTE_BATCH_SIZE,
-        )
-        pending_listings: List[Tuple[int, str]] = []
-        for listing_id, symbol in scope_listings:
-            state = states_by_id.get(listing_id, {}).get(metric_id)
-            verdict = classify_availability_state(state)
-            if verdict == "usable":
-                continue
-            if verdict == "fresh_failure":
-                assert state is not None and state.status_record is not None
-                totals[metric_id] += 1
-                tally.record(
-                    metric_id=metric_id,
-                    reason=state.status_record.reason_code or "no warning emitted",
-                    listing_id=listing_id,
-                    symbol=symbol,
-                    reason_detail=state.status_record.reason_detail,
-                )
-                continue
-            pending_listings.append((listing_id, symbol))
-
-        if not pending_listings:
-            continue
-
-        batch_market_repo = (
-            market_repo if getattr(metric_cls, "uses_market_data", False) else None
-        )
-        for listing_batch in _batch_listings(
-            pending_listings,
-            METRICS_COMPUTE_BATCH_SIZE,
-        ):
-            batch_results = _compute_metric_batch_results(
-                listing_batch,
-                [metric_id],
-                fact_repo,
-                batch_market_repo,
-                suppress_metric_warnings=True,
-            )
-            batch_attempts: List[_MetricAttemptResult] = []
-            for result in batch_results:
-                batch_attempts.extend(result.attempts)
-                for attempt in result.attempts:
-                    if attempt.status != "failure":
-                        continue
-                    totals[metric_id] += 1
-                    tally.record(
-                        metric_id=metric_id,
-                        reason=attempt.reason_code or "no warning emitted",
-                        listing_id=attempt.listing_id,
-                        symbol=attempt.symbol,
-                        reason_detail=attempt.reason_detail,
-                    )
-            _persist_metric_attempts(
-                metrics_repo,
-                status_repo,
-                batch_attempts,
-            )
-
-    total_symbols = len(scope_listings)
-    metric_order = sorted(
-        metric_id_order,
-        key=lambda current_metric_id: (
-            -totals.get(current_metric_id, 0),
-            current_metric_id,
-        ),
-    )
-    scope_label = _scope_label(
-        explicit_symbols,
-        resolved_exchange_codes,
-        "all supported tickers",
-    )
-    print(
-        f"Metric failure reasons for {scope_label} (symbols={total_symbols}, metrics={len(metric_classes)})"
-    )
-    for metric_id in metric_order:
-        total_failures = totals.get(metric_id, 0)
-        print(f"- {metric_id}: failures={total_failures}/{total_symbols}")
-        counter = tally.failures.get(metric_id)
-        if not counter:
-            continue
-        for reason, count in counter.most_common():
-            example = tally.examples.get(metric_id, {}).get(reason)
-            suffix = failure_example_console_suffix(example)
-            print(f"    {reason}: {count}{suffix}")
-
-    if output_csv:
-        _write_metric_failure_report_csv(
-            tally.failures, tally.examples, total_symbols, metric_order, output_csv
-        )
-        print(f"Wrote metric failure reasons to {output_csv}")
-    return 0
 
 
 def cmd_report_screen_failures(

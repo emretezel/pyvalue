@@ -8,16 +8,20 @@ from __future__ import annotations
 import csv
 import sqlite3
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Sequence, Tuple
 
 import pytest
 
 from pyvalue.cli import cmd_report_metric_status
+from pyvalue.facts import RegionFactsRepository
+from pyvalue.metrics import REGISTRY
+from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.current_ratio import CurrentRatioMetric
 from pyvalue.metrics.working_capital import WorkingCapitalMetric
 from pyvalue.persistence.storage import (
     MetricComputeStatusRecord,
     MetricComputeStatusRepository,
+    SecurityRepository,
 )
 from pyvalue.universe import Listing
 
@@ -160,9 +164,12 @@ def test_metric_status_reason_breakdown_and_csv(tmp_path: Path) -> None:
         "reason",
         "reason_count",
         "example_symbol",
+        "example_market_cap",
+        "example_reason_detail",
     ]
     # Both reason rows repeat the metric summary; the bigger bucket comes first
-    # and the example is the smallest listing id of the group (BBB before CCC).
+    # and, with no market caps derivable, each bucket keeps its first-seen
+    # scope listing as the example (BBB before CCC for the shared reason).
     assert rows[1] == [
         CURRENT_RATIO,
         "3",
@@ -173,6 +180,8 @@ def test_metric_status_reason_breakdown_and_csv(tmp_path: Path) -> None:
         "current_ratio: guard tripped",
         "2",
         "BBB.US",
+        "",
+        "",
     ]
     assert rows[2] == [
         CURRENT_RATIO,
@@ -184,6 +193,8 @@ def test_metric_status_reason_breakdown_and_csv(tmp_path: Path) -> None:
         "current_ratio: other guard",
         "1",
         "AAA.US",
+        "",
+        "",
     ]
 
 
@@ -270,6 +281,134 @@ def test_metric_status_is_read_only(tmp_path: Path) -> None:
     assert _dump_status_rows(db_path) == before
 
 
+def test_metric_status_reasons_buckets_stale_and_never_attempted(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Non-usable pairs without a trustworthy failure land in remedy buckets."""
+
+    db_path = tmp_path / "status-stale.db"
+    _seed_universe(db_path)
+    # AAA: fresh persisted failure -> reason bucket. BBB: fresh SUCCESS whose
+    # stored metrics row is absent -> stale bucket (the status no longer
+    # describes reality). CCC: no persisted state -> never-attempted bucket.
+    seed_metric_status(
+        db_path,
+        _status("AAA.US", CURRENT_RATIO, "failure", "current_ratio: guard tripped"),
+        _status("BBB.US", CURRENT_RATIO, "success"),
+    )
+
+    exit_code = cmd_report_metric_status(
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=["US"],
+        all_supported=False,
+        metric_ids=[CURRENT_RATIO],
+        config_path=None,
+        show_reasons=True,
+        output_csv=None,
+    )
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "    current_ratio: guard tripped: 1 (example=AAA.US" in output
+    assert (
+        "    stale_inputs (run compute-metrics): 1 "
+        "(example=BBB.US, market_cap=N/A, detail=last attempt: success)" in output
+    )
+    assert (
+        "    never_attempted (run compute-metrics): 1 "
+        "(example=CCC.US, market_cap=N/A)" in output
+    )
+
+
+def test_metric_status_reasons_never_computes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--reasons only reads persisted state; metric compute must never run."""
+
+    db_path = tmp_path / "status-nocompute.db"
+    _seed_universe(db_path)
+
+    class CachedMetric:
+        id = "cached_metric"
+        required_concepts = ()
+        uses_market_data = False
+        uses_financial_facts = False
+
+        def compute(
+            self, listing_id: int, repo: RegionFactsRepository
+        ) -> MetricResult | None:
+            raise AssertionError("report-metric-status must never compute metrics")
+
+    monkeypatch.setitem(REGISTRY, CachedMetric.id, CachedMetric)
+    seed_metric_status(
+        db_path,
+        _status("AAA.US", CachedMetric.id, "failure", "cached_failure"),
+    )
+
+    exit_code = cmd_report_metric_status(
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=["US"],
+        all_supported=False,
+        metric_ids=[CachedMetric.id],
+        config_path=None,
+        show_reasons=True,
+        output_csv=None,
+    )
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "cached_failure: 1 (example=AAA.US" in output
+
+
+def test_metric_status_reasons_carries_scope_listing_ids(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """All reads key on the scope's listing ids; symbols never re-resolve."""
+
+    db_path = tmp_path / "status-carry-ids.db"
+    _seed_universe(db_path)
+    seed_metric_status(
+        db_path,
+        _status("AAA.US", CURRENT_RATIO, "failure", "current_ratio: guard tripped"),
+    )
+
+    calls = {"resolve_ids_many": 0}
+    original_resolve_ids_many = SecurityRepository.resolve_ids_many
+
+    def counting_resolve_ids_many(
+        self: SecurityRepository,
+        symbols: Sequence[str],
+        chunk_size: int = 500,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, int]:
+        calls["resolve_ids_many"] += 1
+        return original_resolve_ids_many(
+            self, symbols, chunk_size=chunk_size, connection=connection
+        )
+
+    monkeypatch.setattr(
+        SecurityRepository, "resolve_ids_many", counting_resolve_ids_many
+    )
+
+    exit_code = cmd_report_metric_status(
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=["US"],
+        all_supported=False,
+        metric_ids=[CURRENT_RATIO],
+        config_path=None,
+        show_reasons=True,
+        output_csv=None,
+    )
+
+    assert exit_code == 0
+    assert calls == {"resolve_ids_many": 0}
+    assert "symbols=3" in capsys.readouterr().out
+
+
 def test_count_statuses_chunking_matches_unchunked(tmp_path: Path) -> None:
     """Chunked aggregation (chunk_size=1) equals the single-query result."""
 
@@ -292,17 +431,7 @@ def test_count_statuses_chunking_matches_unchunked(tmp_path: Path) -> None:
     chunked_counts = repo.count_statuses_by_metric(
         listing_ids, metric_ids, chunk_size=1
     )
-    default_reasons = repo.count_failure_reasons_by_metric(listing_ids, metric_ids)
-    chunked_reasons = repo.count_failure_reasons_by_metric(
-        listing_ids, metric_ids, chunk_size=1
-    )
 
     assert chunked_counts == default_counts
     assert default_counts[CURRENT_RATIO].successes == 1
     assert default_counts[CURRENT_RATIO].failures == 2
-    assert chunked_reasons == default_reasons
-    assert default_reasons[CURRENT_RATIO][0].count == 2
-    assert default_reasons[CURRENT_RATIO][0].example_listing_id == min(
-        resolve_listing_id(db_path, "BBB.US"),
-        resolve_listing_id(db_path, "CCC.US"),
-    )

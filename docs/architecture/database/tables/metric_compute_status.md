@@ -51,13 +51,15 @@ One row per `(listing_id, metric_id)`.
 
 ## Main Read Paths
 
-- metric failure reports
-- screen/report diagnostics
+- `report-metric-status` (summary aggregates; `--reasons` per-pair states)
+- `report-screen-failures` / `run-screen` (status-shadowed metric reads and NA
+  display)
+- `explain-metric` (persisted attempt state)
 
 ## Main Write Paths
 
-- `compute-metrics`
-- bulk metric recomputation
+- `compute-metrics` (sole writer of attempt rows)
+- `clear-metrics` / `clear-financial-facts` (bulk delete)
 
 ## Sample Rows
 

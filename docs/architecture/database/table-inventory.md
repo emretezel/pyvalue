@@ -33,7 +33,7 @@ All row counts and table sizes below come from the live `data/pyvalue.db` snapsh
 | [financial_facts_refresh_state](tables/financial_facts_refresh_state.md) | `61,058` | `2.4 MiB` | `listing_id` | `listing_id` in `listing` | verify it still adds value beyond `fundamentals_normalization_state` |
 | [market_data](tables/market_data.md) | `221,186` | `15.3 MiB` | `listing_id`, `as_of` | `listing_id` in `listing` | latest-snapshot access and time-series retention |
 | [metrics](tables/metrics.md) | `2,418,864` | `130.2 MiB` | `listing_id`, `metric_id` | `listing_id` in `listing` | screen-read performance and lack of historical versions |
-| [metric_compute_status](tables/metric_compute_status.md) | `4,887,280` | `881.7 MiB` | `listing_id`, `metric_id` | `listing_id` in `listing` | failure-report read shape and duplication with `metrics` freshness |
+| [metric_compute_status](tables/metric_compute_status.md) | `4,887,280` | `881.7 MiB` | `listing_id`, `metric_id` | `listing_id` in `listing` | status-survey read shape and duplication with `metrics` freshness; written only by `compute-metrics` |
 
 ## FX
 

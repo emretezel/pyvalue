@@ -1,12 +1,12 @@
 """Regression: diagnostic-report outputs over persisted state only.
 
-The failure diagnostics were made pure reads: ``report-metric-failures`` keeps
-its persisted-status bucketing (with the ``reason_detail`` example column) and
-``report-screen-failures`` was slimmed to criterion fallout, deferring root
-causes to ``report-metric-status --reasons``. These tests pin the console
-lines, CSV layouts, and read-only guarantee end to end so any future drift --
-bucketing, example selection, columns, or a reintroduced DB write -- fails
-loudly.
+The failure diagnostics were made pure reads: ``report-metric-failures`` was
+merged into ``report-metric-status --reasons`` (persisted-status bucketing
+with the ``reason_detail`` example column) and ``report-screen-failures`` was
+slimmed to criterion fallout, deferring root causes to that survey. These
+tests pin the console lines, CSV layouts, and read-only guarantee end to end
+so any future drift -- bucketing, example selection, columns, or a
+reintroduced DB write -- fails loudly.
 
 Author: Emre Tezel
 """
@@ -20,7 +20,7 @@ from typing import List, Tuple
 
 import pytest
 
-from pyvalue.cli import cmd_report_metric_failures, cmd_report_screen_failures
+from pyvalue.cli import cmd_report_metric_status, cmd_report_screen_failures
 from pyvalue.metrics.current_ratio import CurrentRatioMetric
 from pyvalue.persistence.storage import MetricComputeStatusRecord
 from pyvalue.universe import Listing
@@ -100,7 +100,7 @@ def _dump_rows(db_path: Path, table: str, columns: str) -> List[Tuple[object, ..
     return [tuple(row) for row in rows]
 
 
-def test_metric_failures_persisted_path_output_and_csv(
+def test_metric_status_reasons_persisted_output_and_csv(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     db_path = tmp_path / "parity-metric.db"
@@ -108,20 +108,26 @@ def test_metric_failures_persisted_path_output_and_csv(
     before_status = _dump_rows(
         db_path, "metric_compute_status", "listing_id, metric_id, status, reason_code"
     )
-    output_csv = tmp_path / "failures.csv"
+    before_metrics = _dump_rows(db_path, "metrics", "listing_id, metric_id, value")
+    output_csv = tmp_path / "status.csv"
 
-    exit_code = cmd_report_metric_failures(
+    exit_code = cmd_report_metric_status(
         database=str(db_path),
-        metric_ids=[CURRENT_RATIO],
         symbols=None,
         exchange_codes=["US"],
         all_supported=False,
+        metric_ids=[CURRENT_RATIO],
+        config_path=None,
+        show_reasons=True,
         output_csv=str(output_csv),
     )
 
     assert exit_code == 0
     output = capsys.readouterr().out
-    assert f"- {CURRENT_RATIO}: failures=2/3" in output
+    assert (
+        f"- {CURRENT_RATIO}: na_share=66.7% "
+        "(failures=2, never_attempted=0, successes=1 of 3)" in output
+    )
     # The example is the first fresh failure seen (no market caps seeded), and
     # its untemplated reason_detail rides along on the console line.
     assert (
@@ -133,20 +139,26 @@ def test_metric_failures_persisted_path_output_and_csv(
     assert rows == [
         [
             "metric_id",
-            "reason",
-            "count",
             "total_symbols",
-            "failure_rate",
+            "successes",
+            "failures",
+            "never_attempted",
+            "na_share",
+            "reason",
+            "reason_count",
             "example_symbol",
             "example_market_cap",
             "example_reason_detail",
         ],
         [
             CURRENT_RATIO,
+            "3",
+            "1",
+            "2",
+            "0",
+            "0.6667",
             REASON,
             "2",
-            "3",
-            str(2 / 3),
             "AAA.US",
             "",
             DETAIL,
@@ -160,6 +172,9 @@ def test_metric_failures_persisted_path_output_and_csv(
             "listing_id, metric_id, status, reason_code",
         )
         == before_status
+    )
+    assert (
+        _dump_rows(db_path, "metrics", "listing_id, metric_id, value") == before_metrics
     )
 
 

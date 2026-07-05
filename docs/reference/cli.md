@@ -21,7 +21,7 @@ Provider rules:
   `normalize-fundamentals`, and `update-market-data` accept `--provider` and
   default it to `EODHD`
 - `compute-metrics`, `run-screen`, `report-fact-freshness`,
-  `report-metric-failures`, and `report-screen-failures`
+  `report-metric-status`, and `report-screen-failures`
   are provider-agnostic and operate on canonical symbols
 
 For EODHD-backed symbols, downstream stage commands and canonical-scope
@@ -322,38 +322,12 @@ Notes:
   snapshots over the scope) — concept coverage alone cannot explain NAs caused
   by a missing or stale price
 
-### `report-metric-failures`
-
-Summarize warning reasons for metric computation failures on the requested
-canonical scope.
-
-Key options:
-
-- optional scope selector: `--symbols`, `--exchange-codes`, or
-  `--all-supported` (defaults to the full supported universe)
-- `--metrics <metric-ids...>`
-- `--output-csv <path>`
-- `--database <path>`
-
-Notes:
-
-- ROIC FY-series metrics now emit standardized root-cause buckets such as
-  missing FY EBIT history, fewer than required FY EBIT years, missing current
-  or prior FY invested capital, missing invested-capital debt/equity/cash
-  inputs, currency conflict, zero average invested capital, and latest FY point
-  too old.
-- the command reads fresh persisted metric failure status first and only
-  recomputes pairs whose status is missing or stale for the current inputs —
-  recomputed attempts are written back to `metrics`/`metric_compute_status`
-  (this "report" intentionally backfills the DB)
-- each reason's example line appends `detail=<reason_detail>` (truncated on the
-  console) when the example's attempt carried an untemplated detail; the CSV
-  ends with the full text in an `example_reason_detail` column
-
 ### `report-metric-status`
 
 Rank metrics by persisted NA share (failed or never-attempted) for the
-requested canonical scope, without recomputing anything.
+requested canonical scope, and break the failures down by reason — the survey
+side of the diagnostics. A pure read: nothing is recomputed and nothing is
+written; run `compute-metrics` first to refresh the underlying state.
 
 Key options:
 
@@ -362,23 +336,37 @@ Key options:
 - `--metrics <metric-ids...>` or `--config <path>` (mutually exclusive);
   `--config` restricts the report to the screen's criteria metrics — the set
   whose NA excludes a symbol from that screen
-- `--reasons` breaks each metric's failures down by persisted `reason_code`
-  with a stable example symbol
+- `--reasons` breaks each metric down into per-reason buckets with a
+  representative example
 - `--output-csv <path>`
 - `--database <path>`
 
 Notes:
 
-- a pure read of `metric_compute_status`: nothing is recomputed and nothing is
-  written, so a full-universe ranking finishes in seconds — but the numbers are
-  only as fresh as the last `compute-metrics` run or report backfill
-- `na_share = (failures + never_attempted) / total_symbols`, i.e. the share of
-  the scope with no usable persisted value — what a screen effectively sees
+- the summary is a SQL aggregate over `metric_compute_status`, so a
+  full-universe ranking finishes in seconds; `na_share = (failures +
+  never_attempted) / total_symbols`, i.e. the share of the scope with no
+  usable persisted value — what a screen effectively sees
 - `never_attempted` counts scope listings with no persisted attempt at all for
   the metric (how a newly registered metric looks before its first
   `compute-metrics` run)
+- `--reasons` classifies every (listing, metric) persisted state against the
+  current input watermarks — the same staleness lens `run-screen` applies
+  before trusting a stored value:
+  - fresh failures bucket by their persisted `reason_code`; the example is the
+    largest-market-cap listing in the bucket and appends
+    `detail=<reason_detail>` (truncated on the console) when the attempt
+    carried an untemplated detail — the CSV keeps the full text in
+    `example_reason_detail`
+  - pairs whose persisted state no longer matches the current inputs bucket
+    under `stale_inputs (run compute-metrics)`, with the example detail
+    summarizing the last (now untrustworthy) attempt
+  - pairs with no persisted attempt bucket under `never_attempted (run
+    compute-metrics)`
+  - a large stale or never-attempted bucket means the summary counts are out
+    of date — rerun `compute-metrics` before reading the reason mix
 - `reason_code` is the first templated warning of the last failed attempt; use
-  `report-metric-failures` for a live recomputed reason survey
+  `explain-metric` for a per-symbol live recompute with untemplated warnings
 
 ### `explain-metric`
 

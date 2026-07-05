@@ -34,7 +34,6 @@ from .records import (
     IngestProgressSummary,
     MarketSnapshotRecord,
     MetricComputeStatusRecord,
-    MetricFailureReasonAggregate,
     MetricRecord,
     MetricStatusAggregate,
     NormalizationUnit,  # noqa: F401
@@ -119,7 +118,6 @@ __all__ = [
     "MarketSnapshotRecord",
     "MetricComputeStatusRecord",
     "MetricComputeStatusRepository",
-    "MetricFailureReasonAggregate",
     "MetricRecord",
     "MetricStatusAggregate",
     "MetricsRepository",
