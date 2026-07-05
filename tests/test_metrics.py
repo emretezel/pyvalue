@@ -8,6 +8,7 @@ import csv
 from datetime import date, timedelta
 import io
 from pathlib import Path
+import statistics
 
 from hypothesis import assume, given
 from hypothesis import strategies as st
@@ -139,6 +140,7 @@ from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     MAX_FY_FACT_AGE_DAYS,
     filter_unique_fy,
+    latest_consecutive_year_chain,
     metric_fx_service_context,
 )
 from pyvalue.metrics.working_capital import WorkingCapitalMetric
@@ -296,6 +298,58 @@ def test_filter_unique_fy_keeps_first_row_per_end_date() -> None:
 
     assert list(unique) == ["2023-12-31"]
     assert unique["2023-12-31"].value == 2.0
+
+
+def test_latest_consecutive_year_chain_returns_empty_for_empty_mapping() -> None:
+    assert latest_consecutive_year_chain({}, max_years=10) == []
+
+
+def test_latest_consecutive_year_chain_caps_at_max_years() -> None:
+    values = {year: f"v{year}" for year in range(2014, 2026)}  # 12 years
+
+    chain = latest_consecutive_year_chain(values, max_years=10)
+
+    assert [year for year, _ in chain] == list(range(2025, 2015, -1))
+    assert chain[0] == (2025, "v2025")
+    assert chain[-1] == (2016, "v2016")
+
+
+def test_latest_consecutive_year_chain_truncates_at_first_gap() -> None:
+    values = {2024: "a", 2023: "b", 2021: "c", 2020: "d"}
+
+    chain = latest_consecutive_year_chain(values, max_years=10)
+
+    # 2022 is missing, so older history beyond the hole is unreachable.
+    assert chain == [(2024, "a"), (2023, "b")]
+
+
+def test_latest_consecutive_year_chain_single_year_and_cap_one() -> None:
+    assert latest_consecutive_year_chain({2024: "a"}, max_years=10) == [(2024, "a")]
+    assert latest_consecutive_year_chain({2024: "a", 2023: "b"}, max_years=1) == [
+        (2024, "a")
+    ]
+
+
+@given(
+    years=st.sets(st.integers(min_value=1990, max_value=2050), min_size=1, max_size=40),
+    max_years=st.integers(min_value=1, max_value=12),
+)
+def test_latest_consecutive_year_chain_properties(
+    years: set[int], max_years: int
+) -> None:
+    values = {year: year for year in years}
+
+    chain = latest_consecutive_year_chain(values, max_years=max_years)
+
+    chain_years = [year for year, _ in chain]
+    # Anchored at the newest year, strictly consecutive descending, capped.
+    assert chain_years[0] == max(years)
+    assert chain_years == list(range(chain_years[0], chain_years[0] - len(chain), -1))
+    assert 1 <= len(chain) <= max_years
+    assert all(year in values for year in chain_years)
+    # Maximal: the chain stops only at the cap or at a genuinely missing year.
+    if len(chain) < max_years:
+        assert (chain_years[-1] - 1) not in values
 
 
 def test_metric_modules_do_not_use_metric_side_fx_helpers() -> None:
@@ -11497,7 +11551,9 @@ def test_cfo_to_ni_10y_median_metric() -> None:
     assert result.value == 5.5
 
 
-def test_cfo_to_ni_10y_median_metric_requires_strict_consecutive_years() -> None:
+def test_cfo_to_ni_10y_median_metric_returns_none_when_chain_too_short() -> None:
+    # A CFO gap four years back leaves a 4-year joint chain — below the 6-point
+    # minimum, so the adaptive window still refuses to produce a median.
     metric = CFOToNITenYearMedianMetric()
     latest_year = date.today().year - 1
     records_by_concept = _build_cash_conversion_fy_records(
@@ -11515,7 +11571,33 @@ def test_cfo_to_ni_10y_median_metric_requires_strict_consecutive_years() -> None
     assert metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept)) is None
 
 
-def test_cfo_to_ni_10y_median_metric_rejects_non_positive_net_income_year() -> None:
+def test_cfo_to_ni_10y_median_metric_uses_truncated_chain_when_gap_is_old() -> None:
+    # A CFO gap seven years back truncates the chain to 7 joint years; the
+    # median is taken over those 7 ratios instead of failing outright.
+    metric = CFOToNITenYearMedianMetric()
+    latest_year = date.today().year - 1
+    records_by_concept = _build_cash_conversion_fy_records(
+        "AAPL.US",
+        latest_year,
+        [100.0 * value for value in range(1, 11)],  # ratios 1.0, 2.0, ... 10.0
+        [100.0] * 10,
+    )
+    records_by_concept["NetCashProvidedByUsedInOperatingActivities"] = [
+        record
+        for record in records_by_concept["NetCashProvidedByUsedInOperatingActivities"]
+        if record.end_date != f"{latest_year - 7}-09-30"
+    ]
+
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
+    assert result is not None
+    # Chain = offsets 0..6 -> ratios 1.0..7.0, median 4.0.
+    assert result.value == 4.0
+    assert result.as_of == f"{latest_year}-09-30"
+
+
+def test_cfo_to_ni_10y_median_metric_skips_loss_years() -> None:
+    # A single non-positive NI year no longer voids the decade: the year is
+    # skipped and the median is taken over the remaining 9 valid ratios.
     metric = CFOToNITenYearMedianMetric()
     latest_year = date.today().year - 1
     ni_values = [100.0] * 10
@@ -11529,7 +11611,89 @@ def test_cfo_to_ni_10y_median_metric_rejects_non_positive_net_income_year() -> N
         )
     )
 
+    result = metric.compute(LISTING_ID, repo)
+    assert result is not None
+    assert result.value == 1.5
+    assert result.as_of == f"{latest_year}-09-30"
+
+
+def test_cfo_to_ni_10y_median_metric_returns_none_when_fewer_than_six_positive_ni_years() -> (
+    None
+):
+    metric = CFOToNITenYearMedianMetric()
+    latest_year = date.today().year - 1
+    ni_values = [100.0] * 10
+    for offset in range(5):  # 5 loss years leave only 5 valid points
+        ni_values[2 * offset] = -50.0
+    repo = _OwnerEarningsRepo(
+        _build_cash_conversion_fy_records(
+            "AAPL.US",
+            latest_year,
+            [150.0] * 10,
+            ni_values,
+        )
+    )
+
     assert metric.compute(LISTING_ID, repo) is None
+
+
+def test_cfo_to_ni_10y_median_metric_anchors_as_of_on_latest_joint_year_even_if_loss() -> (
+    None
+):
+    # The staleness clock and reported as_of stay on the chain anchor (the
+    # latest joint FY year) even when that year is a skipped loss year.
+    metric = CFOToNITenYearMedianMetric()
+    latest_year = date.today().year - 1
+    ni_values = [100.0] * 10
+    ni_values[0] = -50.0
+    repo = _OwnerEarningsRepo(
+        _build_cash_conversion_fy_records(
+            "AAPL.US",
+            latest_year,
+            [150.0] * 10,
+            ni_values,
+        )
+    )
+
+    result = metric.compute(LISTING_ID, repo)
+    assert result is not None
+    assert result.value == 1.5
+    assert result.as_of == f"{latest_year}-09-30"
+
+
+@given(
+    slots=st.lists(
+        st.one_of(st.none(), st.floats(min_value=0.05, max_value=20.0)),
+        min_size=6,
+        max_size=10,
+    )
+)
+def test_cfo_to_ni_10y_median_metric_matches_statistics_median_property(
+    slots: list[float | None],
+) -> None:
+    # Each slot is one chain year, newest first: a float is that year's CFO/NI
+    # ratio, ``None`` is a loss year. Wherever the losses sit (anchor included),
+    # the metric must equal statistics.median over the valid ratios only.
+    valid_ratios = [ratio for ratio in slots if ratio is not None]
+    assume(len(valid_ratios) >= 6)
+
+    latest_year = date.today().year - 1
+    # NI of +/-1.0 makes each valid year's CFO/NI reproduce the ratio exactly.
+    cfo_values = [ratio if ratio is not None else 1.0 for ratio in slots]
+    ni_values = [1.0 if ratio is not None else -1.0 for ratio in slots]
+    repo = _OwnerEarningsRepo(
+        _build_cash_conversion_fy_records(
+            "AAPL.US",
+            latest_year,
+            cfo_values,
+            ni_values,
+        )
+    )
+
+    result = CFOToNITenYearMedianMetric().compute(LISTING_ID, repo)
+    assert result is not None
+    assert result.value == pytest.approx(statistics.median(valid_ratios))
+    assert result.as_of == f"{latest_year}-09-30"
 
 
 def test_cfo_to_ni_10y_median_metric_rejects_stale_latest_fy() -> None:

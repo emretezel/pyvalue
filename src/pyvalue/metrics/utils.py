@@ -16,6 +16,7 @@ from typing import (
     Iterable,
     Iterator,
     List,
+    Mapping,
     Optional,
     Sequence,
     TypeVar,
@@ -37,6 +38,10 @@ MAX_FY_FACT_AGE_DAYS = 400
 # are generic over the concrete fact type -- a raw ``FactRecord`` or a
 # kind-tagged ``MonetaryFact`` / ``ScalarFact`` -- and preserve it on return.
 FactT = TypeVar("FactT", bound=FactView)
+
+# The consecutive-year chain builder is agnostic about what a year's payload is
+# (a single Money point, a (CFO, NI) pair, ...), so it stays generic.
+_ChainValueT = TypeVar("_ChainValueT")
 
 # Shares-outstanding concepts, in resolution priority. Mirrors the default order
 # in ``FinancialFactsRepository.latest_share_counts_many_by_ids`` so the
@@ -153,6 +158,39 @@ def filter_unique_fy(records: Iterable[FactT]) -> Dict[str, FactT]:
         if record.end_date not in unique:
             unique[record.end_date] = record
     return unique
+
+
+def latest_consecutive_year_chain(
+    values_by_year: Mapping[int, _ChainValueT],
+    *,
+    max_years: int,
+) -> list[tuple[int, _ChainValueT]]:
+    """Return the longest consecutive-year suffix ending at the latest year.
+
+    Anchored at ``max(values_by_year)`` and walking backwards one calendar year
+    at a time, the chain stops at the first missing year or after ``max_years``
+    entries, whichever comes first. Entries are returned newest-first as
+    ``(year, value)`` pairs; an empty mapping (or non-positive ``max_years``)
+    yields an empty list.
+
+    This is the *adaptive* sibling of the strict ``range(latest, latest - N)``
+    loops the FY-series metrics hand-roll: instead of failing outright when a
+    year is missing, callers get whatever consecutive history exists and apply
+    their own minimum-length policy. A fiscal-year-end change can leave a
+    calendar-year hole in an otherwise continuous history; the chain then
+    truncates at the hole (strictly better than the old hard failure, but the
+    reason callers must still enforce a minimum length).
+    """
+
+    if not values_by_year or max_years <= 0:
+        return []
+    anchor = max(values_by_year)
+    chain: list[tuple[int, _ChainValueT]] = []
+    for year in range(anchor, anchor - max_years, -1):
+        if year not in values_by_year:
+            break
+        chain.append((year, values_by_year[year]))
+    return chain
 
 
 def ttm_sum(records: Sequence[FactRecord], periods: int = 4) -> float | None:
@@ -566,6 +604,7 @@ def _filter_quarterly(records: Iterable[FactT]) -> List[FactT]:
 
 __all__ = [
     "filter_unique_fy",
+    "latest_consecutive_year_chain",
     "ttm_sum",
     "latest_quarterly_records",
     "is_recent_fact",
