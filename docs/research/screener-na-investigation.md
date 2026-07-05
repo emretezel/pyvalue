@@ -62,7 +62,7 @@ untemplated warnings:
 
 ```
 pyvalue explain-metric --symbols 000660.KO --metrics oey_ev_norm sbc_to_fcf
-pyvalue explain-metric --symbols <symbol> --screen screeners/quality_reasonable_price_primary.yml
+pyvalue explain-metric --symbols <symbol> --config screeners/quality_reasonable_price_primary.yml
 ```
 
 ### (c) Universe-scale NA ranking (persisted state, read-only)

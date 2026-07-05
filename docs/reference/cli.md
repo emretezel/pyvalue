@@ -401,7 +401,7 @@ Key options:
 
 - `--symbols <symbols...>` required (deliberately symbol-scoped; exchange and
   all-supported scopes are not accepted)
-- `--metrics <metric-ids...>` or `--screen <path>` (exactly one); `--screen`
+- `--metrics <metric-ids...>` or `--config <path>` (exactly one); `--config`
   expands to the screen's criteria metrics
 - `--max-age-days <int>` default `400`
 - `--database <path>`

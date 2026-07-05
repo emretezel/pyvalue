@@ -546,10 +546,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--metrics",
         nargs="+",
         default=None,
-        help="Metric identifiers to explain (mutually exclusive with --screen).",
+        help="Metric identifiers to explain (mutually exclusive with --config).",
     )
     explain_metric.add_argument(
-        "--screen",
+        "--config",
         default=None,
         help="Screening config (YAML); explains the screen's criteria metrics (mutually exclusive with --metrics).",
     )
@@ -754,7 +754,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 database=args.database,
                 symbols=args.symbols,
                 metric_ids=args.metrics,
-                screen_config=args.screen,
+                config_path=args.config,
                 max_age_days=args.max_age_days,
             )
         if args.command == "report-metric-status":

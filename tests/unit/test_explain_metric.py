@@ -72,13 +72,13 @@ def _dump_tables(db_path: Path) -> List[Tuple[object, ...]]:
 def _explain(
     db_path: Path,
     metric_ids: List[str] | None = None,
-    screen_config: str | None = None,
+    config_path: str | None = None,
 ) -> int:
     return cmd_explain_metric(
         database=str(db_path),
         symbols=["AAA.US"],
         metric_ids=metric_ids,
-        screen_config=screen_config,
+        config_path=config_path,
         max_age_days=400,
     )
 
@@ -158,7 +158,7 @@ def test_explain_expands_screen_config(
         encoding="utf-8",
     )
 
-    assert _explain(db_path, screen_config=str(config)) == 0
+    assert _explain(db_path, config_path=str(config)) == 0
     output = capsys.readouterr().out
     assert f"== AAA.US / {CURRENT_RATIO} ==" in output
     assert output.count("== AAA.US /") == 1
@@ -168,10 +168,10 @@ def test_explain_requires_exactly_one_selection_mode(tmp_path: Path) -> None:
     db_path = tmp_path / "explain-exclusive.db"
     _seed_listing(db_path)
 
-    with pytest.raises(SystemExit, match="exactly one of --metrics or --screen"):
+    with pytest.raises(SystemExit, match="exactly one of --metrics or --config"):
         _explain(db_path)
-    with pytest.raises(SystemExit, match="exactly one of --metrics or --screen"):
-        _explain(db_path, metric_ids=[CURRENT_RATIO], screen_config="screen.yml")
+    with pytest.raises(SystemExit, match="exactly one of --metrics or --config"):
+        _explain(db_path, metric_ids=[CURRENT_RATIO], config_path="screen.yml")
 
 
 def test_explain_is_write_free_and_shows_persisted_detail(

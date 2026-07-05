@@ -123,7 +123,7 @@ def cmd_explain_metric(
     database: str,
     symbols: Sequence[str],
     metric_ids: Optional[Sequence[str]],
-    screen_config: Optional[str],
+    config_path: Optional[str],
     max_age_days: int,
 ) -> int:
     """Explain per (symbol, metric) why the metric computes or comes out NA.
@@ -134,8 +134,8 @@ def cmd_explain_metric(
     what screens or reports see.
     """
 
-    if bool(metric_ids) == bool(screen_config):
-        raise SystemExit("Pass exactly one of --metrics or --screen.")
+    if bool(metric_ids) == bool(config_path):
+        raise SystemExit("Pass exactly one of --metrics or --config.")
 
     db_path = _resolve_database_path(database)
     scope_listings, _, _ = _resolve_canonical_scope_listings(
@@ -145,10 +145,10 @@ def cmd_explain_metric(
         False,
     )
 
-    if screen_config:
+    if config_path:
         # A screen's criteria metrics are exactly the ones whose NA excludes a
         # symbol, so they are the default explanation set for screen tuning.
-        selected_metric_ids = screen_metric_ids(load_screen(screen_config))
+        selected_metric_ids = screen_metric_ids(load_screen(config_path))
         _select_metric_classes(selected_metric_ids)
     else:
         selected_metric_ids = [
