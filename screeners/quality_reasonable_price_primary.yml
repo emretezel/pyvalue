@@ -90,13 +90,11 @@ criteria:
     right:
       value: 7
 
-  - name: "SBC / FCF <= 20% (stock comp not masking weak cash)"
-    left:
-      metric: sbc_to_fcf
-    operator: "<="
-    right:
-      value: 0.20
-
+  # NOTE: no SBC/FCF gate. EODHD's stockBasedCompensation coverage is too thin
+  # and too unreliable to hard-gate on (absent for ~85% of the universe, stops
+  # mid-history for some issuers, and carries sign/magnitude errors where
+  # present). Dilution — the outcome SBC ultimately produces — is policed by
+  # the share-count CAGR criterion below, which has far broader coverage.
   - name: "Share count CAGR (5Y) <= +1% (no net dilution)"
     left:
       metric: share_count_cagr_5y
