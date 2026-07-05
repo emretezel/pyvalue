@@ -80,17 +80,12 @@ Important limitation: `multiplier` is applied only to the right-hand side becaus
 
 ## Canonical Example
 
-This repo ships several example screens:
+This repo ships two screens:
 
-- [`screeners/basic_value.yml`](../../screeners/basic_value.yml): small learning example
-- [`screeners/value.yml`](../../screeners/value.yml): larger opinionated value screen
-- [`screeners/value_normalized.yml`](../../screeners/value_normalized.yml): compact value screen using normalized owner earnings and EV/EBIT
-- [`screeners/quality.yml`](../../screeners/quality.yml): quality-focused screen with durability and balance-sheet checks
-- [`screeners/quality_reasonable_price.yml`](../../screeners/quality_reasonable_price.yml): quality at a reasonable price screen combining durability with valuation discipline, plus post-screen `qarp_score` and `qarp_rank` output for passing symbols
-- [`screeners/quality_reasonable_price_primary.yml`](../../screeners/quality_reasonable_price_primary.yml): the primary, stricter QARP screen; extends the above with reinvestment (`iroic_5y`), gross-margin level and stability, full-cycle earnings quality (`cfo_to_ni_10y_median`, `accruals_ratio`), and modernized Graham earnings stability, ranked sector-relative on a blend spanning quality/capital-efficiency, valuation, capital allocation, and earnings stability
+- [`screeners/quality_reasonable_price_primary.yml`](../../screeners/quality_reasonable_price_primary.yml): the primary QARP (quality at a reasonable price) screen; hard-gates durability and valuation discipline plus reinvestment (`iroic_5y`), gross-margin level and stability, full-cycle earnings quality (`cfo_to_ni_10y_median`, `accruals_ratio`), and modernized Graham earnings stability, ranked sector-relative on a blend spanning quality/capital-efficiency, valuation, capital allocation, and earnings stability, with post-screen `qarp_score` and `qarp_rank` output for passing symbols
 - [`screeners/deep_value_graham.yml`](../../screeners/deep_value_graham.yml): deep-value Graham screen; deliberately loose structural gates (positive 7Y ROIC, Piotroski F-Score >= 5, Altman Z >= 1.81, P/B <= 3, a USD 150M market-cap investability floor) that exclude broken businesses rather than demand quality, ranked sector-relative on a cheapness-weighted blend of valuation (`price_to_book`, `ev_to_sales`, `ev_to_ebit`), capped capital efficiency (`croic`, `roce`), and composite health (`piotroski_f_score`, `altman_z`)
 
-The beginner example looks like this:
+A minimal screen definition looks like this:
 
 ```yaml
 criteria:
@@ -145,7 +140,7 @@ Using `--all` is the easiest way to avoid missing metric rows while learning the
 If the symbol already includes its exchange suffix, run:
 
 ```bash
-pyvalue run-screen --config screeners/basic_value.yml --symbols SHEL.LSE
+pyvalue run-screen --config screeners/quality_reasonable_price_primary.yml --symbols SHEL.LSE
 ```
 
 Single-symbol output prints:
@@ -159,13 +154,13 @@ The command exits with status `0` only if all criteria pass.
 ## Run a Screen in Bulk
 
 ```bash
-pyvalue run-screen --config screeners/basic_value.yml --exchange-codes US
+pyvalue run-screen --config screeners/quality_reasonable_price_primary.yml --exchange-codes US
 ```
 
 Write passing symbols to a CSV:
 
 ```bash
-pyvalue run-screen --config screeners/basic_value.yml --exchange-codes US --output-csv data/screen_results_basic_value.csv
+pyvalue run-screen --config screeners/quality_reasonable_price_primary.yml --exchange-codes US --output-csv data/screen_results_qarp.csv
 ```
 
 Bulk output shows only symbols that satisfy every criterion.
@@ -219,7 +214,7 @@ If a bulk screen returns very few hits, run the dedicated diagnostics command on
 the same scope:
 
 ```bash
-pyvalue report-screen-failures --config screeners/basic_value.yml --exchange-codes US
+pyvalue report-screen-failures --config screeners/quality_reasonable_price_primary.yml --exchange-codes US
 ```
 
 The report separates two different problems:
@@ -234,7 +229,7 @@ nothing is recomputed or written. For the per-reason root causes behind the NA
 counts, follow the printed hint:
 
 ```bash
-pyvalue report-metric-status --config screeners/basic_value.yml --reasons --exchange-codes US
+pyvalue report-metric-status --config screeners/quality_reasonable_price_primary.yml --reasons --exchange-codes US
 ```
 
 Use this when you want to decide whether to:
@@ -255,7 +250,7 @@ pyvalue normalize-fundamentals --provider EODHD --exchange-codes US
 pyvalue refresh-security-metadata --exchange-codes US
 pyvalue update-market-data --provider EODHD --exchange-codes US
 pyvalue compute-metrics --exchange-codes US
-pyvalue run-screen --config screeners/quality_reasonable_price.yml --exchange-codes US --output-csv data/screen_results_qarp_US.csv
+pyvalue run-screen --config screeners/quality_reasonable_price_primary.yml --exchange-codes US --output-csv data/screen_results_qarp_US.csv
 ```
 
 ## Why a Screen Can Return No Results
@@ -273,7 +268,7 @@ Remember that a missing metric row causes that criterion to fail.
 To see which criteria or missing metrics are doing the most damage, run:
 
 ```bash
-pyvalue report-screen-failures --config screeners/basic_value.yml --exchange-codes US
+pyvalue report-screen-failures --config screeners/quality_reasonable_price_primary.yml --exchange-codes US
 ```
 
 ## Related Docs

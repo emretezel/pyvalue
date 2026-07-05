@@ -29,7 +29,7 @@ Useful commands:
 ```bash
 pyvalue report-fact-freshness --exchange-codes US
 pyvalue report-metric-status --exchange-codes US --reasons
-pyvalue report-screen-failures --config screeners/value.yml --exchange-codes US
+pyvalue report-screen-failures --config screeners/quality_reasonable_price_primary.yml --exchange-codes US
 ```
 
 ## No Supported Tickers Found

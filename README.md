@@ -19,8 +19,8 @@ pyvalue normalize-fundamentals --provider EODHD --exchange-codes US
 pyvalue refresh-security-metadata --exchange-codes US
 pyvalue update-market-data --provider EODHD --exchange-codes US
 pyvalue compute-metrics --exchange-codes US
-pyvalue run-screen --config screeners/value.yml --exchange-codes US --output-csv data/screen_results_value.csv
-pyvalue report-screen-failures --config screeners/value.yml --exchange-codes US
+pyvalue run-screen --config screeners/quality_reasonable_price_primary.yml --exchange-codes US --output-csv data/screen_results_qarp.csv
+pyvalue report-screen-failures --config screeners/quality_reasonable_price_primary.yml --exchange-codes US
 ```
 
 Default database: `data/pyvalue.db`
@@ -134,7 +134,7 @@ pyvalue ingest-fundamentals --provider EODHD --symbols SHEL.LSE
 pyvalue normalize-fundamentals --provider EODHD --symbols SHEL.LSE
 pyvalue update-market-data --symbols SHEL.LSE
 pyvalue compute-metrics --symbols SHEL.LSE
-pyvalue run-screen --config screeners/value.yml --symbols SHEL.LSE
+pyvalue run-screen --config screeners/quality_reasonable_price_primary.yml --symbols SHEL.LSE
 ```
 
 ## Developer Notes

@@ -48,13 +48,13 @@ pyvalue compute-metrics --exchange-codes US
 Then inspect screens or run a screen config:
 
 ```bash
-pyvalue run-screen --config screeners/value.yml --exchange-codes US
+pyvalue run-screen --config screeners/quality_reasonable_price_primary.yml --exchange-codes US
 ```
 
 If a bulk screen returns few or no hits, inspect the fallout:
 
 ```bash
-pyvalue report-screen-failures --config screeners/value.yml --exchange-codes US
+pyvalue report-screen-failures --config screeners/quality_reasonable_price_primary.yml --exchange-codes US
 ```
 
 ## Minimal Single-Symbol Workflow

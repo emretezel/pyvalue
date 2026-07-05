@@ -296,29 +296,81 @@ def test_evaluate_criterion_detail_reports_missing_metric_ids(tmp_path: Path) ->
     assert result.missing_metric_ids == ("working_capital", "current_ratio")
 
 
-def test_screen_metric_ids_dedupes_metrics_in_first_seen_order() -> None:
-    definition = load_screen(
-        Path(__file__).resolve().parents[1] / "screeners" / "value.yml"
+def test_screen_metric_ids_dedupes_metrics_in_first_seen_order(
+    tmp_path: Path,
+) -> None:
+    # Inline screen: eps_ttm repeats across criteria and metrics also appear
+    # as right-hand terms — the id list must keep first-seen order and include
+    # each metric exactly once. (The checked-in screeners never repeat a
+    # metric, so the dedupe semantics are pinned here instead.)
+    screen_path = tmp_path / "dedupe.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "EPS positive"
+    left:
+      metric: eps_ttm
+    operator: ">"
+    right:
+      value: 0
+  - name: "Debt covered by working capital"
+    left:
+      metric: long_term_debt
+    operator: "<="
+    right:
+      metric: working_capital
+      multiplier: 1.75
+  - name: "EPS above per-share book floor"
+    left:
+      metric: eps_ttm
+    operator: ">="
+    right:
+      metric: book_value_per_share
+""",
+        encoding="utf-8",
     )
 
+    definition = load_screen(screen_path)
+
     assert screen_metric_ids(definition) == [
+        "eps_ttm",
         "long_term_debt",
         "working_capital",
-        "eps_streak",
-        "graham_eps_10y_cagr_3y_avg",
-        "graham_multiplier",
-        "current_ratio",
-        "earnings_yield",
-        "roc_greenblatt_5y_avg",
-        "roe_greenblatt_5y_avg",
-        "price_to_fcf",
-        "eps_ttm",
-        "eps_6y_avg",
+        "book_value_per_share",
     ]
 
 
-def test_load_screen_parses_basic_value_example() -> None:
-    screen_path = Path(__file__).resolve().parents[1] / "screeners" / "basic_value.yml"
+def test_load_screen_parses_metric_vs_metric_multiplier(tmp_path: Path) -> None:
+    # Pins loader behaviours the checked-in screeners do not exercise: a
+    # metric-vs-metric criterion with a right-hand multiplier and the strict
+    # ">" operator (Graham's working-capital debt cover, formerly in the
+    # deleted basic_value.yml example).
+    screen_path = tmp_path / "multiplier.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Current ratio floor"
+    left:
+      metric: current_ratio
+    operator: ">="
+    right:
+      value: 1.25
+  - name: "Earnings yield strictly positive"
+    left:
+      metric: earnings_yield
+    operator: ">"
+    right:
+      value: 0
+  - name: "Debt covered by working capital"
+    left:
+      metric: long_term_debt
+    operator: "<="
+    right:
+      metric: working_capital
+      multiplier: 1.75
+""",
+        encoding="utf-8",
+    )
 
     definition = load_screen(screen_path)
 
@@ -333,58 +385,6 @@ def test_load_screen_parses_basic_value_example() -> None:
     assert definition.criteria[2].left.metric == "long_term_debt"
     assert definition.criteria[2].right.metric == "working_capital"
     assert definition.criteria[2].right.multiplier == 1.75
-
-
-def test_load_screen_parses_value_normalized_example() -> None:
-    screen_path = (
-        Path(__file__).resolve().parents[1] / "screeners" / "value_normalized.yml"
-    )
-
-    definition = load_screen(screen_path)
-
-    assert len(definition.criteria) == 3
-    assert {criterion.operator for criterion in definition.criteria} == {
-        ">=",
-        "<=",
-    }
-    assert definition.criteria[0].left.metric == "oey_ev_norm"
-    assert definition.criteria[1].left.metric == "ev_to_ebit"
-    assert definition.criteria[2].left.metric == "graham_multiplier"
-
-
-def test_load_screen_parses_quality_reasonable_price_example() -> None:
-    screen_path = (
-        Path(__file__).resolve().parents[1]
-        / "screeners"
-        / "quality_reasonable_price.yml"
-    )
-
-    definition = load_screen(screen_path)
-
-    assert len(definition.criteria) == 6
-    assert {criterion.operator for criterion in definition.criteria} == {
-        ">=",
-        "<=",
-    }
-    assert definition.criteria[0].left.metric == "roic_7y_median"
-    assert definition.criteria[1].left.metric == "opm_7y_min"
-    assert definition.criteria[2].left.metric == "net_debt_to_ebitda"
-    assert definition.criteria[3].left.metric == "cfo_to_ni_ttm"
-    assert definition.criteria[4].left.metric == "oey_ev_norm"
-    assert definition.criteria[5].left.metric == "share_count_cagr_5y"
-    assert definition.ranking is not None
-    assert definition.ranking.peer_group == "sector"
-    assert definition.ranking.min_sector_peers == 10
-    assert definition.ranking.winsor_lower_percentile == 0.05
-    assert definition.ranking.winsor_upper_percentile == 0.95
-    assert definition.ranking.metrics[0].metric_id == "oey_ev_norm"
-    assert definition.ranking.metrics[0].weight == 0.30
-    assert definition.ranking.metrics[0].direction == "higher"
-    assert definition.ranking.metrics[4].metric_id == "cfo_to_ni_ttm"
-    assert definition.ranking.metrics[4].cap == 1.5
-    assert definition.ranking.tie_breakers[0].metric_id == "oey_ev_norm"
-    assert definition.ranking.tie_breakers[1].direction == "ascending"
-    assert definition.ranking.tie_breakers[2].metric_id == "canonical_symbol"
 
 
 def test_load_screen_parses_quality_reasonable_price_primary_example() -> None:
@@ -514,22 +514,42 @@ def test_load_screen_parses_deep_value_graham_example() -> None:
     assert definition.ranking.tie_breakers[2].metric_id == "canonical_symbol"
 
 
-def test_ranking_metric_ids_preserve_first_seen_order() -> None:
-    definition = load_screen(
-        Path(__file__).resolve().parents[1]
-        / "screeners"
-        / "quality_reasonable_price.yml"
+def test_ranking_metric_ids_preserve_first_seen_order(tmp_path: Path) -> None:
+    # A ranking block that repeats a metric id must yield each id once, in
+    # first-seen order; tie-breakers contribute no ids. (The checked-in
+    # screeners never repeat a ranking metric, so the dedupe semantics are
+    # pinned here instead.)
+    screen_path = tmp_path / "ranking.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Owner-earnings yield floor"
+    left:
+      metric: oey_ev_norm
+    operator: ">="
+    right:
+      value: 0.05
+
+ranking:
+  peer_group: sector
+  min_sector_peers: 10
+  metrics:
+    - metric: oey_ev_norm
+      weight: 0.4
+      direction: higher
+    - metric: ev_to_ebit
+      weight: 0.3
+      direction: lower
+    - metric: oey_ev_norm
+      weight: 0.3
+      direction: higher
+  tie_breakers:
+    - metric: roic_7y_median
+      direction: descending
+""",
+        encoding="utf-8",
     )
 
-    assert ranking_metric_ids(definition) == [
-        "oey_ev_norm",
-        "ev_to_ebit",
-        "graham_multiplier",
-        "roic_7y_median",
-        "cfo_to_ni_ttm",
-        "opm_10y_std",
-        "net_debt_to_ebitda",
-        "interest_coverage",
-        "share_count_cagr_5y",
-        "net_buyback_yield",
-    ]
+    definition = load_screen(screen_path)
+
+    assert ranking_metric_ids(definition) == ["oey_ev_norm", "ev_to_ebit"]
