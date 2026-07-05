@@ -70,9 +70,9 @@ pyvalue explain-metric --symbols <symbol> --screen screeners/quality_reasonable_
 `pyvalue report-metric-status --config <screen.yml> --all-supported --reasons`
 (added by this investigation) ranks a screen's metrics by persisted failure rate
 and lists each metric's unique failure reasons — seconds at full-universe scale,
-no recompute, no writes. A fresh *recompute* of the universe (needed for the four
-DVG metrics added 2026-07 that were never batch-computed) is a separate,
-explicitly-scheduled follow-up.
+no recompute, no writes. The full-universe *recompute* (needed for the four DVG
+metrics added 2026-07 that were never batch-computed) ran on 2026-07-04; the
+2026-07-05 snapshot below reflects it.
 
 ### (d) Recording findings
 
@@ -110,13 +110,27 @@ per metric, after author sign-off.
 
 ## Findings
 
-### Snapshot 2026-07-04 — persisted state before recompute
+### Snapshot 2026-07-05 — persisted state after the full universe recompute
 
-**Headline: four DVG criteria metrics were never batch-computed.**
-`piotroski_f_score`, `altman_z`, `price_to_book`, `fcf_to_ebitda` had ~10 status
-rows in the whole DB (a small test scope) vs 61,091 (the full primary universe)
-for the older metrics. Until they are computed, DVG excludes essentially every
-symbol on those criteria. Operational fix, not a code fix.
+The universe re-normalization and full metric recompute have run: every
+registered metric now has a persisted outcome for all 61,091 supported
+listings, stamped 2026-07-04 in `metric_compute_status.attempted_at`
+(`never_attempted` = 0 throughout). The four DVG metrics that were never
+batch-computed get their first universe-scale numbers below; the 19
+pre-existing criteria metrics reproduce their pre-recompute shares exactly
+(same-day recompute over effectively unchanged inputs — cfo_to_ni_10y_median
+again fails 53,514 listings with an identical 35,043-listing loss-year
+bucket). DVG is no longer zeroed by never-computed criteria; its binding
+constraints are now the generic ones (cfo_to_ni_10y_median 87.6%,
+ni_loss_years_10y 66.7%, roic_7y_median 66.2%).
+
+Notables from the `--reasons` breakdown: post-sweep, `altman_z` fails on
+missing/stale `RetainedEarnings` for only 1,582 listings (vs the
+18,574-listing starved cohort — the hash-gate fix held at universe scale);
+its dominant gap, like `price_to_book`'s (missing equity, 12,244), is the
+~12k-listing missing-balance-sheet-history cluster (example BLTN.AS).
+`piotroski_f_score` fails mostly on the 400-day FY freshness gate (25,899 of
+39,004 failures — rubric cause 6).
 
 **Universe failure rates, criteria metrics (persisted `metric_compute_status`):**
 
@@ -132,21 +146,33 @@ symbol on those criteria. Operational fix, not a code fix.
 | ni_loss_years_10y | 66.7% | DVG, QARP |
 | roic_7y_median | 66.2% | DVG, QARP |
 | opm_7y_min | 65.3% | QARP |
+| piotroski_f_score | 63.8% | DVG |
+| fcf_to_ebitda | 59.9% | DVG |
 | net_debt_to_ebitda | 59.4% | DVG, QARP |
 | interest_coverage | 59.0% | DVG, QARP |
 | cfo_to_ni_ttm | 57.5% | QARP |
 | gross_margin_ttm | 40.0% | QARP |
 | share_count_cagr_5y | 34.5% | QARP |
 | accruals_ratio | 31.8% | QARP |
+| price_to_book | 30.6% | DVG |
+| altman_z | 29.9% | DVG |
 | eps_streak | 17.0% | QARP |
 | market_cap | 10.1% | DVG |
-| piotroski_f_score / altman_z / price_to_book / fcf_to_ebitda | n/a (never batch-computed) | DVG |
 
 Caveats: whole 61k global primary universe including micro-caps; persisted-state
 freshness as described above. A market-cap-floored view is future work.
 
-**Watchlist criteria-NA matrix (beyond the four never-computed metrics, which hit
-all nine):**
+### Snapshot 2026-07-04 — persisted state before recompute
+
+**Headline: four DVG criteria metrics were never batch-computed.**
+`piotroski_f_score`, `altman_z`, `price_to_book`, `fcf_to_ebitda` had ~10 status
+rows in the whole DB (a small test scope) vs 61,091 (the full primary universe)
+for the older metrics. Until they are computed, DVG excludes essentially every
+symbol on those criteria. Operational fix, not a code fix. **Resolved** by the
+2026-07-04 full recompute — current numbers in the snapshot above.
+
+**Watchlist criteria-NA matrix (beyond the four then-never-computed metrics,
+which hit all nine):**
 
 | Stock | NA criteria metrics (persisted reason) |
 |---|---|
@@ -188,8 +214,9 @@ mapping changes auto-invalidate.
 
 **Operational finding 2: never-computed metrics.** The four DVG metrics added
 2026-07 had ~10 status rows DB-wide until this investigation's watchlist
-recompute; the universe compute remains a follow-up. `report-metric-status`
-now makes this failure mode visible as `never_attempted`.
+recompute; the full universe compute ran 2026-07-04 (see the 2026-07-05
+snapshot). `report-metric-status` now makes this failure mode visible as
+`never_attempted`.
 
 **Data-quality finding: KRW price cap.** `market_data` holds 45 rows with
 `price >= 999,999`; 000660.KO's latest close is stored as exactly
@@ -218,7 +245,7 @@ net_debt_to_ebitda; its NAs are the generic ones.
 
 | Metric | Screens | Watchlist hit | Universe share | Classification | Evidence | Proposed follow-up |
 |---|---|---|---|---|---|---|
-| altman_z | DVG | ~~NVDA, PLTR, TSLA~~ fixed | never batch-computed | **data-gap (operational)** — hash-gated normalizer starved RetainedEarnings | raw payloads carry retainedEarnings; 2026-06-17 cohort has 0 facts | --force normalization sweep + universe compute; concept-map version in normalization state |
+| altman_z | DVG | ~~NVDA, PLTR, TSLA~~ fixed | 29.9% (post-recompute) | **data-gap (operational)** — hash-gated normalizer starved RetainedEarnings | raw payloads carry retainedEarnings; 2026-06-17 cohort has 0 facts | ~~--force normalization sweep + universe compute~~ done 2026-07-04; concept-map version in normalization state |
 | cfo_to_ni_10y_median | DVG, QARP | AMD, C, PLTR, TSLA, 000660.KO | 87.6% (35,043 of 53,514 failures = loss-year guard) | **calc-modification** | TSLA: single 2019 loss year voids a 20-FY history; contradicts DVG's own `ni_loss_years_10y <= 4` tolerance | median over positive-NI years with a minimum count (e.g. >=6 of 10); loss years excluded, not fatal |
 | owner_earnings_cagr_10y | QARP | NVDA, AMD, C, TSLA, 000660.KO (+PLTR short history) | 85.3% | **calc-modification / possibly replace** | "non-positive endpoint averages": CAGR from a <=0 base is undefined; capex-heavy early years push owner earnings negative | consider regression-slope owner-earnings growth (defined for any sign pattern) or 3y-avg windows that skip non-positive bases |
 | sbc_to_fcf | QARP | C.US (SBC line ended FY2023), 000660.KO (annual-only SBC: FY=5, Q=1) | 85.5% | **fallback** | Korean filings report SBC annually; C's provider line stopped | fall back to latest fresh FY SBC as the TTM numerator when 4 quarters are unavailable; document the approximation |
@@ -247,10 +274,11 @@ zero writes — the "sort a screen's metrics by universe NA%" ask) and
 
 ### Follow-up queue (each its own commit, author sign-off per item)
 
-1. `normalize-fundamentals --force` sweep of the 2026-06-17 cohort (18,574
-   listings; local, no API) + universe compute-metrics for
-   piotroski_f_score/altman_z/price_to_book/fcf_to_ebitda; then refresh the
-   universe NA ranking via `report-metric-status`.
+1. **Done 2026-07-04/05.** `normalize-fundamentals --force` sweep of the
+   2026-06-17 cohort (18,574 listings; local, no API) + universe
+   compute-metrics for piotroski_f_score/altman_z/price_to_book/fcf_to_ebitda;
+   universe NA ranking refreshed via `report-metric-status` (2026-07-05
+   snapshot).
 2. metrics: EV denominator fallbacks (oey_ev_norm, ev_to_* family).
 3. metrics: cfo_to_ni_10y_median loss-year tolerance.
 4. metrics: dividend_yield_ttm = 0 for non-payers.
