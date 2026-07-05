@@ -258,11 +258,84 @@ net_debt_to_ebitda; its NAs are the generic ones.
 | owner_earnings_cagr_10y | QARP | NVDA, AMD, C, TSLA, 000660.KO (+PLTR short history) | 85.3% | **calc-modification** | "non-positive endpoint averages": the guard tripped on any single non-positive endpoint value — AMD's lone FY2016 loss year voided a start window averaging ~+76M — and the strict 10-point chain demanded 13 consecutive FY of NWC concepts vs the screen's own 10y maturity bar | ~~consider regression-slope owner-earnings growth (defined for any sign pattern) or 3y-avg windows that skip non-positive bases~~ done 2026-07-05: adaptive 7–10 point consecutive chain (7-point floor ⇔ 10 FY of fundamentals), exponent 1/(points-3), endpoint guard on the 3y window *averages*; all-negative windows stay NA |
 | sbc_to_fcf | ~~QARP~~ (criterion removed 2026-07-05) | C.US (SBC line ended FY2023), 000660.KO (annual-only SBC: FY=5, Q=1) | 85.5% | ~~fallback~~ **screener-change (done 2026-07-05)** | C.US raw payload carries `stockBasedCompensation: null` for every 2024/25 period, and only 1,759 of the 44,474 missing/stale failures have a recent FY SBC fact — an FY fallback rescues ~4%. Where EODHD does supply SBC it is often garbage (C.US FY2020 15.8B ≈ 10x reality, FY2021 −3.65B, derived Q4-2023 −2.34B); 274 of 8,885 stored ratios are negative and would trivially pass a `<=` gate | author decision: the `sbc_to_fcf <= 20%` criterion was dropped from QARP — provider coverage/quality cannot support a hard gate; net dilution stays policed by `share_count_cagr_5y` (65.5% coverage). The metric itself remains computed for reports |
 | oey_ev_norm | QARP | 000660.KO | 72.2% | **fallback** | `CashAndShortTermInvestments` MISSING while `CashAndCashEquivalents` (14.9T KRW) + `ShortTermInvestments` (20.2T KRW) both present; EV resolver has NO fallbacks, `invested_capital.py` does | mirror invested-capital fallbacks in `resolve_enterprise_value_denominator` (cash = CCE+STI; debt = TotalDebtFromBalanceSheet) |
-| interest_coverage | DVG, QARP | PLTR.US | 59.0% | **calc-modification** | InterestExpense line ended FY2023 ($3.5M) while EBIT fresh ($1.4B) — effectively debt-free firms can never pass a `>=` bar | when EBIT>0 and interest is absent-or-<=0 with fresh EBIT, emit a documented cap value (e.g. 100x) instead of None |
+| interest_coverage | DVG, QARP | PLTR.US | 59.0% | **calc-modification** | InterestExpense line ended FY2023 ($3.5M) while EBIT fresh ($1.4B) — effectively debt-free firms can never pass a `>=` bar | when EBIT>0 and interest is absent-or-<=0 with fresh EBIT, emit a documented cap value (e.g. 100x) instead of None — **decided 2026-07-05**: 100x on the missing-interest-alone trigger (see the 2026-07-05 findings section) |
 | iroic_5y | QARP | ADBE.US | 72.9% | **calc-modification (decide semantics)** | buybacks shrink invested capital -> delta IC <= 0 while NOPAT grows — arguably excellent, not uncomputable | options: treat deltaIC<=0 with deltaNOPAT>0 as pass/cap, or keep NA with a documented caveat — needs author decision |
 | dividend_yield_ttm (-> shareholder_yield_ttm 0.20 QARP ranking weight) | QARP ranking | ADBE, AMD, TSLA, PLTR | n/a (ranking) | **bug-class** | ADBE's last dividend row is 2016 (value 0) — a non-payer has yield 0, not NA; the NA silently renormalizes 20% of the ranking | dividend_yield_ttm = 0 when no recent dividend facts exist but the CF statement is otherwise fresh |
 | PLTR history cluster (roic_10y_min, roic_years_above_12pct, gm_10y_std, ni_loss_years_10y, opm_7y_min...) | QARP | PLTR.US | 65-75% | **leave-NA** | 8 FY rows (2020 listing); the screen deliberately demands 10y maturity | none — document that young listings are excluded by design |
-| Strict-chain family (roic_7y, gm_10y_std, opm_*, ni_loss_years_10y) universe-wide | both | (watchlist mostly OK) | 65-72%, with 12-22k "missing strict consecutive FY chain" buckets | **calc-modification candidate (universe)** | one missing mid-history year voids the metric; also 12-16k "latest FY point too old" (400d gate vs non-annual filers) | consider n-of-m tolerance after a fresh universe recompute quantifies the true chain-gap share |
+| Strict-chain family (roic_7y, gm_10y_std, opm_*, ni_loss_years_10y) universe-wide | both | (watchlist mostly OK) | 65-72%, with 12-22k "missing strict consecutive FY chain" buckets | **calc-modification candidate (universe)** | one missing mid-history year voids the metric; also 12-16k "latest FY point too old" (400d gate vs non-annual filers) | **resolved 2026-07-05**: chain-gap share quantified at ~1.2k listings vs ~21k short histories — n-of-m tolerance rejected as not worth the complexity; windows stay strict |
+
+### 2026-07-05 — ROIC & maturity-bar findings (PLTR metric review)
+
+Trigger: the seven PLTR.US NA criteria metrics (calc-correctness review,
+relaxation potential, screen consistency). Universe numbers are persisted
+state (2026-07-04 recompute) plus direct fact SQL; PLTR facts verified fresh
+through FY2025-12-31 (8 FY rows, 2018–2025 — EODHD carries the pre-IPO S-1
+years).
+
+**Coverage ceilings (FY `Revenues` depth proxy, 61,091 supported listings):**
+
+| Cohort | Listings | Share |
+|---|---|---|
+| >= 10 consecutive FY ending at the latest year (strict-10y feasible) | 30,747 | 50.3% |
+| >= 10 FY total but gapped inside the latest-10 window | 1,184 | 1.9% |
+| < 10 FY, consecutive (young listing / shallow provider history) | 21,213 | 34.7% |
+| >= 8 FY (any) | 38,968 | 63.8% |
+| >= 6 FY (any) | 43,432 | 71.1% |
+
+Consequences: an n-of-m gap tolerance would rescue only ~1.2k listings —
+**rejected**; shortening the 10y windows is the only material coverage lever
+and stays **rejected** for QARP (the decade discipline is the screen's
+identity; the young-listing leave-NA verdict is reaffirmed).
+
+**ROIC series pathologies → A1/A2 (decided 2026-07-05):**
+
+- `roic_fy_series.diagnose_series` guards the average-IC denominator only
+  against *exactly* zero. IC = debt + equity − cash passes through zero for
+  cash-rich firms, and the ratio explodes or sign-flips on either side:
+  1,758 stored `roic_10y_min` values are < −100%, and 235 listings with sane
+  12–60% `roic_7y_median` carry minima < −50% (BESIY: median 53%, min
+  −9,255%). Sign-flip channel: NOPAT < 0 with IC < 0 yields a *positive*
+  point that can spuriously count toward `roic_years_above_12pct`. Every
+  sibling return-on-capital metric (`roic_ttm`, `croic`, `roce`,
+  `roc_greenblatt`) already guards `<= 0`; the FY series is the lone `== 0`
+  outlier. → **A1**: fail years with non-positive average IC.
+- Each ROIC year needs *prior-year* IC, so the 10y pair silently demands an
+  11th FY year ("missing prior FY invested capital": 4,573 listings) — one
+  year above the 10-FY maturity bar `owner_earnings_cagr_10y` was redesigned
+  to (7-point floor ⇔ 10 FY). → **A2**: history-boundary years (the oldest
+  IC year, not mid-chain holes) fall back to their own end-of-FY IC.
+
+**interest_coverage → A3 (decided 2026-07-05, resolves queue item 5):**
+PLTR's InterestExpense line ended Q4-2023 after debt repayment (net cash,
+net_debt_to_ebitda −4.79x) while EBIT is fresh — "latest quarter too old" is
+really "no debt left to service". Universe buckets: missing interest 24,209,
+stale 2,697, non-positive 107. Author decision: emit a documented cap (100x)
+whenever TTM EBIT is positive and fresh and interest is absent, stale, or
+<= 0 — missing-interest-alone trigger, chosen over the net-cash-evidence
+variant for simplicity and reach; leverage remains policed by
+`net_debt_to_ebitda` where debt facts exist.
+
+**eps_streak earnings basis → B3 (decided 2026-07-05):** `EarningsPerShare`
+derives from EODHD `Earnings::Annual epsActual` — analyst-adjusted, not GAAP.
+PLTR stores +0.13/+0.14/+0.06 for FY2020–2022 against GAAP diluted
+−1.19/−0.27/−0.18, giving a 6-year "streak" across three GAAP loss years.
+Inside QARP `ni_loss_years_10y == 0` already implies a >= 10-year GAAP
+streak, so the criterion adds nothing on a GAAP basis and its NAs (17%
+universe failure share, short adjusted-EPS histories) can only wrongly
+exclude. Author decision: drop the `eps_streak >= 7` criterion from QARP
+(`sbc_to_fcf` removal precedent); the metric stays computed for reports.
+
+**DVG gate interaction → B1 (decided 2026-07-05):** `cfo_to_ni_10y_median`'s
+flat >= 6 positive-NI floor caps DVG's effective loss tolerance at
+`min(floor(0.4·n), n−6)` — zero loss years on a 6-year chain even though
+`ni_loss_year_share <= 0.40` advertises two. Congruence restored by a
+proportional floor `ceil(0.6·n)` positive points (bit-identical at n = 10).
+
+**DVG maturity bar → B2 (decided 2026-07-05):** strict `roic_7y_median > 0`
+sets DVG's real history bar at 8 FY years (7 ROIC years + prior IC), above
+the screen's 6-year adaptive evidence floors. A new adaptive ROIC median
+(consecutive chain capped at 10y, >= 6 points — 6 FY years once A2 lands)
+replaces it in DVG; QARP keeps the strict `roic_7y_median >= 12%`.
 
 ### Diagnostic CLI verdict (the user's question 4)
 
@@ -314,8 +387,10 @@ consolidated around a strict read-only contract — only `normalize-fundamentals
    the chain anchor. Companion `ni_loss_year_share` + DVG gate swap follow as
    their own commits.
 4. metrics: dividend_yield_ttm = 0 for non-payers.
-5. metrics: interest_coverage documented cap for zero-interest EBIT-positive
-   firms.
+5. **Decided 2026-07-05.** metrics: interest_coverage documented cap (100x)
+   for zero/missing/stale-interest firms with fresh positive TTM EBIT
+   (missing-interest-alone trigger) — implementation lands as its own commit
+   (item 12).
 6. **Superseded 2026-07-05.** ~~metrics: sbc_to_fcf FY fallback for annual-only
    SBC filers.~~ Author decision: EODHD SBC is too sparse (null for ~96% of the
    failing universe; FY fallback would rescue only ~1.8k of 44.5k) and too
@@ -327,3 +402,18 @@ consolidated around a strict read-only contract — only `normalize-fundamentals
 9. tests: migrate the 20 flat `tests/*.py` files into `tests/unit|regression/`.
 10. catalog: cross-listing issuer linkage (all three SK Hynix listings are
     `primary` under separate issuers).
+11. metrics: roic_fy_series fails years with non-positive average invested
+    capital (A1, decided 2026-07-05 — sign-flip/explosion pathology).
+12. metrics: interest_coverage debt-free cap implementation (A3, decided —
+    see item 5).
+13. metrics: ROIC history-boundary year uses its own end-of-FY invested
+    capital, dropping the silent 11th-year demand (A2, decided 2026-07-05).
+14. metrics: cfo_to_ni_10y_median proportional positive-point floor
+    `ceil(0.6·chain)` for DVG loss-tolerance congruence (B1, decided
+    2026-07-05).
+15. metrics+screeners: adaptive ROIC median (`roic_10y_median_adaptive`,
+    <=10y chain, >=6 points) replaces strict `roic_7y_median > 0` in DVG
+    (B2, decided 2026-07-05).
+16. screeners: drop the `eps_streak >= 7` criterion from QARP — adjusted-EPS
+    (epsActual) basis, redundant next to `ni_loss_years_10y == 0` (B3,
+    decided 2026-07-05).
