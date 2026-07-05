@@ -22,10 +22,10 @@ leaving the eight columns below.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-06-01`
-- Row count: `6,987`
-- Table size: `532,480 bytes` (`520.0 KiB`)
-- Approximate bytes per row: `76.2`
+- Snapshot source: `data/pyvalue.db` on `2026-07-05`
+- Row count: `104,110,732`
+- Table size: `7,797,411,840 bytes` (`7.26 GiB`)
+- Approximate bytes per row: `74.9`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -73,60 +73,60 @@ leaving the eight columns below.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-06-01`
+- Snapshot source: `data/pyvalue.db` on `2026-07-05`
 - Sample window: first `5` rows returned by SQLite ordered by `listing_id ASC, concept ASC, fiscal_period ASC, end_date ASC`
 
 ```json
 [
   {
-    "listing_id": 53177,
+    "listing_id": 1,
     "concept": "Assets",
     "fiscal_period": "FY",
-    "end_date": "1985-09-30",
+    "end_date": "2000-12-31",
     "unit_kind": "monetary",
-    "value": 936200000.0,
-    "filed": "1985-09-30",
-    "currency": "USD"
+    "value": 381357000.0,
+    "filed": null,
+    "currency": "EUR"
   },
   {
-    "listing_id": 53177,
+    "listing_id": 1,
     "concept": "Assets",
     "fiscal_period": "FY",
-    "end_date": "1986-09-30",
+    "end_date": "2001-12-31",
     "unit_kind": "monetary",
-    "value": 1160100000.0,
-    "filed": "1986-09-30",
-    "currency": "USD"
+    "value": 536399000.0,
+    "filed": null,
+    "currency": "EUR"
   },
   {
-    "listing_id": 53177,
+    "listing_id": 1,
     "concept": "Assets",
     "fiscal_period": "FY",
-    "end_date": "1987-09-30",
+    "end_date": "2002-12-31",
     "unit_kind": "monetary",
-    "value": 1477900000.0,
-    "filed": "1987-09-30",
-    "currency": "USD"
+    "value": 735651000.0,
+    "filed": "2002-12-31",
+    "currency": "EUR"
   },
   {
-    "listing_id": 53177,
+    "listing_id": 1,
     "concept": "Assets",
     "fiscal_period": "FY",
-    "end_date": "1988-09-30",
+    "end_date": "2003-12-31",
     "unit_kind": "monetary",
-    "value": 2082100000.0,
-    "filed": "1988-09-30",
-    "currency": "USD"
+    "value": 699151000.0,
+    "filed": "2003-12-31",
+    "currency": "EUR"
   },
   {
-    "listing_id": 53177,
+    "listing_id": 1,
     "concept": "Assets",
     "fiscal_period": "FY",
-    "end_date": "1989-09-30",
+    "end_date": "2004-12-31",
     "unit_kind": "monetary",
-    "value": 2743900000.0,
-    "filed": "1989-09-30",
-    "currency": "USD"
+    "value": 823703000.0,
+    "filed": "2004-12-31",
+    "currency": "EUR"
   }
 ]
 ```

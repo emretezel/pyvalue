@@ -11,10 +11,10 @@ One row per `(listing_id, metric_id)`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-06-01`
-- Row count: `2,418,864`
-- Table size: `136,495,104 bytes` (`130.2 MiB`)
-- Approximate bytes per row: `56.4`
+- Snapshot source: `data/pyvalue.db` on `2026-07-05`
+- Row count: `2,655,384`
+- Table size: `148,766,720 bytes` (`141.9 MiB`)
+- Approximate bytes per row: `56.0`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -59,7 +59,7 @@ One row per `(listing_id, metric_id)`.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-06-01`
+- Snapshot source: `data/pyvalue.db` on `2026-07-05`
 - Sample window: first `5` rows returned by SQLite ordered by `listing_id ASC, metric_id ASC`
 
 ```json
@@ -70,6 +70,15 @@ One row per `(listing_id, metric_id)`.
     "value": -0.1261966826029527,
     "as_of": "2025-12-31",
     "unit_kind": "ratio",
+    "currency": null,
+    "unit_label": null
+  },
+  {
+    "listing_id": 1,
+    "metric_id": "altman_z",
+    "value": 3.626889593371108,
+    "as_of": "2025-12-31",
+    "unit_kind": "other",
     "currency": null,
     "unit_label": null
   },
@@ -95,15 +104,6 @@ One row per `(listing_id, metric_id)`.
     "listing_id": 1,
     "metric_id": "cfo_to_ni_ttm",
     "value": 3.0156833457804333,
-    "as_of": "2025-12-31",
-    "unit_kind": "ratio",
-    "currency": null,
-    "unit_label": null
-  },
-  {
-    "listing_id": 1,
-    "metric_id": "current_ratio",
-    "value": 1.5236842105263158,
     "as_of": "2025-12-31",
     "unit_kind": "ratio",
     "currency": null,

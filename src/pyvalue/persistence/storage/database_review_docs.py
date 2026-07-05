@@ -161,7 +161,7 @@ TABLE_GROUPS: tuple[tuple[str, tuple[TableInventoryEntry, ...]], ...] = (
             TableInventoryEntry(
                 table_name="metric_compute_status",
                 logical_refs="`listing_id` in `listing`",
-                review_focus="failure-report read shape and duplication with `metrics` freshness",
+                review_focus="status-survey read shape and duplication with `metrics` freshness; written only by `compute-metrics`",
             ),
         ),
     ),

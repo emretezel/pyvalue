@@ -11,10 +11,10 @@ One row per `provider_listing_id`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-06-01`
-- Row count: `1`
-- Table size: `4,096 bytes` (`4.0 KiB`)
-- Approximate bytes per row: `4,096.0`
+- Snapshot source: `data/pyvalue.db` on `2026-07-05`
+- Row count: `61,091`
+- Table size: `7,208,960 bytes` (`6.9 MiB`)
+- Approximate bytes per row: `118.0`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -55,15 +55,35 @@ One row per `provider_listing_id`.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-06-01`
-- Sample window: first `1` rows returned by SQLite ordered by `provider_listing_id ASC`
+- Snapshot source: `data/pyvalue.db` on `2026-07-05`
+- Sample window: first `5` rows returned by SQLite ordered by `provider_listing_id ASC`
 
 ```json
 [
   {
-    "provider_listing_id": 52878,
-    "normalized_payload_hash": "e8f5d7cd01f84e65f8d1dd9b8bdc8a4ea1d8de2520a6be23029b36d96a6d9a70",
-    "normalized_at": "2026-06-01T17:08:27.073853+00:00"
+    "provider_listing_id": 1,
+    "normalized_payload_hash": "dccd9d08007aa97929e92800dfd0ad5e5364d638e9b0a58f1bc9df3b5437c6c7",
+    "normalized_at": "2026-07-04T16:33:33.768553+00:00"
+  },
+  {
+    "provider_listing_id": 2,
+    "normalized_payload_hash": "381be9035eb7de4f43b546ba6f99bda96ebf7c3cc6072aeeb5632a8cb2a7945a",
+    "normalized_at": "2026-07-04T16:33:35.034111+00:00"
+  },
+  {
+    "provider_listing_id": 3,
+    "normalized_payload_hash": "c12f24b84cffcc6b767192d5aee1e7762e738d7212deca7ae427779074c4e8f3",
+    "normalized_at": "2026-07-04T16:33:36.670617+00:00"
+  },
+  {
+    "provider_listing_id": 4,
+    "normalized_payload_hash": "8f65bd3b378e791e97b01fa0cfb0efc7345cdc5d69d946d326368c344002f224",
+    "normalized_at": "2026-07-04T16:33:38.087693+00:00"
+  },
+  {
+    "provider_listing_id": 5,
+    "normalized_payload_hash": "aea318e6295f0aaa847c235b73c1aad5bab84b65dab11b0c1fa5f77903f6e460",
+    "normalized_at": "2026-07-04T16:33:39.795148+00:00"
   }
 ]
 ```

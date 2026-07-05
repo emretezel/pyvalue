@@ -3,7 +3,7 @@
 This page is the quickest way to inspect the current schema before going table by table.
 
 <!-- BEGIN generated_table_inventory -->
-All row counts and table sizes below come from the live `data/pyvalue.db` snapshot on `2026-06-01`. Sizes refer to the table object's own pages, not the size of its secondary indexes.
+All row counts and table sizes below come from the live `data/pyvalue.db` snapshot on `2026-07-05`. Sizes refer to the table object's own pages, not the size of its secondary indexes.
 
 ## Identity And Catalog
 
@@ -12,7 +12,7 @@ All row counts and table sizes below come from the live `data/pyvalue.db` snapsh
 | [provider](tables/provider.md) | `1` | `4.0 KiB` | `provider_id` | referenced physically by `provider_exchange` and `provider_listing` | keep the registry narrow and avoid leaking runtime config into it |
 | [exchange](tables/exchange.md) | `73` | `12.0 KiB` | `exchange_id` | referenced physically by `provider_exchange.exchange_id` and `listing.exchange_id` | keep the canonical exchange table narrow and indexed for provider-catalog resolution |
 | [provider_exchange](tables/provider_exchange.md) | `73` | `12.0 KiB` | `provider_exchange_id` | maps provider exchange codes to canonical exchange identity | check whether provider-owned exchange metadata belongs here and whether exchange-slice rewrites stay cheap |
-| [issuer](tables/issuer.md) | `68,728` | `61.5 MiB` | `issuer_id` | referenced physically by `listing.issuer_id` | separate issuer metadata from listing identity and keep updates cheap |
+| [issuer](tables/issuer.md) | `68,728` | `61.9 MiB` | `issuer_id` | referenced physically by `listing.issuer_id` | separate issuer metadata from listing identity and keep updates cheap |
 | [listing](tables/listing.md) | `75,847` | `2.3 MiB` | `listing_id` | canonical root for facts, prices, metrics, and primary-listing status | maintain fast lookup by `(exchange_id, symbol)` and keep canonical status semantics clear |
 | [provider_listing](tables/provider_listing.md) | `75,847` | `1.3 MiB` | `provider_listing_id` | links provider catalog rows to canonical `listing_id` | highest-priority provider catalog table; review provider slice rewrites and lookup indexes |
 
@@ -22,18 +22,18 @@ All row counts and table sizes below come from the live `data/pyvalue.db` snapsh
 | --- | --- | --- | --- | --- | --- |
 | [fundamentals_raw](tables/fundamentals_raw.md) | `75,847` | `16.63 GiB` | `provider_listing_id` | `provider_listing_id` in `provider_listing` | wide-row storage, JSON payload size, hash versioning, and latest-row-only semantics |
 | [fundamentals_fetch_state](tables/fundamentals_fetch_state.md) | `16` | `4.0 KiB` | `provider_listing_id` | `provider_listing_id` in `provider_listing` | active retry/backoff rows only; success is derived from raw payloads |
-| [fundamentals_normalization_state](tables/fundamentals_normalization_state.md) | `1` | `4.0 KiB` | `provider_listing_id` | `provider_listing_id` in `provider_listing` | payload-hash watermark minimality |
+| [fundamentals_normalization_state](tables/fundamentals_normalization_state.md) | `61,091` | `6.9 MiB` | `provider_listing_id` | `provider_listing_id` in `provider_listing` | payload-hash watermark minimality |
 | [market_data_fetch_state](tables/market_data_fetch_state.md) | `61,091` | `2.8 MiB` | `provider_listing_id` | `provider_listing_id` in `provider_listing` | same pattern as fundamentals state; check duplication vs simplicity |
 
 ## Canonical Analytics
 
 | Table | Rows | Table size | Primary key | Main logical refs | Initial review focus |
 | --- | --- | --- | --- | --- | --- |
-| [financial_facts](tables/financial_facts.md) | `6,987` | `520.0 KiB` | `listing_id`, `concept`, `fiscal_period`, `end_date` | `listing_id` in `listing` | hottest fact table; check row width, nullable PK parts, and latest-fact indexes |
-| [financial_facts_refresh_state](tables/financial_facts_refresh_state.md) | `61,058` | `2.4 MiB` | `listing_id` | `listing_id` in `listing` | verify it still adds value beyond `fundamentals_normalization_state` |
+| [financial_facts](tables/financial_facts.md) | `104,110,732` | `7.26 GiB` | `listing_id`, `concept`, `fiscal_period`, `end_date` | `listing_id` in `listing` | hottest fact table; check row width, nullable PK parts, and latest-fact indexes |
+| [financial_facts_refresh_state](tables/financial_facts_refresh_state.md) | `61,091` | `2.6 MiB` | `listing_id` | `listing_id` in `listing` | verify it still adds value beyond `fundamentals_normalization_state` |
 | [market_data](tables/market_data.md) | `221,186` | `15.3 MiB` | `listing_id`, `as_of` | `listing_id` in `listing` | latest-snapshot access and time-series retention |
-| [metrics](tables/metrics.md) | `2,418,864` | `130.2 MiB` | `listing_id`, `metric_id` | `listing_id` in `listing` | screen-read performance and lack of historical versions |
-| [metric_compute_status](tables/metric_compute_status.md) | `4,887,280` | `881.7 MiB` | `listing_id`, `metric_id` | `listing_id` in `listing` | status-survey read shape and duplication with `metrics` freshness; written only by `compute-metrics` |
+| [metrics](tables/metrics.md) | `2,655,384` | `141.9 MiB` | `listing_id`, `metric_id` | `listing_id` in `listing` | screen-read performance and lack of historical versions |
+| [metric_compute_status](tables/metric_compute_status.md) | `5,620,372` | `1.02 GiB` | `listing_id`, `metric_id` | `listing_id` in `listing` | status-survey read shape and duplication with `metrics` freshness; written only by `compute-metrics` |
 
 ## FX
 

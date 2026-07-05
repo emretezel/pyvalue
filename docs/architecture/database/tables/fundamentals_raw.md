@@ -13,7 +13,7 @@ One row per `provider_listing_id`; historical payload versions are not retained.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-06-01`
+- Snapshot source: `data/pyvalue.db` on `2026-07-05`
 - Row count: `75,847`
 - Table size: `17,856,688,128 bytes` (`16.63 GiB`)
 - Approximate bytes per row: `235,430.4`
@@ -44,15 +44,6 @@ One row per `provider_listing_id`; historical payload versions are not retained.
 <!-- BEGIN generated_secondary_indexes -->
 - `idx_fundamentals_raw_last_fetched (last_fetched_at)`
 <!-- END generated_secondary_indexes -->
-
-`idx_fundamentals_raw_last_fetched` serves the stale-eligibility scan
-(`_fetch_stale`), which filters `WHERE last_fetched_at <= ?` and orders by
-`last_fetched_at`. It is the covering index for that branch: the planner reads
-the timestamp straight from the index instead of cracking the wide `data` blob
-(which spills to overflow pages, with `last_fetched_at` stored after it). On the
-live ~75.8k-row database this cut the default `--max-age-days 30` eligibility
-scan from ~16 s to ~0.1 s. Dropped by migration 067 (then unused) and
-re-created by migration 079 after the `_fetch_stale` rewrite.
 
 ## Main Read Paths
 

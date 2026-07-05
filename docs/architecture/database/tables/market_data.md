@@ -11,7 +11,7 @@ One row per `(listing_id, as_of)` snapshot date.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-06-01`
+- Snapshot source: `data/pyvalue.db` on `2026-07-05`
 - Row count: `221,186`
 - Table size: `16,031,744 bytes` (`15.3 MiB`)
 - Approximate bytes per row: `72.5`
@@ -58,7 +58,7 @@ One row per `(listing_id, as_of)` snapshot date.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-06-01`
+- Snapshot source: `data/pyvalue.db` on `2026-07-05`
 - Sample window: first `5` rows returned by SQLite ordered by `listing_id ASC, as_of ASC`
 
 ```json

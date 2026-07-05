@@ -237,16 +237,13 @@ CREATE INDEX idx_fin_facts_currency_nonnull
         WHERE currency IS NOT NULL;
 CREATE INDEX idx_fin_facts_security_concept_latest
         ON financial_facts(listing_id, concept, end_date DESC, filed DESC);
+CREATE INDEX idx_fundamentals_raw_last_fetched
+        ON fundamentals_raw(last_fetched_at);
 CREATE INDEX idx_fx_rates_pair_date
         ON fx_rates(provider, base_currency, quote_currency, rate_date DESC);
 CREATE INDEX idx_fx_supported_pairs_refreshable
                 ON fx_supported_pairs(provider, is_refreshable, canonical_symbol);
 CREATE UNIQUE INDEX idx_issuer_name_country
         ON issuer(name, country);
-CREATE INDEX idx_listing_currency_nonnull
-        ON listing(currency)
-        WHERE currency IS NOT NULL;
-CREATE INDEX idx_provider_exchange_exchange
-        ON provider_exchange(exchange_id);
 CREATE INDEX idx_provider_listing_listing
         ON provider_listing(listing_id);

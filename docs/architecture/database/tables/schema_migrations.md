@@ -13,7 +13,7 @@ duplicate or stray-id rows impossible.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-06-01`
+- Snapshot source: `data/pyvalue.db` on `2026-07-05`
 - Row count: `1`
 - Table size: `4,096 bytes` (`4.0 KiB`)
 - Approximate bytes per row: `4,096.0`
@@ -57,14 +57,14 @@ duplicate or stray-id rows impossible.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-06-01`
+- Snapshot source: `data/pyvalue.db` on `2026-07-05`
 - Sample window: first `1` rows returned by SQLite ordered by `version ASC`
 
 ```json
 [
   {
     "id": 1,
-    "version": 74
+    "version": 79
   }
 ]
 ```
