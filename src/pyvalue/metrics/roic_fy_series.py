@@ -59,7 +59,7 @@ FAILURE_MISSING_INVESTED_CAPITAL_DEBT_INPUT = "missing invested capital debt inp
 FAILURE_MISSING_INVESTED_CAPITAL_EQUITY_INPUT = "missing invested capital equity input"
 FAILURE_MISSING_INVESTED_CAPITAL_CASH_INPUT = "missing invested capital cash input"
 FAILURE_CURRENCY_CONFLICT = "currency conflict"
-FAILURE_ZERO_AVERAGE_INVESTED_CAPITAL = "zero average invested capital"
+FAILURE_NON_POSITIVE_AVERAGE_INVESTED_CAPITAL = "non-positive average invested capital"
 FAILURE_LATEST_FY_POINT_TOO_OLD = "latest FY point too old"
 
 TAX_RATE_SOURCE_PERIOD = "period"
@@ -208,8 +208,18 @@ class ROICFYSeriesCalculator:
                 continue
 
             avg_ic = (ic_current.money + ic_previous.money) / 2.0
-            if avg_ic.amount == 0:
-                roic_failure_by_year[year] = FAILURE_ZERO_AVERAGE_INVESTED_CAPITAL
+            # ROIC has no economic meaning at or below a zero capital base:
+            # IC = debt + equity - cash passes through zero for cash-rich
+            # firms, and NOPAT / avg_ic explodes near zero and sign-flips
+            # below it (a profitable year reads as catastrophic; a loss year
+            # with negative IC reads as a *good* year). Fail the year instead
+            # of emitting a garbage point — the same `<= 0` convention the
+            # sibling return-on-capital metrics (roic_ttm, croic, roce,
+            # roc_greenblatt) already apply.
+            if avg_ic.amount <= 0:
+                roic_failure_by_year[year] = (
+                    FAILURE_NON_POSITIVE_AVERAGE_INVESTED_CAPITAL
+                )
                 continue
 
             nopat = ebit.money * (1.0 - tax_rate.rate)
