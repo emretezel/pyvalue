@@ -2,9 +2,12 @@ criteria:
   # --- Baseline quality gate: existing metrics, deliberately loosened vs
   # quality_reasonable_price_primary.yml. Purpose is excluding structurally
   # broken businesses, not demanding quality on Screen A's terms.
-  - name: "ROIC median (7Y) > 0% (excludes structural capital destroyers only)"
+  # Adaptive chain (<= 10y, >= 6 valid ROIC years): its 6-FY evidence floor
+  # matches this screen's other adaptive gates (cfo_to_ni_10y_median,
+  # ni_loss_year_share), where the strict roic_7y_median demanded 7 FY years.
+  - name: "ROIC median (adaptive <= 10Y) > 0% (excludes structural capital destroyers only)"
     left:
-      metric: roic_7y_median
+      metric: roic_10y_median_adaptive
     operator: ">"
     right:
       value: 0

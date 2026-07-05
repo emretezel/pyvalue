@@ -129,6 +129,7 @@ from pyvalue.metrics.roic_fy_series import (
     ROIC7YMedianMetric,
     ROIC7YMinMetric,
     ROICFYSeriesCalculator,
+    ROICMedianAdaptiveMetric,
     ROICYearsAbove12PctMetric,
 )
 from pyvalue.metrics.roic_ttm import RoicTTMMetric
@@ -4261,6 +4262,80 @@ def test_roic_7y_metrics_pass_when_10y_fails_on_seven_ic_years() -> None:
     assert min_result is not None
     assert round(median_result.value, 6) == 0.18
     assert round(min_result.value, 6) == 0.12
+
+
+def _six_year_roic_concepts(
+    latest_year: int, *, ebit: float = 200.0
+) -> dict[str, list[FactRecord]]:
+    """Six FY years of every ROIC input (rate 0.2, IC 1000 per year)."""
+
+    years = range(latest_year - 5, latest_year + 1)
+    return _base_roic_10y_concepts(
+        latest_year=latest_year,
+        ebit_by_year={year: ebit for year in years},
+        tax_by_year={year: 40.0 for year in years},
+        pretax_by_year={year: 200.0 for year in years},
+        ic_short_by_year={year: 100.0 for year in years},
+        ic_long_by_year={year: 300.0 for year in years},
+        ic_equity_by_year={year: 900.0 for year in years},
+        ic_cash_by_year={year: 300.0 for year in years},
+    )
+
+
+def test_roic_adaptive_median_matches_strict_on_full_history() -> None:
+    latest_year = date.today().year - 1
+    repo = _build_ic_repo(
+        concept_records=_base_roic_10y_concepts(latest_year=latest_year)
+    )
+
+    strict = ROIC10YMedianMetric().compute(LISTING_ID, repo)
+    adaptive = ROICMedianAdaptiveMetric().compute(LISTING_ID, repo)
+
+    assert strict is not None
+    assert adaptive is not None
+    assert adaptive.value == strict.value
+    assert round(adaptive.value, 6) == 0.15
+    assert adaptive.as_of == strict.as_of
+
+
+def test_roic_adaptive_median_computes_on_six_fy_years() -> None:
+    # Six FY years support the adaptive chain (boundary year included) while
+    # the strict 7y median still needs seven EBIT years.
+    latest_year = date.today().year - 1
+    repo = _build_ic_repo(concept_records=_six_year_roic_concepts(latest_year))
+
+    assert ROIC7YMedianMetric().compute(LISTING_ID, repo) is None
+
+    result = ROICMedianAdaptiveMetric().compute(LISTING_ID, repo)
+    assert result is not None
+    # NOPAT = 200 * (1 - 0.2) = 160 over IC 1000 in every year.
+    assert round(result.value, 6) == 0.16
+
+
+def test_roic_adaptive_median_requires_six_points() -> None:
+    latest_year = date.today().year - 1
+    years = range(latest_year - 4, latest_year + 1)
+    repo = _build_ic_repo(
+        concept_records=_base_roic_10y_concepts(
+            latest_year=latest_year,
+            ebit_by_year={year: 200.0 for year in years},
+            tax_by_year={year: 40.0 for year in years},
+            pretax_by_year={year: 200.0 for year in years},
+            ic_short_by_year={year: 100.0 for year in years},
+            ic_long_by_year={year: 300.0 for year in years},
+            ic_equity_by_year={year: 900.0 for year in years},
+            ic_cash_by_year={year: 300.0 for year in years},
+        )
+    )
+
+    assert ROICMedianAdaptiveMetric().compute(LISTING_ID, repo) is None
+
+
+def test_roic_adaptive_median_rejects_stale_anchor() -> None:
+    stale_latest_year = date.today().year - 3
+    repo = _build_ic_repo(concept_records=_six_year_roic_concepts(stale_latest_year))
+
+    assert ROICMedianAdaptiveMetric().compute(LISTING_ID, repo) is None
 
 
 def test_iroic_5y_metric_happy_path() -> None:

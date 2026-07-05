@@ -75,6 +75,7 @@ _METRIC_METADATA: dict[str, MetricMetadata] = {
     "croic": MetricMetadata("percent"),
     "roic_10y_median": MetricMetadata("percent"),
     "roic_7y_median": MetricMetadata("percent"),
+    "roic_10y_median_adaptive": MetricMetadata("percent"),
     "roic_years_above_12pct": MetricMetadata("count"),
     "roic_10y_min": MetricMetadata("percent"),
     "roic_7y_min": MetricMetadata("percent"),

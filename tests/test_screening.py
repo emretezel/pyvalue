@@ -473,7 +473,10 @@ def test_load_screen_parses_deep_value_graham_example() -> None:
     # Spot-check the composite-score gates and the monetary constant. The
     # market-cap floor is the first currency-tagged constant used by a shipped
     # screener, so pin both the value and the currency.
-    assert definition.criteria[0].left.metric == "roic_7y_median"
+    # The capital-efficiency floor uses the adaptive ROIC median so its 6-FY
+    # evidence bar matches the screen's other adaptive gates (the strict
+    # roic_7y_median needed 7 FY years); QARP keeps the strict median.
+    assert definition.criteria[0].left.metric == "roic_10y_median_adaptive"
     assert definition.criteria[0].operator == ">"
     assert definition.criteria[0].right.value == 0
     # The stability gate uses the adaptive share metric so short-history

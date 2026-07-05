@@ -10,6 +10,7 @@ from datetime import date, timedelta
 from typing import Optional, Sequence
 
 import logging
+import statistics
 
 from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
@@ -25,6 +26,7 @@ from pyvalue.metrics.invested_capital import (
 )
 from pyvalue.metrics.utils import (
     MAX_FY_FACT_AGE_DAYS,
+    latest_consecutive_year_chain,
     require_metric_money,
     require_metric_ticker_currency,
 )
@@ -48,6 +50,12 @@ PRETAX_MIN_ABS = 1.0
 ABOVE_THRESHOLD = 0.12
 DEFAULT_SERIES_YEARS = 10
 STRICT_7Y_YEARS = 7
+# Floor for the adaptive median chain: six valid ROIC points, which under the
+# history-boundary IC convention correspond to exactly six FY years of
+# fundamentals — deliberately equal to the six-year chain floors of the DVG
+# screen's other adaptive gates (``cash_conversion.MIN_CHAIN_YEARS`` /
+# ``fundamental_consistency.MIN_CHAIN_YEARS``).
+ADAPTIVE_MIN_POINTS = 6
 IROIC_LOOKBACK_YEARS = 5
 IROIC_MIN_RELATIVE_DELTA_IC = 0.01
 
@@ -161,6 +169,25 @@ class ROICFYSeriesDiagnostic:
     year_diagnostics: tuple[ROICFYYearDiagnostic, ...]
 
 
+@dataclass(frozen=True)
+class _ROICYearComputation:
+    """Output of the shared per-year ROIC pass.
+
+    One construction feeds two selectors: the strict-window diagnostics
+    (``diagnose_series``) and the adaptive-chain median
+    (``compute_adaptive_series``), so a valid ROIC year means exactly the
+    same thing in both.
+    """
+
+    ebit_map: dict[int, _AmountResult]
+    tax_map: dict[int, _AmountResult]
+    pretax_map: dict[int, _AmountResult]
+    tax_rate_by_year: dict[int, _TaxRateResult]
+    ic_diagnostics: dict[int, _InvestedCapitalYearDiagnostic]
+    roic_by_year: dict[int, _ROICFYPoint]
+    roic_failure_by_year: dict[int, str]
+
+
 class ROICFYSeriesCalculator:
     """Build strict-window FY ROIC series diagnostics and snapshots.
 
@@ -173,12 +200,11 @@ class ROICFYSeriesCalculator:
     turns the raise into ``None``) rather than a silently dropped year.
     """
 
-    def diagnose_series(
-        self,
-        listing_id: int,
-        repo: RegionFactsRepository,
-        window_years: int = DEFAULT_SERIES_YEARS,
-    ) -> ROICFYSeriesDiagnostic:
+    def _compute_roic_years(
+        self, listing_id: int, repo: RegionFactsRepository
+    ) -> _ROICYearComputation:
+        """Run the shared per-year ROIC pass (no window selection)."""
+
         ebit_map = self._fy_map(listing_id, repo, EBIT_CONCEPT)
         tax_map = self._fy_map(listing_id, repo, TAX_EXPENSE_CONCEPT)
         pretax_map = self._fy_map(listing_id, repo, PRETAX_INCOME_CONCEPT)
@@ -248,6 +274,31 @@ class ROICFYSeriesCalculator:
                 as_of=max(as_of_values),
                 currency=ebit.money.currency,
             )
+
+        return _ROICYearComputation(
+            ebit_map=ebit_map,
+            tax_map=tax_map,
+            pretax_map=pretax_map,
+            tax_rate_by_year=tax_rate_by_year,
+            ic_diagnostics=ic_diagnostics,
+            roic_by_year=roic_by_year,
+            roic_failure_by_year=roic_failure_by_year,
+        )
+
+    def diagnose_series(
+        self,
+        listing_id: int,
+        repo: RegionFactsRepository,
+        window_years: int = DEFAULT_SERIES_YEARS,
+    ) -> ROICFYSeriesDiagnostic:
+        computation = self._compute_roic_years(listing_id, repo)
+        ebit_map = computation.ebit_map
+        tax_map = computation.tax_map
+        pretax_map = computation.pretax_map
+        tax_rate_by_year = computation.tax_rate_by_year
+        ic_diagnostics = computation.ic_diagnostics
+        roic_by_year = computation.roic_by_year
+        roic_failure_by_year = computation.roic_failure_by_year
 
         latest_ebit_year = max(ebit_map.keys()) if ebit_map else None
         latest_valid_roic_year = max(roic_by_year.keys()) if roic_by_year else None
@@ -360,6 +411,63 @@ class ROICFYSeriesCalculator:
             listing_id,
         )
         return None
+
+    def compute_adaptive_series(
+        self,
+        listing_id: int,
+        repo: RegionFactsRepository,
+        *,
+        max_years: int = DEFAULT_SERIES_YEARS,
+        min_points: int = ADAPTIVE_MIN_POINTS,
+    ) -> Optional[ROICFYSeriesSnapshot]:
+        """Return the latest consecutive valid-ROIC chain, capped at ``max_years``.
+
+        The adaptive sibling of the strict windows, mirroring
+        ``cfo_to_ni_10y_median`` / ``ni_loss_year_share``: anchored at the
+        newest valid ROIC year and walking back until the first failed or
+        missing year, so short histories (young listings, thin exchange
+        coverage) shrink the window instead of voiding the metric. Under the
+        history-boundary IC convention, ``min_points`` chain points need
+        exactly ``min_points`` FY years of fundamentals. Freshness is gated
+        on the chain anchor.
+        """
+
+        computation = self._compute_roic_years(listing_id, repo)
+        roic_by_year = computation.roic_by_year
+        if not roic_by_year:
+            LOGGER.warning(
+                "roic_10y_median_adaptive: no valid FY ROIC years for listing_id=%s",
+                listing_id,
+            )
+            return None
+
+        chain = latest_consecutive_year_chain(roic_by_year, max_years=max_years)
+        if len(chain) < min_points:
+            LOGGER.warning(
+                "roic_10y_median_adaptive: valid FY ROIC chain too short for "
+                "listing_id=%s: %s of %s years",
+                listing_id,
+                len(chain),
+                min_points,
+            )
+            return None
+
+        points = tuple(point for _, point in chain)
+        if not self._is_recent_as_of(
+            points[0].as_of, max_age_days=MAX_FY_FACT_AGE_DAYS
+        ):
+            LOGGER.warning(
+                "roic_10y_median_adaptive: latest FY point (%s) too old for listing_id=%s",
+                points[0].as_of,
+                listing_id,
+            )
+            return None
+
+        return ROICFYSeriesSnapshot(
+            points=points,
+            as_of=points[0].as_of,
+            currency=points[0].currency,
+        )
 
     def compute_incremental_5y(
         self, listing_id: int, repo: RegionFactsRepository
@@ -977,6 +1085,34 @@ class ROIC7YMedianMetric:
 
 
 @dataclass
+class ROICMedianAdaptiveMetric:
+    """Compute median FY ROIC over the latest adaptive (<= 10y, >= 6 point) chain.
+
+    DVG's coverage-friendly sibling of the strict medians: the same per-year
+    ROIC construction, selected over the latest consecutive run of valid
+    years instead of a strict window, so 6-9-year histories stay screenable.
+    QARP keeps gating on the strict ``roic_7y_median``.
+    """
+
+    id: str = "roic_10y_median_adaptive"
+    required_concepts = REQUIRED_CONCEPTS
+
+    def compute(
+        self, listing_id: int, repo: RegionFactsRepository
+    ) -> Optional[MetricResult]:
+        snapshot = ROICFYSeriesCalculator().compute_adaptive_series(listing_id, repo)
+        if snapshot is None:
+            return None
+        median = statistics.median(point.value for point in snapshot.points)
+        return MetricResult(
+            listing_id=listing_id,
+            metric_id=self.id,
+            value=median,
+            as_of=snapshot.as_of,
+        )
+
+
+@dataclass
 class ROICYearsAbove12PctMetric:
     """Count FY ROIC years above 12% over latest strict 10 consecutive years."""
 
@@ -1077,6 +1213,7 @@ __all__ = [
     "ROICFYSeriesCalculator",
     "ROIC10YMedianMetric",
     "ROIC7YMedianMetric",
+    "ROICMedianAdaptiveMetric",
     "ROICYearsAbove12PctMetric",
     "ROIC10YMinMetric",
     "ROIC7YMinMetric",
