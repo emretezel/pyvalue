@@ -40,8 +40,10 @@ FIVE_YEAR_POINTS = 5
 TEN_YEAR_POINTS = 10
 # Minimum length of the adaptive FY chain behind ``ni_loss_year_share``: a
 # loss-year *share* over fewer than six observed years says little. Equal to
-# ``cash_conversion.MIN_VALID_POINTS`` on purpose — the DVG screen pairs the
-# two adaptive metrics, so their evidence floors must match.
+# ``cash_conversion.MIN_CHAIN_YEARS`` on purpose — the DVG screen pairs the
+# two adaptive metrics, so their chain-evidence floors must match (and
+# ``cash_conversion.POSITIVE_NI_SHARE_FLOOR`` mirrors the ``<= 0.40``
+# loss-share tolerance itself).
 MIN_CHAIN_YEARS = 6
 FY_PERIODS = {"FY"}
 

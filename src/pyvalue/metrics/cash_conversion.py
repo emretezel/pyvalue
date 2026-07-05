@@ -5,8 +5,10 @@ Author: Emre Tezel
 
 from __future__ import annotations
 
+import math
 import statistics
 from dataclasses import dataclass
+from fractions import Fraction
 from typing import Optional, Sequence
 
 import logging
@@ -40,18 +42,36 @@ NET_INCOME_CONCEPTS = (
 QUARTERLY_PERIODS = {"Q1", "Q2", "Q3", "Q4"}
 FY_PERIODS = {"FY"}
 # Window cap: the freshest 10 fiscal years, the "full cycle" the metric name
-# refers to. The window is adaptive below the cap — see MIN_VALID_POINTS.
+# refers to. The window is adaptive below the cap — see MIN_CHAIN_YEARS.
 SERIES_YEARS = 10
-# Minimum positive-NI observations for a meaningful full-cycle median. The
-# CFO/NI ratio is undefined for loss years (a negative denominator flips the
-# sign of a *good* outcome), so loss years are skipped rather than fatal; six
-# valid points keeps the median honest while tolerating up to four losses in a
-# full 10-year window — deliberately equal to the DVG screen's old
-# ``ni_loss_years_10y <= 4`` gate and to
-# ``fundamental_consistency.MIN_CHAIN_YEARS`` (the screen pairs the two
-# metrics). The old any-loss-is-fatal guard caused 87.6% of this metric's
-# failures (see docs/research/screener-na-investigation.md).
-MIN_VALID_POINTS = 6
+# Minimum observed chain length for a meaningful full-cycle median: fewer
+# than six joint CFO+NI years says little. Deliberately equal to
+# ``fundamental_consistency.MIN_CHAIN_YEARS`` — the DVG screen pairs the two
+# adaptive metrics, so their chain-evidence floors must match.
+MIN_CHAIN_YEARS = 6
+# Positive-NI evidence floor *within* the chain. The CFO/NI ratio is
+# undefined for loss years (a negative denominator flips the sign of a *good*
+# outcome), so loss years are skipped and the median needs
+# ceil(3/5 x chain length) positive years — the exact complement of DVG's
+# ``ni_loss_year_share <= 0.40`` loss-share gate, so both criteria tolerate
+# the same loss count at every window length. (The previous flat floor of six
+# nullified the advertised 40% tolerance on short chains: a 6-year chain
+# allowed zero losses. At the full 10-year window the floor is still six
+# points — bit-identical behaviour for deep histories. The even older
+# any-loss-is-fatal guard caused 87.6% of this metric's failures; see
+# docs/research/screener-na-investigation.md.)
+POSITIVE_NI_SHARE_FLOOR = Fraction(3, 5)
+
+
+def _min_positive_points(chain_length: int) -> int:
+    """Return the positive-NI floor for a chain: ceil(3/5 x chain length).
+
+    ``Fraction`` arithmetic keeps the ceil exact — no float rounding can
+    detach this floor from the ``ni_loss_year_share`` complement.
+    """
+
+    return math.ceil(POSITIVE_NI_SHARE_FLOOR * chain_length)
+
 
 REQUIRED_CONCEPTS = tuple(
     dict.fromkeys(OPERATING_CASH_FLOW_CONCEPTS + NET_INCOME_CONCEPTS)
@@ -82,10 +102,11 @@ class _CashConversionFYPoint:
 class CashConversionTenYearSnapshot:
     """Adaptive FY cash-conversion series.
 
-    ``points`` holds only the positive-NI ratio points (6..10, newest-first) of
-    the latest consecutive joint CFO+NI chain; skipped loss years contribute no
-    point. ``as_of`` is the chain anchor's date — the staleness clock — which
-    may belong to a skipped loss year and therefore not match any point.
+    ``points`` holds only the positive-NI ratio points of the latest
+    consecutive joint CFO+NI chain (at least ``ceil(3/5 x chain length)`` of
+    them, newest-first); skipped loss years contribute no point. ``as_of`` is
+    the chain anchor's date — the staleness clock — which may belong to a
+    skipped loss year and therefore not match any point.
     """
 
     points: tuple[_CashConversionFYPoint, ...]
@@ -190,12 +211,12 @@ class CashConversionCalculator:
         # years. Short histories (young listings, thin exchange coverage) shrink
         # the window instead of voiding the metric outright.
         chain = latest_consecutive_year_chain(joint, max_years=SERIES_YEARS)
-        if len(chain) < MIN_VALID_POINTS:
+        if len(chain) < MIN_CHAIN_YEARS:
             LOGGER.warning(
                 "cfo_to_ni_10y: joint FY chain too short for listing_id=%s: %s of %s years",
                 listing_id,
                 len(chain),
-                MIN_VALID_POINTS,
+                MIN_CHAIN_YEARS,
             )
             return None
 
@@ -219,7 +240,7 @@ class CashConversionCalculator:
             for year, (cfo, net_income) in chain
             if net_income.money.amount > 0
         ]
-        if len(selected) < MIN_VALID_POINTS:
+        if len(selected) < _min_positive_points(len(chain)):
             LOGGER.warning(
                 "cfo_to_ni_10y: too few positive-NI FY years for listing_id=%s: %s of %s in chain",
                 listing_id,
@@ -397,11 +418,14 @@ class CFOToNITTMMetric:
 class CFOToNITenYearMedianMetric:
     """Compute the median FY cash conversion over an adaptive full-cycle window.
 
-    The window is the latest consecutive joint CFO+NI chain capped at 10 fiscal
-    years; loss years are skipped and at least six positive-NI points are
-    required (see ``MIN_VALID_POINTS``). For a full loss-free 10-year window
-    ``statistics.median`` reproduces the previous hardcoded even-count formula
-    bit-for-bit, so strict-history listings keep identical values.
+    The window is the latest consecutive joint CFO+NI chain capped at 10
+    fiscal years (at least six years observed, see ``MIN_CHAIN_YEARS``); loss
+    years are skipped and at least ``ceil(3/5 x chain length)`` positive-NI
+    points are required (see ``POSITIVE_NI_SHARE_FLOOR`` — the exact
+    complement of DVG's ``ni_loss_year_share <= 0.40`` gate). For a full
+    loss-free 10-year window ``statistics.median`` reproduces the previous
+    hardcoded even-count formula bit-for-bit, so strict-history listings keep
+    identical values.
     """
 
     id: str = "cfo_to_ni_10y_median"
