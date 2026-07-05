@@ -157,10 +157,11 @@ class OwnerEarningsEquityCalculator:
         target_currency = require_metric_ticker_currency(
             listing_id, repo, metric_id=FIVE_YEAR_CONTEXT
         )
-        delta_nwc_maint = self._delta_nwc_maint_money(
-            listing_id, repo, target_currency=target_currency, context=FIVE_YEAR_CONTEXT
-        )
-        if delta_nwc_maint is None:
+        # Each FY point subtracts *that year's own* maintenance NWC delta (see
+        # the enterprise calculator for the rationale: a constant current-value
+        # subtrahend distorts historical points for fast-growing businesses).
+        maint_series = DeltaNWCMaintMetric().fy_series_by_year(listing_id, repo)
+        if not maint_series:
             LOGGER.warning(
                 "oe_equity_5y_avg: missing delta_nwc_maint for listing_id=%s",
                 listing_id,
@@ -191,11 +192,40 @@ class OwnerEarningsEquityCalculator:
         )
         points: list[_FYPoint] = []
         for end_date in candidate_dates:
+            year = self._parse_year(end_date)
+            if year is None:
+                LOGGER.warning(
+                    "oe_equity_5y_avg: invalid FY end date %s for listing_id=%s",
+                    end_date,
+                    listing_id,
+                )
+                continue
+            maint = maint_series.get(year)
+            if maint is None:
+                # Expected at the series boundary (the oldest NWC years never
+                # carry a trailing 3-delta chain); debug keeps persisted
+                # failure reasons pointing at the count guard below.
+                LOGGER.debug(
+                    "oe_equity_5y_avg: no per-year delta_nwc_maint for FY %s "
+                    "(listing_id=%s)",
+                    end_date,
+                    listing_id,
+                )
+                continue
+
             ni = ni_map[end_date]
             mcapex = mcapex_map[end_date]
             da = da_map.get(end_date)
             da_money = da.money if da is not None else Money.of(0.0, target_currency)
-            point_value = ni.money + da_money - mcapex.money - delta_nwc_maint.money
+            maint_money = require_metric_money(
+                maint.money,
+                target_currency=target_currency,
+                metric_id=FIVE_YEAR_CONTEXT,
+                listing_id=listing_id,
+                input_name="delta_nwc_maint",
+                as_of=maint.as_of,
+            )
+            point_value = ni.money + da_money - mcapex.money - maint_money
             points.append(_FYPoint(money=point_value, as_of=end_date))
 
         if len(points) < 5:
@@ -495,6 +525,12 @@ class OwnerEarningsEquityCalculator:
         except ValueError:
             return False
         return end_date >= (date.today() - timedelta(days=max_age_days))
+
+    def _parse_year(self, as_of: str) -> Optional[int]:
+        try:
+            return date.fromisoformat(as_of).year
+        except ValueError:
+            return None
 
 
 @dataclass

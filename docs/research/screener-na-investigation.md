@@ -99,7 +99,10 @@ per metric, after author sign-off.
 3. **All-or-nothing composites**: piotroski_f_score (9 signals x 3 FY years),
    altman_z (NAs when RetainedEarnings is absent), owner-earnings chain
    (delta_nwc_maint needs 4 consecutive FY of 4 balance-sheet concepts — the most
-   fragile dependency in QARP).
+   fragile dependency in QARP; since the per-year maintenance-NWC change, the FY
+   owner-earnings series subtracts each year's own trailing 3-delta value, so
+   the 5y metrics need up to 8 and the 10y metrics up to 13 consecutive FY of
+   those concepts).
 4. **Market-data seam**: market_cap / EV metrics need a positive shares fact and
    a positive stored price.
 5. **TTM strictness**: 4 consecutive quarters; interest_coverage needs 4 *aligned*

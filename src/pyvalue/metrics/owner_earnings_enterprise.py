@@ -238,22 +238,11 @@ class OwnerEarningsEnterpriseCalculator:
             )
             return None
 
-        latest_by_year: dict[int, _FYPoint] = {}
-        for point in points:
-            latest_by_year.setdefault(point.year, point)
-
-        latest_year = max(latest_by_year)
-        selected: list[_FYPoint] = []
-        for year in range(latest_year, latest_year - TEN_YEAR_POINTS, -1):
-            selected_point = latest_by_year.get(year)
-            if selected_point is None:
-                LOGGER.warning(
-                    "worst_oe_ev_fy_10y: missing strict consecutive FY chain "
-                    "for listing_id=%s",
-                    listing_id,
-                )
-                return None
-            selected.append(selected_point)
+        selected = self._latest_consecutive_ten(
+            points, context="worst_oe_ev_fy_10y", listing_id=listing_id
+        )
+        if selected is None:
+            return None
 
         if not self._is_recent_as_of(
             selected[0].as_of, max_age_days=MAX_FY_FACT_AGE_DAYS
@@ -289,7 +278,14 @@ class OwnerEarningsEnterpriseCalculator:
             )
             return None
 
-        latest_ten = points[:TEN_YEAR_POINTS]
+        # The 1/OE_CAGR_YEARS exponent assumes the ten points span exactly ten
+        # consecutive fiscal years; enforce the same strict chain as the
+        # worst-of-10y metric instead of silently accepting gaps.
+        latest_ten = self._latest_consecutive_ten(
+            points, context="owner_earnings_cagr_10y", listing_id=listing_id
+        )
+        if latest_ten is None:
+            return None
         if not self._is_recent_as_of(
             latest_ten[0].as_of, max_age_days=MAX_FY_FACT_AGE_DAYS
         ):
@@ -303,6 +299,10 @@ class OwnerEarningsEnterpriseCalculator:
         ordered = list(reversed(latest_ten))
         start_monies = [point.money for point in ordered[:AVG_WINDOW]]
         end_monies = [point.money for point in ordered[-AVG_WINDOW:]]
+        # A compound growth rate has no real solution from a non-positive base,
+        # so both 3-year endpoint windows must be strictly positive; anything
+        # else is reported as not-computable rather than a convention-based
+        # number.
         if any(money.amount <= 0 for money in start_monies + end_monies):
             LOGGER.warning(
                 "owner_earnings_cagr_10y: non-positive endpoint averages "
@@ -313,17 +313,42 @@ class OwnerEarningsEnterpriseCalculator:
 
         start_avg = sum_money(start_monies) / AVG_WINDOW
         end_avg = sum_money(end_monies) / AVG_WINDOW
-        if start_avg.amount <= 0 or end_avg.amount <= 0:
-            LOGGER.warning(
-                "owner_earnings_cagr_10y: invalid endpoint averages for listing_id=%s",
-                listing_id,
-            )
-            return None
-
         return OwnerEarningsGrowthSnapshot(
             value=(end_avg / start_avg) ** (1.0 / OE_CAGR_YEARS) - 1.0,
             as_of=latest_ten[0].as_of,
         )
+
+    def _latest_consecutive_ten(
+        self,
+        points: Sequence[_FYPoint],
+        *,
+        context: str,
+        listing_id: int,
+    ) -> Optional[list[_FYPoint]]:
+        """Select the latest point per year across a strict 10-consecutive-year window.
+
+        Both 10-year consumers (worst-of and CAGR) rely on the window spanning
+        exactly ten fiscal years, so a gap or duplicate-year collapse must fail
+        the selection rather than silently shift the window. Callers guarantee
+        ``points`` is non-empty.
+        """
+        latest_by_year: dict[int, _FYPoint] = {}
+        for point in points:
+            latest_by_year.setdefault(point.year, point)
+
+        latest_year = max(latest_by_year)
+        selected: list[_FYPoint] = []
+        for year in range(latest_year, latest_year - TEN_YEAR_POINTS, -1):
+            selected_point = latest_by_year.get(year)
+            if selected_point is None:
+                LOGGER.warning(
+                    "%s: missing strict consecutive FY chain for listing_id=%s",
+                    context,
+                    listing_id,
+                )
+                return None
+            selected.append(selected_point)
+        return selected
 
     def _latest_available_five_points(
         self,
@@ -366,10 +391,13 @@ class OwnerEarningsEnterpriseCalculator:
         target_currency = require_metric_ticker_currency(
             listing_id, repo, metric_id=context
         )
-        delta_nwc_maint = self._delta_nwc_maint_money(
-            listing_id, repo, target_currency=target_currency, context=context
-        )
-        if delta_nwc_maint is None:
+        # Each FY point subtracts *that year's own* maintenance NWC delta.
+        # Reusing the current value for every year would scale today's
+        # working-capital investment onto a decade-old (often far smaller)
+        # business and can flip genuinely positive historical owner earnings
+        # negative.
+        maint_series = DeltaNWCMaintMetric().fy_series_by_year(listing_id, repo)
+        if not maint_series:
             LOGGER.warning(
                 "%s: missing delta_nwc_maint for listing_id=%s", context, listing_id
             )
@@ -428,6 +456,20 @@ class OwnerEarningsEnterpriseCalculator:
                 )
                 continue
 
+            maint = maint_series.get(year)
+            if maint is None:
+                # Expected at the series boundary: the oldest NWC years can
+                # never carry a trailing 3-delta chain, so this fires for every
+                # deep-history listing. Debug level keeps persisted failure
+                # reasons pointing at the metric-level guards instead.
+                LOGGER.debug(
+                    "%s: no per-year delta_nwc_maint for FY %s (listing_id=%s)",
+                    context,
+                    end_date,
+                    listing_id,
+                )
+                continue
+
             ebit = ebit_map[end_date]
             da = da_map.get(end_date)
             mcapex = mcapex_map[end_date]
@@ -440,10 +482,18 @@ class OwnerEarningsEnterpriseCalculator:
 
             nopat = ebit.money * (1.0 - tax_rate.rate)
             da_money = da.money if da is not None else Money.of(0.0, target_currency)
+            maint_money = require_metric_money(
+                maint.money,
+                target_currency=target_currency,
+                metric_id=context,
+                listing_id=listing_id,
+                input_name="delta_nwc_maint",
+                as_of=maint.as_of,
+            )
             points.append(
                 _FYPoint(
                     year=year,
-                    money=nopat + da_money - mcapex.money - delta_nwc_maint.money,
+                    money=nopat + da_money - mcapex.money - maint_money,
                     as_of=end_date,
                 )
             )

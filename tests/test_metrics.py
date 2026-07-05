@@ -7454,6 +7454,122 @@ def _build_nwc_fy_records(
     }
 
 
+def test_delta_nwc_maint_fy_series_by_year_computes_trailing_averages() -> None:
+    metric = DeltaNWCMaintMetric()
+    latest_year = date.today().year - 1
+    # NWC levels newest-first; year-over-year deltas are therefore
+    # +50, +20, +20, +20, -60, +20, +20 (newest delta first).
+    records = _build_nwc_fy_records(
+        "AAPL.US",
+        latest_year,
+        [300.0, 250.0, 230.0, 210.0, 190.0, 250.0, 230.0, 210.0],
+    )
+
+    series = metric.fy_series_by_year(LISTING_ID, _OwnerEarningsRepo(records))
+
+    # Only years with the full trailing chain (y..y-3) are present: 8 levels
+    # yield entries for the 5 newest years.
+    assert set(series) == {latest_year - offset for offset in range(5)}
+    assert series[latest_year].money.amount == pytest.approx((50.0 + 20.0 + 20.0) / 3.0)
+    assert series[latest_year - 1].money.amount == pytest.approx(20.0)
+    # Years whose trailing window includes the -60 release average negative
+    # and are floored at zero.
+    assert series[latest_year - 2].money.amount == 0.0
+    assert series[latest_year - 3].money.amount == 0.0
+    assert series[latest_year - 4].money.amount == 0.0
+    assert series[latest_year].as_of == f"{latest_year}-09-30"
+    assert series[latest_year].money.currency == "USD"
+
+
+def test_delta_nwc_maint_fy_series_by_year_stops_at_history_gaps() -> None:
+    metric = DeltaNWCMaintMetric()
+    latest_year = date.today().year - 1
+    gap_date = f"{latest_year - 4}-09-30"
+    records = _build_nwc_fy_records(
+        "AAPL.US",
+        latest_year,
+        [300.0, 280.0, 260.0, 240.0, 220.0, 200.0, 180.0, 160.0],
+    )
+    # Drop one mid-history year entirely: every trailing window spanning it
+    # must vanish, on both sides of the gap.
+    records = {
+        concept: [record for record in concept_records if record.end_date != gap_date]
+        for concept, concept_records in records.items()
+    }
+
+    series = metric.fy_series_by_year(LISTING_ID, _OwnerEarningsRepo(records))
+
+    assert set(series) == {latest_year}
+    assert series[latest_year].money.amount == pytest.approx(20.0)
+
+
+@given(
+    levels=st.lists(
+        st.floats(min_value=-1e6, max_value=1e6, allow_nan=False, allow_infinity=False),
+        min_size=4,
+        max_size=12,
+    ),
+    shift=st.floats(
+        min_value=-1e6, max_value=1e6, allow_nan=False, allow_infinity=False
+    ),
+)
+def test_delta_nwc_maint_fy_series_is_shift_invariant(
+    levels: list[float], shift: float
+) -> None:
+    # Maintenance NWC is built from year-over-year *deltas*, so translating
+    # every NWC level by a constant must leave the whole series unchanged.
+    metric = DeltaNWCMaintMetric()
+    latest_year = date.today().year - 1
+
+    base = metric.fy_series_by_year(
+        LISTING_ID,
+        _OwnerEarningsRepo(_build_nwc_fy_records("AAPL.US", latest_year, levels)),
+    )
+    shifted = metric.fy_series_by_year(
+        LISTING_ID,
+        _OwnerEarningsRepo(
+            _build_nwc_fy_records(
+                "AAPL.US", latest_year, [level + shift for level in levels]
+            )
+        ),
+    )
+
+    assert set(base) == set(shifted)
+    assert len(base) == len(levels) - 3
+    for year, point in base.items():
+        assert shifted[year].money.amount == pytest.approx(
+            point.money.amount, rel=1e-9, abs=1e-6
+        )
+        # The floor is part of the convention: no year may report a negative
+        # maintenance NWC investment.
+        assert point.money.amount >= 0.0
+
+
+@given(
+    level=st.floats(
+        min_value=-1e6, max_value=1e6, allow_nan=False, allow_infinity=False
+    ),
+    years=st.integers(min_value=4, max_value=12),
+)
+def test_delta_nwc_maint_fy_series_is_zero_for_constant_nwc(
+    level: float, years: int
+) -> None:
+    # A business whose working capital never changes invests nothing in NWC:
+    # every per-year maintenance delta must be exactly zero.
+    metric = DeltaNWCMaintMetric()
+    latest_year = date.today().year - 1
+
+    series = metric.fy_series_by_year(
+        LISTING_ID,
+        _OwnerEarningsRepo(
+            _build_nwc_fy_records("AAPL.US", latest_year, [level] * years)
+        ),
+    )
+
+    assert len(series) == years - 3
+    assert all(point.money.amount == 0.0 for point in series.values())
+
+
 def _build_cash_conversion_fy_records(
     symbol: str,
     latest_year: int,
@@ -7958,6 +8074,8 @@ def _build_oe_ev_fy_input_records(
     nwc_values: list[float] | None = None,
 ) -> dict[str, list[FactRecord]]:
     if nwc_values is None:
+        # 13 FY levels so every year of a 10-point owner-earnings series carries
+        # its own trailing 3-delta maintenance NWC chain (year y needs y-3).
         nwc_values = [
             300.0,
             250.0,
@@ -7970,6 +8088,8 @@ def _build_oe_ev_fy_input_records(
             110.0,
             90.0,
             70.0,
+            50.0,
+            30.0,
         ]
     records_by_concept = _build_nwc_fy_records(symbol, latest_year, nwc_values)
     records_by_concept["OperatingIncomeLoss"] = [
@@ -8721,8 +8841,12 @@ def test_oe_equity_5y_avg_metric_computes_expected_average() -> None:
     latest_year = date.today().year - 1
     years = [latest_year - offset for offset in range(5)]
 
+    # Uniform +20 NWC deltas: every year's trailing 3-delta maintenance NWC
+    # is 20, so the per-year rule subtracts the same 20 from all five points.
     records_by_concept = _build_nwc_fy_records(
-        symbol, latest_year, [150.0, 130.0, 110.0, 90.0, 70.0]
+        symbol,
+        latest_year,
+        [150.0, 130.0, 110.0, 90.0, 70.0, 50.0, 30.0, 10.0],
     )
     records_by_concept.update(
         {
@@ -8805,8 +8929,12 @@ def test_oe_equity_5y_avg_metric_requires_five_points() -> None:
     latest_year = date.today().year - 1
     years = [latest_year - offset for offset in range(4)]
 
+    # NWC history is deep enough for every seeded year, so the only shortfall
+    # is the number of owner-earnings points themselves.
     records_by_concept = _build_nwc_fy_records(
-        symbol, latest_year, [150.0, 130.0, 110.0, 90.0]
+        symbol,
+        latest_year,
+        [150.0, 130.0, 110.0, 90.0, 70.0, 50.0, 30.0, 10.0],
     )
     records_by_concept.update(
         {
@@ -8851,8 +8979,12 @@ def test_oe_equity_5y_avg_metric_allows_year_gaps() -> None:
         latest_year - 6,
     ]
 
+    # Uniform +20 NWC deltas across ten years: every selected (gapped) year
+    # carries its own trailing 3-delta chain and subtracts the same 20.
     records_by_concept = _build_nwc_fy_records(
-        symbol, latest_year, [150.0, 130.0, 110.0, 90.0, 70.0, 60.0]
+        symbol,
+        latest_year,
+        [150.0, 130.0, 110.0, 90.0, 70.0, 50.0, 30.0, 10.0, -10.0, -30.0],
     )
     records_by_concept.update(
         {
@@ -8897,15 +9029,19 @@ def test_oe_equity_5y_avg_metric_allows_year_gaps() -> None:
     assert result.value == 330.0
 
 
-def test_oe_equity_5y_avg_metric_uses_latest_delta_nwc_maint_for_all_years() -> None:
+def test_oe_equity_5y_avg_metric_uses_per_year_delta_nwc_maint() -> None:
     metric = OwnerEarningsEquityFiveYearAverageMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
     years = [latest_year - offset for offset in range(5)]
 
-    # NWC deltas: +50, +20, +20 => delta_nwc_maint = 30 from latest FY.
+    # NWC deltas: +50 then +20s. The latest year's maintenance delta is
+    # avg(50, 20, 20) = 30 while every earlier year's is 20 — a constant
+    # (latest-value) subtrahend would take 30 off all five points instead.
     records_by_concept = _build_nwc_fy_records(
-        symbol, latest_year, [300.0, 250.0, 230.0, 210.0, 190.0, 170.0]
+        symbol,
+        latest_year,
+        [300.0, 250.0, 230.0, 210.0, 190.0, 170.0, 150.0, 130.0],
     )
     records_by_concept.update(
         {
@@ -8947,7 +9083,9 @@ def test_oe_equity_5y_avg_metric_uses_latest_delta_nwc_maint_for_all_years() -> 
 
     result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
-    assert result.value == 280.0
+    # NI 300 + (D&A 100 - mcapex 90) = 310 per year; minus 30 for the latest
+    # year and 20 for the four earlier ones.
+    assert result.value == (280.0 + 290.0 + 290.0 + 290.0 + 290.0) / 5.0
 
 
 def test_oe_equity_5y_avg_metric_requires_consistent_currency_across_years() -> None:
@@ -9572,7 +9710,9 @@ def test_oe_ev_5y_avg_metric_computes_expected_average() -> None:
     years = [latest_year - offset for offset in range(5)]
 
     records_by_concept = _build_nwc_fy_records(
-        symbol, latest_year, [300.0, 250.0, 230.0, 210.0, 190.0, 170.0]
+        symbol,
+        latest_year,
+        [300.0, 250.0, 230.0, 210.0, 190.0, 170.0, 150.0, 130.0],
     )
     records_by_concept.update(
         {
@@ -9637,7 +9777,9 @@ def test_oe_ev_5y_avg_metric_computes_expected_average() -> None:
     result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
     assert result.as_of == f"{years[0]}-09-30"
-    assert result.value == 300.0
+    # Per-year maintenance NWC: the latest year averages deltas (50, 20, 20)
+    # = 30, every earlier year averages (20, 20, 20) = 20.
+    assert result.value == (380.0 + 350.0 + 310.0 + 270.0 + 230.0) / 5.0
 
 
 def test_oe_ev_5y_avg_metric_requires_five_points() -> None:
@@ -9647,7 +9789,9 @@ def test_oe_ev_5y_avg_metric_requires_five_points() -> None:
     years = [latest_year - offset for offset in range(4)]
 
     records_by_concept = _build_nwc_fy_records(
-        symbol, latest_year, [300.0, 250.0, 230.0, 210.0, 190.0, 170.0]
+        symbol,
+        latest_year,
+        [300.0, 250.0, 230.0, 210.0, 190.0, 170.0, 150.0, 130.0],
     )
     records_by_concept.update(
         {
@@ -9693,7 +9837,9 @@ def test_oe_ev_5y_avg_metric_allows_year_gaps() -> None:
     ]
 
     records_by_concept = _build_nwc_fy_records(
-        symbol, latest_year, [300.0, 250.0, 230.0, 210.0, 190.0, 170.0, 150.0]
+        symbol,
+        latest_year,
+        [300.0, 250.0, 230.0, 210.0, 190.0, 170.0, 150.0, 130.0, 110.0, 90.0],
     )
     records_by_concept.update(
         {
@@ -9757,17 +9903,24 @@ def test_oe_ev_5y_avg_metric_allows_year_gaps() -> None:
 
     result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
-    assert result.value == 284.0
+    # Latest year subtracts avg(50, 20, 20) = 30; each gapped earlier year
+    # still carries its own trailing 3-delta chain and subtracts 20.
+    assert result.value == (380.0 + 326.0 + 294.0 + 246.0 + 214.0) / 5.0
 
 
-def test_oe_ev_5y_avg_metric_uses_latest_delta_nwc_maint_for_all_years() -> None:
+def test_oe_ev_5y_avg_metric_uses_per_year_delta_nwc_maint() -> None:
     metric = OwnerEarningsEnterpriseFiveYearAverageMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
     years = [latest_year - offset for offset in range(5)]
 
+    # NWC deltas: +50 then +20s. The latest year's maintenance delta is
+    # avg(50, 20, 20) = 30 while every earlier year's is 20 — a constant
+    # (latest-value) subtrahend would take 30 off all five points instead.
     records_by_concept = _build_nwc_fy_records(
-        symbol, latest_year, [300.0, 250.0, 230.0, 210.0, 190.0, 170.0]
+        symbol,
+        latest_year,
+        [300.0, 250.0, 230.0, 210.0, 190.0, 170.0, 150.0, 130.0],
     )
     records_by_concept.update(
         {
@@ -9831,7 +9984,9 @@ def test_oe_ev_5y_avg_metric_uses_latest_delta_nwc_maint_for_all_years() -> None
 
     result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
-    assert result.value == 140.0
+    # NOPAT 160 + (D&A 100 - mcapex 90) = 170 per year; minus 30 for the
+    # latest year and 20 for the four earlier ones.
+    assert result.value == (140.0 + 150.0 + 150.0 + 150.0 + 150.0) / 5.0
 
 
 def test_oe_ev_5y_avg_metric_requires_consistent_currency_across_years() -> None:
@@ -10052,8 +10207,12 @@ def test_oey_equity_5y_metric_computes_ratio_from_5y_numerator() -> None:
     latest_year = date.today().year - 1
     years = [latest_year - offset for offset in range(5)]
 
+    # Uniform +20 NWC deltas: each of the five numerator years subtracts its
+    # own trailing 3-delta maintenance NWC of 20.
     records_by_concept = _build_nwc_fy_records(
-        symbol, latest_year, [150.0, 130.0, 110.0, 90.0, 70.0]
+        symbol,
+        latest_year,
+        [150.0, 130.0, 110.0, 90.0, 70.0, 50.0, 30.0, 10.0],
     )
     records_by_concept.update(
         {
@@ -12788,7 +12947,9 @@ def test_oe_ev_fy_median_5y_metric_computes_expected_median() -> None:
     result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
     assert result.as_of == f"{years[0]}-09-30"
-    assert result.value == 300.0
+    # Points 380, 350, 310, 270, 230 (per-year maintenance NWC: 30 for the
+    # latest year, 20 for the earlier ones); the median is the third value.
+    assert result.value == 310.0
 
 
 def test_oe_ev_fy_median_5y_metric_requires_five_points() -> None:
@@ -12833,7 +12994,9 @@ def test_oe_ev_fy_median_5y_metric_allows_year_gaps() -> None:
 
     result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
-    assert result.value == 284.0
+    # Points 380, 326, 294, 246, 214 (latest year subtracts 30, gapped earlier
+    # years subtract their own 20); the median is the third value.
+    assert result.value == 294.0
 
 
 def test_oe_ev_fy_median_5y_metric_returns_none_when_delta_nwc_maint_missing() -> None:
@@ -12906,12 +13069,16 @@ def test_worst_oe_ev_fy_10y_metric_preserves_negative_worst_year() -> None:
             110.0,
             90.0,
             70.0,
+            50.0,
+            30.0,
         ],
     )
 
     result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
-    assert result.value == -20.0
+    # The oldest year's NOPAT is 0, plus (D&A 100 - mcapex 90) minus its own
+    # maintenance NWC of 20 — negative owner earnings are preserved as-is.
+    assert result.value == -10.0
 
 
 def test_worst_oe_ev_fy_10y_metric_requires_strict_consecutive_years() -> None:
@@ -13172,7 +13339,9 @@ def test_oey_ev_norm_metric_computes_ev_from_components() -> None:
         ),
     )
     assert result is not None
-    assert result.value == 300.0 / 3250.0
+    # The 5y-median numerator is 310 (per-year maintenance NWC: 30 for the
+    # latest year, 20 for the earlier ones).
+    assert result.value == 310.0 / 3250.0
 
 
 def _new_metric_quarter_dates() -> tuple[str, str, str, str, str]:
@@ -13695,16 +13864,48 @@ def test_owner_earnings_cagr_10y_metric_uses_three_year_endpoint_averages() -> N
             140.0,
             120.0,
             100.0,
+            80.0,
+            60.0,
         ],
     )
 
     result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
     assert result is not None
+    # Uniform +20 NWC deltas make every year's maintenance NWC 20, so each
+    # point is NOPAT + 10 - 20.
     start_avg = (246.0 + 222.0 + 198.0) / 3.0
     end_avg = (414.0 + 390.0 + 366.0) / 3.0
     assert round(result.value, 8) == round(
         (end_avg / start_avg) ** (1.0 / 7.0) - 1.0, 8
     )
+
+
+def test_owner_earnings_cagr_10y_metric_requires_strict_consecutive_years() -> None:
+    # Eleven FY points exist but one year inside the latest-ten window is
+    # missing; the 1/7-year exponent assumes ten consecutive fiscal years, so
+    # the metric must refuse the gapped series instead of sliding older points
+    # into the window.
+    metric = OwnerEarningsCAGR10YMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    years = [latest_year - offset for offset in range(7)] + [
+        latest_year - offset for offset in range(8, 12)
+    ]
+    ebit_values = [200.0 + 10.0 * index for index in range(len(years))]
+
+    records_by_concept = _build_oe_ev_fy_input_records(
+        symbol=symbol,
+        latest_year=latest_year,
+        years=years,
+        ebit_values=ebit_values,
+        tax_values=[value * 0.2 for value in ebit_values],
+        pretax_values=ebit_values,
+        da_values=[100.0] * len(years),
+        capex_values=[90.0] * len(years),
+        nwc_values=[300.0 - 20.0 * index for index in range(15)],
+    )
+
+    assert metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept)) is None
 
 
 def test_registry_contains_all_ids() -> None:

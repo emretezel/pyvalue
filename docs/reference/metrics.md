@@ -20,7 +20,7 @@ Columns:
 | Net Working Capital (Fiscal Year) | `nwc_fy` | EODHD-oriented FY version of the same adjusted NWC formula used by `nwc_mqr`. | Gives an annual baseline for working-capital intensity. |
 | Delta Net Working Capital (TTM Style) | `delta_nwc_ttm` | EODHD-oriented: `NWC(MRQ) - NWC(same fiscal quarter last year)` with strict quarter matching. | Highlights whether the business is tying up more capital in operations year over year. |
 | Delta Net Working Capital (Fiscal Year) | `delta_nwc_fy` | EODHD-oriented: `NWC(latest FY) - NWC(prior FY)`. | Shows annual change in operating capital demands. |
-| Net Working Capital Maintenance | `delta_nwc_maint` | EODHD-oriented: `max(average(last 3 FY deltas of NWC), 0)`. | Converts multi-year NWC drift into a conservative maintenance drag used in owner-earnings style analysis. |
+| Net Working Capital Maintenance | `delta_nwc_maint` | EODHD-oriented: `max(average(last 3 FY deltas of NWC), 0)`. The FY-series owner-earnings metrics reuse the same rule per fiscal year: `maint_nwc_FY(y)` is the trailing 3-delta average as of year `y`, floored at 0, and exists only when NWC points cover `y` through `y-3`. | Converts multi-year NWC drift into a conservative maintenance drag used in owner-earnings style analysis. |
 
 ## Leverage / Coverage
 
@@ -64,11 +64,11 @@ Columns:
 | English Descriptive Name of the Metric | pyvalue key | How is it calculated | Why is it important in identifying quality/value stocks |
 | --- | --- | --- | --- |
 | Owner Earnings Equity (TTM) | `oe_equity_ttm` | EODHD-oriented: `NI_TTM + D&A_TTM - MCapex_TTM - delta_nwc_maint`. | Approximates cash earnings available to equity after maintenance reinvestment and working-capital drag. |
-| Owner Earnings Equity (5Y Average) | `oe_equity_5y_avg` | EODHD-oriented average of latest 5 available FY points of `NI_FY + D&A_FY - MCapex_FY - latest_delta_nwc_maint`. | Smooths owner earnings over multiple years to reduce one-year noise. |
+| Owner Earnings Equity (5Y Average) | `oe_equity_5y_avg` | EODHD-oriented average of latest 5 available FY points of `NI_FY + D&A_FY - MCapex_FY - maint_nwc_FY(y)`, each year subtracting its own trailing 3-delta maintenance NWC (see `delta_nwc_maint`); a year without that chain yields no point, so up to 8 consecutive FY of NWC history is needed. | Smooths owner earnings over multiple years to reduce one-year noise. |
 | Owner Earnings Enterprise (TTM) | `oe_ev_ttm` | EODHD-oriented: `NOPAT_TTM + D&A_TTM - MCapex_TTM - delta_nwc_maint`, where `NOPAT_TTM = EBIT_TTM * (1 - tax_rate)`. | Gives an unlevered owner-earnings view that is less distorted by capital structure. |
-| Owner Earnings Enterprise (5Y Average) | `oe_ev_5y_avg` | EODHD-oriented average of latest 5 available FY points of `NOPAT_FY + D&A_FY - MCapex_FY - latest_delta_nwc_maint`. | Normalizes enterprise owner earnings across the cycle. |
-| Owner Earnings Enterprise Median (5Y FY) | `oe_ev_fy_median_5y` | EODHD-oriented median of latest 5 available FY enterprise owner-earnings points using the same FY OE formula as `oe_ev_5y_avg`. | Median is more robust than an average when one year is abnormally high or low. |
-| Worst Owner Earnings Enterprise Year (10Y) | `worst_oe_ev_fy_10y` | EODHD-oriented minimum FY enterprise owner-earnings point over the latest strict 10 consecutive FY window. | A direct bad-year stress test: it shows what the business looked like in its weakest decade year. |
+| Owner Earnings Enterprise (5Y Average) | `oe_ev_5y_avg` | EODHD-oriented average of latest 5 available FY points of `NOPAT_FY + D&A_FY - MCapex_FY - maint_nwc_FY(y)`, each year subtracting its own trailing 3-delta maintenance NWC (see `delta_nwc_maint`); a year without that chain yields no point, so up to 8 consecutive FY of NWC history is needed. | Normalizes enterprise owner earnings across the cycle. |
+| Owner Earnings Enterprise Median (5Y FY) | `oe_ev_fy_median_5y` | EODHD-oriented median of latest 5 available FY enterprise owner-earnings points using the same FY OE formula as `oe_ev_5y_avg` (per-year maintenance NWC included). | Median is more robust than an average when one year is abnormally high or low. |
+| Worst Owner Earnings Enterprise Year (10Y) | `worst_oe_ev_fy_10y` | EODHD-oriented minimum FY enterprise owner-earnings point over the latest strict 10 consecutive FY window; each point subtracts its own per-year maintenance NWC, so the strict window needs up to 13 consecutive FY of NWC history. | A direct bad-year stress test: it shows what the business looked like in its weakest decade year. |
 
 ## EV / Valuation
 
@@ -147,7 +147,7 @@ Columns:
 | --- | --- | --- | --- |
 | Revenue CAGR (10Y) | `revenue_cagr_10y` | Strict FY endpoint CAGR: `((Revenue_FY0 / Revenue_FY-10)^(1/10)) - 1`. | Long-run sales compounding is a basic test of market opportunity and business relevance. |
 | Free Cash Flow per Share CAGR (10Y) | `fcf_per_share_cagr_10y` | Strict FY endpoint CAGR of `(FCF_FY / DilutedShares_FY)`, where `FCF_FY = OCF_FY - Capex_FY`. | Filters out growth that came from dilution rather than improving per-share economics. |
-| Owner Earnings CAGR (10Y) | `owner_earnings_cagr_10y` | EODHD-oriented enterprise owner-earnings CAGR using the latest 10 eligible FY OE points and 3-year average endpoints, mirroring the Graham-style EPS CAGR approach. | Tests whether maintenance-adjusted operating cash earnings are compounding over time, not just reported accounting profit. |
+| Owner Earnings CAGR (10Y) | `owner_earnings_cagr_10y` | EODHD-oriented enterprise owner-earnings CAGR over a strict window of 10 consecutive FY OE points (each subtracting its own per-year maintenance NWC, so up to 13 consecutive FY of NWC history is needed), with 3-year average endpoints, mirroring the Graham-style EPS CAGR approach. Both endpoint windows must be strictly positive — a compound growth rate has no real solution from a non-positive base. | Tests whether maintenance-adjusted operating cash earnings are compounding over time, not just reported accounting profit. |
 
 ## Screening Utility / Misc
 

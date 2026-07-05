@@ -52,6 +52,18 @@ class _NWCPoint:
     fiscal_period: str
 
 
+@dataclass(frozen=True)
+class MaintDeltaFYPoint:
+    """Maintenance NWC delta for one fiscal year.
+
+    ``money`` is the floored trailing-3-FY-delta average as of that year;
+    ``as_of`` is the FY end date the value is anchored to.
+    """
+
+    money: Money
+    as_of: str
+
+
 class _NWCBase:
     def _build_points(
         self,
@@ -413,7 +425,13 @@ class DeltaNWCFYMetric(_NWCBase):
 
 @dataclass
 class DeltaNWCMaintMetric(_NWCBase):
-    """Compute maintenance delta NWC as max(avg(last 3 FY deltas), 0)."""
+    """Compute maintenance delta NWC as max(avg(last 3 FY deltas), 0).
+
+    Besides the point-in-time metric (``compute``), this class owns the
+    per-fiscal-year series of the same quantity (``fy_series_by_year``): the FY
+    owner-earnings metrics subtract *each year's own* maintenance NWC delta, so
+    both readings must share one definition.
+    """
 
     id: str = "delta_nwc_maint"
     required_concepts = REQUIRED_CONCEPTS
@@ -437,45 +455,71 @@ class DeltaNWCMaintMetric(_NWCBase):
             )
             return None
 
-        by_year: dict[int, _NWCPoint] = {}
-        for point in points:
-            year = self._extract_year(point.as_of)
-            if year is None:
-                continue
-            if year not in by_year:
-                by_year[year] = point
-
-        required_years = [
-            latest_year,
-            latest_year - 1,
-            latest_year - 2,
-            latest_year - 3,
-        ]
-        if not all(year in by_year for year in required_years):
+        # The latest-year entry of the per-year series is exactly the old
+        # "avg of the last 3 FY deltas" computation; absence means the strict
+        # 4-consecutive-year chain behind it is broken.
+        entry = self._fy_series_from_points(points).get(latest_year)
+        if entry is None:
             LOGGER.warning(
                 "delta_nwc_maint: need 4 consecutive FY NWC points for listing_id=%s",
                 listing_id,
             )
             return None
 
-        delta_latest = by_year[latest_year].money - by_year[latest_year - 1].money
-        delta_prev_1 = by_year[latest_year - 1].money - by_year[latest_year - 2].money
-        delta_prev_2 = by_year[latest_year - 2].money - by_year[latest_year - 3].money
-        average_delta = (delta_latest + delta_prev_1 + delta_prev_2) / 3.0
-
-        # Maintenance NWC investment is floored at zero: a shrinking NWC frees
-        # cash rather than consuming it, so it does not reduce owner earnings.
-        floored = max(average_delta, Money.of(0.0, average_delta.currency))
         return MetricResult.monetary(
             listing_id=listing_id,
             metric_id=self.id,
-            value=floored.amount,
-            as_of=latest.as_of,
-            currency=floored.currency,
+            value=entry.money.amount,
+            as_of=entry.as_of,
+            currency=entry.money.currency,
         )
+
+    def fy_series_by_year(
+        self, listing_id: int, repo: RegionFactsRepository
+    ) -> dict[int, MaintDeltaFYPoint]:
+        """Per-fiscal-year maintenance NWC deltas, keyed by calendar year.
+
+        A year ``y`` is present only when FY NWC points exist for the strict
+        chain ``y`` through ``y-3``; its value is
+        ``max(avg of the 3 trailing year-over-year NWC deltas, 0)`` — the same
+        convention ``compute`` applies to the latest year. No freshness gate:
+        the series is historical by nature, and consumers apply their own
+        recency rules to the owner-earnings points they build from it.
+        """
+        points = self._build_points(listing_id, repo, FY_PERIODS)
+        return self._fy_series_from_points(points)
+
+    def _fy_series_from_points(
+        self, points: Sequence[_NWCPoint]
+    ) -> dict[int, MaintDeltaFYPoint]:
+        # Points arrive newest-first, so keep-first dedup selects the latest
+        # point within each calendar year (mirrors the historical behaviour).
+        by_year: dict[int, _NWCPoint] = {}
+        for point in points:
+            year = self._extract_year(point.as_of)
+            if year is None or year in by_year:
+                continue
+            by_year[year] = point
+
+        series: dict[int, MaintDeltaFYPoint] = {}
+        for year, point in by_year.items():
+            if not all((year - offset) in by_year for offset in (1, 2, 3)):
+                continue
+            deltas = [
+                by_year[year - offset].money - by_year[year - offset - 1].money
+                for offset in (0, 1, 2)
+            ]
+            average_delta = (deltas[0] + deltas[1] + deltas[2]) / 3.0
+            # Maintenance NWC investment is floored at zero: a shrinking NWC
+            # frees cash rather than consuming it, so it does not reduce owner
+            # earnings.
+            floored = max(average_delta, Money.of(0.0, average_delta.currency))
+            series[year] = MaintDeltaFYPoint(money=floored, as_of=point.as_of)
+        return series
 
 
 __all__ = [
+    "MaintDeltaFYPoint",
     "NWCMostRecentQuarterMetric",
     "NWCFYMetric",
     "DeltaNWCTTMMetric",
