@@ -203,11 +203,25 @@ class ROICFYSeriesCalculator:
                 continue
 
             ic_previous = ic_map.get(year - 1)
-            if ic_previous is None:
+            if ic_previous is None and year != min(ic_map):
+                # A missing prior year *inside* the observable IC history is a
+                # data hole and still fails the year; only the history
+                # boundary (the oldest IC year, which cannot have a prior
+                # balance sheet) falls through to the end-of-FY convention
+                # below.
                 roic_failure_by_year[year] = FAILURE_MISSING_PRIOR_FY_INVESTED_CAPITAL
                 continue
 
-            avg_ic = (ic_current.money + ic_previous.money) / 2.0
+            if ic_previous is None:
+                # History boundary: average IC is unobservable for the oldest
+                # balance-sheet year, so use that year's own end-of-FY level.
+                # Conservative for a growing business (end >= average, so ROIC
+                # is biased low), and it lets a 10-FY history support a full
+                # 10-year window instead of silently demanding an 11th year —
+                # the same 10-FY maturity bar the other strict-10y gates use.
+                avg_ic = ic_current.money
+            else:
+                avg_ic = (ic_current.money + ic_previous.money) / 2.0
             # ROIC has no economic meaning at or below a zero capital base:
             # IC = debt + equity - cash passes through zero for cash-rich
             # firms, and NOPAT / avg_ic explodes near zero and sign-flips
@@ -223,7 +237,9 @@ class ROICFYSeriesCalculator:
                 continue
 
             nopat = ebit.money * (1.0 - tax_rate.rate)
-            as_of_values = [ebit.as_of, ic_current.as_of, ic_previous.as_of]
+            as_of_values = [ebit.as_of, ic_current.as_of]
+            if ic_previous is not None:
+                as_of_values.append(ic_previous.as_of)
             if tax_rate.as_of is not None:
                 as_of_values.append(tax_rate.as_of)
             roic_by_year[year] = _ROICFYPoint(

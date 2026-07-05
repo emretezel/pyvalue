@@ -4126,10 +4126,17 @@ def test_roic_10y_returns_none_when_latest_fy_stale() -> None:
 
 
 def test_roic_10y_diagnostics_reports_missing_prior_ic_year() -> None:
+    # A prior-IC gap now means a hole *inside* the observable IC history: the
+    # history-boundary year (the oldest IC year) computes from its own
+    # end-of-FY invested capital instead, so only genuine mid-chain holes
+    # carry this failure.
     calculator = ROICFYSeriesCalculator()
     metric = ROIC10YMedianMetric()
     latest_year = date.today().year - 1
-    ic_years = range(latest_year - 9, latest_year + 1)
+    hole_year = latest_year - 4
+    ic_years = [
+        year for year in range(latest_year - 9, latest_year + 1) if year != hole_year
+    ]
     repo = _build_ic_repo(
         concept_records=_base_roic_10y_concepts(
             latest_year=latest_year,
@@ -4145,11 +4152,17 @@ def test_roic_10y_diagnostics_reports_missing_prior_ic_year() -> None:
     assert diagnostic.snapshot is None
     assert diagnostic.failure_reason == "missing prior FY invested capital"
     assert diagnostic.latest_valid_roic_year == latest_year
-    assert diagnostic.missing_window_years == (latest_year - 9,)
-    oldest_year = next(
-        item for item in diagnostic.year_diagnostics if item.year == latest_year - 9
+    # The hole voids its own year (no current IC) and the year after it (no
+    # prior IC); the window years are reported newest-first.
+    assert diagnostic.missing_window_years == (hole_year + 1, hole_year)
+    by_year = {item.year: item for item in diagnostic.year_diagnostics}
+    assert (
+        by_year[hole_year + 1].roic_failure_reason
+        == "missing prior FY invested capital"
     )
-    assert oldest_year.roic_failure_reason == "missing prior FY invested capital"
+    assert (
+        by_year[hole_year].roic_failure_reason == "missing current FY invested capital"
+    )
     assert metric.compute(LISTING_ID, repo) is None
 
 
@@ -4220,9 +4233,12 @@ def test_roic_10y_diagnostics_records_tax_fallback_without_failing() -> None:
     assert latest.roic_available is True
 
 
-def test_roic_7y_metrics_pass_when_10y_fails_on_missing_eleventh_ic_year() -> None:
+def test_roic_7y_metrics_pass_when_10y_fails_on_seven_ic_years() -> None:
+    # Seven IC years support the 7-year window (the oldest via the
+    # history-boundary end-of-FY convention) but leave the 10-year window
+    # three current-IC years short.
     latest_year = date.today().year - 1
-    ic_years = range(latest_year - 9, latest_year + 1)
+    ic_years = range(latest_year - 6, latest_year + 1)
     repo = _build_ic_repo(
         concept_records=_base_roic_10y_concepts(
             latest_year=latest_year,
