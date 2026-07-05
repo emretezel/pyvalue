@@ -30,12 +30,12 @@ criteria:
     right:
       value: 1.5
 
-  - name: "Net income loss years (10Y) <= 4 (tolerates cyclicality, excludes chronic loss-makers only)"
+  - name: "Net income loss-year share (adaptive 10Y) <= 0.40 (tolerates cyclicality, excludes chronic loss-makers only)"
     left:
-      metric: ni_loss_years_10y
+      metric: ni_loss_year_share
     operator: "<="
     right:
-      value: 4
+      value: 0.40
 
   # --- New metric gates
   - name: "Piotroski F-Score >= 5 of 9 (deliberately looser than the docs' canonical >=7)"

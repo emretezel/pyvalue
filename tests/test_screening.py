@@ -471,6 +471,11 @@ def test_load_screen_parses_deep_value_graham_example() -> None:
     assert definition.criteria[0].left.metric == "roic_7y_median"
     assert definition.criteria[0].operator == ">"
     assert definition.criteria[0].right.value == 0
+    # The stability gate uses the adaptive share metric so short-history
+    # listings stay screenable; 0.40 preserves the old 4-of-10 tolerance.
+    assert definition.criteria[4].left.metric == "ni_loss_year_share"
+    assert definition.criteria[4].operator == "<="
+    assert definition.criteria[4].right.value == 0.40
     assert definition.criteria[5].left.metric == "piotroski_f_score"
     assert definition.criteria[5].right.value == 5
     assert definition.criteria[6].left.metric == "altman_z"
