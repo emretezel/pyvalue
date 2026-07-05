@@ -155,7 +155,7 @@ Columns:
 
 | English Descriptive Name of the Metric | pyvalue key | How is it calculated | Why is it important in identifying quality/value stocks |
 | --- | --- | --- | --- |
-| EPS Streak | `eps_streak` | Counts consecutive FY periods with positive diluted EPS. | Persistent profitability usually signals a more durable business. |
+| EPS Streak | `eps_streak` | Counts consecutive FY periods with positive diluted EPS. Basis caveat: EODHD's `EarningsPerShare` derives from the Earnings section's `epsActual` — analyst-adjusted, not GAAP — so the streak can stay positive across GAAP loss years (PLTR 2020-2022). For GAAP earnings stability use `ni_loss_years_10y` / `ni_loss_year_share`; no shipped screen gates on this metric. | Persistent profitability on the adjusted (analyst) basis; a complementary signal, not a GAAP stability test. |
 | EPS (TTM) | `eps_ttm` | Sum of the latest four quarterly EPS values. | A quick recent earnings-power view used in valuation and screen rules. |
 | EPS 6Y Average | `eps_6y_avg` | Average of the latest six FY EPS values. | Smooths cyclicality and provides a normalized per-share earnings baseline. |
 | Graham EPS CAGR (10Y, 3Y Average Endpoints) | `graham_eps_10y_cagr_3y_avg` | 10-year EPS CAGR using 3-year average EPS at both the start and end of the measurement window. | Rewards long-run earnings compounding while reducing endpoint noise. |

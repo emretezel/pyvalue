@@ -396,19 +396,22 @@ def test_load_screen_parses_quality_reasonable_price_primary_example() -> None:
 
     definition = load_screen(screen_path)
 
-    # 17 hard filters: the 6-filter draft plus the reinvestment, gross-margin,
+    # 16 hard filters: the 6-filter draft plus the reinvestment, gross-margin,
     # and full-cycle earnings-quality legs. There is deliberately no sbc_to_fcf
     # gate (EODHD SBC coverage is too sparse/unreliable; dilution is policed by
-    # share_count_cagr_5y instead). The "==" operator is exercised by the
-    # zero-loss-years criterion, which the original draft did not use.
-    assert len(definition.criteria) == 17
+    # share_count_cagr_5y instead) and no eps_streak gate (EODHD EPS is
+    # analyst-adjusted epsActual; GAAP stability is the zero-loss-years gate).
+    # The "==" operator is exercised by the zero-loss-years criterion, which
+    # the original draft did not use.
+    assert len(definition.criteria) == 16
     assert {criterion.operator for criterion in definition.criteria} == {
         ">=",
         "<=",
         "==",
     }
     assert not any(
-        criterion.left.metric == "sbc_to_fcf" for criterion in definition.criteria
+        criterion.left.metric in {"sbc_to_fcf", "eps_streak"}
+        for criterion in definition.criteria
     )
     # Spot-check a percent bound, a count bound, and the equality criterion.
     assert definition.criteria[0].left.metric == "roic_7y_median"
@@ -418,8 +421,8 @@ def test_load_screen_parses_quality_reasonable_price_primary_example() -> None:
     assert definition.criteria[11].left.metric == "ni_loss_years_10y"
     assert definition.criteria[11].operator == "=="
     assert definition.criteria[11].right.value == 0
-    assert definition.criteria[15].left.metric == "iroic_5y"
-    assert definition.criteria[16].left.metric == "owner_earnings_cagr_10y"
+    assert definition.criteria[14].left.metric == "iroic_5y"
+    assert definition.criteria[15].left.metric == "owner_earnings_cagr_10y"
 
     # Ranking block: same sector-relative shape as the draft, but a seven-metric
     # blend grouped by bucket -- quality/capital-efficiency 35% (roic_7y_median,

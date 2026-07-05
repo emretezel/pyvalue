@@ -387,10 +387,9 @@ consolidated around a strict read-only contract — only `normalize-fundamentals
    the chain anchor. Companion `ni_loss_year_share` + DVG gate swap follow as
    their own commits.
 4. metrics: dividend_yield_ttm = 0 for non-payers.
-5. **Decided 2026-07-05.** metrics: interest_coverage documented cap (100x)
+5. **Done 2026-07-05.** metrics: interest_coverage documented cap (100x)
    for zero/missing/stale-interest firms with fresh positive TTM EBIT
-   (missing-interest-alone trigger) — implementation lands as its own commit
-   (item 12).
+   (missing-interest-alone trigger) — implemented with item 12.
 6. **Superseded 2026-07-05.** ~~metrics: sbc_to_fcf FY fallback for annual-only
    SBC filers.~~ Author decision: EODHD SBC is too sparse (null for ~96% of the
    failing universe; FY fallback would rescue only ~1.8k of 44.5k) and too
@@ -402,18 +401,20 @@ consolidated around a strict read-only contract — only `normalize-fundamentals
 9. tests: migrate the 20 flat `tests/*.py` files into `tests/unit|regression/`.
 10. catalog: cross-listing issuer linkage (all three SK Hynix listings are
     `primary` under separate issuers).
-11. metrics: roic_fy_series fails years with non-positive average invested
-    capital (A1, decided 2026-07-05 — sign-flip/explosion pathology).
-12. metrics: interest_coverage debt-free cap implementation (A3, decided —
-    see item 5).
-13. metrics: ROIC history-boundary year uses its own end-of-FY invested
-    capital, dropping the silent 11th-year demand (A2, decided 2026-07-05).
-14. metrics: cfo_to_ni_10y_median proportional positive-point floor
-    `ceil(0.6·chain)` for DVG loss-tolerance congruence (B1, decided
-    2026-07-05).
-15. metrics+screeners: adaptive ROIC median (`roic_10y_median_adaptive`,
-    <=10y chain, >=6 points) replaces strict `roic_7y_median > 0` in DVG
-    (B2, decided 2026-07-05).
-16. screeners: drop the `eps_streak >= 7` criterion from QARP — adjusted-EPS
-    (epsActual) basis, redundant next to `ni_loss_years_10y == 0` (B3,
-    decided 2026-07-05).
+11. **Done 2026-07-05.** metrics: roic_fy_series fails years with
+    non-positive average invested capital (A1 — sign-flip/explosion
+    pathology).
+12. **Done 2026-07-05.** metrics: interest_coverage debt-free cap
+    implementation (A3 — see item 5).
+13. **Done 2026-07-05.** metrics: ROIC history-boundary year uses its own
+    end-of-FY invested capital, dropping the silent 11th-year demand (A2).
+14. **Done 2026-07-05.** metrics: cfo_to_ni_10y_median proportional
+    positive-point floor `ceil(0.6·chain)` for DVG loss-tolerance congruence
+    (B1).
+15. **Done 2026-07-05.** metrics+screeners: adaptive ROIC median
+    (`roic_10y_median_adaptive`, <=10y chain, >=6 points) replaces strict
+    `roic_7y_median > 0` in DVG (B2).
+16. **Done 2026-07-05.** screeners: drop the `eps_streak >= 7` criterion from
+    QARP — adjusted-EPS (epsActual) basis, redundant next to
+    `ni_loss_years_10y == 0` (B3). Effects of 11-16 materialize at the next
+    full-universe compute-metrics run.

@@ -85,12 +85,13 @@ criteria:
     right:
       value: 0
 
-  - name: "EPS streak >= 7 (modernized Graham stability)"
-    left:
-      metric: eps_streak
-    operator: ">="
-    right:
-      value: 7
+  # NOTE: no eps_streak gate. EODHD's EarningsPerShare derives from the
+  # Earnings section's epsActual — analyst-adjusted, not GAAP (PLTR shows a
+  # 6-year positive "streak" across three GAAP loss years). On a GAAP basis
+  # the criterion is implied by the zero-loss-years gate above (ten straight
+  # profitable NI years => a streak >= 10), so keeping it could only wrongly
+  # exclude listings with short or missing adjusted-EPS histories. The
+  # eps_streak metric itself stays computed for reports.
 
   # NOTE: no SBC/FCF gate. EODHD's stockBasedCompensation coverage is too thin
   # and too unreliable to hard-gate on (absent for ~85% of the universe, stops
