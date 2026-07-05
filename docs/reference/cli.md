@@ -21,8 +21,7 @@ Provider rules:
   `normalize-fundamentals`, and `update-market-data` accept `--provider` and
   default it to `EODHD`
 - `compute-metrics`, `run-screen`, `report-fact-freshness`,
-  `report-metric-coverage`, `report-metric-failures`, and
-  `report-screen-failures`
+  `report-metric-failures`, and `report-screen-failures`
   are provider-agnostic and operate on canonical symbols
 
 For EODHD-backed symbols, downstream stage commands and canonical-scope
@@ -322,17 +321,6 @@ Notes:
   with a one-line market-data seam summary (fresh/stale/missing price
   snapshots over the scope) — concept coverage alone cannot explain NAs caused
   by a missing or stale price
-
-### `report-metric-coverage`
-
-Count how many symbols can compute all requested metrics without writing results.
-
-Key options:
-
-- optional scope selector: `--symbols`, `--exchange-codes`, or
-  `--all-supported` (defaults to the full supported universe)
-- `--metrics <metric-ids...>`
-- `--database <path>`
 
 ### `report-metric-failures`
 

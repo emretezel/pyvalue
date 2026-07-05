@@ -106,7 +106,6 @@ from .explain import (
 from .reports import (
     SCREEN_PROGRESS_INTERVAL_SECONDS,  # noqa: F401
     cmd_report_fact_freshness,
-    cmd_report_metric_coverage,
     cmd_report_metric_failures,
     cmd_report_metric_status,
     cmd_report_screen_failures,
@@ -165,7 +164,6 @@ __all__ = [
     "cmd_run_screen_stage",
     "cmd_explain_metric",
     "cmd_report_fact_freshness",
-    "cmd_report_metric_coverage",
     "cmd_report_metric_failures",
     "cmd_report_metric_status",
     "cmd_report_screen_failures",
