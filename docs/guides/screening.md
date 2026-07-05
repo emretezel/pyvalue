@@ -225,17 +225,25 @@ pyvalue report-screen-failures --config screeners/basic_value.yml --exchange-cod
 The report separates two different problems:
 
 - `Metric NA impact`: which metric ids are missing for the largest number of
-  symbols, plus recompute-time root causes such as missing history, missing
-  market data, unknown metric ids, or metrics that could be computed now
+  symbols, and which criteria each gap affects
 - `Criterion fallout`: which criteria eliminate the most symbols, split into
   `na_fails` versus `threshold_fails`
+
+The command is a pure read of stored metrics and persisted attempt status —
+nothing is recomputed or written. For the per-reason root causes behind the NA
+counts, follow the printed hint:
+
+```bash
+pyvalue report-metric-status --config screeners/basic_value.yml --reasons --exchange-codes US
+```
 
 Use this when you want to decide whether to:
 
 - relax a threshold that is filtering out too many otherwise-computable symbols
 - amend a metric calculation so it returns non-`NA` for more symbols
 - fix a wrong metric id in the YAML
-- recompute metrics or refresh missing market data
+- rerun `compute-metrics` (or refresh market data first) so persisted metrics
+  reflect the current facts
 
 ## End-to-End Example
 

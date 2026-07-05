@@ -53,8 +53,10 @@ pyvalue report-screen-failures --config screeners/quality_reasonable_price_prima
 pyvalue report-fact-freshness --symbols <WL9> --metrics <na metric ids>
 ```
 
-Note `report-screen-failures` recomputes NA screen metrics and backfills
-`metrics`/`metric_compute_status` — intended here.
+Note (2026-07-05): `report-screen-failures` is now a pure read of persisted
+state — criterion fallout plus metric NA impact counts only. It no longer
+recomputes or backfills; run `compute-metrics` first and use
+`report-metric-status --config <screen> --reasons` for per-reason root causes.
 
 Per-(symbol, metric) root cause — persisted state incl. `reason_detail`,
 per-concept input depth, market seam, and a write-free live recompute with

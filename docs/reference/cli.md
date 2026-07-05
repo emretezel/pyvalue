@@ -414,14 +414,16 @@ Notes:
 ### `report-screen-failures`
 
 Rank which screen criteria and missing metrics exclude the most symbols for the
-requested canonical scope.
+requested canonical scope — the criterion-fallout analyzer. A pure read:
+nothing is recomputed and nothing is written.
 
 Key options:
 
 - `--config <path>` required
 - optional scope selector: `--symbols`, `--exchange-codes`, or
   `--all-supported` (defaults to the full supported universe)
-- `--output-csv <path>`
+- `--output-csv <path>` (columns: `metric_id`, `missing_symbols`,
+  `affected_criteria_count`, `affected_criteria`)
 - `--database <path>`
 
 Notes:
@@ -430,24 +432,17 @@ Notes:
   by YAML order
 - metric NA counts are deduplicated by `(symbol, metric_id)`, even when the same
   metric appears in multiple criteria
-- screen evaluation now treats fresh failed or stale metric status as
+- screen evaluation treats fresh failed or stale metric status as
   unavailable, even if an older raw row still exists in `metrics`
 - the console report has two sections:
   - `Metric NA impact`: missing stored metrics ranked by affected-symbol count,
-    with recompute-time root-cause buckets
+    with the criteria each gap affects
   - `Criterion fallout`: per-criterion fail counts split into `na_fails` versus
-    `threshold_fails`
-- if a metric is unavailable because its latest status is missing or stale, the
-  command recomputes only that metric for the affected symbols to distinguish:
-  - `stored_missing_but_computable_now`
-  - warning-driven `None` results
-  - `exception: <type>`
-  - `unknown_metric_id` when the screen references an unregistered metric
-- for ROIC FY-series metrics, those warning-driven `None` results now retain the
-  same standardized root-cause buckets shown by `report-metric-failures`
-- recomputed attempts are persisted back to `metrics`/`metric_compute_status`
-  (this "report" intentionally backfills the DB), and example lines/CSV rows
-  carry the same `example_reason_detail` column as `report-metric-failures`
+    `threshold_fails` — the "relax the threshold or fix the data?" signal
+- per-reason NA root causes intentionally live elsewhere: the report ends its
+  NA-impact section with a `hint: pyvalue report-metric-status --config
+  <screen> --reasons` drill-down instead of duplicating that survey; run
+  `compute-metrics` first if statuses are missing or stale
 
 ## Screening Commands
 

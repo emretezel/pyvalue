@@ -55,7 +55,6 @@ from pyvalue.persistence.storage import (
     IdKeyedStoredMetricRow,
     MarketDataFetchStateRepository,
     MarketDataRepository,
-    MarketSnapshotRecord,
     MetricComputeStatusRecord,
     MetricComputeStatusRepository,
     MetricRecord,
@@ -6986,32 +6985,28 @@ criteria:
     output = capsys.readouterr().out
     assert "Progress: [--------------------] 0/2 symbols screened (0.0%)" in output
     assert "Progress: [####################] 2/2 symbols screened (100.0%)" in output
-    assert (
-        "Progress: [--------------------] 0/1 missing symbols analyzed (0.0%)" in output
-    )
-    assert (
-        "Progress: [####################] 1/1 missing symbols analyzed (100.0%)"
-        in output
-    )
     assert "Passed all criteria: 0/2" in output
     assert "Metric NA impact" in output
+    # BBB's missing metric counts once even though it blocks both criteria.
     assert "- working_capital: missing=1 symbols, affects=2 criteria" in output
-    assert "stored_missing_but_computable_now: 1 (example=BBB.US" in output
+    # Root causes moved to report-metric-status --reasons; the report hints there.
+    assert (
+        f"hint: pyvalue report-metric-status --config {screen_path} --reasons" in output
+    )
     assert "Criterion fallout" in output
     assert "Working capital >= 20: fails=2/2, na_fails=1, threshold_fails=1" in output
     assert "Working capital >= 50: fails=2/2, na_fails=1, threshold_fails=1" in output
     assert "missing_metrics: working_capital=1" in output
     csv_lines = csv_path.read_text().strip().splitlines()
     assert csv_lines[0] == (
-        "metric_id,missing_symbols,affected_criteria_count,"
-        "affected_criteria,root_cause,root_cause_count,"
-        "example_symbol,example_market_cap,example_reason_detail"
+        "metric_id,missing_symbols,affected_criteria_count,affected_criteria"
     )
-    assert "working_capital,1,2," in csv_lines[1]
-    assert "stored_missing_but_computable_now,1,BBB.US,250.0" in csv_lines[1]
+    assert csv_lines[1] == (
+        "working_capital,1,2,1. Working capital >= 20; 2. Working capital >= 50"
+    )
 
 
-def test_cmd_report_screen_failures_reuses_persisted_failure_status_without_recompute(
+def test_cmd_report_screen_failures_never_recomputes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     db_path = tmp_path / "screen-failure-status.db"
@@ -7043,7 +7038,7 @@ def test_cmd_report_screen_failures_reuses_persisted_failure_status_without_reco
         def compute(
             self, listing_id: int, repo: RegionFactsRepository
         ) -> MetricResult | None:
-            raise AssertionError("expected persisted failure status to skip recompute")
+            raise AssertionError("report-screen-failures must never compute metrics")
 
     patch_cli(monkeypatch, "REGISTRY", {CachedMetric.id: CachedMetric})
 
@@ -7072,7 +7067,11 @@ criteria:
     assert rc == 0
     output = capsys.readouterr().out
     assert "- cached_metric: missing=1 symbols, affects=1 criteria" in output
-    assert "cached_failure: 1 (example=AAA.US" in output
+    # Reason buckets no longer render here; the drill-down hint replaces them.
+    assert "cached_failure" not in output
+    assert (
+        f"hint: pyvalue report-metric-status --config {screen_path} --reasons" in output
+    )
 
 
 def test_cmd_report_screen_failures_reports_progress_by_phase(
@@ -7160,14 +7159,8 @@ criteria:
     assert (
         "Progress: [####################] 2/2 symbols screened (100.0%)" in output_lines
     )
-    assert (
-        "Progress: [--------------------] 0/1 missing symbols analyzed (0.0%)"
-        in output_lines
-    )
-    assert (
-        "Progress: [####################] 1/1 missing symbols analyzed (100.0%)"
-        in output_lines
-    )
+    # The recompute phase is gone: screening progress is the only progress bar.
+    assert not any("missing symbols analyzed" in line for line in output_lines)
 
 
 def test_cmd_report_screen_failures_avoids_point_metric_fetches(
@@ -7241,338 +7234,6 @@ criteria:
     assert rc == 0
     output = capsys.readouterr().out
     assert "- working_capital: missing=1 symbols, affects=1 criteria" in output
-
-
-def test_cmd_report_screen_failures_recompute_uses_symbol_caches(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    db_path = tmp_path / "screen_failures_symbol_cache.db"
-    store_catalog_listings(
-        db_path,
-        "US",
-        [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
-        provider="SEC",
-    )
-    fact_repo = FinancialFactsRepository(db_path)
-    fact_repo.initialize_schema()
-    seed_facts(
-        db_path,
-        "AAA.US",
-        [
-            make_fact(concept="AssetsCurrent", end_date="2024-12-31", value=500.0),
-            make_fact(
-                concept="EarningsPerShare",
-                fiscal_period="FY",
-                end_date="2024-12-31",
-                value=2.0,
-            ),
-            make_fact(
-                concept="EarningsPerShare",
-                fiscal_period="FY",
-                end_date="2023-12-31",
-                value=1.5,
-            ),
-        ],
-    )
-    market_repo = MarketDataRepository(db_path)
-    market_repo.initialize_schema()
-    seed_price(db_path, "AAA.US", "2024-12-31", price=25.0)
-    _seed_share_count(db_path, "AAA.US", "2024-12-31", 40.0)
-
-    fact_calls: dict[str, int] = {"count": 0}
-
-    @dataclass
-    class FactsManyCalls:
-        # The bulk-fact reader is invoked once per recompute batch; we record how
-        # many times and with which listing-id tuples / concept filter so the test
-        # can assert the id-keyed path issued a single bulk call. A plain dict
-        # literal would infer ``dict[str, object]`` and break ``count += 1`` and
-        # ``listing_ids.append(...)``, so the accumulator is a typed record instead.
-        count: int = 0
-        listing_ids: list[tuple[int, ...]] = field(default_factory=list)
-        concepts: tuple[str, ...] | None = None
-
-    facts_many_calls = FactsManyCalls()
-    snapshot_batch_calls: dict[str, int] = {"count": 0}
-    original_facts_for_id = FinancialFactsRepository.facts_for_id
-    original_facts_for_ids_many = FinancialFactsRepository.facts_for_ids_many
-    original_latest_snapshots_many_by_ids = (
-        MarketDataRepository.latest_snapshots_many_by_ids
-    )
-
-    def counting_facts_for_id(
-        self: FinancialFactsRepository, listing_id: int
-    ) -> list[FactRecord]:
-        fact_calls["count"] += 1
-        return original_facts_for_id(self, listing_id)
-
-    def counting_facts_for_ids_many(
-        self: FinancialFactsRepository,
-        listing_ids: Sequence[int],
-        chunk_size: int = 25,
-        *,
-        concepts: Sequence[str] | None = None,
-        connection: sqlite3.Connection | None = None,
-    ) -> dict[int, list[FactRecord]]:
-        facts_many_calls.count += 1
-        facts_many_calls.listing_ids.append(tuple(listing_ids))
-        facts_many_calls.concepts = tuple(concepts) if concepts is not None else None
-        return original_facts_for_ids_many(
-            self,
-            listing_ids,
-            chunk_size=chunk_size,
-            concepts=concepts,
-            connection=connection,
-        )
-
-    def counting_latest_snapshots_many_by_ids(
-        self: MarketDataRepository,
-        listing_ids: Sequence[int],
-        chunk_size: int = 500,
-        *,
-        connection: sqlite3.Connection | None = None,
-    ) -> dict[int, MarketSnapshotRecord]:
-        snapshot_batch_calls["count"] += 1
-        return original_latest_snapshots_many_by_ids(
-            self,
-            listing_ids,
-            chunk_size=chunk_size,
-            connection=connection,
-        )
-
-    monkeypatch.setattr(
-        FinancialFactsRepository,
-        "facts_for_id",
-        counting_facts_for_id,
-    )
-    monkeypatch.setattr(
-        FinancialFactsRepository,
-        "facts_for_ids_many",
-        counting_facts_for_ids_many,
-    )
-    monkeypatch.setattr(
-        MarketDataRepository,
-        "latest_snapshots_many_by_ids",
-        counting_latest_snapshots_many_by_ids,
-    )
-
-    class RepeatedFactsMetric:
-        id = "repeat_facts"
-        required_concepts = ("AssetsCurrent",)
-        uses_market_data = False
-
-        def compute(
-            self, listing_id: int, repo: RegionFactsRepository
-        ) -> MetricResult | None:
-            latest_a = repo.latest_fact(listing_id, "AssetsCurrent")
-            latest_b = repo.latest_fact(listing_id, "AssetsCurrent")
-            series_a = repo.facts_for_concept(listing_id, "EarningsPerShare", "FY")
-            series_b = repo.facts_for_concept(listing_id, "EarningsPerShare", "FY")
-            # The test seeds the required facts, so both reads resolve; assert to
-            # narrow the optional for the type checker.
-            assert latest_a is not None and latest_b is not None
-            return MetricResult(
-                listing_id=listing_id,
-                metric_id=self.id,
-                value=latest_a.value + latest_b.value + len(series_a) + len(series_b),
-                as_of=latest_a.end_date,
-            )
-
-    class RepeatedMarketMetric:
-        id = "repeat_market"
-        required_concepts = ()
-        uses_market_data = True
-        uses_financial_facts = False
-
-        def compute(
-            self,
-            listing_id: int,
-            repo: RegionFactsRepository,
-            market_repo: MarketDataRepository,
-        ) -> MetricResult | None:
-            snapshot_a = market_repo.latest_snapshot_by_id(listing_id)
-            snapshot_b = market_repo.latest_snapshot_by_id(listing_id)
-            latest_price = market_repo.latest_price_by_id(listing_id)
-            # The test seeds a price, so every read resolves; assert to narrow the
-            # optionals (snapshots and the (currency, price) tuple) for mypy.
-            assert snapshot_a is not None and snapshot_b is not None
-            assert latest_price is not None
-            return MetricResult(
-                listing_id=listing_id,
-                metric_id=self.id,
-                value=snapshot_a.price + snapshot_b.price + latest_price[1],
-                as_of=snapshot_a.as_of,
-            )
-
-    patch_cli(
-        monkeypatch,
-        "REGISTRY",
-        {
-            RepeatedFactsMetric.id: RepeatedFactsMetric,
-            RepeatedMarketMetric.id: RepeatedMarketMetric,
-        },
-    )
-
-    screen_path = tmp_path / "screen.yml"
-    screen_path.write_text(
-        """
-criteria:
-  - name: "Repeated facts > 0"
-    left:
-      metric: repeat_facts
-    operator: ">"
-    right:
-      value: 0
-
-  - name: "Repeated market > 0"
-    left:
-      metric: repeat_market
-    operator: ">"
-    right:
-      value: 0
-"""
-    )
-
-    rc = cli.cmd_report_screen_failures(
-        config_path=str(screen_path),
-        database=str(db_path),
-        symbols=["AAA.US"],
-        exchange_codes=None,
-        all_supported=False,
-        output_csv=None,
-    )
-
-    assert rc == 0
-    output = capsys.readouterr().out
-    assert "- repeat_facts: missing=1 symbols, affects=1 criteria" in output
-    assert "- repeat_market: missing=1 symbols, affects=1 criteria" in output
-    assert "stored_missing_but_computable_now: 1 (example=AAA.US" in output
-    assert fact_calls["count"] == 0
-    listing_id = resolve_listing_id(db_path, "AAA.US")
-    assert listing_id is not None
-    assert facts_many_calls.count == 1
-    assert facts_many_calls.listing_ids == [(listing_id,)]
-    assert facts_many_calls.concepts == ("AssetsCurrent",)
-    assert snapshot_batch_calls["count"] == 1
-
-
-def test_cmd_report_screen_failures_suppresses_console_metric_warnings(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    clear_root_logging_handlers()
-    cli.setup_logging(log_dir=tmp_path / "logs")
-    try:
-        db_path = tmp_path / "screen_failures_warning_suppression.db"
-        store_catalog_listings(
-            db_path,
-            "US",
-            [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
-            provider="SEC",
-        )
-        screen_path = tmp_path / "screen.yml"
-        screen_path.write_text(
-            """
-criteria:
-  - name: "Noisy metric"
-    left:
-      metric: noisy_metric
-    operator: ">"
-    right:
-      value: 0
-"""
-        )
-
-        class NoisyMetric:
-            id = "noisy_metric"
-            required_concepts = ()
-
-            def compute(
-                self, listing_id: int, repo: RegionFactsRepository
-            ) -> MetricResult | None:
-                # ``compute`` keys on ``listing_id`` and no longer sees the symbol,
-                # but this test exercises the console warning-dedup, which collapses
-                # the *scoped* symbol token to ``<symbol>``. The only seeded listing
-                # is AAA.US, so emit it literally as the warning arg so the file log
-                # carries the real symbol and the console summary collapses it.
-                logging.getLogger("pyvalue.metrics.noisy").warning(
-                    "Console-only warning for %s", "AAA.US"
-                )
-                return None
-
-        monkeypatch.setitem(cli.REGISTRY, "noisy_metric", NoisyMetric)
-
-        rc = cli.cmd_report_screen_failures(
-            config_path=str(screen_path),
-            database=str(db_path),
-            symbols=["AAA.US"],
-            exchange_codes=None,
-            all_supported=False,
-            output_csv=None,
-        )
-
-        assert rc == 0
-        output = capsys.readouterr().out
-        assert "WARNING Console-only warning for AAA.US" not in output
-        assert "Console-only warning for <symbol>: 1" in output
-        log_text = (tmp_path / "logs" / "pyvalue.log").read_text()
-        assert "Console-only warning for AAA.US" in log_text
-    finally:
-        clear_root_logging_handlers()
-
-
-def test_cmd_report_screen_failures_reports_metric_exceptions(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    db_path = tmp_path / "screen_failure_exception.db"
-    store_catalog_listings(
-        db_path,
-        "US",
-        [Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE")],
-        provider="SEC",
-    )
-    screen_path = tmp_path / "screen.yml"
-    screen_path.write_text(
-        """
-criteria:
-  - name: "Exploding metric"
-    left:
-      metric: exploding_metric
-    operator: ">"
-    right:
-      value: 0
-"""
-    )
-
-    class ExplodingMetric:
-        id = "exploding_metric"
-        required_concepts = ()
-
-        def compute(
-            self, listing_id: int, repo: RegionFactsRepository
-        ) -> MetricResult | None:
-            raise RuntimeError("boom")
-
-    monkeypatch.setitem(cli.REGISTRY, "exploding_metric", ExplodingMetric)
-
-    rc = cli.cmd_report_screen_failures(
-        config_path=str(screen_path),
-        database=str(db_path),
-        symbols=["AAA.US"],
-        exchange_codes=None,
-        all_supported=False,
-        output_csv=None,
-    )
-
-    assert rc == 0
-    output = capsys.readouterr().out
-    assert "- exploding_metric: missing=1 symbols, affects=1 criteria" in output
-    assert "exception: RuntimeError: 1" in output
 
 
 def test_report_skipped_no_currency_prints_count_and_preview(

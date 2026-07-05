@@ -1,10 +1,12 @@
-"""Regression: failure-report outputs across the shared-engine consolidation.
+"""Regression: diagnostic-report outputs over persisted state only.
 
-The metric- and screen-failure reports were rewired onto one shared engine
-(``cli/_failure_analysis.py``) and grew a ``reason_detail`` example column.
-These tests pin the persisted-status path end to end -- console lines and CSV
-rows -- so any future drift in bucketing, example selection, or column layout
-fails loudly.
+The failure diagnostics were made pure reads: ``report-metric-failures`` keeps
+its persisted-status bucketing (with the ``reason_detail`` example column) and
+``report-screen-failures`` was slimmed to criterion fallout, deferring root
+causes to ``report-metric-status --reasons``. These tests pin the console
+lines, CSV layouts, and read-only guarantee end to end so any future drift --
+bucketing, example selection, columns, or a reintroduced DB write -- fails
+loudly.
 
 Author: Emre Tezel
 """
@@ -166,6 +168,12 @@ def test_screen_failures_persisted_path_output_and_csv(
 ) -> None:
     db_path = tmp_path / "parity-screen.db"
     _seed_fixture(db_path)
+    before_status = _dump_rows(
+        db_path,
+        "metric_compute_status",
+        "listing_id, metric_id, status, reason_code, attempted_at",
+    )
+    before_metrics = _dump_rows(db_path, "metrics", "listing_id, metric_id, value")
     config = tmp_path / "screen.yml"
     config.write_text(
         "criteria:\n"
@@ -193,9 +201,10 @@ def test_screen_failures_persisted_path_output_and_csv(
     # CCC passes on its stored row; AAA/BBB are NA via their fresh failures.
     assert "Passed all criteria: 1/3" in output
     assert f"- {CURRENT_RATIO}: missing=2 symbols, affects=1 criteria" in output
-    assert (
-        f"    {REASON}: 2 (example=AAA.US, market_cap=N/A, detail={DETAIL})" in output
-    )
+    # Root-cause buckets moved to report-metric-status --reasons: the report
+    # prints the drill-down hint instead of inlining persisted reasons.
+    assert f"hint: pyvalue report-metric-status --config {config} --reasons" in output
+    assert REASON not in output
     assert "- Current ratio >= 1: fails=2/3, na_fails=2, threshold_fails=0" in output
 
     with output_csv.open(newline="", encoding="utf-8") as handle:
@@ -206,11 +215,6 @@ def test_screen_failures_persisted_path_output_and_csv(
             "missing_symbols",
             "affected_criteria_count",
             "affected_criteria",
-            "root_cause",
-            "root_cause_count",
-            "example_symbol",
-            "example_market_cap",
-            "example_reason_detail",
         ],
         [
             CURRENT_RATIO,
@@ -218,10 +222,17 @@ def test_screen_failures_persisted_path_output_and_csv(
             "1",
             # Criterion labels carry their 1-based index prefix in the CSV.
             "1. Current ratio >= 1",
-            REASON,
-            "2",
-            "AAA.US",
-            "",
-            DETAIL,
         ],
     ]
+    # Read-only: the report must not have rewritten metric or status state.
+    assert (
+        _dump_rows(
+            db_path,
+            "metric_compute_status",
+            "listing_id, metric_id, status, reason_code, attempted_at",
+        )
+        == before_status
+    )
+    assert (
+        _dump_rows(db_path, "metrics", "listing_id, metric_id, value") == before_metrics
+    )

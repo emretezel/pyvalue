@@ -10,7 +10,6 @@ import time
 from collections import Counter
 from dataclasses import dataclass
 from typing import (
-    Callable,
     Dict,
     List,
     Mapping,
@@ -47,7 +46,6 @@ from ._common import (
     _MetricAttemptResult,
     _ScreenMetricImpactSummary,
     _prepare_output_csv_path,
-    _print_symbol_progress,
     _resolve_canonical_scope_listings,
     _resolve_database_path,
     _scope_label,
@@ -78,36 +76,6 @@ from .metrics import (
 )
 
 
-def _make_symbol_progress_reporter(
-    total_symbols: int,
-    interval_seconds: float,
-    printer: Optional[Callable[[int, int], None]] = None,
-    start_immediately: bool = False,
-) -> Callable[[int, bool], None]:
-    """Return a throttled symbol-progress reporter."""
-
-    progress_printer = printer or _print_symbol_progress
-    last_progress_at = time.monotonic()
-    last_reported_completed = -1
-    if start_immediately and total_symbols > 0:
-        progress_printer(0, total_symbols)
-        last_reported_completed = 0
-
-    def maybe_report_progress(completed_symbols: int, force: bool = False) -> None:
-        nonlocal last_progress_at, last_reported_completed
-        if total_symbols <= 0 or completed_symbols == last_reported_completed:
-            return
-        now = time.monotonic()
-        elapsed = now - last_progress_at
-        if not force and elapsed < interval_seconds:
-            return
-        progress_printer(completed_symbols, total_symbols)
-        last_progress_at = now
-        last_reported_completed = completed_symbols
-
-    return maybe_report_progress
-
-
 def _print_screen_progress_bar(completed_symbols: int, total_symbols: int) -> None:
     """Print a compact ASCII bar for screen-evaluation progress."""
 
@@ -120,24 +88,6 @@ def _print_screen_progress_bar(completed_symbols: int, total_symbols: int) -> No
     bar = "#" * filled_width + "-" * (bar_width - filled_width)
     print(
         f"Progress: [{bar}] {completed_symbols}/{total_symbols} symbols screened ({percent:.1f}%)",
-        flush=True,
-    )
-
-
-def _print_recompute_progress_bar(completed_symbols: int, total_symbols: int) -> None:
-    """Print a compact ASCII bar for missing-metric root-cause analysis progress."""
-
-    if total_symbols <= 0:
-        percent = 100.0
-    else:
-        percent = (completed_symbols / total_symbols) * 100.0
-    bar_width = 20
-    filled_width = min(bar_width, max(0, round((percent / 100.0) * bar_width)))
-    bar = "#" * filled_width + "-" * (bar_width - filled_width)
-    print(
-        "Progress: "
-        f"[{bar}] {completed_symbols}/{total_symbols} missing symbols analyzed "
-        f"({percent:.1f}%)",
         flush=True,
     )
 
@@ -473,10 +423,10 @@ def _write_metric_failure_report_csv(
 
 def _write_screen_failure_report_csv(
     impacts: Sequence[_ScreenMetricImpactSummary],
-    failures: Dict[str, Counter],
-    examples: Dict[str, Dict[str, _FailureExample]],
     path: str,
 ) -> None:
+    # Criterion-fallout columns only: per-reason root causes belong to
+    # ``report-metric-status --reasons``, so this CSV stays screen-shaped.
     output_path = _prepare_output_csv_path(path)
     with output_path.open("w", newline="") as handle:
         writer = csv.writer(handle)
@@ -486,196 +436,26 @@ def _write_screen_failure_report_csv(
                 "missing_symbols",
                 "affected_criteria_count",
                 "affected_criteria",
-                "root_cause",
-                "root_cause_count",
-                "example_symbol",
-                "example_market_cap",
-                "example_reason_detail",
             ]
         )
         for impact in impacts:
-            counter = failures.get(impact.metric_id, Counter())
             criteria = sorted(impact.affected_criteria)
-            if not counter:
-                writer.writerow(
-                    [
-                        impact.metric_id,
-                        len(impact.missing_symbols),
-                        len(criteria),
-                        "; ".join(criteria),
-                        "",
-                        0,
-                    ]
-                    + failure_example_csv_cells(None)
-                )
-                continue
-            for reason, count in counter.most_common():
-                example = examples.get(impact.metric_id, {}).get(reason)
-                writer.writerow(
-                    [
-                        impact.metric_id,
-                        len(impact.missing_symbols),
-                        len(criteria),
-                        "; ".join(criteria),
-                        reason,
-                        count,
-                    ]
-                    + failure_example_csv_cells(example)
-                )
-
-
-def _recompute_missing_screen_metrics(
-    metric_impacts: Mapping[str, _ScreenMetricImpactSummary],
-    fact_repo: FinancialFactsRepository,
-    market_repo: MarketDataRepository,
-    progress_interval_seconds: Optional[float] = None,
-    *,
-    listing_id_by_symbol: Mapping[str, int],
-) -> tuple[Dict[str, Counter], Dict[str, Dict[str, _FailureExample]]]:
-    # ``metric_impacts`` carries display symbols (the screen evaluator recorded
-    # them); the recompute keys everything on listing_id via the scope's
-    # ``listing_id_by_symbol`` map, retaining the display symbol only for the
-    # examples that feed the CSV/print output.
-    metric_ids_by_id: Dict[int, List[str]] = {}
-    symbol_by_id: Dict[int, str] = {}
-    for metric_id, impact in metric_impacts.items():
-        for symbol in impact.missing_symbols:
-            listing_id = listing_id_by_symbol.get(symbol)
-            if listing_id is None:
-                continue
-            metric_ids_by_id.setdefault(listing_id, []).append(metric_id)
-            symbol_by_id.setdefault(listing_id, symbol)
-
-    ids_to_recompute = sorted(metric_ids_by_id.keys())
-    if not ids_to_recompute:
-        empty_tally = FailureTally(metric_impacts.keys(), {})
-        return empty_tally.failures, empty_tally.examples
-
-    db_path = fact_repo.db_path
-    metrics_repo = _SchemaReadyMetricsRepository(db_path)
-    status_repo = _SchemaReadyMetricComputeStatusRepository(db_path)
-    availability_repo = _StatusAwareMetricsRepository(
-        db_path,
-        raw_metrics_repo=metrics_repo,
-        status_repo=status_repo,
-        facts_refresh_repo=_SchemaReadyFinancialFactsRefreshStateRepository(db_path),
-        market_repo=market_repo,
-    )
-    maybe_report_progress = (
-        _make_symbol_progress_reporter(
-            len(ids_to_recompute),
-            progress_interval_seconds,
-            printer=_print_recompute_progress_bar,
-            start_immediately=True,
-        )
-        if progress_interval_seconds is not None
-        else None
-    )
-
-    snapshots_by_id = market_repo.latest_snapshots_many_by_ids(ids_to_recompute)
-    tally = FailureTally(
-        metric_impacts.keys(),
-        _estimate_market_caps(fact_repo, snapshots_by_id),
-    )
-
-    availability_states = availability_repo.states_many_by_ids(
-        ids_to_recompute,
-        tuple(metric_impacts.keys()),
-        chunk_size=METRICS_COMPUTE_BATCH_SIZE,
-    )
-    pending_metric_ids_by_id: Dict[int, List[str]] = {}
-    completed_symbols = 0
-
-    for listing_id in ids_to_recompute:
-        display_symbol = symbol_by_id[listing_id]
-        pending_metric_ids: List[str] = []
-        for metric_id in metric_ids_by_id[listing_id]:
-            if metric_id not in REGISTRY:
-                tally.record(
-                    metric_id=metric_id,
-                    reason="unknown_metric_id",
-                    listing_id=listing_id,
-                    symbol=display_symbol,
-                )
-                continue
-            state = availability_states.get(listing_id, {}).get(metric_id)
-            # The screen evaluator already deemed these metrics unavailable, so
-            # a fresh persisted failure is counted directly; anything else
-            # (stale, missing, or nominally-usable state) goes through the
-            # recompute to learn its current outcome.
-            if classify_availability_state(state) == "fresh_failure":
-                assert state is not None and state.status_record is not None
-                tally.record(
-                    metric_id=metric_id,
-                    reason=state.status_record.reason_code or "no warning emitted",
-                    listing_id=listing_id,
-                    symbol=display_symbol,
-                    reason_detail=state.status_record.reason_detail,
-                )
-                continue
-            pending_metric_ids.append(metric_id)
-        if pending_metric_ids:
-            pending_metric_ids_by_id[listing_id] = pending_metric_ids
-            continue
-        completed_symbols += 1
-        if maybe_report_progress is not None:
-            maybe_report_progress(completed_symbols, False)
-
-    listings_by_metric_group: Dict[Tuple[str, ...], List[Tuple[int, str]]] = {}
-    for listing_id, pending_metric_ids in pending_metric_ids_by_id.items():
-        metric_group = tuple(pending_metric_ids)
-        listings_by_metric_group.setdefault(metric_group, []).append(
-            (listing_id, symbol_by_id[listing_id])
-        )
-
-    for metric_group, group_listings in listings_by_metric_group.items():
-        for listing_batch in _batch_listings(
-            group_listings,
-            METRICS_COMPUTE_BATCH_SIZE,
-        ):
-            batch_results = _compute_metric_batch_results(
-                listing_batch,
-                metric_group,
-                fact_repo,
-                market_repo,
-                suppress_metric_warnings=True,
-                preloaded_snapshots_by_id=snapshots_by_id,
+            writer.writerow(
+                [
+                    impact.metric_id,
+                    len(impact.missing_symbols),
+                    len(criteria),
+                    "; ".join(criteria),
+                ]
             )
-            batch_attempts: List[_MetricAttemptResult] = []
-            for result in batch_results:
-                batch_attempts.extend(result.attempts)
-                for attempt in result.attempts:
-                    reason = (
-                        "stored_missing_but_computable_now"
-                        if attempt.status == "success"
-                        else attempt.reason_code or "no warning emitted"
-                    )
-                    tally.record(
-                        metric_id=attempt.metric_id,
-                        reason=reason,
-                        listing_id=attempt.listing_id,
-                        symbol=attempt.symbol,
-                        reason_detail=attempt.reason_detail,
-                    )
-                completed_symbols += 1
-                if maybe_report_progress is not None:
-                    maybe_report_progress(completed_symbols, False)
-            _persist_metric_attempts(
-                metrics_repo,
-                status_repo,
-                batch_attempts,
-            )
-
-    if maybe_report_progress is not None:
-        maybe_report_progress(len(ids_to_recompute), True)
-    return tally.failures, tally.examples
 
 
 def _print_screen_metric_na_impact(
     impacts: Sequence[_ScreenMetricImpactSummary],
-    failures: Dict[str, Counter],
-    examples: Dict[str, Dict[str, _FailureExample]],
 ) -> None:
+    # Impact counts only: which metric gaps hurt which criteria. The per-reason
+    # root causes live with the persisted-status survey (report-metric-status
+    # --reasons); the caller prints a drill-down hint after this section.
     print("Metric NA impact")
     if not impacts:
         print("- none")
@@ -685,13 +465,6 @@ def _print_screen_metric_na_impact(
             f"- {impact.metric_id}: missing={len(impact.missing_symbols)} symbols, "
             f"affects={len(impact.affected_criteria)} criteria"
         )
-        counter = failures.get(impact.metric_id, Counter())
-        if not counter:
-            continue
-        for reason, count in counter.most_common():
-            example = examples.get(impact.metric_id, {}).get(reason)
-            suffix = failure_example_console_suffix(example)
-            print(f"    {reason}: {count}{suffix}")
 
 
 def _print_screen_criterion_fallout(
@@ -890,7 +663,15 @@ def cmd_report_screen_failures(
     all_supported: bool,
     output_csv: Optional[str],
 ) -> int:
-    """Rank which criteria and missing metrics eliminate the most symbols."""
+    """Rank which criteria and missing metrics eliminate the most symbols.
+
+    A pure read: criteria are evaluated against stored metric values shadowed
+    by persisted attempt status — nothing is recomputed and nothing is written.
+    This report owns the criterion-level analytics only screen evaluation can
+    produce (threshold vs NA fallout, metric-to-criteria linkage); per-reason
+    NA root causes live in ``report-metric-status --reasons``, which the
+    console output points at.
+    """
 
     db_path = _resolve_database_path(database)
     scope_listings, explicit_symbols, resolved_exchange_codes = (
@@ -901,11 +682,6 @@ def cmd_report_screen_failures(
             all_supported,
         )
     )
-    # Scope symbols are already uppercase canonical tickers; keep the listing_id
-    # the scope join produced so the screen reads carry it instead of re-resolving.
-    # The recompute step maps the screen evaluator's display symbols back to
-    # listing ids through this map.
-    listing_id_by_symbol = {symbol: listing_id for listing_id, symbol in scope_listings}
     total_symbols = len(scope_listings)
     completed_symbols = 0
     last_progress_at = time.monotonic()
@@ -934,7 +710,6 @@ def cmd_report_screen_failures(
     )
     MetricsRepository(db_path).initialize_schema()
     _initialize_metric_read_schema(db_path, include_market_data)
-    fact_repo = _SchemaReadyFinancialFactsRepository(db_path)
     market_repo = _SchemaReadyMarketDataRepository(db_path)
     metrics_repo = _StatusAwareMetricsRepository(
         db_path,
@@ -992,14 +767,6 @@ def cmd_report_screen_failures(
 
         maybe_report_progress(True)
 
-        failures, examples = _recompute_missing_screen_metrics(
-            metric_impacts,
-            fact_repo,
-            market_repo,
-            progress_interval_seconds=SCREEN_PROGRESS_INTERVAL_SECONDS,
-            listing_id_by_symbol=listing_id_by_symbol,
-        )
-
     ordered_impacts = sorted(
         (impact for impact in metric_impacts.values() if impact.missing_symbols),
         key=lambda impact: (-len(impact.missing_symbols), impact.metric_id),
@@ -1023,16 +790,15 @@ def cmd_report_screen_failures(
     print(
         f"Failed at least one criterion: {total_symbols - passed_all}/{total_symbols}"
     )
-    _print_screen_metric_na_impact(ordered_impacts, failures, examples)
+    _print_screen_metric_na_impact(ordered_impacts)
+    if ordered_impacts:
+        # Same drill-down style as run-screen's explain-metric hint: name the
+        # exact command that explains WHY the missing metrics are NA.
+        print(f"hint: pyvalue report-metric-status --config {config_path} --reasons")
     _print_screen_criterion_fallout(ordered_criteria, total_symbols)
 
     if output_csv:
-        _write_screen_failure_report_csv(
-            ordered_impacts,
-            failures,
-            examples,
-            output_csv,
-        )
+        _write_screen_failure_report_csv(ordered_impacts, output_csv)
         print(f"Wrote screen failure reasons to {output_csv}")
 
     return 0
