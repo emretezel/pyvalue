@@ -31,7 +31,7 @@ Columns:
 | Debt Paydown Years | `debt_paydown_years` | EODHD-oriented: `TotalDebt / FCF_TTM`, where debt uses layered fallback and `FCF_TTM = OCF_TTM - Capex_TTM`. | Lower values indicate the balance sheet could be repaired faster with current cash generation. |
 | Free Cash Flow to Debt | `fcf_to_debt` | EODHD-oriented reciprocal of debt paydown years: `FCF_TTM / TotalDebt`. | Higher values show stronger debt-service capacity from internally generated cash. |
 | Net Debt to EBITDA | `net_debt_to_ebitda` | EODHD-oriented: `NetDebt / EBITDA_TTM`, where `EBITDA_TTM = EBIT_TTM + D&A_TTM` and cash/debt use fallback chains. | A widely used leverage check that compares debt burden to operating cash-earnings power. |
-| Interest Coverage | `interest_coverage` | EODHD-oriented: `EBIT_TTM / InterestExpense_TTM`, with rescue-only fallback from `interestIncome - netInterestIncome`. | Tests whether operating profit comfortably covers financing cost. |
+| Interest Coverage | `interest_coverage` | EODHD-oriented: `EBIT_TTM / InterestExpense_TTM`, with rescue-only fallback from `interestIncome - netInterestIncome`. When TTM EBIT is positive and fresh but interest expense is absent, stale, misaligned, or non-positive — the debt-free/net-cash shape (issuers that repay their debt stop reporting the line) — the metric emits the documented cap `100.0` instead of NA. The cap is a convention for an economically unbounded ratio, not a measurement; loss-making or stale-EBIT issuers stay NA. | Tests whether operating profit comfortably covers financing cost — without excluding the strongest (debt-free) balance sheets from `>=` screen gates. |
 
 ## Cash Flow / Cash Conversion
 

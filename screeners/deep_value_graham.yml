@@ -23,6 +23,8 @@ criteria:
     right:
       value: 5.0
 
+  # Debt-free/net-cash issuers with no measurable interest expense score the
+  # documented 100x cap (docs/reference/metrics.md) and pass this gate.
   - name: "Interest coverage >= 1.5x (going-concern check, not a strength bar)"
     left:
       metric: interest_coverage

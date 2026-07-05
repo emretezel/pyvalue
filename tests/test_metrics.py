@@ -51,7 +51,10 @@ from pyvalue.metrics.eps_streak import EPSStreakMetric
 from pyvalue.metrics.graham_eps_cagr import GrahamEPSCAGRMetric
 from pyvalue.metrics.graham_multiplier import GrahamMultiplierMetric
 from pyvalue.metrics.gross_margin_stability import GrossMarginTenYearStdMetric
-from pyvalue.metrics.interest_coverage import InterestCoverageMetric
+from pyvalue.metrics.interest_coverage import (
+    INTEREST_COVERAGE_CAP,
+    InterestCoverageMetric,
+)
 from pyvalue.metrics.invested_capital import (
     AvgICMetric,
     ICFYMetric,
@@ -4921,7 +4924,9 @@ def test_interest_coverage_metric() -> None:
     assert result.value == 10.0
 
 
-def test_interest_coverage_skips_non_positive_interest() -> None:
+def test_interest_coverage_caps_non_positive_interest() -> None:
+    # Zero interest across fresh aligned quarters is the debt-free shape:
+    # since 2026-07 the metric emits the documented cap instead of NA.
     metric = InterestCoverageMetric()
     today = date.today()
     q4 = (today - timedelta(days=30)).isoformat()
@@ -5003,7 +5008,8 @@ def test_interest_coverage_skips_non_positive_interest() -> None:
 
     repo = DummyRepo()
     result = metric.compute(LISTING_ID, repo)
-    assert result is None
+    assert result is not None
+    assert result.value == INTEREST_COVERAGE_CAP
 
 
 def test_interest_coverage_uses_derived_interest_fallback() -> None:
@@ -5066,7 +5072,9 @@ def test_interest_coverage_keeps_direct_path_when_valid() -> None:
     assert result.value == 10.0
 
 
-def test_interest_coverage_returns_none_when_fallback_insufficient() -> None:
+def test_interest_coverage_caps_when_fallback_insufficient() -> None:
+    # Only three aligned EBIT+interest quarters exist, but the EBIT-only TTM
+    # is fresh and positive: no measurable debt service -> documented cap.
     metric = InterestCoverageMetric()
     q4, q3, q2, q1 = _net_debt_quarter_dates()
 
@@ -5090,7 +5098,8 @@ def test_interest_coverage_returns_none_when_fallback_insufficient() -> None:
 
     repo = DummyRepo()
     result = metric.compute(LISTING_ID, repo)
-    assert result is None
+    assert result is not None
+    assert result.value == INTEREST_COVERAGE_CAP
 
 
 def test_interest_coverage_returns_none_on_fallback_currency_mismatch() -> None:

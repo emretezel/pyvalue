@@ -27,6 +27,15 @@ EBIT_CONCEPTS = ("OperatingIncomeLoss",)
 INTEREST_CONCEPTS = ("InterestExpense",)
 INTEREST_FALLBACK_CONCEPTS = ("InterestExpenseFromNetInterestIncome",)
 
+# Documented cap emitted when coverage is economically unbounded: fresh,
+# positive TTM EBIT with no measurable interest expense (line never reported,
+# stale after a debt repayment, or non-positive). Debt-free issuers stop
+# reporting an interest line entirely, so a plain ratio can never pass a
+# `>= N` screen gate for exactly the strongest balance sheets. 100x sits
+# above every screen threshold in use and is a *convention*, not a
+# measurement -- see docs/reference/metrics.md.
+INTEREST_COVERAGE_CAP: float = 100.0
+
 
 @dataclass
 class InterestCoverageMetric:
@@ -59,22 +68,89 @@ class InterestCoverageMetric:
         fallback_interest_quarters = self._quarterly_map(
             repo.monetary_facts_for_concept(listing_id, INTEREST_FALLBACK_CONCEPTS[0])
         )
-        if not fallback_interest_quarters:
+        merged_interest_quarters = dict(direct_interest_quarters)
+        for end_date, record in fallback_interest_quarters.items():
+            merged_interest_quarters.setdefault(end_date, record)
+        if fallback_interest_quarters:
+            result = self._compute_from_maps(
+                listing_id=listing_id,
+                ebit_quarters=ebit_quarters,
+                interest_quarters=merged_interest_quarters,
+                log_failures=False,
+                repo=repo,
+            )
+            if result is not None:
+                return result
+
+        # The ratio path is exhausted: interest is absent, stale, misaligned,
+        # or non-positive. For a business whose *current* TTM EBIT is positive
+        # and fresh that is the debt-free/net-cash shape (an issuer that
+        # repaid its debt typically stops reporting the interest line), so
+        # coverage is economically unbounded -- emit the documented cap
+        # instead of NA. Loss-making or stale-EBIT issuers are not rescued.
+        cap_result = self._debt_free_cap(listing_id, ebit_quarters, repo)
+        if cap_result is not None:
+            return cap_result
+
+        # Genuine NA: emit the precise legacy warning so the persisted
+        # failure reason stays diagnostic (missing interest facts entirely,
+        # or the aligned-quarter/freshness/sign detail from a logged re-run).
+        if not merged_interest_quarters:
             LOGGER.warning(
                 "interest_coverage: missing direct and fallback interest expense for listing_id=%s",
                 listing_id,
             )
             return None
-
-        merged_interest_quarters = dict(direct_interest_quarters)
-        for end_date, record in fallback_interest_quarters.items():
-            merged_interest_quarters.setdefault(end_date, record)
         return self._compute_from_maps(
             listing_id=listing_id,
             ebit_quarters=ebit_quarters,
             interest_quarters=merged_interest_quarters,
             log_failures=True,
             repo=repo,
+        )
+
+    def _debt_free_cap(
+        self,
+        listing_id: int,
+        ebit_quarters: dict[str, MonetaryFact],
+        repo: RegionFactsRepository,
+    ) -> Optional[MetricResult]:
+        """Return the capped result when fresh TTM EBIT is positive.
+
+        The cap deliberately keys on the EBIT-only quarterly series, not the
+        EBIT-and-interest aligned one: for an issuer whose interest line ended
+        years ago (the PLTR shape) the aligned series is stale while the
+        business itself is current. Returns ``None`` when EBIT is short,
+        stale, or non-positive -- those issuers stay NA.
+        """
+
+        latest_dates = sorted(ebit_quarters, reverse=True)[:4]
+        if len(latest_dates) < 4:
+            return None
+        ebit_records = [ebit_quarters[end_date] for end_date in latest_dates]
+        if not is_recent_fact(ebit_records[0]):
+            return None
+
+        target_currency = require_metric_ticker_currency(
+            listing_id, repo, metric_id=self.id, input_name=EBIT_CONCEPTS[0]
+        )
+        ebit_ttm = self._ttm_money(
+            ebit_records, EBIT_CONCEPTS[0], target_currency, listing_id
+        )
+        if ebit_ttm.amount <= 0:
+            return None
+
+        LOGGER.info(
+            "interest_coverage: no measurable interest expense with positive TTM "
+            "EBIT for listing_id=%s -- emitting documented cap %.0fx",
+            listing_id,
+            INTEREST_COVERAGE_CAP,
+        )
+        return MetricResult.ratio(
+            listing_id=listing_id,
+            metric_id=self.id,
+            value=INTEREST_COVERAGE_CAP,
+            as_of=ebit_records[0].end_date,
         )
 
     def _compute_from_maps(
@@ -186,4 +262,4 @@ class InterestCoverageMetric:
         return filtered
 
 
-__all__ = ["InterestCoverageMetric"]
+__all__ = ["INTEREST_COVERAGE_CAP", "InterestCoverageMetric"]
