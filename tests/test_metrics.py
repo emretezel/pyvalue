@@ -11662,13 +11662,26 @@ def test_cfo_to_ni_10y_median_metric_anchors_as_of_on_latest_joint_year_even_if_
     assert result.as_of == f"{latest_year}-09-30"
 
 
-@given(
-    slots=st.lists(
-        st.one_of(st.none(), st.floats(min_value=0.05, max_value=20.0)),
-        min_size=6,
-        max_size=10,
+@st.composite
+def _cfo_ni_chain_slots(draw: st.DrawFn) -> list[float | None]:
+    """Chain slots with >= 6 ratio years by construction (no filtering).
+
+    Drawing 6-10 slots freely and discarding chains with fewer than six valid
+    ratios rejected most inputs and tripped Hypothesis's ``filter_too_much``
+    health check seed-dependently; instead draw the valid ratios first, pad
+    with loss years up to the 10-slot cap, and shuffle so losses land anywhere
+    in the chain (anchor included).
+    """
+
+    valid = draw(
+        st.lists(st.floats(min_value=0.05, max_value=20.0), min_size=6, max_size=10)
     )
-)
+    loss_years = draw(st.integers(min_value=0, max_value=10 - len(valid)))
+    slots: list[float | None] = [*valid, *([None] * loss_years)]
+    return draw(st.permutations(slots))
+
+
+@given(slots=_cfo_ni_chain_slots())
 def test_cfo_to_ni_10y_median_metric_matches_statistics_median_property(
     slots: list[float | None],
 ) -> None:
@@ -11676,7 +11689,6 @@ def test_cfo_to_ni_10y_median_metric_matches_statistics_median_property(
     # ratio, ``None`` is a loss year. Wherever the losses sit (anchor included),
     # the metric must equal statistics.median over the valid ratios only.
     valid_ratios = [ratio for ratio in slots if ratio is not None]
-    assume(len(valid_ratios) >= 6)
 
     latest_year = date.today().year - 1
     # NI of +/-1.0 makes each valid year's CFO/NI reproduce the ratio exactly.
