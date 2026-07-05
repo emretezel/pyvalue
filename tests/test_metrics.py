@@ -29,6 +29,7 @@ from pyvalue.metrics.cash_conversion import (
 from pyvalue.metrics.fundamental_consistency import (
     FCFFiveYearMedianMetric,
     FCFNegativeYearsTenYearMetric,
+    NetIncomeLossYearShareMetric,
     NetIncomeLossYearsTenYearMetric,
 )
 from pyvalue.metrics.sbc_load import SBCToFCFMetric, SBCToRevenueMetric
@@ -13466,6 +13467,124 @@ def test_ni_loss_years_10y_metric_requires_strict_consecutive_years() -> None:
     assert metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept)) is None
 
 
+def test_ni_loss_year_share_metric_counts_share_with_fallback_concept() -> None:
+    metric = NetIncomeLossYearShareMetric()
+    latest_year = date.today().year - 1
+
+    records_by_concept = _build_net_income_fy_records(
+        "AAPL.US",
+        latest_year,
+        [10.0, -5.0, 20.0, -1.0, 30.0, -2.0, 40.0, 50.0, 3.0, 60.0],
+        concept="NetIncomeLossAvailableToCommonStockholdersBasic",
+    )
+
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
+    assert result is not None
+    assert result.value == 0.3
+    assert result.as_of == f"{latest_year}-09-30"
+    assert result.unit_kind == "percent"
+
+
+def test_ni_loss_year_share_metric_counts_zero_ni_as_loss_unlike_count_metric() -> None:
+    # NI == 0 is a loss year for the share metric (aligned with the years
+    # cfo_to_ni_10y_median skips) but NOT for ni_loss_years_10y's strict < 0.
+    latest_year = date.today().year - 1
+    values = [10.0, 0.0, 20.0, -1.0, 30.0, -2.0, 40.0, 50.0, 3.0, 60.0]
+    repo = _OwnerEarningsRepo(
+        _build_net_income_fy_records("AAPL.US", latest_year, values)
+    )
+
+    share_result = NetIncomeLossYearShareMetric().compute(LISTING_ID, repo)
+    count_result = NetIncomeLossYearsTenYearMetric().compute(LISTING_ID, repo)
+
+    assert share_result is not None
+    assert share_result.value == 0.3  # two negatives + the zero year
+    assert count_result is not None
+    assert count_result.value == 2.0  # strict < 0 ignores the zero year
+
+
+def test_ni_loss_year_share_metric_uses_truncated_chain() -> None:
+    # A gap eight years back truncates the chain to 8 years; the share is
+    # normalized by the observed chain length, and older history beyond the
+    # hole (including its losses) is unreachable.
+    metric = NetIncomeLossYearShareMetric()
+    latest_year = date.today().year - 1
+    values = [10.0, -5.0, 20.0, 30.0, -2.0, 40.0, 50.0, 3.0, 60.0, -9.0, -9.0]
+    records_by_concept = _build_net_income_fy_records("AAPL.US", latest_year, values)
+    records_by_concept["NetIncomeLoss"] = [
+        record
+        for record in records_by_concept["NetIncomeLoss"]
+        if record.end_date != f"{latest_year - 8}-09-30"
+    ]
+
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
+    assert result is not None
+    assert result.value == 0.25  # 2 losses over the 8-year chain
+    assert result.as_of == f"{latest_year}-09-30"
+
+
+def test_ni_loss_year_share_metric_caps_chain_at_ten_years() -> None:
+    # Losses older than the 10-year cap are ignored even when the consecutive
+    # history extends further back.
+    metric = NetIncomeLossYearShareMetric()
+    latest_year = date.today().year - 1
+    values = [10.0] * 10 + [-5.0] * 5
+    repo = _OwnerEarningsRepo(
+        _build_net_income_fy_records("AAPL.US", latest_year, values)
+    )
+
+    result = metric.compute(LISTING_ID, repo)
+    assert result is not None
+    assert result.value == 0.0
+
+
+def test_ni_loss_year_share_metric_returns_none_when_chain_too_short() -> None:
+    metric = NetIncomeLossYearShareMetric()
+    latest_year = date.today().year - 1
+    repo = _OwnerEarningsRepo(
+        _build_net_income_fy_records("AAPL.US", latest_year, [10.0] * 5)
+    )
+
+    assert metric.compute(LISTING_ID, repo) is None
+
+
+def test_ni_loss_year_share_metric_rejects_stale_anchor() -> None:
+    metric = NetIncomeLossYearShareMetric()
+    latest_year = date.today().year - 2
+    repo = _OwnerEarningsRepo(
+        _build_net_income_fy_records("AAPL.US", latest_year, [10.0] * 10)
+    )
+
+    assert metric.compute(LISTING_ID, repo) is None
+
+
+def test_ni_loss_year_share_metric_declares_percent_metadata() -> None:
+    assert metadata_for_metric("ni_loss_year_share").unit_kind == "percent"
+
+
+@given(
+    loss_mask=st.lists(st.booleans(), min_size=6, max_size=10),
+)
+def test_ni_loss_year_share_metric_matches_mask_share_property(
+    loss_mask: list[bool],
+) -> None:
+    # Whatever the placement of loss years (zero or negative NI alike), the
+    # share must equal losses / chain length and stay within [0, 1].
+    latest_year = date.today().year - 1
+    values = [
+        (0.0 if offset % 2 == 0 else -5.0) if is_loss else 10.0
+        for offset, is_loss in enumerate(loss_mask)
+    ]
+    repo = _OwnerEarningsRepo(
+        _build_net_income_fy_records("AAPL.US", latest_year, values)
+    )
+
+    result = NetIncomeLossYearShareMetric().compute(LISTING_ID, repo)
+    assert result is not None
+    assert result.value == pytest.approx(sum(loss_mask) / len(loss_mask))
+    assert 0.0 <= result.value <= 1.0
+
+
 def test_oey_ev_norm_metric_computes_ev_from_components() -> None:
     metric = OwnerEarningsYieldEVNormalizedMetric()
     symbol = "AAPL.US"
@@ -14109,6 +14228,7 @@ def test_registry_contains_all_ids() -> None:
     assert "cfo_to_ni_10y_median" in REGISTRY
     assert "fcf_fy_median_5y" in REGISTRY
     assert "ni_loss_years_10y" in REGISTRY
+    assert "ni_loss_year_share" in REGISTRY
     assert "fcf_neg_years_10y" in REGISTRY
     assert "accruals_ratio" in REGISTRY
     assert "share_count_cagr_5y" in REGISTRY

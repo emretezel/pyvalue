@@ -11,6 +11,7 @@ from .cash_conversion import CFOToNITTMMetric, CFOToNITenYearMedianMetric
 from .fundamental_consistency import (
     FCFFiveYearMedianMetric,
     FCFNegativeYearsTenYearMetric,
+    NetIncomeLossYearShareMetric,
     NetIncomeLossYearsTenYearMetric,
 )
 from .accruals_ratio import AccrualsRatioMetric
@@ -117,6 +118,7 @@ REGISTRY = {
     FCFFiveYearMedianMetric.id: FCFFiveYearMedianMetric,
     FCFNegativeYearsTenYearMetric.id: FCFNegativeYearsTenYearMetric,
     NetIncomeLossYearsTenYearMetric.id: NetIncomeLossYearsTenYearMetric,
+    NetIncomeLossYearShareMetric.id: NetIncomeLossYearShareMetric,
     AccrualsRatioMetric.id: AccrualsRatioMetric,
     AltmanZMetric.id: AltmanZMetric,
     PiotroskiFScoreMetric.id: PiotroskiFScoreMetric,
@@ -217,6 +219,7 @@ __all__ = [
     "FCFFiveYearMedianMetric",
     "FCFNegativeYearsTenYearMetric",
     "NetIncomeLossYearsTenYearMetric",
+    "NetIncomeLossYearShareMetric",
     "AccrualsRatioMetric",
     "AltmanZMetric",
     "PiotroskiFScoreMetric",

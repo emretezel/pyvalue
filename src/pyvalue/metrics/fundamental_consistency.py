@@ -15,6 +15,8 @@ from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
     MAX_FY_FACT_AGE_DAYS,
+    is_recent_date,
+    latest_consecutive_year_chain,
     require_metric_money,
     require_metric_ticker_currency,
 )
@@ -36,6 +38,11 @@ NET_INCOME_CONCEPTS = (
 
 FIVE_YEAR_POINTS = 5
 TEN_YEAR_POINTS = 10
+# Minimum length of the adaptive FY chain behind ``ni_loss_year_share``: a
+# loss-year *share* over fewer than six observed years says little. Equal to
+# ``cash_conversion.MIN_VALID_POINTS`` on purpose — the DVG screen pairs the
+# two adaptive metrics, so their evidence floors must match.
+MIN_CHAIN_YEARS = 6
 FY_PERIODS = {"FY"}
 
 FCF_REQUIRED_CONCEPTS = tuple(
@@ -140,6 +147,65 @@ class FundamentalConsistencyCalculator:
             listing_id=listing_id,
             context="ni_loss_years_10y",
             target_currency=target_currency,
+        )
+
+    def compute_net_income_loss_year_share(
+        self, listing_id: int, repo: RegionFactsRepository
+    ) -> Optional[FundamentalConsistencySnapshot]:
+        """Share of FY loss years within the latest adaptive (<= 10y) chain.
+
+        Unlike the strict 10-year count behind ``ni_loss_years_10y``, the
+        denominator here is the actual consecutive-chain length (6..10 years),
+        so short histories stay screenable while the tolerance a screen
+        expresses (e.g. ``<= 0.40``) scales with the observed window.
+        """
+
+        target_currency = require_metric_ticker_currency(
+            listing_id, repo, metric_id="ni_loss_year_share"
+        )
+        amount_map = self._build_fy_amount_map(
+            listing_id,
+            repo,
+            NET_INCOME_CONCEPTS,
+            context="ni_loss_year_share",
+            target_currency=target_currency,
+        )
+        if not amount_map:
+            LOGGER.warning(
+                "ni_loss_year_share: missing FY net income history for listing_id=%s",
+                listing_id,
+            )
+            return None
+
+        chain = latest_consecutive_year_chain(amount_map, max_years=TEN_YEAR_POINTS)
+        if len(chain) < MIN_CHAIN_YEARS:
+            LOGGER.warning(
+                "ni_loss_year_share: FY net income chain too short for listing_id=%s: %s of %s years",
+                listing_id,
+                len(chain),
+                MIN_CHAIN_YEARS,
+            )
+            return None
+
+        anchor_year, anchor_point = chain[0]
+        if not is_recent_date(anchor_point.as_of, max_age_days=MAX_FY_FACT_AGE_DAYS):
+            LOGGER.warning(
+                "ni_loss_year_share: latest FY year %s (%s) too old for listing_id=%s",
+                anchor_year,
+                anchor_point.as_of,
+                listing_id,
+            )
+            return None
+
+        # NI == 0 counts as a loss: a zero-profit year is not a profitable one.
+        # This aligns the loss partition with the years cfo_to_ni_10y_median
+        # skips (NI <= 0) and deliberately differs from ``ni_loss_years_10y``'s
+        # strict ``< 0`` count, which stays unchanged for QARP-primary's gate.
+        loss_years = sum(1 for _, point in chain if point.money.amount <= 0)
+        return FundamentalConsistencySnapshot(
+            value=loss_years / len(chain),
+            as_of=anchor_point.as_of,
+            currency=None,
         )
 
     def _build_fcf_points(
@@ -418,6 +484,39 @@ class NetIncomeLossYearsTenYearMetric:
 
 
 @dataclass
+class NetIncomeLossYearShareMetric:
+    """Share of FY loss years within the latest adaptive (<= 10y) chain.
+
+    The length-normalized sibling of ``ni_loss_years_10y``: the denominator is
+    the observed consecutive-chain length (6..10 FY years), so 6-9-year
+    histories stay screenable and a share threshold keeps one meaning across
+    window lengths. Stored as a 0..1 fraction with ``unit_kind="percent"``,
+    mirroring ``short_term_debt_share``.
+    """
+
+    id: str = "ni_loss_year_share"
+    required_concepts = NET_INCOME_REQUIRED_CONCEPTS
+
+    def compute(
+        self, listing_id: int, repo: RegionFactsRepository
+    ) -> Optional[MetricResult]:
+        snapshot = (
+            FundamentalConsistencyCalculator().compute_net_income_loss_year_share(
+                listing_id, repo
+            )
+        )
+        if snapshot is None:
+            return None
+        return MetricResult(
+            listing_id=listing_id,
+            metric_id=self.id,
+            value=snapshot.value,
+            as_of=snapshot.as_of,
+            unit_kind="percent",
+        )
+
+
+@dataclass
 class FCFNegativeYearsTenYearMetric:
     """Count FY negative free-cash-flow years over the latest strict 10-year window."""
 
@@ -445,5 +544,6 @@ __all__ = [
     "FundamentalConsistencySnapshot",
     "FCFFiveYearMedianMetric",
     "NetIncomeLossYearsTenYearMetric",
+    "NetIncomeLossYearShareMetric",
     "FCFNegativeYearsTenYearMetric",
 ]
