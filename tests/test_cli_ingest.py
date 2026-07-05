@@ -21,7 +21,7 @@ import pytest
 import requests
 
 from pyvalue import cli
-from pyvalue.cli._common import _PreparedFundamentalsRun
+from pyvalue.cli._common import _MetricWarningCollector, _PreparedFundamentalsRun
 from pyvalue.cli.ingest import _run_eodhd_fundamentals_ingestion
 from cli_test_helpers import patch_cli
 from conftest import (
@@ -3070,6 +3070,108 @@ def test_compute_metrics_for_symbol_collects_currency_invariant_failures(
     assert len(result.failures) == 1
     assert result.failures[0].metric_id == "bad_metric"
     assert result.failures[0].reason.startswith("currency invariant:")
+
+
+def test_compute_metrics_for_symbol_populates_reason_detail_from_first_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Guard failures persist both the scrubbed template and the raw warning.
+
+    ``reason_code`` must stay the templated grouping key (numbers scrubbed to
+    ``<n>``) while ``reason_detail`` carries the untemplated first warning so a
+    status row says *which* year/count tripped the guard.
+    """
+
+    class GuardedMetric:
+        id = "guarded_metric"
+        required_concepts = ()
+        uses_market_data = False
+
+        def compute(
+            self, listing_id: int, repo: RegionFactsRepository
+        ) -> MetricResult | None:
+            logging.getLogger("pyvalue.metrics.guarded").warning(
+                "guarded_metric: need %s FY values for listing_id=%s, found %s",
+                10,
+                listing_id,
+                3,
+            )
+            return None
+
+    class SilentMetric:
+        id = "silent_metric"
+        required_concepts = ()
+        uses_market_data = False
+
+        def compute(
+            self, listing_id: int, repo: RegionFactsRepository
+        ) -> MetricResult | None:
+            return None
+
+    patch_cli(
+        monkeypatch,
+        "REGISTRY",
+        {
+            GuardedMetric.id: GuardedMetric,
+            SilentMetric.id: SilentMetric,
+        },
+    )
+
+    class _FakeFactsRepository(FinancialFactsRepository):
+        def __init__(self) -> None:
+            pass
+
+        def facts_for_id(self, listing_id: int) -> list[FactRecord]:
+            return []
+
+        def latest_fact(self, listing_id: int, concept: str) -> FactRecord | None:
+            return None
+
+        def facts_for_concept(
+            self,
+            listing_id: int,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
+            return []
+
+        def ticker_currency_by_id(self, listing_id: int) -> str | None:
+            return "USD"
+
+    # The collector only sees warnings while attached to the root logger — the
+    # batch driver (and explain-metric) attach it the same way in production.
+    collector = _MetricWarningCollector()
+    root_logger = logging.getLogger()
+    root_logger.addHandler(collector)
+    try:
+        result = cli._compute_metrics_for_symbol(
+            "AAA.US",
+            LISTING_ID,
+            [GuardedMetric.id, SilentMetric.id],
+            _FakeFactsRepository(),
+            warning_collector=collector,
+        )
+    finally:
+        root_logger.removeHandler(collector)
+
+    attempts_by_id = {attempt.metric_id: attempt for attempt in result.attempts}
+    guarded = attempts_by_id[GuardedMetric.id]
+    assert guarded.status == "failure"
+    assert (
+        guarded.reason_code
+        == "guarded_metric: need <n> FY values for listing_id=<n>, found <n>"
+    )
+    assert (
+        guarded.reason_detail
+        == f"guarded_metric: need 10 FY values for listing_id={LISTING_ID}, found 3"
+    )
+
+    # A guard that emits no warning keeps detail empty rather than inventing one.
+    silent = attempts_by_id[SilentMetric.id]
+    assert silent.status == "failure"
+    assert silent.reason_code == "no warning emitted"
+    assert silent.reason_detail is None
 
 
 def test_suppress_console_metric_warnings_filters_only_metric_noise(

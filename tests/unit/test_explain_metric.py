@@ -108,6 +108,13 @@ def test_explain_shows_missing_concept_and_untemplated_warning(
         f"warning: current_ratio: missing assets/liabilities for listing_id={listing_id}"
         in output
     )
+    # The untemplated first warning is also the attempt's reason_detail, so the
+    # FAILURE block itself names the real inputs (mirrors what compute-metrics
+    # now persists in metric_compute_status.reason_detail).
+    assert (
+        f"reason_detail: current_ratio: missing assets/liabilities for listing_id={listing_id}"
+        in output
+    )
 
 
 def test_explain_flags_stale_inputs(

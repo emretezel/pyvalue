@@ -541,6 +541,13 @@ def _compute_metrics_for_symbol_inner(
             )
             continue
         if result is None:
+            # Snapshot the guard warnings BEFORE emitting the orchestrator's own
+            # generic warning below — otherwise a metric that returned None
+            # silently would get the generic message as its "diagnostic" and the
+            # "no warning emitted" reason could never surface.
+            guard_warnings = (
+                tuple(warning_collector.records) if warning_collector else ()
+            )
             LOGGER.warning(
                 "Metric %s could not be computed for %s", metric_id, symbol_upper
             )
@@ -551,10 +558,10 @@ def _compute_metrics_for_symbol_inner(
                     metric_id=metric_id,
                     attempted_at=attempted_at,
                     reason_code=_format_failure_reason(
-                        warning_collector.records if warning_collector else (),
+                        guard_warnings,
                         symbol_upper,
                     ),
-                    reason_detail=None,
+                    reason_detail=_format_failure_detail(guard_warnings),
                     facts_refreshed_at=facts_refreshed_at,
                     market_snapshot_record=preloaded_market_snapshot_record,
                 )
@@ -1223,6 +1230,20 @@ def _format_failure_reason(records: Sequence[logging.LogRecord], symbol: str) ->
         return msg % transformed_args
     except Exception:
         return record.getMessage()
+
+
+def _format_failure_detail(records: Sequence[logging.LogRecord]) -> Optional[str]:
+    """Return the untemplated first warning for one metric failure, if any.
+
+    The scrubbed template from :func:`_format_failure_reason` stays the stable
+    grouping key (``reason_code``); this fully rendered message keeps the real
+    year/count/date values so a persisted failure row says *which* input
+    tripped the guard instead of ``<n>`` placeholders.
+    """
+
+    if not records:
+        return None
+    return records[0].getMessage()
 
 
 def _metric_failure_reason_from_exception(exc: Exception) -> str:

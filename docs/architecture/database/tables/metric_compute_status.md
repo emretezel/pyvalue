@@ -25,7 +25,7 @@ One row per `(listing_id, metric_id)`.
 | `metric_id` | `TEXT` | no | PK, idx | metric identifier |
 | `status` | `TEXT` | no | idx | `'success'` or `'failure'`, enforced by CHECK |
 | `reason_code` | `TEXT` | yes |  | failure bucket |
-| `reason_detail` | `TEXT` | yes |  | diagnostic detail |
+| `reason_detail` | `TEXT` | yes |  | diagnostic detail: untemplated first warning for guard failures, invariant/exception text for raised failures |
 | `attempted_at` | `TEXT` | no |  | attempt timestamp |
 | `value_as_of` | `TEXT` | yes |  | metric value date when successful |
 | `facts_refreshed_at` | `TEXT` | yes |  | fact freshness context |
@@ -136,6 +136,9 @@ One row per `(listing_id, metric_id)`.
 ## Review Notes
 
 - This table is large relative to its data value. Keep status-survey query paths index-aligned before adding more diagnostic columns.
+- Since 2026-07-05 guard failures populate `reason_detail` (untemplated first
+  warning, ~60–120 bytes per failure row) instead of leaving it NULL — accepted
+  diagnostic-volume growth; no index impact (column was already present).
 - Column audit (2026-07-05, after the diagnostics went read-only): every column
   is load-bearing — `status`/`reason_code`/`reason_detail` feed the status
   survey, screen diagnostics, and explain-metric; `attempted_at` feeds

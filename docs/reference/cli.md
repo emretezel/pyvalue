@@ -365,8 +365,11 @@ Notes:
     compute-metrics)`
   - a large stale or never-attempted bucket means the summary counts are out
     of date — rerun `compute-metrics` before reading the reason mix
-- `reason_code` is the first templated warning of the last failed attempt; use
-  `explain-metric` for a per-symbol live recompute with untemplated warnings
+- `reason_code` is the first templated warning of the last failed attempt;
+  `reason_detail` carries the same first warning **untemplated** (real years,
+  counts, dates) for guard failures, and the invariant/exception text for
+  raised failures — use `explain-metric` for a per-symbol live recompute with
+  every guard warning untemplated
 
 ### `explain-metric`
 
