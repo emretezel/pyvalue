@@ -87,8 +87,9 @@ per metric, after author sign-off.
 
 ## Classification rubric (structural NA causes)
 
-1. **Strict consecutive FY chains** (roic_7y/10y variants, cfo_to_ni_10y_median,
-   ni_loss_years_10y, gm_10y_std, opm_7y_min/10y_std, owner_earnings_cagr_10y):
+1. **Strict consecutive FY chains** (roic_7y/10y variants, ni_loss_years_10y,
+   gm_10y_std, opm_7y_min/10y_std; cfo_to_ni_10y_median and
+   owner_earnings_cagr_10y have since moved to adaptive chains, 2026-07-05):
    one missing fiscal year voids the whole metric. Candidate: tolerate gaps /
    "N of M years".
 2. **Non-positive guards that NA instead of failing the criterion**:
@@ -101,7 +102,8 @@ per metric, after author sign-off.
    (delta_nwc_maint needs 4 consecutive FY of 4 balance-sheet concepts — the most
    fragile dependency in QARP; since the per-year maintenance-NWC change, the FY
    owner-earnings series subtracts each year's own trailing 3-delta value, so
-   the 5y metrics need up to 8 and the 10y metrics up to 13 consecutive FY of
+   the 5y metrics need up to 8, `worst_oe_ev_fy_10y` up to 13, and the adaptive
+   `owner_earnings_cagr_10y` 10–13 (7-point floor ⇔ 10 FY) consecutive FY of
    those concepts).
 4. **Market-data seam**: market_cap / EV metrics need a positive shares fact and
    a positive stored price.
@@ -253,7 +255,7 @@ net_debt_to_ebitda; its NAs are the generic ones.
 |---|---|---|---|---|---|---|
 | altman_z | DVG | ~~NVDA, PLTR, TSLA~~ fixed | 29.9% (post-recompute) | **data-gap (operational)** — hash-gated normalizer starved RetainedEarnings | raw payloads carry retainedEarnings; 2026-06-17 cohort has 0 facts | ~~--force normalization sweep + universe compute~~ done 2026-07-04; concept-map version in normalization state |
 | cfo_to_ni_10y_median | DVG, QARP | AMD, C, PLTR, TSLA, 000660.KO | 87.6% (35,043 of 53,514 failures = loss-year guard) | **calc-modification** | TSLA: single 2019 loss year voids a 20-FY history; contradicted DVG's own loss tolerance (DVG now gates on `ni_loss_year_share <= 0.40` instead of `ni_loss_years_10y <= 4`, 2026-07-05) | ~~median over positive-NI years with a minimum count (e.g. >=6 of 10); loss years excluded, not fatal~~ done 2026-07-05: adaptive consecutive joint chain capped at 10y, loss years skipped, >=6 positive-NI points, freshness/as_of on the chain anchor |
-| owner_earnings_cagr_10y | QARP | NVDA, AMD, C, TSLA, 000660.KO (+PLTR short history) | 85.3% | **calc-modification / possibly replace** | "non-positive endpoint averages": CAGR from a <=0 base is undefined; capex-heavy early years push owner earnings negative | consider regression-slope owner-earnings growth (defined for any sign pattern) or 3y-avg windows that skip non-positive bases |
+| owner_earnings_cagr_10y | QARP | NVDA, AMD, C, TSLA, 000660.KO (+PLTR short history) | 85.3% | **calc-modification** | "non-positive endpoint averages": the guard tripped on any single non-positive endpoint value — AMD's lone FY2016 loss year voided a start window averaging ~+76M — and the strict 10-point chain demanded 13 consecutive FY of NWC concepts vs the screen's own 10y maturity bar | ~~consider regression-slope owner-earnings growth (defined for any sign pattern) or 3y-avg windows that skip non-positive bases~~ done 2026-07-05: adaptive 7–10 point consecutive chain (7-point floor ⇔ 10 FY of fundamentals), exponent 1/(points-3), endpoint guard on the 3y window *averages*; all-negative windows stay NA |
 | sbc_to_fcf | QARP | C.US (SBC line ended FY2023), 000660.KO (annual-only SBC: FY=5, Q=1) | 85.5% | **fallback** | Korean filings report SBC annually; C's provider line stopped | fall back to latest fresh FY SBC as the TTM numerator when 4 quarters are unavailable; document the approximation |
 | oey_ev_norm | QARP | 000660.KO | 72.2% | **fallback** | `CashAndShortTermInvestments` MISSING while `CashAndCashEquivalents` (14.9T KRW) + `ShortTermInvestments` (20.2T KRW) both present; EV resolver has NO fallbacks, `invested_capital.py` does | mirror invested-capital fallbacks in `resolve_enterprise_value_denominator` (cash = CCE+STI; debt = TotalDebtFromBalanceSheet) |
 | interest_coverage | DVG, QARP | PLTR.US | 59.0% | **calc-modification** | InterestExpense line ended FY2023 ($3.5M) while EBIT fresh ($1.4B) — effectively debt-free firms can never pass a `>=` bar | when EBIT>0 and interest is absent-or-<=0 with fresh EBIT, emit a documented cap value (e.g. 100x) instead of None |

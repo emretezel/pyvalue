@@ -18,6 +18,7 @@ from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     MAX_FY_FACT_AGE_DAYS,
     is_recent_fact,
+    latest_consecutive_year_chain,
     require_metric_amount_money,
     require_metric_money,
     require_metric_ticker_currency,
@@ -70,7 +71,13 @@ DA_MULTIPLIER = 1.1
 FIVE_YEAR_POINTS = 5
 TEN_YEAR_POINTS = 10
 AVG_WINDOW = 3
-OE_CAGR_YEARS = 7
+# Floor for the adaptive CAGR chain. Seven owner-earnings points span ten
+# consecutive fiscal years of fundamentals (each OE year consumes a trailing
+# 3-delta NWC chain, so the three oldest fundamentals years can never yield a
+# point) — the same ten-year maturity bar the strict-10y screen gates impose,
+# instead of silently demanding thirteen years. Listings younger than ten
+# fiscal years stay not-computable by design.
+MIN_CAGR_POINTS = 7
 
 
 @dataclass(frozen=True)
@@ -269,41 +276,51 @@ class OwnerEarningsEnterpriseCalculator:
         )
         if points is None:
             return None
-        if len(points) < TEN_YEAR_POINTS:
+
+        # Adaptive window, mirroring cfo_to_ni_10y_median / ni_loss_year_share:
+        # anchor at the latest fiscal year and walk back until the first hole,
+        # capped at ten points. Points arrive newest-first, so the first point
+        # seen per year is the newest filing for that year (same duplicate-year
+        # collapse rule as the strict worst-of-10y selector).
+        latest_by_year: dict[int, _FYPoint] = {}
+        for point in points:
+            latest_by_year.setdefault(point.year, point)
+        chain = [
+            point
+            for _, point in latest_consecutive_year_chain(
+                latest_by_year, max_years=TEN_YEAR_POINTS
+            )
+        ]
+        if len(chain) < MIN_CAGR_POINTS:
             LOGGER.warning(
-                "owner_earnings_cagr_10y: need 10 FY owner earnings values "
-                "for listing_id=%s, found %s",
+                "owner_earnings_cagr_10y: need at least %s consecutive FY owner "
+                "earnings values for listing_id=%s, found %s",
+                MIN_CAGR_POINTS,
                 listing_id,
-                len(points),
+                len(chain),
             )
             return None
-
-        # The 1/OE_CAGR_YEARS exponent assumes the ten points span exactly ten
-        # consecutive fiscal years; enforce the same strict chain as the
-        # worst-of-10y metric instead of silently accepting gaps.
-        latest_ten = self._latest_consecutive_ten(
-            points, context="owner_earnings_cagr_10y", listing_id=listing_id
-        )
-        if latest_ten is None:
-            return None
-        if not self._is_recent_as_of(
-            latest_ten[0].as_of, max_age_days=MAX_FY_FACT_AGE_DAYS
-        ):
+        if not self._is_recent_as_of(chain[0].as_of, max_age_days=MAX_FY_FACT_AGE_DAYS):
             LOGGER.warning(
                 "owner_earnings_cagr_10y: latest FY (%s) too old for listing_id=%s",
-                latest_ten[0].as_of,
+                chain[0].as_of,
                 listing_id,
             )
             return None
 
-        ordered = list(reversed(latest_ten))
+        ordered = list(reversed(chain))
         start_monies = [point.money for point in ordered[:AVG_WINDOW]]
         end_monies = [point.money for point in ordered[-AVG_WINDOW:]]
+        start_avg = sum_money(start_monies) / AVG_WINDOW
+        end_avg = sum_money(end_monies) / AVG_WINDOW
         # A compound growth rate has no real solution from a non-positive base,
-        # so both 3-year endpoint windows must be strictly positive; anything
-        # else is reported as not-computable rather than a convention-based
-        # number.
-        if any(money.amount <= 0 for money in start_monies + end_monies):
+        # and the 3-year endpoint *averages* are the base and end of this
+        # compound — a single loss year inside an otherwise positive window
+        # must not void the metric (loss-year exclusion belongs to the explicit
+        # screen criteria ni_loss_years_10y / ni_loss_year_share). Windows whose
+        # average is non-positive stay not-computable rather than becoming a
+        # convention-based number.
+        if start_avg.amount <= 0 or end_avg.amount <= 0:
             LOGGER.warning(
                 "owner_earnings_cagr_10y: non-positive endpoint averages "
                 "for listing_id=%s",
@@ -311,11 +328,13 @@ class OwnerEarningsEnterpriseCalculator:
             )
             return None
 
-        start_avg = sum_money(start_monies) / AVG_WINDOW
-        end_avg = sum_money(end_monies) / AVG_WINDOW
+        # Each 3-year endpoint average is centred one year inside its end of
+        # the chain, so the compound spans len(chain) - AVG_WINDOW years —
+        # 1/7 for a full ten-point chain, mirroring the Graham EPS CAGR.
+        cagr_years = len(chain) - AVG_WINDOW
         return OwnerEarningsGrowthSnapshot(
-            value=(end_avg / start_avg) ** (1.0 / OE_CAGR_YEARS) - 1.0,
-            as_of=latest_ten[0].as_of,
+            value=(end_avg / start_avg) ** (1.0 / cagr_years) - 1.0,
+            as_of=chain[0].as_of,
         )
 
     def _latest_consecutive_ten(
@@ -327,10 +346,12 @@ class OwnerEarningsEnterpriseCalculator:
     ) -> Optional[list[_FYPoint]]:
         """Select the latest point per year across a strict 10-consecutive-year window.
 
-        Both 10-year consumers (worst-of and CAGR) rely on the window spanning
-        exactly ten fiscal years, so a gap or duplicate-year collapse must fail
-        the selection rather than silently shift the window. Callers guarantee
-        ``points`` is non-empty.
+        The worst-of-10y consumer relies on the window spanning exactly ten
+        fiscal years — a worst-of-decade over fewer observations would
+        understate downside — so a gap or duplicate-year collapse must fail
+        the selection rather than silently shift the window. (The CAGR sibling
+        uses the adaptive ``latest_consecutive_year_chain`` instead.) Callers
+        guarantee ``points`` is non-empty.
         """
         latest_by_year: dict[int, _FYPoint] = {}
         for point in points:

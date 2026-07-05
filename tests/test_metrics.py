@@ -14163,11 +14163,12 @@ def test_owner_earnings_cagr_10y_metric_uses_three_year_endpoint_averages() -> N
     )
 
 
-def test_owner_earnings_cagr_10y_metric_requires_strict_consecutive_years() -> None:
+def test_owner_earnings_cagr_10y_metric_truncates_at_gap() -> None:
     # Eleven FY points exist but one year inside the latest-ten window is
-    # missing; the 1/7-year exponent assumes ten consecutive fiscal years, so
-    # the metric must refuse the gapped series instead of sliding older points
-    # into the window.
+    # missing; the adaptive chain must truncate at the hole and compound over
+    # the seven-point consecutive suffix with the exponent adapted to the
+    # shorter span (1/(7-3)), instead of refusing the series outright or
+    # sliding older points across the gap.
     metric = OwnerEarningsCAGR10YMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
@@ -14186,6 +14187,138 @@ def test_owner_earnings_cagr_10y_metric_requires_strict_consecutive_years() -> N
         da_values=[100.0] * len(years),
         capex_values=[90.0] * len(years),
         nwc_values=[300.0 - 20.0 * index for index in range(15)],
+    )
+
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
+    assert result is not None
+    # Uniform +20 NWC deltas make every year's maintenance NWC 20, so each
+    # suffix point is 0.8 * EBIT + 10 - 20; the suffix runs from 198 (oldest,
+    # EBIT 260) down to 150 (newest, EBIT 200).
+    start_avg = (198.0 + 190.0 + 182.0) / 3.0
+    end_avg = (166.0 + 158.0 + 150.0) / 3.0
+    assert round(result.value, 8) == round(
+        (end_avg / start_avg) ** (1.0 / 4.0) - 1.0, 8
+    )
+
+
+def test_owner_earnings_cagr_10y_metric_requires_seven_consecutive_points() -> None:
+    # A gap after only six consecutive points leaves the chain below the
+    # MIN_CAGR_POINTS floor (six owner-earnings points span nine fiscal years
+    # of fundamentals, under the ten-year maturity bar), so the metric must
+    # stay not-computable.
+    metric = OwnerEarningsCAGR10YMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    years = [latest_year - offset for offset in range(6)] + [
+        latest_year - offset for offset in range(7, 12)
+    ]
+    ebit_values = [200.0 + 10.0 * index for index in range(len(years))]
+
+    records_by_concept = _build_oe_ev_fy_input_records(
+        symbol=symbol,
+        latest_year=latest_year,
+        years=years,
+        ebit_values=ebit_values,
+        tax_values=[value * 0.2 for value in ebit_values],
+        pretax_values=ebit_values,
+        da_values=[100.0] * len(years),
+        capex_values=[90.0] * len(years),
+        nwc_values=[300.0 - 20.0 * index for index in range(15)],
+    )
+
+    assert metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept)) is None
+
+
+def test_owner_earnings_cagr_10y_metric_computes_from_ten_fiscal_years() -> None:
+    # Ten fiscal years of fundamentals is a common depth on thin-history
+    # exchanges. The three oldest years can never carry a trailing 3-delta
+    # maintenance-NWC chain, so exactly seven owner-earnings points remain —
+    # the adaptive floor — and the metric must compute over them instead of
+    # effectively demanding thirteen years of data.
+    metric = OwnerEarningsCAGR10YMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    years = [latest_year - offset for offset in range(10)]
+    records_by_concept = _build_oe_ev_fy_input_records(
+        symbol=symbol,
+        latest_year=latest_year,
+        years=years,
+        ebit_values=[
+            530.0,
+            500.0,
+            470.0,
+            440.0,
+            410.0,
+            380.0,
+            350.0,
+            320.0,
+            290.0,
+            260.0,
+        ],
+        tax_values=[106.0, 100.0, 94.0, 88.0, 82.0, 76.0, 70.0, 64.0, 58.0, 52.0],
+        pretax_values=[
+            530.0,
+            500.0,
+            470.0,
+            440.0,
+            410.0,
+            380.0,
+            350.0,
+            320.0,
+            290.0,
+            260.0,
+        ],
+        da_values=[100.0] * 10,
+        capex_values=[90.0] * 10,
+        nwc_values=[300.0 - 20.0 * index for index in range(10)],
+    )
+
+    result = metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept))
+    assert result is not None
+    # Only the seven newest FYs carry a maintenance NWC value (uniform 20), so
+    # the chain holds the points 0.8 * EBIT + 10 - 20 for EBIT 350..530.
+    start_avg = (270.0 + 294.0 + 318.0) / 3.0
+    end_avg = (366.0 + 390.0 + 414.0) / 3.0
+    assert round(result.value, 8) == round(
+        (end_avg / start_avg) ** (1.0 / 4.0) - 1.0, 8
+    )
+    assert result.as_of == f"{latest_year}-09-30"
+
+
+def test_owner_earnings_cagr_10y_metric_refuses_non_positive_start_average() -> None:
+    # Operating losses across the whole start window leave a non-positive
+    # 3-year average base; a compound growth rate has no real solution there,
+    # so the metric must stay not-computable (a genuine turnaround, not a
+    # single bad year inside an otherwise positive window).
+    metric = OwnerEarningsCAGR10YMetric()
+    symbol = "AAPL.US"
+    latest_year = date.today().year - 1
+    years = [latest_year - offset for offset in range(10)]
+    ebit_values = [
+        530.0,
+        500.0,
+        470.0,
+        440.0,
+        410.0,
+        380.0,
+        350.0,
+        -320.0,
+        -290.0,
+        -260.0,
+    ]
+
+    records_by_concept = _build_oe_ev_fy_input_records(
+        symbol=symbol,
+        latest_year=latest_year,
+        years=years,
+        ebit_values=ebit_values,
+        # Loss years have pretax <= 0, so their per-year rate is invalid and
+        # the latest valid FY rate (0.2) applies to them as well.
+        tax_values=[value * 0.2 for value in ebit_values],
+        pretax_values=ebit_values,
+        da_values=[100.0] * 10,
+        capex_values=[90.0] * 10,
+        nwc_values=[300.0 - 20.0 * index for index in range(13)],
     )
 
     assert metric.compute(LISTING_ID, _OwnerEarningsRepo(records_by_concept)) is None
