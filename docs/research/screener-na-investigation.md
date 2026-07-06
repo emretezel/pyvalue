@@ -417,6 +417,36 @@ recompute: ~915 listings keep the cap, ~1,190 flip 100x → NA. The
 net-cash-evidence variant was rejected again: gross-levered-but-net-cash
 issuers can have genuinely low coverage, so only gross-debt evidence is safe.
 
+### 2026-07-06 — interest_coverage FY (annual) fallback
+
+The evidence gate above sends levered issuers with no fresh *quarterly*
+interest line to NA. But 218 of them carry a fresh *annual* `InterestExpense`
+row the metric never reads (the ratio path only consumes `Q1`..`Q4` rows;
+FY rows are excluded from `resolve_ttm_window`). Many issuers — Korean
+conglomerates especially — file operating income quarterly but interest only
+annually. Hanwha 000880.KO is the archetype: FY EBIT ₩4.15T / FY interest
+₩1.57T = 2.64x, a real gate-relevant figure discarded as NA.
+
+**Author decision (implemented 2026-07-06):** in the material/absent-debt
+branches only, fall back to the same-fiscal-year annual ratio
+`FY EBIT / FY InterestExpense` (480-day window, direct interest preferred over
+the derived net-interest fallback). Confined to those branches deliberately:
+annual interest is trustworthy when debt is material (Hanwha's 2.64x implies a
+sane ~2.6% rate on its ₩60T debt) but noise-dominated when debt is small —
+Aperam SA (APMSF.US) shows a contaminated 0.25x against 1x-EBIT debt (an
+implied ~400% rate), so a debt-evidenced cap-keeper must never be re-scored on
+that line. The change is strictly additive (NA → measured; never cap → fail);
+of the 218, ~90 measure ≥6x, 69 in 1.5–6x, 59 <1.5x (already NA-excluded, now
+honest in reports) — and the material-debt names remain independently policed
+by `net_debt_to_ebitda`.
+
+**Deferred (separate sign-off):** ~3,645 *annual-only* filers (no quarterly
+EBIT at all — 3,491 currently NA) could be measured by a standalone FY path
+not gated on quarterly EBIT. With no debt-evidence cap to protect it, that
+path needs a plausibility guard (reject when `FY interest / debt` implies an
+absurd rate) to reject the Aperam-class contamination at scale. Not
+implemented; queue item 19.
+
 ### Follow-up queue (each its own commit, author sign-off per item)
 
 1. **Done 2026-07-04/05.** `normalize-fundamentals --force` sweep of the
@@ -467,3 +497,10 @@ issuers can have genuinely low coverage, so only gross-debt evidence is safe.
     `Liabilities` fallback) — closes the A3 misfire (see the 2026-07-06
     audit section). Effects materialize at the next full-universe
     compute-metrics run.
+18. **Done 2026-07-06.** metrics: interest_coverage annual (FY) fallback
+    ratio in the material/absent-debt branches — rescues ~218 levered
+    issuers that report interest only annually (see the 2026-07-06 FY
+    fallback section). Effects materialize at the next full-universe
+    compute-metrics run.
+19. metrics: interest_coverage standalone FY path for annual-only filers
+    (~3,491 NA), needs an implied-rate plausibility guard — deferred.

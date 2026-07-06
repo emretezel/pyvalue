@@ -77,8 +77,9 @@ criteria:
   # Debt-free issuers with no measurable interest expense score the
   # documented 100x cap (docs/reference/metrics.md) and pass this gate --
   # but only when fresh balance-sheet evidence bounds debt at <= 1x TTM
-  # EBIT. Material debt without a measurable interest line (a provider data
-  # gap) stays NA and fails the gate.
+  # EBIT. A levered issuer that reports interest only annually gets a
+  # measured annual ratio instead (which may fail this gate); one with
+  # material debt and no interest line at all stays NA and fails.
   - name: "Interest coverage >= 6x (debt-service capacity)"
     left:
       metric: interest_coverage

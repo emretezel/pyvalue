@@ -24,6 +24,9 @@ from pyvalue.metrics.ttm import (
     resolve_ttm_window,
 )
 from pyvalue.metrics.utils import (
+    MAX_FY_FACT_AGE_DAYS,
+    filter_unique_fy,
+    is_recent_fact,
     require_metric_money,
     require_metric_ticker_currency,
     sum_money,
@@ -129,7 +132,13 @@ class InterestCoverageMetric:
         # not rescued.
         ebit_ttm = self._fresh_positive_ttm_ebit(listing_id, ebit_records, repo)
         if ebit_ttm is not None:
-            return self._debt_free_cap(listing_id, ebit_ttm, repo)
+            return self._debt_free_cap(
+                listing_id,
+                ebit_ttm,
+                repo,
+                ebit_records=ebit_records,
+                interest_records=merged_interest,
+            )
 
         # Genuine NA: emit the precise legacy warning so the persisted
         # failure reason stays diagnostic (missing interest facts entirely,
@@ -189,16 +198,25 @@ class InterestCoverageMetric:
         listing_id: int,
         ebit: _FreshTTMEbit,
         repo: RegionFactsRepository,
+        *,
+        ebit_records: Sequence[MonetaryFact],
+        interest_records: Sequence[MonetaryFact],
     ) -> Optional[MetricResult]:
         """Emit the cap only with evidence that debt is immaterial.
 
-        A missing interest line on a fresh, profitable business is ambiguous:
-        genuinely debt-free issuers stop reporting it, but provider feeds
-        also drop it for levered issuers. Fresh balance-sheet debt evidence
-        (upper bound; total liabilities as last resort) at or under
-        ``CAP_MAX_DEBT_TO_EBIT`` x TTM EBIT proves the cap safe; material or
-        absent evidence returns ``None`` (an honest NA) with a diagnostic
-        warning -- missing data must not manufacture a gate pass.
+        A missing quarterly interest line on a fresh, profitable business is
+        ambiguous: genuinely debt-free issuers stop reporting it, but provider
+        feeds also drop it for levered issuers. Fresh balance-sheet debt
+        evidence (upper bound; total liabilities as last resort) at or under
+        ``CAP_MAX_DEBT_TO_EBIT`` x TTM EBIT proves the cap safe. When the
+        evidence instead shows *material* debt (or is absent) the cap is
+        unsafe -- but the issuer may still report interest annually even when
+        it drops the quarterly line, so before conceding NA we try the annual
+        ratio (:meth:`_fy_coverage`). The debt-evidence gate stays in front of
+        that fallback deliberately: annual interest is noise-dominated when
+        debt is small (contaminated with FX/financial charges, it can imply an
+        absurd triple-digit rate), so a proven-immaterial-debt issuer must
+        keep its cap and never be re-scored on that unreliable line.
         """
 
         threshold = ebit.money * CAP_MAX_DEBT_TO_EBIT
@@ -208,6 +226,9 @@ class InterestCoverageMetric:
         )
         if evidence is not None:
             if evidence.money > threshold:
+                fy = self._fy_coverage(listing_id, ebit, ebit_records, interest_records)
+                if fy is not None:
+                    return fy
                 LOGGER.warning(
                     "interest_coverage: material debt without measurable interest "
                     "expense for listing_id=%s -- provider data gap, not debt-free "
@@ -227,6 +248,9 @@ class InterestCoverageMetric:
         )
         if liabilities is not None:
             if liabilities.money > threshold:
+                fy = self._fy_coverage(listing_id, ebit, ebit_records, interest_records)
+                if fy is not None:
+                    return fy
                 LOGGER.warning(
                     "interest_coverage: no fresh debt facts and material total "
                     "liabilities for listing_id=%s -- debt is unknown, not zero "
@@ -241,12 +265,81 @@ class InterestCoverageMetric:
             # positive evidence even when every debt field is null.
             return self._emit_cap(listing_id, ebit)
 
+        fy = self._fy_coverage(listing_id, ebit, ebit_records, interest_records)
+        if fy is not None:
+            return fy
         LOGGER.warning(
             "interest_coverage: no fresh balance-sheet evidence to support the "
             "debt-free cap for listing_id=%s",
             listing_id,
         )
         return None
+
+    def _fy_coverage(
+        self,
+        listing_id: int,
+        ebit: _FreshTTMEbit,
+        ebit_records: Sequence[MonetaryFact],
+        interest_records: Sequence[MonetaryFact],
+    ) -> Optional[MetricResult]:
+        """Measure coverage from the annual (FY) statements, or ``None``.
+
+        The quarterly ratio path only consumes ``Q1``..``Q4`` interest rows, so
+        an issuer that reports operating income quarterly but interest only in
+        its annual filing (common for e.g. Korean conglomerates) never forms a
+        quarterly window and lands here. When a fresh FY interest line exists we
+        can still measure honestly: ``FY EBIT / FY InterestExpense`` for the
+        *same* fiscal year -- a coherent annual ratio, never a mix of a
+        trailing-twelve-month EBIT with an annual interest figure.
+
+        Only ever turns what would have been NA into a measured ratio (the
+        caller gates this behind material/absent debt evidence), so it cannot
+        downgrade a debt-free cap. Returns ``None`` when there is no fresh
+        FY interest, no aligned FY EBIT for that year, or the annual EBIT is
+        non-positive (a levered loss-maker stays NA) -- letting the caller emit
+        its branch-specific NA reason.
+        """
+
+        # Direct rows precede derived fallback rows in ``interest_records``, and
+        # ``filter_unique_fy`` keeps the first fact per end_date, so a direct FY
+        # interest line always wins its year over the derived one.
+        fy_interest = filter_unique_fy(interest_records)
+        fy_ebit = filter_unique_fy(ebit_records)
+
+        # The ratio needs both legs on the same fiscal year; take the latest
+        # such year whose FY interest is fresh within the annual window.
+        aligned_years = [
+            end_date
+            for end_date, record in fy_interest.items()
+            if end_date in fy_ebit
+            and is_recent_fact(record, max_age_days=MAX_FY_FACT_AGE_DAYS)
+        ]
+        if not aligned_years:
+            return None
+        as_of = max(aligned_years)
+
+        interest_record = fy_interest[as_of]
+        interest_money = self._ttm_money(
+            [interest_record], interest_record.concept, ebit.target_currency, listing_id
+        )
+        if interest_money.amount <= 0:
+            # A non-positive annual interest line is "no measurable interest",
+            # not a coverage reading -- defer to the caller's cap/NA decision.
+            return None
+
+        ebit_money = self._ttm_money(
+            [fy_ebit[as_of]], EBIT_CONCEPTS[0], ebit.target_currency, listing_id
+        )
+        if ebit_money.amount <= 0:
+            return None
+
+        ratio = ebit_money / interest_money
+        return MetricResult.ratio(
+            listing_id=listing_id,
+            metric_id=self.id,
+            value=ratio,
+            as_of=as_of,
+        )
 
     def _emit_cap(self, listing_id: int, ebit: _FreshTTMEbit) -> MetricResult:
         # INFO text kept byte-identical: the console-noise regression pins it.
