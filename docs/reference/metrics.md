@@ -14,6 +14,19 @@ two concepts per period (EBITDA's D&A, gross profit's COGS, interest
 coverage's interest expense), the companion row must exist for every window
 period on the same end date.
 
+**D&A sign guard (applies to every EBITDA and owner-earnings metric below).**
+Depreciation & amortization is always a positive add-back, but EODHD sometimes
+reports it negative — sign errors on operating companies (e.g. Argan/AGX FY2026
+`depreciationAndAmortization = -4,743,000` beside a positive `+1,912,000`
+cash-flow figure) and net accretion-of-discount mislabels or scale blow-ups on
+financials (e.g. SuRo/SSSS cash-flow depreciation `-87,445,149,000,000`). A
+negative D&A fact is treated as *unavailable* — dropped at read time, never
+`abs()`-ed (which would explode the scale-error rows). The primary
+(`DepreciationDepletionAndAmortization`) → cash-flow (`DepreciationFromCashFlow`)
+fallback then engages, and a name with no usable D&A degrades to NA
+(EBITDA-family) or a zero add-back (owner earnings) rather than a corrupted
+number. Implemented once in `src/pyvalue/metrics/depreciation.py`.
+
 Columns:
 - English Descriptive Name of the Metric
 - `pyvalue` key

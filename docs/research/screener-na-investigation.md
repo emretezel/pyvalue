@@ -491,6 +491,36 @@ materialize at the next full-universe compute-metrics run. `interest_coverage`
 is the deliberate exception (queue item 19): its FY handling stays behind the
 debt-evidence cap, so it does not use the shared opt-in.
 
+### 2026-07-06 — negative D&A sign guard (EODHD data-quality)
+
+D&A must be a positive add-back, but EODHD stores it negative for a minority of
+rows and we stored those verbatim (the normalizer has no D&A derivation). Audit
+of `financial_facts` (~104M rows): income-statement D&A
+(`DepreciationDepletionAndAmortization`) is ~2.4% negative on FY rows / ~5% on
+quarters; cash-flow D&A (`DepreciationFromCashFlow`) spikes to 8.9% negative on
+Q3 (a YTD-differencing artifact in EODHD's own quarterly derivation). Taking the
+latest FY per listing, **846 / 51,115 (1.66%)** have a negative current D&A,
+**57% of them Financial Services** (9.6% of financials), then Real Estate; real
+operating sectors are <1%.
+
+Two root causes, both EODHD-side (web-verified as of 2026-07-06): sign errors on
+operating companies — Argan (AGX) FY2026 raw `depreciationAndAmortization =
+-4,743,000` while the real figure is positive (+$6.17M third-party) and its own
+cash-flow depreciation is `+1,912,000`; and net accretion-of-discount mislabels
+plus scale blow-ups on financials/BDCs/insurers/REITs (SuRo/SSSS raw cash-flow
+depreciation `-87,445,149,000,000`).
+
+Every EBITDA (`net_debt_to_ebitda`, `ev_to_ebitda`, `fcf_to_ebitda`) and
+owner-earnings metric added the raw signed value, understating the result; the
+metric-level primary→cash-flow fallback fired only on *missing*, not *negative*,
+so a positive cash-flow figure sat unused beside a negative primary. Fix: a
+concept-aware read guard (`src/pyvalue/metrics/depreciation.py`,
+`guarded_monetary_facts`) drops negative D&A at read time — not `abs()` (which
+would explode the scale-error rows) — so the fallback engages and a name with no
+usable D&A degrades to NA (EBITDA-family) or a zero add-back (owner earnings).
+Capex/net-income reads pass through untouched. Effects on persisted state
+materialize at the next full-universe compute-metrics run.
+
 ### Follow-up queue (each its own commit, author sign-off per item)
 
 1. **Done 2026-07-04/05.** `normalize-fundamentals --force` sweep of the

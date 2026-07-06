@@ -18,6 +18,11 @@ from pyvalue.metrics.balance_sheet import (
     resolve_total_debt,
 )
 from pyvalue.metrics.base import MetricResult
+from pyvalue.metrics.depreciation import (
+    DA_FALLBACK_CONCEPTS,
+    DA_PRIMARY_CONCEPTS,
+    guarded_monetary_facts,
+)
 from pyvalue.metrics.ttm import Cadence, paired_records, resolve_ttm_window
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
@@ -30,8 +35,6 @@ from pyvalue.money import Money
 
 LOGGER = logging.getLogger(__name__)
 EBIT_CONCEPTS = ("OperatingIncomeLoss",)
-DA_PRIMARY_CONCEPTS = ("DepreciationDepletionAndAmortization",)
-DA_FALLBACK_CONCEPTS = ("DepreciationFromCashFlow",)
 
 
 @dataclass
@@ -141,8 +144,8 @@ class NetDebtToEBITDAMetric:
         pairs = paired_records(
             window,
             [
-                *repo.monetary_facts_for_concept(listing_id, DA_PRIMARY_CONCEPTS[0]),
-                *repo.monetary_facts_for_concept(listing_id, DA_FALLBACK_CONCEPTS[0]),
+                *guarded_monetary_facts(repo, listing_id, DA_PRIMARY_CONCEPTS[0]),
+                *guarded_monetary_facts(repo, listing_id, DA_FALLBACK_CONCEPTS[0]),
             ],
         )
         if pairs is None:

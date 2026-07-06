@@ -13,6 +13,14 @@ import logging
 
 from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
+from pyvalue.metrics.depreciation import (
+    DA_FALLBACK_CONCEPT,
+    DA_FALLBACK_CONCEPTS,
+    DA_MULTIPLIER,
+    DA_PRIMARY_CONCEPT,
+    DA_PRIMARY_CONCEPTS,
+    guarded_monetary_facts,
+)
 from pyvalue.metrics.nwc import DeltaNWCMaintMetric
 from pyvalue.metrics.ttm import resolve_ttm_window
 from pyvalue.metrics.utils import (
@@ -31,16 +39,11 @@ FIVE_YEAR_CONTEXT = "oe_equity_5y_avg"
 
 NI_PRIMARY_CONCEPT = "NetIncomeLoss"
 NI_FALLBACK_CONCEPT = "NetIncomeLossAvailableToCommonStockholdersBasic"
-DA_PRIMARY_CONCEPT = "DepreciationDepletionAndAmortization"
-DA_FALLBACK_CONCEPT = "DepreciationFromCashFlow"
 CAPEX_CONCEPT = "CapitalExpenditures"
 
 NI_CONCEPTS = (NI_PRIMARY_CONCEPT, NI_FALLBACK_CONCEPT)
-DA_PRIMARY_CONCEPTS = (DA_PRIMARY_CONCEPT,)
-DA_FALLBACK_CONCEPTS = (DA_FALLBACK_CONCEPT,)
 CAPEX_CONCEPTS = (CAPEX_CONCEPT,)
 FY_PERIODS = {"FY"}
-DA_MULTIPLIER = 1.1
 
 NWC_MAINT_REQUIRED_CONCEPTS = (
     "AssetsCurrent",
@@ -285,7 +288,7 @@ class OwnerEarningsEquityCalculator:
     ) -> Optional[_AmountResult]:
         for concept in concepts:
             resolution = resolve_ttm_window(
-                repo.monetary_facts_for_concept(listing_id, concept)
+                guarded_monetary_facts(repo, listing_id, concept)
             )
             window = resolution.window
             if window is None:
@@ -458,9 +461,7 @@ class OwnerEarningsEquityCalculator:
         context: str,
         absolute: bool = False,
     ) -> dict[str, _AmountResult]:
-        records = repo.monetary_facts_for_concept(
-            listing_id, concept, fiscal_period="FY"
-        )
+        records = guarded_monetary_facts(repo, listing_id, concept, fiscal_period="FY")
         ordered = self._filter_periods(records, FY_PERIODS)
         mapped: dict[str, _AmountResult] = {}
         for record in ordered:

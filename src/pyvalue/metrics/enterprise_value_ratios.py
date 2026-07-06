@@ -12,6 +12,11 @@ import logging
 
 from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
+from pyvalue.metrics.depreciation import (
+    DA_FALLBACK_CONCEPT,
+    DA_PRIMARY_CONCEPT,
+    guarded_monetary_facts,
+)
 from pyvalue.metrics.enterprise_value import (
     EV_REQUIRED_CONCEPTS,
     resolve_enterprise_value_denominator,
@@ -32,8 +37,6 @@ LOGGER = logging.getLogger(__name__)
 EBIT_CONCEPT = "OperatingIncomeLoss"
 OPERATING_CASH_FLOW_CONCEPT = "NetCashProvidedByUsedInOperatingActivities"
 CAPEX_CONCEPT = "CapitalExpenditures"
-DA_PRIMARY_CONCEPT = "DepreciationDepletionAndAmortization"
-DA_FALLBACK_CONCEPT = "DepreciationFromCashFlow"
 REVENUE_CONCEPT = "Revenues"
 
 EBIT_REQUIRED_CONCEPTS = tuple(dict.fromkeys((EBIT_CONCEPT,) + EV_REQUIRED_CONCEPTS))
@@ -145,8 +148,8 @@ class EnterpriseValueRatioCalculator:
         pairs = paired_records(
             window,
             [
-                *repo.monetary_facts_for_concept(listing_id, DA_PRIMARY_CONCEPT),
-                *repo.monetary_facts_for_concept(listing_id, DA_FALLBACK_CONCEPT),
+                *guarded_monetary_facts(repo, listing_id, DA_PRIMARY_CONCEPT),
+                *guarded_monetary_facts(repo, listing_id, DA_FALLBACK_CONCEPT),
             ],
         )
         if pairs is None:

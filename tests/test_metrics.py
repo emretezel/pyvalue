@@ -6235,7 +6235,53 @@ def test_mcapex_fy_metric_falls_back_to_da_when_capex_missing() -> None:
     assert round(result.value, 6) == 55.0
 
 
-def test_mcapex_fy_metric_uses_absolute_values() -> None:
+def test_mcapex_fy_metric_uses_absolute_capex() -> None:
+    # Capex is stored as a negative cash outflow, so the proxy works in
+    # magnitudes: |capex| = 120, capped at 1.1 x D&A = 1.1 x 80 = 88 -> 88.
+    # D&A is a normal positive add-back here (the negative-D&A case is dropped by
+    # the sign guard -- see test_mcapex_fy_metric_drops_negative_da).
+    metric = MCapexFYMetric()
+    recent = (date.today() - timedelta(days=20)).isoformat()
+
+    class DummyRepo(_USDTickerCurrencyRepo):
+        def facts_for_concept(
+            self,
+            listing_id: int,
+            concept: str,
+            fiscal_period: str | None = None,
+            limit: int | None = None,
+        ) -> list[FactRecord]:
+            if concept == "CapitalExpenditures":
+                return [
+                    fact(
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=recent,
+                        value=-120.0,
+                        currency="USD",
+                    )
+                ]
+            if concept == "DepreciationDepletionAndAmortization":
+                return [
+                    fact(
+                        concept=concept,
+                        fiscal_period="FY",
+                        end_date=recent,
+                        value=80.0,
+                        currency="USD",
+                    )
+                ]
+            return []
+
+    result = metric.compute(LISTING_ID, DummyRepo())
+    assert result is not None
+    assert result.value == 88.0
+
+
+def test_mcapex_fy_metric_drops_negative_da() -> None:
+    # A negative D&A is an EODHD data-quality artifact: the sign guard drops it,
+    # so the proxy falls back to capex-only (|capex| = 120) rather than abs()-ing
+    # the broken value into min(120, 1.1 x 80) = 88.
     metric = MCapexFYMetric()
     recent = (date.today() - timedelta(days=20)).isoformat()
 
@@ -6271,7 +6317,7 @@ def test_mcapex_fy_metric_uses_absolute_values() -> None:
 
     result = metric.compute(LISTING_ID, DummyRepo())
     assert result is not None
-    assert result.value == 88.0
+    assert result.value == 120.0
 
 
 def test_mcapex_ttm_metric_uses_quarterly_formula() -> None:

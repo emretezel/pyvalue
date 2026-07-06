@@ -13,6 +13,14 @@ import logging
 
 from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
+from pyvalue.metrics.depreciation import (
+    DA_FALLBACK_CONCEPT,
+    DA_FALLBACK_CONCEPTS,
+    DA_MULTIPLIER,
+    DA_PRIMARY_CONCEPT,
+    DA_PRIMARY_CONCEPTS,
+    guarded_monetary_facts,
+)
 from pyvalue.metrics.nwc import DeltaNWCMaintMetric
 from pyvalue.metrics.ttm import resolve_ttm_window
 from pyvalue.metrics.utils import (
@@ -30,15 +38,11 @@ LOGGER = logging.getLogger(__name__)
 EBIT_CONCEPT = "OperatingIncomeLoss"
 TAX_EXPENSE_CONCEPT = "IncomeTaxExpense"
 PRETAX_INCOME_CONCEPT = "IncomeBeforeIncomeTaxes"
-DA_PRIMARY_CONCEPT = "DepreciationDepletionAndAmortization"
-DA_FALLBACK_CONCEPT = "DepreciationFromCashFlow"
 CAPEX_CONCEPT = "CapitalExpenditures"
 
 EBIT_CONCEPTS = (EBIT_CONCEPT,)
 TAX_EXPENSE_CONCEPTS = (TAX_EXPENSE_CONCEPT,)
 PRETAX_INCOME_CONCEPTS = (PRETAX_INCOME_CONCEPT,)
-DA_PRIMARY_CONCEPTS = (DA_PRIMARY_CONCEPT,)
-DA_FALLBACK_CONCEPTS = (DA_FALLBACK_CONCEPT,)
 CAPEX_CONCEPTS = (CAPEX_CONCEPT,)
 
 NWC_MAINT_REQUIRED_CONCEPTS = (
@@ -65,7 +69,6 @@ REQUIRED_CONCEPTS = tuple(
 FY_PERIODS = {"FY"}
 DEFAULT_TAX_RATE = 0.21
 PRETAX_MIN_ABS = 1.0
-DA_MULTIPLIER = 1.1
 FIVE_YEAR_POINTS = 5
 TEN_YEAR_POINTS = 10
 AVG_WINDOW = 3
@@ -666,7 +669,7 @@ class OwnerEarningsEnterpriseCalculator:
     ) -> Optional[_AmountResult]:
         for concept in concepts:
             resolution = resolve_ttm_window(
-                repo.monetary_facts_for_concept(listing_id, concept)
+                guarded_monetary_facts(repo, listing_id, concept)
             )
             window = resolution.window
             if window is None:
@@ -837,9 +840,7 @@ class OwnerEarningsEnterpriseCalculator:
         context: str,
         absolute: bool = False,
     ) -> dict[str, _AmountResult]:
-        records = repo.monetary_facts_for_concept(
-            listing_id, concept, fiscal_period="FY"
-        )
+        records = guarded_monetary_facts(repo, listing_id, concept, fiscal_period="FY")
         ordered = self._filter_periods(records, FY_PERIODS)
         mapped: dict[str, _AmountResult] = {}
         for record in ordered:

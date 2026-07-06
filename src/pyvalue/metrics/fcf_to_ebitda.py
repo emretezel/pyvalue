@@ -17,10 +17,9 @@ import logging
 
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
+from pyvalue.metrics.depreciation import DA_FALLBACK_CONCEPT, DA_PRIMARY_CONCEPT
 from pyvalue.metrics.enterprise_value_ratios import (
     CAPEX_CONCEPT,
-    DA_FALLBACK_CONCEPT,
-    DA_PRIMARY_CONCEPT,
     EBIT_CONCEPT,
     OPERATING_CASH_FLOW_CONCEPT,
     EnterpriseValueRatioCalculator,
