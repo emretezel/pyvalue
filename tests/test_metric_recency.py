@@ -85,13 +85,16 @@ def test_ttm_metric_requires_recent_quarters(tmp_path: Path) -> None:
     repo.initialize_schema()
     today = date.today()
     records = []
-    for idx, months_ago in enumerate((1, 3, 4, 5), start=1):
+    # Quarter-spaced (~90d) end dates: the shared TTM window resolver refuses
+    # histories whose spacing forms neither a quarterly nor a semi-annual
+    # cadence, so the freshness fixture must look like a real quarterly filer.
+    for idx, days_ago in enumerate((30, 120, 210, 300), start=1):
         records.append(
             FactRecord(
                 symbol="AAPL.US",
                 concept="EarningsPerShare",
                 fiscal_period=f"Q{idx}",
-                end_date=(today - timedelta(days=months_ago * 30)).isoformat(),
+                end_date=(today - timedelta(days=days_ago)).isoformat(),
                 unit_kind="monetary",
                 currency="USD",
                 value=float(idx),

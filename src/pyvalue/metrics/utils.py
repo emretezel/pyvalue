@@ -193,36 +193,6 @@ def latest_consecutive_year_chain(
     return chain
 
 
-def ttm_sum(records: Sequence[FactRecord], periods: int = 4) -> float | None:
-    """Return the sum of the latest ``periods`` records if enough quarterly data exists."""
-
-    quarterly = _filter_quarterly(records)
-    if len(quarterly) < periods:
-        return None
-    return sum(item.value for item in quarterly[:periods])
-
-
-def latest_quarterly_records(
-    repo_fetcher: Callable[[int, str], Sequence[FactT]],
-    listing_id: int,
-    concepts: Sequence[str],
-    periods: int = 4,
-    max_age_days: int = MAX_FACT_AGE_DAYS,
-) -> List[FactT]:
-    """Fetch recent quarterly records for the first concept with enough data."""
-
-    for concept in concepts:
-        records = repo_fetcher(listing_id, concept)
-        quarterly = _filter_quarterly(records)
-        if not quarterly:
-            continue
-        if not is_recent_fact(quarterly[0], max_age_days=max_age_days):
-            continue
-        if len(quarterly) >= periods:
-            return quarterly[:periods]
-    return []
-
-
 def resolve_metric_ticker_currency(
     listing_id: int,
     *objects: object,
@@ -588,25 +558,9 @@ def market_cap_money(
     return MarketCap(money=price_money * share_fact.value, as_of=snapshot.as_of)
 
 
-def _filter_quarterly(records: Iterable[FactT]) -> List[FactT]:
-    filtered: List[FactT] = []
-    seen_end_dates: set[str] = set()
-    for record in records:
-        period = (record.fiscal_period or "").upper()
-        if period not in {"Q1", "Q2", "Q3", "Q4"}:
-            continue
-        if record.end_date in seen_end_dates:
-            continue
-        filtered.append(record)
-        seen_end_dates.add(record.end_date)
-    return filtered
-
-
 __all__ = [
     "filter_unique_fy",
     "latest_consecutive_year_chain",
-    "ttm_sum",
-    "latest_quarterly_records",
     "is_recent_fact",
     "MAX_FY_FACT_AGE_DAYS",
     "MAX_FACT_AGE_DAYS",

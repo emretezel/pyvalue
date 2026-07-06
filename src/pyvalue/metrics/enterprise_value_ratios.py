@@ -6,7 +6,7 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Optional, Sequence
+from typing import Optional
 
 import logging
 
@@ -16,9 +16,8 @@ from pyvalue.metrics.enterprise_value import (
     EV_REQUIRED_CONCEPTS,
     resolve_enterprise_value_denominator,
 )
+from pyvalue.metrics.ttm import paired_records, resolve_ttm_window
 from pyvalue.metrics.utils import (
-    MAX_FACT_AGE_DAYS,
-    is_recent_fact,
     require_metric_money,
     require_metric_ticker_currency,
     sum_money,
@@ -27,8 +26,6 @@ from pyvalue.money import Money
 from pyvalue.persistence.storage import MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
-
-QUARTERLY_PERIODS = {"Q1", "Q2", "Q3", "Q4"}
 
 EBIT_CONCEPT = "OperatingIncomeLoss"
 OPERATING_CASH_FLOW_CONCEPT = "NetCashProvidedByUsedInOperatingActivities"
@@ -111,57 +108,50 @@ class EnterpriseValueRatioCalculator:
     def compute_ttm_ebitda(
         self, listing_id: int, repo: RegionFactsRepository, *, context: str
     ) -> Optional[TTMResult]:
-        ebit_records = self._filter_quarterly(
+        resolution = resolve_ttm_window(
             repo.monetary_facts_for_concept(listing_id, EBIT_CONCEPT)
         )
-        if len(ebit_records) < 4:
+        window = resolution.window
+        if window is None:
             LOGGER.warning(
-                "%s: need 4 quarterly EBIT records for listing_id=%s",
+                "%s: %s (concept=%s, listing_id=%s)",
                 context,
-                listing_id,
-            )
-            return None
-        if not is_recent_fact(ebit_records[0], max_age_days=MAX_FACT_AGE_DAYS):
-            LOGGER.warning(
-                "%s: latest EBIT (%s) too old for listing_id=%s",
-                context,
-                ebit_records[0].end_date,
+                resolution.failure,
+                EBIT_CONCEPT,
                 listing_id,
             )
             return None
 
-        da_primary = self._quarterly_map(
-            repo.monetary_facts_for_concept(listing_id, DA_PRIMARY_CONCEPT)
+        # Primary D&A rows are listed before the fallback rows: paired_records
+        # keeps the first candidate per end_date, so the primary concept wins
+        # a quarter and the fallback only fills its holes -- the same
+        # per-quarter primary-else-fallback rule as before the window refactor.
+        pairs = paired_records(
+            window,
+            [
+                *repo.monetary_facts_for_concept(listing_id, DA_PRIMARY_CONCEPT),
+                *repo.monetary_facts_for_concept(listing_id, DA_FALLBACK_CONCEPT),
+            ],
         )
-        da_fallback = self._quarterly_map(
-            repo.monetary_facts_for_concept(listing_id, DA_FALLBACK_CONCEPT)
-        )
+        if pairs is None:
+            LOGGER.warning(
+                "%s: missing D&A for a TTM window quarter (listing_id=%s)",
+                context,
+                listing_id,
+            )
+            return None
 
         target_currency = require_metric_ticker_currency(
             listing_id, repo, metric_id=context
         )
-        quarter_totals: list[Money] = []
-        for ebit_record in ebit_records[:4]:
-            da_record = da_primary.get(ebit_record.end_date) or da_fallback.get(
-                ebit_record.end_date
-            )
-            if da_record is None:
-                LOGGER.warning(
-                    "%s: missing D&A for quarter %s (listing_id=%s)",
-                    context,
-                    ebit_record.end_date,
-                    listing_id,
-                )
-                return None
-
-            quarter_totals.append(
-                self._money(ebit_record, target_currency, listing_id, context)
-                + self._money(da_record, target_currency, listing_id, context)
-            )
-
+        quarter_totals = [
+            self._money(ebit_record, target_currency, listing_id, context)
+            + self._money(da_record, target_currency, listing_id, context)
+            for ebit_record, da_record in pairs
+        ]
         return TTMResult(
             money=sum_money(quarter_totals),
-            as_of=ebit_records[0].end_date,
+            as_of=window.as_of,
         )
 
     def compute_ttm_revenue(
@@ -179,24 +169,16 @@ class EnterpriseValueRatioCalculator:
         *,
         context: str,
     ) -> Optional[TTMResult]:
-        quarterly = self._filter_quarterly(
+        resolution = resolve_ttm_window(
             repo.monetary_facts_for_concept(listing_id, concept)
         )
-        if len(quarterly) < 4:
+        window = resolution.window
+        if window is None:
             LOGGER.warning(
-                "%s: need 4 quarterly %s records for listing_id=%s, found %s",
+                "%s: %s (concept=%s, listing_id=%s)",
                 context,
+                resolution.failure,
                 concept,
-                listing_id,
-                len(quarterly),
-            )
-            return None
-        if not is_recent_fact(quarterly[0], max_age_days=MAX_FACT_AGE_DAYS):
-            LOGGER.warning(
-                "%s: latest %s (%s) too old for listing_id=%s",
-                context,
-                concept,
-                quarterly[0].end_date,
                 listing_id,
             )
             return None
@@ -206,31 +188,12 @@ class EnterpriseValueRatioCalculator:
         )
         monies = [
             self._money(record, target_currency, listing_id, context)
-            for record in quarterly[:4]
+            for record in window.records
         ]
         return TTMResult(
             money=sum_money(monies),
-            as_of=quarterly[0].end_date,
+            as_of=window.as_of,
         )
-
-    def _filter_quarterly(self, records: Iterable[MonetaryFact]) -> list[MonetaryFact]:
-        filtered: list[MonetaryFact] = []
-        seen_end_dates: set[str] = set()
-        for record in records:
-            period = (record.fiscal_period or "").upper()
-            if period not in QUARTERLY_PERIODS:
-                continue
-            if record.end_date in seen_end_dates:
-                continue
-            filtered.append(record)
-            seen_end_dates.add(record.end_date)
-        filtered.sort(key=lambda record: record.end_date, reverse=True)
-        return filtered
-
-    def _quarterly_map(
-        self, records: Sequence[MonetaryFact]
-    ) -> dict[str, MonetaryFact]:
-        return {record.end_date: record for record in self._filter_quarterly(records)}
 
     def _money(
         self, fact: MonetaryFact, target_currency: str, listing_id: int, context: str

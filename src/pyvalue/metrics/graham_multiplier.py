@@ -13,9 +13,9 @@ import logging
 from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.marketdata.base import PriceData
 from pyvalue.metrics.base import MetricResult
+from pyvalue.metrics.ttm import TTMWindow, resolve_ttm_window
 from pyvalue.metrics.utils import (
     is_recent_fact,
-    latest_quarterly_records,
     require_metric_amount_money,
     require_metric_money,
     require_metric_ticker_currency,
@@ -130,8 +130,8 @@ class GrahamMultiplierMetric:
     def _ttm_eps(
         self, listing_id: int, repo: RegionFactsRepository, target_currency: str
     ) -> Optional[tuple[Money, str]]:
-        eps_records = self._latest_quarters(listing_id, repo)
-        if len(eps_records) >= 4:
+        window = self._resolve_eps_window(listing_id, repo)
+        if window is not None:
             ttm = sum_money(
                 [
                     require_metric_money(
@@ -142,10 +142,10 @@ class GrahamMultiplierMetric:
                         input_name="EarningsPerShare",
                         as_of=record.end_date,
                     )
-                    for record in eps_records[:4]
+                    for record in window.records
                 ]
             )
-            return ttm, eps_records[0].end_date
+            return ttm, window.as_of
 
         fy_record = self._latest_fy_eps(listing_id, repo)
         if fy_record is None or not is_recent_fact(fy_record):
@@ -160,12 +160,24 @@ class GrahamMultiplierMetric:
         )
         return money, fy_record.end_date
 
-    def _latest_quarters(
+    def _resolve_eps_window(
         self, listing_id: int, repo: RegionFactsRepository
-    ) -> list[MonetaryFact]:
-        return latest_quarterly_records(
-            repo.monetary_facts_for_concept, listing_id, EPS_CONCEPTS, periods=4
-        )
+    ) -> Optional[TTMWindow[MonetaryFact]]:
+        """Return the first EPS concept's trailing-twelve-month window, or None.
+
+        Keeps the legacy concept-fallback iteration. The failure reason is not
+        threaded further because every failure funnels into the same FY-EPS
+        fallback in ``_ttm_eps``; ``compute`` logs the metric-level miss only
+        when both paths fail, exactly as before the window refactor.
+        """
+
+        for concept in EPS_CONCEPTS:
+            resolution = resolve_ttm_window(
+                repo.monetary_facts_for_concept(listing_id, concept)
+            )
+            if resolution.window is not None:
+                return resolution.window
+        return None
 
     def _latest_fy_eps(
         self, listing_id: int, repo: RegionFactsRepository

@@ -6,15 +6,14 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import Optional
 
 import logging
 
-from pyvalue.facts import MonetaryFact, RegionFactsRepository
+from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
+from pyvalue.metrics.ttm import resolve_ttm_window
 from pyvalue.metrics.utils import (
-    MAX_FACT_AGE_DAYS,
-    is_recent_fact,
     require_metric_money,
     require_metric_ticker_currency,
     sum_money,
@@ -27,8 +26,6 @@ STOCK_BASED_COMPENSATION_CONCEPT = "StockBasedCompensation"
 REVENUE_CONCEPT = "Revenues"
 OPERATING_CASH_FLOW_CONCEPT = "NetCashProvidedByUsedInOperatingActivities"
 CAPEX_CONCEPT = "CapitalExpenditures"
-
-QUARTERLY_PERIODS = {"Q1", "Q2", "Q3", "Q4"}
 
 REQUIRED_CONCEPTS = (
     STOCK_BASED_COMPENSATION_CONCEPT,
@@ -115,23 +112,16 @@ class SBCLoadCalculator:
         *,
         context: str,
     ) -> Optional[_MoneyResult]:
-        records = repo.monetary_facts_for_concept(listing_id, concept)
-        quarterly = self._filter_quarterly(records)
-        if len(quarterly) < 4:
+        resolution = resolve_ttm_window(
+            repo.monetary_facts_for_concept(listing_id, concept)
+        )
+        window = resolution.window
+        if window is None:
             LOGGER.warning(
-                "%s: need 4 quarterly %s records for listing_id=%s, found %s",
+                "%s: %s (concept=%s, listing_id=%s)",
                 context,
+                resolution.failure,
                 concept,
-                listing_id,
-                len(quarterly),
-            )
-            return None
-        if not is_recent_fact(quarterly[0], max_age_days=MAX_FACT_AGE_DAYS):
-            LOGGER.warning(
-                "%s: latest %s (%s) too old for listing_id=%s",
-                context,
-                concept,
-                quarterly[0].end_date,
                 listing_id,
             )
             return None
@@ -141,7 +131,7 @@ class SBCLoadCalculator:
             repo,
             metric_id=context,
             input_name=concept,
-            as_of=quarterly[0].end_date,
+            as_of=window.as_of,
         )
         monies = [
             require_metric_money(
@@ -152,20 +142,9 @@ class SBCLoadCalculator:
                 input_name=concept,
                 as_of=record.end_date,
             )
-            for record in quarterly[:4]
+            for record in window.records
         ]
-        return _MoneyResult(money=sum_money(monies), as_of=quarterly[0].end_date)
-
-    def _filter_quarterly(self, records: Iterable[MonetaryFact]) -> list[MonetaryFact]:
-        filtered: list[MonetaryFact] = []
-        seen_end_dates: set[str] = set()
-        for record in records:
-            period = (record.fiscal_period or "").upper()
-            if period not in QUARTERLY_PERIODS or record.end_date in seen_end_dates:
-                continue
-            filtered.append(record)
-            seen_end_dates.add(record.end_date)
-        return filtered
+        return _MoneyResult(money=sum_money(monies), as_of=window.as_of)
 
 
 @dataclass

@@ -6,17 +6,16 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import Optional
 
 import logging
 
-from pyvalue.facts import MonetaryFact, RegionFactsRepository
+from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.share_count_change import ShareCountChangeCalculator
+from pyvalue.metrics.ttm import resolve_ttm_window
 from pyvalue.metrics.utils import (
-    MAX_FACT_AGE_DAYS,
     SHARE_COUNT_CONCEPTS,
-    is_recent_fact,
     market_cap_money,
     require_metric_money,
     require_metric_ticker_currency,
@@ -31,7 +30,6 @@ SALE_PURCHASE_CONCEPT = "SalePurchaseOfStock"
 ISSUANCE_CAPITAL_STOCK_CONCEPT = "IssuanceOfCapitalStock"
 SHARE_COUNT_CONCEPT = "CommonStockSharesOutstanding"
 
-QUARTERLY_PERIODS = {"Q1", "Q2", "Q3", "Q4"}
 FALLBACK_YEARS = 1
 
 REQUIRED_CONCEPTS = tuple(
@@ -124,23 +122,16 @@ class NetBuybackYieldMetric:
         repo: RegionFactsRepository,
         concept: str,
     ) -> Optional[_MoneyResult]:
-        records = repo.monetary_facts_for_concept(listing_id, concept)
-        quarterly = self._filter_quarterly(records)
-        if len(quarterly) < 4:
+        resolution = resolve_ttm_window(
+            repo.monetary_facts_for_concept(listing_id, concept)
+        )
+        window = resolution.window
+        if window is None:
             LOGGER.warning(
-                "%s: need 4 quarterly %s records for listing_id=%s, found %s",
+                "%s: %s (concept=%s, listing_id=%s)",
                 self.id,
+                resolution.failure,
                 concept,
-                listing_id,
-                len(quarterly),
-            )
-            return None
-        if not is_recent_fact(quarterly[0], max_age_days=MAX_FACT_AGE_DAYS):
-            LOGGER.warning(
-                "%s: latest %s (%s) too old for listing_id=%s",
-                self.id,
-                concept,
-                quarterly[0].end_date,
                 listing_id,
             )
             return None
@@ -150,7 +141,7 @@ class NetBuybackYieldMetric:
             repo,
             metric_id=self.id,
             input_name="ShareRepurchases",
-            as_of=quarterly[0].end_date,
+            as_of=window.as_of,
         )
         total = sum_money(
             [
@@ -162,23 +153,10 @@ class NetBuybackYieldMetric:
                     input_name="ShareRepurchases",
                     as_of=record.end_date,
                 )
-                for record in quarterly[:4]
+                for record in window.records
             ]
         )
-        return _MoneyResult(money=total, as_of=quarterly[0].end_date)
-
-    def _filter_quarterly(self, records: Iterable[MonetaryFact]) -> list[MonetaryFact]:
-        filtered: list[MonetaryFact] = []
-        seen_end_dates: set[str] = set()
-        for record in records:
-            period = (record.fiscal_period or "").upper()
-            if period not in QUARTERLY_PERIODS:
-                continue
-            if record.end_date in seen_end_dates:
-                continue
-            filtered.append(record)
-            seen_end_dates.add(record.end_date)
-        return filtered
+        return _MoneyResult(money=total, as_of=window.as_of)
 
 
 __all__ = ["NetBuybackYieldMetric"]

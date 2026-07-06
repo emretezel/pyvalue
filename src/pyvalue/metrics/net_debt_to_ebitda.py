@@ -6,12 +6,13 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Optional
 
 import logging
 
 from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
+from pyvalue.metrics.ttm import paired_records, resolve_ttm_window
 from pyvalue.metrics.utils import (
     is_recent_fact,
     require_metric_money,
@@ -21,8 +22,6 @@ from pyvalue.metrics.utils import (
 from pyvalue.money import Money
 
 LOGGER = logging.getLogger(__name__)
-
-QUARTERLY_PERIODS = {"Q1", "Q2", "Q3", "Q4"}
 EBIT_CONCEPTS = ("OperatingIncomeLoss",)
 DA_PRIMARY_CONCEPTS = ("DepreciationDepletionAndAmortization",)
 DA_FALLBACK_CONCEPTS = ("DepreciationFromCashFlow",)
@@ -98,43 +97,39 @@ class NetDebtToEBITDAMetric:
         repo: RegionFactsRepository,
         target_currency: str,
     ) -> Optional[_MoneyResult]:
-        ebit_records = self._filter_quarterly(
+        resolution = resolve_ttm_window(
             repo.monetary_facts_for_concept(listing_id, EBIT_CONCEPTS[0])
         )
-        if len(ebit_records) < 4:
+        window = resolution.window
+        if window is None:
             LOGGER.warning(
-                "net_debt_to_ebitda: need 4 quarterly EBIT records for listing_id=%s",
-                listing_id,
-            )
-            return None
-        if not is_recent_fact(ebit_records[0]):
-            LOGGER.warning(
-                "net_debt_to_ebitda: latest EBIT (%s) too old for listing_id=%s",
-                ebit_records[0].end_date,
+                "net_debt_to_ebitda: %s (concept=%s, listing_id=%s)",
+                resolution.failure,
+                EBIT_CONCEPTS[0],
                 listing_id,
             )
             return None
 
-        da_primary = self._quarterly_map(
-            repo.monetary_facts_for_concept(listing_id, DA_PRIMARY_CONCEPTS[0])
+        # Primary D&A rows precede the fallback rows: paired_records keeps the
+        # first candidate per end_date, so the primary concept wins a quarter
+        # and the fallback only fills its holes -- the same per-quarter
+        # primary-else-fallback rule as before the window refactor.
+        pairs = paired_records(
+            window,
+            [
+                *repo.monetary_facts_for_concept(listing_id, DA_PRIMARY_CONCEPTS[0]),
+                *repo.monetary_facts_for_concept(listing_id, DA_FALLBACK_CONCEPTS[0]),
+            ],
         )
-        da_fallback = self._quarterly_map(
-            repo.monetary_facts_for_concept(listing_id, DA_FALLBACK_CONCEPTS[0])
-        )
+        if pairs is None:
+            LOGGER.warning(
+                "net_debt_to_ebitda: missing D&A for a TTM window quarter (listing_id=%s)",
+                listing_id,
+            )
+            return None
 
         quarter_totals: list[Money] = []
-        for ebit_record in ebit_records[:4]:
-            da_record = da_primary.get(ebit_record.end_date) or da_fallback.get(
-                ebit_record.end_date
-            )
-            if da_record is None:
-                LOGGER.warning(
-                    "net_debt_to_ebitda: missing D&A for quarter %s (listing_id=%s)",
-                    ebit_record.end_date,
-                    listing_id,
-                )
-                return None
-
+        for ebit_record, da_record in pairs:
             ebit_money = self._money(
                 ebit_record, EBIT_CONCEPTS[0], target_currency, listing_id
             )
@@ -143,9 +138,7 @@ class NetDebtToEBITDAMetric:
             )
             quarter_totals.append(ebit_money + da_money)
 
-        return _MoneyResult(
-            money=sum_money(quarter_totals), as_of=ebit_records[0].end_date
-        )
+        return _MoneyResult(money=sum_money(quarter_totals), as_of=window.as_of)
 
     def _compute_net_debt(
         self,
@@ -217,23 +210,6 @@ class NetDebtToEBITDAMetric:
             )
             as_of_candidates.append(short_term_investments.end_date)
         return _MoneyResult(money=cash_money, as_of=max(as_of_candidates))
-
-    def _filter_quarterly(self, records: Sequence[MonetaryFact]) -> list[MonetaryFact]:
-        filtered: list[MonetaryFact] = []
-        seen_end_dates: set[str] = set()
-        for record in records:
-            period = (record.fiscal_period or "").upper()
-            if period not in QUARTERLY_PERIODS or record.end_date in seen_end_dates:
-                continue
-            filtered.append(record)
-            seen_end_dates.add(record.end_date)
-        filtered.sort(key=lambda record: record.end_date, reverse=True)
-        return filtered
-
-    def _quarterly_map(
-        self, records: Sequence[MonetaryFact]
-    ) -> dict[str, MonetaryFact]:
-        return {record.end_date: record for record in self._filter_quarterly(records)}
 
     def _latest_recent_fact(
         self,

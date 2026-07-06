@@ -12,6 +12,7 @@ import logging
 
 from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
+from pyvalue.metrics.ttm import resolve_ttm_window
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     is_recent_fact,
@@ -131,33 +132,26 @@ class AccrualsRatioCalculator:
             listing_id, repo, metric_id=context
         )
         for concept in concepts:
-            records = repo.monetary_facts_for_concept(listing_id, concept)
-            quarterly = self._filter_periods(records, QUARTERLY_PERIODS)
-            if len(quarterly) < 4:
+            resolution = resolve_ttm_window(
+                repo.monetary_facts_for_concept(listing_id, concept)
+            )
+            window = resolution.window
+            if window is None:
                 LOGGER.warning(
-                    "%s: need 4 quarterly %s records for listing_id=%s, found %s",
+                    "%s: %s (concept=%s, listing_id=%s)",
                     context,
+                    resolution.failure,
                     concept,
-                    listing_id,
-                    len(quarterly),
-                )
-                continue
-            if not is_recent_fact(quarterly[0], max_age_days=MAX_FACT_AGE_DAYS):
-                LOGGER.warning(
-                    "%s: latest %s (%s) too old for listing_id=%s",
-                    context,
-                    concept,
-                    quarterly[0].end_date,
                     listing_id,
                 )
                 continue
             monies = [
                 self._money(record, target_currency, listing_id, context)
-                for record in quarterly[:4]
+                for record in window.records
             ]
             return _AmountResult(
                 money=sum_money(monies),
-                as_of=quarterly[0].end_date,
+                as_of=window.as_of,
             )
         return None
 

@@ -13,10 +13,9 @@ import logging
 
 from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
+from pyvalue.metrics.ttm import resolve_ttm_window
 from pyvalue.metrics.utils import (
-    MAX_FACT_AGE_DAYS,
     MAX_FY_FACT_AGE_DAYS,
-    is_recent_fact,
     require_metric_money,
     require_metric_ticker_currency,
     sum_money,
@@ -32,7 +31,6 @@ CAPEX_CONCEPTS = (CAPEX_CONCEPT,)
 DA_PRIMARY_CONCEPTS = (DA_PRIMARY_CONCEPT,)
 DA_FALLBACK_CONCEPTS = (DA_FALLBACK_CONCEPT,)
 ALL_CONCEPTS = CAPEX_CONCEPTS + DA_PRIMARY_CONCEPTS + DA_FALLBACK_CONCEPTS
-QUARTERLY_PERIODS = {"Q1", "Q2", "Q3", "Q4"}
 FY_PERIODS = {"FY"}
 DA_MULTIPLIER = 1.1
 
@@ -76,31 +74,24 @@ class _MCapexBase:
         target_currency: str,
     ) -> Optional[_MoneyResult]:
         for concept in concepts:
-            records = repo.monetary_facts_for_concept(listing_id, concept)
-            quarterly = self._filter_periods(records, QUARTERLY_PERIODS)
-            if len(quarterly) < 4:
+            resolution = resolve_ttm_window(
+                repo.monetary_facts_for_concept(listing_id, concept)
+            )
+            window = resolution.window
+            if window is None:
                 LOGGER.warning(
-                    "%s: need 4 quarterly %s records for listing_id=%s, found %s",
+                    "%s: %s (concept=%s, listing_id=%s)",
                     context,
+                    resolution.failure,
                     concept,
-                    listing_id,
-                    len(quarterly),
-                )
-                continue
-            if not is_recent_fact(quarterly[0], max_age_days=MAX_FACT_AGE_DAYS):
-                LOGGER.warning(
-                    "%s: latest %s (%s) too old for listing_id=%s",
-                    context,
-                    concept,
-                    quarterly[0].end_date,
                     listing_id,
                 )
                 continue
             monies = [
                 self._money(record, target_currency, listing_id, context)
-                for record in quarterly[:4]
+                for record in window.records
             ]
-            return _MoneyResult(money=sum_money(monies), as_of=quarterly[0].end_date)
+            return _MoneyResult(money=sum_money(monies), as_of=window.as_of)
         return None
 
     def _build_fy_points(
@@ -163,17 +154,22 @@ class _MCapexBase:
         records = repo.monetary_facts_for_concept(
             listing_id, concept, fiscal_period="FY"
         )
-        ordered = self._filter_periods(records, FY_PERIODS)
+        ordered = self._filter_fy(records)
         return {record.end_date: record for record in ordered}
 
-    def _filter_periods(
-        self, records: Sequence[MonetaryFact], periods: set[str]
-    ) -> list[MonetaryFact]:
+    def _filter_fy(self, records: Sequence[MonetaryFact]) -> list[MonetaryFact]:
+        """Filter to FY rows, dedupe by end_date (first record per date wins).
+
+        The quarterly TTM path goes through the shared window resolver
+        (``pyvalue.metrics.ttm``); only the FY paths still need local period
+        filtering.
+        """
+
         filtered: list[MonetaryFact] = []
         seen_end_dates: set[str] = set()
         for record in records:
             period = (record.fiscal_period or "").upper()
-            if period not in periods:
+            if period not in FY_PERIODS:
                 continue
             if record.end_date in seen_end_dates:
                 continue

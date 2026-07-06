@@ -14,10 +14,9 @@ import logging
 from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.nwc import DeltaNWCMaintMetric
+from pyvalue.metrics.ttm import resolve_ttm_window
 from pyvalue.metrics.utils import (
-    MAX_FACT_AGE_DAYS,
     MAX_FY_FACT_AGE_DAYS,
-    is_recent_fact,
     latest_consecutive_year_chain,
     require_metric_amount_money,
     require_metric_money,
@@ -63,7 +62,6 @@ REQUIRED_CONCEPTS = tuple(
     )
 )
 
-QUARTERLY_PERIODS = {"Q1", "Q2", "Q3", "Q4"}
 FY_PERIODS = {"FY"}
 DEFAULT_TAX_RATE = 0.21
 PRETAX_MIN_ABS = 1.0
@@ -667,11 +665,18 @@ class OwnerEarningsEnterpriseCalculator:
         absolute: bool = False,
     ) -> Optional[_AmountResult]:
         for concept in concepts:
-            records = repo.monetary_facts_for_concept(listing_id, concept)
-            quarterly = self._filter_periods(records, QUARTERLY_PERIODS)
-            if len(quarterly) < 4:
-                continue
-            if not is_recent_fact(quarterly[0], max_age_days=MAX_FACT_AGE_DAYS):
+            resolution = resolve_ttm_window(
+                repo.monetary_facts_for_concept(listing_id, concept)
+            )
+            window = resolution.window
+            if window is None:
+                LOGGER.warning(
+                    "%s: %s (concept=%s, listing_id=%s)",
+                    context,
+                    resolution.failure,
+                    concept,
+                    listing_id,
+                )
                 continue
             monies = [
                 self._money(
@@ -681,9 +686,9 @@ class OwnerEarningsEnterpriseCalculator:
                     context=context,
                     absolute=absolute,
                 )
-                for record in quarterly[:4]
+                for record in window.records
             ]
-            return _AmountResult(money=sum_money(monies), as_of=quarterly[0].end_date)
+            return _AmountResult(money=sum_money(monies), as_of=window.as_of)
         return None
 
     def _build_fy_amount_map(

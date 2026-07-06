@@ -13,9 +13,9 @@ import logging
 from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.marketdata.base import PriceData
 from pyvalue.metrics.base import MetricResult
+from pyvalue.metrics.ttm import resolve_ttm_window
 from pyvalue.metrics.utils import (
     is_recent_fact,
-    latest_quarterly_records,
     require_metric_amount_money,
     require_metric_money,
     require_metric_ticker_currency,
@@ -76,14 +76,20 @@ class EarningsYieldMetric:
     def _ttm_eps(
         self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[tuple[Money, str]]:
-        quarterly_records = self._latest_quarters(listing_id, repo)
-        if len(quarterly_records) >= 4:
+        # Quarterly-path failures are not logged here: every miss (short,
+        # stale, or cadence-broken history) funnels into the FY fallback
+        # below, and the FY branch already logs the metric-level miss.
+        resolution = resolve_ttm_window(
+            repo.monetary_facts_for_concept(listing_id, EPS_CONCEPTS[0])
+        )
+        window = resolution.window
+        if window is not None:
             target_currency = require_metric_ticker_currency(
                 listing_id,
                 repo,
                 metric_id=self.id,
                 input_name="EarningsPerShare",
-                as_of=quarterly_records[0].end_date,
+                as_of=window.as_of,
             )
             ttm = sum_money(
                 [
@@ -95,10 +101,10 @@ class EarningsYieldMetric:
                         input_name="EarningsPerShare",
                         as_of=record.end_date,
                     )
-                    for record in quarterly_records[:4]
+                    for record in window.records
                 ]
             )
-            return ttm, quarterly_records[0].end_date
+            return ttm, window.as_of
 
         fy_record = self._latest_fy_eps(listing_id, repo)
         if fy_record is None:
@@ -129,13 +135,6 @@ class EarningsYieldMetric:
             as_of=fy_record.end_date,
         )
         return money, fy_record.end_date
-
-    def _latest_quarters(
-        self, listing_id: int, repo: RegionFactsRepository
-    ) -> list[MonetaryFact]:
-        return latest_quarterly_records(
-            repo.monetary_facts_for_concept, listing_id, EPS_CONCEPTS, periods=4
-        )
 
     def _latest_fy_eps(
         self, listing_id: int, repo: RegionFactsRepository

@@ -12,6 +12,7 @@ import logging
 
 from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
+from pyvalue.metrics.ttm import resolve_ttm_window
 from pyvalue.metrics.utils import (
     is_recent_fact,
     require_metric_money,
@@ -32,7 +33,6 @@ REQUIRED_CONCEPTS = tuple(
     + DEBT_COMPONENT_CONCEPTS
     + TOTAL_DEBT_FALLBACK_CONCEPTS
 )
-QUARTERLY_PERIODS = {"Q1", "Q2", "Q3", "Q4"}
 
 
 @dataclass
@@ -185,47 +185,26 @@ class _FCFDebtCalculator:
         target_currency: str,
     ) -> Optional[_MoneyResult]:
         for concept in concepts:
-            records = repo.monetary_facts_for_concept(listing_id, concept)
-            quarterly = self._filter_quarterly(records)
-            if len(quarterly) < 4:
+            resolution = resolve_ttm_window(
+                repo.monetary_facts_for_concept(listing_id, concept)
+            )
+            window = resolution.window
+            if window is None:
                 LOGGER.warning(
-                    "%s: need 4 quarterly %s records for listing_id=%s, found %s",
+                    "%s: %s (concept=%s, listing_id=%s)",
                     metric_id,
+                    resolution.failure,
                     concept,
-                    listing_id,
-                    len(quarterly),
-                )
-                continue
-            if not is_recent_fact(quarterly[0]):
-                LOGGER.warning(
-                    "%s: latest %s (%s) too old for listing_id=%s",
-                    metric_id,
-                    concept,
-                    quarterly[0].end_date,
                     listing_id,
                 )
                 continue
 
             monies = [
                 self._money(record, concept, target_currency, listing_id, metric_id)
-                for record in quarterly[:4]
+                for record in window.records
             ]
-            return _MoneyResult(money=sum_money(monies), as_of=quarterly[0].end_date)
+            return _MoneyResult(money=sum_money(monies), as_of=window.as_of)
         return None
-
-    def _filter_quarterly(self, records: Sequence[MonetaryFact]) -> list[MonetaryFact]:
-        filtered: list[MonetaryFact] = []
-        seen_end_dates: set[str] = set()
-        for record in records:
-            period = (record.fiscal_period or "").upper()
-            if period not in QUARTERLY_PERIODS:
-                continue
-            if record.end_date in seen_end_dates:
-                continue
-            filtered.append(record)
-            seen_end_dates.add(record.end_date)
-        filtered.sort(key=lambda record: record.end_date, reverse=True)
-        return filtered
 
     def _latest_recent_fact(
         self, repo: RegionFactsRepository, listing_id: int, concept: str

@@ -2,6 +2,18 @@
 
 This file is the single source of truth for supported `pyvalue` metrics.
 
+**TTM construction (applies to every "TTM" below).** Trailing-twelve-month
+sums resolve a cadence-aware window over the quarterly-table rows: four
+consecutive quarterly rows (adjacent end-date gaps 70–110 days) or, for
+half-yearly reporters (EODHD stores them as Q2/Q4 rows), two consecutive
+half-year rows (gap 150–220 days). The newest row must be within the 400-day
+freshness window. Histories whose spacing forms neither shape — a reporting
+hole right below the anchor, a cadence transition — yield no TTM value at all
+rather than a sum covering more or less than twelve months. Where a TTM pairs
+two concepts per period (EBITDA's D&A, gross profit's COGS, interest
+coverage's interest expense), the companion row must exist for every window
+period on the same end date.
+
 Columns:
 - English Descriptive Name of the Metric
 - `pyvalue` key

@@ -19,6 +19,7 @@ from pyvalue.metrics.owner_earnings_enterprise import (
     REQUIRED_CONCEPTS as OE_ENTERPRISE_REQUIRED_CONCEPTS,
     OwnerEarningsEnterpriseCalculator,
 )
+from pyvalue.metrics.ttm import resolve_ttm_window
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     MAX_FY_FACT_AGE_DAYS,
@@ -658,24 +659,19 @@ class ProfitabilityReturnsGrowthCalculator:
         target_currency = require_metric_ticker_currency(
             listing_id, repo, metric_id=context
         )
-        revenue_records = self._filter_periods(
-            repo.monetary_facts_for_concept(listing_id, REVENUE_CONCEPT),
-            QUARTERLY_PERIODS,
+        # The *revenue* window anchors the COGS build: each resolved revenue
+        # row (four quarters, or two half-years for a semi-annual reporter)
+        # must find a same-period COGS -- or gross-profit -- companion below.
+        resolution = resolve_ttm_window(
+            repo.monetary_facts_for_concept(listing_id, REVENUE_CONCEPT)
         )
-        if len(revenue_records) < 4:
+        window = resolution.window
+        if window is None:
             LOGGER.warning(
-                "%s: need 4 quarterly revenue records for listing_id=%s, found %s",
+                "%s: %s (concept=%s, listing_id=%s)",
                 context,
-                listing_id,
-                len(revenue_records),
-            )
-            return None
-        latest_revenue = revenue_records[0]
-        if not is_recent_fact(latest_revenue, max_age_days=MAX_FACT_AGE_DAYS):
-            LOGGER.warning(
-                "%s: latest revenue quarter (%s) too old for listing_id=%s",
-                context,
-                latest_revenue.end_date,
+                resolution.failure,
+                REVENUE_CONCEPT,
                 listing_id,
             )
             return None
@@ -689,9 +685,13 @@ class ProfitabilityReturnsGrowthCalculator:
             QUARTERLY_PERIODS,
         )
 
+        # Per-row two-way fallback (COGS on the same (end_date, period) key,
+        # else revenue minus same-key gross profit, else fail) deliberately
+        # stays hand-rolled: ``paired_records`` matches exactly one companion
+        # concept per window row and cannot express the derived-GP branch.
         quarter_cogs: list[Money] = []
         as_of_dates: list[str] = []
-        for revenue_record in revenue_records[:4]:
+        for revenue_record in window.records:
             key = (
                 revenue_record.end_date,
                 (revenue_record.fiscal_period or "").upper(),
@@ -1010,11 +1010,18 @@ class ProfitabilityReturnsGrowthCalculator:
             listing_id, repo, metric_id=context
         )
         for concept in concepts:
-            records = repo.monetary_facts_for_concept(listing_id, concept)
-            quarterly = self._filter_periods(records, QUARTERLY_PERIODS)
-            if len(quarterly) < 4:
-                continue
-            if not is_recent_fact(quarterly[0], max_age_days=MAX_FACT_AGE_DAYS):
+            resolution = resolve_ttm_window(
+                repo.monetary_facts_for_concept(listing_id, concept)
+            )
+            window = resolution.window
+            if window is None:
+                LOGGER.warning(
+                    "%s: %s (concept=%s, listing_id=%s)",
+                    context,
+                    resolution.failure,
+                    concept,
+                    listing_id,
+                )
                 continue
             monies = [
                 self._money(
@@ -1024,9 +1031,9 @@ class ProfitabilityReturnsGrowthCalculator:
                     context=context,
                     absolute=absolute,
                 )
-                for record in quarterly[:4]
+                for record in window.records
             ]
-            return _MoneySnapshot(money=sum_money(monies), as_of=quarterly[0].end_date)
+            return _MoneySnapshot(money=sum_money(monies), as_of=window.as_of)
         return None
 
     def _latest_amount(

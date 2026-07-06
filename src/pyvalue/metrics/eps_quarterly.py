@@ -6,12 +6,17 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import Optional, Sequence
 
 import logging
 
 from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
+from pyvalue.metrics.ttm import (
+    FAILURE_TOO_FEW_QUARTERLY_RECORDS,
+    TTMWindowResolution,
+    resolve_ttm_window,
+)
 from pyvalue.metrics.utils import (
     is_recent_fact,
     require_metric_money,
@@ -35,32 +40,25 @@ class EarningsPerShareTTM:
         listing_id: int,
         repo: RegionFactsRepository,
     ) -> Optional[MetricResult]:
-        latest_records = self._fetch_quarters(listing_id, repo)
-        if len(latest_records) >= 4 and is_recent_fact(latest_records[0]):
-            ttm_value, currency = self._align_records(
-                listing_id, repo, latest_records[:4]
-            )
-            as_of = latest_records[0].end_date
+        resolution = self._resolve_window(listing_id, repo)
+        window = resolution.window
+        if window is not None:
+            # Per-share amounts sum like flows: four quarters -- or two
+            # half-years for a semi-annual reporter -- cover twelve months.
+            ttm_value, currency = self._align_records(listing_id, repo, window.records)
             return MetricResult.per_share(
                 listing_id=listing_id,
                 metric_id=self.id,
                 value=ttm_value,
-                as_of=as_of,
+                as_of=window.as_of,
                 currency=currency,
             )
 
         fy_record = self._latest_fy_eps(listing_id, repo)
         if fy_record is None:
-            if len(latest_records) < 4:
-                LOGGER.warning(
-                    "eps_ttm: missing EPS quarters for listing_id=%s", listing_id
-                )
-            else:
-                LOGGER.warning(
-                    "eps_ttm: latest EPS quarter too old for listing_id=%s (%s)",
-                    listing_id,
-                    latest_records[0].end_date,
-                )
+            LOGGER.warning(
+                "eps_ttm: %s for listing_id=%s", resolution.failure, listing_id
+            )
             return None
         if not is_recent_fact(fy_record):
             LOGGER.warning(
@@ -92,15 +90,28 @@ class EarningsPerShareTTM:
             currency=target_currency,
         )
 
-    def _fetch_quarters(
+    def _resolve_window(
         self, listing_id: int, repo: RegionFactsRepository
-    ) -> list[MonetaryFact]:
+    ) -> TTMWindowResolution[MonetaryFact]:
+        """Resolve the EPS TTM window from the first concept that forms one.
+
+        Preserves the legacy concept-fallback iteration: the first concept
+        whose quarterly history resolves to a trailing-twelve-month window
+        wins. When none does, the last failure is returned so ``compute`` can
+        log why the quarterly path was skipped once the FY fallback also comes
+        up empty. The initial value only covers an empty concept list.
+        """
+
+        resolution: TTMWindowResolution[MonetaryFact] = TTMWindowResolution(
+            window=None, failure=FAILURE_TOO_FEW_QUARTERLY_RECORDS
+        )
         for concept in EPS_CONCEPTS:
-            records = repo.monetary_facts_for_concept(listing_id, concept)
-            quarterly = self._filter_quarterly(records)
-            if len(quarterly) >= 4:
-                return quarterly[:4]
-        return []
+            resolution = resolve_ttm_window(
+                repo.monetary_facts_for_concept(listing_id, concept)
+            )
+            if resolution.window is not None:
+                break
+        return resolution
 
     def _latest_fy_eps(
         self, listing_id: int, repo: RegionFactsRepository
@@ -113,24 +124,11 @@ class EarningsPerShareTTM:
                 return records[0]
         return None
 
-    def _filter_quarterly(self, records: Iterable[MonetaryFact]) -> list[MonetaryFact]:
-        filtered: list[MonetaryFact] = []
-        seen_end_dates: set[str] = set()
-        for record in records:
-            period = (record.fiscal_period or "").upper()
-            if period not in {"Q1", "Q2", "Q3", "Q4"}:
-                continue
-            if record.end_date in seen_end_dates:
-                continue
-            filtered.append(record)
-            seen_end_dates.add(record.end_date)
-        return filtered
-
     def _align_records(
         self,
         listing_id: int,
         repo: RegionFactsRepository,
-        records: list[MonetaryFact],
+        records: Sequence[MonetaryFact],
     ) -> tuple[float, str]:
         target_currency = require_metric_ticker_currency(
             listing_id,

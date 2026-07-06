@@ -1481,6 +1481,9 @@ def test_graham_multiplier_metric() -> None:
             limit: int | None = None,
         ) -> list[FactRecord]:
             if concept == "EarningsPerShare":
+                # Quarter-spaced (~90d) dates: the shared TTM window resolver
+                # refuses gapped histories, so the fixture must look like a
+                # real quarterly filer for the TTM path to stay exercised.
                 return [
                     fact(
                         concept=concept,
@@ -1491,19 +1494,19 @@ def test_graham_multiplier_metric() -> None:
                     fact(
                         concept=concept,
                         fiscal_period="Q3",
-                        end_date="2024-09-30",
+                        end_date=(date.today() - timedelta(days=110)).isoformat(),
                         value=2.0,
                     ),
                     fact(
                         concept=concept,
                         fiscal_period="Q2",
-                        end_date="2024-06-30",
+                        end_date=(date.today() - timedelta(days=200)).isoformat(),
                         value=1.5,
                     ),
                     fact(
                         concept=concept,
                         fiscal_period="Q1",
-                        end_date="2024-03-31",
+                        end_date=(date.today() - timedelta(days=290)).isoformat(),
                         value=1.0,
                     ),
                 ]
@@ -5397,6 +5400,9 @@ def test_graham_multiplier_uses_zero_when_optional_values_missing() -> None:
             limit: int | None = None,
         ) -> list[FactRecord]:
             if concept == "EarningsPerShare":
+                # Quarter-spaced (~90d) dates: the shared TTM window resolver
+                # refuses gapped histories, so the fixture must look like a
+                # real quarterly filer for the TTM path to stay exercised.
                 return [
                     fact(
                         concept=concept,
@@ -5407,19 +5413,19 @@ def test_graham_multiplier_uses_zero_when_optional_values_missing() -> None:
                     fact(
                         concept=concept,
                         fiscal_period="Q3",
-                        end_date="2024-09-30",
+                        end_date=(date.today() - timedelta(days=110)).isoformat(),
                         value=2.0,
                     ),
                     fact(
                         concept=concept,
                         fiscal_period="Q2",
-                        end_date="2024-06-30",
+                        end_date=(date.today() - timedelta(days=200)).isoformat(),
                         value=1.5,
                     ),
                     fact(
                         concept=concept,
                         fiscal_period="Q1",
-                        end_date="2024-03-31",
+                        end_date=(date.today() - timedelta(days=290)).isoformat(),
                         value=1.0,
                     ),
                 ]
@@ -5470,6 +5476,9 @@ def test_earnings_yield_metric() -> None:
             limit: int | None = None,
         ) -> list[FactRecord]:
             if concept == "EarningsPerShare":
+                # Quarter-spaced (~90d) dates: the shared TTM window resolver
+                # refuses gapped histories, so the fixture must look like a
+                # real quarterly filer for the TTM path to stay exercised.
                 return [
                     fact(
                         concept=concept,
@@ -5486,13 +5495,13 @@ def test_earnings_yield_metric() -> None:
                     fact(
                         concept=concept,
                         fiscal_period="Q2",
-                        end_date="2024-06-30",
+                        end_date=(date.today() - timedelta(days=210)).isoformat(),
                         value=1.5,
                     ),
                     fact(
                         concept=concept,
                         fiscal_period="Q1",
-                        end_date="2024-03-31",
+                        end_date=(date.today() - timedelta(days=300)).isoformat(),
                         value=1.0,
                     ),
                 ]
@@ -5763,22 +5772,26 @@ def test_eps_ttm_metric() -> None:
                         end_date=older,
                         value=2.0,
                     ),
+                    # Quarter-spaced (~90d) dates: the shared TTM window
+                    # resolver refuses gapped histories, so the fixture must
+                    # look like a real quarterly filer. The fifth row proves
+                    # the window still stops at four quarters.
                     fact(
                         concept=concept,
                         fiscal_period="Q2",
-                        end_date="2024-06-30",
+                        end_date=(date.today() - timedelta(days=210)).isoformat(),
                         value=1.5,
                     ),
                     fact(
                         concept=concept,
                         fiscal_period="Q1",
-                        end_date="2024-03-31",
+                        end_date=(date.today() - timedelta(days=300)).isoformat(),
                         value=1.0,
                     ),
                     fact(
                         concept=concept,
                         fiscal_period="Q4",
-                        end_date="2023-12-31",
+                        end_date=(date.today() - timedelta(days=390)).isoformat(),
                         value=0.5,
                     ),
                 ]
