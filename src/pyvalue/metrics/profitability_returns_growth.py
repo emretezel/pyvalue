@@ -176,6 +176,7 @@ class ProfitabilityReturnsGrowthCalculator:
             repo,
             REVENUE_CONCEPTS,
             context="gross_margin_ttm",
+            annual_max_age_days=MAX_FY_FACT_AGE_DAYS,
         )
         if revenue is None:
             LOGGER.warning(
@@ -637,7 +638,11 @@ class ProfitabilityReturnsGrowthCalculator:
         context: str,
     ) -> Optional[_MoneySnapshot]:
         revenue = self._compute_ttm_amount(
-            listing_id, repo, REVENUE_CONCEPTS, context=context
+            listing_id,
+            repo,
+            REVENUE_CONCEPTS,
+            context=context,
+            annual_max_age_days=MAX_FY_FACT_AGE_DAYS,
         )
         if revenue is None:
             return None
@@ -660,10 +665,12 @@ class ProfitabilityReturnsGrowthCalculator:
             listing_id, repo, metric_id=context
         )
         # The *revenue* window anchors the COGS build: each resolved revenue
-        # row (four quarters, or two half-years for a semi-annual reporter)
-        # must find a same-period COGS -- or gross-profit -- companion below.
+        # row (four quarters, two half-years for a semi-annual reporter, or one
+        # FY row for an annual-only filer) must find a same-period COGS -- or
+        # gross-profit -- companion below.
         resolution = resolve_ttm_window(
-            repo.monetary_facts_for_concept(listing_id, REVENUE_CONCEPT)
+            repo.monetary_facts_for_concept(listing_id, REVENUE_CONCEPT),
+            annual_max_age_days=MAX_FY_FACT_AGE_DAYS,
         )
         window = resolution.window
         if window is None:
@@ -676,13 +683,20 @@ class ProfitabilityReturnsGrowthCalculator:
             )
             return None
 
+        # The companion COGS/gross-profit rows are keyed on the period set the
+        # window resolved: FY companions for an annual window, quarters
+        # otherwise (the quarterly branch is byte-for-byte the prior behaviour,
+        # so quarterly and semi-annual reporters are unaffected).
+        companion_periods = (
+            FY_PERIODS if window.cadence == "annual" else QUARTERLY_PERIODS
+        )
         cogs_map = self._period_record_map(
             repo.monetary_facts_for_concept(listing_id, COST_OF_REVENUE_CONCEPT),
-            QUARTERLY_PERIODS,
+            companion_periods,
         )
         gross_profit_map = self._period_record_map(
             repo.monetary_facts_for_concept(listing_id, GROSS_PROFIT_CONCEPT),
-            QUARTERLY_PERIODS,
+            companion_periods,
         )
 
         # Per-row two-way fallback (COGS on the same (end_date, period) key,
@@ -1005,13 +1019,18 @@ class ProfitabilityReturnsGrowthCalculator:
         *,
         context: str,
         absolute: bool = False,
+        annual_max_age_days: Optional[int] = None,
     ) -> Optional[_MoneySnapshot]:
+        # This helper is shared by many TTM ratios; the annual cadence is
+        # opt-in (``annual_max_age_days`` set) so only callers reviewed for
+        # annual-only support enable it -- the rest keep quarterly-only windows.
         target_currency = require_metric_ticker_currency(
             listing_id, repo, metric_id=context
         )
         for concept in concepts:
             resolution = resolve_ttm_window(
-                repo.monetary_facts_for_concept(listing_id, concept)
+                repo.monetary_facts_for_concept(listing_id, concept),
+                annual_max_age_days=annual_max_age_days,
             )
             window = resolution.window
             if window is None:

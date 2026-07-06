@@ -26,6 +26,10 @@ from pyvalue.metrics.cash_conversion import CFOToNITTMMetric
 from pyvalue.metrics.enterprise_value_ratios import EVToEBITMetric, EVToSalesMetric
 from pyvalue.metrics.fcf_to_ebitda import FCFToEBITDAMetric
 from pyvalue.metrics.net_debt_to_ebitda import NetDebtToEBITDAMetric
+from pyvalue.metrics.profitability_returns_growth import (
+    GrossMarginTTMMetric,
+    GrossProfitToAssetsTTMMetric,
+)
 from pyvalue.persistence.storage import MarketDataRepository
 
 LISTING_ID = 1
@@ -35,6 +39,12 @@ _TODAY = date.today()
 # under the standard window, fresh under the FY window.
 FRESH_FY = (_TODAY - timedelta(days=180)).isoformat()
 BAND_FY = (_TODAY - timedelta(days=430)).isoformat()
+# Prior-year FY end_dates (one calendar year before the latest), for the
+# two-point average-assets denominator. Subtracting 365 days always lands in
+# the previous calendar year, which is what the same-period prior-year match
+# keys on; only the latest point is freshness-checked, so the prior may be old.
+PRIOR_FRESH_FY = (_TODAY - timedelta(days=180 + 365)).isoformat()
+PRIOR_BAND_FY = (_TODAY - timedelta(days=430 + 365)).isoformat()
 
 
 class _FakeFactsRepo(RegionFactsRepository):
@@ -226,3 +236,53 @@ def test_cfo_to_ni_ttm_measures_an_annual_only_filer() -> None:
     result = CFOToNITTMMetric().compute(LISTING_ID, repo)
     assert result is not None
     assert abs(result.value - 0.9) < 1e-12
+
+
+def test_gross_margin_ttm_measures_an_annual_only_filer() -> None:
+    # Self-normalizing ratio of two annual flows: (FY revenue 200 - FY COGS
+    # 120) / FY revenue 200 = 0.4. The COGS companion is paired on the FY key.
+    repo = _FakeFactsRepo(
+        {
+            "Revenues": [_fy("Revenues", 200.0)],
+            "CostOfRevenue": [_fy("CostOfRevenue", 120.0)],
+        }
+    )
+    result = GrossMarginTTMMetric().compute(LISTING_ID, repo)
+    assert result is not None
+    assert abs(result.value - 0.4) < 1e-12
+
+
+def _gross_profit_to_assets_repo(*, latest_fy: str, prior_fy: str) -> _FakeFactsRepo:
+    # FY gross profit = 200 - 120 = 80; average assets = (1000 + 800) / 2 = 900.
+    return _FakeFactsRepo(
+        {
+            "Revenues": [_fy("Revenues", 200.0, end_date=latest_fy)],
+            "CostOfRevenue": [_fy("CostOfRevenue", 120.0, end_date=latest_fy)],
+            "Assets": [
+                _fy("Assets", 1000.0, end_date=latest_fy),
+                _fy("Assets", 800.0, end_date=prior_fy),
+            ],
+        }
+    )
+
+
+def test_gross_profit_to_assets_ttm_measures_an_annual_only_filer() -> None:
+    result = GrossProfitToAssetsTTMMetric().compute(
+        LISTING_ID,
+        _gross_profit_to_assets_repo(latest_fy=FRESH_FY, prior_fy=PRIOR_FRESH_FY),
+    )
+    assert result is not None
+    # gross profit 80 / average assets 900.
+    assert abs(result.value - 80.0 / 900.0) < 1e-12
+
+
+def test_gross_profit_to_assets_ttm_annual_assets_in_post_fye_band() -> None:
+    # Latest FY balance sheet 430 days old: no quarterly assets, so the two-
+    # point average resolves on the FY cadence's 480-day window (not the 400-
+    # day default that would reject it).
+    result = GrossProfitToAssetsTTMMetric().compute(
+        LISTING_ID,
+        _gross_profit_to_assets_repo(latest_fy=BAND_FY, prior_fy=PRIOR_BAND_FY),
+    )
+    assert result is not None
+    assert abs(result.value - 80.0 / 900.0) < 1e-12

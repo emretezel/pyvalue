@@ -64,13 +64,13 @@ Columns:
 
 | English Descriptive Name of the Metric | pyvalue key | How is it calculated | Why is it important in identifying quality/value stocks |
 | --- | --- | --- | --- |
-| Gross Margin (TTM) | `gross_margin_ttm` | `(Revenue_TTM - COGS_TTM) / Revenue_TTM`, where `COGS_TTM` prefers normalized `CostOfRevenue` and falls back to `Revenue - GrossProfit`; clamped to `[-1, 1]`. | A high and stable gross margin usually points to pricing power or a structurally advantaged business model. |
+| Gross Margin (TTM) | `gross_margin_ttm` | `(Revenue_TTM - COGS_TTM) / Revenue_TTM`, where `COGS_TTM` prefers normalized `CostOfRevenue` and falls back to `Revenue - GrossProfit`; clamped to `[-1, 1]`. Annual-only filers resolve revenue and its COGS/gross-profit companion from single fresh FY rows (480-day window) via the annual cadence. | A high and stable gross margin usually points to pricing power or a structurally advantaged business model. |
 | Operating Margin (TTM) | `operating_margin_ttm` | `EBIT_TTM / Revenue_TTM`. | Shows how much revenue survives normal operating costs before financing and tax noise. |
 | Free Cash Flow Margin (TTM) | `fcf_margin_ttm` | `FCF_TTM / Revenue_TTM`, where `FCF_TTM = OCF_TTM - Capex_TTM` and capex missing is treated as `0`. | Tests whether accounting profitability is translating into real free cash generation. |
 | Return on Equity (TTM) | `roe_ttm` | `NetIncome_TTM / AvgCommonEquity`, using quarterly same-quarter averaging first and strict FY fallback. | Highlights how efficiently management turns common equity into earnings. |
 | Return on Assets (TTM) | `roa_ttm` | `NetIncome_TTM / AvgTotalAssets`, where assets use strict same-quarter prior-year averaging. | Helps compare earnings power across firms with different leverage. |
 | Return on Tangible Common Equity (TTM) | `roetce_ttm` | `NetIncome_TTM / AvgTangibleCommonEquity`, where `TangibleCommonEquity = CommonEquity - Goodwill - Intangibles` with missing goodwill/intangibles treated as `0`. | Reduces goodwill-driven ROE distortion and is especially useful for acquisitive businesses. |
-| Gross Profit to Assets (TTM) | `gross_profit_to_assets_ttm` | `(Revenue_TTM - COGS_TTM) / AvgTotalAssets`, using the same TTM gross-profit logic as `gross_margin_ttm` and the accruals-style asset average. | A strong ratio indicates the asset base is generating a lot of gross economic output before overhead. |
+| Gross Profit to Assets (TTM) | `gross_profit_to_assets_ttm` | `(Revenue_TTM - COGS_TTM) / AvgTotalAssets`, using the same TTM gross-profit logic as `gross_margin_ttm` and the accruals-style asset average. Annual-only filers resolve the gross-profit legs via the annual cadence, and the average-assets denominator falls back to a two-point FY average (latest and prior-year balance sheets, 480-day window) when no quarterly assets exist. | A strong ratio indicates the asset base is generating a lot of gross economic output before overhead. |
 
 ## Owner Earnings
 

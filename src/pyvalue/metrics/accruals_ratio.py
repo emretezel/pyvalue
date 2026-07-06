@@ -15,6 +15,7 @@ from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.ttm import resolve_ttm_window
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
+    MAX_FY_FACT_AGE_DAYS,
     is_recent_fact,
     require_metric_money,
     require_metric_ticker_currency,
@@ -43,6 +44,10 @@ REQUIRED_CONCEPTS = tuple(
 )
 
 QUARTERLY_PERIODS = {"Q1", "Q2", "Q3", "Q4"}
+# Annual-only filers report a single FY balance sheet; the same two-point
+# average (latest FY plus prior-year FY) applies, on the 480-day FY freshness
+# window that matches the once-a-year cadence.
+ANNUAL_PERIODS = {"FY"}
 
 
 @dataclass(frozen=True)
@@ -164,20 +169,57 @@ class AccrualsRatioCalculator:
             listing_id, repo, metric_id=_METRIC_ID
         )
         records = repo.monetary_facts_for_concept(listing_id, ASSETS_CONCEPT)
-        quarterly = self._filter_periods(records, QUARTERLY_PERIODS)
-        if not quarterly:
-            LOGGER.warning(
-                "accruals_ratio: missing quarterly assets for listing_id=%s", listing_id
-            )
-            return None
 
-        latest = quarterly[0]
-        if not is_recent_fact(latest, max_age_days=MAX_FACT_AGE_DAYS):
+        # Prefer the quarterly cadence (latest quarter plus the same quarter a
+        # year earlier). An annual-only filer has no quarterly assets, so fall
+        # back to the FY cadence -- the identical two-point average over the
+        # latest and prior FY balance sheets, on the wider 480-day freshness
+        # window that matches its once-a-year reporting.
+        result = self._avg_assets_over_periods(
+            records,
+            QUARTERLY_PERIODS,
+            max_age_days=MAX_FACT_AGE_DAYS,
+            target_currency=target_currency,
+            listing_id=listing_id,
+        )
+        if result is None:
+            result = self._avg_assets_over_periods(
+                records,
+                ANNUAL_PERIODS,
+                max_age_days=MAX_FY_FACT_AGE_DAYS,
+                target_currency=target_currency,
+                listing_id=listing_id,
+            )
+        if result is None:
             LOGGER.warning(
-                "accruals_ratio: latest assets quarter (%s) too old for listing_id=%s",
-                latest.end_date,
+                "accruals_ratio: cannot resolve fresh two-point average assets"
+                " for listing_id=%s",
                 listing_id,
             )
+        return result
+
+    def _avg_assets_over_periods(
+        self,
+        records: Sequence[MonetaryFact],
+        periods: set[str],
+        *,
+        max_age_days: int,
+        target_currency: str,
+        listing_id: int,
+    ) -> Optional[_AmountResult]:
+        """Average the latest and prior-year balance sheets within ``periods``.
+
+        Returns ``None`` (not a hard failure) when the cadence is absent, its
+        latest point is stale, or no same-period prior-year companion exists --
+        the caller then tries the next cadence before logging.
+        """
+
+        filtered = self._filter_periods(records, periods)
+        if not filtered:
+            return None
+
+        latest = filtered[0]
+        if not is_recent_fact(latest, max_age_days=max_age_days):
             return None
 
         latest_point = _AssetPoint(
@@ -188,14 +230,10 @@ class AccrualsRatioCalculator:
 
         latest_year = self._extract_year(latest.end_date)
         if latest_year is None:
-            LOGGER.warning(
-                "accruals_ratio: invalid latest assets date for listing_id=%s",
-                listing_id,
-            )
             return None
 
         prior_point: Optional[_AssetPoint] = None
-        for record in quarterly[1:]:
+        for record in filtered[1:]:
             point_year = self._extract_year(record.end_date)
             if (
                 point_year is not None
@@ -210,10 +248,6 @@ class AccrualsRatioCalculator:
                 break
 
         if prior_point is None:
-            LOGGER.warning(
-                "accruals_ratio: missing same-quarter prior-year assets for listing_id=%s",
-                listing_id,
-            )
             return None
 
         return _AmountResult(
