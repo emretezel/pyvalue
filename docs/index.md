@@ -27,6 +27,7 @@ This directory is the main documentation home for `pyvalue`. Each file owns one 
 ## Research
 
 - [Screener NA Investigation](research/screener-na-investigation.md): which screener metrics come out NA, why, and what to change.
+- [QARP & DVG Metric Verification (2026-07)](research/qarp-dvg-metric-verification-2026-07.md): watchlist metrics recomputed against SEC/DART filings; EODHD-garbage and pyvalue calc findings with a prioritised fix backlog.
 
 ## Architecture
 
