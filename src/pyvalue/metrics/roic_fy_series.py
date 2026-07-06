@@ -58,6 +58,18 @@ STRICT_7Y_YEARS = 7
 ADAPTIVE_MIN_POINTS = 6
 IROIC_LOOKBACK_YEARS = 5
 IROIC_MIN_RELATIVE_DELTA_IC = 0.01
+# Documented cap emitted when incremental ROIC is economically unbounded:
+# NOPAT grew over the 5-year lookback while invested capital shrank or moved
+# less than the materiality floor above -- the capital-light growth shape
+# (buyback-heavy compounders, asset-lightening businesses). DeltaNOPAT /
+# DeltaIC has no meaningful magnitude there (near-zero or negative
+# denominator), yet the economics are exactly what a reinvestment gate wants
+# to reward, so NA would exclude the best capital allocators (~6k listings
+# hit the non-positive-DeltaIC reason in the 2026-07 audit). 1.0 (100%) sits
+# above every screen threshold in use and is a *convention*, not a
+# measurement -- see docs/reference/metrics.md. Shrinking NOPAT on flat or
+# shrinking capital stays NA: there is nothing rewardable to measure.
+IROIC_CAP: float = 1.0
 
 FAILURE_MISSING_FY_EBIT_HISTORY = "missing FY EBIT history"
 FAILURE_FEWER_THAN_REQUIRED_FY_EBIT_YEARS = "fewer than required FY EBIT years"
@@ -530,25 +542,37 @@ class ROICFYSeriesCalculator:
         prior_nopat = prior_ebit.money * (1.0 - prior_tax_rate.rate)
         delta_nopat = latest_nopat - prior_nopat
 
-        delta_ic = latest_ic.money - prior_ic.money
-        if delta_ic.amount <= 0:
-            LOGGER.warning(
-                "iroic_5y: non-positive delta invested capital for listing_id=%s",
-                listing_id,
-            )
-            return None
-
-        ic_scale = max(abs(latest_ic.money.amount), abs(prior_ic.money.amount), 1.0)
-        relative_delta_ic = abs(delta_ic.amount) / ic_scale
-        if relative_delta_ic < IROIC_MIN_RELATIVE_DELTA_IC:
-            LOGGER.warning(
-                "iroic_5y: tiny delta invested capital for listing_id=%s", listing_id
-            )
-            return None
-
         as_of_values = [latest_ebit.as_of, latest_ic.as_of]
         if latest_tax_rate.as_of is not None:
             as_of_values.append(latest_tax_rate.as_of)
+
+        # The ratio only measures anything when capital actually grew by a
+        # material amount; below that floor (including outright shrinkage) the
+        # denominator is noise. Growing NOPAT on flat-or-released capital is
+        # the capital-light growth shape and scores the documented cap;
+        # non-growing NOPAT stays NA.
+        delta_ic = latest_ic.money - prior_ic.money
+        ic_scale = max(abs(latest_ic.money.amount), abs(prior_ic.money.amount), 1.0)
+        relative_delta_ic = abs(delta_ic.amount) / ic_scale
+        if delta_ic.amount <= 0 or relative_delta_ic < IROIC_MIN_RELATIVE_DELTA_IC:
+            if delta_nopat.amount > 0:
+                LOGGER.info(
+                    "iroic_5y: NOPAT grew on flat/shrinking invested capital for "
+                    "listing_id=%s -- emitting documented cap %.0f%%",
+                    listing_id,
+                    IROIC_CAP * 100.0,
+                )
+                return IncrementalROICSnapshot(
+                    value=IROIC_CAP,
+                    as_of=max(as_of_values),
+                    currency=latest_ebit.money.currency,
+                )
+            LOGGER.warning(
+                "iroic_5y: flat or shrinking invested capital without NOPAT "
+                "growth for listing_id=%s",
+                listing_id,
+            )
+            return None
 
         return IncrementalROICSnapshot(
             value=delta_nopat / delta_ic,
@@ -1206,6 +1230,7 @@ class IncrementalROICFiveYearMetric:
 
 
 __all__ = [
+    "IROIC_CAP",
     "ROICFYYearDiagnostic",
     "ROICFYSeriesDiagnostic",
     "ROICFYSeriesSnapshot",

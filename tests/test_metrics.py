@@ -123,6 +123,7 @@ from pyvalue.metrics.profitability_returns_growth import (
 from pyvalue.metrics.roc_greenblatt import ROCGreenblattMetric
 from pyvalue.metrics.roce import ROCEMetric
 from pyvalue.metrics.roic_fy_series import (
+    IROIC_CAP,
     IncrementalROICFiveYearMetric,
     ROIC10YMedianMetric,
     ROIC10YMinMetric,
@@ -4409,14 +4410,21 @@ def test_iroic_5y_tax_fallback_uses_default_when_no_valid_proxy() -> None:
     assert round(result.value, 6) == 1.975
 
 
-def test_iroic_5y_returns_none_when_delta_ic_non_positive() -> None:
+def test_iroic_5y_caps_when_nopat_grows_on_flat_capital() -> None:
+    # The default fixture grows EBIT on constant invested capital: DeltaIC is
+    # zero, so the ratio is unbounded -- the capital-light growth shape scores
+    # the documented cap instead of NA (pre-cap behavior: None).
     metric = IncrementalROICFiveYearMetric()
     repo = _build_ic_repo(concept_records=_base_roic_10y_concepts())
     result = metric.compute(LISTING_ID, repo)
-    assert result is None
+    assert result is not None
+    assert result.value == IROIC_CAP
 
 
-def test_iroic_5y_returns_none_when_relative_delta_ic_is_tiny() -> None:
+def test_iroic_5y_caps_when_delta_ic_below_materiality_floor() -> None:
+    # A tiny positive DeltaIC (< 1% of the capital scale) is measurement
+    # noise, not reinvestment; with growing NOPAT it is the same
+    # capital-light shape and scores the cap.
     metric = IncrementalROICFiveYearMetric()
     latest_year = date.today().year - 1
     concepts = _base_roic_10y_concepts(
@@ -4425,6 +4433,20 @@ def test_iroic_5y_returns_none_when_relative_delta_ic_is_tiny() -> None:
         ic_equity_by_year={
             year: 900_000.0 for year in range(latest_year - 10, latest_year + 1)
         },
+    )
+    repo = _build_ic_repo(concept_records=concepts)
+    result = metric.compute(LISTING_ID, repo)
+    assert result is not None
+    assert result.value == IROIC_CAP
+
+
+def test_iroic_5y_stays_na_when_nopat_flat_on_flat_capital() -> None:
+    # Flat NOPAT on flat capital has nothing rewardable to measure: no cap.
+    metric = IncrementalROICFiveYearMetric()
+    latest_year = date.today().year - 1
+    concepts = _base_roic_10y_concepts(
+        latest_year=latest_year,
+        ebit_by_year={year: 100.0 for year in range(latest_year - 9, latest_year + 1)},
     )
     repo = _build_ic_repo(concept_records=concepts)
     result = metric.compute(LISTING_ID, repo)
