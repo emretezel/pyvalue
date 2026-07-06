@@ -584,3 +584,59 @@ materialize at the next full-universe compute-metrics run.
     Cadence-matched 480-day balance-sheet freshness where an annual flow meets
     a point-in-time leg. Effects materialize at the next full-universe
     compute-metrics run.
+
+### 2026-07-06 — OR / K-of-N criterion groups (coverage payoff realised)
+
+This investigation kept surfacing the same shape: a listing clears an entire
+screen except for one gate whose metric is either NA (a data gap the screen
+should not punish) or a single-lens miss another equally valid lens would have
+passed. The OR / K-of-N grouping feature (`any_of` + `at_least`) is the
+structural fix, and both shipped screens now use it. Sizing is against the
+fresh full-universe compute (61,091 canonical listings, recomputed 2026-07-06);
+every count below is from the real screening engine, not an estimate.
+
+**QARP (62 → 126 passers).** Two former single-lens hard gates became groups:
+
+- *Reasonable price* — `oey_ev_norm >= 5%` became an OR over three enterprise
+  yields (`oey_ev_norm >= 5%` **or** `ebit_yield_ev >= 6.67%` (EV/EBIT ≤ 15x)
+  **or** `fcf_yield_ev >= 5%`). `oey_ev_norm` is this doc's #1 NA gate (72.2%),
+  and it was QARP's single tightest gate: **182** listings cleared all 13 other
+  quality gates and failed only here. Decomposed, only 6 of the 182 are NA — the
+  other 176 have a genuinely low *normalized* owner-earnings yield, which
+  structurally understates a business still growing into its maintenance profile
+  (it subtracts maintenance capex + maintenance-NWC from a backward 5-yr median).
+  The OR recovers **+39** (Copart, ResMed, Inditex, ADP, Marsh, Sweco, WuXi,
+  Aristocrat), each reasonably priced on EBIT (≤15x) or FCF (≥5%) yield; **143 of
+  the 182 stay excluded** because they are dear on all three yields. No quality
+  gate was touched.
+- *Debt service* — `interest_coverage >= 6x` became `interest_coverage >= 6x`
+  **or** `net_debt_to_ebitda <= 1.5x` (the standalone `<= 2.5x` hard gate still
+  caps every listing). `interest_coverage` is 59.0% NA; this recovers **+16**
+  already-low-leverage names whose coverage is NA or a near-miss, without
+  admitting a levered issuer (leverage above 1.5x still requires 6x coverage).
+
+**DVG (2,119 → 4,761 passers).** Two changes:
+
+- *Solvency scorecard* — the four separate distress gates (`net_debt_to_ebitda`,
+  `interest_coverage`, `altman_z`, `fcf_to_ebitda`) became one **`at_least: 3`**
+  group. A deep-value stock is usually cheap *because* one dimension looks bad;
+  the recovery of **+1,557** exactly equals the sum of the four gates' sole-blocker
+  counts (Altman 788 + coverage 568 + FCF/EBITDA 181 + leverage 20) — i.e. it
+  recovers precisely the names blocked by a *single* trip (Vale Indonesia: net
+  cash, 14x coverage, Altman 5.5, Piotroski 5, only a fractionally negative
+  trailing FCF/EBITDA), never those failing two or more. The `na_blocked` OR
+  logic also makes it coverage-robust: an NA arm simply cannot count toward the
+  three.
+- *Valuation OR* — `price_to_book <= 3.0` became cheap on book **or** `ev_to_ebit
+  <= 12` **or** `fcf_yield_ev >= 6%`. P/B was DVG's #1 sole-blocker (**2,296**),
+  blind to asset-light businesses cheap on earnings/cash. Recovers **+647**.
+  Validation that the OR is sound, not loose: a `price_to_tangible_book <= 2.0`
+  arm rescues **0** of the 2,296 (tangible P/B ≥ P/B always), and an
+  `earnings_yield` arm was rejected (peak-earnings value-trap risk; +48 only).
+
+The two payoffs differ in spirit and both are honest: QARP's is a *coverage +
+mild valuation broadening* on names that already proved quality; DVG's is a
+*distress-tolerance* widening true to a screen whose stated job is to exclude
+only structurally broken businesses and push cheapness into the ranking. The
+`na_blocked` classification (see `evaluate_group_detail`) ensures a metric
+missing on one arm is not blamed for an exclusion another arm answered.

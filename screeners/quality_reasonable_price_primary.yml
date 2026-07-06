@@ -74,18 +74,31 @@ criteria:
     right:
       value: 2.5
 
-  # Debt-free issuers with no measurable interest expense score the
-  # documented 100x cap (docs/reference/metrics.md) and pass this gate --
-  # but only when fresh balance-sheet evidence bounds debt at <= 1x TTM
-  # EBIT. A levered issuer that reports interest only annually gets a
-  # measured annual ratio instead (which may fail this gate); one with
-  # material debt and no interest line at all stays NA and fails.
-  - name: "Interest coverage >= 6x (debt-service capacity)"
-    left:
-      metric: interest_coverage
-    operator: ">="
-    right:
-      value: 6
+  # Debt service is proven either way: a business already carrying <= 1.5x
+  # net-debt/EBITDA is safe regardless of a *measured* coverage number, so it
+  # need not clear the 6x coverage bar as well. This OR is a coverage rescue,
+  # not a loosening -- the standalone net_debt/EBITDA <= 2.5x gate above still
+  # caps leverage for every listing; this group only says that between 1.5x and
+  # 2.5x you must additionally show 6x coverage, while at or below 1.5x you need
+  # not. It recovers low-leverage names whose interest_coverage is NA (no fresh
+  # interest line) or a near-miss. Debt-free issuers with no measurable interest
+  # expense still score the documented 100x cap (docs/reference/metrics.md) --
+  # but only with fresh evidence bounding debt at <= 1x TTM EBIT -- and clear the
+  # coverage arm directly.
+  - name: "Debt service (6x coverage, or already low leverage)"
+    any_of:
+      - name: "Interest coverage >= 6x (debt-service capacity)"
+        left:
+          metric: interest_coverage
+        operator: ">="
+        right:
+          value: 6
+      - name: "Net debt / EBITDA <= 1.5x (low leverage needs no coverage proof)"
+        left:
+          metric: net_debt_to_ebitda
+        operator: "<="
+        right:
+          value: 1.5
 
   - name: "No loss years (10Y net income) (Graham earnings stability)"
     left:
@@ -114,12 +127,37 @@ criteria:
     right:
       value: 0.01
 
-  - name: "Owner earnings yield on EV (normalised) >= 5% (reasonable price anchor)"
-    left:
-      metric: oey_ev_norm
-    operator: ">="
-    right:
-      value: 0.05
+  # "Reasonable price" is captured by any one of three enterprise yields, not
+  # only the normalised owner-earnings yield. oey_ev_norm subtracts maintenance
+  # capex and maintenance-NWC drags from a *backward* 5-year median, so it
+  # structurally understates the yield of a business still growing into its
+  # maintenance profile: premier compounders that clear all the quality gates
+  # (e.g. Copart -- 10/10 ROIC years > 12%, 19%/yr owner-earnings growth) show
+  # oey_ev_norm just under 5% while trading at a plainly reasonable 15-16x
+  # EV/EBIT with a >5% FCF yield. Passing on EBIT yield (>= 6.67% == EV/EBIT
+  # <= 15x) or FCF yield (>= 5% == EV/FCF <= 20x) is equally valid evidence of a
+  # reasonable price. This does not admit expensive names: a listing dear on all
+  # three yields still fails. The quality gates above are untouched.
+  - name: "Reasonable price (owner-earnings, EBIT, or FCF yield on EV)"
+    any_of:
+      - name: "Owner earnings yield on EV (normalised) >= 5%"
+        left:
+          metric: oey_ev_norm
+        operator: ">="
+        right:
+          value: 0.05
+      - name: "EBIT yield on EV >= 6.67% (EV/EBIT <= 15x)"
+        left:
+          metric: ebit_yield_ev
+        operator: ">="
+        right:
+          value: 0.0667
+      - name: "FCF yield on EV >= 5% (EV/FCF <= 20x)"
+        left:
+          metric: fcf_yield_ev
+        operator: ">="
+        right:
+          value: 0.05
 
   - name: "Incremental ROIC (5Y) >= 12% (Akre/Gayner reinvestment leg)"
     left:

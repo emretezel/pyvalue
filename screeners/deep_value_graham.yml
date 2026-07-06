@@ -27,26 +27,6 @@ criteria:
     right:
       value: 0.60
 
-  - name: "Net debt / EBITDA <= 5.0x (loose leverage ceiling)"
-    left:
-      metric: net_debt_to_ebitda
-    operator: "<="
-    right:
-      value: 5.0
-
-  # Debt-free issuers with no measurable interest expense score the
-  # documented 100x cap (docs/reference/metrics.md) and pass this gate --
-  # but only when fresh balance-sheet evidence bounds debt at <= 1x TTM
-  # EBIT. A levered issuer that reports interest only annually gets a
-  # measured annual ratio instead (which may fail this gate); one with
-  # material debt and no interest line at all stays NA and fails.
-  - name: "Interest coverage >= 1.5x (going-concern check, not a strength bar)"
-    left:
-      metric: interest_coverage
-    operator: ">="
-    right:
-      value: 1.5
-
   - name: "Net income loss-year share (adaptive 10Y) <= 0.40 (tolerates cyclicality, excludes chronic loss-makers only)"
     left:
       metric: ni_loss_year_share
@@ -54,7 +34,46 @@ criteria:
     right:
       value: 0.40
 
-  # --- New metric gates
+  # --- Solvency scorecard: pass >= 3 of 4 going-concern signals.
+  # A deep-value stock is usually cheap *because* one dimension looks bad; a
+  # hard AND of four overlapping distress checks excludes solvent cyclicals for
+  # a single benign trip (e.g. Vale Indonesia -- net cash, 14x coverage, Altman
+  # 5.5, Piotroski 5 -- fails only a fractionally negative trailing FCF/EBITDA).
+  # Requiring 3 of 4 tolerates one trip while still excluding genuine distress,
+  # which fails two or more. Note the arms partly overlap (Altman already embeds
+  # leverage and profitability), which is why a *majority*, not all, is the bar.
+  # A missing arm (NA) simply cannot count toward the three, so the scorecard is
+  # also coverage-robust. Debt-free issuers with no measurable interest expense
+  # score the documented 100x coverage cap (docs/reference/metrics.md) only with
+  # fresh evidence bounding debt at <= 1x TTM EBIT.
+  - name: "Solvency scorecard (>= 3 of 4: leverage, coverage, Altman, FCF/EBITDA)"
+    at_least: 3
+    any_of:
+      - name: "Net debt / EBITDA <= 5.0x (loose leverage ceiling)"
+        left:
+          metric: net_debt_to_ebitda
+        operator: "<="
+        right:
+          value: 5.0
+      - name: "Interest coverage >= 1.5x (going-concern check, not a strength bar)"
+        left:
+          metric: interest_coverage
+        operator: ">="
+        right:
+          value: 1.5
+      - name: "Altman Z-Score >= 1.81 (classic formula; out of the distress zone)"
+        left:
+          metric: altman_z
+        operator: ">="
+        right:
+          value: 1.81
+      - name: "FCF / EBITDA > 0 (not cash-burning)"
+        left:
+          metric: fcf_to_ebitda
+        operator: ">"
+        right:
+          value: 0
+
   - name: "Piotroski F-Score >= 5 of 9 (deliberately looser than the docs' canonical >=7)"
     left:
       metric: piotroski_f_score
@@ -62,26 +81,35 @@ criteria:
     right:
       value: 5
 
-  - name: "Altman Z-Score >= 1.81 (classic formula; excludes only the distress zone, safe zone not required)"
-    left:
-      metric: altman_z
-    operator: ">="
-    right:
-      value: 1.81
-
-  - name: "Price to book <= 3.0x (loose valuation sanity check; deeper cheapness lives in ranking, not here)"
-    left:
-      metric: price_to_book
-    operator: "<="
-    right:
-      value: 3.0
-
-  - name: "FCF / EBITDA > 0 (excludes cash-burning businesses; very loose, not an efficiency bar)"
-    left:
-      metric: fcf_to_ebitda
-    operator: ">"
-    right:
-      value: 0
+  # --- Valuation: cheap on assets, operating earnings, OR free cash flow.
+  # Price-to-book alone is blind to asset-light businesses (services, software)
+  # that carry little book value yet are demonstrably cheap on earnings or cash
+  # flow -- 2,296 listings clear every other gate and fail only on P/B. A
+  # loose sanity gate ("cheap on some hard measure") is truer to the screen's
+  # design, which pushes deeper cheapness into the ranking, not the gates. The
+  # OR cannot admit an all-round-expensive name: it must be cheap on at least
+  # one basis. price_to_tangible_book is deliberately absent as an arm -- it is
+  # always >= price_to_book, so it can never rescue a P/B miss.
+  - name: "Cheap on assets, operating earnings, or free cash flow"
+    any_of:
+      - name: "Price to book <= 3.0x"
+        left:
+          metric: price_to_book
+        operator: "<="
+        right:
+          value: 3.0
+      - name: "EV / EBIT <= 12x (cheap on operating earnings)"
+        left:
+          metric: ev_to_ebit
+        operator: "<="
+        right:
+          value: 12
+      - name: "FCF yield on EV >= 6% (EV/FCF <= 16.7x, cheap on free cash flow)"
+        left:
+          metric: fcf_yield_ev
+        operator: ">="
+        right:
+          value: 0.06
 
   # --- Practical investability floor
   - name: "Market cap >= $150M (excludes micro/nano caps that are hard to actually transact)"

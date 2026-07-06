@@ -441,23 +441,24 @@ def test_load_screen_parses_quality_reasonable_price_primary_example() -> None:
 
     definition = load_screen(screen_path)
 
-    # 14 hard filters. Deliberately absent gates: sbc_to_fcf (EODHD SBC
-    # coverage is too sparse/unreliable; dilution is policed by
-    # share_count_cagr_5y), eps_streak (EODHD EPS is analyst-adjusted
+    # 14 groups: 12 bare hard filters plus two OR groups that recover genuine
+    # quality/value a single-lens AND gate over-excluded -- "Debt service"
+    # (interest coverage OR already-low leverage) and "Reasonable price"
+    # (owner-earnings OR EBIT OR FCF yield on EV). The count is unchanged because
+    # each OR replaced one former bare gate in place. Deliberately absent gates:
+    # sbc_to_fcf (EODHD SBC coverage is too sparse/unreliable; dilution is
+    # policed by share_count_cagr_5y), eps_streak (EODHD EPS is analyst-adjusted
     # epsActual; GAAP stability is the zero-loss-years gate), roic_7y_median
-    # (mathematically implied by roic_years_above_12pct >= 7) and
-    # accruals_ratio (implied by cfo_to_ni_ttm >= 0.90 for any ROA <= 100%).
-    # The "==" operator is exercised by the zero-loss-years criterion.
+    # (mathematically implied by roic_years_above_12pct >= 7) and accruals_ratio
+    # (implied by cfo_to_ni_ttm >= 0.90 for any ROA <= 100%). The "==" operator
+    # is exercised by the zero-loss-years criterion.
     assert len(definition.criteria) == 14
-    assert {_sole(group).operator for group in definition.criteria} == {
-        ">=",
-        "<=",
-        "==",
-    }
+    all_members = [member for group in definition.criteria for member in group.members]
+    assert {member.operator for member in all_members} == {">=", "<=", "=="}
     assert not any(
-        _sole(group).left.metric
+        member.left.metric
         in {"sbc_to_fcf", "eps_streak", "roic_7y_median", "accruals_ratio"}
-        for group in definition.criteria
+        for member in all_members
     )
     # Spot-check a percent bound, a count bound, and the equality criterion.
     assert _sole(definition.criteria[0]).left.metric == "roic_years_above_12pct"
@@ -469,6 +470,41 @@ def test_load_screen_parses_quality_reasonable_price_primary_example() -> None:
     assert _sole(definition.criteria[9]).right.value == 0
     assert _sole(definition.criteria[12]).left.metric == "iroic_5y"
     assert _sole(definition.criteria[13]).left.metric == "owner_earnings_cagr_10y"
+
+    # Debt-service OR (index 8): interest coverage >= 6x, or already-low leverage
+    # (net debt / EBITDA <= 1.5x). min_pass == 1 (OR). The standalone
+    # net_debt_to_ebitda <= 2.5x hard gate (index 7) still caps every listing, so
+    # this only relaxes the 6x coverage demand for names below 1.5x leverage.
+    assert _sole(definition.criteria[7]).left.metric == "net_debt_to_ebitda"
+    assert _sole(definition.criteria[7]).right.value == 2.5
+    debt_service = definition.criteria[8]
+    assert debt_service.min_pass == 1
+    assert [member.left.metric for member in debt_service.members] == [
+        "interest_coverage",
+        "net_debt_to_ebitda",
+    ]
+    assert [member.operator for member in debt_service.members] == [">=", "<="]
+    assert [member.right.value for member in debt_service.members] == [6, 1.5]
+
+    # Reasonable-price OR (index 11): owner-earnings, EBIT, or FCF yield on EV;
+    # any one yield proves a reasonable price (min_pass == 1).
+    reasonable_price = definition.criteria[11]
+    assert reasonable_price.min_pass == 1
+    assert [member.left.metric for member in reasonable_price.members] == [
+        "oey_ev_norm",
+        "ebit_yield_ev",
+        "fcf_yield_ev",
+    ]
+    assert [member.operator for member in reasonable_price.members] == [
+        ">=",
+        ">=",
+        ">=",
+    ]
+    assert [member.right.value for member in reasonable_price.members] == [
+        0.05,
+        0.0667,
+        0.05,
+    ]
 
     # Ranking block: same sector-relative shape as the draft, but a seven-metric
     # blend grouped by bucket -- quality/capital-efficiency 35% (roic_7y_median,
@@ -510,36 +546,64 @@ def test_load_screen_parses_deep_value_graham_example() -> None:
 
     definition = load_screen(screen_path)
 
-    # 10 loose gates: structural-quality floors plus the composite-score and
-    # investability criteria. Strict ">" is exercised here, which the QARP
-    # screens do not use.
-    assert len(definition.criteria) == 10
-    assert {_sole(group).operator for group in definition.criteria} == {
-        ">",
-        ">=",
-        "<=",
-    }
-    # Spot-check the composite-score gates and the monetary constant. The
-    # market-cap floor is the first currency-tagged constant used by a shipped
-    # screener, so pin both the value and the currency.
-    # The capital-efficiency floor uses the adaptive ROIC median so its 6-FY
-    # evidence bar matches the screen's other adaptive gates (the strict
-    # roic_7y_median needed 7 FY years); QARP keeps the strict median.
+    # 7 groups: three bare structural-quality floors (adaptive ROIC, cash
+    # conversion, loss-year share), a >= 3-of-4 solvency scorecard, the Piotroski
+    # floor, a >= 1-of-3 valuation OR (cheap on book, EV/EBIT, or FCF yield), and
+    # the market-cap investability floor. Strict ">" is exercised here, which the
+    # QARP screen does not use. The scorecard replaced four former bare distress
+    # gates (leverage, coverage, Altman, FCF/EBITDA); the valuation OR replaced
+    # the former bare price-to-book gate.
+    assert len(definition.criteria) == 7
+    all_members = [member for group in definition.criteria for member in group.members]
+    assert {member.operator for member in all_members} == {">", ">=", "<="}
+    # Bare structural floors. The adaptive ROIC median's 6-FY evidence bar
+    # matches the screen's other adaptive gates (the strict roic_7y_median needed
+    # 7 FY years); QARP keeps the strict median. The loss-share gate's 0.40
+    # preserves the old 4-of-10 tolerance while staying screenable on short
+    # histories.
     assert _sole(definition.criteria[0]).left.metric == "roic_10y_median_adaptive"
     assert _sole(definition.criteria[0]).operator == ">"
     assert _sole(definition.criteria[0]).right.value == 0
-    # The stability gate uses the adaptive share metric so short-history
-    # listings stay screenable; 0.40 preserves the old 4-of-10 tolerance.
-    assert _sole(definition.criteria[4]).left.metric == "ni_loss_year_share"
-    assert _sole(definition.criteria[4]).operator == "<="
-    assert _sole(definition.criteria[4]).right.value == 0.40
-    assert _sole(definition.criteria[5]).left.metric == "piotroski_f_score"
-    assert _sole(definition.criteria[5]).right.value == 5
-    assert _sole(definition.criteria[6]).left.metric == "altman_z"
-    assert _sole(definition.criteria[6]).right.value == 1.81
-    assert _sole(definition.criteria[9]).left.metric == "market_cap"
-    assert _sole(definition.criteria[9]).right.value == 150_000_000
-    assert _sole(definition.criteria[9]).right.currency == "USD"
+    assert _sole(definition.criteria[1]).left.metric == "cfo_to_ni_10y_median"
+    assert _sole(definition.criteria[2]).left.metric == "ni_loss_year_share"
+    assert _sole(definition.criteria[2]).operator == "<="
+    assert _sole(definition.criteria[2]).right.value == 0.40
+    assert _sole(definition.criteria[4]).left.metric == "piotroski_f_score"
+    assert _sole(definition.criteria[4]).right.value == 5
+
+    # Solvency scorecard (index 3): >= 3 of 4 going-concern signals, so a
+    # deep-value cyclical may trip one benign signal and still pass while genuine
+    # distress (fails two or more) is excluded.
+    solvency = definition.criteria[3]
+    assert solvency.min_pass == 3
+    assert len(solvency.members) == 4
+    assert [member.left.metric for member in solvency.members] == [
+        "net_debt_to_ebitda",
+        "interest_coverage",
+        "altman_z",
+        "fcf_to_ebitda",
+    ]
+    assert [member.operator for member in solvency.members] == ["<=", ">=", ">=", ">"]
+    assert [member.right.value for member in solvency.members] == [5.0, 1.5, 1.81, 0]
+
+    # Valuation OR (index 5): cheap on book, operating earnings, or free cash
+    # flow (min_pass == 1). price_to_tangible_book is deliberately not an arm --
+    # it is always >= price_to_book, so it could never rescue a P/B miss.
+    valuation = definition.criteria[5]
+    assert valuation.min_pass == 1
+    assert [member.left.metric for member in valuation.members] == [
+        "price_to_book",
+        "ev_to_ebit",
+        "fcf_yield_ev",
+    ]
+    assert [member.operator for member in valuation.members] == ["<=", "<=", ">="]
+    assert [member.right.value for member in valuation.members] == [3.0, 12, 0.06]
+
+    # Market-cap floor (index 6): the first currency-tagged constant used by a
+    # shipped screener, so pin both the value and the currency.
+    assert _sole(definition.criteria[6]).left.metric == "market_cap"
+    assert _sole(definition.criteria[6]).right.value == 150_000_000
+    assert _sole(definition.criteria[6]).right.currency == "USD"
 
     # Ranking block: cheapness-weighted blend -- valuation 45% (price_to_book,
     # ev_to_sales, ev_to_ebit), capital efficiency 25% (croic, roce, both
