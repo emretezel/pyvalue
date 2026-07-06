@@ -17,6 +17,7 @@ from pyvalue.metrics.ttm import (
     paired_records,
     resolve_ttm_window,
 )
+from pyvalue.metrics.utils import MAX_FY_FACT_AGE_DAYS
 from pyvalue.persistence.storage import FactRecord
 from test_metrics import fact
 
@@ -256,6 +257,123 @@ def test_paired_records_ignores_fy_row_sharing_quarter_end_date() -> None:
         )
     ]
     assert paired_records(resolution.window, candidates) is None
+
+
+def _fy_row(
+    end_date: str, *, value: float = 100.0, concept: str = "OperatingIncomeLoss"
+) -> FactRecord:
+    return fact(
+        concept=concept,
+        fiscal_period="FY",
+        end_date=end_date,
+        value=value,
+    )
+
+
+def test_annual_opt_in_resolves_a_lone_fresh_fy_row() -> None:
+    # An annual-only filer: a single fresh FY row and no quarters. With the
+    # opt-in it forms a one-row "annual" window.
+    resolution = resolve_ttm_window(
+        [_fy_row("2025-12-31")],
+        reference_date=REFERENCE,
+        annual_max_age_days=MAX_FY_FACT_AGE_DAYS,
+    )
+    window = resolution.window
+    assert resolution.failure is None
+    assert window is not None
+    assert window.cadence == "annual"
+    assert [record.end_date for record in window.records] == ["2025-12-31"]
+    assert window.as_of == "2025-12-31"
+
+
+def test_annual_is_off_without_the_opt_in() -> None:
+    # The default (annual_max_age_days=None) must not change any behaviour:
+    # a lone FY row still fails exactly as before.
+    resolution = resolve_ttm_window([_fy_row("2025-12-31")], reference_date=REFERENCE)
+    assert resolution.window is None
+    assert resolution.failure == FAILURE_TOO_FEW_QUARTERLY_RECORDS
+
+
+def test_quarterly_still_wins_over_an_available_fy_row() -> None:
+    # Opting in must not disturb a listing that has a clean quarterly window.
+    resolution = resolve_ttm_window(
+        [_fy_row("2026-04-30"), *_rows(QUARTERLY_DATES)],
+        reference_date=REFERENCE,
+        annual_max_age_days=MAX_FY_FACT_AGE_DAYS,
+    )
+    assert resolution.window is not None
+    assert resolution.window.cadence == "quarterly"
+    assert resolution.window.as_of == QUARTERLY_DATES[0]
+
+
+def test_stale_fy_row_is_not_resolved_even_when_opted_in() -> None:
+    # 2024-12-31 is >480 days before the reference: an annual data gap, not a
+    # usable window.
+    resolution = resolve_ttm_window(
+        [_fy_row("2024-12-31")],
+        reference_date=REFERENCE,
+        annual_max_age_days=MAX_FY_FACT_AGE_DAYS,
+    )
+    assert resolution.window is None
+    assert resolution.failure == FAILURE_TOO_FEW_QUARTERLY_RECORDS
+
+
+def test_annual_fallback_preserves_the_sub_annual_failure_reason() -> None:
+    # Stale quarters plus no fresh FY row: the diagnostic quarterly failure
+    # (not a generic annual one) must survive for metric_compute_status.
+    stale_reference = date.fromisoformat(QUARTERLY_DATES[0]) + timedelta(days=401)
+    resolution = resolve_ttm_window(
+        _rows(QUARTERLY_DATES),
+        reference_date=stale_reference,
+        annual_max_age_days=MAX_FY_FACT_AGE_DAYS,
+    )
+    assert resolution.window is None
+    assert resolution.failure == FAILURE_LATEST_QUARTER_TOO_OLD
+
+
+def test_annual_picks_the_latest_fresh_fy_row() -> None:
+    resolution = resolve_ttm_window(
+        [_fy_row("2024-12-31", value=1.0), _fy_row("2025-12-31", value=2.0)],
+        reference_date=REFERENCE,
+        annual_max_age_days=MAX_FY_FACT_AGE_DAYS,
+    )
+    assert resolution.window is not None
+    assert resolution.window.as_of == "2025-12-31"
+    assert resolution.window.records[0].value == 2.0
+
+
+def test_paired_records_on_annual_window_matches_the_fy_companion() -> None:
+    resolution = resolve_ttm_window(
+        [_fy_row("2025-12-31")],
+        reference_date=REFERENCE,
+        annual_max_age_days=MAX_FY_FACT_AGE_DAYS,
+    )
+    assert resolution.window is not None
+    companion = _fy_row(
+        "2025-12-31", value=40.0, concept="DepreciationDepletionAndAmortization"
+    )
+    pairs = paired_records(resolution.window, [companion])
+    assert pairs is not None
+    assert len(pairs) == 1
+    assert pairs[0][1].value == 40.0
+
+
+def test_paired_records_on_annual_window_ignores_a_quarterly_companion() -> None:
+    # On an annual window the companion must be the FY row, not a quarter that
+    # happens to share the end_date.
+    resolution = resolve_ttm_window(
+        [_fy_row("2025-12-31")],
+        reference_date=REFERENCE,
+        annual_max_age_days=MAX_FY_FACT_AGE_DAYS,
+    )
+    assert resolution.window is not None
+    quarter_companion = fact(
+        concept="DepreciationDepletionAndAmortization",
+        fiscal_period="Q4",
+        end_date="2025-12-31",
+        value=40.0,
+    )
+    assert paired_records(resolution.window, [quarter_companion]) is None
 
 
 @given(

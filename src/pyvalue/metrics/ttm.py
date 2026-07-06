@@ -13,11 +13,20 @@ copies. It infers the reporting cadence from the spacing of the newest
 end dates and returns a window that actually spans ~12 months:
 
 - four consecutive quarterly rows (adjacent end-date gaps 70-110 days), or
-- two consecutive half-year rows (gap 150-220 days).
+- two consecutive half-year rows (gap 150-220 days), or
+- one annual (``FY``) row -- but only when the caller opts in by passing
+  ``annual_max_age_days``, and only as a last resort once neither sub-annual
+  shape resolves. This is how annual-only filers (companies that never file
+  quarterly) become computable on trailing-twelve-month flow metrics: a single
+  FY row already *is* a twelve-month figure. It is opt-in because most call
+  sites want the stricter quarterly discipline; a metric enables it after
+  reviewing that an annual figure is a sound substitute (see the per-metric
+  rationale where each passes ``annual_max_age_days=MAX_FY_FACT_AGE_DAYS``).
 
-Histories that form neither shape -- a reporting hole right below the anchor,
-a cadence transition, irregular spacing -- resolve to a failure instead of a
-window: a wrong-but-plausible sum is strictly worse than an honest NA, and the
+Histories that form neither sub-annual shape -- a reporting hole right below
+the anchor, a cadence transition, irregular spacing -- resolve to a failure
+instead of a window (unless the annual opt-in rescues them with a fresh FY
+row): a wrong-but-plausible sum is strictly worse than an honest NA, and the
 affected listing becomes computable again as soon as a clean window re-forms.
 
 Known limitation (accepted): a quarterly reporter whose *newest* row is its
@@ -35,15 +44,19 @@ from datetime import date
 from typing import Generic, Literal, Optional, Sequence, TypeVar
 
 from pyvalue.facts import FactView
-from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS, is_recent_date
+from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS, filter_unique_fy, is_recent_date
 
-Cadence = Literal["quarterly", "semi_annual"]
+Cadence = Literal["quarterly", "semi_annual", "annual"]
 
 # Fiscal periods that may participate in a TTM window. FY/INSTANT rows are
 # excluded up front: an FY row often shares its end_date with Q4, and letting
 # it into the window (or into a paired lookup) would silently sum an annual
 # amount into a quarterly chain.
 QUARTERLY_PERIODS: frozenset[str] = frozenset({"Q1", "Q2", "Q3", "Q4"})
+
+# The lone period that forms (and pairs onto) an "annual" window. An FY row is
+# admitted only on the annual cadence, and only under the caller's opt-in.
+ANNUAL_PERIODS: frozenset[str] = frozenset({"FY"})
 
 # Adjacent end-date gap bands, in days. Quarterly tolerates 13/14-week fiscal
 # quarters and month-end drift; semi-annual tolerates 26+/--week halves. The
@@ -96,8 +109,47 @@ def resolve_ttm_window(
     *,
     max_age_days: int = MAX_FACT_AGE_DAYS,
     reference_date: Optional[date] = None,
+    annual_max_age_days: Optional[int] = None,
 ) -> TTMWindowResolution[WindowFactT]:
-    """Resolve the newest ~12-month window from quarterly-table rows.
+    """Resolve the newest ~12-month window from a listing's flow rows.
+
+    First attempts the sub-annual cadences (quarterly, then semi-annual). When
+    those fail *and* the caller opts in with ``annual_max_age_days``, falls
+    back to a single fresh ``FY`` row as a one-row "annual" window -- this is
+    what makes annual-only filers computable. Without the opt-in
+    (``annual_max_age_days is None``) the behaviour is exactly the legacy
+    quarterly/semi-annual resolver, so no existing call site changes.
+
+    On the annual fallback, when no fresh FY row exists the *sub-annual*
+    failure reason is preserved (it is the more diagnostic one -- "too few
+    quarterly records", "latest quarter too old", etc.), so persisted
+    ``metric_compute_status`` reasons stay meaningful.
+    """
+
+    resolution = _resolve_sub_annual_window(
+        records, max_age_days=max_age_days, reference_date=reference_date
+    )
+    if resolution.window is not None or annual_max_age_days is None:
+        return resolution
+
+    annual = _annual_row(
+        records, max_age_days=annual_max_age_days, reference_date=reference_date
+    )
+    if annual is None:
+        return resolution
+    return TTMWindowResolution(
+        window=TTMWindow(records=(annual,), as_of=annual.end_date, cadence="annual"),
+        failure=None,
+    )
+
+
+def _resolve_sub_annual_window(
+    records: Sequence[WindowFactT],
+    *,
+    max_age_days: int = MAX_FACT_AGE_DAYS,
+    reference_date: Optional[date] = None,
+) -> TTMWindowResolution[WindowFactT]:
+    """Resolve the newest quarterly or semi-annual window (no annual fallback).
 
     ``records`` may arrive in any order and may mix fiscal periods; rows are
     filtered to Q1..Q4, deduped by end_date (first record seen per end_date
@@ -174,15 +226,22 @@ def paired_records(
     same end_date, otherwise the whole pairing fails (``None``) -- a partially
     paired sum would mix window lengths.
 
-    Candidates are filtered to Q1..Q4 and deduped by end_date (first seen
-    wins) for the same reason the window itself is: an FY row sharing Q4's
-    end_date must never stand in for the quarterly amount.
+    Candidates are filtered to the window's cadence periods (Q1..Q4 for a
+    quarterly/semi-annual window, FY for an annual one) and deduped by end_date
+    (first seen wins): on a quarterly window an FY row sharing Q4's end_date
+    must never stand in for the quarterly amount, and symmetrically an annual
+    window must pair only with the FY companion, not a same-dated quarter.
     """
 
+    # An annual window carries a single FY row, so its companion must also be
+    # the FY row for that year; every other cadence pairs on quarterly rows.
+    allowed_periods = (
+        ANNUAL_PERIODS if window.cadence == "annual" else QUARTERLY_PERIODS
+    )
     by_end_date: dict[str, PairedFactT] = {}
     for candidate in candidates:
         period = (candidate.fiscal_period or "").upper()
-        if period not in QUARTERLY_PERIODS:
+        if period not in allowed_periods:
             continue
         by_end_date.setdefault(candidate.end_date, candidate)
 
@@ -221,6 +280,38 @@ def _quarterly_rows(
             continue
         deduped[record.end_date] = (end_date, record)
     return sorted(deduped.values(), key=lambda item: item[0], reverse=True)
+
+
+def _annual_row(
+    records: Sequence[WindowFactT],
+    *,
+    max_age_days: int,
+    reference_date: Optional[date] = None,
+) -> Optional[WindowFactT]:
+    """Return the latest fresh ``FY`` row, or ``None``.
+
+    The building block of a one-row "annual" window: an FY figure already
+    spans twelve months, so no gap arithmetic applies -- only recency (within
+    ``max_age_days``, the caller's FY window) and "latest wins". ``FY`` rows
+    are deduped end_date-first by :func:`filter_unique_fy`, preserving the
+    repositories' newest-filed-first contract for amendments.
+    """
+
+    latest_parsed: Optional[date] = None
+    latest_record: Optional[WindowFactT] = None
+    for end_date, record in filter_unique_fy(records).items():
+        try:
+            parsed = date.fromisoformat(end_date)
+        except ValueError:
+            continue
+        if not is_recent_date(
+            end_date, max_age_days=max_age_days, reference_date=reference_date
+        ):
+            continue
+        if latest_parsed is None or parsed > latest_parsed:
+            latest_parsed = parsed
+            latest_record = record
+    return latest_record
 
 
 def _within(bounds: tuple[int, int], gap: int) -> bool:
