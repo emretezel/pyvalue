@@ -5026,7 +5026,9 @@ def test_interest_coverage_metric() -> None:
 
 def test_interest_coverage_caps_non_positive_interest() -> None:
     # Zero interest across fresh aligned quarters is the debt-free shape:
-    # since 2026-07 the metric emits the documented cap instead of NA.
+    # since 2026-07 the metric emits the documented cap instead of NA. The
+    # cap requires no-material-debt evidence, supplied here as PLTR-shape
+    # lease-contaminated rows well under 1x TTM EBIT (100.0).
     metric = InterestCoverageMetric()
     today = date.today()
     q4 = (today - timedelta(days=30)).isoformat()
@@ -5104,6 +5106,26 @@ def test_interest_coverage_caps_non_positive_interest() -> None:
                         currency="USD",
                     ),
                 ]
+            if concept == "ShortTermDebt":
+                return [
+                    fact(
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=3.0,
+                        currency="USD",
+                    ),
+                ]
+            if concept == "LongTermDebt":
+                return [
+                    fact(
+                        concept=concept,
+                        fiscal_period="Q4",
+                        end_date=q4,
+                        value=17.0,
+                        currency="USD",
+                    ),
+                ]
             return []
 
     repo = DummyRepo()
@@ -5174,7 +5196,8 @@ def test_interest_coverage_keeps_direct_path_when_valid() -> None:
 
 def test_interest_coverage_caps_when_fallback_insufficient() -> None:
     # Only three aligned EBIT+interest quarters exist, but the EBIT-only TTM
-    # is fresh and positive: no measurable debt service -> documented cap.
+    # is fresh and positive and immaterial-debt evidence is on file: no
+    # measurable debt service -> documented cap.
     metric = InterestCoverageMetric()
     q4, q3, q2, q1 = _net_debt_quarter_dates()
 
@@ -5194,6 +5217,10 @@ def test_interest_coverage_caps_when_fallback_insufficient() -> None:
                 return _quarterly_records(concept, (q4, q3), (4.0, 3.0))
             if concept == "InterestExpenseFromNetInterestIncome":
                 return _quarterly_records(concept, (q2,), (2.0,))
+            if concept == "ShortTermDebt":
+                return _quarterly_records(concept, (q4,), (3.0,))
+            if concept == "LongTermDebt":
+                return _quarterly_records(concept, (q4,), (17.0,))
             return []
 
     repo = DummyRepo()

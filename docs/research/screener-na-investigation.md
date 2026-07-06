@@ -313,7 +313,8 @@ stale 2,697, non-positive 107. Author decision: emit a documented cap (100x)
 whenever TTM EBIT is positive and fresh and interest is absent, stale, or
 <= 0 — missing-interest-alone trigger, chosen over the net-cash-evidence
 variant for simplicity and reach; leverage remains policed by
-`net_debt_to_ebitda` where debt facts exist.
+`net_debt_to_ebitda` where debt facts exist. *Amended 2026-07-06: the trigger
+proved too broad — see the cap-misfire audit below (queue item 17).*
 
 **eps_streak earnings basis → B3 (decided 2026-07-05):** `EarningsPerShare`
 derives from EODHD `Earnings::Annual epsActual` — analyst-adjusted, not GAAP.
@@ -373,6 +374,49 @@ consolidated around a strict read-only contract — only `normalize-fundamentals
   its untemplated warnings are the microscope's core value; its screen flag
   was renamed `--screen` → `--config` for CLI-wide consistency.
 
+### 2026-07-06 — interest_coverage cap misfire audit (evidence gate)
+
+The missing-interest-alone trigger (A3) capped every fresh-profitable issuer
+whose feed lacked a fresh quarterly interest line — including levered ones.
+Live-DB audit of the ~2,107 listings on the cap path (fresh positive TTM
+EBIT, no fresh quarterly interest), bucketed by fresh balance-sheet debt
+(`max(ShortTermDebt + LongTermDebt, TotalDebtFromBalanceSheet)`, 400-day
+window):
+
+| fresh debt evidence | listings |
+| --- | --- |
+| explicit zero-debt facts | 157 |
+| 0 < debt <= 1x TTM EBIT | 734 |
+| debt > 1x TTM EBIT (**misfires**) | **1,160** (580 of them > 5x) |
+| debt fields null, `Liabilities` fresh | 40 (23 with liabilities <= 1x EBIT) |
+| no fresh balance-sheet facts at all | 16 |
+
+Web cross-checks on matching as-of dates (2025-12-31) confirmed the misfires
+are real: Hanwha 000880.KO carries ~₩63.5T of debt (~15x EBIT; DB ₩60.2T,
+LongTermDebt exact to the million), S-Oil 010950.KO ~₩7.9T (~32x; DB ₩7.5T),
+plus banks (Santander, CaixaBank) and provider junk (SIGA.US stores a x10^6
+unit error: $2.65T LongTermDebt against a web-verified debt-free reality).
+The correct caps are equally real: Arista/Airbnb/PDD BDRs sit in the
+zero-debt bucket, and PLTR.US — the shape A3 was built for — shows 0.29x
+EBIT of "debt" that is entirely lease liabilities plus the normalizer's
+derived `LongTermDebt` (= totalLiab − totalCurrentLiabilities, exactly), so
+a strict zero test would break it.
+
+**Author decision (implemented 2026-07-06):** the cap requires fresh
+no-material-debt evidence — `resolve_debt_evidence` (the *larger* of the
+component sum and the `TotalDebtFromBalanceSheet` rollup; overstatement can
+only block a cap, never create one) at or under `CAP_MAX_DEBT_TO_EBIT = 1.0`
+x TTM EBIT, falling back to total `Liabilities` (debt's upper bound) when no
+debt concept is fresh. Derivation of 1.0x: at a punitive 10% assumed rate,
+implied true coverage is still >= 10x, above the toughest 6x gate in use,
+while tolerating the lease/derived contamination above. Material evidence or
+no balance-sheet evidence at all → honest NA with dedicated warning reasons
+(`material debt without measurable interest expense`, `material total
+liabilities`, `no fresh balance-sheet evidence`). Net effect at the next
+recompute: ~915 listings keep the cap, ~1,190 flip 100x → NA. The
+net-cash-evidence variant was rejected again: gross-levered-but-net-cash
+issuers can have genuinely low coverage, so only gross-debt evidence is safe.
+
 ### Follow-up queue (each its own commit, author sign-off per item)
 
 1. **Done 2026-07-04/05.** `normalize-fundamentals --force` sweep of the
@@ -418,3 +462,8 @@ consolidated around a strict read-only contract — only `normalize-fundamentals
     QARP — adjusted-EPS (epsActual) basis, redundant next to
     `ni_loss_years_10y == 0` (B3). Effects of 11-16 materialize at the next
     full-universe compute-metrics run.
+17. **Done 2026-07-06.** metrics: interest_coverage cap gated on
+    no-material-debt evidence (`resolve_debt_evidence` <= 1.0x TTM EBIT,
+    `Liabilities` fallback) — closes the A3 misfire (see the 2026-07-06
+    audit section). Effects materialize at the next full-universe
+    compute-metrics run.

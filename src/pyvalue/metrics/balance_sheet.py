@@ -21,6 +21,18 @@ semantics identical by construction:
 - freshness: every fact must be within the standard 400-day window --
   a stale balance sheet is a data gap, not a usable position.
 
+Two further resolvers serve evidence checks rather than net-debt arithmetic:
+
+- ``resolve_debt_evidence``: an *upper bound* on the debt burden -- the
+  larger of the component sum and the provider's total-debt rollup. Used by
+  ``interest_coverage`` to decide whether its debt-free cap is safe to emit;
+  deliberate overstatement (e.g. the normalizer's derived ``LongTermDebt`` =
+  total minus current liabilities, or lease-contaminated rollups) can only
+  *block* a cap, never create one, so it is fail-safe by construction.
+- ``resolve_total_liabilities``: the latest fresh total-liabilities figure,
+  the coarsest upper bound of all (debt is a subset of liabilities), for
+  listings whose feed carries no debt concept at all.
+
 Resolvers return ``None`` silently; callers own the metric-scoped logging so
 persisted failure reasons keep their per-metric wording.
 """
@@ -43,6 +55,11 @@ CASH_CONCEPTS: tuple[str, ...] = (
     "ShortTermInvestments",
 )
 DEBT_CONCEPTS: tuple[str, ...] = ("ShortTermDebt", "LongTermDebt")
+# Evidence checks also consult the provider's total-debt rollup
+# (``shortLongTermDebtTotal``), which providers populate independently of the
+# component fields -- and total liabilities as the bound of last resort.
+DEBT_EVIDENCE_CONCEPTS: tuple[str, ...] = (*DEBT_CONCEPTS, "TotalDebtFromBalanceSheet")
+TOTAL_LIABILITIES_CONCEPT: str = "Liabilities"
 
 
 @dataclass(frozen=True)
@@ -113,6 +130,69 @@ def resolve_total_debt(
     return BalanceSheetPosition(money=debt_money, as_of=max(as_of_candidates))
 
 
+def resolve_debt_evidence(
+    listing_id: int,
+    repo: RegionFactsRepository,
+    *,
+    target_currency: str,
+    metric_id: str,
+) -> Optional[BalanceSheetPosition]:
+    """Resolve an upper bound on the listing's fresh debt burden.
+
+    Returns the *larger* of the component sum (``resolve_total_debt``) and
+    the provider's ``TotalDebtFromBalanceSheet`` rollup, or ``None`` when no
+    debt concept has a fresh row. ``max()`` -- not the components-preferred
+    chain ``debt_paydown_years`` uses -- because the two representations can
+    disagree (a provider unit error in one field, leases in the other) and an
+    evidence check must trust the worst reading: overstatement blocks a
+    debt-free cap (an honest NA), understatement would manufacture a false
+    gate pass. Do not reuse this for net-debt arithmetic, where a measured
+    single representation is wanted instead.
+    """
+
+    component_sum = resolve_total_debt(
+        listing_id, repo, target_currency=target_currency, metric_id=metric_id
+    )
+    rollup_fact = _latest_recent_fact(repo, listing_id, DEBT_EVIDENCE_CONCEPTS[2])
+    rollup: Optional[BalanceSheetPosition] = None
+    if rollup_fact is not None:
+        rollup = BalanceSheetPosition(
+            money=_money(rollup_fact, target_currency, listing_id, metric_id),
+            as_of=rollup_fact.end_date,
+        )
+
+    if component_sum is None:
+        return rollup
+    if rollup is None:
+        return component_sum
+    # Both minted to target_currency above, so Money ordering is safe.
+    return rollup if rollup.money > component_sum.money else component_sum
+
+
+def resolve_total_liabilities(
+    listing_id: int,
+    repo: RegionFactsRepository,
+    *,
+    target_currency: str,
+    metric_id: str,
+) -> Optional[BalanceSheetPosition]:
+    """Resolve the latest fresh total-liabilities figure.
+
+    Debt is a subset of total liabilities, so this is the coarsest upper
+    bound available -- the evidence of last resort when a feed carries no
+    debt concept at all (some providers null the debt fields instead of
+    reporting zeroes). ``None`` when absent or stale.
+    """
+
+    fact = _latest_recent_fact(repo, listing_id, TOTAL_LIABILITIES_CONCEPT)
+    if fact is None:
+        return None
+    return BalanceSheetPosition(
+        money=_money(fact, target_currency, listing_id, metric_id),
+        as_of=fact.end_date,
+    )
+
+
 def _latest_recent_fact(
     repo: RegionFactsRepository,
     listing_id: int,
@@ -144,6 +224,10 @@ __all__ = [
     "BalanceSheetPosition",
     "CASH_CONCEPTS",
     "DEBT_CONCEPTS",
+    "DEBT_EVIDENCE_CONCEPTS",
+    "TOTAL_LIABILITIES_CONCEPT",
     "resolve_cash_position",
+    "resolve_debt_evidence",
     "resolve_total_debt",
+    "resolve_total_liabilities",
 ]

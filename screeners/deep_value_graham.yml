@@ -34,8 +34,11 @@ criteria:
     right:
       value: 5.0
 
-  # Debt-free/net-cash issuers with no measurable interest expense score the
-  # documented 100x cap (docs/reference/metrics.md) and pass this gate.
+  # Debt-free issuers with no measurable interest expense score the
+  # documented 100x cap (docs/reference/metrics.md) and pass this gate --
+  # but only when fresh balance-sheet evidence bounds debt at <= 1x TTM
+  # EBIT. Material debt without a measurable interest line (a provider data
+  # gap) stays NA and fails the gate.
   - name: "Interest coverage >= 1.5x (going-concern check, not a strength bar)"
     left:
       metric: interest_coverage

@@ -14,6 +14,11 @@ now emits the documented ``INTEREST_COVERAGE_CAP`` (100x) instead of ``None``.
 Loss-making or stale-EBIT issuers are not rescued. The capped tests fail on
 the ratio-only code (``None``) and pass with the cap.
 
+Amended 2026-07-06: the cap additionally requires fresh no-material-debt
+evidence (see ``test_interest_coverage_cap_material_debt_misfire``), so the
+capped shapes here seed the balance-sheet rows a genuine debt-free issuer
+carries -- debt-free is evidenced, not assumed.
+
 Author: Emre Tezel
 """
 
@@ -97,8 +102,30 @@ def _quarterly(
     ]
 
 
+def _balance_row(concept: str, value: float) -> list[FactRecord]:
+    """One fresh balance-sheet row -- enough for latest_monetary_fact."""
+
+    return [
+        FactRecord(
+            symbol="PLTR.US",
+            concept=concept,
+            fiscal_period="Q4",
+            end_date=FRESH_QUARTERS[0],
+            unit_kind="monetary",
+            value=value,
+            filed=None,
+            currency="USD",
+        )
+    ]
+
+
 def test_stale_interest_line_with_fresh_ebit_scores_the_cap() -> None:
-    """The PLTR shape: interest reporting ended years ago, EBIT is current."""
+    """The PLTR shape: interest reporting ended years ago, EBIT is current.
+
+    The debt rows mirror PLTR's real EODHD shape -- lease liabilities and a
+    derived noncurrent-liabilities ``LongTermDebt`` well under 1x TTM EBIT --
+    which the evidence gate must tolerate.
+    """
 
     repo = _FakeFactsRepo(
         {
@@ -108,6 +135,8 @@ def test_stale_interest_line_with_fresh_ebit_scores_the_cap() -> None:
             "InterestExpense": _quarterly(
                 "InterestExpense", STALE_QUARTERS, (4.0, 3.0, 2.0, 1.0)
             ),
+            "ShortTermDebt": _balance_row("ShortTermDebt", 3.0),
+            "LongTermDebt": _balance_row("LongTermDebt", 17.0),
         }
     )
 
@@ -120,13 +149,19 @@ def test_stale_interest_line_with_fresh_ebit_scores_the_cap() -> None:
 
 
 def test_no_interest_facts_at_all_scores_the_cap() -> None:
-    """An issuer that never reported an interest line is debt-free, not NA."""
+    """No interest line plus explicit zero-debt rows is debt-free, not NA.
+
+    Debt-free is now evidenced, not assumed: the explicit fresh zeroes are
+    what distinguishes this issuer from a provider data gap (which stays NA).
+    """
 
     repo = _FakeFactsRepo(
         {
             "OperatingIncomeLoss": _quarterly(
                 "OperatingIncomeLoss", FRESH_QUARTERS, (40.0, 30.0, 20.0, 10.0)
             ),
+            "ShortTermDebt": _balance_row("ShortTermDebt", 0.0),
+            "LongTermDebt": _balance_row("LongTermDebt", 0.0),
         }
     )
 

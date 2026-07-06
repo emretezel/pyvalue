@@ -8,7 +8,9 @@ from datetime import date, timedelta
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics.balance_sheet import (
     resolve_cash_position,
+    resolve_debt_evidence,
     resolve_total_debt,
+    resolve_total_liabilities,
 )
 from pyvalue.persistence.storage import FactRecord
 from test_metrics import fact
@@ -147,3 +149,77 @@ def test_debt_ignores_a_stale_side() -> None:
         }
     )
     assert _debt(repo) == 150.0
+
+
+def _evidence(repo: _FakeFactsRepo) -> float | None:
+    position = resolve_debt_evidence(
+        LISTING_ID, repo, target_currency="USD", metric_id="test"
+    )
+    return None if position is None else position.money.amount
+
+
+def _liabilities(repo: _FakeFactsRepo) -> float | None:
+    position = resolve_total_liabilities(
+        LISTING_ID, repo, target_currency="USD", metric_id="test"
+    )
+    return None if position is None else position.money.amount
+
+
+def test_debt_evidence_takes_the_larger_rollup() -> None:
+    # Components 50+150=200 vs rollup 260: the evidence is the worst reading.
+    repo = _FakeFactsRepo(
+        {
+            "ShortTermDebt": _instant("ShortTermDebt", 50.0),
+            "LongTermDebt": _instant("LongTermDebt", 150.0),
+            "TotalDebtFromBalanceSheet": _instant("TotalDebtFromBalanceSheet", 260.0),
+        }
+    )
+    assert _evidence(repo) == 260.0
+
+
+def test_debt_evidence_takes_the_larger_component_sum() -> None:
+    repo = _FakeFactsRepo(
+        {
+            "ShortTermDebt": _instant("ShortTermDebt", 50.0),
+            "LongTermDebt": _instant("LongTermDebt", 150.0),
+            "TotalDebtFromBalanceSheet": _instant("TotalDebtFromBalanceSheet", 120.0),
+        }
+    )
+    assert _evidence(repo) == 200.0
+
+
+def test_debt_evidence_single_component_alone() -> None:
+    repo = _FakeFactsRepo({"ShortTermDebt": _instant("ShortTermDebt", 50.0)})
+    assert _evidence(repo) == 50.0
+
+
+def test_debt_evidence_rollup_alone() -> None:
+    repo = _FakeFactsRepo(
+        {"TotalDebtFromBalanceSheet": _instant("TotalDebtFromBalanceSheet", 260.0)}
+    )
+    assert _evidence(repo) == 260.0
+
+
+def test_debt_evidence_ignores_stale_rows_and_is_none_when_empty() -> None:
+    repo = _FakeFactsRepo(
+        {
+            "LongTermDebt": _instant("LongTermDebt", 150.0, end_date=STALE),
+            "TotalDebtFromBalanceSheet": _instant(
+                "TotalDebtFromBalanceSheet", 260.0, end_date=STALE
+            ),
+        }
+    )
+    assert _evidence(repo) is None
+    assert _evidence(_FakeFactsRepo({})) is None
+
+
+def test_total_liabilities_resolves_fresh_row() -> None:
+    repo = _FakeFactsRepo({"Liabilities": _instant("Liabilities", 500.0)})
+    assert _liabilities(repo) == 500.0
+
+
+def test_total_liabilities_stale_is_none() -> None:
+    repo = _FakeFactsRepo(
+        {"Liabilities": _instant("Liabilities", 500.0, end_date=STALE)}
+    )
+    assert _liabilities(repo) is None

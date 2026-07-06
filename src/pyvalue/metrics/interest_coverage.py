@@ -11,6 +11,12 @@ from typing import Optional, Sequence
 import logging
 
 from pyvalue.facts import MonetaryFact, RegionFactsRepository
+from pyvalue.metrics.balance_sheet import (
+    DEBT_EVIDENCE_CONCEPTS,
+    TOTAL_LIABILITIES_CONCEPT,
+    resolve_debt_evidence,
+    resolve_total_liabilities,
+)
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.ttm import (
     QUARTERLY_PERIODS,
@@ -32,12 +38,36 @@ INTEREST_FALLBACK_CONCEPTS = ("InterestExpenseFromNetInterestIncome",)
 
 # Documented cap emitted when coverage is economically unbounded: fresh,
 # positive TTM EBIT with no measurable interest expense (line never reported,
-# stale after a debt repayment, or non-positive). Debt-free issuers stop
-# reporting an interest line entirely, so a plain ratio can never pass a
-# `>= N` screen gate for exactly the strongest balance sheets. 100x sits
-# above every screen threshold in use and is a *convention*, not a
-# measurement -- see docs/reference/metrics.md.
+# stale after a debt repayment, or non-positive) AND fresh balance-sheet
+# evidence that debt is immaterial. Debt-free issuers stop reporting an
+# interest line entirely, so a plain ratio can never pass a `>= N` screen
+# gate for exactly the strongest balance sheets -- but a missing interest
+# line alone is also the signature of a provider data gap on a levered
+# issuer (the 2026-07-06 audit found 55% of cap-path listings carrying fresh
+# debt above 1x TTM EBIT), so the cap demands corroboration instead of
+# assuming debt-freedom. 100x sits above every screen threshold in use and
+# is a *convention*, not a measurement -- see docs/reference/metrics.md.
 INTEREST_COVERAGE_CAP: float = 100.0
+
+# Cap eligibility bound: fresh debt evidence (or, failing that, total
+# liabilities) must not exceed this multiple of TTM EBIT, inclusively.
+# Derivation: at a punitive 10% assumed rate on debt equal to 1x EBIT the
+# implied true coverage is still >= 10x -- above the toughest 6x gate in use
+# (QARP) -- so an issuer under the bound passes any gate honestly even if it
+# secretly pays interest. The slack over a strict zero test is deliberate:
+# EODHD debt fields conflate leases and derived noncurrent liabilities with
+# borrowings (web-verified debt-free PLTR.US shows 0.29x), so a tight bound
+# would NA exactly the balance sheets the cap exists for.
+CAP_MAX_DEBT_TO_EBIT: float = 1.0
+
+
+@dataclass(frozen=True)
+class _FreshTTMEbit:
+    """Fresh, positive TTM EBIT resolved over the EBIT-only quarterly series."""
+
+    money: Money
+    as_of: str
+    target_currency: str
 
 
 @dataclass
@@ -46,7 +76,11 @@ class InterestCoverageMetric:
 
     id: str = "interest_coverage"
     required_concepts = tuple(
-        EBIT_CONCEPTS + INTEREST_CONCEPTS + INTEREST_FALLBACK_CONCEPTS
+        EBIT_CONCEPTS
+        + INTEREST_CONCEPTS
+        + INTEREST_FALLBACK_CONCEPTS
+        + DEBT_EVIDENCE_CONCEPTS
+        + (TOTAL_LIABILITIES_CONCEPT,)
     )
 
     def compute(
@@ -86,13 +120,16 @@ class InterestCoverageMetric:
 
         # The ratio path is exhausted: interest is absent, stale, misaligned,
         # or non-positive. For a business whose *current* TTM EBIT is positive
-        # and fresh that is the debt-free/net-cash shape (an issuer that
-        # repaid its debt typically stops reporting the interest line), so
-        # coverage is economically unbounded -- emit the documented cap
-        # instead of NA. Loss-making or stale-EBIT issuers are not rescued.
-        cap_result = self._debt_free_cap(listing_id, ebit_records, repo)
-        if cap_result is not None:
-            return cap_result
+        # and fresh that is *either* the debt-free/net-cash shape (an issuer
+        # that repaid its debt typically stops reporting the interest line)
+        # *or* a provider data gap on a levered issuer -- the balance sheet
+        # arbitrates. Cap-or-veto is the final word for this branch: falling
+        # through to the legacy missing-interest diagnostics below would
+        # mislabel an evidence veto. Loss-making or stale-EBIT issuers are
+        # not rescued.
+        ebit_ttm = self._fresh_positive_ttm_ebit(listing_id, ebit_records, repo)
+        if ebit_ttm is not None:
+            return self._debt_free_cap(listing_id, ebit_ttm, repo)
 
         # Genuine NA: emit the precise legacy warning so the persisted
         # failure reason stays diagnostic (missing interest facts entirely,
@@ -114,20 +151,20 @@ class InterestCoverageMetric:
             repo=repo,
         )
 
-    def _debt_free_cap(
+    def _fresh_positive_ttm_ebit(
         self,
         listing_id: int,
         ebit_records: Sequence[MonetaryFact],
         repo: RegionFactsRepository,
-    ) -> Optional[MetricResult]:
-        """Return the capped result when fresh TTM EBIT is positive.
+    ) -> Optional[_FreshTTMEbit]:
+        """Resolve fresh, positive TTM EBIT over the EBIT-only series.
 
-        The cap deliberately keys on the EBIT-only quarterly series, not the
-        EBIT-and-interest aligned one: for an issuer whose interest line ended
-        years ago (the PLTR shape) the aligned series is stale while the
-        business itself is current. Returns ``None`` when no fresh TTM window
-        forms from the EBIT rows, or when TTM EBIT is non-positive -- those
-        issuers stay NA.
+        Deliberately keys on the EBIT-only quarterly series, not the
+        EBIT-and-interest aligned one: for an issuer whose interest line
+        ended years ago (the PLTR shape) the aligned series is stale while
+        the business itself is current. Returns ``None`` when no fresh TTM
+        window forms from the EBIT rows, or when TTM EBIT is non-positive --
+        those issuers stay NA.
         """
 
         resolution = resolve_ttm_window(ebit_records)
@@ -143,7 +180,76 @@ class InterestCoverageMetric:
         )
         if ebit_ttm.amount <= 0:
             return None
+        return _FreshTTMEbit(
+            money=ebit_ttm, as_of=window.as_of, target_currency=target_currency
+        )
 
+    def _debt_free_cap(
+        self,
+        listing_id: int,
+        ebit: _FreshTTMEbit,
+        repo: RegionFactsRepository,
+    ) -> Optional[MetricResult]:
+        """Emit the cap only with evidence that debt is immaterial.
+
+        A missing interest line on a fresh, profitable business is ambiguous:
+        genuinely debt-free issuers stop reporting it, but provider feeds
+        also drop it for levered issuers. Fresh balance-sheet debt evidence
+        (upper bound; total liabilities as last resort) at or under
+        ``CAP_MAX_DEBT_TO_EBIT`` x TTM EBIT proves the cap safe; material or
+        absent evidence returns ``None`` (an honest NA) with a diagnostic
+        warning -- missing data must not manufacture a gate pass.
+        """
+
+        threshold = ebit.money * CAP_MAX_DEBT_TO_EBIT
+
+        evidence = resolve_debt_evidence(
+            listing_id, repo, target_currency=ebit.target_currency, metric_id=self.id
+        )
+        if evidence is not None:
+            if evidence.money > threshold:
+                LOGGER.warning(
+                    "interest_coverage: material debt without measurable interest "
+                    "expense for listing_id=%s -- provider data gap, not debt-free "
+                    "(debt evidence %.0f %s > %.1fx TTM EBIT)",
+                    listing_id,
+                    evidence.money.amount,
+                    evidence.money.currency,
+                    CAP_MAX_DEBT_TO_EBIT,
+                )
+                return None
+            # Explicit zero-debt rows and immaterial (lease/derived
+            # contaminated) balances land here -- the genuine debt-free shape.
+            return self._emit_cap(listing_id, ebit)
+
+        liabilities = resolve_total_liabilities(
+            listing_id, repo, target_currency=ebit.target_currency, metric_id=self.id
+        )
+        if liabilities is not None:
+            if liabilities.money > threshold:
+                LOGGER.warning(
+                    "interest_coverage: no fresh debt facts and material total "
+                    "liabilities for listing_id=%s -- debt is unknown, not zero "
+                    "(liabilities %.0f %s > %.1fx TTM EBIT)",
+                    listing_id,
+                    liabilities.money.amount,
+                    liabilities.money.currency,
+                    CAP_MAX_DEBT_TO_EBIT,
+                )
+                return None
+            # Liabilities upper-bound debt, so a tiny balance sheet is
+            # positive evidence even when every debt field is null.
+            return self._emit_cap(listing_id, ebit)
+
+        LOGGER.warning(
+            "interest_coverage: no fresh balance-sheet evidence to support the "
+            "debt-free cap for listing_id=%s",
+            listing_id,
+        )
+        return None
+
+    def _emit_cap(self, listing_id: int, ebit: _FreshTTMEbit) -> MetricResult:
+        # INFO text kept byte-identical: the console-noise regression pins it.
         LOGGER.info(
             "interest_coverage: no measurable interest expense with positive TTM "
             "EBIT for listing_id=%s -- emitting documented cap %.0fx",
@@ -154,7 +260,7 @@ class InterestCoverageMetric:
             listing_id=listing_id,
             metric_id=self.id,
             value=INTEREST_COVERAGE_CAP,
-            as_of=window.as_of,
+            as_of=ebit.as_of,
         )
 
     def _compute_aligned(
@@ -252,4 +358,8 @@ class InterestCoverageMetric:
         return sum_money(monies)
 
 
-__all__ = ["INTEREST_COVERAGE_CAP", "InterestCoverageMetric"]
+__all__ = [
+    "CAP_MAX_DEBT_TO_EBIT",
+    "INTEREST_COVERAGE_CAP",
+    "InterestCoverageMetric",
+]
