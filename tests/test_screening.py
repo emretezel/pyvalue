@@ -396,33 +396,34 @@ def test_load_screen_parses_quality_reasonable_price_primary_example() -> None:
 
     definition = load_screen(screen_path)
 
-    # 16 hard filters: the 6-filter draft plus the reinvestment, gross-margin,
-    # and full-cycle earnings-quality legs. There is deliberately no sbc_to_fcf
-    # gate (EODHD SBC coverage is too sparse/unreliable; dilution is policed by
-    # share_count_cagr_5y instead) and no eps_streak gate (EODHD EPS is
-    # analyst-adjusted epsActual; GAAP stability is the zero-loss-years gate).
-    # The "==" operator is exercised by the zero-loss-years criterion, which
-    # the original draft did not use.
-    assert len(definition.criteria) == 16
+    # 14 hard filters. Deliberately absent gates: sbc_to_fcf (EODHD SBC
+    # coverage is too sparse/unreliable; dilution is policed by
+    # share_count_cagr_5y), eps_streak (EODHD EPS is analyst-adjusted
+    # epsActual; GAAP stability is the zero-loss-years gate), roic_7y_median
+    # (mathematically implied by roic_years_above_12pct >= 7) and
+    # accruals_ratio (implied by cfo_to_ni_ttm >= 0.90 for any ROA <= 100%).
+    # The "==" operator is exercised by the zero-loss-years criterion.
+    assert len(definition.criteria) == 14
     assert {criterion.operator for criterion in definition.criteria} == {
         ">=",
         "<=",
         "==",
     }
     assert not any(
-        criterion.left.metric in {"sbc_to_fcf", "eps_streak"}
+        criterion.left.metric
+        in {"sbc_to_fcf", "eps_streak", "roic_7y_median", "accruals_ratio"}
         for criterion in definition.criteria
     )
     # Spot-check a percent bound, a count bound, and the equality criterion.
-    assert definition.criteria[0].left.metric == "roic_7y_median"
-    assert definition.criteria[0].right.value == 0.12
-    assert definition.criteria[1].left.metric == "roic_years_above_12pct"
-    assert definition.criteria[1].right.value == 7
-    assert definition.criteria[11].left.metric == "ni_loss_years_10y"
-    assert definition.criteria[11].operator == "=="
-    assert definition.criteria[11].right.value == 0
-    assert definition.criteria[14].left.metric == "iroic_5y"
-    assert definition.criteria[15].left.metric == "owner_earnings_cagr_10y"
+    assert definition.criteria[0].left.metric == "roic_years_above_12pct"
+    assert definition.criteria[0].right.value == 7
+    assert definition.criteria[1].left.metric == "roic_10y_min"
+    assert definition.criteria[1].right.value == 0.07
+    assert definition.criteria[9].left.metric == "ni_loss_years_10y"
+    assert definition.criteria[9].operator == "=="
+    assert definition.criteria[9].right.value == 0
+    assert definition.criteria[12].left.metric == "iroic_5y"
+    assert definition.criteria[13].left.metric == "owner_earnings_cagr_10y"
 
     # Ranking block: same sector-relative shape as the draft, but a seven-metric
     # blend grouped by bucket -- quality/capital-efficiency 35% (roic_7y_median,

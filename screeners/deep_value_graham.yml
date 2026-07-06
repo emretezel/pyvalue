@@ -1,3 +1,11 @@
+# NOTE: financials (banks, insurers) are structurally excluded from this
+# screen: altman_z needs AssetsCurrent / LiabilitiesCurrent and
+# piotroski_f_score needs a current ratio -- lines financial issuers do not
+# report, and both scores are invalid for balance-sheet businesses anyway
+# (the 1968 Z-Score is calibrated on manufacturers; deposit/reserve
+# liabilities crush X4). Deliberate, even though banks are historically the
+# cheapest price-to-book cohort a Graham screen would otherwise surface.
+
 criteria:
   # --- Baseline quality gate: existing metrics, deliberately loosened vs
   # quality_reasonable_price_primary.yml. Purpose is excluding structurally

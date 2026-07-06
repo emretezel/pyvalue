@@ -1,11 +1,17 @@
-criteria:
-  - name: "ROIC median (7Y) >= 12% (Greenblatt/Akre high return on capital)"
-    left:
-      metric: roic_7y_median
-    operator: ">="
-    right:
-      value: 0.12
+# NOTE: financials (banks, insurers) are structurally excluded from this
+# screen: the owner-earnings gates (oey_ev_norm, owner_earnings_cagr_10y)
+# need the maintenance-NWC chain, which needs AssetsCurrent /
+# LiabilitiesCurrent -- lines financial issuers do not report. That is
+# intended (owner earnings and NWC are not meaningful for balance-sheet
+# businesses), but it is a property of the screen, not a data gap.
 
+criteria:
+  # NOTE: no roic_7y_median gate. It is mathematically implied by the
+  # persistence gate below: with at most 3 of the strict 10 FY years at or
+  # below 12%, at most 3 of the latest 7 are, so the 7-year median is always
+  # above 12% whenever roic_years_above_12pct >= 7 (both metrics share the
+  # same chain and anchor; zero counterexamples in the 2026-07 universe).
+  # The metric stays computed -- the ranking below weights it at 0.15.
   - name: "ROIC years above 12% >= 7 (persistence, not just average level)"
     left:
       metric: roic_years_above_12pct
@@ -55,13 +61,12 @@ criteria:
     right:
       value: 0.90
 
-  - name: "Accruals ratio <= 10% (clean, cash-backed earnings)"
-    left:
-      metric: accruals_ratio
-    operator: "<="
-    right:
-      value: 0.10
-
+  # NOTE: no accruals_ratio gate. CFO >= 0.9 x NI with NI > 0 bounds accruals
+  # at 0.1 x ROA, so any listing passing the cash-conversion gate above passes
+  # accruals_ratio <= 0.10 for every ROA <= 100% (empirically 1 counterexample
+  # in 19,214). Keeping it only added NA surface: listings passing on cash
+  # conversion could still fail here on a missing average-assets input. The
+  # metric itself stays computed for reports.
   - name: "Net debt / EBITDA <= 2.5x (unleveraged returns)"
     left:
       metric: net_debt_to_ebitda
