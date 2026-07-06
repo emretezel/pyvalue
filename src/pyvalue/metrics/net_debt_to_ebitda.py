@@ -18,8 +18,10 @@ from pyvalue.metrics.balance_sheet import (
     resolve_total_debt,
 )
 from pyvalue.metrics.base import MetricResult
-from pyvalue.metrics.ttm import paired_records, resolve_ttm_window
+from pyvalue.metrics.ttm import Cadence, paired_records, resolve_ttm_window
 from pyvalue.metrics.utils import (
+    MAX_FACT_AGE_DAYS,
+    MAX_FY_FACT_AGE_DAYS,
     require_metric_money,
     require_metric_ticker_currency,
     sum_money,
@@ -36,6 +38,17 @@ DA_FALLBACK_CONCEPTS = ("DepreciationFromCashFlow",)
 class _MoneyResult:
     money: Money
     as_of: str
+
+
+@dataclass
+class _EBITDAResult:
+    money: Money
+    as_of: str
+    # The reporting cadence the EBITDA window resolved on. An annual-only filer
+    # resolves "annual", and its balance sheet is filed on the same once-a-year
+    # cadence -- so the net-debt legs must widen their freshness window to match
+    # (a fresh annual EBITDA over a "stale" 400-day balance sheet is a false NA).
+    cadence: Cadence
 
 
 @dataclass
@@ -72,7 +85,16 @@ class NetDebtToEBITDAMetric:
             )
             return None
 
-        net_debt = self._compute_net_debt(listing_id, repo, target_currency)
+        # Match the balance-sheet freshness to the income cadence: an annual
+        # filer's debt/cash rows are as fresh as its once-a-year EBITDA.
+        balance_sheet_max_age = (
+            MAX_FY_FACT_AGE_DAYS
+            if ttm_ebitda.cadence == "annual"
+            else MAX_FACT_AGE_DAYS
+        )
+        net_debt = self._compute_net_debt(
+            listing_id, repo, target_currency, max_age_days=balance_sheet_max_age
+        )
         if net_debt is None:
             LOGGER.warning(
                 "net_debt_to_ebitda: missing net debt inputs for listing_id=%s",
@@ -95,9 +117,12 @@ class NetDebtToEBITDAMetric:
         listing_id: int,
         repo: RegionFactsRepository,
         target_currency: str,
-    ) -> Optional[_MoneyResult]:
+    ) -> Optional[_EBITDAResult]:
+        # Opt into the annual cadence: an annual-only filer with no quarterly
+        # EBIT still yields a coherent twelve-month EBITDA from its FY rows.
         resolution = resolve_ttm_window(
-            repo.monetary_facts_for_concept(listing_id, EBIT_CONCEPTS[0])
+            repo.monetary_facts_for_concept(listing_id, EBIT_CONCEPTS[0]),
+            annual_max_age_days=MAX_FY_FACT_AGE_DAYS,
         )
         window = resolution.window
         if window is None:
@@ -137,22 +162,36 @@ class NetDebtToEBITDAMetric:
             )
             quarter_totals.append(ebit_money + da_money)
 
-        return _MoneyResult(money=sum_money(quarter_totals), as_of=window.as_of)
+        return _EBITDAResult(
+            money=sum_money(quarter_totals),
+            as_of=window.as_of,
+            cadence=window.cadence,
+        )
 
     def _compute_net_debt(
         self,
         listing_id: int,
         repo: RegionFactsRepository,
         target_currency: str,
+        *,
+        max_age_days: int,
     ) -> Optional[_MoneyResult]:
         debt = resolve_total_debt(
-            listing_id, repo, target_currency=target_currency, metric_id=self.id
+            listing_id,
+            repo,
+            target_currency=target_currency,
+            metric_id=self.id,
+            max_age_days=max_age_days,
         )
         if debt is None:
             return None
 
         cash = resolve_cash_position(
-            listing_id, repo, target_currency=target_currency, metric_id=self.id
+            listing_id,
+            repo,
+            target_currency=target_currency,
+            metric_id=self.id,
+            max_age_days=max_age_days,
         )
         if cash is None:
             return None

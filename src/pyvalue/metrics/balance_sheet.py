@@ -18,8 +18,12 @@ semantics identical by construction:
   is a real balance-sheet shape (no current maturities, or no long-term
   debt), so a single side suffices; both absent means debt is unknown, not
   zero, and resolves to ``None``;
-- freshness: every fact must be within the standard 400-day window --
-  a stale balance sheet is a data gap, not a usable position.
+- freshness: every fact must be within a caller-supplied window (the standard
+  400-day one by default) -- a stale balance sheet is a data gap, not a usable
+  position. Callers whose income flow resolved on the annual cadence pass the
+  480-day FY window instead, so an annual-only filer's balance-sheet legs stay
+  as fresh as its once-a-year income statement rather than going stale in the
+  post-fiscal-year-end gap.
 
 Two further resolvers serve evidence checks rather than net-debt arithmetic:
 
@@ -43,7 +47,11 @@ from dataclasses import dataclass
 from typing import Optional
 
 from pyvalue.facts import MonetaryFact, RegionFactsRepository
-from pyvalue.metrics.utils import is_recent_fact, require_metric_money
+from pyvalue.metrics.utils import (
+    MAX_FACT_AGE_DAYS,
+    is_recent_fact,
+    require_metric_money,
+)
 from pyvalue.money import Money
 
 # Resolution order matters: the first cash concept is the broad rollup, the
@@ -76,17 +84,22 @@ def resolve_cash_position(
     *,
     target_currency: str,
     metric_id: str,
+    max_age_days: int = MAX_FACT_AGE_DAYS,
 ) -> Optional[BalanceSheetPosition]:
     """Resolve the latest fresh cash position through the fallback chain."""
 
-    primary = _latest_recent_fact(repo, listing_id, CASH_CONCEPTS[0])
+    primary = _latest_recent_fact(
+        repo, listing_id, CASH_CONCEPTS[0], max_age_days=max_age_days
+    )
     if primary is not None:
         return BalanceSheetPosition(
             money=_money(primary, target_currency, listing_id, metric_id),
             as_of=primary.end_date,
         )
 
-    cash_eq = _latest_recent_fact(repo, listing_id, CASH_CONCEPTS[1])
+    cash_eq = _latest_recent_fact(
+        repo, listing_id, CASH_CONCEPTS[1], max_age_days=max_age_days
+    )
     if cash_eq is None:
         return None
     cash_money = _money(cash_eq, target_currency, listing_id, metric_id)
@@ -94,7 +107,9 @@ def resolve_cash_position(
 
     # Short-term investments are an optional add-on: their absence usually
     # means "none held", so only the equivalents leg is mandatory.
-    short_term_investments = _latest_recent_fact(repo, listing_id, CASH_CONCEPTS[2])
+    short_term_investments = _latest_recent_fact(
+        repo, listing_id, CASH_CONCEPTS[2], max_age_days=max_age_days
+    )
     if short_term_investments is not None:
         cash_money = cash_money + _money(
             short_term_investments, target_currency, listing_id, metric_id
@@ -109,11 +124,16 @@ def resolve_total_debt(
     *,
     target_currency: str,
     metric_id: str,
+    max_age_days: int = MAX_FACT_AGE_DAYS,
 ) -> Optional[BalanceSheetPosition]:
     """Resolve total debt from whichever fresh debt sides are reported."""
 
-    short_debt = _latest_recent_fact(repo, listing_id, DEBT_CONCEPTS[0])
-    long_debt = _latest_recent_fact(repo, listing_id, DEBT_CONCEPTS[1])
+    short_debt = _latest_recent_fact(
+        repo, listing_id, DEBT_CONCEPTS[0], max_age_days=max_age_days
+    )
+    long_debt = _latest_recent_fact(
+        repo, listing_id, DEBT_CONCEPTS[1], max_age_days=max_age_days
+    )
     if short_debt is None and long_debt is None:
         return None
 
@@ -136,6 +156,7 @@ def resolve_debt_evidence(
     *,
     target_currency: str,
     metric_id: str,
+    max_age_days: int = MAX_FACT_AGE_DAYS,
 ) -> Optional[BalanceSheetPosition]:
     """Resolve an upper bound on the listing's fresh debt burden.
 
@@ -151,9 +172,15 @@ def resolve_debt_evidence(
     """
 
     component_sum = resolve_total_debt(
-        listing_id, repo, target_currency=target_currency, metric_id=metric_id
+        listing_id,
+        repo,
+        target_currency=target_currency,
+        metric_id=metric_id,
+        max_age_days=max_age_days,
     )
-    rollup_fact = _latest_recent_fact(repo, listing_id, DEBT_EVIDENCE_CONCEPTS[2])
+    rollup_fact = _latest_recent_fact(
+        repo, listing_id, DEBT_EVIDENCE_CONCEPTS[2], max_age_days=max_age_days
+    )
     rollup: Optional[BalanceSheetPosition] = None
     if rollup_fact is not None:
         rollup = BalanceSheetPosition(
@@ -175,6 +202,7 @@ def resolve_total_liabilities(
     *,
     target_currency: str,
     metric_id: str,
+    max_age_days: int = MAX_FACT_AGE_DAYS,
 ) -> Optional[BalanceSheetPosition]:
     """Resolve the latest fresh total-liabilities figure.
 
@@ -184,7 +212,9 @@ def resolve_total_liabilities(
     reporting zeroes). ``None`` when absent or stale.
     """
 
-    fact = _latest_recent_fact(repo, listing_id, TOTAL_LIABILITIES_CONCEPT)
+    fact = _latest_recent_fact(
+        repo, listing_id, TOTAL_LIABILITIES_CONCEPT, max_age_days=max_age_days
+    )
     if fact is None:
         return None
     return BalanceSheetPosition(
@@ -197,9 +227,11 @@ def _latest_recent_fact(
     repo: RegionFactsRepository,
     listing_id: int,
     concept: str,
+    *,
+    max_age_days: int = MAX_FACT_AGE_DAYS,
 ) -> Optional[MonetaryFact]:
     record = repo.latest_monetary_fact(listing_id, concept)
-    if record is None or not is_recent_fact(record):
+    if record is None or not is_recent_fact(record, max_age_days=max_age_days):
         return None
     return record
 
