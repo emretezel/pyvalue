@@ -9,7 +9,7 @@ listings, and any NA here is treated as a defect to be root-caused (see
 This file is the canonical record of the watchlist; update it here (and only here)
 when the set changes.
 
-## Tracked stocks (9)
+## Tracked stocks (10)
 
 | Canonical symbol | listing_id | Issuer | Exchange | Currency |
 |---|---|---|---|---|
@@ -21,6 +21,7 @@ when the set changes.
 | C.US | 56282 | Citigroup Inc. | US | USD |
 | PLTR.US | 67393 | Palantir Technologies Inc. | US | USD |
 | TSLA.US | 71610 | Tesla Inc | US | USD |
+| INTC.US | 62587 | Intel Corporation | US | USD |
 | 000660.KO | 24625 | SK Hynix Inc | KO (KOSPI) | KRW |
 
 `listing_id` values are recorded so ad-hoc read-only SQL can target these rows
@@ -32,7 +33,7 @@ All pyvalue commands share one scope resolver, so the watchlist can be passed
 verbatim to any of them:
 
 ```
---symbols MSFT.US GOOGL.US ADBE.US NVDA.US AMD.US C.US PLTR.US TSLA.US 000660.KO
+--symbols MSFT.US GOOGL.US ADBE.US NVDA.US AMD.US C.US PLTR.US TSLA.US INTC.US 000660.KO
 ```
 
 ## SK Hynix cross-listings (known, NOT tracked)
