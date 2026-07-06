@@ -447,6 +447,50 @@ path needs a plausibility guard (reject when `FY interest / debt` implies an
 absurd rate) to reject the Aperam-class contamination at scale. Not
 implemented; queue item 19.
 
+### 2026-07-06 — annual-only issuer support (opt-in annual cadence)
+
+The FY interest fallback above was one metric's version of a universe-wide
+gap: ~2,921 listings file a fresh annual income statement but no recent
+quarterly one, so they NA'd on *every* trailing-twelve-month flow metric —
+`resolve_ttm_window` builds from quarterly rows and excludes FY up front. The
+FY inputs exist in the live DB for the vast majority (revenue 2,795, D&A
+2,706, CFO 2,814, NI 2,914, gross-profit/COGS 2,440, assets 2,868), so the
+NA was mechanical, not a data gap.
+
+**Author decision (implemented 2026-07-06):** add a third **`annual`** cadence
+to the shared resolver — one fresh FY row within a 480-day window — made
+available only when a caller passes `annual_max_age_days`. Opt-in, not default:
+there are 19 call sites and defaulting would silently change all of them, so
+each metric enables annual after per-metric review. Shipped across six commits
+(foundation + five metric phases):
+
+- **Foundation** (`ttm.py`): `Cadence` gains `"annual"`; `resolve_ttm_window`
+  tries sub-annual first and falls to a lone fresh FY row only when opted in;
+  `paired_records` keys companions on `FY` for an annual window.
+- **8 metrics opted in**, each with a regression test for an annual-only
+  filer and a `docs/reference/metrics.md` note: `net_debt_to_ebitda`,
+  `ev_to_ebit`, `ev_to_sales`, `fcf_to_ebitda`, `cfo_to_ni_ttm`,
+  `gross_margin_ttm`, `gross_profit_to_assets_ttm`, `shareholder_yield_ttm`
+  (both its dividend and buyback legs). `oey_ev_norm` was already FY-based;
+  `roce`/`croic` carry their own cadence handling.
+- **Cadence-matched balance-sheet freshness:** where a metric divides an
+  annual flow by a point-in-time balance-sheet leg (net debt in
+  `net_debt_to_ebitda`; the EV denominator's debt/cash; the average-assets
+  denominator in `gross_profit_to_assets_ttm`), that leg widens from the
+  400-day to the 480-day FY window when the flow resolves annual — an annual
+  filer's once-a-year balance sheet must not read as stale in the
+  post-fiscal-year-end gap. The average-assets resolver in `accruals_ratio`
+  gained a two-point FY fallback (latest and prior-year FY balance sheets).
+
+Verified live on two annual-only filers (JDE Peet's 0A5I.LSE, Aedas Homes
+0RV8.LSE — the latter with FY data in the 400–480d band, exercising the
+widened freshness): all eight metrics moved NA → measured. The opt-in leaves
+quarterly and semi-annual reporters byte-unchanged (the annual branch is
+unreachable when a sub-annual window resolves). Effects on persisted state
+materialize at the next full-universe compute-metrics run. `interest_coverage`
+is the deliberate exception (queue item 19): its FY handling stays behind the
+debt-evidence cap, so it does not use the shared opt-in.
+
 ### Follow-up queue (each its own commit, author sign-off per item)
 
 1. **Done 2026-07-04/05.** `normalize-fundamentals --force` sweep of the
@@ -504,3 +548,9 @@ implemented; queue item 19.
     compute-metrics run.
 19. metrics: interest_coverage standalone FY path for annual-only filers
     (~3,491 NA), needs an implied-rate plausibility guard — deferred.
+20. **Done 2026-07-06.** metrics: opt-in `annual` cadence in `resolve_ttm_window`
+    plus per-metric opt-in across 8 TTM-flow metrics, so ~2,921 annual-only
+    filers become computable (see the 2026-07-06 annual-only support section).
+    Cadence-matched 480-day balance-sheet freshness where an annual flow meets
+    a point-in-time leg. Effects materialize at the next full-universe
+    compute-metrics run.
