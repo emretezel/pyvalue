@@ -4,12 +4,19 @@ Author: Emre Tezel
 """
 
 from pathlib import Path
+from typing import Optional
+
+import pytest
 
 from pyvalue.screening import (
     Criterion,
+    CriterionGroup,
+    GroupEvaluation,
     Term,
     evaluate_criterion,
     evaluate_criterion_detail,
+    evaluate_group,
+    evaluate_group_detail,
     load_screen,
     ranking_metric_ids,
     screen_metric_ids,
@@ -43,6 +50,43 @@ def _evaluate(
     return evaluate_criterion(
         criterion, listing_id, metrics_repo, display_symbol=symbol
     )
+
+
+def _sole(group: CriterionGroup) -> Criterion:
+    """Return the single member of a one-member (bare-criterion) group.
+
+    A bare screener criterion parses into a one-member group, so the shipped
+    screeners' operators and terms live on ``group.members[0]``.
+    """
+
+    assert len(group.members) == 1
+    return group.members[0]
+
+
+def _evaluate_group(
+    group: CriterionGroup,
+    db: Path,
+    symbol: str,
+    metrics_repo: MetricsRepository,
+) -> tuple[bool, Optional[float]]:
+    """Resolve ``symbol`` then evaluate a group by natural identity (as the CLI does)."""
+
+    listing_id = resolve_listing_id(db, symbol)
+    assert listing_id is not None
+    return evaluate_group(group, listing_id, metrics_repo, display_symbol=symbol)
+
+
+def _group_detail(
+    group: CriterionGroup,
+    db: Path,
+    symbol: str,
+    metrics_repo: MetricsRepository,
+) -> GroupEvaluation:
+    """Resolve ``symbol`` then return the full per-member group evaluation."""
+
+    listing_id = resolve_listing_id(db, symbol)
+    assert listing_id is not None
+    return evaluate_group_detail(group, listing_id, metrics_repo, display_symbol=symbol)
 
 
 def _seed_listing(db_path: Path, symbol: str, *, currency: str = "USD") -> None:
@@ -375,16 +419,17 @@ criteria:
     definition = load_screen(screen_path)
 
     assert len(definition.criteria) == 3
-    assert {criterion.operator for criterion in definition.criteria} == {
+    # Bare criteria parse into one-member groups; operator/terms live on the member.
+    assert {_sole(group).operator for group in definition.criteria} == {
         ">",
         ">=",
         "<=",
     }
-    assert definition.criteria[0].left.metric == "current_ratio"
-    assert definition.criteria[0].right.value == 1.25
-    assert definition.criteria[2].left.metric == "long_term_debt"
-    assert definition.criteria[2].right.metric == "working_capital"
-    assert definition.criteria[2].right.multiplier == 1.75
+    assert _sole(definition.criteria[0]).left.metric == "current_ratio"
+    assert _sole(definition.criteria[0]).right.value == 1.25
+    assert _sole(definition.criteria[2]).left.metric == "long_term_debt"
+    assert _sole(definition.criteria[2]).right.metric == "working_capital"
+    assert _sole(definition.criteria[2]).right.multiplier == 1.75
 
 
 def test_load_screen_parses_quality_reasonable_price_primary_example() -> None:
@@ -404,26 +449,26 @@ def test_load_screen_parses_quality_reasonable_price_primary_example() -> None:
     # accruals_ratio (implied by cfo_to_ni_ttm >= 0.90 for any ROA <= 100%).
     # The "==" operator is exercised by the zero-loss-years criterion.
     assert len(definition.criteria) == 14
-    assert {criterion.operator for criterion in definition.criteria} == {
+    assert {_sole(group).operator for group in definition.criteria} == {
         ">=",
         "<=",
         "==",
     }
     assert not any(
-        criterion.left.metric
+        _sole(group).left.metric
         in {"sbc_to_fcf", "eps_streak", "roic_7y_median", "accruals_ratio"}
-        for criterion in definition.criteria
+        for group in definition.criteria
     )
     # Spot-check a percent bound, a count bound, and the equality criterion.
-    assert definition.criteria[0].left.metric == "roic_years_above_12pct"
-    assert definition.criteria[0].right.value == 7
-    assert definition.criteria[1].left.metric == "roic_10y_min"
-    assert definition.criteria[1].right.value == 0.07
-    assert definition.criteria[9].left.metric == "ni_loss_years_10y"
-    assert definition.criteria[9].operator == "=="
-    assert definition.criteria[9].right.value == 0
-    assert definition.criteria[12].left.metric == "iroic_5y"
-    assert definition.criteria[13].left.metric == "owner_earnings_cagr_10y"
+    assert _sole(definition.criteria[0]).left.metric == "roic_years_above_12pct"
+    assert _sole(definition.criteria[0]).right.value == 7
+    assert _sole(definition.criteria[1]).left.metric == "roic_10y_min"
+    assert _sole(definition.criteria[1]).right.value == 0.07
+    assert _sole(definition.criteria[9]).left.metric == "ni_loss_years_10y"
+    assert _sole(definition.criteria[9]).operator == "=="
+    assert _sole(definition.criteria[9]).right.value == 0
+    assert _sole(definition.criteria[12]).left.metric == "iroic_5y"
+    assert _sole(definition.criteria[13]).left.metric == "owner_earnings_cagr_10y"
 
     # Ranking block: same sector-relative shape as the draft, but a seven-metric
     # blend grouped by bucket -- quality/capital-efficiency 35% (roic_7y_median,
@@ -469,7 +514,7 @@ def test_load_screen_parses_deep_value_graham_example() -> None:
     # investability criteria. Strict ">" is exercised here, which the QARP
     # screens do not use.
     assert len(definition.criteria) == 10
-    assert {criterion.operator for criterion in definition.criteria} == {
+    assert {_sole(group).operator for group in definition.criteria} == {
         ">",
         ">=",
         "<=",
@@ -480,21 +525,21 @@ def test_load_screen_parses_deep_value_graham_example() -> None:
     # The capital-efficiency floor uses the adaptive ROIC median so its 6-FY
     # evidence bar matches the screen's other adaptive gates (the strict
     # roic_7y_median needed 7 FY years); QARP keeps the strict median.
-    assert definition.criteria[0].left.metric == "roic_10y_median_adaptive"
-    assert definition.criteria[0].operator == ">"
-    assert definition.criteria[0].right.value == 0
+    assert _sole(definition.criteria[0]).left.metric == "roic_10y_median_adaptive"
+    assert _sole(definition.criteria[0]).operator == ">"
+    assert _sole(definition.criteria[0]).right.value == 0
     # The stability gate uses the adaptive share metric so short-history
     # listings stay screenable; 0.40 preserves the old 4-of-10 tolerance.
-    assert definition.criteria[4].left.metric == "ni_loss_year_share"
-    assert definition.criteria[4].operator == "<="
-    assert definition.criteria[4].right.value == 0.40
-    assert definition.criteria[5].left.metric == "piotroski_f_score"
-    assert definition.criteria[5].right.value == 5
-    assert definition.criteria[6].left.metric == "altman_z"
-    assert definition.criteria[6].right.value == 1.81
-    assert definition.criteria[9].left.metric == "market_cap"
-    assert definition.criteria[9].right.value == 150_000_000
-    assert definition.criteria[9].right.currency == "USD"
+    assert _sole(definition.criteria[4]).left.metric == "ni_loss_year_share"
+    assert _sole(definition.criteria[4]).operator == "<="
+    assert _sole(definition.criteria[4]).right.value == 0.40
+    assert _sole(definition.criteria[5]).left.metric == "piotroski_f_score"
+    assert _sole(definition.criteria[5]).right.value == 5
+    assert _sole(definition.criteria[6]).left.metric == "altman_z"
+    assert _sole(definition.criteria[6]).right.value == 1.81
+    assert _sole(definition.criteria[9]).left.metric == "market_cap"
+    assert _sole(definition.criteria[9]).right.value == 150_000_000
+    assert _sole(definition.criteria[9]).right.currency == "USD"
 
     # Ranking block: cheapness-weighted blend -- valuation 45% (price_to_book,
     # ev_to_sales, ev_to_ebit), capital efficiency 25% (croic, roce, both
@@ -565,3 +610,376 @@ ranking:
     definition = load_screen(screen_path)
 
     assert ranking_metric_ids(definition) == ["oey_ev_norm", "ev_to_ebit"]
+
+
+# --------------------------------------------------------------------------- #
+# Criterion groups: OR / K-of-N parsing and evaluation.
+# --------------------------------------------------------------------------- #
+
+
+def _metrics_repo(db: Path) -> MetricsRepository:
+    """Initialise the facts + metrics schemas and return a ready metrics repo."""
+
+    FinancialFactsRepository(db).initialize_schema()
+    repo = MetricsRepository(db)
+    repo.initialize_schema()
+    return repo
+
+
+def _debt_service_group(min_pass: int = 1) -> CriterionGroup:
+    """A two-arm debt-service group: interest coverage OR clean leverage.
+
+    This is the canonical substitution case -- a debt-free issuer with no interest
+    line can still clear the group on ``net_debt_to_ebitda``.
+    """
+
+    return CriterionGroup(
+        name="Debt-service capacity",
+        members=(
+            Criterion(
+                name="Interest coverage >= 6x",
+                left=Term(metric="interest_coverage"),
+                operator=">=",
+                right=Term(value=6.0),
+            ),
+            Criterion(
+                name="Net debt / EBITDA <= 2.5x",
+                left=Term(metric="net_debt_to_ebitda"),
+                operator="<=",
+                right=Term(value=2.5),
+            ),
+        ),
+        min_pass=min_pass,
+    )
+
+
+def test_load_screen_parses_any_of_group(tmp_path: Path) -> None:
+    # A screen mixing a bare criterion, an OR group (default at_least), and a
+    # K-of-N scorecard. Group names are the reportable units; screen_metric_ids
+    # must union every arm's metrics in first-seen order.
+    screen_path = tmp_path / "groups.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "ROIC floor"
+    left:
+      metric: roic_10y_min
+    operator: ">="
+    right:
+      value: 0.07
+  - name: "Debt-service capacity"
+    any_of:
+      - name: "Interest coverage >= 6x"
+        left:
+          metric: interest_coverage
+        operator: ">="
+        right:
+          value: 6
+      - name: "Net debt / EBITDA <= 2.5x"
+        left:
+          metric: net_debt_to_ebitda
+        operator: "<="
+        right:
+          value: 2.5
+  - name: "Quality scorecard (>=2 of 3)"
+    at_least: 2
+    any_of:
+      - name: "GM"
+        left:
+          metric: gross_margin_ttm
+        operator: ">="
+        right:
+          value: 0.35
+      - name: "CFO/NI"
+        left:
+          metric: cfo_to_ni_ttm
+        operator: ">="
+        right:
+          value: 0.9
+      - name: "F-score"
+        left:
+          metric: piotroski_f_score
+        operator: ">="
+        right:
+          value: 6
+""",
+        encoding="utf-8",
+    )
+
+    definition = load_screen(screen_path)
+
+    assert len(definition.criteria) == 3
+    bare, or_group, scorecard = definition.criteria
+
+    assert bare.name == "ROIC floor"
+    assert len(bare.members) == 1
+    assert bare.min_pass == 1
+
+    assert or_group.name == "Debt-service capacity"
+    assert or_group.min_pass == 1  # OR is the default
+    assert [member.left.metric for member in or_group.members] == [
+        "interest_coverage",
+        "net_debt_to_ebitda",
+    ]
+
+    assert scorecard.min_pass == 2
+    assert len(scorecard.members) == 3
+
+    # The metric-id union walks every member of every group, first-seen order.
+    assert screen_metric_ids(definition) == [
+        "roic_10y_min",
+        "interest_coverage",
+        "net_debt_to_ebitda",
+        "gross_margin_ttm",
+        "cfo_to_ni_ttm",
+        "piotroski_f_score",
+    ]
+
+
+def test_load_screen_wraps_bare_criterion_as_one_member_group(tmp_path: Path) -> None:
+    # Backward compatibility: a bare criterion becomes a one-member group whose
+    # name is the criterion's name, so pre-group screeners parse unchanged.
+    screen_path = tmp_path / "bare.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Current ratio floor"
+    left:
+      metric: current_ratio
+    operator: ">="
+    right:
+      value: 1.25
+""",
+        encoding="utf-8",
+    )
+
+    definition = load_screen(screen_path)
+
+    assert len(definition.criteria) == 1
+    group = definition.criteria[0]
+    assert group.name == "Current ratio floor"
+    assert group.min_pass == 1
+    assert _sole(group).left.metric == "current_ratio"
+
+
+def test_load_screen_rejects_duplicate_group_names(tmp_path: Path) -> None:
+    # Names are CSV columns / fallout labels, so duplicates would silently
+    # collide in the per-group value dict -- reject them at parse time.
+    screen_path = tmp_path / "dupe.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Same"
+    left:
+      metric: current_ratio
+    operator: ">="
+    right:
+      value: 1
+  - name: "Same"
+    left:
+      metric: earnings_yield
+    operator: ">"
+    right:
+      value: 0
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Duplicate"):
+        load_screen(screen_path)
+
+
+def test_load_screen_rejects_at_least_out_of_range(tmp_path: Path) -> None:
+    # at_least cannot exceed the member count (an unsatisfiable group).
+    screen_path = tmp_path / "bad_at_least.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Impossible"
+    at_least: 3
+    any_of:
+      - name: "A"
+        left:
+          metric: gross_margin_ttm
+        operator: ">="
+        right:
+          value: 0.35
+      - name: "B"
+        left:
+          metric: cfo_to_ni_ttm
+        operator: ">="
+        right:
+          value: 0.9
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="at_least"):
+        load_screen(screen_path)
+
+
+def test_load_screen_rejects_group_without_name(tmp_path: Path) -> None:
+    # An explicit group's name is its output column, so it is required.
+    screen_path = tmp_path / "no_name.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - any_of:
+      - name: "A"
+        left:
+          metric: gross_margin_ttm
+        operator: ">="
+        right:
+          value: 0.35
+      - name: "B"
+        left:
+          metric: cfo_to_ni_ttm
+        operator: ">="
+        right:
+          value: 0.9
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="name"):
+        load_screen(screen_path)
+
+
+def test_load_screen_rejects_empty_any_of(tmp_path: Path) -> None:
+    screen_path = tmp_path / "empty_any_of.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Empty"
+    any_of: []
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="any_of"):
+        load_screen(screen_path)
+
+
+def test_evaluate_group_or_passes_when_any_member_passes(tmp_path: Path) -> None:
+    db = tmp_path / "group_or_pass.db"
+    metrics_repo = _metrics_repo(db)
+    _seed_listing(db, "AAPL.US")
+    # Coverage is weak (fails >= 6) but leverage is clean (passes <= 2.5): the OR
+    # group still passes on its second arm.
+    seed_metric(db, "AAPL.US", "interest_coverage", 3.0, "2023-12-31")
+    seed_metric(db, "AAPL.US", "net_debt_to_ebitda", 1.0, "2023-12-31")
+
+    passed, reported = _evaluate_group(
+        _debt_service_group(), db, "AAPL.US", metrics_repo
+    )
+
+    assert passed is True
+    # Reported value is the first passing arm's left value -- the leverage arm here.
+    assert reported == 1.0
+
+
+def test_evaluate_group_or_fails_when_all_members_fail(tmp_path: Path) -> None:
+    db = tmp_path / "group_or_fail.db"
+    metrics_repo = _metrics_repo(db)
+    _seed_listing(db, "AAPL.US")
+    # Both arms have data and both miss their bars -> a genuine threshold fail.
+    seed_metric(db, "AAPL.US", "interest_coverage", 3.0, "2023-12-31")
+    seed_metric(db, "AAPL.US", "net_debt_to_ebitda", 4.0, "2023-12-31")
+
+    passed, reported = _evaluate_group(
+        _debt_service_group(), db, "AAPL.US", metrics_repo
+    )
+    assert passed is False
+    assert reported is None
+
+    detail = _group_detail(_debt_service_group(), db, "AAPL.US", metrics_repo)
+    assert detail.passed is False
+    assert detail.pass_count == 0
+    assert detail.failure_kind == "comparison_failed"
+
+
+def test_evaluate_group_k_of_n_requires_min_pass(tmp_path: Path) -> None:
+    db = tmp_path / "group_kofn.db"
+    metrics_repo = _metrics_repo(db)
+    _seed_listing(db, "AAPL.US")
+    # Two of three arms pass.
+    seed_metric(db, "AAPL.US", "interest_coverage", 8.0, "2023-12-31")  # passes >= 6
+    seed_metric(db, "AAPL.US", "net_debt_to_ebitda", 1.0, "2023-12-31")  # passes <= 2.5
+    seed_metric(db, "AAPL.US", "current_ratio", 0.5, "2023-12-31")  # fails >= 1.5
+
+    members = (
+        Criterion(
+            name="Interest coverage >= 6x",
+            left=Term(metric="interest_coverage"),
+            operator=">=",
+            right=Term(value=6.0),
+        ),
+        Criterion(
+            name="Net debt / EBITDA <= 2.5x",
+            left=Term(metric="net_debt_to_ebitda"),
+            operator="<=",
+            right=Term(value=2.5),
+        ),
+        Criterion(
+            name="Current ratio >= 1.5x",
+            left=Term(metric="current_ratio"),
+            operator=">=",
+            right=Term(value=1.5),
+        ),
+    )
+
+    # 2 of 3 passing clears an at_least=2 gate...
+    two_of_three = CriterionGroup(name="Scorecard", members=members, min_pass=2)
+    assert _evaluate_group(two_of_three, db, "AAPL.US", metrics_repo)[0] is True
+
+    # ...but not an at_least=3 (all) gate, since the current-ratio arm fails.
+    all_three = CriterionGroup(name="Scorecard", members=members, min_pass=3)
+    assert _evaluate_group(all_three, db, "AAPL.US", metrics_repo)[0] is False
+
+
+def test_evaluate_group_detail_na_coverage_not_blamed(tmp_path: Path) -> None:
+    db = tmp_path / "group_na_coverage.db"
+    metrics_repo = _metrics_repo(db)
+    _seed_listing(db, "AAPL.US")
+    # The coverage arm's metric is absent (NA), but the leverage arm passes: a
+    # debt-free issuer clears the group without interest_coverage ever computing.
+    seed_metric(db, "AAPL.US", "net_debt_to_ebitda", 1.0, "2023-12-31")
+
+    detail = _group_detail(_debt_service_group(), db, "AAPL.US", metrics_repo)
+
+    assert detail.passed is True
+    assert detail.failure_kind is None
+    assert detail.reported_value == 1.0
+
+
+def test_evaluate_group_detail_threshold_failure_beats_missing_arm(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "group_threshold_over_na.db"
+    metrics_repo = _metrics_repo(db)
+    _seed_listing(db, "AAPL.US")
+    # Coverage is NA, leverage has data and genuinely misses the bar. The group
+    # fails, but the failure is a real threshold miss -- not NA-blocked -- so the
+    # missing coverage metric is NOT blamed for the exclusion (the coverage payoff).
+    seed_metric(db, "AAPL.US", "net_debt_to_ebitda", 4.0, "2023-12-31")
+
+    detail = _group_detail(_debt_service_group(), db, "AAPL.US", metrics_repo)
+
+    assert detail.passed is False
+    assert detail.failure_kind == "comparison_failed"
+
+
+def test_evaluate_group_detail_all_arms_na_is_na_blocked(tmp_path: Path) -> None:
+    db = tmp_path / "group_all_na.db"
+    metrics_repo = _metrics_repo(db)
+    _seed_listing(db, "AAPL.US")
+    # Neither arm's metric was computed: the group is genuinely un-evaluable, so
+    # both missing metrics are attributed to NA fallout.
+    detail = _group_detail(_debt_service_group(), db, "AAPL.US", metrics_repo)
+
+    assert detail.passed is False
+    assert detail.failure_kind == "na_blocked"
+    assert set(detail.missing_metric_ids) == {
+        "interest_coverage",
+        "net_debt_to_ebitda",
+    }

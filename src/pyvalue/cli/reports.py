@@ -19,8 +19,8 @@ from pyvalue.metrics import REGISTRY
 from pyvalue.metrics.utils import is_recent_date
 from pyvalue.reporting import MetricCoverage, compute_fact_coverage
 from pyvalue.screening import (
-    CriterionEvaluation,
-    evaluate_criterion_detail,
+    GroupEvaluation,
+    evaluate_group_detail,
     load_screen,
     screen_metric_ids,
 )
@@ -38,7 +38,7 @@ from pyvalue.persistence.storage import (
 from ._common import (
     METRICS_COMPUTE_BATCH_SIZE,
     SCREEN_PROGRESS_INTERVAL_SECONDS,
-    _CriterionFailureSummary,
+    _GroupFailureSummary,
     _ScreenMetricImpactSummary,
     _prepare_output_csv_path,
     _resolve_canonical_scope_listings,
@@ -447,7 +447,7 @@ def _print_screen_metric_na_impact(
 
 
 def _print_screen_criterion_fallout(
-    summaries: Sequence[_CriterionFailureSummary],
+    summaries: Sequence[_GroupFailureSummary],
     total_symbols: int,
 ) -> None:
     print("Criterion fallout")
@@ -456,15 +456,18 @@ def _print_screen_criterion_fallout(
         return
     for summary in summaries:
         print(
-            f"- {summary.criterion.name}: fails={summary.fail_count}/{total_symbols}, "
+            f"- {summary.group.name}: fails={summary.fail_count}/{total_symbols}, "
             f"na_fails={summary.na_fail_count}, "
             f"threshold_fails={summary.threshold_fail_count}"
         )
+        # One member ⇒ the original "left_metric=.., right_metric=.." pair; a
+        # multi-arm group lists each arm's metrics in order.
         metric_details: List[str] = []
-        if summary.criterion.left.metric:
-            metric_details.append(f"left_metric={summary.criterion.left.metric}")
-        if summary.criterion.right.metric:
-            metric_details.append(f"right_metric={summary.criterion.right.metric}")
+        for member in summary.group.members:
+            if member.left.metric:
+                metric_details.append(f"left_metric={member.left.metric}")
+            if member.right.metric:
+                metric_details.append(f"right_metric={member.right.metric}")
         if metric_details:
             print(f"    {', '.join(metric_details)}")
         if summary.missing_metric_symbols:
@@ -547,9 +550,9 @@ def cmd_report_screen_failures(
         metrics_repo.fetch_many_by_ids(listing_ids, metric_ids),
     )
 
-    criterion_summaries = [
-        _CriterionFailureSummary(index=index, criterion=criterion)
-        for index, criterion in enumerate(definition.criteria)
+    group_summaries = [
+        _GroupFailureSummary(index=index, group=group)
+        for index, group in enumerate(definition.criteria)
     ]
     metric_impacts: Dict[str, _ScreenMetricImpactSummary] = {
         metric_id: _ScreenMetricImpactSummary(metric_id=metric_id)
@@ -560,9 +563,9 @@ def cmd_report_screen_failures(
     with suppress_console_metric_warnings(True):
         for listing_id, symbol in scope_listings:
             symbol_passed = True
-            for summary in criterion_summaries:
-                evaluation: CriterionEvaluation = evaluate_criterion_detail(
-                    summary.criterion,
+            for summary in group_summaries:
+                evaluation: GroupEvaluation = evaluate_group_detail(
+                    summary.group,
                     listing_id,
                     evaluation_metrics_repo,
                     display_symbol=symbol,
@@ -575,6 +578,10 @@ def cmd_report_screen_failures(
                 if evaluation.failure_kind == "comparison_failed":
                     summary.threshold_fail_count += 1
                     continue
+                # na_blocked: no arm produced a real answer, so these missing metrics
+                # genuinely blocked the group -- attribute them to NA fallout. (Under
+                # OR/K-of-N a metric missing on one arm is NOT counted here when
+                # another arm gave a real answer; that is the coverage payoff.)
                 summary.na_fail_count += 1
                 for metric_id in evaluation.missing_metric_ids:
                     impact = metric_impacts.setdefault(
@@ -597,8 +604,8 @@ def cmd_report_screen_failures(
         (impact for impact in metric_impacts.values() if impact.missing_symbols),
         key=lambda impact: (-len(impact.missing_symbols), impact.metric_id),
     )
-    ordered_criteria = sorted(
-        criterion_summaries,
+    ordered_groups = sorted(
+        group_summaries,
         key=lambda summary: (-summary.fail_count, summary.index),
     )
 
@@ -621,7 +628,7 @@ def cmd_report_screen_failures(
         # Same drill-down style as run-screen's explain-metric hint: name the
         # exact command that explains WHY the missing metrics are NA.
         print(f"hint: pyvalue report-metric-status --config {config_path} --reasons")
-    _print_screen_criterion_fallout(ordered_criteria, total_symbols)
+    _print_screen_criterion_fallout(ordered_groups, total_symbols)
 
     if output_csv:
         _write_screen_failure_report_csv(ordered_impacts, output_csv)

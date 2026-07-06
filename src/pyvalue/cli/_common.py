@@ -24,7 +24,7 @@ from pyvalue.config import Config
 from pyvalue.ingestion import EODHDFundamentalsClient
 from pyvalue.metrics import REGISTRY
 from pyvalue.screening import (
-    Criterion,
+    CriterionGroup,
 )
 from pyvalue.persistence.storage import (
     IdKeyedStoredMetricRow,
@@ -203,11 +203,11 @@ class _ScreenMetricImpactSummary:
 
 
 @dataclass
-class _CriterionFailureSummary:
-    """Aggregated fallout counts for one screen criterion."""
+class _GroupFailureSummary:
+    """Aggregated fallout counts for one screen criterion group."""
 
     index: int
-    criterion: Criterion
+    group: CriterionGroup
     fail_count: int = 0
     na_fail_count: int = 0
     threshold_fail_count: int = 0
@@ -215,7 +215,7 @@ class _CriterionFailureSummary:
 
     @property
     def label(self) -> str:
-        return f"{self.index + 1}. {self.criterion.name}"
+        return f"{self.index + 1}. {self.group.name}"
 
 
 def _resolve_database_path(database: str) -> Path:

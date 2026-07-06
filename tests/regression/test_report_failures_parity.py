@@ -251,3 +251,81 @@ def test_screen_failures_persisted_path_output_and_csv(
     assert (
         _dump_rows(db_path, "metrics", "listing_id, metric_id, value") == before_metrics
     )
+
+
+def test_screen_failures_or_group_fallout_and_na_coverage(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Pins the OR-group fallout contract: the fallout label is the GROUP name
+    # (index-prefixed), and NA fallout is attributed only when the group is
+    # NA-blocked. AAA fails on a real leverage-arm threshold miss, so its missing
+    # interest_coverage is NOT blamed; BBB is NA on both arms, so both metrics are
+    # blamed, once each. Any future drift in these counts fails loudly.
+    db_path = tmp_path / "parity-or-group.db"
+    seed_exchange(db_path, "US", provider="EODHD")
+    seed_supported_listings(
+        db_path,
+        "EODHD",
+        "US",
+        [
+            Listing(
+                symbol="AAA.US", security_name="AAA", exchange="NYSE", currency="USD"
+            ),
+            Listing(
+                symbol="BBB.US", security_name="BBB", exchange="NYSE", currency="USD"
+            ),
+        ],
+    )
+    seed_metric(db_path, "AAA.US", "net_debt_to_ebitda", 4.0, "2026-03-31")
+
+    config = tmp_path / "or-screen.yml"
+    config.write_text(
+        "criteria:\n"
+        '  - name: "Debt-service capacity"\n'
+        "    any_of:\n"
+        '      - name: "Interest coverage >= 6x"\n'
+        "        left:\n"
+        "          metric: interest_coverage\n"
+        '        operator: ">="\n'
+        "        right:\n"
+        "          value: 6\n"
+        '      - name: "Net debt / EBITDA <= 2.5x"\n'
+        "        left:\n"
+        "          metric: net_debt_to_ebitda\n"
+        '        operator: "<="\n'
+        "        right:\n"
+        "          value: 2.5\n",
+        encoding="utf-8",
+    )
+    output_csv = tmp_path / "or_screen_failures.csv"
+
+    exit_code = cmd_report_screen_failures(
+        config_path=str(config),
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=["US"],
+        all_supported=False,
+        output_csv=str(output_csv),
+    )
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "Passed all criteria: 0/2" in output
+    assert "- Debt-service capacity: fails=2/2, na_fails=1, threshold_fails=1" in output
+    # interest_coverage is blamed only for BBB (the NA-blocked issuer), not AAA.
+    assert "- interest_coverage: missing=1 symbols, affects=1 criteria" in output
+    assert "- net_debt_to_ebitda: missing=1 symbols, affects=1 criteria" in output
+
+    with output_csv.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.reader(handle))
+    assert rows == [
+        [
+            "metric_id",
+            "missing_symbols",
+            "affected_criteria_count",
+            "affected_criteria",
+        ],
+        # The fallout label is the GROUP name with its 1-based index prefix.
+        ["interest_coverage", "1", "1", "1. Debt-service capacity"],
+        ["net_debt_to_ebitda", "1", "1", "1. Debt-service capacity"],
+    ]

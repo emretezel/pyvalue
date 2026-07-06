@@ -6144,6 +6144,76 @@ ranking:
     assert any("BBB.US" in line for line in output)
 
 
+def test_cmd_run_screen_stage_any_of_group_column_and_or_coverage(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db_path = tmp_path / "screen-or-group.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+    # AAA clears the group on interest coverage; BBB has no interest line at all
+    # but clears it on leverage -- the OR keeps a debt-free issuer in.
+    seed_metric(db_path, "AAA.US", "interest_coverage", 8.0, "2023-12-31")
+    seed_metric(db_path, "BBB.US", "net_debt_to_ebitda", 1.0, "2023-12-31")
+    security_repo = SecurityRepository(db_path)
+    security_repo.initialize_schema()
+    seed_security_metadata(db_path, "AAA.US", "AAA Inc", description="AAA description")
+    seed_security_metadata(db_path, "BBB.US", "BBB Inc", description="BBB description")
+
+    screen_path = tmp_path / "or-group-screen.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Debt-service capacity"
+    any_of:
+      - name: "Interest coverage >= 6x"
+        left:
+          metric: interest_coverage
+        operator: ">="
+        right:
+          value: 6
+      - name: "Net debt / EBITDA <= 2.5x"
+        left:
+          metric: net_debt_to_ebitda
+        operator: "<="
+        right:
+          value: 2.5
+"""
+    )
+    csv_path = tmp_path / "or-group-results.csv"
+
+    rc = cli.cmd_run_screen_stage(
+        config_path=str(screen_path),
+        database=str(db_path),
+        symbols=None,
+        exchange_codes=["US"],
+        all_supported=False,
+        output_csv=str(csv_path),
+    )
+
+    assert rc == 0
+    csv_contents = csv_path.read_text().strip().splitlines()
+    # The GROUP name is the trailing column -- not the member criteria names.
+    assert (
+        csv_contents[0]
+        == "symbol,entity,description,price,price_currency,Debt-service capacity"
+    )
+    rows = {line.split(",", 1)[0]: line for line in csv_contents[1:]}
+    assert set(rows) == {"AAA.US", "BBB.US"}
+    # The reported value is the left value of the arm that carried each issuer.
+    assert rows["AAA.US"].endswith(",8")  # interest coverage arm
+    assert rows["BBB.US"].endswith(",1")  # leverage arm
+    assert "Passing symbols: 2" in capsys.readouterr().out
+
+
 def test_cmd_run_screen_stage_defers_ranking_metric_loads_until_after_filtering(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -6801,6 +6871,69 @@ criteria:
     assert csv_lines[1] == (
         "working_capital,1,2,1. Working capital >= 20; 2. Working capital >= 50"
     )
+
+
+def test_cmd_report_screen_failures_or_group_na_coverage(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db_path = tmp_path / "screen_failures_or.db"
+    store_catalog_listings(
+        db_path,
+        "US",
+        [
+            Listing(symbol="AAA.US", security_name="AAA Inc", exchange="NYSE"),
+            Listing(symbol="BBB.US", security_name="BBB Inc", exchange="NYSE"),
+        ],
+        provider="SEC",
+    )
+    metrics_repo = MetricsRepository(db_path)
+    metrics_repo.initialize_schema()
+    # AAA has leverage data and misses the bar (a real threshold fail); its missing
+    # interest_coverage does NOT block the group. BBB is NA on both arms, so both
+    # metrics genuinely block its group.
+    seed_metric(db_path, "AAA.US", "net_debt_to_ebitda", 4.0, "2023-12-31")
+
+    screen_path = tmp_path / "or-fallout-screen.yml"
+    screen_path.write_text(
+        """
+criteria:
+  - name: "Debt-service capacity"
+    any_of:
+      - name: "Interest coverage >= 6x"
+        left:
+          metric: interest_coverage
+        operator: ">="
+        right:
+          value: 6
+      - name: "Net debt / EBITDA <= 2.5x"
+        left:
+          metric: net_debt_to_ebitda
+        operator: "<="
+        right:
+          value: 2.5
+"""
+    )
+
+    rc = cli.cmd_report_screen_failures(
+        config_path=str(screen_path),
+        database=str(db_path),
+        symbols=["AAA.US", "BBB.US"],
+        exchange_codes=None,
+        all_supported=False,
+        output_csv=None,
+    )
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "Passed all criteria: 0/2" in output
+    # AAA fails on a real threshold miss (leverage arm); BBB is NA-blocked (both
+    # arms missing). One group, so both symbols land on the same fallout line.
+    assert "Debt-service capacity: fails=2/2, na_fails=1, threshold_fails=1" in output
+    # Coverage payoff: interest_coverage is blamed only for BBB (missing=1), NOT
+    # for AAA -- even though AAA is also missing it -- because AAA's group got a
+    # real answer from the leverage arm.
+    assert "- interest_coverage: missing=1 symbols, affects=1 criteria" in output
+    assert "- net_debt_to_ebitda: missing=1 symbols, affects=1 criteria" in output
 
 
 def test_cmd_report_screen_failures_never_recomputes(

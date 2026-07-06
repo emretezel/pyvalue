@@ -26,11 +26,11 @@ from pyvalue.money.fx import (
 )
 from pyvalue.metrics import REGISTRY
 from pyvalue.screening import (
-    Criterion,
+    CriterionGroup,
     ScreenDefinition,
     compute_screen_ranking,
-    evaluate_criterion_detail,
-    evaluate_criterion_verbose,
+    evaluate_group,
+    evaluate_group_detail,
     load_screen,
     ranking_metric_ids,
     screen_metric_ids,
@@ -131,7 +131,7 @@ def _evaluate_screen_scope(
     *,
     report_progress: bool,
 ) -> tuple[List[int], Dict[str, Dict[int, float]], Dict[int, str]]:
-    """Evaluate every criterion per listing, keyed by ``listing_id``.
+    """Evaluate every group per listing, keyed by ``listing_id``.
 
     ``listings`` are the scope-resolved ``(listing_id, canonical_symbol)`` pairs.
     The display label comes from ``universe_names`` (one batch query loaded by the
@@ -142,7 +142,7 @@ def _evaluate_screen_scope(
     entity_labels: Dict[int, str] = {}
     passed_listing_ids: List[int] = []
     criterion_values: Dict[str, Dict[int, float]] = {
-        criterion.name: {} for criterion in definition.criteria
+        group.name: {} for group in definition.criteria
     }
     completed = 0
     total = len(listings)
@@ -166,22 +166,22 @@ def _evaluate_screen_scope(
         listing_passed = True
         per_listing_values: Dict[str, float] = {}
         entity_labels[listing_id] = universe_names.get(listing_id) or display_symbol
-        for criterion in definition.criteria:
-            passed, left_value = evaluate_criterion_verbose(
-                criterion,
+        for group in definition.criteria:
+            passed, reported_value = evaluate_group(
+                group,
                 listing_id,
                 metrics_repo,
                 display_symbol=display_symbol,
             )
-            if not passed or left_value is None:
+            if not passed or reported_value is None:
                 listing_passed = False
                 break
-            per_listing_values[criterion.name] = left_value
+            per_listing_values[group.name] = reported_value
         if listing_passed:
             passed_listing_ids.append(listing_id)
-            for criterion in definition.criteria:
-                criterion_values[criterion.name][listing_id] = per_listing_values[
-                    criterion.name
+            for group in definition.criteria:
+                criterion_values[group.name][listing_id] = per_listing_values[
+                    group.name
                 ]
         completed += 1
         maybe_report_progress()
@@ -331,7 +331,7 @@ def _rank_screen_passers(
 
 
 def _emit_screen_results(
-    criteria: Sequence[Criterion],
+    criteria: Sequence[CriterionGroup],
     ordered_listings: Sequence[tuple[int, str]],
     values: Dict[str, Dict[int, float]],
     entity_labels: Mapping[int, str],
@@ -480,27 +480,52 @@ def cmd_run_screen_stage(
             print(f"Entity: {entity_name}")
             print(f"Description: {description}")
             print(f"Price: {price_label}")
-            evaluations = [
-                evaluate_criterion_detail(
-                    criterion, listing_id, metrics_repo, display_symbol=symbol
+            group_evaluations = [
+                evaluate_group_detail(
+                    group, listing_id, metrics_repo, display_symbol=symbol
                 )
-                for criterion in definition.criteria
+                for group in definition.criteria
             ]
-            passed_all = all(evaluation.passed for evaluation in evaluations)
+            passed_all = all(evaluation.passed for evaluation in group_evaluations)
             missing_metric_ids: List[str] = []
-            for criterion, evaluation in zip(definition.criteria, evaluations):
-                value_display = (
-                    _format_value(evaluation.left_value)
-                    if evaluation.left_value is not None
-                    else "N/A"
-                )
-                print(
-                    f"{criterion.name}: "
-                    f"{'PASS' if evaluation.passed else 'FAIL'} (value={value_display})"
-                )
-                # A missing metric is why the criterion shows value=N/A; say why
-                # the metric itself is unavailable straight from its persisted
-                # attempt state instead of leaving the user to dig.
+            for group, evaluation in zip(definition.criteria, group_evaluations):
+                verdict = "PASS" if evaluation.passed else "FAIL"
+                if len(group.members) == 1:
+                    # A one-member group is an ordinary criterion: keep the exact
+                    # single-line "<name>: PASS/FAIL (value=...)" output.
+                    member_eval = evaluation.member_evaluations[0]
+                    value_display = (
+                        _format_value(member_eval.left_value)
+                        if member_eval.left_value is not None
+                        else "N/A"
+                    )
+                    print(f"{group.name}: {verdict} (value={value_display})")
+                else:
+                    # OR / K-of-N: summarise the group, then show each arm so the
+                    # reader sees which condition carried (or failed) the group.
+                    print(
+                        f"{group.name}: {verdict} "
+                        f"({evaluation.pass_count}/{len(group.members)} passed, "
+                        f"need {group.min_pass})"
+                    )
+                    for member, member_eval in zip(
+                        group.members, evaluation.member_evaluations
+                    ):
+                        member_verdict = "PASS" if member_eval.passed else "FAIL"
+                        value_display = (
+                            _format_value(member_eval.left_value)
+                            if member_eval.left_value is not None
+                            else "N/A"
+                        )
+                        print(
+                            f"    {member.name}: {member_verdict} "
+                            f"(value={value_display})"
+                        )
+                # Explain NA only when missing data actually blocked the group (every
+                # arm was NA). If another arm produced a real answer the group's fate
+                # did not hinge on the missing metric, so we stay quiet about it.
+                if evaluation.failure_kind != "na_blocked":
+                    continue
                 for metric_id in evaluation.missing_metric_ids:
                     state = metrics_repo.state_by_id(listing_id, metric_id)
                     status_record = state.status_record
@@ -606,7 +631,7 @@ def cmd_run_screen_stage(
 
 
 def _print_screen_table(
-    criteria: Sequence[Criterion],
+    criteria: Sequence[CriterionGroup],
     symbols: Sequence[str],
     values: Dict[str, Dict[str, float]],
     entity_names: Dict[str, str],
@@ -659,7 +684,7 @@ def _print_screen_table(
 
 
 def _build_screen_output_rows(
-    criteria: Sequence[Criterion],
+    criteria: Sequence[CriterionGroup],
     symbols: Sequence[str],
     values: Dict[str, Dict[str, float]],
     entity_names: Mapping[str, str],
@@ -683,15 +708,15 @@ def _build_screen_output_rows(
         for row_name, row_values in extra_rows or ():
             value = row_values.get(symbol)
             row[row_name] = "" if value is None else _format_output_cell(value)
-        for criterion in criteria:
-            value = values.get(criterion.name, {}).get(symbol)
-            row[criterion.name] = "" if value is None else _format_value(value)
+        for group in criteria:
+            value = values.get(group.name, {}).get(symbol)
+            row[group.name] = "" if value is None else _format_value(value)
         rows.append(row)
     return rows
 
 
 def _screen_output_columns(
-    criteria: Sequence[Criterion],
+    criteria: Sequence[CriterionGroup],
     extra_rows: Optional[Sequence[tuple[str, Dict[str, object]]]] = None,
 ) -> List[str]:
     return [
@@ -701,7 +726,7 @@ def _screen_output_columns(
         "price",
         "price_currency",
         *[row_name for row_name, _ in extra_rows or ()],
-        *[criterion.name for criterion in criteria],
+        *[group.name for group in criteria],
     ]
 
 
@@ -814,7 +839,7 @@ def _format_output_cell(value: object) -> str:
 
 
 def _write_screen_csv(
-    criteria: Sequence[Criterion],
+    criteria: Sequence[CriterionGroup],
     symbols: Sequence[str],
     values: Dict[str, Dict[str, float]],
     entity_names: Dict[str, str],

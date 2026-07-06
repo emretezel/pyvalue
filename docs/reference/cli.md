@@ -404,9 +404,9 @@ Notes:
 
 ### `report-screen-failures`
 
-Rank which screen criteria and missing metrics exclude the most symbols for the
-requested canonical scope — the criterion-fallout analyzer. A pure read:
-nothing is recomputed and nothing is written.
+Rank which screen groups and missing metrics exclude the most symbols for the
+requested canonical scope — the fallout analyzer. A pure read: nothing is
+recomputed and nothing is written.
 
 Key options:
 
@@ -419,17 +419,20 @@ Key options:
 
 Notes:
 
-- evaluates every criterion for every symbol, so criterion ranking is not biased
+- evaluates every group for every symbol, so group ranking is not biased
   by YAML order
 - metric NA counts are deduplicated by `(symbol, metric_id)`, even when the same
-  metric appears in multiple criteria
+  metric appears in multiple groups
 - screen evaluation treats fresh failed or stale metric status as
   unavailable, even if an older raw row still exists in `metrics`
+- for OR / K-of-N groups a missing metric is attributed to NA fallout only when
+  it actually blocked the group — i.e. no other arm produced a real answer
 - the console report has two sections:
   - `Metric NA impact`: missing stored metrics ranked by affected-symbol count,
-    with the criteria each gap affects
-  - `Criterion fallout`: per-criterion fail counts split into `na_fails` versus
-    `threshold_fails` — the "relax the threshold or fix the data?" signal
+    with the groups each gap affects
+  - `Criterion fallout`: per-group fail counts split into `na_fails` (the group
+    was NA-blocked — no arm had data) versus `threshold_fails` (an arm had data
+    and missed its bar) — the "relax the threshold or fix the data?" signal
 - per-reason NA root causes intentionally live elsewhere: the report ends its
   NA-impact section with a `hint: pyvalue report-metric-status --config
   <screen> --reasons` drill-down instead of duplicating that survey; run
@@ -458,9 +461,10 @@ Notes:
   status or stale success status hides older raw metric rows until the metric is
   recomputed
 - when the scope is a single symbol, output includes entity details and
-  criterion-by-criterion pass/fail rows; every `value=N/A` criterion is
-  followed by the missing metric's persisted NA reason (`reason_code`,
-  never-attempted, or stale-state note) and the output ends with a paste-ready
+  group-by-group pass/fail rows (a multi-member group also prints an indented
+  per-member breakdown); when a group is NA-blocked, each missing metric is
+  followed by its persisted NA reason (`reason_code`, never-attempted, or
+  stale-state note) and the output ends with a paste-ready
   `hint: pyvalue explain-metric --symbols <symbol> --metrics <ids>` line
 - when the scope contains multiple symbols, output lists only passing symbols
 - the multi-symbol console view is a compact preview with one passing symbol per
@@ -469,7 +473,7 @@ Notes:
   to save or inspect the full result set
 - `--output-csv` writes a row-oriented file with one passing symbol per row,
   base columns such as `symbol`, `entity`, `description`, `price`, and
-  `price_currency`, then ranking columns and one column per criterion.
+  `price_currency`, then ranking columns and one column per group.
   `price_currency` is the listing quote unit; monetary metrics and market-cap
   values use base(`listing.currency`)
 - if the screen YAML defines a `ranking` block, multi-symbol output also adds

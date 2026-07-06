@@ -7,7 +7,8 @@
 Screens do not:
 - read raw fundamentals directly
 - compute metrics on demand
-- support nested logic or custom formulas inside the YAML file
+- support arbitrary boolean nesting or custom formulas inside the YAML file
+  (grouping is limited to one level of OR / K-of-N — see below)
 
 That means the normal workflow is:
 1. ingest fundamentals
@@ -20,11 +21,20 @@ If a metric row is missing from the `metrics` table, the screen treats that crit
 
 ## Screening Semantics
 
-The current screening engine is intentionally simple:
+The screening engine combines criteria in **conjunctive normal form** — a
+logical AND of groups, where each group is either a single criterion or an
+OR / K-of-N set of criteria:
 
-- every criterion is combined with logical AND
-- each criterion compares a left term to a right term
-- if either term resolves to `None`, the criterion fails
+- the top-level `criteria` list is combined with logical AND: a symbol passes
+  only if every entry passes
+- a bare criterion compares a left term to a right term
+- a group (`any_of`) passes when at least `at_least` of its member criteria
+  pass. `at_least` defaults to `1`, so a plain `any_of` is OR ("any of a subset
+  passes"); set `at_least: k` for a "pass at least k of n" scorecard, or
+  `at_least: n` to AND a named subset under one output column
+- if either term of a criterion resolves to `None`, that criterion fails; a
+  group fails only when it cannot reach `at_least` passing members — so an OR
+  group keeps a symbol whose missing metric is covered by another arm
 - only these operators are supported: `<=`, `>=`, `<`, `>`, `==`
 
 Screening is unit-aware:
@@ -38,19 +48,27 @@ Screening is unit-aware:
   the whole run
 
 There is no support for:
-- OR logic
-- nested groups
+- arbitrary boolean nesting (groups are one level deep — an AND of ORs; a group
+  cannot contain another group, and there is no `NOT`)
 - inline arithmetic beyond a multiplier on the right-hand term
 
 ## YAML Schema
 
-A screen definition is a YAML file with a top-level `criteria` list.
+A screen definition is a YAML file with a top-level `criteria` list. Each item
+is either a **bare criterion** or a **group**.
 
-Each item has:
+A bare criterion has:
 - `name`: human-readable label shown in output
 - `left`: a metric term
 - `operator`: one of `<=`, `>=`, `<`, `>`, `==`
 - `right`: either a constant term or a metric term
+
+A group has:
+- `name`: the group's label — the reportable unit (one CSV column, one fallout
+  row), so group names must be unique across the screen
+- `any_of`: a non-empty list of bare criteria (its members)
+- `at_least` (optional, default `1`): how many members must pass for the group
+  to pass — `1` is OR, `len(any_of)` is AND, `k` is a "pass ≥ k of n" scorecard
 
 Supported term forms:
 
@@ -77,6 +95,32 @@ multiplier: 1.75
 ```
 
 Important limitation: `multiplier` is applied only to the right-hand side because that is how the current evaluator is implemented.
+
+Group form — two alternative debt-service tests, either of which keeps the
+symbol in (a debt-free issuer with no interest line still clears it on
+leverage):
+
+```yaml
+criteria:
+  - name: "Debt-service capacity"
+    any_of:
+      - name: "Interest coverage >= 6x"
+        left:
+          metric: interest_coverage
+        operator: ">="
+        right:
+          value: 6
+      - name: "Net debt / EBITDA <= 2.5x"
+        left:
+          metric: net_debt_to_ebitda
+        operator: "<="
+        right:
+          value: 2.5
+```
+
+Add `at_least: 2` alongside `any_of` to require any two members instead of any
+one. The group's `name` (`Debt-service capacity`) becomes the output column and
+fallout label; the member `name`s appear in the single-symbol per-arm breakdown.
 
 ## Canonical Example
 
@@ -147,9 +191,10 @@ Single-symbol output prints:
 - entity name
 - description
 - latest price if available
-- one `PASS` or `FAIL` row per criterion
+- one `PASS` or `FAIL` row per group; a multi-member group also prints an
+  indented `PASS`/`FAIL` line per member so you can see which arm carried it
 
-The command exits with status `0` only if all criteria pass.
+The command exits with status `0` only if all groups pass.
 
 ## Run a Screen in Bulk
 
@@ -186,13 +231,14 @@ the columns include:
 - `price_currency` (the listing quote unit, such as `GBX` for a pence-quoted
   UK listing)
 - ranking fields such as `qarp_rank` and `qarp_score` when present
-- one column per screen criterion with the stored left-side metric value
+- one column per screen group (its `name`), holding the stored left-side value
+  of the member that carried the group
 
 Some screens also define a post-screen ranking block. In those cases:
 
 - pass/fail behavior stays unchanged
 - only passing symbols are ranked
-- extra `qarp_rank` and `qarp_score` columns are added before the criterion columns
+- extra `qarp_rank` and `qarp_score` columns are added before the group columns
 - passing symbols are ordered best to worst in the console table and CSV
 
 Ranking notes:
@@ -220,9 +266,12 @@ pyvalue report-screen-failures --config screeners/quality_reasonable_price_prima
 The report separates two different problems:
 
 - `Metric NA impact`: which metric ids are missing for the largest number of
-  symbols, and which criteria each gap affects
-- `Criterion fallout`: which criteria eliminate the most symbols, split into
-  `na_fails` versus `threshold_fails`
+  symbols, and which groups each gap affects. For OR / K-of-N groups a missing
+  metric is counted only when it actually blocked the group — i.e. no other arm
+  produced a real answer
+- `Criterion fallout`: which groups eliminate the most symbols, split into
+  `na_fails` (the group was NA-blocked — no arm had data) versus
+  `threshold_fails` (at least one arm had data and missed its bar)
 
 The command is a pure read of stored metrics and persisted attempt status —
 nothing is recomputed or written. For the per-reason root causes behind the NA

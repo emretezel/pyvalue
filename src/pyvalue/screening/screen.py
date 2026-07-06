@@ -47,8 +47,30 @@ class Criterion:
 
 
 @dataclass
+class CriterionGroup:
+    """A named group of criteria combined by a K-of-N pass rule.
+
+    A screen is an AND of groups (conjunctive normal form). A group passes when
+    at least ``min_pass`` of its ``members`` pass: ``min_pass == 1`` is OR -- the
+    common case, "any of a subset passes" -- ``min_pass == len(members)`` is a
+    plain AND of a named subset, and ``1 < min_pass < len(members)`` is a
+    scorecard ("pass at least K of N"). An ordinary single criterion is a
+    one-member group whose ``name`` is the criterion's name, which is why the
+    flat, pre-group screener YAML keeps parsing unchanged.
+
+    ``name`` is the group's reportable unit: the screen-output CSV column header,
+    the fallout-funnel label, and the per-group value key. It must be unique
+    across the screen (``load_screen`` enforces this).
+    """
+
+    name: str
+    members: tuple[Criterion, ...]
+    min_pass: int = 1
+
+
+@dataclass
 class ScreenDefinition:
-    criteria: List[Criterion]
+    criteria: List[CriterionGroup]
     ranking: Optional["RankingDefinition"] = None
 
 
@@ -111,20 +133,113 @@ class CriterionEvaluation:
     right_metric_id: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class GroupEvaluation:
+    """Detailed evaluation result for one criterion group.
+
+    ``failure_kind`` distinguishes the two ways a group can fail so the fallout
+    funnel can bucket them. ``comparison_failed`` means at least one member had
+    the data it needed and its comparison came back false (a genuine threshold
+    miss). ``na_blocked`` means no member reached a real comparison at all -- every
+    failing arm was missing data. This is the OR/K-of-N coverage payoff: a metric
+    missing on one arm is not blamed for the exclusion when another arm produced a
+    real (data-backed) answer, so ``na_blocked`` is the only case where the missing
+    metrics are attributed to NA fallout.
+    """
+
+    passed: bool
+    member_evaluations: tuple[CriterionEvaluation, ...]
+    reported_value: Optional[float]
+    pass_count: int
+    failure_kind: Optional[str]
+    missing_metric_ids: tuple[str, ...]
+
+
 def load_screen(path: str | Path) -> ScreenDefinition:
+    """Parse a screener YAML file into a :class:`ScreenDefinition`.
+
+    Each ``criteria`` entry is either a bare criterion (``left``/``operator``/
+    ``right``) or an OR/K-of-N group (``any_of`` plus an optional ``at_least``).
+    A bare criterion becomes a one-member group, so pre-group screeners parse
+    unchanged. Group names must be unique because they are the output columns and
+    fallout labels.
+    """
+
     data = yaml.safe_load(Path(path).read_text())
-    criteria = []
+    groups: List[CriterionGroup] = []
+    seen_names: set[str] = set()
     for entry in data.get("criteria", []):
-        criteria.append(
-            Criterion(
-                name=entry.get("name", "criterion"),
-                left=Term(**entry["left"]),
-                operator=entry.get("operator", "<="),
-                right=Term(**entry["right"]),
+        group = _parse_group(entry)
+        if group.name in seen_names:
+            raise ValueError(
+                f"Duplicate screen criterion/group name: {group.name!r}. Names are the "
+                "output CSV columns and fallout labels, so they must be unique."
             )
-        )
+        seen_names.add(group.name)
+        groups.append(group)
     ranking = _load_ranking_definition(data.get("ranking"))
-    return ScreenDefinition(criteria=criteria, ranking=ranking)
+    return ScreenDefinition(criteria=groups, ranking=ranking)
+
+
+def _parse_group(entry: object) -> CriterionGroup:
+    """Parse one ``criteria`` entry into a :class:`CriterionGroup`.
+
+    ``any_of`` marks an explicit group (its members are OR-ed, or K-of-N via
+    ``at_least``); anything else is a bare criterion wrapped as a one-member group.
+    """
+
+    if not isinstance(entry, dict):
+        raise ValueError(
+            f"Screen criteria entry must be a mapping, got {type(entry).__name__}"
+        )
+    any_of = entry.get("any_of")
+    if any_of is None:
+        # Bare criterion: a one-member group named by the criterion itself, so the
+        # group name lands in exactly the CSV-column / label slot the flat design used.
+        criterion = _parse_criterion(entry)
+        return CriterionGroup(name=criterion.name, members=(criterion,), min_pass=1)
+    if not isinstance(any_of, list) or not any_of:
+        raise ValueError("Screen group 'any_of' must be a non-empty list of criteria")
+    name = entry.get("name")
+    if not name:
+        raise ValueError(
+            "Screen group with 'any_of' must have a 'name' (its output CSV column)"
+        )
+    members = tuple(_parse_criterion(member) for member in any_of)
+    # at_least is the K in "pass at least K of N"; it defaults to 1 (OR) and cannot
+    # exceed the member count (that would be an unsatisfiable group).
+    min_pass = int(entry.get("at_least", 1))
+    if not 1 <= min_pass <= len(members):
+        raise ValueError(
+            f"Screen group {name!r}: 'at_least' must be between 1 and "
+            f"{len(members)}, got {min_pass}"
+        )
+    return CriterionGroup(name=str(name), members=members, min_pass=min_pass)
+
+
+def _parse_criterion(entry: object) -> Criterion:
+    """Parse a single criterion mapping (``name``/``left``/``operator``/``right``)."""
+
+    if not isinstance(entry, dict):
+        raise ValueError(
+            f"Screen criterion must be a mapping, got {type(entry).__name__}"
+        )
+    if "left" not in entry or "right" not in entry:
+        raise ValueError("Screen criterion must have both 'left' and 'right' terms")
+    return Criterion(
+        name=str(entry.get("name", "criterion")),
+        left=_parse_term(entry["left"]),
+        operator=str(entry.get("operator", "<=")),
+        right=_parse_term(entry["right"]),
+    )
+
+
+def _parse_term(data: object) -> Term:
+    """Parse a term mapping; unknown keys raise via ``Term(**...)`` as before."""
+
+    if not isinstance(data, dict):
+        raise ValueError(f"Screen term must be a mapping, got {type(data).__name__}")
+    return Term(**data)
 
 
 def screen_metric_ids(definition: ScreenDefinition) -> List[str]:
@@ -132,12 +247,13 @@ def screen_metric_ids(definition: ScreenDefinition) -> List[str]:
 
     metric_ids: List[str] = []
     seen: set[str] = set()
-    for criterion in definition.criteria:
-        for term in (criterion.left, criterion.right):
-            if not term.metric or term.metric in seen:
-                continue
-            seen.add(term.metric)
-            metric_ids.append(term.metric)
+    for group in definition.criteria:
+        for criterion in group.members:
+            for term in (criterion.left, criterion.right):
+                if not term.metric or term.metric in seen:
+                    continue
+                seen.add(term.metric)
+                metric_ids.append(term.metric)
     return metric_ids
 
 
@@ -281,6 +397,103 @@ def evaluate_criterion_detail(
         missing_metric_ids=missing_metric_ids,
         left_metric_id=left.metric_id,
         right_metric_id=right.metric_id,
+    )
+
+
+def evaluate_group(
+    group: CriterionGroup,
+    listing_id: int,
+    metrics_repo: MetricsRepository,
+    *,
+    display_symbol: str,
+) -> tuple[bool, Optional[float]]:
+    """Return ``(passed, reported_value)`` for a group, short-circuiting.
+
+    Members are evaluated in order and the scan stops as soon as ``min_pass`` of
+    them pass; ``reported_value`` is the left-hand value of the member that
+    reached the threshold (for OR that is simply the first passing member). A
+    passing criterion always resolves its left term, so a passing group's reported
+    value is never ``None``. Returns ``(False, None)`` when fewer than ``min_pass``
+    members pass. This mirrors the fast :func:`evaluate_criterion_verbose` path and
+    is what the per-listing screen loop uses.
+    """
+
+    pass_count = 0
+    for member in group.members:
+        passed, left_value = evaluate_criterion_verbose(
+            member, listing_id, metrics_repo, display_symbol=display_symbol
+        )
+        if not passed:
+            continue
+        pass_count += 1
+        if pass_count >= group.min_pass:
+            return True, left_value
+    return False, None
+
+
+def evaluate_group_detail(
+    group: CriterionGroup,
+    listing_id: int,
+    metrics_repo: MetricsRepository,
+    *,
+    display_symbol: str,
+    log_missing_metrics: bool = True,
+) -> GroupEvaluation:
+    """Return a full evaluation of every member of ``group``.
+
+    Unlike :func:`evaluate_group` this evaluates all members (no short-circuit) so
+    the single-symbol detail view and the fallout funnel can show each arm and
+    classify *why* a failing group failed. ``failure_kind`` is ``na_blocked`` only
+    when no member reached a real comparison (every failing arm was missing data);
+    otherwise a failing group is ``comparison_failed`` (see :class:`GroupEvaluation`).
+    """
+
+    member_evaluations = tuple(
+        evaluate_criterion_detail(
+            member,
+            listing_id,
+            metrics_repo,
+            display_symbol=display_symbol,
+            log_missing_metrics=log_missing_metrics,
+        )
+        for member in group.members
+    )
+    pass_count = sum(1 for evaluation in member_evaluations if evaluation.passed)
+    passed = pass_count >= group.min_pass
+
+    reported_value: Optional[float] = None
+    for evaluation in member_evaluations:
+        if evaluation.passed:
+            reported_value = evaluation.left_value
+            break
+
+    failure_kind: Optional[str]
+    if passed:
+        failure_kind = None
+    elif any(
+        evaluation.failure_kind == "comparison_failed"
+        for evaluation in member_evaluations
+    ):
+        # At least one arm had its data and genuinely missed the bar -- a real
+        # threshold fail, not a data gap.
+        failure_kind = "comparison_failed"
+    else:
+        failure_kind = "na_blocked"
+
+    missing_metric_ids = _dedupe_missing_metric_ids(
+        *(
+            metric_id
+            for evaluation in member_evaluations
+            for metric_id in evaluation.missing_metric_ids
+        )
+    )
+    return GroupEvaluation(
+        passed=passed,
+        member_evaluations=member_evaluations,
+        reported_value=reported_value,
+        pass_count=pass_count,
+        failure_kind=failure_kind,
+        missing_metric_ids=missing_metric_ids,
     )
 
 
@@ -598,6 +811,8 @@ def _normalize_percentile_threshold(value: object) -> float:
 __all__ = [
     "Criterion",
     "CriterionEvaluation",
+    "CriterionGroup",
+    "GroupEvaluation",
     "RankingDefinition",
     "RankingMetric",
     "RankingTieBreaker",
@@ -607,6 +822,8 @@ __all__ = [
     "evaluate_criterion",
     "evaluate_criterion_detail",
     "evaluate_criterion_verbose",
+    "evaluate_group",
+    "evaluate_group_detail",
     "load_screen",
     "ranking_metric_ids",
     "screen_metric_ids",
