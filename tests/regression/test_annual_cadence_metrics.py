@@ -22,6 +22,7 @@ from datetime import date, timedelta
 
 from pyvalue.facts import FactRecord, RegionFactsRepository
 from pyvalue.marketdata.base import PriceData
+from pyvalue.metrics.cash_conversion import CFOToNITTMMetric
 from pyvalue.metrics.enterprise_value_ratios import EVToEBITMetric, EVToSalesMetric
 from pyvalue.metrics.fcf_to_ebitda import FCFToEBITDAMetric
 from pyvalue.metrics.net_debt_to_ebitda import NetDebtToEBITDAMetric
@@ -210,3 +211,18 @@ def test_fcf_to_ebitda_measures_an_annual_only_filer() -> None:
     result = FCFToEBITDAMetric().compute(LISTING_ID, repo)
     assert result is not None
     assert abs(result.value - 0.6) < 1e-12
+
+
+def test_cfo_to_ni_ttm_measures_an_annual_only_filer() -> None:
+    # Ratio of two annual flows: FY CFO 90 / FY net income 100 = 0.9.
+    repo = _FakeFactsRepo(
+        {
+            "NetCashProvidedByUsedInOperatingActivities": [
+                _fy("NetCashProvidedByUsedInOperatingActivities", 90.0)
+            ],
+            "NetIncomeLoss": [_fy("NetIncomeLoss", 100.0)],
+        }
+    )
+    result = CFOToNITTMMetric().compute(LISTING_ID, repo)
+    assert result is not None
+    assert abs(result.value - 0.9) < 1e-12

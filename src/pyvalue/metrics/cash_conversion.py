@@ -272,8 +272,12 @@ class CashConversionCalculator:
         target_currency: str,
     ) -> Optional[_MoneyResult]:
         for concept in concepts:
+            # cfo_to_ni_ttm is a ratio of two flows with no balance-sheet leg,
+            # so the annual cadence needs no freshness threading: an annual-only
+            # filer's FY CFO over FY net income is a coherent twelve-month ratio.
             resolution = resolve_ttm_window(
-                repo.monetary_facts_for_concept(listing_id, concept)
+                repo.monetary_facts_for_concept(listing_id, concept),
+                annual_max_age_days=MAX_FY_FACT_AGE_DAYS,
             )
             window = resolution.window
             if window is None:
