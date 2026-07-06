@@ -161,7 +161,7 @@ def test_compute_screen_ranking_falls_back_to_full_universe_when_sector_too_smal
     assert result.scores["T08.US"] == 77.27272727272727
 
 
-def test_compute_screen_ranking_normalizes_by_available_weight() -> None:
+def test_compute_screen_ranking_scores_missing_metrics_as_neutral() -> None:
     ranking = _ranking_definition(
         [
             RankingMetric(metric_id="metric_a", weight=0.7, direction="higher"),
@@ -179,8 +179,35 @@ def test_compute_screen_ranking_normalizes_by_available_weight() -> None:
         {"AAA.US": None, "BBB.US": None},
     )
 
-    assert result.scores["AAA.US"] == 75.0
+    # AAA has no metric_b: the 0.3 weight contributes the neutral 50.0
+    # subscore (0.7 x 75 + 0.3 x 50 = 67.5) instead of renormalizing onto
+    # metric_a alone, which used to score AAA a pure 75.0.
+    assert result.scores["AAA.US"] == 67.5
     assert result.scores["BBB.US"] == 32.5
+
+
+def test_compute_screen_ranking_scores_all_missing_listing_at_neutral() -> None:
+    ranking = _ranking_definition(
+        [
+            RankingMetric(metric_id="metric_a", weight=0.7, direction="higher"),
+            RankingMetric(metric_id="metric_b", weight=0.3, direction="higher"),
+        ]
+    )
+
+    result = _rank_by_symbol(
+        ["AAA.US", "BBB.US", "CCC.US"],
+        ranking,
+        {
+            "metric_a": {"AAA.US": 10.0, "BBB.US": 5.0},
+            "metric_b": {"BBB.US": 3.0},
+        },
+        {"AAA.US": None, "BBB.US": None, "CCC.US": None},
+    )
+
+    # No information at all is the peer median, not the bottom of the list
+    # (the renormalizing code scored an all-missing listing 0.0, last).
+    assert result.scores["CCC.US"] == 50.0
+    assert result.ordered_symbols == ("AAA.US", "CCC.US", "BBB.US")
 
 
 def test_compute_screen_ranking_uses_configured_tie_breakers() -> None:

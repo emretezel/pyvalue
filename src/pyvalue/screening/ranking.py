@@ -14,6 +14,12 @@ from .screen import RankingDefinition
 
 _ALL_PEERS = "__all__"
 
+# Subscore for a ranking metric the listing has no value for (or no peer
+# distribution to rank it against): the peer median on the 0-100 percentile
+# scale. "No information" must not reweight the metrics the listing does
+# have -- see the scoring loop.
+_NEUTRAL_SUBSCORE = 50.0
+
 
 @dataclass(frozen=True)
 class ScreenRankingResult:
@@ -38,6 +44,12 @@ def compute_screen_ranking(
     canonical symbol used *only* as the final deterministic tie-break key, so the
     output order stays stable and matches the historical symbol-ordered result;
     it never affects a score.
+
+    A metric the listing has no value for contributes a neutral peer-median
+    subscore (50.0) at its full weight rather than being skipped: skipping
+    would renormalize the remaining weights and let the listing's other
+    subscores stretch into the missing slot. A listing missing every ranking
+    metric therefore scores exactly 50.0, not 0.0.
     """
 
     ordered_listing_ids = tuple(int(listing_id) for listing_id in listing_ids)
@@ -97,6 +109,13 @@ def compute_screen_ranking(
             )
             value = metric_values_for_listings.get(listing_id)
             if value is None:
+                # Missing information scores the peer median, at full weight.
+                # Skipping the metric instead (the previous behavior) silently
+                # renormalized the remaining weights, letting a listing's other
+                # subscores stretch into the missing slot -- an advantage or
+                # penalty depending on how good those happened to be.
+                weighted_score += metric.weight * _NEUTRAL_SUBSCORE
+                available_weight += metric.weight
                 continue
             peer_values = [
                 metric_values_for_listings[peer_listing]
@@ -104,6 +123,10 @@ def compute_screen_ranking(
                 if peer_listing in metric_values_for_listings
             ]
             if not peer_values:
+                # No peer distribution to rank against carries no information
+                # either: same neutral treatment as a missing value.
+                weighted_score += metric.weight * _NEUTRAL_SUBSCORE
+                available_weight += metric.weight
                 continue
             lower_bound = _quantile(
                 peer_values,
