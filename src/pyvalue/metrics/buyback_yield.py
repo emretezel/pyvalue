@@ -15,6 +15,7 @@ from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.share_count_change import ShareCountChangeCalculator
 from pyvalue.metrics.ttm import resolve_ttm_window
 from pyvalue.metrics.utils import (
+    MAX_FY_FACT_AGE_DAYS,
     SHARE_COUNT_CONCEPTS,
     market_cap_money,
     require_metric_money,
@@ -122,8 +123,13 @@ class NetBuybackYieldMetric:
         repo: RegionFactsRepository,
         concept: str,
     ) -> Optional[_MoneyResult]:
+        # Opt into the annual cadence: an annual-only filer's financing cash
+        # flow (sale/purchase of stock) is a single FY figure. The compute()
+        # fallback -- year-over-year share-count change -- is already FY-based,
+        # so annual support here just prefers the direct cash figure when present.
         resolution = resolve_ttm_window(
-            repo.monetary_facts_for_concept(listing_id, concept)
+            repo.monetary_facts_for_concept(listing_id, concept),
+            annual_max_age_days=MAX_FY_FACT_AGE_DAYS,
         )
         window = resolution.window
         if window is None:

@@ -415,6 +415,7 @@ class ProfitabilityReturnsGrowthCalculator:
             DIVIDENDS_PAID_CONCEPTS,
             context="dividend_yield_ttm",
             absolute=True,
+            annual_max_age_days=MAX_FY_FACT_AGE_DAYS,
         )
         if dividends_paid is not None:
             cash_yield = self._compute_cash_dividend_yield(

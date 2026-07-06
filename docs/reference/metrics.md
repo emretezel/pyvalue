@@ -145,14 +145,14 @@ Columns:
 | Share Count CAGR (5Y) | `share_count_cagr_5y` | Uses point-in-time outstanding shares only: `((Shares_t / Shares_t-5)^(1/5)) - 1`, preferring MRQ then falling back to FY. | Flags more recent dilution or buyback behavior that may matter more than decade-old capital allocation. |
 | Share Count CAGR (10Y) | `share_count_cagr_10y` | Uses point-in-time outstanding shares only: `((Shares_t / Shares_t-10)^(1/10)) - 1`, preferring MRQ then falling back to FY. | Long-run dilution or shrinkage materially changes per-share value compounding. |
 | Share Count Percentage Change (10Y) | `shares_10y_pct_change` | Exact 10-year point-in-time share-count change: `(Shares_t / Shares_t-10) - 1`, using the same pairing rules as `share_count_cagr_10y`. | Gives a direct measure of dilution or buyback behavior over a decade. |
-| Net Buyback Yield | `net_buyback_yield` | EODHD-oriented: primary `-TTM(SalePurchaseOfStock) / market_cap`, with issuance-only fallback and 1Y share-count fallback. | Captures whether management is shrinking or diluting the share base in value-relevant terms. |
+| Net Buyback Yield | `net_buyback_yield` | EODHD-oriented: primary `-TTM(SalePurchaseOfStock) / market_cap`, with issuance-only fallback and 1Y share-count fallback. Annual-only filers resolve the financing cash flow from a single fresh FY row (480-day window) via the annual cadence; the year-over-year share-count fallback is already FY-based. | Captures whether management is shrinking or diluting the share base in value-relevant terms. |
 
 ## Shareholder Returns / Distribution
 
 | English Descriptive Name of the Metric | pyvalue key | How is it calculated | Why is it important in identifying quality/value stocks |
 | --- | --- | --- | --- |
-| Dividend Yield (TTM) | `dividend_yield_ttm` | Primary `abs(CommonStockDividendsPaid_TTM) / market_cap`; fallback `CommonStockDividendsPerShareCashPaid / latest price` when the cash-dividend path is unavailable. | Separates actual cash returned to owners from forward-looking provider yield fields. |
-| Shareholder Yield (TTM) | `shareholder_yield_ttm` | `dividend_yield_ttm + net_buyback_yield`, emitted only when both inputs are available. | Combines cash dividends and buybacks into one capital-allocation return measure. |
+| Dividend Yield (TTM) | `dividend_yield_ttm` | Primary `abs(CommonStockDividendsPaid_TTM) / market_cap`; fallback `CommonStockDividendsPerShareCashPaid / latest price` when the cash-dividend path is unavailable. Annual-only filers resolve the cash-dividends leg from a single fresh FY row (480-day window) via the annual cadence. | Separates actual cash returned to owners from forward-looking provider yield fields. |
+| Shareholder Yield (TTM) | `shareholder_yield_ttm` | `dividend_yield_ttm + net_buyback_yield`, emitted only when both inputs are available. Both legs opt into the annual cadence, so an annual-only filer with FY dividends and FY financing cash flow is measured. | Combines cash dividends and buybacks into one capital-allocation return measure. |
 | Dividend Payout Ratio (TTM) | `dividend_payout_ratio_ttm` | `abs(CommonStockDividendsPaid_TTM) / NetIncome_TTM`, only when `NetIncome_TTM > 0`. | Flags whether the dividend is comfortably covered by trailing earnings. |
 
 ## Growth / Compounding

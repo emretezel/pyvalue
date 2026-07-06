@@ -29,6 +29,7 @@ from pyvalue.metrics.net_debt_to_ebitda import NetDebtToEBITDAMetric
 from pyvalue.metrics.profitability_returns_growth import (
     GrossMarginTTMMetric,
     GrossProfitToAssetsTTMMetric,
+    ShareholderYieldTTMMetric,
 )
 from pyvalue.persistence.storage import MarketDataRepository
 
@@ -286,3 +287,21 @@ def test_gross_profit_to_assets_ttm_annual_assets_in_post_fye_band() -> None:
     )
     assert result is not None
     assert abs(result.value - 80.0 / 900.0) < 1e-12
+
+
+def test_shareholder_yield_ttm_measures_an_annual_only_filer() -> None:
+    # Both legs are annual flows over a live market cap (shares 100 x price 5 =
+    # 500). Dividend leg: |FY dividends 20| / 500 = 0.04. Buyback leg:
+    # -(FY sale/purchase of stock -30) / 500 = 0.06. Shareholder yield = 0.10.
+    repo = _FakeFactsRepo(
+        {
+            "CommonStockDividendsPaid": [_fy("CommonStockDividendsPaid", -20.0)],
+            "SalePurchaseOfStock": [_fy("SalePurchaseOfStock", -30.0)],
+            "CommonStockSharesOutstanding": _shares(100.0),
+        }
+    )
+    result = ShareholderYieldTTMMetric().compute(
+        LISTING_ID, repo, _FakeMarketRepo(price=5.0)
+    )
+    assert result is not None
+    assert abs(result.value - 0.10) < 1e-12
