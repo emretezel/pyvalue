@@ -29,9 +29,16 @@ from pyvalue.metrics.base import MetricCurrencyInvariantError
 from pyvalue.money import CurrencyMismatchError, Money, fx_service_for_context
 from pyvalue.persistence.storage import FactRecord, MarketDataRepository
 
-# Default freshness windows (days)
+# Default freshness windows (days), measured on the period end_date (not the
+# filing date). Quarterly/TTM data stays at 400 days. FY-series metrics get
+# 480: an annual-only filer with a December fiscal year end would otherwise go
+# stale in early February of the second year -- months before its next annual
+# report is published and ingested -- and "latest FY too old" was the top
+# failure for several decade-window metrics (2026-07 screener audit). 480
+# days keeps such filers screenable through late April while a genuinely dead
+# listing still fails the quarterly gates and price-dependent metrics.
 MAX_FACT_AGE_DAYS = 400
-MAX_FY_FACT_AGE_DAYS = 400
+MAX_FY_FACT_AGE_DAYS = 480
 
 # Metric *metadata* helpers (recency, FY filtering, quarterly selection)
 # read only the provenance surface (:class:`~pyvalue.facts.FactView`), so they
