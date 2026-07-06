@@ -58,7 +58,7 @@ Columns:
 | Accruals Ratio | `accruals_ratio` | EODHD-oriented: `(NetIncome_TTM - CFO_TTM) / AvgTotalAssets`, where `AvgTotalAssets` uses strict same-quarter prior-year averaging. | Lower or negative accruals usually indicate cleaner, cash-backed earnings. |
 | Stock-Based Compensation to Revenue | `sbc_to_revenue` | EODHD-oriented: `StockBasedCompensation_TTM / Revenues_TTM`. | Shows how much top-line output is offset by equity compensation and potential dilution. |
 | Stock-Based Compensation to Free Cash Flow | `sbc_to_fcf` | EODHD-oriented: `StockBasedCompensation_TTM / FCF_TTM`, with `FCF_TTM = OCF_TTM - Capex_TTM` and capex missing treated as `0`. | Helps judge whether apparent cash generation is being offset by large stock comp. |
-| Free Cash Flow to EBITDA | `fcf_to_ebitda` | EODHD-oriented: `FCF_TTM / EBITDA_TTM`, where `FCF_TTM = OCF_TTM - Capex_TTM` (missing capex treated as `0`) and `EBITDA_TTM = EBIT_TTM + D&A_TTM`; only when `EBITDA_TTM > 0`, negative FCF allowed. | Operationalizes Buffett's critique that EBITDA ignores capex: high conversion shows EBITDA is backed by real free cash flow, low or negative conversion flags capital-hungry earnings. |
+| Free Cash Flow to EBITDA | `fcf_to_ebitda` | EODHD-oriented: `FCF_TTM / EBITDA_TTM`, where `FCF_TTM = OCF_TTM - Capex_TTM` (missing capex treated as `0`) and `EBITDA_TTM = EBIT_TTM + D&A_TTM`; only when `EBITDA_TTM > 0`, negative FCF allowed. Both legs resolve from single fresh FY rows (480-day window) via the annual cadence for annual-only filers. | Operationalizes Buffett's critique that EBITDA ignores capex: high conversion shows EBITDA is backed by real free cash flow, low or negative conversion flags capital-hungry earnings. |
 
 ## Profitability / Returns
 
@@ -101,9 +101,9 @@ Columns:
 | Owner Earnings Yield on EV (Normalized) | `oey_ev_norm` | EODHD-oriented: `oe_ev_fy_median_5y / EV`, using the same EV denominator policy as `oey_ev`. | Helps avoid buying a business on peak recent owner earnings. |
 | EBIT Yield on EV | `ebit_yield_ev` | EODHD-oriented: `EBIT_TTM / EV`. | A simple enterprise earnings-yield lens before owner-earnings refinements. |
 | Free Cash Flow Yield on EV | `fcf_yield_ev` | EODHD-oriented: `FCF_TTM / EV`. | Shows how much enterprise value is backed by trailing free cash flow. |
-| EV to EBIT | `ev_to_ebit` | EODHD-oriented: `EV / EBIT_TTM`, only when `EBIT_TTM > 0`. | A practical operating multiple that compares companies independent of capital structure. |
+| EV to EBIT | `ev_to_ebit` | EODHD-oriented: `EV / EBIT_TTM`, only when `EBIT_TTM > 0`. Annual-only filers resolve `EBIT_TTM` from a single fresh FY row (480-day window) via the annual cadence; the EV's debt/cash legs then widen to the same window (market cap is a live price, always fresh). | A practical operating multiple that compares companies independent of capital structure. |
 | EV to EBITDA | `ev_to_ebitda` | EODHD-oriented: `EV / EBITDA_TTM`, where `EBITDA_TTM = EBIT_TTM + D&A_TTM`, only when positive. | A common acquisition-style multiple that uses operating cash-earnings proxy. |
-| EV to Sales | `ev_to_sales` | EODHD-oriented: `EV / Revenues_TTM`, only when revenue is positive. | Values the enterprise against top-line output, staying usable for margin-trough cyclicals and temporarily unprofitable businesses where EV/EBIT is undefined. |
+| EV to Sales | `ev_to_sales` | EODHD-oriented: `EV / Revenues_TTM`, only when revenue is positive. Annual-only filers resolve `Revenues_TTM` from a single fresh FY row (480-day window) via the annual cadence; the EV's debt/cash legs then widen to the same window. | Values the enterprise against top-line output, staying usable for margin-trough cyclicals and temporarily unprofitable businesses where EV/EBIT is undefined. |
 
 ## ROIC / Capital Efficiency
 

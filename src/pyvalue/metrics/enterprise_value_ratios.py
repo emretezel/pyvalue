@@ -16,8 +16,10 @@ from pyvalue.metrics.enterprise_value import (
     EV_REQUIRED_CONCEPTS,
     resolve_enterprise_value_denominator,
 )
-from pyvalue.metrics.ttm import paired_records, resolve_ttm_window
+from pyvalue.metrics.ttm import Cadence, paired_records, resolve_ttm_window
 from pyvalue.metrics.utils import (
+    MAX_FACT_AGE_DAYS,
+    MAX_FY_FACT_AGE_DAYS,
     require_metric_money,
     require_metric_ticker_currency,
     sum_money,
@@ -63,6 +65,16 @@ SALES_REQUIRED_CONCEPTS = tuple(
 class TTMResult:
     money: Money
     as_of: str
+    # The cadence the flow window resolved on. An annual-only filer resolves
+    # "annual"; its EV denominator's balance-sheet legs then widen to the FY
+    # freshness window to match (see the metric computes below).
+    cadence: Cadence
+
+
+def _balance_sheet_max_age(cadence: Cadence) -> int:
+    """FY freshness window for an annual flow, else the standard one."""
+
+    return MAX_FY_FACT_AGE_DAYS if cadence == "annual" else MAX_FACT_AGE_DAYS
 
 
 class EnterpriseValueRatioCalculator:
@@ -103,13 +115,17 @@ class EnterpriseValueRatioCalculator:
         return TTMResult(
             money=operating.money - capex.money,
             as_of=max(operating.as_of, capex.as_of),
+            # Operating cash flow is the mandatory leg; its cadence governs
+            # whether the filer is annual (capex is an optional add-on).
+            cadence=operating.cadence,
         )
 
     def compute_ttm_ebitda(
         self, listing_id: int, repo: RegionFactsRepository, *, context: str
     ) -> Optional[TTMResult]:
         resolution = resolve_ttm_window(
-            repo.monetary_facts_for_concept(listing_id, EBIT_CONCEPT)
+            repo.monetary_facts_for_concept(listing_id, EBIT_CONCEPT),
+            annual_max_age_days=MAX_FY_FACT_AGE_DAYS,
         )
         window = resolution.window
         if window is None:
@@ -152,6 +168,7 @@ class EnterpriseValueRatioCalculator:
         return TTMResult(
             money=sum_money(quarter_totals),
             as_of=window.as_of,
+            cadence=window.cadence,
         )
 
     def compute_ttm_revenue(
@@ -170,7 +187,8 @@ class EnterpriseValueRatioCalculator:
         context: str,
     ) -> Optional[TTMResult]:
         resolution = resolve_ttm_window(
-            repo.monetary_facts_for_concept(listing_id, concept)
+            repo.monetary_facts_for_concept(listing_id, concept),
+            annual_max_age_days=MAX_FY_FACT_AGE_DAYS,
         )
         window = resolution.window
         if window is None:
@@ -193,6 +211,7 @@ class EnterpriseValueRatioCalculator:
         return TTMResult(
             money=sum_money(monies),
             as_of=window.as_of,
+            cadence=window.cadence,
         )
 
     def _money(
@@ -324,6 +343,7 @@ class EVToEBITMetric:
             market_repo=market_repo,
             target_currency=numerator.money.currency,
             context=self.id,
+            max_age_days=_balance_sheet_max_age(numerator.cadence),
         )
         if enterprise_value is None:
             return None
@@ -370,6 +390,7 @@ class EVToEBITDAMetric:
             market_repo=market_repo,
             target_currency=numerator.money.currency,
             context=self.id,
+            max_age_days=_balance_sheet_max_age(numerator.cadence),
         )
         if enterprise_value is None:
             return None
@@ -422,6 +443,7 @@ class EVToSalesMetric:
             market_repo=market_repo,
             target_currency=revenue.money.currency,
             context=self.id,
+            max_age_days=_balance_sheet_max_age(revenue.cadence),
         )
         if enterprise_value is None:
             return None

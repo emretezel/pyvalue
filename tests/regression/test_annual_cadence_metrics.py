@@ -21,7 +21,11 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from pyvalue.facts import FactRecord, RegionFactsRepository
+from pyvalue.marketdata.base import PriceData
+from pyvalue.metrics.enterprise_value_ratios import EVToEBITMetric, EVToSalesMetric
+from pyvalue.metrics.fcf_to_ebitda import FCFToEBITDAMetric
 from pyvalue.metrics.net_debt_to_ebitda import NetDebtToEBITDAMetric
+from pyvalue.persistence.storage import MarketDataRepository
 
 LISTING_ID = 1
 _TODAY = date.today()
@@ -117,3 +121,92 @@ def test_net_debt_to_ebitda_cadence_matched_freshness_in_post_fye_band() -> None
     )
     assert result is not None
     assert result.value == 0.5
+
+
+class _FakeMarketRepo(MarketDataRepository):
+    # Nominal MarketDataRepository subtype whose __init__ skips super() so no
+    # SQLite DB is opened; serves one fixed fresh in-memory snapshot.
+    def __init__(self, price: float) -> None:
+        self._price = price
+
+    def latest_snapshot_by_id(self, listing_id: int) -> PriceData | None:
+        return PriceData(
+            symbol="TEST.US",
+            price=self._price,
+            as_of=(_TODAY - timedelta(days=1)).isoformat(),
+            currency="USD",
+        )
+
+    def ticker_currency_by_id(self, listing_id: int) -> str | None:
+        return "USD"
+
+
+def _shares(value: float) -> list[FactRecord]:
+    return [
+        FactRecord(
+            symbol="TEST.US",
+            concept="CommonStockSharesOutstanding",
+            fiscal_period="FY",
+            end_date=FRESH_FY,
+            unit_kind="count",
+            value=value,
+            filed=None,
+            currency=None,
+        )
+    ]
+
+
+def _ev_balance_sheet() -> dict[str, list[FactRecord]]:
+    # Shares 100 x price 5 = 500 market cap; net debt (30 + 70) - 50 = 50;
+    # EV = 550.
+    return {
+        "ShortTermDebt": [_fy("ShortTermDebt", 30.0)],
+        "LongTermDebt": [_fy("LongTermDebt", 70.0)],
+        "CashAndShortTermInvestments": [_fy("CashAndShortTermInvestments", 50.0)],
+        "CommonStockSharesOutstanding": _shares(100.0),
+    }
+
+
+def test_ev_to_ebit_measures_an_annual_only_filer() -> None:
+    repo = _FakeFactsRepo(
+        {
+            "OperatingIncomeLoss": [_fy("OperatingIncomeLoss", 80.0)],
+            **_ev_balance_sheet(),
+        }
+    )
+    result = EVToEBITMetric().compute(LISTING_ID, repo, _FakeMarketRepo(price=5.0))
+    assert result is not None
+    # EV 550 / FY EBIT 80.
+    assert abs(result.value - 550.0 / 80.0) < 1e-12
+
+
+def test_ev_to_sales_measures_an_annual_only_filer() -> None:
+    repo = _FakeFactsRepo(
+        {
+            "Revenues": [_fy("Revenues", 200.0)],
+            **_ev_balance_sheet(),
+        }
+    )
+    result = EVToSalesMetric().compute(LISTING_ID, repo, _FakeMarketRepo(price=5.0))
+    assert result is not None
+    # EV 550 / FY revenue 200.
+    assert abs(result.value - 550.0 / 200.0) < 1e-12
+
+
+def test_fcf_to_ebitda_measures_an_annual_only_filer() -> None:
+    # Ratio of two annual flows, no EV denominator. Capex omitted (assumed
+    # zero), so FCF = FY OCF 60; EBITDA = FY EBIT 80 + FY D&A 20 = 100.
+    repo = _FakeFactsRepo(
+        {
+            "NetCashProvidedByUsedInOperatingActivities": [
+                _fy("NetCashProvidedByUsedInOperatingActivities", 60.0)
+            ],
+            "OperatingIncomeLoss": [_fy("OperatingIncomeLoss", 80.0)],
+            "DepreciationDepletionAndAmortization": [
+                _fy("DepreciationDepletionAndAmortization", 20.0)
+            ],
+        }
+    )
+    result = FCFToEBITDAMetric().compute(LISTING_ID, repo)
+    assert result is not None
+    assert abs(result.value - 0.6) < 1e-12

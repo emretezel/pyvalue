@@ -16,7 +16,11 @@ from pyvalue.metrics.balance_sheet import (
     resolve_cash_position,
     resolve_total_debt,
 )
-from pyvalue.metrics.utils import SHARE_COUNT_CONCEPTS, market_cap_money
+from pyvalue.metrics.utils import (
+    MAX_FACT_AGE_DAYS,
+    SHARE_COUNT_CONCEPTS,
+    market_cap_money,
+)
 from pyvalue.money import Money
 from pyvalue.persistence.storage import MarketDataRepository
 
@@ -39,6 +43,7 @@ def resolve_enterprise_value_denominator(
     market_repo: MarketDataRepository,
     target_currency: str,
     context: str,
+    max_age_days: int = MAX_FACT_AGE_DAYS,
 ) -> Optional[Money]:
     """Compute EV (as ``Money``) as market cap + total debt - cash.
 
@@ -54,6 +59,11 @@ def resolve_enterprise_value_denominator(
     shared Money seam, so the result is a single-currency ``Money``. Returns
     ``None`` when market cap, debt, or cash cannot be resolved fresh, or when
     the computed EV is non-positive.
+
+    ``max_age_days`` sets the balance-sheet freshness window: a caller whose
+    trailing flow resolved on the annual cadence passes the 480-day FY window
+    so an annual-only filer's once-a-year debt/cash rows are not falsely stale
+    (market cap is a live price, always fresh, and is unaffected).
     """
 
     cap = market_cap_money(
@@ -69,10 +79,18 @@ def resolve_enterprise_value_denominator(
         return None
 
     debt = resolve_total_debt(
-        listing_id, repo, target_currency=target_currency, metric_id=context
+        listing_id,
+        repo,
+        target_currency=target_currency,
+        metric_id=context,
+        max_age_days=max_age_days,
     )
     cash = resolve_cash_position(
-        listing_id, repo, target_currency=target_currency, metric_id=context
+        listing_id,
+        repo,
+        target_currency=target_currency,
+        metric_id=context,
+        max_age_days=max_age_days,
     )
     if debt is None or cash is None:
         LOGGER.warning(
