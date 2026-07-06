@@ -75,13 +75,21 @@ def current_logging_config() -> tuple[Optional[Path], int, int]:
 
 
 class _ConsoleMetricWarningFilter(logging.Filter):
-    """Suppress noisy metric and screen warnings on console only."""
+    """Suppress noisy per-listing metric and screen diagnostics on console only.
+
+    Metric modules narrate every listing they touch -- WARNING failure
+    reasons and INFO notices such as documented-cap emissions. During a batch
+    run that narration would drown the progress output, so records from
+    ``pyvalue.metrics`` loggers at WARNING and below are file-only; errors
+    still surface. Two known per-symbol screen/CLI warnings get the same
+    treatment.
+    """
 
     def filter(self, record: logging.LogRecord) -> bool:
+        if record.name.startswith("pyvalue.metrics"):
+            return record.levelno > logging.WARNING
         if record.levelno != logging.WARNING:
             return True
-        if record.name.startswith("pyvalue.metrics"):
-            return False
         if (
             record.name == "pyvalue.screening.screen"
             and record.msg == "Metric %s missing for %s; run compute-metrics first"
@@ -143,7 +151,7 @@ def _suppress_console_filter(
 
 @contextmanager
 def suppress_console_metric_warnings(enabled: bool = True) -> Iterator[None]:
-    """Hide metric warning noise from console handlers only."""
+    """Hide per-listing metric log noise (INFO and WARNING) from console only."""
 
     with _suppress_console_filter(_ConsoleMetricWarningFilter(), enabled):
         yield

@@ -3183,23 +3183,35 @@ def test_suppress_console_metric_warnings_filters_only_metric_noise(
     try:
         with cli.suppress_console_metric_warnings(True):
             logging.getLogger("pyvalue.metrics.test").warning("metric noise")
+            # Per-listing INFO diagnostics (documented-cap notices, FX
+            # conversion traces) are metric noise too -- file-only.
+            logging.getLogger("pyvalue.metrics.test").info("metric info noise")
+            # Errors from metric loggers must still surface on the console.
+            logging.getLogger("pyvalue.metrics.test").error("metric error")
             logging.getLogger("pyvalue.cli").warning(
                 "Metric %s could not be computed for %s",
                 "dummy_metric",
                 "AAA.US",
             )
+            logging.getLogger("pyvalue.cli").info("Operational info")
             logging.getLogger("pyvalue.cli").warning("Operational warning")
 
         captured = capsys.readouterr()
         assert "metric noise" not in captured.err
+        assert "metric info noise" not in captured.err
+        assert "metric error" in captured.err
         assert (
             "Metric dummy_metric could not be computed for AAA.US" not in captured.err
         )
+        assert "Operational info" in captured.err
         assert "Operational warning" in captured.err
 
         log_text = (log_dir / "pyvalue.log").read_text(encoding="utf-8")
         assert "metric noise" in log_text
+        assert "metric info noise" in log_text
+        assert "metric error" in log_text
         assert "Metric dummy_metric could not be computed for AAA.US" in log_text
+        assert "Operational info" in log_text
         assert "Operational warning" in log_text
     finally:
         clear_root_logging_handlers()

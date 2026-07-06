@@ -11,11 +11,9 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 import logging
 from typing import (
-    Callable,
     Dict,
     Iterable,
     Iterator,
-    List,
     Mapping,
     Optional,
     Sequence,

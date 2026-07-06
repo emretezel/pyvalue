@@ -255,8 +255,8 @@ Key options:
   `--all-supported` (defaults to the full supported universe)
 - `--metrics <metric-ids...>` default all registered metrics
 - console output defaults to periodic symbol progress like `Progress: 1234/75848 symbols complete (1.6%)`
-- metric/data-quality warnings are suppressed on the console by default but still written to `data/logs/pyvalue.log`
-- `--show-metric-warnings` to show metric/data-quality warnings on the console again
+- per-listing metric/data-quality diagnostics (warnings plus INFO notices such as documented-cap emissions) are suppressed on the console by default but still written to `data/logs/pyvalue.log`
+- `--show-metric-warnings` to show those diagnostics on the console again
 - `--database <path>`
 
 Notes:
@@ -447,8 +447,8 @@ Key options:
 - optional scope selector: `--symbols`, `--exchange-codes`, or
   `--all-supported` (defaults to the full supported universe)
 - console output defaults to periodic symbol progress like `Progress: 1234/75848 symbols complete (1.6%)`
-- metric/data-quality warnings are suppressed on the console by default but still written to `data/logs/pyvalue.log`
-- `--show-metric-warnings` to show metric/data-quality warnings on the console again
+- per-listing metric/data-quality diagnostics (warnings plus INFO notices such as documented-cap emissions) are suppressed on the console by default but still written to `data/logs/pyvalue.log`
+- `--show-metric-warnings` to show those diagnostics on the console again
 - `--output-csv <path>`
 - `--database <path>`
 
