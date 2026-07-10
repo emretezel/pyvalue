@@ -1,17 +1,21 @@
-# NOTE: financials (banks, insurers) are structurally excluded from this
-# screen: the owner-earnings gates (oey_ev_norm, owner_earnings_cagr_10y)
-# need the maintenance-NWC chain, which needs AssetsCurrent /
-# LiabilitiesCurrent -- lines financial issuers do not report. That is
-# intended (owner earnings and NWC are not meaningful for balance-sheet
-# businesses), but it is a property of the screen, not a data gap.
+# Quality at a Reasonable Price (QARP), the primary screen: persistent
+# high-return compounders with durable margins, cash-backed earnings, and a
+# safe balance sheet, bought at a sane enterprise valuation. Gates demand
+# quality; price is one loose OR-gate; finer ordering is the ranking's job.
+#
+# Financials (banks, insurers) are structurally excluded: the owner-earnings
+# gates (oey_ev_norm, owner_earnings_cagr_10y) need the maintenance-NWC chain
+# and therefore AssetsCurrent / LiabilitiesCurrent -- lines financial issuers
+# do not report. Intended (owner earnings and NWC are not meaningful for
+# balance-sheet businesses): a property of the screen, not a data gap.
 
 criteria:
-  # NOTE: no roic_7y_median gate. It is mathematically implied by the
-  # persistence gate below: with at most 3 of the strict 10 FY years at or
-  # below 12%, at most 3 of the latest 7 are, so the 7-year median is always
-  # above 12% whenever roic_years_above_12pct >= 7 (both metrics share the
-  # same chain and anchor; zero counterexamples in the 2026-07 universe).
-  # The metric stays computed -- the ranking below weights it at 0.15.
+  # ROIC = after-tax operating profit (NOPAT) / average invested capital, per
+  # fiscal year. Requiring 7 of the strict last 10 years above 12% tests
+  # *persistence* of moat-level returns; a flattering average can hide fade.
+  # NOTE: no roic_7y_median gate -- with at most 3 of 10 years at or below
+  # 12%, at most 3 of the latest 7 are, so a >12% 7Y median is mathematically
+  # implied (same chain, same anchor). The metric still ranks at 0.15 below.
   - name: "ROIC years above 12% >= 7 (persistence, not just average level)"
     left:
       metric: roic_years_above_12pct
@@ -19,6 +23,9 @@ criteria:
     right:
       value: 7
 
+  # Worst single-year ROIC of the same strict decade. Even the bad year must
+  # earn roughly cost-of-capital returns -- excludes quality-on-average
+  # businesses whose returns collapse in downturns.
   - name: "ROIC minimum (10Y) >= 7% (resilience across a bad year)"
     left:
       metric: roic_10y_min
@@ -26,6 +33,9 @@ criteria:
     right:
       value: 0.07
 
+  # Gross margin = (revenue - COGS) / revenue, trailing twelve months. A fat
+  # gross margin is the primary evidence of pricing power or a structurally
+  # differentiated product.
   - name: "Gross margin (TTM) >= 35% (pricing power)"
     left:
       metric: gross_margin_ttm
@@ -33,6 +43,9 @@ criteria:
     right:
       value: 0.35
 
+  # Standard deviation of FY gross margin over the strict last 10 years.
+  # Staying within 7 margin points shows the pricing power is structural,
+  # not a commodity-cycle peak.
   - name: "Gross margin stability (10Y std) <= 7pp (durable pricing power)"
     left:
       metric: gm_10y_std
@@ -40,6 +53,8 @@ criteria:
     right:
       value: 0.07
 
+  # Worst FY operating margin (EBIT / revenue) of the last 7 years. The
+  # operating line must stay clearly positive even in the worst year.
   - name: "Operating margin minimum (7Y) >= 5% (margin floor)"
     left:
       metric: opm_7y_min
@@ -47,6 +62,8 @@ criteria:
     right:
       value: 0.05
 
+  # Operating cash flow / net income, trailing twelve months. Profits must
+  # show up as cash -- guards against accrual-inflated earnings.
   - name: "Cash conversion (CFO / NI TTM) >= 0.90 (earnings quality)"
     left:
       metric: cfo_to_ni_ttm
@@ -54,6 +71,8 @@ criteria:
     right:
       value: 0.90
 
+  # Median of the same ratio over up to 10 fiscal years (loss years skipped).
+  # One clean year can be engineered; a decade-long median cannot.
   - name: "Cash conversion median (CFO / NI 10Y) >= 0.90 (full-cycle earnings quality)"
     left:
       metric: cfo_to_ni_10y_median
@@ -61,12 +80,13 @@ criteria:
     right:
       value: 0.90
 
-  # NOTE: no accruals_ratio gate. CFO >= 0.9 x NI with NI > 0 bounds accruals
-  # at 0.1 x ROA, so any listing passing the cash-conversion gate above passes
-  # accruals_ratio <= 0.10 for every ROA <= 100% (empirically 1 counterexample
-  # in 19,214). Keeping it only added NA surface: listings passing on cash
-  # conversion could still fail here on a missing average-assets input. The
-  # metric itself stays computed for reports.
+  # NOTE: no accruals_ratio gate -- CFO >= 0.9x NI already bounds accruals
+  # ((NI - CFO) / avg assets) at 0.1x ROA, so <= 0.10 is implied for any ROA
+  # up to 100%; keeping it only added NA failures on the average-assets
+  # input. The metric stays computed for reports.
+
+  # Net debt / TTM EBITDA. Caps leverage so the returns above come from the
+  # business rather than the balance sheet, and so a downturn is survivable.
   - name: "Net debt / EBITDA <= 2.5x (unleveraged returns)"
     left:
       metric: net_debt_to_ebitda
@@ -74,19 +94,16 @@ criteria:
     right:
       value: 2.5
 
-  # Debt service is proven either way: a business already carrying <= 1.5x
-  # net-debt/EBITDA is safe regardless of a *measured* coverage number, so it
-  # need not clear the 6x coverage bar as well. This OR is a coverage rescue,
-  # not a loosening -- the standalone net_debt/EBITDA <= 2.5x gate above still
-  # caps leverage for every listing; this group only says that between 1.5x and
-  # 2.5x you must additionally show 6x coverage, while at or below 1.5x you need
-  # not. It recovers low-leverage names whose interest_coverage is NA (no fresh
-  # interest line) or a near-miss. Debt-free issuers with no measurable interest
-  # expense still score the documented 100x cap (docs/reference/metrics.md) --
-  # but only with fresh evidence bounding debt at <= 1x TTM EBIT -- and clear the
-  # coverage arm directly.
+  # Debt service proven either way: 6x EBIT-over-interest headroom, OR net
+  # debt already <= 1.5x EBITDA -- at that leverage solvency needs no coverage
+  # proof. A coverage *rescue*, not a loosening: the standalone 2.5x cap above
+  # still binds everyone; this recovers low-leverage names whose interest line
+  # is NA or a near-miss. Debt-free issuers score the documented 100x cap
+  # (docs/reference/metrics.md; requires fresh debt <= 1x TTM EBIT evidence)
+  # and clear the coverage arm directly.
   - name: "Debt service (6x coverage, or already low leverage)"
     any_of:
+      # Interest coverage = TTM EBIT / TTM interest expense.
       - name: "Interest coverage >= 6x (debt-service capacity)"
         left:
           metric: interest_coverage
@@ -100,6 +117,8 @@ criteria:
         right:
           value: 1.5
 
+  # Count of net-income loss years in the strict last 10. Zero red years in
+  # a decade is Graham's earnings-stability test.
   - name: "No loss years (10Y net income) (Graham earnings stability)"
     left:
       metric: ni_loss_years_10y
@@ -107,19 +126,19 @@ criteria:
     right:
       value: 0
 
-  # NOTE: no eps_streak gate. EODHD's EarningsPerShare derives from the
-  # Earnings section's epsActual — analyst-adjusted, not GAAP (PLTR shows a
-  # 6-year positive "streak" across three GAAP loss years). On a GAAP basis
-  # the criterion is implied by the zero-loss-years gate above (ten straight
-  # profitable NI years => a streak >= 10), so keeping it could only wrongly
-  # exclude listings with short or missing adjusted-EPS histories. The
-  # eps_streak metric itself stays computed for reports.
+  # NOTE: no eps_streak gate -- EODHD EPS is analyst-adjusted epsActual, not
+  # GAAP (PLTR shows a positive "streak" across three GAAP loss years), and
+  # on a GAAP basis the zero-loss-years gate above already implies a >= 10
+  # streak. The metric stays computed for reports.
 
-  # NOTE: no SBC/FCF gate. EODHD's stockBasedCompensation coverage is too thin
-  # and too unreliable to hard-gate on (absent for ~85% of the universe, stops
-  # mid-history for some issuers, and carries sign/magnitude errors where
-  # present). Dilution — the outcome SBC ultimately produces — is policed by
-  # the share-count CAGR criterion below, which has far broader coverage.
+  # NOTE: no SBC/FCF gate -- EODHD stockBasedCompensation is too sparse and
+  # unreliable to gate on (absent for ~85% of the universe, sign/magnitude
+  # errors). Dilution, the outcome SBC ultimately produces, is policed by the
+  # share-count gate below, which has far broader coverage.
+
+  # 5-year CAGR of point-in-time shares outstanding. Capping drift at +1%/yr
+  # keeps per-share compounding from leaking away through issuance; buybacks
+  # (negative CAGR) pass trivially.
   - name: "Share count CAGR (5Y) <= +1% (no net dilution)"
     left:
       metric: share_count_cagr_5y
@@ -127,31 +146,31 @@ criteria:
     right:
       value: 0.01
 
-  # "Reasonable price" is captured by any one of three enterprise yields, not
-  # only the normalised owner-earnings yield. oey_ev_norm subtracts maintenance
-  # capex and maintenance-NWC drags from a *backward* 5-year median, so it
-  # structurally understates the yield of a business still growing into its
-  # maintenance profile: premier compounders that clear all the quality gates
-  # (e.g. Copart -- 10/10 ROIC years > 12%, 19%/yr owner-earnings growth) show
-  # oey_ev_norm just under 5% while trading at a plainly reasonable 15-16x
-  # EV/EBIT with a >5% FCF yield. Passing on EBIT yield (>= 6.67% == EV/EBIT
-  # <= 15x) or FCF yield (>= 5% == EV/FCF <= 20x) is equally valid evidence of a
-  # reasonable price. This does not admit expensive names: a listing dear on all
-  # three yields still fails. The quality gates above are untouched.
+  # The price gate: the enterprise must yield >= ~5% on at least one of three
+  # bases. oey_ev_norm is the strictest lens, but its *backward* 5Y-median
+  # maintenance profile structurally understates businesses still growing into
+  # it (Copart: 10/10 ROIC years, ~19%/yr owner-earnings growth, yet just
+  # under 5% at a plainly reasonable 15-16x EV/EBIT) -- so a plain EBIT or FCF
+  # yield is equally valid evidence. A name dear on all three still fails;
+  # the quality gates above are untouched.
   - name: "Reasonable price (owner-earnings, EBIT, or FCF yield on EV)"
     any_of:
+      # 5Y-median enterprise owner earnings (NOPAT + D&A - maintenance capex
+      # - maintenance NWC) / EV: the maintenance-adjusted yield.
       - name: "Owner earnings yield on EV (normalised) >= 5%"
         left:
           metric: oey_ev_norm
         operator: ">="
         right:
           value: 0.05
+      # TTM EBIT / EV: cheap on operating earnings.
       - name: "EBIT yield on EV >= 6.67% (EV/EBIT <= 15x)"
         left:
           metric: ebit_yield_ev
         operator: ">="
         right:
           value: 0.0667
+      # TTM free cash flow / EV: cheap on cash generation.
       - name: "FCF yield on EV >= 5% (EV/FCF <= 20x)"
         left:
           metric: fcf_yield_ev
@@ -159,6 +178,10 @@ criteria:
         right:
           value: 0.05
 
+  # Incremental ROIC: 5Y change in NOPAT / 5Y change in invested capital.
+  # Reinvested capital must itself earn moat-level returns -- growth has to
+  # create value, not just size. (Capital-light growers -- NOPAT up on flat
+  # or shrinking capital -- score the documented 1.0 cap.)
   - name: "Incremental ROIC (5Y) >= 12% (Akre/Gayner reinvestment leg)"
     left:
       metric: iroic_5y
@@ -166,6 +189,9 @@ criteria:
     right:
       value: 0.12
 
+  # CAGR of enterprise owner earnings over an adaptive 7-10 FY chain with
+  # 3Y-average endpoints. The compounding test: maintenance-adjusted cash
+  # earnings must actually grow, not merely stay high.
   - name: "Owner earnings CAGR (10Y) >= 7% (Nomad/Akre compounding test)"
     left:
       metric: owner_earnings_cagr_10y
@@ -173,6 +199,11 @@ criteria:
     right:
       value: 0.07
 
+# Gates are binary; survivors are ordered sector-relative (>= 10 peers,
+# winsorized at the 5th/95th percentiles). Weights: capital efficiency 35%
+# (roic_7y_median, iroic_5y, gross_profit_to_assets_ttm), valuation 25%
+# (oey_ev_norm, ev_to_ebit), capital allocation 20% (shareholder_yield_ttm),
+# earnings stability 20% (opm_10y_std).
 ranking:
   peer_group: sector
   min_sector_peers: 10
@@ -180,28 +211,36 @@ ranking:
     lower_percentile: 5
     upper_percentile: 95
   metrics:
+    # Level of capital efficiency (the gate above only tests persistence).
     - metric: roic_7y_median
       weight: 0.15
       direction: higher
+    # Reinvestment quality; capped so the 1.0 convention cap cannot dominate.
     - metric: iroic_5y
       weight: 0.12
       direction: higher
       cap: 0.50
+    # Novy-Marx quality factor: TTM gross profit / average total assets.
     - metric: gross_profit_to_assets_ttm
       weight: 0.08
       direction: higher
+    # Normalised owner-earnings yield: the screen's strictest value lens.
     - metric: oey_ev_norm
       weight: 0.13
       direction: higher
+    # Plain operating multiple, complementing the owner-earnings lens.
     - metric: ev_to_ebit
       weight: 0.12
       direction: lower
+    # Dividends + net buybacks over market cap: cash actually returned.
     - metric: shareholder_yield_ttm
       weight: 0.20
       direction: higher
+    # 10Y operating-margin variability: rewards predictability.
     - metric: opm_10y_std
       weight: 0.20
       direction: lower
+  # Deterministic order (symbol last) keeps screen output bit-reproducible.
   tie_breakers:
     - metric: oey_ev_norm
       direction: descending

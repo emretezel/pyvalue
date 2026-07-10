@@ -1,18 +1,25 @@
-# NOTE: financials (banks, insurers) are structurally excluded from this
-# screen: altman_z needs AssetsCurrent / LiabilitiesCurrent and
-# piotroski_f_score needs a current ratio -- lines financial issuers do not
-# report, and both scores are invalid for balance-sheet businesses anyway
-# (the 1968 Z-Score is calibrated on manufacturers; deposit/reserve
-# liabilities crush X4). Deliberate, even though banks are historically the
-# cheapest price-to-book cohort a Graham screen would otherwise surface.
+# Deep Value (Graham): statistically cheap, solvent, not structurally broken
+# businesses. Gates are deliberately loose -- their job is excluding value
+# traps (distress, chronic losses, cash burn), not demanding quality; depth
+# of cheapness and safety are rewarded in the ranking.
+#
+# Financials (banks, insurers) are structurally excluded: altman_z and
+# piotroski_f_score need AssetsCurrent / LiabilitiesCurrent -- lines financial
+# issuers do not report -- and both scores are invalid for balance-sheet
+# businesses anyway (the 1968 Z-Score is calibrated on manufacturers;
+# deposit/reserve liabilities crush X4). Deliberate, even though banks are
+# historically the cheapest price-to-book cohort a Graham screen would
+# otherwise surface.
 
 criteria:
-  # --- Baseline quality gate: existing metrics, deliberately loosened vs
-  # quality_reasonable_price_primary.yml. Purpose is excluding structurally
-  # broken businesses, not demanding quality on Screen A's terms.
-  # Adaptive chain (<= 10y, >= 6 valid ROIC years): its 6-FY evidence floor
-  # matches this screen's other adaptive gates (cfo_to_ni_10y_median,
-  # ni_loss_year_share), where the strict roic_7y_median demanded 7 FY years.
+  # --- Baseline quality floors: deliberately loose vs the QARP screen. The
+  # job is excluding structurally broken businesses, not demanding quality on
+  # QARP's terms. All three use adaptive <= 10Y chains with the same 6-FY
+  # evidence floor, so 6-9-year histories stay screenable.
+
+  # Median FY ROIC (NOPAT / average invested capital) over the adaptive
+  # chain. Any positive median passes: only structural capital destroyers
+  # are excluded.
   - name: "ROIC median (adaptive <= 10Y) > 0% (excludes structural capital destroyers only)"
     left:
       metric: roic_10y_median_adaptive
@@ -20,6 +27,8 @@ criteria:
     right:
       value: 0
 
+  # Median operating-cash-flow / net-income across the cycle. 0.60 rejects
+  # chronic paper-profit reporters without demanding QARP's 0.90.
   - name: "Cash conversion median (CFO/NI 10Y) >= 0.60 (loose full-cycle earnings quality floor)"
     left:
       metric: cfo_to_ni_10y_median
@@ -27,6 +36,9 @@ criteria:
     right:
       value: 0.60
 
+  # Fraction of loss years (NI <= 0) in the adaptive window. Allowing up to
+  # 40% tolerates the cyclical troughs deep value is bought at, while still
+  # excluding chronic loss-makers.
   - name: "Net income loss-year share (adaptive 10Y) <= 0.40 (tolerates cyclicality, excludes chronic loss-makers only)"
     left:
       metric: ni_loss_year_share
@@ -34,39 +46,41 @@ criteria:
     right:
       value: 0.40
 
-  # --- Solvency scorecard: pass >= 3 of 4 going-concern signals.
-  # A deep-value stock is usually cheap *because* one dimension looks bad; a
-  # hard AND of four overlapping distress checks excludes solvent cyclicals for
-  # a single benign trip (e.g. Vale Indonesia -- net cash, 14x coverage, Altman
-  # 5.5, Piotroski 5 -- fails only a fractionally negative trailing FCF/EBITDA).
-  # Requiring 3 of 4 tolerates one trip while still excluding genuine distress,
-  # which fails two or more. Note the arms partly overlap (Altman already embeds
-  # leverage and profitability), which is why a *majority*, not all, is the bar.
-  # A missing arm (NA) simply cannot count toward the three, so the scorecard is
-  # also coverage-robust. Debt-free issuers with no measurable interest expense
-  # score the documented 100x coverage cap (docs/reference/metrics.md) only with
-  # fresh evidence bounding debt at <= 1x TTM EBIT.
+  # --- Solvency scorecard: >= 3 of 4 going-concern signals. A deep-value
+  # stock is usually cheap *because* one dimension looks bad, and the arms
+  # overlap (Altman already embeds leverage and profitability), so a hard AND
+  # evicts solvent cyclicals for one benign trip (Vale Indonesia: net cash,
+  # 14x coverage, Altman 5.5 -- failed only a fractionally negative trailing
+  # FCF). Genuine distress fails two or more. An NA arm cannot count toward
+  # the three, which also makes the scorecard coverage-robust.
   - name: "Solvency scorecard (>= 3 of 4: leverage, coverage, Altman, FCF/EBITDA)"
     at_least: 3
     any_of:
+      # Net debt / TTM EBITDA: leverage under a loose 5x ceiling.
       - name: "Net debt / EBITDA <= 5.0x (loose leverage ceiling)"
         left:
           metric: net_debt_to_ebitda
         operator: "<="
         right:
           value: 5.0
+      # TTM EBIT / TTM interest expense: earnings clear interest at all.
+      # Debt-free issuers score the documented 100x cap only with fresh
+      # evidence bounding debt at <= 1x TTM EBIT (docs/reference/metrics.md).
       - name: "Interest coverage >= 1.5x (going-concern check, not a strength bar)"
         left:
           metric: interest_coverage
         operator: ">="
         right:
           value: 1.5
+      # Classic 1968 five-factor bankruptcy score; 1.81 is the boundary of
+      # the distress zone.
       - name: "Altman Z-Score >= 1.81 (classic formula; out of the distress zone)"
         left:
           metric: altman_z
         operator: ">="
         right:
           value: 1.81
+      # TTM free cash flow relative to EBITDA: positive = not burning cash.
       - name: "FCF / EBITDA > 0 (not cash-burning)"
         left:
           metric: fcf_to_ebitda
@@ -74,6 +88,10 @@ criteria:
         right:
           value: 0
 
+  # Nine binary FY-over-FY signals of improving profitability, leverage/
+  # liquidity, and efficiency (Piotroski 2000). >= 5 keeps it a value-trap
+  # filter rather than the canonical >= 7 strength bar; the score also ranks
+  # at 0.10 below.
   - name: "Piotroski F-Score >= 5 of 9 (deliberately looser than the docs' canonical >=7)"
     left:
       metric: piotroski_f_score
@@ -81,29 +99,30 @@ criteria:
     right:
       value: 5
 
-  # --- Valuation: cheap on assets, operating earnings, OR free cash flow.
-  # Price-to-book alone is blind to asset-light businesses (services, software)
-  # that carry little book value yet are demonstrably cheap on earnings or cash
-  # flow -- 2,296 listings clear every other gate and fail only on P/B. A
-  # loose sanity gate ("cheap on some hard measure") is truer to the screen's
-  # design, which pushes deeper cheapness into the ranking, not the gates. The
-  # OR cannot admit an all-round-expensive name: it must be cheap on at least
-  # one basis. price_to_tangible_book is deliberately absent as an arm -- it is
-  # always >= price_to_book, so it can never rescue a P/B miss.
+  # --- Valuation: cheap on at least one hard measure. P/B alone is blind to
+  # asset-light businesses -- 2,296 listings cleared every other gate and
+  # failed only P/B -- so cheap on operating earnings or free cash flow
+  # counts equally; an all-round-expensive name fails every arm. Deeper
+  # cheapness is the ranking's job. price_to_tangible_book is deliberately
+  # not an arm: it is always >= price_to_book, so it can never rescue a P/B
+  # miss.
   - name: "Cheap on assets, operating earnings, or free cash flow"
     any_of:
+      # Market price / accounting net worth: the classic Graham asset lens.
       - name: "Price to book <= 3.0x"
         left:
           metric: price_to_book
         operator: "<="
         right:
           value: 3.0
+      # Enterprise value / TTM operating profit.
       - name: "EV / EBIT <= 12x (cheap on operating earnings)"
         left:
           metric: ev_to_ebit
         operator: "<="
         right:
           value: 12
+      # TTM free cash flow / EV.
       - name: "FCF yield on EV >= 6% (EV/FCF <= 16.7x, cheap on free cash flow)"
         left:
           metric: fcf_yield_ev
@@ -111,7 +130,8 @@ criteria:
         right:
           value: 0.06
 
-  # --- Practical investability floor
+  # --- Practical investability floor: resolved company-total shares x latest
+  # price, compared in USD. Micro/nano caps are too illiquid to actually buy.
   - name: "Market cap >= $150M (excludes micro/nano caps that are hard to actually transact)"
     left:
       metric: market_cap
@@ -120,6 +140,10 @@ criteria:
       value: 150_000_000
       currency: USD
 
+# Gates only exclude; cheapness and safety are ordered here, sector-relative
+# (>= 10 peers, winsorized at the 5th/95th percentiles). Weights: raw
+# cheapness 45% (price_to_book, ev_to_sales, ev_to_ebit), cash returns on
+# capital 25% (croic, roce), safety scores 30% (piotroski_f_score, altman_z).
 ranking:
   peer_group: sector
   min_sector_peers: 10
@@ -127,29 +151,41 @@ ranking:
     lower_percentile: 5
     upper_percentile: 95
   metrics:
+    # Cheapness on assets: the Graham / HML anchor.
     - metric: price_to_book
       weight: 0.15
       direction: lower
+    # Cheapness on revenue: stays usable for margin-trough cyclicals where
+    # EV/EBIT is undefined.
     - metric: ev_to_sales
       weight: 0.15
       direction: lower
+    # Cheapness on operating earnings.
     - metric: ev_to_ebit
       weight: 0.15
       direction: lower
+    # Cash return on invested capital (TTM FCF / average invested capital);
+    # capped to tame small-denominator outliers.
     - metric: croic
       weight: 0.13
       direction: higher
       cap: 0.75
+    # Pre-tax operating return on capital employed (TTM EBIT / (assets -
+    # current liabilities)); same outlier cap.
     - metric: roce
       weight: 0.12
       direction: higher
       cap: 0.75
+    # Improving fundamentals: recovering value over value trap.
     - metric: piotroski_f_score
       weight: 0.10
       direction: higher
+    # Distance from distress -- the heaviest weight: among cheap stocks,
+    # survival is the edge.
     - metric: altman_z
       weight: 0.20
       direction: higher
+  # Deterministic order (symbol last) keeps screen output bit-reproducible.
   tie_breakers:
     - metric: altman_z
       direction: descending
