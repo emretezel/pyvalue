@@ -14,18 +14,22 @@ two concepts per period (EBITDA's D&A, gross profit's COGS, interest
 coverage's interest expense), the companion row must exist for every window
 period on the same end date.
 
-**D&A sign guard (applies to every EBITDA and owner-earnings metric below).**
-Depreciation & amortization is always a positive add-back, but EODHD sometimes
-reports it negative — sign errors on operating companies (e.g. Argan/AGX FY2026
-`depreciationAndAmortization = -4,743,000` beside a positive `+1,912,000`
-cash-flow figure) and net accretion-of-discount mislabels or scale blow-ups on
-financials (e.g. SuRo/SSSS cash-flow depreciation `-87,445,149,000,000`). A
-negative D&A fact is treated as *unavailable* — dropped at read time, never
-`abs()`-ed (which would explode the scale-error rows). The primary
-(`DepreciationDepletionAndAmortization`) → cash-flow (`DepreciationFromCashFlow`)
-fallback then engages, and a name with no usable D&A degrades to NA
-(EBITDA-family) or a zero add-back (owner earnings) rather than a corrupted
-number. Implemented once in `src/pyvalue/metrics/depreciation.py`.
+**Sign guard (applies to every EBITDA, owner-earnings and interest-coverage
+metric below).** D&A is always a positive add-back and interest expense a
+positive denominator, but EODHD sometimes reports them negative — sign errors
+on operating companies (e.g. Argan/AGX FY2026 `depreciationAndAmortization =
+-4,743,000` beside a positive `+1,912,000` cash-flow figure; Adobe/ADBE Q1
+FY2026 `interestExpense = -63,000,000` beside +62/+68/+67/+66M surrounding
+quarters) and net accretion-of-discount mislabels or scale blow-ups on
+financials (e.g. SuRo/SSSS cash-flow depreciation `-87,445,149,000,000`; the
+worst interest row in the 2026-07 universe is `-262.5B`). A negative fact for
+these concepts is treated as *unavailable* — dropped at read time, never
+`abs()`-ed (which would explode the scale-error rows). Concept fallbacks and
+the TTM-window resolver then engage as if the row were never supplied: D&A
+falls from `DepreciationDepletionAndAmortization` to `DepreciationFromCashFlow`
+and degrades to NA (EBITDA-family) or a zero add-back (owner earnings);
+interest coverage recedes to the last clean aligned window (or its cap/FY
+arbitration). Implemented once in `src/pyvalue/metrics/fact_guards.py`.
 
 Columns:
 - English Descriptive Name of the Metric
@@ -56,7 +60,7 @@ Columns:
 | Debt Paydown Years | `debt_paydown_years` | EODHD-oriented: `TotalDebt / FCF_TTM`, where debt uses layered fallback and `FCF_TTM = OCF_TTM - Capex_TTM`. | Lower values indicate the balance sheet could be repaired faster with current cash generation. |
 | Free Cash Flow to Debt | `fcf_to_debt` | EODHD-oriented reciprocal of debt paydown years: `FCF_TTM / TotalDebt`. | Higher values show stronger debt-service capacity from internally generated cash. |
 | Net Debt to EBITDA | `net_debt_to_ebitda` | EODHD-oriented: `NetDebt / EBITDA_TTM`, where `EBITDA_TTM = EBIT_TTM + D&A_TTM` and cash/debt use fallback chains. Annual-only filers (no quarterly income statement) resolve `EBITDA_TTM` from a single fresh FY row (480-day window) via the resolver's annual cadence; when that path is taken, the net-debt legs widen to the same 480-day window so the balance sheet stays as fresh as the once-a-year income statement. | A widely used leverage check that compares debt burden to operating cash-earnings power. |
-| Interest Coverage | `interest_coverage` | EODHD-oriented: `EBIT_TTM / InterestExpense_TTM`, with rescue-only fallback from `interestIncome - netInterestIncome`. When TTM EBIT is positive and fresh but interest expense is absent, stale, misaligned, or non-positive, the metric emits the documented cap `100.0` instead of NA — but only with fresh no-material-debt evidence: `max(ShortTermDebt + LongTermDebt, TotalDebtFromBalanceSheet) <= 1.0x TTM EBIT` (falling back to total `Liabilities`, an upper bound on debt, when no debt concept is fresh). The 1.0x slack absorbs EODHD's lease/derived-liability contamination of debt fields (web-verified debt-free PLTR.US shows 0.29x). Where evidence shows material debt (or is absent) the cap is unsafe, but a levered issuer that dropped its quarterly line often still reports interest annually: the metric then falls back to the same-fiscal-year annual ratio `FY EBIT / FY InterestExpense` (480-day window; e.g. Hanwha 000880.KO measures 2.64x). This fallback runs only in the material/absent-evidence branches — never where an issuer earns the cap — because annual interest is noise-dominated on small-debt balance sheets (contaminated with FX/financial charges it can imply a triple-digit rate). Only when that annual ratio is also unavailable (no fresh FY interest, no aligned FY EBIT, or a non-positive annual EBIT) does the metric stay NA. The cap is a convention for an economically unbounded ratio, not a measurement; loss-making or stale-EBIT issuers stay NA. | Tests whether operating profit comfortably covers financing cost — without excluding the strongest (debt-free) balance sheets from `>=` screen gates, without letting missing provider data manufacture a pass, and without discarding a usable annual interest line. |
+| Interest Coverage | `interest_coverage` | EODHD-oriented: `EBIT_TTM / InterestExpense_TTM`, with rescue-only fallback from `interestIncome - netInterestIncome`. Negative interest-expense facts are provider artifacts and are treated as unavailable per the sign guard above (the window recedes to the last clean quarter instead of summing a corrupted denominator). When TTM EBIT is positive and fresh but interest expense is absent, stale, misaligned, or non-positive, the metric emits the documented cap `100.0` instead of NA — but only with fresh no-material-debt evidence: `max(ShortTermDebt + LongTermDebt, TotalDebtFromBalanceSheet) <= 1.0x TTM EBIT` (falling back to total `Liabilities`, an upper bound on debt, when no debt concept is fresh). The 1.0x slack absorbs EODHD's lease/derived-liability contamination of debt fields (web-verified debt-free PLTR.US shows 0.29x). Where evidence shows material debt (or is absent) the cap is unsafe, but a levered issuer that dropped its quarterly line often still reports interest annually: the metric then falls back to the same-fiscal-year annual ratio `FY EBIT / FY InterestExpense` (480-day window; e.g. Hanwha 000880.KO measures 2.64x). This fallback runs only in the material/absent-evidence branches — never where an issuer earns the cap — because annual interest is noise-dominated on small-debt balance sheets (contaminated with FX/financial charges it can imply a triple-digit rate). Only when that annual ratio is also unavailable (no fresh FY interest, no aligned FY EBIT, or a non-positive annual EBIT) does the metric stay NA. The cap is a convention for an economically unbounded ratio, not a measurement; loss-making or stale-EBIT issuers stay NA. | Tests whether operating profit comfortably covers financing cost — without excluding the strongest (debt-free) balance sheets from `>=` screen gates, without letting missing provider data manufacture a pass, and without discarding a usable annual interest line. |
 
 ## Cash Flow / Cash Conversion
 

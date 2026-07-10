@@ -15,12 +15,12 @@ from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.depreciation import (
     DA_FALLBACK_CONCEPT,
     DA_PRIMARY_CONCEPT,
-    guarded_monetary_facts,
 )
 from pyvalue.metrics.enterprise_value import (
     EV_REQUIRED_CONCEPTS,
     resolve_enterprise_value_denominator,
 )
+from pyvalue.metrics.fact_guards import guarded_monetary_facts
 from pyvalue.metrics.ttm import Cadence, paired_records, resolve_ttm_window
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,

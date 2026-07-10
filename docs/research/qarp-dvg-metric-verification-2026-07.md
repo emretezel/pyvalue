@@ -246,6 +246,36 @@ GOOGL/PLTR (multi-class) and TSLA/Citi (weighted-avg-Entity) cases.
 > unit tests in `tests/test_eodhd_normalization.py`. See
 > `docs/reference/eodhd-concept-normalization.md` (Earnings EPS).
 
+> **P5 RESOLVED (2026-07-10).** Root cause confirmed at the source: EODHD's raw
+> payload literally carries `Income_Statement.quarterly."2026-02-28"
+> .interestExpense = -63,000,000` for ADBE (prior quarters +62/+68/+67/+66M sum
+> exactly to the FY 263M; `interestIncome`/`netInterestIncome` null, so the
+> sign-guarded derived fallback could not rescue the quarter), and
+> `_compute_aligned` summed the TTM window *signed*, guarding only the total —
+> a lone flipped quarter halved the denominator (8,961/138 = 64.93 vs
+> 8,961/264 = 33.9 true). Universe footprint: 2,679 negative quarterly
+> `InterestExpense` rows across 1,644 listings (plus 234 FY rows / 185
+> listings); 623 listings had a negative row inside their latest-4 quarterly
+> rows and 416 of those carried a live contaminated `interest_coverage`.
+> Artifact taxonomy is identical to negative D&A — sign flips *and* scale
+> blow-ups (worst row `-262.5B`), so `abs()` is unsafe. Fixed exactly as P5
+> sketched: the D&A read guard was promoted to a neutral seam
+> (`metrics/fact_guards.py`, `NON_NEGATIVE_CONCEPTS`) and `InterestExpense` +
+> `InterestExpenseFromNetInterestIncome` joined the set; `interest_coverage`
+> reads interest through it, so a negative quarter is treated as absent and the
+> aligned window recedes to the last clean quarter (metric-layer only — no
+> re-normalization needed). ADBE after watchlist-scoped `compute-metrics`:
+> `interest_coverage` 64.93 → **33.10** (as_of 2025-11-30); both QARP >=6x and
+> DVG >=1.5x arms still pass, and the other nine watchlist names carry no
+> negative interest rows (provably unchanged). Residual note: the normalizer's
+> *derived* `OperatingIncomeLoss = incomeBeforeTax + interestExpense -
+> interestIncome` still consumes the raw flipped field for issuers with no
+> direct operating-income line — out of scope here, candidate follow-up is
+> skipping that derivation when `interestExpense < 0`. Regression tests:
+> `tests/regression/test_interest_coverage_negative_quarter.py`; guard unit
+> tests moved/extended in `tests/unit/test_fact_guards.py`. See
+> `docs/reference/metrics.md` (Sign guard).
+
 ## Caveats / limitations
 
 - Headline metrics were recomputed against >=1 primary filing per name; the deep-

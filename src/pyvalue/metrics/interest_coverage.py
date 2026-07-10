@@ -18,6 +18,7 @@ from pyvalue.metrics.balance_sheet import (
     resolve_total_liabilities,
 )
 from pyvalue.metrics.base import MetricResult
+from pyvalue.metrics.fact_guards import guarded_monetary_facts
 from pyvalue.metrics.ttm import (
     QUARTERLY_PERIODS,
     paired_records,
@@ -89,10 +90,14 @@ class InterestCoverageMetric:
     def compute(
         self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]:
+        # EBIT is read unguarded (a loss quarter is legitimately negative);
+        # interest reads go through the fact_guards sign guard, which drops
+        # EODHD's negative interest-expense artifacts (sign flips, scale
+        # blow-ups) as *absent* -- the aligned window then recedes to the last
+        # clean quarter instead of summing a corrupted denominator (the ADBE
+        # Q1 FY2026 -63M shape: 64.9x from a halved denominator vs ~33x real).
         ebit_records = repo.monetary_facts_for_concept(listing_id, EBIT_CONCEPTS[0])
-        direct_interest = repo.monetary_facts_for_concept(
-            listing_id, INTEREST_CONCEPTS[0]
-        )
+        direct_interest = guarded_monetary_facts(repo, listing_id, INTEREST_CONCEPTS[0])
         result = self._compute_aligned(
             listing_id=listing_id,
             ebit_records=ebit_records,
@@ -103,8 +108,8 @@ class InterestCoverageMetric:
         if result is not None:
             return result
 
-        fallback_interest = repo.monetary_facts_for_concept(
-            listing_id, INTEREST_FALLBACK_CONCEPTS[0]
+        fallback_interest = guarded_monetary_facts(
+            repo, listing_id, INTEREST_FALLBACK_CONCEPTS[0]
         )
         # Direct rows precede fallback rows: the aligned pairing keeps the
         # first candidate per end_date, so a direct quarter always beats the

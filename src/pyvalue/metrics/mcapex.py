@@ -19,8 +19,8 @@ from pyvalue.metrics.depreciation import (
     DA_MULTIPLIER,
     DA_PRIMARY_CONCEPT,
     DA_PRIMARY_CONCEPTS,
-    guarded_monetary_facts,
 )
+from pyvalue.metrics.fact_guards import guarded_monetary_facts
 from pyvalue.metrics.ttm import resolve_ttm_window
 from pyvalue.metrics.utils import (
     MAX_FY_FACT_AGE_DAYS,
