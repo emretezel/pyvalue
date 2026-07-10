@@ -221,6 +221,47 @@ GOOGL/PLTR (multi-class) and TSLA/Citi (weighted-avg-Entity) cases.
 > `docs/reference/eodhd-concept-normalization.md` (Shares / Provider market
 > capitalization).
 
+> **P3 RESOLVED (2026-07-10).** Root cause pinned one layer deeper than A2/B3's
+> framing: the "internally inconsistent garbage" was **pyvalue's mapping
+> choice, not an unusable provider fact**. EODHD carries the filing's cash &
+> equivalents in *two* fields that swap reliability by era, even within one
+> payload: TSLA 2023+ holds the true figure in `cash` (FY2025 16,513M; it
+> satisfies EODHD's own identity `cash + shortTermInvestments ==
+> cashAndShortTermInvestments` to the dollar) while `cashAndEquivalents` is a
+> narrow sub-line (1,890M) — and AMD FY2020–22 is the exact inverse (`cash`
+> holds the *prior* period's balance; `cashAndEquivalents` + STI == the rollup
+> exactly). The old mapping `["cashAndEquivalents", "cash"]` preferred the
+> TSLA-garbage field; a plain priority flip would have corrupted the AMD-class
+> rows instead. Universe footprint (full-history random sample of ~437
+> payloads / 20,154 balance-sheet rows): ~85% of rows carry `cash` only, 3%
+> both-equal, 0.92% divergent-with-`cash`-identity-correct, 0.36%
+> divergent-with-`cashAndEquivalents`-identity-correct, 0.24% undecidable;
+> stored facts had 28,662 inconsistent rows across 5,661 listings, 431 with a
+> live (latest-row) contamination. Fixed at source (no metric-layer change —
+> the B3/P3 cross-check sketch is superseded):
+> `_resolve_cash_and_equivalents` (`normalization/eodhd.py`) arbitrates the
+> two fields per entry against the rollup identity (1% relative tolerance;
+> real matches are unit-exact, artifacts sit 10%+ away) and defaults to
+> `cash` when the identity is unavailable or undecided; the `AssetsCurrent`
+> component-sum fallback consumes the same arbitrated value. Corrected TSLA
+> values after watchlist-scoped `normalize-fundamentals --force` +
+> `compute-metrics`: `CashAndCashEquivalents` FY2025 1,890M → **16,513M** (all
+> 2024–25 periods likewise), `ic_fy`/`ic_mqr` 88,623M → **74,000M** (= debt
+> 8,376 + equity 82,137 − cash 16,513), `roic_ttm` 0.0374 → **0.0455**,
+> `croic` 0.0730 → **0.0890**, `roic_10y_median_adaptive` 0.0568 → 0.0705;
+> `roic_years_above_12pct` unchanged at 3 — **no QARP/DVG gate flips**, as the
+> audit predicted. Watchlist side effects, each row verified against the
+> stored identity: AMD's 40 old-era garbage rows corrected (1994: 378,000k →
+> 121,343k = the filing) with **zero** AMD metric movement vs baseline; MSFT
+> one FY2004 row moved to EODHD's internally-reallocated split (total
+> preserved, no metric impact); the other seven names byte-identical. The
+> ~5.6k other affected listings self-heal on their next re-normalization.
+> Regression tests: `tests/regression/test_invested_capital_cash_priority.py`
+> (TSLA-shaped payload → normalizer → FY invested capital 74,000M) plus
+> arbitration/fallback unit tests in `tests/test_eodhd_normalization.py`. See
+> `docs/reference/eodhd-concept-normalization.md` (Balance Sheet, `cash` vs
+> `cashAndEquivalents`).
+
 > **P4 RESOLVED (2026-07-10).** Root cause differed from B5's framing: the
 > normalizer already skips a null `epsActual` on every path — the phantoms are
 > **literal `epsActual: 0` pre-fills from EODHD itself** (GOOGL 2026-03-31:

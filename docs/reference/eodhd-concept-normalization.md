@@ -155,7 +155,7 @@ All three statement families share the same header rules; only the leaf field(s)
 
 | Concept | leaf field(s) tried | unit_kind | Fallback / skip·scale |
 | --- | --- | --- | --- |
-| AssetsCurrent | `totalCurrentAssets` | monetary | else `totalAssets − nonCurrentAssetsTotal` (if ≥0); else Σ(`cashAndShortTermInvestments` **or** `shortTermInvestments`+`cash`/`cashAndEquivalents`, `netReceivables`, `inventory`, `otherCurrentAssets`) |
+| AssetsCurrent | `totalCurrentAssets` | monetary | else `totalAssets − nonCurrentAssetsTotal` (if ≥0); else Σ(`cashAndShortTermInvestments` **or** `shortTermInvestments`+arbitrated cash (see note below), `netReceivables`, `inventory`, `otherCurrentAssets`) |
 | LiabilitiesCurrent | `totalCurrentLiabilities` | monetary | else `totalLiab − nonCurrentLiabilitiesTotal` (if ≥0); else Σ(`accountsPayable`, `otherCurrentLiab`, `currentDeferredRevenue`, `shortTermDebt` **or** `shortLongTermDebt`) |
 | Assets | `totalAssets` | monetary | — |
 | Liabilities | `totalLiabilities`, `totalLiab` | monetary | — |
@@ -167,7 +167,7 @@ All three statement families share the same header rules; only the leaf field(s)
 | NetTangibleAssets | `netTangibleAssets` | monetary | — |
 | NoncontrollingInterestInConsolidatedEntity | `noncontrollingInterestInConsolidatedEntity` | monetary | — |
 | CashAndShortTermInvestments | `cashAndShortTermInvestments` | monetary | — |
-| CashAndCashEquivalents | `cashAndEquivalents`, `cash` | monetary | — |
+| CashAndCashEquivalents | `cash`, `cashAndEquivalents` | monetary | identity-arbitrated per entry — see note below |
 | ShortTermInvestments | `shortTermInvestments` | monetary | — |
 | ShortTermDebt | `shortTermDebt`, `shortLongTermDebt` | monetary | — |
 | LongTermDebtNoncurrent | `longTermDebtNoncurrent`, `longTermDebtTotal`, `longTermDebt` | monetary | — |
@@ -176,6 +176,21 @@ All three statement families share the same header rules; only the leaf field(s)
 | PropertyPlantAndEquipmentNet | `propertyPlantAndEquipmentNet`, `propertyPlantEquipment`, `netPropertyPlantAndEquipment`, `propertyPlantAndEquipment` | monetary | else `propertyPlantAndEquipmentGross − accumulatedDepreciation` (if ≥0) |
 | EntityCommonStockSharesOutstanding | `shareIssued`, `commonStockSharesOutstanding` | count | currency NULL |
 | CommonStockSharesOutstanding | `shareIssued`, `commonStockSharesOutstanding` | count | currency NULL; also from snapshot + historical + alias; share-record collapse dedups |
+
+> **`cash` vs `cashAndEquivalents`.** Neither raw field is trustworthy on its own — EODHD
+> swaps which one carries the filing's "cash and cash equivalents" by era, even within a
+> single payload. TSLA 2023+ holds the headline figure in `cash` (FY2025 16.51B) and a
+> narrow sub-line in `cashAndEquivalents` (1.89B); AMD FY2020–22 is the exact inverse
+> (`cash` holds the *prior* period's balance, `cashAndEquivalents` the true one). When both
+> are present and disagree, `_resolve_cash_and_equivalents` picks the candidate satisfying
+> the provider's own rollup identity `candidate + shortTermInvestments ==
+> cashAndShortTermInvestments` (1% relative tolerance — real matches are exact to the unit,
+> artifacts sit 10%+ away). Without a rollup to test against, or when neither candidate
+> satisfies it, `cash` wins: it is populated for ~99.8% of entries and won every
+> identity-checkable recent divergence (full-history random sample, 2026-07: ~85% of rows
+> are `cash`-only, ~0.9% divergent-with-`cash`-correct, ~0.4% divergent-with-
+> `cashAndEquivalents`-correct). The `AssetsCurrent` component-sum fallback consumes the
+> same arbitrated value.
 
 ### Income Statement — `Financials.Income_Statement`
 

@@ -1759,3 +1759,126 @@ def test_eodhd_preferred_stock_read_from_genuine_field() -> None:
     assert preferred, "PreferredStock should be read from a genuine preferred field"
     assert preferred[0].value == 40.0
     assert preferred[0].currency == "USD"
+
+
+def test_eodhd_prefers_cash_field_over_cash_and_equivalents() -> None:
+    """``cash`` must win when both cash fields are present and diverge.
+
+    EODHD's ``cash`` is the canonical headline "cash and cash equivalents"
+    (it satisfies ``cash + shortTermInvestments == cashAndShortTermInvestments``
+    wherever all three are present); ``cashAndEquivalents`` is a sparsely
+    populated supplement that, when it diverges, carries a narrower sub-line.
+    TSLA FY2025 shape: preferring ``cashAndEquivalents`` stored 1.89B instead
+    of the true 16.513B.
+    """
+
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Balance_Sheet": {
+                "yearly": [
+                    {
+                        "date": "2025-12-31",
+                        "cash": 16_513_000_000.0,
+                        "cashAndEquivalents": 1_890_000_000.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+    cce = [r for r in records if r.concept == "CashAndCashEquivalents"]
+    assert cce, "CashAndCashEquivalents should be normalized"
+    assert cce[0].value == 16_513_000_000.0
+    assert cce[0].currency == "USD"
+
+
+def test_eodhd_cash_and_cash_equivalents_falls_back_when_cash_missing() -> None:
+    """Without ``cash``, ``cashAndEquivalents`` still resolves the concept."""
+
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Balance_Sheet": {
+                "yearly": [
+                    {
+                        "date": "2025-12-31",
+                        "cashAndEquivalents": 5_000_000.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+    cce = [r for r in records if r.concept == "CashAndCashEquivalents"]
+    assert cce, "fallback to cashAndEquivalents should still emit the concept"
+    assert cce[0].value == 5_000_000.0
+
+
+def test_eodhd_cash_arbitration_picks_cash_when_identity_selects_it() -> None:
+    """With the rollup present, ``cash`` wins when it satisfies the identity.
+
+    TSLA FY2025 shape: cash + shortTermInvestments == cashAndShortTermInvestments
+    exactly, while ``cashAndEquivalents`` is a narrow sub-line.
+    """
+
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Balance_Sheet": {
+                "yearly": [
+                    {
+                        "date": "2025-12-31",
+                        "cash": 16_513_000_000.0,
+                        "cashAndEquivalents": 1_890_000_000.0,
+                        "cashAndShortTermInvestments": 44_059_000_000.0,
+                        "shortTermInvestments": 27_546_000_000.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+    cce = [r for r in records if r.concept == "CashAndCashEquivalents"]
+    assert cce and cce[0].value == 16_513_000_000.0
+
+
+def test_eodhd_cash_arbitration_picks_supplement_when_identity_selects_it() -> None:
+    """``cashAndEquivalents`` wins when it alone satisfies the identity.
+
+    AMD FY2021 shape: EODHD's ``cash`` carries the *prior* period's balance
+    (1,595M = FY2020's true cash) while ``cashAndEquivalents`` (2,535M)
+    satisfies 2,535 + 1,073 == 3,608 == cashAndShortTermInvestments.
+    """
+
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Balance_Sheet": {
+                "yearly": [
+                    {
+                        "date": "2021-12-31",
+                        "cash": 1_595_000_000.0,
+                        "cashAndEquivalents": 2_535_000_000.0,
+                        "cashAndShortTermInvestments": 3_608_000_000.0,
+                        "shortTermInvestments": 1_073_000_000.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+    cce = [r for r in records if r.concept == "CashAndCashEquivalents"]
+    assert cce and cce[0].value == 2_535_000_000.0

@@ -68,6 +68,13 @@ INCOME_STATEMENT_SHARES_KEYS = (
 )
 BALANCE_SHEET_SHARES_KEYS = ("commonStockSharesOutstanding", "shareIssued")
 
+# Relative tolerance for the balance-sheet cash identity check
+# ``candidate + shortTermInvestments == cashAndShortTermInvestments``. Vendor
+# rows satisfy the identity to the unit when they satisfy it at all, while the
+# stale/sub-line artifacts being screened out sit 10%+ away, so 1% is generous
+# headroom for rounding without admitting a wrong candidate.
+CASH_IDENTITY_RELATIVE_TOLERANCE = 0.01
+
 EODHD_STATEMENT_FIELDS = {
     "Balance_Sheet": {
         "AssetsCurrent": ["totalCurrentAssets"],
@@ -104,7 +111,20 @@ EODHD_STATEMENT_FIELDS = {
             "retainedEarningsTotalEquity",
         ],
         "CashAndShortTermInvestments": ["cashAndShortTermInvestments"],
-        "CashAndCashEquivalents": ["cashAndEquivalents", "cash"],
+        # Neither raw cash field is trustworthy on its own: EODHD swaps which
+        # one is real by era, even within a single payload. TSLA 2023+ carries
+        # the headline "cash and cash equivalents" in ``cash`` (FY2025 16.51B)
+        # and a narrow sub-line in ``cashAndEquivalents`` (1.89B) — that bias
+        # understated ROIC/CROIC ~20% via invested capital — while AMD
+        # FY2020-22 is the exact inverse (``cash`` holds the *prior* period's
+        # balance, ``cashAndEquivalents`` the true one). Resolution is
+        # therefore arbitrated per entry against the provider's own rollup
+        # identity ``candidate + shortTermInvestments ==
+        # cashAndShortTermInvestments`` in ``_resolve_cash_and_equivalents``;
+        # this list documents the candidates and the default order used when
+        # the identity cannot decide (``cash`` is populated for ~99.8% of
+        # entries and wins every identity-checkable recent divergence).
+        "CashAndCashEquivalents": ["cash", "cashAndEquivalents"],
         "ShortTermInvestments": ["shortTermInvestments"],
         "ShortTermDebt": ["shortTermDebt", "shortLongTermDebt"],
         "LongTermDebtNoncurrent": [
@@ -417,6 +437,13 @@ class EODHDFactsNormalizer:
                     if candidate >= 0:
                         derived_debt = candidate
 
+                arbitrated_cash = None
+                if (
+                    "CashAndCashEquivalents" in field_map
+                    or "AssetsCurrent" in field_map
+                ):
+                    arbitrated_cash = self._resolve_cash_and_equivalents(entry, lowered)
+
                 derived_current_assets = None
                 if "AssetsCurrent" in field_map:
                     total_assets = self._extract_value(entry, ["totalAssets"], lowered)
@@ -436,9 +463,10 @@ class EODHDFactsNormalizer:
                             short_term_investments = self._extract_value(
                                 entry, ["shortTermInvestments"], lowered
                             )
-                            cash_bucket = self._extract_value(
-                                entry, ["cashAndEquivalents", "cash"], lowered
-                            )
+                            # The rollup is absent on this path, so arbitration
+                            # degenerates to the default field priority; sharing
+                            # the resolver keeps one source of cash-field truth.
+                            cash_bucket = arbitrated_cash
                         receivables = self._extract_value(
                             entry, ["netReceivables"], lowered
                         )
@@ -581,7 +609,13 @@ class EODHDFactsNormalizer:
                 for concept, keys in field_map.items():
                     if concept not in self.concepts:
                         continue
-                    value = self._extract_value(entry, keys, lowered)
+                    if concept == "CashAndCashEquivalents":
+                        # Not a plain first-non-null pick: the two raw fields
+                        # swap reliability by era, so the value is identity-
+                        # arbitrated — see _resolve_cash_and_equivalents.
+                        value = arbitrated_cash
+                    else:
+                        value = self._extract_value(entry, keys, lowered)
                     if value is None and concept == "AssetsCurrent":
                         value = derived_current_assets
                     if value is None and concept == "LiabilitiesCurrent":
@@ -644,6 +678,41 @@ class EODHDFactsNormalizer:
                         )
                     )
         return records
+
+    def _resolve_cash_and_equivalents(
+        self,
+        entry: Dict,
+        lowered: Optional[Mapping[str, Any]] = None,
+    ) -> Optional[float]:
+        """Resolve the CashAndCashEquivalents amount for one statement entry.
+
+        EODHD's ``cash`` and ``cashAndEquivalents`` swap reliability by era
+        (see the mapping comment on ``EODHD_STATEMENT_FIELDS``), so when both
+        are present and disagree the winner is the candidate satisfying the
+        provider's own rollup identity ``candidate + shortTermInvestments ==
+        cashAndShortTermInvestments``. Without a rollup to test against — or
+        when neither candidate satisfies it — ``cash`` wins: it is populated
+        for ~99.8% of entries and empirically carries the filing's headline
+        figure in every identity-checkable recent divergence.
+        """
+
+        cash = self._extract_value(entry, ["cash"], lowered)
+        supplement = self._extract_value(entry, ["cashAndEquivalents"], lowered)
+        if cash is None or supplement is None or cash == supplement:
+            return cash if cash is not None else supplement
+        rollup = self._extract_value(entry, ["cashAndShortTermInvestments"], lowered)
+        if rollup is None:
+            return cash
+        short_term = (
+            self._extract_value(entry, ["shortTermInvestments"], lowered) or 0.0
+        )
+        implied = rollup - short_term
+        if implied <= 0:
+            return cash
+        for candidate in (cash, supplement):
+            if abs(candidate - implied) <= CASH_IDENTITY_RELATIVE_TOLERANCE * implied:
+                return candidate
+        return cash
 
     def _payload_updated_at(self, payload: Dict) -> Optional[str]:
         """Return the ISO date in `General.UpdatedAt`, or None if absent/invalid.
