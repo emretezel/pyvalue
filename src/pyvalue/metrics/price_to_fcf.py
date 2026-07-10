@@ -13,7 +13,7 @@ import logging
 from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
-    SHARE_COUNT_CONCEPTS,
+    SHARE_RESOLVER_REQUIRED_CONCEPTS,
     is_recent_fact,
     market_cap_money,
     require_metric_money,
@@ -42,7 +42,9 @@ class PriceToFCFMetric:
     # Numerator is market cap (shares x price); preload the share-count concepts
     # market_cap_money resolves alongside the FCF concepts.
     required_concepts = tuple(
-        OPERATING_CASH_FLOW_CONCEPTS + CAPEX_CONCEPTS + list(SHARE_COUNT_CONCEPTS)
+        OPERATING_CASH_FLOW_CONCEPTS
+        + CAPEX_CONCEPTS
+        + list(SHARE_RESOLVER_REQUIRED_CONCEPTS)
     )
     uses_market_data = True
 

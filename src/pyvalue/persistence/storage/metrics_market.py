@@ -590,6 +590,71 @@ class MarketDataRepository(SQLiteStore):
             updated_at=row["updated_at"],
         )
 
+    def snapshot_near_date_by_id(
+        self,
+        listing_id: int,
+        as_of: str,
+        *,
+        max_distance_days: int,
+    ) -> Optional[PriceData]:
+        """Stored snapshot closest to ``as_of`` within ``max_distance_days``.
+
+        Serves the share-count resolver (``pyvalue.metrics.share_resolver``):
+        the provider market-cap anchor must be divided by the close of the day
+        it was computed on, not by today's close, so the implied share count is
+        price-drift-free. ``market_data`` is a sparse snapshot store, hence the
+        tolerance window; a miss returns ``None`` and the caller degrades to its
+        anchorless policy rather than pricing a different market regime.
+
+        Equidistant ties prefer the on-or-before row: EODHD computes the cap
+        from the last close *preceding* its refresh stamp. The range seek is
+        served by the ``(listing_id, as_of)`` primary key. Currency reporting
+        matches :meth:`latest_snapshot_record_by_id` -- the stored major-unit
+        price labelled with the listing currency collapsed to its base (GBX ->
+        GBP), so no second subunit collapse can occur downstream.
+        """
+
+        self.initialize_schema()
+        if max_distance_days < 0:
+            raise ValueError("max_distance_days must be non-negative")
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    l.symbol || '.' || e.exchange_code AS canonical_symbol,
+                    md.as_of,
+                    md.price,
+                    md.volume,
+                    l.currency
+                FROM market_data md
+                JOIN listing l ON l.listing_id = md.listing_id
+                JOIN "exchange" e ON e.exchange_id = l.exchange_id
+                WHERE md.listing_id = ?
+                  AND md.as_of BETWEEN date(?, ?) AND date(?, ?)
+                ORDER BY ABS(julianday(md.as_of) - julianday(?)) ASC,
+                         (md.as_of > ?) ASC
+                LIMIT 1
+                """,
+                (
+                    int(listing_id),
+                    as_of,
+                    f"-{int(max_distance_days)} days",
+                    as_of,
+                    f"+{int(max_distance_days)} days",
+                    as_of,
+                    as_of,
+                ),
+            ).fetchone()
+        if row is None:
+            return None
+        return PriceData(
+            symbol=row["canonical_symbol"],
+            price=row["price"],
+            as_of=row["as_of"],
+            volume=row["volume"],
+            currency=canonical_trading_currency(row["currency"]),
+        )
+
     def latest_snapshots_many_by_ids(
         self,
         listing_ids: Sequence[int],

@@ -481,6 +481,82 @@ def test_eodhd_dividend_share_skipped_when_updated_at_missing() -> None:
     )
 
 
+def test_eodhd_normalizes_provider_market_cap_from_highlights() -> None:
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Highlights": {"MarketCapitalization": 3_318_691_135_488.0},
+        "General": {"CurrencyCode": "USD", "UpdatedAt": "2026-03-29"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+    anchors = [r for r in records if r.concept == "ProviderMarketCapitalization"]
+    assert anchors, (
+        "ProviderMarketCapitalization should map from Highlights.MarketCapitalization"
+    )
+    anchor = anchors[0]
+    assert anchor.value == 3_318_691_135_488.0
+    # Like the SharesStats/DividendShare snapshots, the Highlights block is
+    # refreshed as a unit and timestamped by General.UpdatedAt.
+    assert anchor.fiscal_period == "INSTANT"
+    assert anchor.end_date == "2026-03-29"
+    assert anchor.unit_kind == "monetary"
+    assert anchor.currency == "USD"
+
+
+def test_eodhd_provider_market_cap_gbx_collapses_code_but_not_amount() -> None:
+    # EODHD quotes Highlights.MarketCapitalization in MAJOR units even when
+    # General.CurrencyCode is a subunit code (verified against stored GBX/ZAC
+    # payloads), so the code collapses to GBP while the amount must NOT be
+    # divided by the 100x subunit divisor.
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Highlights": {"MarketCapitalization": 3_007_000_000.0},
+        "General": {"CurrencyCode": "GBX", "UpdatedAt": "2026-03-29"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.LSE")
+    anchors = [r for r in records if r.concept == "ProviderMarketCapitalization"]
+    assert anchors
+    assert anchors[0].currency == "GBP"
+    assert anchors[0].value == 3_007_000_000.0
+
+
+def test_eodhd_provider_market_cap_skipped_when_absent_or_non_positive() -> None:
+    normalizer = EODHDFactsNormalizer()
+    for highlights in (
+        None,
+        {},
+        {"MarketCapitalization": None},
+        {"MarketCapitalization": "n/a"},
+        {"MarketCapitalization": 0},
+        {"MarketCapitalization": -5.0},
+    ):
+        payload: dict[str, object] = {
+            "General": {"CurrencyCode": "USD", "UpdatedAt": "2026-03-29"}
+        }
+        if highlights is not None:
+            payload["Highlights"] = highlights
+        records = normalizer.normalize(payload, symbol="TEST.US")
+        anchors = [r for r in records if r.concept == "ProviderMarketCapitalization"]
+        assert not anchors, (
+            f"placeholder provider cap {highlights!r} must not become a fact"
+        )
+
+
+def test_eodhd_provider_market_cap_skipped_when_updated_at_missing() -> None:
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Highlights": {"MarketCapitalization": 1_000_000.0},
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+    anchors = [r for r in records if r.concept == "ProviderMarketCapitalization"]
+    assert not anchors, (
+        "provider market-cap snapshot must be skipped when General.UpdatedAt is absent"
+    )
+
+
 def test_eodhd_normalizes_short_term_debt_and_cash_investments() -> None:
     normalizer = EODHDFactsNormalizer()
     payload = {

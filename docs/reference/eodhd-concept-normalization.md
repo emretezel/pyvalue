@@ -40,6 +40,7 @@ table doc):
 | `General.CurrencyCode` | payload-level currency fallback (precedence step 3) |
 | `General.UpdatedAt` | `end_date` for snapshot facts (TTM DPS, INSTANT shares) |
 | `Highlights.DividendShare` | `CommonStockDividendsPerShareCashPaid` (TTM) |
+| `Highlights.MarketCapitalization` | `ProviderMarketCapitalization` (INSTANT) |
 | `SharesStats.SharesOutstanding` / `.SharesFloat` | `CommonStockSharesOutstanding` (INSTANT) |
 | `outstandingShares.{annual,quarterly}` | `CommonStockSharesOutstanding` (FY / Qn) |
 | `Earnings.{History,Annual}` | `EarningsPerShareDiluted` (`epsActual`) |
@@ -79,7 +80,7 @@ tables below.
    behavior; see [Normalization and Facts](../architecture/normalization-and-facts.md) for the
    broader FX policy.
 
-## Concept inventory (46)
+## Concept inventory (47)
 
 `F` = directly read from a statement field, `D` = derived/aliased, `S` = snapshot.
 "Periods" are the `fiscal_period` values actually observed in the live table.
@@ -131,6 +132,7 @@ tables below.
 | SalePurchaseOfStock | Cash Flow | monetary | FY, Q1–Q4 | F |
 | IssuanceOfCapitalStock | Cash Flow | monetary | FY, Q1–Q4 | F |
 | CommonStockDividendsPerShareCashPaid | Snapshot | per_share | TTM | S |
+| ProviderMarketCapitalization | Snapshot | monetary | INSTANT | S |
 
 Four concepts are mapped in code but **not present** in the live table — see
 [Mapped but unpopulated](#mapped-but-currently-unpopulated).
@@ -226,6 +228,24 @@ Scalar. Concept `CommonStockDividendsPerShareCashPaid`, `fiscal_period = TTM`,
 `resolve_eodhd_currency(Highlights, payload = General.CurrencyCode)`. Skipped if missing
 (e.g. ADBE's `DividendShare` is `null` → no fact).
 
+### Provider market capitalization — `Highlights.MarketCapitalization`
+
+Monetary. Concept `ProviderMarketCapitalization`, `fiscal_period = INSTANT`,
+`end_date = General.UpdatedAt`. Skipped when missing, non-numeric, or `<= 0`
+(placeholders), and when `UpdatedAt` is absent. **Currency code is collapsed
+(GBX → GBP, ZAC → ZAR) but the amount is NOT divided by the subunit divisor** —
+unlike every statement figure, EODHD quotes this field in major units even when
+`General.CurrencyCode` is a subunit code (verified against stored GBX/ZAC
+payloads, which factorize as close × shares at ratio ~1.0, not ~0.01).
+
+This fact is **arbitration evidence only**, never a metric output: EODHD
+computes it as last close × the *company-total* share count, making it the one
+issuer-level total in the payload. The share-count resolver
+(`pyvalue.metrics.share_resolver`) divides it by the stored close nearest its
+own date to decide whether the SharesStats snapshot or the filing-based
+periodic rows carry the real total (see Shares below). pyvalue's `market_cap`
+metric remains locally computed (resolved shares × latest price).
+
 ## Shares
 
 Concept `CommonStockSharesOutstanding`, `unit_kind = count`, currency NULL, from up to three
@@ -241,6 +261,18 @@ fiscal_period)`, preferring `unit_kind = count` and NULL currency.
   balance-sheet fiscal year-end.
 - **Balance sheet** — `EntityCommonStockSharesOutstanding` (above), aliased to
   `CommonStockSharesOutstanding`.
+
+**No single source is the company total for every issuer.** The INSTANT
+snapshot counts only the listed ticker's class for dual-class issuers (GOOGL:
+5.82B Class A vs the 12.23B total; PLTR similarly), while the filing-based
+periodic rows are weighted-average (TSLA) or issued-incl-treasury (Citi)
+figures for others. Metrics therefore never read a share concept latest-first
+directly: the shared resolver (`pyvalue.metrics.share_resolver`) arbitrates
+snapshot vs periodic using `ProviderMarketCapitalization` ÷ the close nearest
+its date as the implied company total, and every share-basis metric
+(market cap, EV family, P/B, P/TB, Graham multiplier) consumes its choice.
+FY-history consumers (Piotroski F7, share-count CAGRs) keep reading the
+filing-based series directly.
 
 ### Earnings EPS — `Earnings.{History,Annual}`
 
@@ -437,7 +469,9 @@ and pounds.
 - **Snapshot facts are dated by `General.UpdatedAt`**, independent of the latest filed quarter.
 - **One concept, several sources.** `CommonStockSharesOutstanding` is produced by the balance
   sheet, `SharesStats`, and `outstandingShares` at potentially different dates; the share-record
-  collapse keeps one per `(concept, end_date, fiscal_period)`.
+  collapse keeps one per `(concept, end_date, fiscal_period)`. The `SharesStats` INSTANT row is
+  **per ticker class** for dual-class issuers, so the newest row of this concept is not
+  necessarily the company total — consumers go through the share resolver (see Shares).
 - **Stored `currency` is always a major unit**; subunits are collapsed before a fact is built.
 
 ## Related docs

@@ -204,17 +204,26 @@ class _TickerCurrencyRepo(RegionFactsRepository):
         return []
 
     def latest_fact(self, listing_id: int, concept: str) -> FactRecord | None:
+        records = self.facts_for_concept(listing_id, concept)
+        if records:
+            return max(records, key=lambda record: record.end_date)
         if concept == "EntityCommonStockSharesOutstanding":
+            # Fallback share count for tests that never seed one: a
+            # filing-shaped (FY) row, because production Entity rows are never
+            # INSTANT and the share resolver reads the periodic candidate
+            # through latest_fact. Dated antiquity so any share fact a test
+            # *does* seed (the resolver keeps the freshest periodic row) always
+            # outranks this default; market_cap_money applies no recency gate,
+            # so price-pinning tests still derive market cap = price x 1.0.
             return fact(
                 concept=concept,
-                fiscal_period="INSTANT",
-                end_date="2099-12-31",
+                fiscal_period="FY",
+                end_date="1900-01-01",
                 unit_kind="count",
                 currency=None,
                 value=1.0,
             )
-        records = self.facts_for_concept(listing_id, concept)
-        return max(records, key=lambda record: record.end_date) if records else None
+        return None
 
 
 class _USDTickerCurrencyRepo(_TickerCurrencyRepo):
@@ -8027,18 +8036,19 @@ def _share_count_records(
     """An Entity-shares count fact that market_cap_money pairs with the price.
 
     Market cap is now derived as a share-count fact x the price as of that fact's
-    date. ``market_cap_money`` prefers ``EntityCommonStockSharesOutstanding`` --
-    a concept no other metric reads -- so seeding shares=1.0 here lets a test pin
-    market cap purely through the fake market repo's price (shares x price ==
-    price) without disturbing share-count metrics that read
-    ``CommonStockSharesOutstanding``.
+    date. The share resolver treats ``EntityCommonStockSharesOutstanding`` as a
+    filing-based (periodic) source -- production Entity rows are never INSTANT;
+    only the Common SharesStats snapshot is -- so this fact is FY-shaped. Seeding
+    shares=1.0 lets a test pin market cap purely through the fake market repo's
+    price (shares x price == price) without disturbing share-count metrics that
+    read ``CommonStockSharesOutstanding``.
     """
 
     return [
         FactRecord(
             symbol=symbol,
             concept="EntityCommonStockSharesOutstanding",
-            fiscal_period="INSTANT",
+            fiscal_period="FY",
             end_date=as_of,
             unit_kind="count",
             value=shares,

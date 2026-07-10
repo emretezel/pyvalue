@@ -466,8 +466,14 @@ class FinancialFactsRepository(SQLiteStore):
     ) -> Dict[int, float]:
         """Latest shares-outstanding per ``listing_id`` (no symbol resolution).
 
-        Used by the report market-cap estimator. Reads the primary/fallback
-        share-count concepts (``EntityCommonStockSharesOutstanding`` then
+        Used by the report market-cap estimator, and **diagnostic-only**: the
+        latest-``end_date`` read means the fallback concept resolves to the
+        provider SharesStats ``INSTANT`` snapshot, which counts a single share
+        class for dual-class issuers. The metric-grade path is the arbitrated
+        resolver in ``pyvalue.metrics.share_resolver``; duplicating that
+        arbitration in SQL for a sizing heuristic is not worth it. Reads the
+        primary/fallback share-count concepts
+        (``EntityCommonStockSharesOutstanding`` then
         ``CommonStockSharesOutstanding``) with the tie-break ordering encoded in
         :meth:`_latest_share_counts_for_temp_selected_ids`.
         """

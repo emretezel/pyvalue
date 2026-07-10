@@ -16,7 +16,7 @@ from pyvalue.metrics.share_count_change import ShareCountChangeCalculator
 from pyvalue.metrics.ttm import resolve_ttm_window
 from pyvalue.metrics.utils import (
     MAX_FY_FACT_AGE_DAYS,
-    SHARE_COUNT_CONCEPTS,
+    SHARE_RESOLVER_REQUIRED_CONCEPTS,
     market_cap_money,
     require_metric_money,
     require_metric_ticker_currency,
@@ -41,7 +41,7 @@ REQUIRED_CONCEPTS = tuple(
             SHARE_COUNT_CONCEPT,
             # Denominator market cap = shares x price; preload the share-count
             # concepts market_cap_money resolves.
-            *SHARE_COUNT_CONCEPTS,
+            *SHARE_RESOLVER_REQUIRED_CONCEPTS,
         )
     )
 )

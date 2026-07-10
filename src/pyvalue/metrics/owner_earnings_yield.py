@@ -24,7 +24,7 @@ from pyvalue.metrics.owner_earnings_equity import (
     REQUIRED_CONCEPTS as OE_EQUITY_REQUIRED_CONCEPTS,
     OwnerEarningsEquityCalculator,
 )
-from pyvalue.metrics.utils import SHARE_COUNT_CONCEPTS, market_cap_money
+from pyvalue.metrics.utils import SHARE_RESOLVER_REQUIRED_CONCEPTS, market_cap_money
 from pyvalue.money import Money
 from pyvalue.persistence.storage import MarketDataRepository
 
@@ -34,7 +34,7 @@ LOGGER = logging.getLogger(__name__)
 # share-count concepts market_cap_money resolves alongside the owner-earnings
 # equity concepts.
 REQUIRED_CONCEPTS = tuple(
-    dict.fromkeys(OE_EQUITY_REQUIRED_CONCEPTS + SHARE_COUNT_CONCEPTS)
+    dict.fromkeys(OE_EQUITY_REQUIRED_CONCEPTS + SHARE_RESOLVER_REQUIRED_CONCEPTS)
 )
 REQUIRED_EV_CONCEPTS = tuple(
     dict.fromkeys(OE_EV_REQUIRED_CONCEPTS + EV_REQUIRED_CONCEPTS)

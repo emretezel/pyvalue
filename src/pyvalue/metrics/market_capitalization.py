@@ -11,7 +11,7 @@ from typing import Optional
 
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
-from pyvalue.metrics.utils import SHARE_COUNT_CONCEPTS, market_cap_money
+from pyvalue.metrics.utils import SHARE_RESOLVER_REQUIRED_CONCEPTS, market_cap_money
 from pyvalue.persistence.storage import MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -23,7 +23,7 @@ class MarketCapitalizationMetric:
     # fact's date) rather than read from a stored column, so this metric reads
     # financial facts and must declare the share-count concepts it preloads.
     id: str = "market_cap"
-    required_concepts: tuple[str, ...] = SHARE_COUNT_CONCEPTS
+    required_concepts: tuple[str, ...] = SHARE_RESOLVER_REQUIRED_CONCEPTS
     uses_market_data = True
     uses_financial_facts = True
 

@@ -19,7 +19,7 @@ import logging
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
-    SHARE_COUNT_CONCEPTS,
+    SHARE_RESOLVER_REQUIRED_CONCEPTS,
     is_recent_fact,
     market_cap_money,
     require_metric_money,
@@ -130,7 +130,7 @@ class PriceToNCAVMetric:
     id: str = "price_to_ncav"
     # Market cap (= shares x price) reads a share-count fact, so those concepts
     # must be preloaded alongside the NCAV balance-sheet inputs.
-    required_concepts = NCAV_REQUIRED_CONCEPTS + SHARE_COUNT_CONCEPTS
+    required_concepts = NCAV_REQUIRED_CONCEPTS + SHARE_RESOLVER_REQUIRED_CONCEPTS
     uses_market_data = True
 
     def compute(

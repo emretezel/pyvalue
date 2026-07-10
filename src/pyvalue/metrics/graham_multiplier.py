@@ -13,6 +13,10 @@ import logging
 from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.marketdata.base import PriceData
 from pyvalue.metrics.base import MetricResult
+from pyvalue.metrics.share_resolver import (
+    SHARE_RESOLVER_REQUIRED_CONCEPTS,
+    resolve_current_share_count,
+)
 from pyvalue.metrics.ttm import TTMWindow, resolve_ttm_window
 from pyvalue.metrics.utils import (
     is_recent_fact,
@@ -26,7 +30,6 @@ from pyvalue.persistence.storage import MarketDataRepository
 
 EPS_CONCEPTS = ["EarningsPerShare"]
 EQUITY_CONCEPTS = ["StockholdersEquity"]
-SHARE_CONCEPTS = ["CommonStockSharesOutstanding"]
 GOODWILL_CONCEPTS = ["Goodwill"]
 INTANGIBLE_CONCEPTS = ["IntangibleAssetsNetExcludingGoodwill"]
 
@@ -39,7 +42,7 @@ class GrahamMultiplierMetric:
     required_concepts = tuple(
         EPS_CONCEPTS
         + EQUITY_CONCEPTS
-        + SHARE_CONCEPTS
+        + list(SHARE_RESOLVER_REQUIRED_CONCEPTS)
         + GOODWILL_CONCEPTS
         + INTANGIBLE_CONCEPTS
     )
@@ -78,7 +81,7 @@ class GrahamMultiplierMetric:
         equity = self._latest_monetary(
             listing_id, repo, EQUITY_CONCEPTS, target_currency
         )
-        shares = self._latest_shares(listing_id, repo)
+        shares = self._latest_shares(listing_id, repo, market_repo)
         if equity is None or shares is None or shares <= 0:
             LOGGER.warning(
                 "graham_multiplier: equity/shares missing for listing_id=%s",
@@ -221,14 +224,15 @@ class GrahamMultiplierMetric:
         return money if money is not None else Money.of(0.0, target_currency)
 
     def _latest_shares(
-        self, listing_id: int, repo: RegionFactsRepository
+        self,
+        listing_id: int,
+        repo: RegionFactsRepository,
+        market_repo: MarketDataRepository,
     ) -> Optional[float]:
-        for concept in SHARE_CONCEPTS:
-            fact = repo.latest_scalar_fact(listing_id, concept)
-            if fact is None or not is_recent_fact(fact):
-                continue
-            return fact.value
-        return None
+        record = resolve_current_share_count(listing_id, repo, market_repo)
+        if record is None or not is_recent_fact(record):
+            return None
+        return record.value
 
     def _latest_snapshot(
         self, market_repo: MarketDataRepository, listing_id: int

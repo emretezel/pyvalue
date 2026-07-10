@@ -23,7 +23,7 @@ from pyvalue.metrics.ttm import resolve_ttm_window
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     MAX_FY_FACT_AGE_DAYS,
-    SHARE_COUNT_CONCEPTS,
+    SHARE_RESOLVER_REQUIRED_CONCEPTS,
     is_recent_fact,
     market_cap_money,
     require_metric_amount_money,
@@ -102,7 +102,9 @@ DIVIDEND_REQUIRED_CONCEPTS = tuple(
     # The cash dividend yield divides by market cap (shares x price), so preload
     # the share-count concepts market_cap_money resolves.
     dict.fromkeys(
-        DIVIDENDS_PAID_CONCEPTS + DIVIDENDS_PER_SHARE_CONCEPTS + SHARE_COUNT_CONCEPTS
+        DIVIDENDS_PAID_CONCEPTS
+        + DIVIDENDS_PER_SHARE_CONCEPTS
+        + SHARE_RESOLVER_REQUIRED_CONCEPTS
     )
 )
 DIVIDEND_PAYOUT_REQUIRED_CONCEPTS = tuple(

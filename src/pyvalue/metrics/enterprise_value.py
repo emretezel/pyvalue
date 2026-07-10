@@ -18,7 +18,7 @@ from pyvalue.metrics.balance_sheet import (
 )
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
-    SHARE_COUNT_CONCEPTS,
+    SHARE_RESOLVER_REQUIRED_CONCEPTS,
     market_cap_money,
 )
 from pyvalue.money import Money
@@ -32,7 +32,7 @@ EV_REQUIRED_CONCEPTS = (
     # EV = market cap + total debt - cash. Market cap (= shares x price) reads a
     # share-count fact, so every EV metric must preload it too. See
     # metrics.utils.market_cap_money.
-    *SHARE_COUNT_CONCEPTS,
+    *SHARE_RESOLVER_REQUIRED_CONCEPTS,
 )
 
 

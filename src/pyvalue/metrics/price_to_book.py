@@ -18,6 +18,10 @@ import logging
 
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
+from pyvalue.metrics.share_resolver import (
+    SHARE_RESOLVER_REQUIRED_CONCEPTS,
+    resolve_current_share_count,
+)
 from pyvalue.metrics.utils import (
     is_recent_fact,
     require_metric_amount_money,
@@ -33,8 +37,10 @@ LOGGER = logging.getLogger(__name__)
 # numerator; total stockholders' equity is only a rescue when the derivation
 # is unavailable. Sign guards apply *after* selection -- a present-but-negative
 # common equity must not silently fall through to the total.
+# The share denominator has no concept list of its own: it comes from the
+# shared company-total resolver (``pyvalue.metrics.share_resolver``), so BVPS
+# prices the same share basis as market cap.
 EQUITY_CONCEPTS = ("CommonStockholdersEquity", "StockholdersEquity")
-SHARE_CONCEPTS = ("CommonStockSharesOutstanding",)
 GOODWILL_CONCEPTS = ("Goodwill",)
 INTANGIBLE_CONCEPTS = ("IntangibleAssetsNetExcludingGoodwill",)
 
@@ -83,7 +89,7 @@ class PriceToBookCalculator:
             return None
         equity_money, equity_as_of = equity
 
-        shares = self._latest_shares(listing_id, repo)
+        shares = self._latest_shares(listing_id, repo, market_repo)
         if shares is None or shares <= 0:
             LOGGER.warning(
                 "%s: missing/non-positive shares for listing_id=%s",
@@ -168,14 +174,15 @@ class PriceToBookCalculator:
         return resolved[0]
 
     def _latest_shares(
-        self, listing_id: int, repo: RegionFactsRepository
+        self,
+        listing_id: int,
+        repo: RegionFactsRepository,
+        market_repo: MarketDataRepository,
     ) -> Optional[float]:
-        for concept in SHARE_CONCEPTS:
-            record = repo.latest_scalar_fact(listing_id, concept)
-            if record is None or not is_recent_fact(record):
-                continue
-            return record.value
-        return None
+        record = resolve_current_share_count(listing_id, repo, market_repo)
+        if record is None or not is_recent_fact(record):
+            return None
+        return record.value
 
 
 @dataclass
@@ -183,7 +190,7 @@ class PriceToBookMetric:
     """Compute price divided by common book value per share (P/B)."""
 
     id: str = "price_to_book"
-    required_concepts = EQUITY_CONCEPTS + SHARE_CONCEPTS
+    required_concepts = EQUITY_CONCEPTS + SHARE_RESOLVER_REQUIRED_CONCEPTS
     uses_market_data = True
 
     def compute(
@@ -220,7 +227,10 @@ class PriceToTangibleBookMetric:
 
     id: str = "price_to_tangible_book"
     required_concepts = (
-        EQUITY_CONCEPTS + SHARE_CONCEPTS + GOODWILL_CONCEPTS + INTANGIBLE_CONCEPTS
+        EQUITY_CONCEPTS
+        + SHARE_RESOLVER_REQUIRED_CONCEPTS
+        + GOODWILL_CONCEPTS
+        + INTANGIBLE_CONCEPTS
     )
     uses_market_data = True
 

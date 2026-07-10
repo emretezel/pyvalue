@@ -18,7 +18,7 @@ from pyvalue.persistence.storage import (
     SupportedTickerRepository,
 )
 
-from conftest import seed_exchange, seed_price
+from conftest import resolve_listing_id, seed_exchange, seed_price
 
 
 class DummyEODSession(requests.Session):
@@ -426,3 +426,125 @@ def test_market_data_service_prepare_price_data_uses_ila_currency_hint(
     # ILA agorot collapse to ILS major: 1234 -> 12.34.
     assert prepared.price == pytest.approx(12.34)
     assert prepared.currency == "ILS"
+
+
+def _seed_price_history(db_path: Path, symbol: str, rows: dict[str, float]) -> int:
+    """Seed closes for ``symbol`` and return its listing id."""
+
+    for as_of, price in rows.items():
+        seed_price(db_path, symbol, as_of, price)
+    return resolve_listing_id(db_path, symbol)
+
+
+def test_snapshot_near_date_prefers_the_exact_date(tmp_path: Path) -> None:
+    db_path = tmp_path / "near-exact.db"
+    _seed_listing(db_path, "AAA.US")
+    listing_id = _seed_price_history(
+        db_path,
+        "AAA.US",
+        {"2026-03-25": 95.0, "2026-03-29": 100.0, "2026-04-01": 105.0},
+    )
+
+    snapshot = MarketDataRepository(db_path).snapshot_near_date_by_id(
+        listing_id, "2026-03-29", max_distance_days=10
+    )
+
+    assert snapshot is not None
+    assert snapshot.as_of == "2026-03-29"
+    assert snapshot.price == 100.0
+    assert snapshot.currency == "USD"
+
+
+def test_snapshot_near_date_uses_the_nearest_row_either_side(tmp_path: Path) -> None:
+    db_path = tmp_path / "near-side.db"
+    _seed_listing(db_path, "AAA.US")
+    listing_id = _seed_price_history(
+        db_path,
+        "AAA.US",
+        {"2026-03-20": 95.0, "2026-04-02": 105.0},
+    )
+    repo = MarketDataRepository(db_path)
+
+    # 2026-03-29: before-row is 9 days away, after-row 4 -> the after row wins.
+    after = repo.snapshot_near_date_by_id(
+        listing_id, "2026-03-29", max_distance_days=10
+    )
+    assert after is not None
+    assert after.as_of == "2026-04-02"
+    # 2026-03-23: before-row 3 days, after-row 10 -> the before row wins.
+    before = repo.snapshot_near_date_by_id(
+        listing_id, "2026-03-23", max_distance_days=10
+    )
+    assert before is not None
+    assert before.as_of == "2026-03-20"
+
+
+def test_snapshot_near_date_equidistant_tie_prefers_on_or_before(
+    tmp_path: Path,
+) -> None:
+    # The provider cap is computed from the last close *before* its refresh
+    # stamp, so an equidistant tie must resolve backwards.
+    db_path = tmp_path / "near-tie.db"
+    _seed_listing(db_path, "AAA.US")
+    listing_id = _seed_price_history(
+        db_path,
+        "AAA.US",
+        {"2026-03-27": 95.0, "2026-03-31": 105.0},
+    )
+
+    snapshot = MarketDataRepository(db_path).snapshot_near_date_by_id(
+        listing_id, "2026-03-29", max_distance_days=10
+    )
+
+    assert snapshot is not None
+    assert snapshot.as_of == "2026-03-27"
+
+
+def test_snapshot_near_date_misses_outside_the_window(tmp_path: Path) -> None:
+    db_path = tmp_path / "near-miss.db"
+    _seed_listing(db_path, "AAA.US")
+    listing_id = _seed_price_history(db_path, "AAA.US", {"2026-03-01": 95.0})
+    repo = MarketDataRepository(db_path)
+
+    assert (
+        repo.snapshot_near_date_by_id(listing_id, "2026-03-29", max_distance_days=10)
+        is None
+    )
+    # Widening the window brings the row back into range.
+    within = repo.snapshot_near_date_by_id(
+        listing_id, "2026-03-29", max_distance_days=30
+    )
+    assert within is not None
+    assert within.as_of == "2026-03-01"
+
+
+def test_snapshot_near_date_returns_none_without_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "near-empty.db"
+    _seed_listing(db_path, "AAA.US")
+    listing_id = resolve_listing_id(db_path, "AAA.US")
+
+    assert (
+        MarketDataRepository(db_path).snapshot_near_date_by_id(
+            listing_id, "2026-03-29", max_distance_days=10
+        )
+        is None
+    )
+
+
+def test_snapshot_near_date_reports_the_collapsed_listing_currency(
+    tmp_path: Path,
+) -> None:
+    # Stored prices are major-unit; the reported currency must be the listing
+    # currency collapsed to its base (GBX -> GBP), mirroring the latest-snapshot
+    # reader so no second subunit collapse can occur downstream.
+    db_path = tmp_path / "near-gbx.db"
+    _seed_listing(db_path, "AAA.LSE", currency="GBX")
+    listing_id = _seed_price_history(db_path, "AAA.LSE", {"2026-03-29": 3.48})
+
+    snapshot = MarketDataRepository(db_path).snapshot_near_date_by_id(
+        listing_id, "2026-03-29", max_distance_days=10
+    )
+
+    assert snapshot is not None
+    assert snapshot.currency == "GBP"
+    assert snapshot.price == 3.48

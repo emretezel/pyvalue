@@ -195,9 +195,12 @@ def _estimate_market_caps(
     Market cap is no longer a stored column; this is a diagnostic-only sizing
     heuristic used to pick a representative (large) failing example. It pairs the
     latest share count with the latest price rather than the share-count-dated
-    price the metrics use -- close enough for ranking examples by size, and cheap
-    (one bulk share-count read by listing_id over the already-loaded snapshots).
-    The result is keyed by ``listing_id``.
+    price the metrics use, and its bulk share-count read is *not* the arbitrated
+    company-total resolver the metrics use (``pyvalue.metrics.share_resolver``)
+    -- for a dual-class issuer it may see a single class. Close enough for
+    ranking examples by size, and cheap (one bulk share-count read by
+    listing_id over the already-loaded snapshots). The result is keyed by
+    ``listing_id``.
     """
 
     estimates: Dict[int, Optional[float]] = {}

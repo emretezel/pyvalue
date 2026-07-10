@@ -178,7 +178,10 @@ EODHD_STATEMENT_FIELDS = {
     },
 }
 
-EODHD_EXTRA_CONCEPTS = {"CommonStockDividendsPerShareCashPaid"}
+EODHD_EXTRA_CONCEPTS = {
+    "CommonStockDividendsPerShareCashPaid",
+    "ProviderMarketCapitalization",
+}
 EODHD_TARGET_CONCEPTS = {
     concept for statement in EODHD_STATEMENT_FIELDS.values() for concept in statement
 } | EODHD_EXTRA_CONCEPTS
@@ -260,6 +263,13 @@ class EODHDFactsNormalizer:
         )
         records.extend(
             self._normalize_dividends_per_share(
+                payload,
+                symbol=symbol,
+                default_currency=currency_code,
+            )
+        )
+        records.extend(
+            self._normalize_provider_market_cap(
                 payload,
                 symbol=symbol,
                 default_currency=currency_code,
@@ -795,6 +805,84 @@ class EODHDFactsNormalizer:
                 end_date=end_date,
                 unit_kind="per_share",
                 value=normalized_value,
+                filed=None,
+                currency=normalized_currency,
+            )
+        ]
+
+    def _normalize_provider_market_cap(
+        self,
+        payload: Dict,
+        *,
+        symbol: str,
+        default_currency: Optional[str],
+    ) -> List[FactRecord]:
+        """Map Highlights.MarketCapitalization to an INSTANT monetary snapshot.
+
+        EODHD computes this figure as last close x the *company-total* share
+        count -- the only issuer-level total anywhere in the payload. Per-class
+        listings (dual-class issuers) and weighted-average balance-sheet share
+        rows both disagree with it in characteristic ways, which is exactly what
+        the share-count resolver (``pyvalue.metrics.share_resolver``) exploits:
+        this fact is **arbitration evidence only**, never a metric output. That
+        is the deliberate contrast with the purged EnterpriseValue snapshot
+        (migration 075), which duplicated a derivable metric; the provider cap
+        is a provider *observation* no local computation can reproduce.
+        """
+
+        if "ProviderMarketCapitalization" not in self.concepts:
+            return []
+
+        highlights = payload.get("Highlights") or {}
+        raw_value = _to_float(highlights.get("MarketCapitalization"))
+        # Zero/negative caps are provider placeholders, not observations.
+        if raw_value is None or raw_value <= 0:
+            return []
+
+        # Like the SharesStats and DividendShare snapshots, the Highlights block
+        # is refreshed as a unit and timestamped by General.UpdatedAt, not by any
+        # fiscal period.
+        end_date = self._payload_updated_at(payload)
+        if not end_date:
+            LOGGER.warning(
+                "ProviderMarketCapitalization: missing General.UpdatedAt for %s;"
+                " skipping snapshot",
+                symbol,
+            )
+            return []
+
+        currency_resolution = resolve_eodhd_currency(
+            highlights if isinstance(highlights, Mapping) else None,
+            payload_currency=default_currency,
+        )
+        # Collapse only the currency *code* (GBX -> GBP, ZAC -> ZAR). Unlike the
+        # statement figures and DividendShare, EODHD quotes the Highlights
+        # market cap in MAJOR units even when General.CurrencyCode is a subunit
+        # code (verified against stored payloads: GBX and ZAC listings factorize
+        # as close x shares at ratio ~1.0, not ~0.01), so routing the amount
+        # through the subunit divisor (``_normalize_value_currency``) would
+        # shrink the anchor 100x for every LSE/JSE listing.
+        normalized_currency = shared_normalize_currency_code(
+            currency_resolution.currency_code
+        )
+        if normalized_currency is None:
+            # Monetary facts must carry a currency (schema coupling); an anchor
+            # of unknown currency cannot be compared against a price anyway.
+            LOGGER.warning(
+                "ProviderMarketCapitalization: missing currency for %s;"
+                " skipping snapshot",
+                symbol,
+            )
+            return []
+
+        return [
+            FactRecord(
+                symbol=symbol.upper(),
+                concept="ProviderMarketCapitalization",
+                fiscal_period="INSTANT",
+                end_date=end_date,
+                unit_kind="monetary",
+                value=raw_value,
                 filed=None,
                 currency=normalized_currency,
             )

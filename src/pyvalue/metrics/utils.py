@@ -24,8 +24,13 @@ from pyvalue.currency import normalize_currency_code
 from pyvalue.facts import FactView, RawFactSource
 from pyvalue.money.fx import FXService
 from pyvalue.metrics.base import MetricCurrencyInvariantError
+from pyvalue.metrics.share_resolver import (
+    SHARE_COUNT_CONCEPTS,
+    SHARE_RESOLVER_REQUIRED_CONCEPTS,
+    resolve_current_share_count,
+)
 from pyvalue.money import CurrencyMismatchError, Money, fx_service_for_context
-from pyvalue.persistence.storage import FactRecord, MarketDataRepository
+from pyvalue.persistence.storage import MarketDataRepository
 
 # Default freshness windows (days), measured on the period end_date (not the
 # filing date). Quarterly/TTM data stays at 400 days. FY-series metrics get
@@ -47,14 +52,6 @@ FactT = TypeVar("FactT", bound=FactView)
 # The consecutive-year chain builder is agnostic about what a year's payload is
 # (a single Money point, a (CFO, NI) pair, ...), so it stays generic.
 _ChainValueT = TypeVar("_ChainValueT")
-
-# Shares-outstanding concepts, in resolution priority. Mirrors the default order
-# in ``FinancialFactsRepository.latest_share_counts_many_by_ids`` so the
-# on-demand market-cap share count matches the bulk reader.
-SHARE_COUNT_CONCEPTS: tuple[str, ...] = (
-    "EntityCommonStockSharesOutstanding",
-    "CommonStockSharesOutstanding",
-)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -463,24 +460,6 @@ def sum_money(values: Sequence[Money]) -> Money:
     return Money.of(sum(value.amount for value in values), currency)
 
 
-def _latest_share_count_fact(
-    listing_id: int, repo: RawFactSource
-) -> Optional[FactRecord]:
-    """Return the most recent positive shares-outstanding fact (Entity first).
-
-    The share count is a currency-less ``count`` fact, so it is read raw (no
-    ``Money`` minting) and ``repo`` is typed against the minimal
-    :class:`~pyvalue.facts.RawFactSource` -- satisfied by both the SQLite DAO and
-    the metric-facing :class:`~pyvalue.facts.RegionFactsRepository`.
-    """
-
-    for concept in SHARE_COUNT_CONCEPTS:
-        fact = repo.latest_fact(listing_id, concept)
-        if fact is not None and fact.value is not None and fact.value > 0:
-            return fact
-    return None
-
-
 def market_cap_money(
     listing_id: int,
     *,
@@ -490,21 +469,25 @@ def market_cap_money(
     target_currency: Optional[str] = None,
     contexts: Sequence[object] = (),
 ) -> Optional[MarketCap]:
-    """Compute market cap on demand as the latest share count x the latest price.
+    """Compute market cap on demand as the resolved share count x the latest price.
 
     Market cap is shares-outstanding x price, so persisting it (the removed
     ``market_data.market_cap`` column, migration 072) duplicated derivable
-    state. The amount is the latest positive shares-outstanding
-    ``financial_facts`` row times the latest ``market_data`` price
-    (:meth:`MarketDataRepository.latest_snapshot_by_id`). Pairing the latest share
-    count with the latest price -- rather than the price as of the share-count
-    date -- means every price refresh re-prices market cap (and every metric
-    built on it), which is what a value screen that refreshes prices between
-    quarterly fundamentals needs. Shares outstanding move slowly, so a share
-    count that is at most a quarter stale adds negligible error; price is the
-    fast, decision-relevant input and is kept current. Both inputs are on the
-    current split basis (EODHD adjusts historical share counts to it, and the
-    latest price is as-traded today), so the product is split-consistent.
+    state. The share count comes from the shared company-total resolver
+    (:func:`pyvalue.metrics.share_resolver.resolve_current_share_count`), which
+    arbitrates the provider snapshot against the filing-based history so every
+    share-basis metric prices the same total -- note the deliberate change from
+    the old unconditional Entity-first read: a fresher Common periodic row (or
+    an anchor-endorsed snapshot) can now win. Pairing that count with the
+    latest ``market_data`` price (:meth:`MarketDataRepository.latest_snapshot_by_id`)
+    -- rather than the price as of the share-count date -- means every price
+    refresh re-prices market cap (and every metric built on it), which is what
+    a value screen that refreshes prices between quarterly fundamentals needs.
+    Shares outstanding move slowly, so a share count that is at most a quarter
+    stale adds negligible error; price is the fast, decision-relevant input and
+    is kept current. Both inputs are on the current split basis (EODHD adjusts
+    historical share counts to it, and the latest price is as-traded today), so
+    the product is split-consistent.
 
     The stored price is already in the listing's major currency, so the market
     cap is too. Returns ``None`` when there is no usable share count or no stored
@@ -517,7 +500,7 @@ def market_cap_money(
     will turn that seam into an FX conversion to the target instead.
     """
 
-    share_fact = _latest_share_count_fact(listing_id, repo)
+    share_fact = resolve_current_share_count(listing_id, repo, market_repo)
     if share_fact is None:
         LOGGER.warning(
             "%s: no shares-outstanding fact for listing_id=%s", metric_id, listing_id
@@ -572,6 +555,10 @@ __all__ = [
     "has_recent_fact",
     "MarketCap",
     "market_cap_money",
+    # Re-exported from ``pyvalue.metrics.share_resolver`` (its canonical home)
+    # so the many existing consumer imports keep working.
+    "SHARE_COUNT_CONCEPTS",
+    "SHARE_RESOLVER_REQUIRED_CONCEPTS",
     "metric_fx_service_context",
     "reuse_or_bind_metric_fx_service",
     "require_metric_amount_money",

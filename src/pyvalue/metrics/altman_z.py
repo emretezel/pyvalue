@@ -26,7 +26,7 @@ from pyvalue.metrics.enterprise_value_ratios import (
     TTMResult,
 )
 from pyvalue.metrics.utils import (
-    SHARE_COUNT_CONCEPTS,
+    SHARE_RESOLVER_REQUIRED_CONCEPTS,
     is_recent_fact,
     market_cap_money,
     require_metric_money,
@@ -53,7 +53,7 @@ REQUIRED_CONCEPTS = (
     REVENUE_CONCEPT,
     # X4 divides market cap (shares x price) by liabilities, so the
     # share-count concepts must be preloaded too.
-    *SHARE_COUNT_CONCEPTS,
+    *SHARE_RESOLVER_REQUIRED_CONCEPTS,
 )
 
 # Altman's original public-manufacturer discriminant weights (1968).

@@ -201,6 +201,26 @@ resolver would fix GOOGL/PLTR but regress TSLA/Citi (B2). It needs a resolver
 that prefers the latest period-end **total** common shares, validated across the
 GOOGL/PLTR (multi-class) and TSLA/Citi (weighted-avg-Entity) cases.
 
+> **P1 RESOLVED (2026-07-10).** Root cause pinned deeper than B1's framing: the
+> normalizer emits EODHD `SharesStats.SharesOutstanding` as a
+> `CommonStockSharesOutstanding` INSTANT fact dated `General.UpdatedAt`, which
+> always out-dates the filing history — so P/B's share basis was the SharesStats
+> snapshot for *every* listing, and that snapshot is per-ticker-class for
+> dual-class issuers. Inversely, TSLA/Citi's periodic rows are the artifact
+> (weighted-average / issued-incl-treasury) and their snapshot is the only true
+> count. Fixed by a shared resolver (`metrics/share_resolver.py`) consumed by
+> `market_cap`/EV, P/B, P/TB and `graham_multiplier`: it arbitrates snapshot vs
+> periodic via a new `ProviderMarketCapitalization` anchor fact
+> (`Highlights.MarketCapitalization`, which EODHD always computes on the company
+> total — verified by exact factorization on GOOGL/PLTR/TSLA/C/000660.KO) ÷ the
+> stored close nearest its date. GOOGL P/B ≈ 9.34, PLTR on the 2,573M total,
+> TSLA/C keep their true snapshots (TSLA market_cap moves from the 3,539M
+> weighted-average basis to the true 3,752M). Regression tests:
+> `tests/regression/test_share_count_snapshot_arbitration.py`,
+> `tests/regression/test_price_to_book_dual_class_pipeline.py`. See
+> `docs/reference/eodhd-concept-normalization.md` (Shares / Provider market
+> capitalization).
+
 ## Caveats / limitations
 
 - Headline metrics were recomputed against >=1 primary filing per name; the deep-
