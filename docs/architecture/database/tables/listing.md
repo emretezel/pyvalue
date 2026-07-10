@@ -142,6 +142,8 @@ whose listing is absent (creating one would require writing the NOT NULL
   primary-only scopes exclude only `secondary`.
 - `primary_listing_status` is written only by `ingest-fundamentals` (as it
   stores each raw payload) and `reconcile-listing-status`; every other command
-  reads it. Migration 078 is the one-time backfill that resolves any leftover
-  `unknown` listing with stored fundamentals, and a flip to `secondary` purges
-  that listing's downstream facts/metrics/market-data.
+  reads it. A flip to `secondary` changes nothing but this column -- the
+  listing keeps its facts/metrics/market-data and is excluded from universe
+  work solely by the primary-only scope filters. Migration 078 is the one-time
+  backfill that resolved any leftover `unknown` listing with stored
+  fundamentals (it shipped with the eager purge that was policy at the time).

@@ -62,11 +62,14 @@ class FundamentalsRepository(SQLiteStore):
         """Persist a batch of raw payloads for already-catalogued listings.
 
         Writes each payload to ``fundamentals_raw``, clears any fetch-state
-        backoff, refreshes primary-listing status, and eagerly purges the
-        downstream data of any listing the payloads reclassify as secondary.
+        backoff, and refreshes primary-listing status from each payload's
+        ``General.PrimaryTicker``.
 
-        Returns the number of listings reclassified to secondary (and therefore
-        purged) in this batch, so the caller can report the cascade.
+        Returns the number of listings this batch classifies as secondary, so
+        the caller can report it. Classification only flips
+        ``listing.primary_listing_status`` -- a secondary listing keeps its
+        facts/metrics/market-data and is excluded from universe work purely by
+        the primary-only scope filters.
         """
         self.initialize_schema()
         provider_norm = provider.strip().upper()
@@ -121,11 +124,10 @@ class FundamentalsRepository(SQLiteStore):
                 updates,
                 connection=conn,
             )
-        # The purge runs in its own connection after the write transaction above
-        # has closed, so it stays outside the `with conn` block. Both ingest and
-        # reconcile route secondary reclassifications through this one method.
-        secondary_updates = listing_repo.purge_downstream_for_secondary(listing_updates)
-        return len(secondary_updates)
+        # Secondary listings keep their downstream data: exclusion from universe
+        # work happens at the primary-only scope filters, never by deletion
+        # (operator policy, 2026-07). Only the count is surfaced for reporting.
+        return sum(1 for record in listing_updates if not record.is_primary_listing)
 
     def fetch_metadata_candidates(
         self,

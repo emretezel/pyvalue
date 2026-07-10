@@ -68,7 +68,6 @@ leaving the eight columns below.
 ## Main Write Paths
 
 - `normalize-fundamentals`
-- purge when a listing becomes secondary
 
 ## Sample Rows
 

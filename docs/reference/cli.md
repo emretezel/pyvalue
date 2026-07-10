@@ -32,9 +32,11 @@ canonical reporting scopes. Missing or unusable `PrimaryTicker` values are
 treated as primary. That classification is *written* only by
 `ingest-fundamentals` (in the same transaction that stores each raw payload) and
 by `reconcile-listing-status`; every other command reads the cached
-`listing.primary_listing_status` and never reconciles or purges as a side
-effect. A one-time migration (078) resolves any leftover `unknown` listing that
-already has stored fundamentals, so reads can trust the cache.
+`listing.primary_listing_status` and never reconciles as a side effect.
+Classification writes only that status column -- a secondary listing keeps its
+stored data and is excluded from universe work by the primary-only scopes. A
+one-time migration (078) resolves any leftover `unknown` listing that already
+has stored fundamentals, so reads can trust the cache.
 
 ## Catalog Commands
 

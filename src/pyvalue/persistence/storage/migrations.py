@@ -4180,7 +4180,7 @@ def _migration_041_add_metrics_constraints(conn: sqlite3.Connection) -> None:
 
     The migration aborts cleanly if either table contains rows whose
     ``listing_id`` does not exist in ``listing``; orphans must be cleaned
-    before the rebuild can proceed (see ``purge_secondary_security_data``).
+    up with a targeted DELETE before the rebuild can proceed.
     """
 
     # If neither table exists yet (fresh database before earlier migrations
@@ -4209,8 +4209,7 @@ def _migration_041_add_metrics_constraints(conn: sqlite3.Connection) -> None:
         details = ", ".join(f"{name}={count}" for name, count in orphan_counts)
         raise RuntimeError(
             "migration 041 aborted: orphan rows reference missing listings "
-            f"({details}). Clean them via purge_secondary_security_data() "
-            "or a targeted DELETE before retrying."
+            f"({details}). Clean them via a targeted DELETE before retrying."
         )
 
     # Defer FK checks within the rebuild so intermediate states (the temp
@@ -8197,9 +8196,11 @@ def _migration_078_backfill_unknown_listing_status(
         """
     )
 
-    # Purge derived data for the listings that just became secondary, mirroring
-    # SecurityListingStatusRepository.purge_secondary_security_data. Tables keyed
-    # by listing_id first, then those keyed by provider_listing_id.
+    # Purge derived data for the listings that just became secondary -- the
+    # eager-purge policy in force when this migration shipped (the repository
+    # layer later dropped that purge in favour of primary-only scope filtering;
+    # this one-time backfill keeps the behaviour it was applied with). Tables
+    # keyed by listing_id first, then those keyed by provider_listing_id.
     for table_name in (
         "financial_facts",
         "financial_facts_refresh_state",

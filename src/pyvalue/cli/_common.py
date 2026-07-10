@@ -391,13 +391,15 @@ def _reconcile_eodhd_listing_scope(
     security_ids: Optional[Sequence[int]] = None,
 ) -> List[SecurityListingStatusRecord]:
     repo = SecurityListingStatusRepository(database)
-    updates = repo.reconcile_eodhd_fundamentals(
+    # Reconcile only rewrites listing.primary_listing_status. Listings it
+    # classifies secondary keep their facts/metrics/market-data -- the
+    # primary-only scope filters are the sole exclusion mechanism (operator
+    # policy, 2026-07).
+    return repo.reconcile_eodhd_fundamentals(
         provider_symbols=provider_symbols,
         exchange_codes=exchange_codes,
         security_ids=security_ids,
     )
-    repo.purge_downstream_for_secondary(updates)
-    return updates
 
 
 def _resolve_provider_scope(

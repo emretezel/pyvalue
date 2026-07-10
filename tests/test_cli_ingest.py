@@ -2224,9 +2224,11 @@ def test_cmd_reconcile_listing_status_backfills_from_raw_only(
         ("AAA.US", "primary"),
         ("BBB.LSE", "primary"),
     ]
-    assert fact_rows == 0
-    assert market_rows == 0
-    assert metric_rows == 0
+    # Reconcile only rewrites the status column: the now-secondary AAA.LSE
+    # keeps its seeded facts/price/metric (exclusion is scope-side only).
+    assert fact_rows == 1
+    assert market_rows == 1
+    assert metric_rows == 1
 
     output = capsys.readouterr().out.splitlines()
     assert output == [
@@ -5091,7 +5093,7 @@ def test_cmd_normalize_fundamentals_stage_all_supported_normalizes_primary_with_
     assert normalized == {"AAA.US", "DDD.LSE"}
 
 
-def test_ingest_run_reports_and_purges_secondary_reclassification(
+def test_ingest_run_reports_secondary_reclassification_and_retains_data(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     db_path = tmp_path / "ingest-secondary.db"
@@ -5140,7 +5142,8 @@ def test_ingest_run_reports_and_purges_secondary_reclassification(
 
     def fake_fetch(api_key: str, limiter: object, symbol: str) -> dict[str, object]:
         # PrimaryTicker points at AAA.US, so AAA.US is primary and AAA.LSE
-        # secondary -- the cascade should purge AAA.LSE's seeded facts.
+        # secondary -- the reclassification is reported but AAA.LSE's seeded
+        # facts stay put (retention policy: exclusion is scope-side only).
         return {"General": {"Name": symbol, "PrimaryTicker": "AAA.US"}}
 
     patch_cli(monkeypatch, "_fetch_symbol_fundamentals", fake_fetch)
@@ -5155,12 +5158,18 @@ def test_ingest_run_reports_and_purges_secondary_reclassification(
     assert rc == 0
     out = capsys.readouterr().out
     assert "Reclassified 1 listing(s) to secondary" in out
+    assert "retained" in out
     with sqlite3.connect(db_path) as conn:
         remaining_facts = conn.execute(
             "SELECT COUNT(*) FROM financial_facts WHERE listing_id = ?",
             (aaa_lse_id,),
         ).fetchone()[0]
-    assert remaining_facts == 0
+        status = conn.execute(
+            "SELECT primary_listing_status FROM listing WHERE listing_id = ?",
+            (aaa_lse_id,),
+        ).fetchone()[0]
+    assert remaining_facts == 1
+    assert status == "secondary"
 
 
 def test_cmd_normalize_eodhd_fundamentals_bulk_reports_freshness_scan(
@@ -6485,7 +6494,7 @@ def test_cmd_run_screen_stage_does_not_reconcile_or_mutate_listing_status(
 
     Classification is written only by ingest-fundamentals and
     reconcile-listing-status (with migration 078 as the one-time backstop), so a
-    read-only screen must neither reconcile nor purge. To prove no write happens,
+    read-only screen must not write classification. To prove no write happens,
     AAA.LSE is left deliberately ``'unknown'`` -- a value a full reconcile WOULD
     flip to ``'secondary'`` because its ``PrimaryTicker`` points at AAA.US -- and
     the test asserts it stays ``'unknown'`` with its metrics intact. Regression
@@ -6578,7 +6587,7 @@ criteria:
         ).fetchone()[0]
 
     # No reconcile-on-read: the deliberately-stale 'unknown' is left untouched
-    # (a reconcile would have flipped it to 'secondary'), and no purge ran.
+    # (a reconcile would have flipped it to 'secondary') and metrics are intact.
     assert statuses == [
         ("AAA.LSE", "unknown"),
         ("BBB.LSE", "primary"),

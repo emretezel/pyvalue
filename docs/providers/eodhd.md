@@ -107,7 +107,7 @@ pyvalue reconcile-listing-status --all-supported
 
 Every other command (normalize, market-data, metrics, screening,
 metadata-refresh, reports) only *reads* the cached classification -- it never
-reconciles or purges as a side effect. `ingest-fundamentals` keeps the cache
+reconciles as a side effect. `ingest-fundamentals` keeps the cache
 current (it reclassifies in the same transaction that stores each raw payload),
 and migration 078 is the one-time backstop that resolves any leftover `unknown`
 listing with stored fundamentals. Run `reconcile-listing-status` for an explicit
@@ -147,10 +147,12 @@ and stores whether that canonical listing is primary or secondary on
 `listing.primary_listing_status`. Missing, blank, or
 otherwise unusable `PrimaryTicker` values are treated as primary. Once a
 listing is classified as secondary, downstream normalization, market-data,
-metric, screening, metadata-refresh, and FX-discovery scopes exclude it. The
-raw `fundamentals_raw` row is retained for the provider listing while the row
-remains in `provider_listing`; downstream normalized facts, market data,
-metrics, and related refresh state for secondary listings are purged.
+metric, screening, metadata-refresh, and FX-discovery scopes exclude it.
+Classification writes only the status column: a secondary listing keeps its
+raw payload and everything it accumulated while primary (normalized facts,
+market data, metrics, refresh state). Exclusion is purely scope-side, so a
+listing that later flips back to primary re-enters those scopes with its
+history intact.
 
 Important fundamentals options:
 

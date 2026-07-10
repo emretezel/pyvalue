@@ -264,8 +264,10 @@ def _flush_fundamentals_batches(
 ) -> int:
     """Flush buffered payloads and failures.
 
-    Returns the number of listings the stored payloads reclassified to secondary
-    (and therefore purged), so the caller can tally the cascade for its summary.
+    Returns the number of listings the stored payloads classified as secondary,
+    so the caller can tally it for its summary. Classification only updates the
+    listing status -- secondary listings keep their stored data and are excluded
+    from universe work by the primary-only scope filters.
     """
     reclassified_secondary = 0
     if success_updates:
@@ -409,8 +411,8 @@ def _run_eodhd_fundamentals_ingestion(
     )
     if reclassified_secondary:
         print(
-            f"Reclassified {reclassified_secondary} listing(s) to secondary and "
-            "purged their downstream facts/metrics/market-data"
+            f"Reclassified {reclassified_secondary} listing(s) to secondary; "
+            "stored data retained, excluded via primary-only scopes"
         )
     return 0
 

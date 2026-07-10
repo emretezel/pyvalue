@@ -234,9 +234,10 @@ A normal run looks like:
 9. Metric computation writes `metrics` and `metric_compute_status`.
 10. Screens read from canonical metrics and derived canonical symbols.
 
-If an EODHD listing is classified as secondary, downstream rows for that
-`listing_id` are deleted from `financial_facts`, `market_data`, `metrics`, and
-related downstream refresh-state tables.
+If an EODHD listing is classified as secondary, only
+`listing.primary_listing_status` changes: its `financial_facts`,
+`market_data`, `metrics`, and refresh-state rows are retained, and the
+primary-only scope filters keep it out of downstream work.
 
 ## Migration Notes
 

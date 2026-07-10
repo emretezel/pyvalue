@@ -24,7 +24,6 @@ from pyvalue.persistence.storage import (
     MetricsRepository,
     SecurityMetadataUpdate,
     SecurityRepository,
-    SecurityListingStatusRecord,
     SecurityListingStatusRepository,
     SupportedTickerRepository,
 )
@@ -140,9 +139,17 @@ def test_supported_ticker_repository_normalizes_exchange_case(
     ] == ["FOO.LSE"]
 
 
-def test_fundamentals_repository_classifies_and_purges_secondary_listings(
+def test_fundamentals_repository_classifies_secondary_and_retains_data(
     tmp_path: Path,
 ) -> None:
+    """Storing a payload that classifies a listing secondary keeps its data.
+
+    ``FundamentalsRepository.upsert_many`` (which ``seed_raw_fundamentals``
+    routes through) refreshes ``listing.primary_listing_status`` from
+    ``General.PrimaryTicker`` but must not touch the listing's accumulated
+    facts/prices/metrics/state: secondary listings are excluded from universe
+    work by the primary-only scope filters, never by deletion.
+    """
     db_path = tmp_path / "listing-status.db"
     ticker_repo = SupportedTickerRepository(db_path)
     ticker_repo.initialize_schema()
@@ -316,13 +323,14 @@ def test_fundamentals_repository_classifies_and_purges_secondary_listings(
         ("AAA.US", "primary"),
         ("BBB.LSE", "primary"),
     ]
-    assert fact_rows == 0
-    assert refresh_rows == 0
-    assert market_rows == 0
-    assert metric_rows == 0
-    assert status_rows == 0
-    assert normalization_rows == 0
-    assert market_state_rows == 0
+    # Everything seeded for the now-secondary AAA.LSE survives untouched.
+    assert fact_rows == 1
+    assert refresh_rows == 1
+    assert market_rows == 1
+    assert metric_rows == 1
+    assert status_rows == 1
+    assert normalization_rows == 1
+    assert market_state_rows == 1
 
 
 def test_migration_078_backfills_unknown_status_and_purges_secondary(
@@ -332,8 +340,11 @@ def test_migration_078_backfills_unknown_status_and_purges_secondary(
 
     It is the one-time backstop that lets read/compute commands stop reconciling
     on read: every still-'unknown' listing with fundamentals is classified, and
-    the derived data of any that turns out secondary is purged -- mirroring
-    ``reconcile-listing-status`` and ``_build_status_record``.
+    the derived data of any that turns out secondary is purged -- the
+    eager-purge policy in force when 078 shipped. The repository layer has
+    since dropped that purge (secondary listings now retain their data), but an
+    already-applied migration keeps the behaviour it ran with, so this test
+    pins 078 as shipped.
     """
     from pyvalue.persistence.storage.migrations import (
         _migration_078_backfill_unknown_listing_status,
@@ -796,201 +807,6 @@ def test_fundamentals_upsert_never_overwrites_listing_currency(tmp_path: Path) -
             """
         ).fetchone()[0]
     assert currency == "GBP"
-
-
-def test_purge_downstream_for_secondary_purges_only_secondary(tmp_path: Path) -> None:
-    db_path = tmp_path / "purge-secondary.db"
-    ticker_repo = SupportedTickerRepository(db_path)
-    ticker_repo.initialize_schema()
-    seed_exchange(db_path, "US")
-    ticker_repo.replace_for_exchange(
-        "EODHD",
-        "US",
-        [
-            {
-                "Code": "AAA",
-                "Name": "AAA Inc",
-                "Type": "Common Stock",
-                "Currency": "USD",
-            },
-            {
-                "Code": "BBB",
-                "Name": "BBB Inc",
-                "Type": "Common Stock",
-                "Currency": "USD",
-            },
-        ],
-    )
-    by_symbol = {row.symbol: row for row in ticker_repo.list_for_provider("EODHD")}
-    aaa_id = by_symbol["AAA.US"].security_id
-    bbb_id = by_symbol["BBB.US"].security_id
-
-    # Seed downstream facts for both listings so we can prove the primary's
-    # survive and only the secondary's are purged.
-    for symbol in ("AAA.US", "BBB.US"):
-        seed_facts(
-            db_path,
-            symbol,
-            [
-                FactRecord(
-                    symbol=symbol,
-                    concept="Assets",
-                    fiscal_period="FY",
-                    end_date="2024-12-31",
-                    unit_kind="monetary",
-                    value=100.0,
-                    currency="USD",
-                )
-            ],
-        )
-
-    repo = SecurityListingStatusRepository(db_path)
-    records = [
-        SecurityListingStatusRecord(
-            security_id=aaa_id,
-            source_provider="EODHD",
-            provider_symbol="AAA.US",
-            raw_fetched_at="2026-01-01T00:00:00+00:00",
-            is_primary_listing=True,
-            primary_provider_symbol="AAA.US",
-            classification_basis="matched_primary_ticker",
-        ),
-        SecurityListingStatusRecord(
-            security_id=bbb_id,
-            source_provider="EODHD",
-            provider_symbol="BBB.US",
-            raw_fetched_at="2026-01-01T00:00:00+00:00",
-            is_primary_listing=False,
-            primary_provider_symbol="AAA.US",
-            classification_basis="different_primary_ticker",
-        ),
-    ]
-
-    purged = repo.purge_downstream_for_secondary(records)
-
-    # Only the secondary record is returned and purged; the primary is untouched.
-    assert [record.provider_symbol for record in purged] == ["BBB.US"]
-    with sqlite3.connect(db_path) as conn:
-        listing_ids_with_facts = {
-            row[0]
-            for row in conn.execute("SELECT DISTINCT listing_id FROM financial_facts")
-        }
-    assert aaa_id in listing_ids_with_facts
-    assert bbb_id not in listing_ids_with_facts
-
-
-def test_purge_secondary_state_deletes_by_id_without_view(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The secondary purge clears provider-listing state (normalization / fetch
-    state) by resolving provider_listing_id from listing_id via the provider_listing
-    FK -- never through the 6-table provider_listing_catalog view."""
-    db_path = tmp_path / "purge-secondary-view-free.db"
-    ticker_repo = SupportedTickerRepository(db_path)
-    ticker_repo.initialize_schema()
-    seed_exchange(db_path, "US")
-    ticker_repo.replace_for_exchange(
-        "EODHD",
-        "US",
-        [{"Code": "BBB", "Name": "BBB Inc", "Type": "Common Stock", "Currency": "USD"}],
-    )
-    bbb_id = next(
-        row.security_id
-        for row in ticker_repo.list_for_provider("EODHD")
-        if row.symbol == "BBB.US"
-    )
-    # Seed a normalization-state row for the (to-be-secondary) listing.
-    seed_normalization_success(db_path, "BBB.US")
-
-    repo = SecurityListingStatusRepository(db_path)
-    seen_sql: list[str] = []
-
-    class _LoggingConnection:
-        def __init__(self, conn: sqlite3.Connection) -> None:
-            self._conn = conn
-
-        def __enter__(self) -> "_LoggingConnection":
-            self._conn.__enter__()
-            return self
-
-        def __exit__(
-            self,
-            exc_type: Optional[Type[BaseException]],
-            exc_value: Optional[BaseException],
-            traceback: Optional[TracebackType],
-        ) -> bool:
-            return bool(self._conn.__exit__(exc_type, exc_value, traceback))
-
-        def execute(
-            self, sql: str, parameters: Sequence[object] = ()
-        ) -> sqlite3.Cursor:
-            seen_sql.append(" ".join(sql.split()))
-            return self._conn.execute(sql, parameters)
-
-    real_connect = repo._connect
-    monkeypatch.setattr(repo, "_connect", lambda: _LoggingConnection(real_connect()))
-
-    repo.purge_secondary_security_data(security_ids=[bbb_id])
-
-    with sqlite3.connect(db_path) as conn:
-        remaining = conn.execute(
-            "SELECT COUNT(*) FROM fundamentals_normalization_state"
-        ).fetchone()[0]
-    assert remaining == 0
-    deletes = [sql for sql in seen_sql if sql.lower().startswith("delete")]
-    assert deletes  # the purge ran through the logging proxy
-    assert not any("provider_listing_catalog" in sql for sql in seen_sql)
-    assert not any("provider_symbol" in sql for sql in seen_sql)
-
-
-def test_purge_downstream_for_secondary_noop_when_all_primary(tmp_path: Path) -> None:
-    db_path = tmp_path / "purge-secondary-noop.db"
-    ticker_repo = SupportedTickerRepository(db_path)
-    ticker_repo.initialize_schema()
-    seed_exchange(db_path, "US")
-    ticker_repo.replace_for_exchange(
-        "EODHD",
-        "US",
-        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock", "Currency": "USD"}],
-    )
-    aaa_id = next(iter(ticker_repo.list_for_provider("EODHD"))).security_id
-    seed_facts(
-        db_path,
-        "AAA.US",
-        [
-            FactRecord(
-                symbol="AAA.US",
-                concept="Assets",
-                fiscal_period="FY",
-                end_date="2024-12-31",
-                unit_kind="monetary",
-                value=100.0,
-                currency="USD",
-            )
-        ],
-    )
-
-    repo = SecurityListingStatusRepository(db_path)
-    purged = repo.purge_downstream_for_secondary(
-        [
-            SecurityListingStatusRecord(
-                security_id=aaa_id,
-                source_provider="EODHD",
-                provider_symbol="AAA.US",
-                raw_fetched_at="2026-01-01T00:00:00+00:00",
-                is_primary_listing=True,
-                primary_provider_symbol="AAA.US",
-                classification_basis="matched_primary_ticker",
-            )
-        ]
-    )
-
-    assert purged == []
-    with sqlite3.connect(db_path) as conn:
-        count = conn.execute(
-            "SELECT COUNT(*) FROM financial_facts WHERE listing_id = ?", (aaa_id,)
-        ).fetchone()[0]
-    assert count == 1
 
 
 def test_financial_facts_repository_replace_fact_rows_replaces_by_id(
