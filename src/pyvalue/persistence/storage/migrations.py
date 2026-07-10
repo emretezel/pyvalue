@@ -8283,6 +8283,35 @@ def _migration_079_readd_fundamentals_raw_last_fetched_index(
     )
 
 
+def _migration_080_listing_issuer_index(conn: sqlite3.Connection) -> None:
+    """Create ``idx_listing_issuer (issuer_id)`` on ``listing``.
+
+    ``listing.issuer_id`` was the schema's one unindexed FK child column,
+    tolerable while nothing resolved listings from the issuer side. The
+    delisted-ticker purge (``SupportedTickerRepository._purge_delisted_listings``)
+    changed that: after deleting the listings a pruned ticker owned, it asks
+    "does this issuer still have any listing?" once per candidate issuer, and
+    SQLite's FK enforcement runs the same reverse probe for every ``issuer``
+    delete. Without an index each probe is a full scan of the ~75.8k-row
+    ``listing`` table; with it, a point seek. Write-side cost is one small
+    integer key per listing insert -- negligible next to the row itself.
+
+    ``CREATE INDEX IF NOT EXISTS`` keeps the migration idempotent; the column
+    guard lets it no-op on the minimal schemas used by isolated migration
+    tests, where ``listing`` may be absent or a pre-069 shape without
+    ``issuer_id``.
+    """
+
+    if "issuer_id" not in _table_columns(conn, "listing"):
+        return
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_listing_issuer
+        ON listing(issuer_id)
+        """
+    )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -8363,6 +8392,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_077_drop_listing_currency_index,
     _migration_078_backfill_unknown_listing_status,
     _migration_079_readd_fundamentals_raw_last_fetched_index,
+    _migration_080_listing_issuer_index,
 ]
 
 

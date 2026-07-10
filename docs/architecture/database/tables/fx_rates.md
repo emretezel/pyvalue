@@ -11,7 +11,7 @@ One row per `(provider, rate_date, base_currency, quote_currency)`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-05`
+- Snapshot source: `data/pyvalue.db` on `2026-07-11`
 - Row count: `6,306,705`
 - Table size: `1,232,326,656 bytes` (`1.15 GiB`)
 - Approximate bytes per row: `195.4`
@@ -79,7 +79,7 @@ One row per `(provider, rate_date, base_currency, quote_currency)`.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-05`
+- Snapshot source: `data/pyvalue.db` on `2026-07-11`
 - Sample window: first `5` rows returned by SQLite ordered by `provider ASC, rate_date ASC, base_currency ASC, quote_currency ASC`
 
 ```json

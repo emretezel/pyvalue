@@ -43,21 +43,29 @@ def _ranking_definition(metric: RankingMetric) -> ScreenDefinition:
     )
 
 
-def _seed_listing(db_path: Path, symbol: str, *, currency: str = "USD") -> None:
-    """Catalog a listing carrying a currency so metric/entity upserts (which
+def _seed_listings(db_path: Path, *symbols: str, currency: str = "USD") -> None:
+    """Catalog listings carrying a currency so metric/entity upserts (which
     materialize the listing) satisfy the NOT NULL listing.currency invariant.
     The metric's own currency is independent of the listing's quote currency.
+
+    Symbols sharing an exchange go through ONE ``replace_for_exchange`` call:
+    the production writer replaces the whole (provider, exchange) slice, and a
+    ticker absent from a later call counts as delisted and is fully purged
+    (listing row included) -- serial single-symbol calls would delete each
+    other's rows.
     """
 
-    ticker, _, suffix = symbol.partition(".")
-    seed_exchange(db_path, suffix or "US", currency=currency)
+    by_exchange: dict[str, list[dict[str, str]]] = {}
+    for symbol in symbols:
+        ticker, _, suffix = symbol.partition(".")
+        by_exchange.setdefault(suffix or "US", []).append(
+            {"Code": ticker, "Type": "Common Stock", "Currency": currency}
+        )
     repo = SupportedTickerRepository(db_path)
     repo.initialize_schema()
-    repo.replace_for_exchange(
-        "EODHD",
-        suffix or "US",
-        [{"Code": ticker, "Type": "Common Stock", "Currency": currency}],
-    )
+    for exchange_code, rows in by_exchange.items():
+        seed_exchange(db_path, exchange_code, currency=currency)
+        repo.replace_for_exchange("EODHD", exchange_code, rows)
 
 
 def test_rank_screen_passers_skips_mixed_currency_metric_without_ranking_currency(
@@ -66,8 +74,7 @@ def test_rank_screen_passers_skips_mixed_currency_metric_without_ranking_currenc
     db_path = tmp_path / "ranking_skip.db"
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
-    _seed_listing(db_path, "AAA.US")
-    _seed_listing(db_path, "BBB.US")
+    _seed_listings(db_path, "AAA.US", "BBB.US")
     seed_metric(
         db_path,
         "AAA.US",
@@ -116,8 +123,7 @@ def test_rank_screen_passers_normalizes_mixed_currency_metric_with_ranking_curre
     db_path = tmp_path / "ranking_convert.db"
     metrics_repo = MetricsRepository(db_path)
     metrics_repo.initialize_schema()
-    _seed_listing(db_path, "AAA.US")
-    _seed_listing(db_path, "BBB.US")
+    _seed_listings(db_path, "AAA.US", "BBB.US")
     seed_metric(
         db_path,
         "AAA.US",

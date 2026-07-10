@@ -11,7 +11,7 @@ One row per `listing_id`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-05`
+- Snapshot source: `data/pyvalue.db` on `2026-07-11`
 - Row count: `61,091`
 - Table size: `2,715,648 bytes` (`2.6 MiB`)
 - Approximate bytes per row: `44.5`
@@ -50,11 +50,13 @@ One row per `listing_id`.
 
 - `normalize-fundamentals`
 - bulk normalization status updates
+- delisting purge in `refresh-supported-tickers` (deletes a fully delisted
+  listing's rows)
 
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-05`
+- Snapshot source: `data/pyvalue.db` on `2026-07-11`
 - Sample window: first `5` rows returned by SQLite ordered by `listing_id ASC`
 
 ```json

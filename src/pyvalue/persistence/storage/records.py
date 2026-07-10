@@ -438,13 +438,18 @@ class SupportedTickerRefreshResult:
 
     ``inserted`` counts the listings actually catalogued. ``removed`` counts the
     provider listings dropped because they were absent from the refreshed payload
-    (their fundamentals/market-data rows are cascade-deleted with them).
-    ``skipped_no_currency`` lists the provider tickers dropped because the payload
-    carried no currency: ``listing.currency`` is NOT NULL with no fallback, so a
-    currency-less entry cannot be modelled. It is surfaced to the operator so the
-    underlying data issue can be chased with the provider.
+    (their raw-fundamentals and fetch/normalization state go with them).
+    ``purged_listings`` counts the canonical listings deleted outright because
+    that removal left them with no provider mapping at all: a fully delisted
+    ticker loses its facts/prices/metrics, its ``listing`` row, and -- when it
+    was the issuer's last listing -- the ``issuer`` row (operator policy,
+    2026-07). ``skipped_no_currency`` lists the provider tickers dropped because
+    the payload carried no currency: ``listing.currency`` is NOT NULL with no
+    fallback, so a currency-less entry cannot be modelled. It is surfaced to the
+    operator so the underlying data issue can be chased with the provider.
     """
 
     inserted: int
     removed: int
     skipped_no_currency: Tuple[str, ...]
+    purged_listings: int

@@ -11,10 +11,10 @@ One row per `(listing_id, metric_id)`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-05`
-- Row count: `5,620,372`
-- Table size: `1,093,685,248 bytes` (`1.02 GiB`)
-- Approximate bytes per row: `194.6`
+- Snapshot source: `data/pyvalue.db` on `2026-07-11`
+- Row count: `5,742,554`
+- Table size: `1,506,471,936 bytes` (`1.40 GiB`)
+- Approximate bytes per row: `262.3`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -60,11 +60,13 @@ One row per `(listing_id, metric_id)`.
 
 - `compute-metrics` (sole writer of attempt rows)
 - `clear-metrics` / `clear-financial-facts` (bulk delete)
+- delisting purge in `refresh-supported-tickers` (deletes a fully delisted
+  listing's rows)
 
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-05`
+- Snapshot source: `data/pyvalue.db` on `2026-07-11`
 - Sample window: first `5` rows returned by SQLite ordered by `listing_id ASC, metric_id ASC`
 
 ```json
@@ -75,7 +77,7 @@ One row per `(listing_id, metric_id)`.
     "status": "success",
     "reason_code": null,
     "reason_detail": null,
-    "attempted_at": "2026-07-04T21:39:33.468176+00:00",
+    "attempted_at": "2026-07-06T18:28:55.227678+00:00",
     "value_as_of": "2025-12-31",
     "facts_refreshed_at": "2026-07-04T16:33:33.762781+00:00",
     "market_data_as_of": "2026-04-10",
@@ -87,7 +89,7 @@ One row per `(listing_id, metric_id)`.
     "status": "success",
     "reason_code": null,
     "reason_detail": null,
-    "attempted_at": "2026-07-04T21:39:33.471490+00:00",
+    "attempted_at": "2026-07-06T18:28:55.229721+00:00",
     "value_as_of": "2025-12-31",
     "facts_refreshed_at": "2026-07-04T16:33:33.762781+00:00",
     "market_data_as_of": "2026-04-10",
@@ -99,7 +101,7 @@ One row per `(listing_id, metric_id)`.
     "status": "success",
     "reason_code": null,
     "reason_detail": null,
-    "attempted_at": "2026-07-04T21:39:33.515295+00:00",
+    "attempted_at": "2026-07-06T18:28:55.266387+00:00",
     "value_as_of": "2025-12-31",
     "facts_refreshed_at": "2026-07-04T16:33:33.762781+00:00",
     "market_data_as_of": "2026-04-10",
@@ -111,7 +113,7 @@ One row per `(listing_id, metric_id)`.
     "status": "success",
     "reason_code": null,
     "reason_detail": null,
-    "attempted_at": "2026-07-04T21:39:33.462117+00:00",
+    "attempted_at": "2026-07-06T18:28:55.225064+00:00",
     "value_as_of": "2025-12-31",
     "facts_refreshed_at": "2026-07-04T16:33:33.762781+00:00",
     "market_data_as_of": "2026-04-10",
@@ -123,7 +125,7 @@ One row per `(listing_id, metric_id)`.
     "status": "success",
     "reason_code": null,
     "reason_detail": null,
-    "attempted_at": "2026-07-04T21:39:33.459184+00:00",
+    "attempted_at": "2026-07-06T18:28:55.223641+00:00",
     "value_as_of": "2025-12-31",
     "facts_refreshed_at": "2026-07-04T16:33:33.762781+00:00",
     "market_data_as_of": "2026-04-10",

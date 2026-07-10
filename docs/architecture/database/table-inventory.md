@@ -3,7 +3,7 @@
 This page is the quickest way to inspect the current schema before going table by table.
 
 <!-- BEGIN generated_table_inventory -->
-All row counts and table sizes below come from the live `data/pyvalue.db` snapshot on `2026-07-05`. Sizes refer to the table object's own pages, not the size of its secondary indexes.
+All row counts and table sizes below come from the live `data/pyvalue.db` snapshot on `2026-07-11`. Sizes refer to the table object's own pages, not the size of its secondary indexes.
 
 ## Identity And Catalog
 
@@ -29,11 +29,11 @@ All row counts and table sizes below come from the live `data/pyvalue.db` snapsh
 
 | Table | Rows | Table size | Primary key | Main logical refs | Initial review focus |
 | --- | --- | --- | --- | --- | --- |
-| [financial_facts](tables/financial_facts.md) | `104,110,732` | `7.26 GiB` | `listing_id`, `concept`, `fiscal_period`, `end_date` | `listing_id` in `listing` | hottest fact table; check row width, nullable PK parts, and latest-fact indexes |
+| [financial_facts](tables/financial_facts.md) | `104,115,040` | `7.27 GiB` | `listing_id`, `concept`, `fiscal_period`, `end_date` | `listing_id` in `listing` | hottest fact table; check row width, nullable PK parts, and latest-fact indexes |
 | [financial_facts_refresh_state](tables/financial_facts_refresh_state.md) | `61,091` | `2.6 MiB` | `listing_id` | `listing_id` in `listing` | verify it still adds value beyond `fundamentals_normalization_state` |
 | [market_data](tables/market_data.md) | `221,186` | `15.3 MiB` | `listing_id`, `as_of` | `listing_id` in `listing` | latest-snapshot access and time-series retention |
-| [metrics](tables/metrics.md) | `2,655,384` | `141.9 MiB` | `listing_id`, `metric_id` | `listing_id` in `listing` | screen-read performance and lack of historical versions |
-| [metric_compute_status](tables/metric_compute_status.md) | `5,620,372` | `1.02 GiB` | `listing_id`, `metric_id` | `listing_id` in `listing` | status-survey read shape and duplication with `metrics` freshness; written only by `compute-metrics` |
+| [metrics](tables/metrics.md) | `2,902,598` | `158.5 MiB` | `listing_id`, `metric_id` | `listing_id` in `listing` | screen-read performance and lack of historical versions |
+| [metric_compute_status](tables/metric_compute_status.md) | `5,742,554` | `1.40 GiB` | `listing_id`, `metric_id` | `listing_id` in `listing` | status-survey read shape and duplication with `metrics` freshness; written only by `compute-metrics` |
 
 ## FX
 

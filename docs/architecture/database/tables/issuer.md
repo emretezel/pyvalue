@@ -11,7 +11,7 @@ One row per issuer record created during catalog backfill or listing creation.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-05`
+- Snapshot source: `data/pyvalue.db` on `2026-07-11`
 - Row count: `68,728`
 - Table size: `64,876,544 bytes` (`61.9 MiB`)
 - Approximate bytes per row: `944.0`
@@ -52,13 +52,15 @@ One row per issuer record created during catalog backfill or listing creation.
 
 ## Main Write Paths
 
+- `refresh-supported-tickers` — creates issuers while cataloguing listings and
+  deletes an issuer once the delisting purge removes its last listing
 - migration-time backfill from legacy security metadata
 - metadata refreshes from stored fundamentals
 
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-05`
+- Snapshot source: `data/pyvalue.db` on `2026-07-11`
 - Sample window: first `5` rows returned by SQLite ordered by `issuer_id ASC`
 
 ```json

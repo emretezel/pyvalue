@@ -4007,6 +4007,9 @@ _MIGRATION_067_DROPPED_INDEXES = frozenset(
 # migration 079 (the ``_fetch_stale`` rewrite made it the covering index for the
 # stale-eligibility scan), so it must survive the full chain; see
 # ``test_migration_079_*``.
+# ``idx_listing_issuer`` arrived with migration 080 (the delisted-ticker purge
+# probes issuers for surviving listings, as does FK enforcement on issuer
+# deletes); see ``test_migration_080_*``.
 _MIGRATION_067_RETAINED_INDEXES = frozenset(
     {
         "idx_fin_facts_security_concept_latest",
@@ -4016,6 +4019,7 @@ _MIGRATION_067_RETAINED_INDEXES = frozenset(
         "idx_issuer_name_country",
         "idx_provider_listing_listing",
         "idx_fundamentals_raw_last_fetched",
+        "idx_listing_issuer",
     }
 )
 
@@ -4181,6 +4185,38 @@ def test_migration_079_readds_last_fetched_index(tmp_path: Path) -> None:
 
 def test_migration_079_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "readd-last-fetched-index-079-idempotent.sqlite"
+    first = apply_migrations(db_path)
+    second = apply_migrations(db_path)
+
+    assert first == len(MIGRATIONS)
+    assert second == 0
+
+
+def test_migration_080_creates_listing_issuer_index(tmp_path: Path) -> None:
+    db_path = tmp_path / "listing-issuer-index-080.sqlite"
+
+    applied = apply_migrations(db_path)
+    assert applied == len(MIGRATIONS)
+
+    with sqlite3.connect(db_path) as conn:
+        index_names = {
+            row[1] for row in conn.execute("PRAGMA index_list(listing)").fetchall()
+        }
+        # PRAGMA index_info rows are (seqno, cid, column_name).
+        indexed_columns = {
+            row[2]
+            for row in conn.execute("PRAGMA index_info(idx_listing_issuer)").fetchall()
+        }
+
+    # ``listing.issuer_id`` was the one unindexed FK child column; the
+    # delisted-ticker purge and FK enforcement on issuer deletes both probe
+    # "does this issuer still have a listing?", which needs this seek path.
+    assert "idx_listing_issuer" in index_names
+    assert indexed_columns == {"issuer_id"}
+
+
+def test_migration_080_idempotent(tmp_path: Path) -> None:
+    db_path = tmp_path / "listing-issuer-index-080-idempotent.sqlite"
     first = apply_migrations(db_path)
     second = apply_migrations(db_path)
 

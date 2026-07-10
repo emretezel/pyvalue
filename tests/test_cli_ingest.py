@@ -4258,10 +4258,10 @@ def test_run_metric_computation_interrupts_cleanly(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     db_path = tmp_path / "metric-stage-interrupt.db"
-    # Persisting a metric row resolves the listing; seed both symbols so the
-    # listing exists (listing.currency is NOT NULL, no fallback).
-    _seed_listing(db_path, "AAA.US", currency="USD")
-    _seed_listing(db_path, "BBB.US", currency="USD")
+    # Persisting a metric row resolves the listing; seed both symbols in ONE
+    # call (listing.currency is NOT NULL, and a second same-exchange replace
+    # would treat the first symbol as delisted and purge its listing).
+    _seed_listing(db_path, ("AAA.US", "BBB.US"), currency="USD")
 
     class DummyMetric:
         id = "dummy_metric"

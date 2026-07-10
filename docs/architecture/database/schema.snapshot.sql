@@ -245,5 +245,7 @@ CREATE INDEX idx_fx_supported_pairs_refreshable
                 ON fx_supported_pairs(provider, is_refreshable, canonical_symbol);
 CREATE UNIQUE INDEX idx_issuer_name_country
         ON issuer(name, country);
+CREATE INDEX idx_listing_issuer
+        ON listing(issuer_id);
 CREATE INDEX idx_provider_listing_listing
         ON provider_listing(listing_id);

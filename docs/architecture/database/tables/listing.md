@@ -12,7 +12,7 @@ One row per `(exchange_id, symbol)`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-05`
+- Snapshot source: `data/pyvalue.db` on `2026-07-11`
 - Row count: `75,847`
 - Table size: `2,367,488 bytes` (`2.3 MiB`)
 - Approximate bytes per row: `31.2`
@@ -51,7 +51,7 @@ One row per `(exchange_id, symbol)`.
 ## Secondary Indexes
 
 <!-- BEGIN generated_secondary_indexes -->
-- None beyond the primary key and unique constraints.
+- `idx_listing_issuer (issuer_id)`
 <!-- END generated_secondary_indexes -->
 
 ## Main Read Paths
@@ -69,7 +69,9 @@ One row per `(exchange_id, symbol)`.
 ## Main Write Paths
 
 - `refresh-supported-tickers` — the sole runtime writer of `listing` rows and
-  of `listing.currency`
+  of `listing.currency`; it also deletes them: a ticker whose prune leaves the
+  listing with no provider mapping at all is fully purged (data, `listing`
+  row, orphaned `issuer`) in the same per-exchange transaction
 - migration-time backfill from legacy securities
 
 `ingest-fundamentals` never writes here. It attaches each payload to a listing
@@ -80,7 +82,7 @@ whose listing is absent (creating one would require writing the NOT NULL
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-05`
+- Snapshot source: `data/pyvalue.db` on `2026-07-11`
 - Sample window: first `5` rows returned by SQLite ordered by `listing_id ASC`
 
 ```json

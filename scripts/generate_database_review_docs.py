@@ -16,7 +16,9 @@ if str(SRC_ROOT) not in sys.path:
 
 
 def _main() -> int:
-    from pyvalue.persistence.database_review_docs import main
+    # The module moved into the storage package when all database access was
+    # consolidated under persistence/storage/.
+    from pyvalue.persistence.storage.database_review_docs import main
 
     return main()
 

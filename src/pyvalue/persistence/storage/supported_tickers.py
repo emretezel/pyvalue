@@ -13,6 +13,7 @@ from typing import (
     List,
     Optional,
     Sequence,
+    Set,
     Tuple,
 )
 
@@ -308,12 +309,125 @@ class SupportedTickerRepository(SQLiteStore):
                 list(chunk),
             )
 
+    def _purge_delisted_listings(
+        self,
+        conn: sqlite3.Connection,
+        listing_ids: Sequence[int],
+    ) -> int:
+        """Fully remove listings left without any provider mapping.
+
+        Called after the provider-listing prune with the ``listing_id``s the
+        pruned rows pointed at. A candidate that still has another
+        ``provider_listing`` row (another provider, or another slice of this
+        one) is left untouched -- only listings no provider supports at all are
+        purged. Operator policy (2026-07): a fully delisted ticker is removed
+        outright -- its facts/prices/metrics, its ``listing`` row, and, when it
+        was the issuer's last listing, the ``issuer`` row. This is deliberately
+        the opposite of the secondary-reclassification path, which retains data
+        because the provider still carries the listing.
+
+        Every FK in the schema is NO ACTION, so the deletes run children-first
+        by hand; the whole purge shares the caller's per-exchange transaction.
+
+        Returns the number of listings deleted.
+        """
+        candidates = sorted({int(value) for value in listing_ids if value})
+        if not candidates:
+            return 0
+
+        # Keep only candidates with no surviving provider mapping. The probe is
+        # a point seek per row via idx_provider_listing_listing.
+        orphaned: List[int] = []
+        for chunk in _batched(candidates, 500):
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"""
+                SELECT listing_id FROM listing
+                WHERE listing_id IN ({placeholders})
+                  AND NOT EXISTS (
+                      SELECT 1 FROM provider_listing pl
+                      WHERE pl.listing_id = listing.listing_id
+                  )
+                """,
+                list(chunk),
+            ).fetchall()
+            orphaned.extend(int(row["listing_id"]) for row in rows)
+        if not orphaned:
+            return 0
+
+        # Snapshot the issuers BEFORE the listing rows disappear; they are
+        # re-checked for surviving listings afterwards.
+        issuer_candidates: Set[int] = set()
+        for chunk in _batched(orphaned, 500):
+            placeholders = ", ".join("?" for _ in chunk)
+            issuer_rows = conn.execute(
+                f"""
+                SELECT issuer_id FROM listing
+                WHERE listing_id IN ({placeholders})
+                """,
+                list(chunk),
+            ).fetchall()
+            issuer_candidates.update(int(row["issuer_id"]) for row in issuer_rows)
+
+        for chunk in _batched(orphaned, 500):
+            placeholders = ", ".join("?" for _ in chunk)
+            for table_name in (
+                "financial_facts",
+                "financial_facts_refresh_state",
+                "market_data",
+                "metrics",
+                "metric_compute_status",
+            ):
+                conn.execute(
+                    f"""
+                    DELETE FROM {table_name}
+                    WHERE listing_id IN ({placeholders})
+                    """,
+                    list(chunk),
+                )
+            conn.execute(
+                f"""
+                DELETE FROM listing
+                WHERE listing_id IN ({placeholders})
+                """,
+                list(chunk),
+            )
+
+        # An issuer with any surviving listing (including a secondary one, or a
+        # listing on another exchange) is kept; the NOT EXISTS probe is served
+        # by idx_listing_issuer.
+        for chunk in _batched(sorted(issuer_candidates), 500):
+            placeholders = ", ".join("?" for _ in chunk)
+            conn.execute(
+                f"""
+                DELETE FROM issuer
+                WHERE issuer_id IN ({placeholders})
+                  AND NOT EXISTS (
+                      SELECT 1 FROM listing l
+                      WHERE l.issuer_id = issuer.issuer_id
+                  )
+                """,
+                list(chunk),
+            )
+        return len(orphaned)
+
     def replace_for_exchange(
         self,
         provider: str,
         exchange_code: str,
         rows: Sequence[Dict[str, Any]],
     ) -> SupportedTickerRefreshResult:
+        """Replace one provider/exchange supported-ticker slice with ``rows``.
+
+        Upserts every payload ticker into ``issuer``/``listing``/
+        ``provider_listing``, then prunes the provider listings absent from the
+        payload (dropping their raw fundamentals and fetch/normalization
+        state). A pruned listing left with no provider mapping at all is then
+        fully purged -- data, ``listing`` row, and orphaned ``issuer`` -- via
+        :meth:`_purge_delisted_listings`. Payload rows without a currency are
+        skipped, so they count as absent and are pruned like delisted tickers.
+        The whole slice commits as one transaction.
+        """
         self.initialize_schema()
         provider_norm = provider.strip().upper()
         provider_exchange_code = exchange_code.strip().upper()
@@ -350,7 +464,7 @@ class SupportedTickerRepository(SQLiteStore):
             retained = set(retained_tickers)
             existing_rows = conn.execute(
                 """
-                SELECT provider_listing_id, provider_symbol
+                SELECT provider_listing_id, provider_symbol, listing_id
                 FROM provider_listing
                 WHERE provider_exchange_id = ?
                 """,
@@ -361,11 +475,20 @@ class SupportedTickerRepository(SQLiteStore):
                 for row in existing_rows
                 if str(row["provider_symbol"]) not in retained
             ]
+            # Capture the pruned rows' listing ids before the mapping is gone:
+            # they are the only candidates the delist purge must consider.
+            candidate_listing_ids = [
+                int(row["listing_id"])
+                for row in existing_rows
+                if str(row["provider_symbol"]) not in retained
+            ]
             self._delete_provider_listing_ids(conn, to_delete)
+            purged_listings = self._purge_delisted_listings(conn, candidate_listing_ids)
         return SupportedTickerRefreshResult(
             inserted=len(retained_tickers),
             removed=len(to_delete),
             skipped_no_currency=tuple(skipped_no_currency),
+            purged_listings=purged_listings,
         )
 
     def list_for_provider(

@@ -10,12 +10,12 @@ from typing import (
     List,
     Optional,
     Sequence,
-    Tuple,
 )
 
 from pyvalue.ingestion import EODHDFundamentalsClient
 from pyvalue.persistence.storage import (
     ExchangeProviderRepository,
+    SupportedTickerRefreshResult,
     SupportedTickerRepository,
 )
 
@@ -104,14 +104,15 @@ def _refresh_supported_tickers_for_exchange(
     provider: str,
     client: EODHDFundamentalsClient,
     exchange_code: str,
-) -> Tuple[int, int, Tuple[str, ...]]:
+) -> SupportedTickerRefreshResult:
     """Refresh one exchange's supported tickers.
 
-    Returns ``(inserted, removed, skipped_no_currency)``. ``replace_for_exchange``
-    deletes the provider listings absent from the refreshed payload and cascades
-    those deletes to ``fundamentals_raw`` / ``fundamentals_fetch_state`` /
-    ``fundamentals_normalization_state`` / ``market_data_fetch_state``, so no
-    separate fetch-state cleanup is needed here.
+    ``replace_for_exchange`` deletes the provider listings absent from the
+    refreshed payload together with their ``fundamentals_raw`` /
+    ``fundamentals_fetch_state`` / ``fundamentals_normalization_state`` /
+    ``market_data_fetch_state`` rows, and fully purges any listing that lost
+    its last provider mapping (facts/prices/metrics, the ``listing`` row, and
+    an orphaned ``issuer``), so no separate cleanup is needed here.
     """
 
     provider_norm = provider.strip().upper()
@@ -128,10 +129,7 @@ def _refresh_supported_tickers_for_exchange(
         filtered_rows.append(row)
 
     ticker_repo = SupportedTickerRepository(database)
-    result = ticker_repo.replace_for_exchange(
-        provider_norm, exchange_norm, filtered_rows
-    )
-    return result.inserted, result.removed, result.skipped_no_currency
+    return ticker_repo.replace_for_exchange(provider_norm, exchange_norm, filtered_rows)
 
 
 def _list_eodhd_exchange_codes(
@@ -193,15 +191,22 @@ def cmd_refresh_supported_tickers(
 
     total = len(exchange_list)
     for idx, code in enumerate(exchange_list, 1):
-        stored, removed, skipped = _refresh_supported_tickers_for_exchange(
+        result = _refresh_supported_tickers_for_exchange(
             database=database,
             provider=provider_norm,
             client=eodhd_client,
             exchange_code=code,
         )
         print(
-            f"[{idx}/{total}] Stored {stored} supported tickers for {code} "
-            f"in {database} (removed {removed} unsupported tickers)"
+            f"[{idx}/{total}] Stored {result.inserted} supported tickers for {code} "
+            f"in {database} (removed {result.removed} unsupported tickers)"
         )
-        _report_skipped_no_currency(code, skipped)
+        if result.purged_listings:
+            # Destructive outcome worth its own line: these listings lost their
+            # last provider mapping and were deleted with all their data.
+            print(
+                f"    Purged {result.purged_listings} delisted listing(s) "
+                "and all their stored data"
+            )
+        _report_skipped_no_currency(code, result.skipped_no_currency)
     return 0

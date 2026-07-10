@@ -72,8 +72,12 @@ Notes:
   supported exchange catalog for the provider
 - `EODHD` reads `exchange-symbol-list/<EXCHANGE_CODE>` and keeps only
   `Common Stock`, `Preferred Stock`, and `Stock`
-- Removed provider symbols are deleted from `provider_listing` and the relevant
-  fetch-state tables; historical fundamentals, market data, and metrics remain
+- Removed provider symbols are deleted from `provider_listing`, their raw
+  fundamentals, and the relevant fetch-state tables. A listing left with no
+  provider mapping at all is then fully purged -- facts, market data, metrics,
+  compute/refresh state, the `listing` row, and an orphaned `issuer` -- and the
+  run reports the purged count. Listings another provider still carries keep
+  everything
 
 ## Fundamentals Commands
 

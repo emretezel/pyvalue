@@ -11,7 +11,7 @@ One row per `(listing_id, as_of)` snapshot date.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-05`
+- Snapshot source: `data/pyvalue.db` on `2026-07-11`
 - Row count: `221,186`
 - Table size: `16,031,744 bytes` (`15.3 MiB`)
 - Approximate bytes per row: `72.5`
@@ -54,11 +54,13 @@ One row per `(listing_id, as_of)` snapshot date.
 ## Main Write Paths
 
 - `update-market-data`
+- delisting purge in `refresh-supported-tickers` (deletes a fully delisted
+  listing's rows)
 
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-05`
+- Snapshot source: `data/pyvalue.db` on `2026-07-11`
 - Sample window: first `5` rows returned by SQLite ordered by `listing_id ASC, as_of ASC`
 
 ```json

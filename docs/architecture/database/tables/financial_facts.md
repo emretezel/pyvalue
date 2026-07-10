@@ -22,10 +22,10 @@ leaving the eight columns below.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-05`
-- Row count: `104,110,732`
-- Table size: `7,797,411,840 bytes` (`7.26 GiB`)
-- Approximate bytes per row: `74.9`
+- Snapshot source: `data/pyvalue.db` on `2026-07-11`
+- Row count: `104,115,040`
+- Table size: `7,809,675,264 bytes` (`7.27 GiB`)
+- Approximate bytes per row: `75.0`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -68,11 +68,13 @@ leaving the eight columns below.
 ## Main Write Paths
 
 - `normalize-fundamentals`
+- delisting purge in `refresh-supported-tickers` (deletes a fully delisted
+  listing's rows)
 
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-05`
+- Snapshot source: `data/pyvalue.db` on `2026-07-11`
 - Sample window: first `5` rows returned by SQLite ordered by `listing_id ASC, concept ASC, fiscal_period ASC, end_date ASC`
 
 ```json
