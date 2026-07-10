@@ -221,6 +221,31 @@ GOOGL/PLTR (multi-class) and TSLA/Citi (weighted-avg-Entity) cases.
 > `docs/reference/eodhd-concept-normalization.md` (Shares / Provider market
 > capitalization).
 
+> **P4 RESOLVED (2026-07-10).** Root cause differed from B5's framing: the
+> normalizer already skips a null `epsActual` on every path — the phantoms are
+> **literal `epsActual: 0` pre-fills from EODHD itself** (GOOGL 2026-03-31:
+> `{"epsActual":0, "epsEstimate":2.53, "surprisePercent":-100,
+> "reportDate":"2026-04-28"}` in a payload updated 2026-03-29; MSFT's forward
+> row carries `null`, which is why MSFT was clean). Universe footprint: 3,676
+> of 53,011 listings had a companion-less 0.0 as their latest quarterly EPS
+> fact; in a 400-payload sample every one was a literal zero, 250 with
+> `reportDate > General.UpdatedAt` and 150 lingering after the report date
+> passed — so a temporal guard alone was insufficient. Fixed at source:
+> `_filter_unreported_earnings_history` (`normalization/eodhd.py`) drops a
+> `History` entry when its `reportDate` post-dates `General.UpdatedAt` (any
+> value), or when `epsActual == 0.0` with no quarterly-statement companion
+> (net income / statement EPS at the same date); filed breakeven quarters
+> survive, `Annual` is untouched (verified clean, no `reportDate` field). No
+> metric-layer change. Corrected watchlist values after `normalize-fundamentals
+> --force` + `compute-metrics` (watchlist-scoped only, per author instruction —
+> the ~3.7k other affected listings self-clean on their next re-normalization):
+> GOOGL `eps_ttm` 8.00 → **10.81** (as_of 2025-12-31), NVDA 3.97 → **4.78**
+> (2026-01-31), PLTR 0.61 → **0.74**, TSLA 1.22 → **1.34**; `earnings_yield` /
+> `peg_ratio` / `graham_multiplier` move with it. Regression tests:
+> `tests/regression/test_eps_ttm_phantom_quarter.py` plus placeholder-filter
+> unit tests in `tests/test_eodhd_normalization.py`. See
+> `docs/reference/eodhd-concept-normalization.md` (Earnings EPS).
+
 ## Caveats / limitations
 
 - Headline metrics were recomputed against >=1 primary filing per name; the deep-

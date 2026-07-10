@@ -1091,6 +1091,173 @@ def test_eodhd_normalizes_eps_for_configured_subunit_family() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Earnings placeholder ("phantom quarter") filtering — 2026-07 audit P4
+# ---------------------------------------------------------------------------
+
+
+def test_eodhd_eps_zero_placeholder_dropped_when_report_after_updated_at() -> None:
+    # Verbatim GOOGL 2026-03-31 shape: EODHD pre-fills the upcoming quarter
+    # with a literal epsActual of 0 (not null) whose reportDate lies beyond
+    # the payload's own General.UpdatedAt — the actual cannot exist yet.
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "General": {"CurrencyCode": "USD", "UpdatedAt": "2026-03-29"},
+        "Earnings": {
+            "History": {
+                "2025-12-31": {
+                    "date": "2025-12-31",
+                    "reportDate": "2026-02-04",
+                    "epsActual": 2.82,
+                },
+                "2026-03-31": {
+                    "date": "2026-03-31",
+                    "reportDate": "2026-04-28",
+                    "epsActual": 0,
+                    "epsEstimate": 2.53,
+                    "surprisePercent": -100,
+                },
+            }
+        },
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+    eps = {
+        r.end_date: r.value for r in records if r.concept == "EarningsPerShareDiluted"
+    }
+    assert eps == {"2025-12-31": 2.82}
+
+
+def test_eodhd_eps_unreported_entry_dropped_even_when_nonzero() -> None:
+    # An entry whose reportDate post-dates General.UpdatedAt is unreported by
+    # definition; whatever value sits there (e.g. an estimate pre-fill) must
+    # not become a fact.
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "General": {"CurrencyCode": "USD", "UpdatedAt": "2026-03-29"},
+        "Earnings": {
+            "History": {
+                "2025-12-31": {
+                    "date": "2025-12-31",
+                    "reportDate": "2026-02-04",
+                    "epsActual": 2.82,
+                },
+                "2026-03-31": {
+                    "date": "2026-03-31",
+                    "reportDate": "2026-04-28",
+                    "epsActual": 2.53,
+                },
+            }
+        },
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+    eps = {
+        r.end_date: r.value for r in records if r.concept == "EarningsPerShareDiluted"
+    }
+    assert eps == {"2025-12-31": 2.82}
+
+
+def test_eodhd_eps_stale_zero_placeholder_dropped_without_statements() -> None:
+    # The other placeholder population: the report date has passed but EODHD
+    # never ingested an actual — the zero lingers and no quarterly statement
+    # data exists for the period. Placeholder-shaped zeros must be dropped.
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "General": {"CurrencyCode": "USD", "UpdatedAt": "2026-06-15"},
+        "Earnings": {
+            "History": {
+                "2025-12-31": {
+                    "date": "2025-12-31",
+                    "reportDate": "2026-02-04",
+                    "epsActual": 2.82,
+                },
+                "2026-03-31": {
+                    "date": "2026-03-31",
+                    "reportDate": "2026-04-28",
+                    "epsActual": 0,
+                },
+            }
+        },
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+    eps = {
+        r.end_date: r.value for r in records if r.concept == "EarningsPerShareDiluted"
+    }
+    assert eps == {"2025-12-31": 2.82}
+
+
+def test_eodhd_eps_genuine_breakeven_quarter_kept() -> None:
+    # A genuinely filed breakeven quarter (EPS rounds to 0.00) has statement
+    # companions in the same payload; the zero is a real value and must
+    # survive the placeholder filter.
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "General": {"CurrencyCode": "USD", "UpdatedAt": "2026-06-15"},
+        "Earnings": {
+            "History": {
+                "2025-12-31": {
+                    "date": "2025-12-31",
+                    "reportDate": "2026-02-04",
+                    "epsActual": 2.82,
+                },
+                "2026-03-31": {
+                    "date": "2026-03-31",
+                    "reportDate": "2026-04-28",
+                    "epsActual": 0,
+                },
+            }
+        },
+        "Financials": {
+            "Income_Statement": {
+                "quarterly": [
+                    {
+                        "date": "2026-03-31",
+                        "netIncome": 120_000.0,
+                        "currency_symbol": "USD",
+                    }
+                ]
+            }
+        },
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+    eps = {
+        r.end_date: r.value for r in records if r.concept == "EarningsPerShareDiluted"
+    }
+    assert eps == {"2025-12-31": 2.82, "2026-03-31": 0.0}
+
+
+def test_eodhd_eps_placeholder_dropped_in_subunit_family() -> None:
+    # The subunit (ZAC/GBX/ILA) branch normalizes EPS through a different code
+    # path (_normalize_eps_series); the placeholder filter must apply before
+    # the branch split so both paths see the same cleaned history.
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "General": {"CurrencyCode": "ZAC", "UpdatedAt": "2024-08-01"},
+        "Earnings": {
+            "History": {
+                "2024-03-31": {"date": "2024-03-31", "epsActual": 250.0},
+                "2024-06-30": {"date": "2024-06-30", "epsActual": 300.0},
+                "2024-09-30": {
+                    "date": "2024-09-30",
+                    "reportDate": "2024-11-15",
+                    "epsActual": 0,
+                },
+            }
+        },
+    }
+
+    records = normalizer.normalize(payload, symbol="ABG.JSE")
+    eps_records = [r for r in records if r.concept == "EarningsPerShareDiluted"]
+
+    assert {record.end_date: record.value for record in eps_records} == {
+        "2024-03-31": 2.5,
+        "2024-06-30": 3.0,
+    }
+
+
+# ---------------------------------------------------------------------------
 # target_currency conversion
 # ---------------------------------------------------------------------------
 

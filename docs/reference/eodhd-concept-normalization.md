@@ -281,8 +281,18 @@ Concept `EarningsPerShareDiluted`, `unit_kind = per_share`. Value = entry `epsAc
 → `FY`). Currency = entry `currency` → most-recent non-null earnings currency → statement →
 `General.CurrencyCode`.
 
-Two consistency mechanisms:
+Three consistency mechanisms:
 
+- **Unreported-quarter placeholder filter** (`History` only, applied before every EPS path) —
+  EODHD pre-fills the next, not-yet-reported quarter with a literal `epsActual: 0` (only
+  sometimes `null`), and the zero can linger when the actual is never ingested. A `History`
+  entry is dropped when **either** its `reportDate` post-dates `General.UpdatedAt` (the actual
+  cannot exist before its report, whatever value sits there), **or** `epsActual == 0.0` and the
+  period has no quarterly-statement companion (`netIncome` or statement EPS at the same date).
+  A genuinely filed breakeven quarter carries its financials in the same payload and survives.
+  Null `epsActual` is skipped by the emission paths as before; `Annual` carries no placeholders
+  (nor `reportDate` fields) and is not filtered. Without this filter the placeholder anchored
+  `eps_ttm`'s TTM window — 2026-07 audit P4, GOOGL 8.00 vs true 10.81.
 - **Subunit unit-flip detection** (only when the base currency is a subunit family such as
   GBX/ZAC/ILA): the EPS series is scanned for a jump between consecutive values whose ratio is
   in `[40, 140]×` (`EPS_UNIT_FLIP_RATIO_MIN/MAX`); values below `0.05` are ignored. The
@@ -417,6 +427,12 @@ Note MSFT exposes three different share counts at three different dates: `Shares
 ```jsonc
 {
   "General": { "CurrencyCode": "USD", "FiscalYearEnd": "December", "UpdatedAt": "2026-03-29" },
+  "Earnings": {
+    "History": {
+      "2025-12-31": { "epsActual": 2.82, "reportDate": "2026-02-04", "currency": "USD" },  // → EarningsPerShareDiluted (per_share, Q4)
+      "2026-03-31": { "epsActual": 0, "epsEstimate": 2.53, "reportDate": "2026-04-28" }    // dropped: unreported placeholder (reportDate > UpdatedAt; literal 0, no statements for the period)
+    }
+  },
   "Financials": { "Income_Statement": { "currency_symbol": "USD",
     "yearly": { "2025-12-31": {            // → end_date 2025-12-31, FY; quarter 12-31 → Q4 (matches fiscal)
       "totalRevenue": "402963000000.00",   // → Revenues

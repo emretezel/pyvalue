@@ -1054,6 +1054,64 @@ class EODHDFactsNormalizer:
             implied[date_str] = income / share_count
         return implied
 
+    def _filter_unreported_earnings_history(
+        self,
+        history: Dict,
+        general: Dict,
+        income_statement: Dict,
+    ) -> Dict:
+        """Drop ``Earnings.History`` entries for quarters that were never reported.
+
+        EODHD pre-fills the next, not-yet-reported quarter with a literal
+        ``epsActual: 0`` (only sometimes ``null``), and the zero can linger
+        when the actual is never ingested. Stored as a quarterly EPS fact,
+        such a placeholder becomes the newest row of the single-concept EPS
+        series and anchors the TTM window: ``eps_ttm`` adds 0.00 and drops a
+        real quarter (2026-07 audit P4 — GOOGL 8.00 vs true 10.81). Sampling
+        400 affected payloads: every placeholder is a literal zero, 250 have
+        ``reportDate`` beyond ``General.UpdatedAt``, the other 150 kept the
+        zero after the report date passed — and none has quarterly statement
+        data at the placeholder date. Hence two arms:
+
+        - unreported-by-time: ``reportDate`` after ``General.UpdatedAt`` —
+          the actual cannot exist before its report, whatever value sits
+          there (also guards against estimate pre-fills);
+        - placeholder-shaped zero: ``epsActual == 0.0`` with no quarterly
+          statement companion (net income or statement EPS) at the same
+          date — a genuinely filed breakeven quarter carries its financials
+          in the same payload and survives.
+
+        Null ``epsActual`` entries are already skipped by every emission
+        path, and ``Earnings.Annual`` carries no placeholders (nor report
+        dates), so only ``History`` is filtered.
+        """
+        if not isinstance(history, dict) or not history:
+            return {}
+        updated_at = self._extract_date({"date": (general or {}).get("UpdatedAt")})
+        quarterly_statements = (income_statement or {}).get("quarterly")
+        # Dates with filed quarterly financials: enough evidence the period
+        # was actually reported, so a zero EPS there is a real value.
+        reported_dates = set(self._build_net_income_map(quarterly_statements))
+        reported_dates |= self._collect_statement_eps_dates(quarterly_statements)
+        filtered: Dict = {}
+        for key, entry in history.items():
+            entry_dict = entry if isinstance(entry, dict) else {}
+            report_date = self._extract_date({"date": entry_dict.get("reportDate")})
+            if updated_at and report_date and report_date > updated_at:
+                continue
+            if _to_float(entry_dict.get("epsActual")) == 0.0:
+                # Mirror the emission paths' date normalization so the
+                # companion lookup keys match the statement date sets.
+                date_str = (
+                    self._extract_date(entry_dict)
+                    or self._extract_date({"date": key})
+                    or str(key)[:10]
+                )
+                if date_str not in reported_dates:
+                    continue
+            filtered[key] = entry
+        return filtered
+
     def _normalize_earnings_eps(
         self,
         payload: Dict,
@@ -1070,6 +1128,14 @@ class EODHDFactsNormalizer:
             "Income_Statement"
         ) or {}
         statement_currency = self._normalize_statement_currency(income_statement)
+        # Placeholder quarters are filtered before ANY consumer sees the dict:
+        # the history_eps_dates builder (implied-EPS exclusions), the subunit
+        # _normalize_eps_series call and the direct emission loop all read
+        # ``history``. _latest_earnings_currency above deliberately saw the
+        # unfiltered dict so currency resolution is unchanged by the filter.
+        history = self._filter_unreported_earnings_history(
+            history, general, income_statement
+        )
         statement_eps_quarterly = self._collect_statement_eps_dates(
             income_statement.get("quarterly")
         )
