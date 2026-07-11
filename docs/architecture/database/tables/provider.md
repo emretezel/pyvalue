@@ -34,10 +34,10 @@ One row per provider.
 - Primary key: `provider_id`
 - Physical foreign keys: none
 - Physical references from other tables:
-  - `fx_rates`.`provider` -> `provider_code`
   - `fx_refresh_state`.`provider` -> `provider_code`
   - `fx_supported_pairs`.`provider` -> `provider_code`
   - `provider_exchange`.`provider_id` -> `provider_id`
+  - `provider_fx_rates`.`provider_id` -> `provider_id`
 - Unique constraints beyond the primary key:
   - `provider_code`
 - Main logical refs: referenced physically by `provider_exchange` and `provider_listing`
@@ -69,10 +69,10 @@ One row per provider.
   {
     "provider_id": 1,
     "provider_code": "EODHD",
-    "display_name": "EOD Historical Data",
+    "display_name": "EODHD",
     "description": "Exchange, fundamentals, market-data, and FX provider.",
     "created_at": "2026-04-23T16:33:15.427807+00:00",
-    "updated_at": "2026-04-23T16:33:15.427807+00:00"
+    "updated_at": "2026-07-11T14:03:20.673150+00:00"
   }
 ]
 ```

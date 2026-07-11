@@ -18,8 +18,9 @@ Snapshot caveat:
 
 Important structural notes:
 
-- **Referential integrity is enforced at the database level**, not in application code. Migrations 041, 043, and 046–050 added the previously-missing physical FKs on `metrics`, `metric_compute_status`, `financial_facts`, `financial_facts_refresh_state`, `market_data`, and the FX state tables, on top of the FKs the catalog layer (`provider`, `exchange`, `provider_exchange`, `issuer`, `listing`, `provider_listing`) already carried.
-- **Domain invariants are enforced by CHECK constraints**. Migration 041 added `metrics.unit_kind` + currency pairing, migrations 055–059 added enum/format/non-empty CHECKs across `metric_compute_status.status`, `*_fetch_state.last_status`, `fx_rates.source_kind`, currency-code formats, listing symbol formats, `financial_facts.unit` non-empty, and the boolean INTEGER columns (`is_alias`, `is_refreshable`, `full_history_backfilled`), and migration 061 added the row-level `market_data_fetch_state` error-row invariant.
+- **Referential integrity is enforced at the database level**, not in application code. Migrations 041, 043, and 046–050 added the previously-missing physical FKs on `metrics`, `metric_compute_status`, `financial_facts`, `financial_facts_refresh_state`, `market_data`, and the FX state tables, on top of the FKs the catalog layer (`provider`, `exchange`, `provider_exchange`, `issuer`, `listing`, `provider_listing`) already carried. Migrations 081/083 added the provider-layer observation tables `provider_market_data` (FK to `provider_listing`) and `provider_fx_rates` (FK to `provider`).
+- **Domain invariants are enforced by CHECK constraints**. Migration 041 added `metrics.unit_kind` + currency pairing, migrations 055–059 added enum/format/non-empty CHECKs across `metric_compute_status.status`, `*_fetch_state.last_status`, currency-code formats, listing symbol formats, `financial_facts.unit` non-empty, and the boolean INTEGER columns (`is_alias`, `is_refreshable`, `full_history_backfilled`), and migration 061 added the row-level `market_data_fetch_state` error-row invariant. (The 058-era `fx_rates.source_kind` CHECK is gone with the column: it allowed a single value and carried no information — migration 083.)
+- **Market data and FX rates follow the provider/canonical split** (migrations 081–084, mirroring `provider_exchange`/`exchange` and `provider_listing`/`listing`): ingestion dual-writes `provider_market_data`→`market_data` and `provider_fx_rates`→`fx_rates` in one transaction, downstream readers consume only the provider-free canonical tables, and refresh purges touch only the provider layer.
 - **`issuer (name, country)` is now UNIQUE** (migration 060) after a one-time dedup that collapsed ~4,696 duplicate groups (~13,121 rows) and remapped ~8,425 listings to canonical issuers. Rows with NULL name or NULL country remain non-colliding because SQLite UNIQUE indexes treat NULLs as distinct.
 - **`listing` is the canonical identity root** for downstream facts, market data, metrics, and listing status.
 - **`provider_listing` is the operational root** for provider-scoped ingestion and market-data workflows. Migration 054 dropped the denormalised `provider_listing.provider_id`; the owning provider is reachable via `provider_exchange.provider_id` through `provider_exchange_id`.
@@ -42,6 +43,7 @@ Table groups:
   - [fundamentals_fetch_state](tables/fundamentals_fetch_state.md)
   - [fundamentals_normalization_state](tables/fundamentals_normalization_state.md)
   - [market_data_fetch_state](tables/market_data_fetch_state.md)
+  - [provider_market_data](tables/provider_market_data.md)
 - Canonical analytics
   - [financial_facts](tables/financial_facts.md)
   - [financial_facts_refresh_state](tables/financial_facts_refresh_state.md)
@@ -51,6 +53,7 @@ Table groups:
 - FX
   - [fx_supported_pairs](tables/fx_supported_pairs.md)
   - [fx_refresh_state](tables/fx_refresh_state.md)
+  - [provider_fx_rates](tables/provider_fx_rates.md)
   - [fx_rates](tables/fx_rates.md)
 - Housekeeping
   - [schema_migrations](tables/schema_migrations.md)

@@ -228,8 +228,9 @@ Notes:
 
 ### `update-market-data`
 
-Fetch latest market data for supported tickers and write directly into canonical
-`market_data`.
+Fetch latest market data for supported tickers and dual-write each observation:
+the provider layer (`provider_market_data`, keyed by the provider listing) and
+the canonical `market_data` series, in one transaction.
 
 Key options:
 
@@ -254,8 +255,8 @@ Notes:
 - large exchange and all-supported runs may use exchange-bulk fetches and then
   fall back to individual symbols when needed
 - progress across multiple days is tracked through `market_data_fetch_state`
-- suspicious price jumps are rejected before persistence and are stored as
-  symbol-level fetch failures in `market_data_fetch_state`
+- no price-anomaly guard runs before persistence; per-symbol fetch errors are
+  stored as fetch failures in `market_data_fetch_state`
 
 ### `report-market-data-progress`
 
@@ -318,7 +319,8 @@ Notes:
 - EODHD refresh iterates canonical six-letter pairs only; three-letter
   shorthand aliases such as `EUR` are tracked as aliases to `USDEUR` and are
   not refreshed separately
-- stores direct provider rows in `fx_rates`
+- dual-writes each rate: the provider row in `provider_fx_rates` and the
+  canonical provider-free rate in `fx_rates`
 - EODHD stores per-pair coverage and retry state in `fx_refresh_state`
 - the first EODHD run backfills full available history per canonical pair when
   `--start-date` is omitted; later runs top up only missing older/newer outer
@@ -552,7 +554,8 @@ Delete all stored metric rows and metric attempt status.
 
 ### `clear-market-data`
 
-Delete all stored market-data snapshots.
+Delete all stored market-data snapshots, both layers (`provider_market_data`
+and canonical `market_data`) in one transaction.
 
 All clear commands take:
 

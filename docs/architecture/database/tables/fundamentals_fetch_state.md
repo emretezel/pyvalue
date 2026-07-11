@@ -14,9 +14,9 @@ not currently blocked by a fundamentals fetch failure.
 
 <!-- BEGIN generated_live_stats -->
 - Snapshot source: `data/pyvalue.db` on `2026-07-11`
-- Row count: `16`
+- Row count: `0`
 - Table size: `4,096 bytes` (`4.0 KiB`)
-- Approximate bytes per row: `256.0`
+- Approximate bytes per row: `0.0`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -64,46 +64,10 @@ not currently blocked by a fundamentals fetch failure.
 
 <!-- BEGIN generated_sample_rows -->
 - Snapshot source: `data/pyvalue.db` on `2026-07-11`
-- Sample window: first `5` rows returned by SQLite ordered by `provider_listing_id ASC`
+- Sample window: first `0` rows returned by SQLite ordered by `provider_listing_id ASC`
 
 ```json
-[
-  {
-    "provider_listing_id": 609,
-    "failed_at": "2025-12-26T13:17:17.671188+00:00",
-    "error": "('Connection broken: IncompleteRead(7630 bytes read, 2610 more expected)', IncompleteRead(7630 bytes read, 2610 more expected))",
-    "next_eligible_at": "2026-04-01T17:19:48.488904+00:00",
-    "attempts": 1
-  },
-  {
-    "provider_listing_id": 669,
-    "failed_at": "2025-12-26T13:17:36.847648+00:00",
-    "error": "('Connection broken: IncompleteRead(5590 bytes read, 4650 more expected)', IncompleteRead(5590 bytes read, 4650 more expected))",
-    "next_eligible_at": "2026-04-01T17:19:48.488904+00:00",
-    "attempts": 1
-  },
-  {
-    "provider_listing_id": 690,
-    "failed_at": "2025-12-26T13:17:44.274069+00:00",
-    "error": "('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))",
-    "next_eligible_at": "2026-04-01T17:19:48.488904+00:00",
-    "attempts": 1
-  },
-  {
-    "provider_listing_id": 691,
-    "failed_at": "2025-12-26T13:17:44.816215+00:00",
-    "error": "('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))",
-    "next_eligible_at": "2026-04-01T17:19:48.488904+00:00",
-    "attempts": 1
-  },
-  {
-    "provider_listing_id": 699,
-    "failed_at": "2025-12-26T13:17:46.975611+00:00",
-    "error": "('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))",
-    "next_eligible_at": "2026-04-01T17:19:48.488904+00:00",
-    "attempts": 1
-  }
-]
+[]
 ```
 <!-- END generated_sample_rows -->
 

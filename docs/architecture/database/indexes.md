@@ -22,6 +22,8 @@ This page lists the current secondary indexes from the post-refactor schema. Pri
     - serves the stale-eligibility scan (`_fetch_stale`), which filters `WHERE last_fetched_at <= ?` and orders by `last_fetched_at`. As the covering index for that branch it reads the timestamp without cracking the wide `data` blob (which spills to overflow pages, with `last_fetched_at` stored after it) — ~16 s → ~0.1 s on the live ~75.8k-row DB.
     - Dropped by migration 067 (then unused: `_fetch_stale` reached `fundamentals_raw` via PK through `provider_listing_catalog`) and re-created by migration 079 after that branch was rewritten to drive `FROM fundamentals_raw fr`.
 - Migration 067 dropped `idx_fundamentals_fetch_next` and `idx_market_data_fetch_next`: both fetch-state tables are reached via PK in joins, so no scan uses `next_eligible_at` as the leading predicate.
+- `provider_market_data`
+  - PK only `(provider_listing_id, as_of)` — serves the dual-write conflict target and the delisting purge's delete-by-`provider_listing_id`; no runtime read path exists yet (canonical `market_data` answers every read while a single provider is configured).
 
 ## Canonical Analytics
 
@@ -45,8 +47,9 @@ This page lists the current secondary indexes from the post-refactor schema. Pri
   - `idx_fx_supported_pairs_refreshable (provider, is_refreshable, canonical_symbol)`
     - supports provider-catalog refresh planning
 - `fx_rates`
-  - `idx_fx_rates_pair_date (provider, base_currency, quote_currency, rate_date DESC)`
-    - critical pair/date lookup index for direct FX retrieval — the PK leads with `rate_date` after `provider`, so this is required for "latest by pair" probes.
+  - PK only — migration 084 rebuilt the canonical table with PK `(base_currency, quote_currency, rate_date)`, which IS the pair/date lookup index: pair-history scans, latest-on-or-before seeks, and the full-history preload all walk it in index order. `idx_fx_rates_pair_date (provider, base_currency, quote_currency, rate_date DESC)` was retired with the `provider` column it led with.
+- `provider_fx_rates`
+  - PK only `(provider_id, base_currency, quote_currency, rate_date)` — fronts the coverage-planning endpoint seeks (`pair_coverage` MIN/MAX, `fully_covered_quotes_for_window`) as covering probes off the PK autoindex.
 
 ## UNIQUE Indexes
 

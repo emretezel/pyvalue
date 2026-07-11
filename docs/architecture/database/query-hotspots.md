@@ -69,10 +69,13 @@ This page maps the end-to-end pipeline to the tables and indexes that matter mos
 - Reads `provider_listing`
 - Applies primary-listing filter through `listing.primary_listing_status`
 - Reads and writes `market_data_fetch_state`
-- Upserts `market_data`
+- Dual-upserts `provider_market_data` (keyed by the `provider_listing_id`
+  threaded from the eligibility query) and canonical `market_data`, in one
+  transaction
 - Critical structures:
   - `idx_provider_listing_listing`
   - `market_data` primary key `(listing_id, as_of)` (latest-snapshot probes traverse the PK backwards; migration 067 dropped the redundant `idx_market_data_latest`)
+  - `provider_market_data` primary key `(provider_listing_id, as_of)` (dual-write conflict target)
   - `market_data_fetch_state` primary key `provider_listing_id`
 - Review focus:
   - latest-snapshot queries should resolve against the `market_data` PK in a single seek per scoped row
@@ -81,15 +84,18 @@ This page maps the end-to-end pipeline to the tables and indexes that matter mos
 ## 7. Refresh FX Rates
 
 - Discovers currencies from `listing` and `financial_facts`
-- Reads and writes `fx_supported_pairs`, `fx_refresh_state`, and `fx_rates`
+- Reads and writes `fx_supported_pairs` and `fx_refresh_state`; dual-upserts
+  `provider_fx_rates` and canonical `fx_rates` in one transaction
 - Critical structures:
   - partial currency indexes on `listing` and `financial_facts`
   - `idx_fx_supported_pairs_refreshable`
   - `fx_refresh_state` PK
-  - `idx_fx_rates_pair_date`
+  - `provider_fx_rates` PK `(provider_id, base, quote, rate_date)` (coverage
+    seeks); `fx_rates` PK `(base, quote, rate_date)` (converter reads)
 - Per-pair coverage cost:
   - one `pair_coverage` read per refreshable pair (to plan missing ranges),
-    issued as split MIN/MAX index-endpoint seeks rather than a full-group scan
+    issued as split MIN/MAX index-endpoint seeks off the `provider_fx_rates`
+    PK autoindex rather than a full-group scan
   - after each range upsert, coverage is widened in-process from the upserted
     batch's own dates, so there is no second coverage scan per range
 - Review focus:

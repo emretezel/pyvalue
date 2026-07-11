@@ -13,9 +13,9 @@ One row per `(exchange_id, symbol)`.
 
 <!-- BEGIN generated_live_stats -->
 - Snapshot source: `data/pyvalue.db` on `2026-07-11`
-- Row count: `75,847`
-- Table size: `2,367,488 bytes` (`2.3 MiB`)
-- Approximate bytes per row: `31.2`
+- Row count: `75,926`
+- Table size: `2,412,544 bytes` (`2.3 MiB`)
+- Approximate bytes per row: `31.8`
 <!-- END generated_live_stats -->
 
 ## Columns

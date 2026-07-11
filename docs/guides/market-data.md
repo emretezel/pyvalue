@@ -23,6 +23,10 @@ Storage invariants:
   is computed on demand as the latest share-count fact x the latest price
   (`metrics.utils.market_cap_money`)
 - market-data rows do not persist a duplicate currency column
+- each observation is written to both layers in one transaction: the provider
+  layer (`provider_market_data`, keyed by the provider listing) and the
+  canonical `market_data` series every downstream reader consumes; delisting
+  purges remove only the provider layer
 
 ## Update One Symbol
 
@@ -65,8 +69,9 @@ Important behavior:
 - the command selects missing symbols first, then the oldest stale symbols
 - large exchange and all-supported runs can mix exchange-bulk fetches with
   per-symbol fallbacks
-- suspicious price jumps are rejected before they are written to `market_data`;
-  the symbol is recorded as a fetch failure in `market_data_fetch_state`
+- no price-anomaly guard runs before persistence: the stored price is just the
+  latest observation, and per-symbol fetch errors are recorded in
+  `market_data_fetch_state`
 - it uses the EODHD daily quota and stops cleanly when the remaining budget is exhausted
 - rerun it the next day to continue from the remaining stale or missing symbols
 

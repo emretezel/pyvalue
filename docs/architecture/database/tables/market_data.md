@@ -2,7 +2,11 @@
 
 ## Purpose
 
-Stores price and volume snapshots for canonical listings.
+Stores the canonical, provider-free price and volume series for canonical
+listings. Provider provenance (which provider reported each observation, under
+which provider listing) lives in the provider layer, [`provider_market_data`](provider_market_data.md)
+— the same provider/canonical split as `provider_exchange`/`exchange` and
+`provider_listing`/`listing`.
 
 ## Grain
 
@@ -12,9 +16,9 @@ One row per `(listing_id, as_of)` snapshot date.
 
 <!-- BEGIN generated_live_stats -->
 - Snapshot source: `data/pyvalue.db` on `2026-07-11`
-- Row count: `221,186`
-- Table size: `16,031,744 bytes` (`15.3 MiB`)
-- Approximate bytes per row: `72.5`
+- Row count: `217,451`
+- Table size: `14,438,400 bytes` (`13.8 MiB`)
+- Approximate bytes per row: `66.4`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -25,7 +29,6 @@ One row per `(listing_id, as_of)` snapshot date.
 | `as_of` | `DATE` | no | PK, idx | snapshot date |
 | `price` | `REAL` | no |  | latest close or provider price, in the **major** currency (`canonical_trading_currency(listing.currency)`) |
 | `volume` | `INTEGER` | yes |  | provider volume |
-| `source_provider` | `TEXT` | no |  | provenance |
 | `updated_at` | `TEXT` | no |  | write timestamp |
 
 ## Keys And Relationships
@@ -53,10 +56,15 @@ One row per `(listing_id, as_of)` snapshot date.
 
 ## Main Write Paths
 
-- `update-market-data`
+- `update-market-data` — `MarketDataRepository.upsert_prices` dual-writes each
+  observation: the provider layer row (`provider_market_data`) and this
+  canonical row, in one transaction. Single provider today, so the canonical
+  row simply adopts the observation; a future multi-provider priority rule
+  slots into the canonical upsert.
+- `clear-market-data` wipes both layers together.
 - never deleted by catalog refreshes: canonical, provider-independent data is
   retained even when a listing loses its last provider mapping (2026-07-11
-  design)
+  design). The delisting purge removes only the `provider_market_data` rows.
 
 ## Sample Rows
 
@@ -71,7 +79,6 @@ One row per `(listing_id, as_of)` snapshot date.
     "as_of": "2026-03-20",
     "price": 30.02,
     "volume": 349376,
-    "source_provider": "EODHD",
     "updated_at": "2026-04-02T14:21:31.509182+00:00"
   },
   {
@@ -79,7 +86,6 @@ One row per `(listing_id, as_of)` snapshot date.
     "as_of": "2026-04-02",
     "price": 30.02,
     "volume": 350816,
-    "source_provider": "EODHD",
     "updated_at": "2026-04-06T12:14:35.451739+00:00"
   },
   {
@@ -87,7 +93,6 @@ One row per `(listing_id, as_of)` snapshot date.
     "as_of": "2026-04-10",
     "price": 32.26,
     "volume": 387867,
-    "source_provider": "EODHD",
     "updated_at": "2026-04-13T16:12:29.084722+00:00"
   },
   {
@@ -95,7 +100,6 @@ One row per `(listing_id, as_of)` snapshot date.
     "as_of": "2026-03-20",
     "price": 26.43,
     "volume": 11551525,
-    "source_provider": "EODHD",
     "updated_at": "2026-04-02T14:21:31.509182+00:00"
   },
   {
@@ -103,7 +107,6 @@ One row per `(listing_id, as_of)` snapshot date.
     "as_of": "2026-04-02",
     "price": 27.94,
     "volume": 1975088,
-    "source_provider": "EODHD",
     "updated_at": "2026-04-06T12:14:34.283301+00:00"
   }
 ]
@@ -119,6 +122,10 @@ One row per `(listing_id, as_of)` snapshot date.
 - The derived `market_cap` column was **removed (migration 072)**: market cap is
   shares-outstanding x price, so it is computed on demand as the latest share-count
   `financial_facts` row x the latest `market_data` price
-  (`metrics.utils.market_cap_money`) rather than stored. The generated Live
-  Stats / Sample Rows above predate migration 072 and still show the column.
+  (`metrics.utils.market_cap_money`) rather than stored.
+- The `source_provider` tag was **removed (migration 082)**: provenance moved
+  to the provider layer when migration 081 created `provider_market_data`. All
+  canonical readers were already id-keyed and never read the tag. 14,822 rows
+  belonging to canonical-only listings (provider layer purged, e.g. the
+  2026-07 plan-drop remnants) were deliberately kept canonical-only.
 - Market-data rows do not persist a duplicate currency column.

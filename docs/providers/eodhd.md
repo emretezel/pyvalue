@@ -53,10 +53,11 @@ pyvalue refresh-supported-tickers --all-supported
 Ticker refresh keeps only `Common Stock`, `Preferred Stock`, and `Stock`.
 ETF, fund, and other security types are excluded from the operational catalog.
 When a ticker disappears from EODHD, only its provider layer goes: the
-`provider_listing` mapping plus the provider-scoped raw fundamentals and
-fetch/normalization state tied to it. Canonical rows (`listing`, `issuer`) and
-canonical data (`financial_facts`, `market_data`, `metrics`, compute/refresh
-state) are provider-independent and are never deleted by a refresh -- a payload
+`provider_listing` mapping plus the provider-scoped raw fundamentals,
+fetch/normalization state, and `provider_market_data` price observations tied
+to it. Canonical rows (`listing`, `issuer`) and canonical data
+(`financial_facts`, `market_data`, `metrics`, compute/refresh state) are
+provider-independent and are never deleted by a refresh -- a payload
 absence cannot distinguish a real delisting from a plan change, a provider
 glitch, or a truncated response (2026-07-11 incident: a truncated 200-response
 for a plan-dropped exchange nearly emptied it). A listing left with no provider
@@ -202,7 +203,9 @@ Behavior:
 - refreshes canonical six-letter pairs such as `EURUSD`
 - treats three-letter shorthands such as `EUR` as aliases for `USDEUR`
   and does not refresh those aliases separately
-- stores direct provider rows only in `fx_rates`
+- stores each observation twice in one transaction: the provider row in
+  `provider_fx_rates` (with EODHD's pair symbol) and the canonical
+  provider-free rate in `fx_rates`, which all conversion reads consume
 - tracks pair coverage and retry state in `fx_refresh_state`
 - backfills full available history on the first unbounded run, then refreshes
   only the missing older/newer outer ranges later

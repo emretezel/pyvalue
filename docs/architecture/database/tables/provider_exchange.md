@@ -12,9 +12,9 @@ One row per `(provider_id, provider_exchange_code)`.
 
 <!-- BEGIN generated_live_stats -->
 - Snapshot source: `data/pyvalue.db` on `2026-07-11`
-- Row count: `73`
+- Row count: `70`
 - Table size: `12,288 bytes` (`12.0 KiB`)
-- Approximate bytes per row: `168.3`
+- Approximate bytes per row: `175.5`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -87,7 +87,7 @@ One row per `(provider_id, provider_exchange_code)`.
     "operating_mic": "XAMS",
     "country_iso2": "NL",
     "country_iso3": "NLD",
-    "updated_at": "2026-03-22T10:57:47.052304+00:00"
+    "updated_at": "2026-07-11T14:03:20.670728+00:00"
   },
   {
     "provider_exchange_id": 2,
@@ -100,7 +100,7 @@ One row per `(provider_id, provider_exchange_code)`.
     "operating_mic": "ASEX",
     "country_iso2": "GR",
     "country_iso3": "GRC",
-    "updated_at": "2026-03-22T10:57:47.052304+00:00"
+    "updated_at": "2026-07-11T14:03:20.670728+00:00"
   },
   {
     "provider_exchange_id": 3,
@@ -113,7 +113,7 @@ One row per `(provider_id, provider_exchange_code)`.
     "operating_mic": "XASX",
     "country_iso2": "AU",
     "country_iso3": "AUS",
-    "updated_at": "2026-03-22T10:57:47.052304+00:00"
+    "updated_at": "2026-07-11T14:03:20.670728+00:00"
   },
   {
     "provider_exchange_id": 4,
@@ -126,7 +126,7 @@ One row per `(provider_id, provider_exchange_code)`.
     "operating_mic": "XBUE",
     "country_iso2": "AR",
     "country_iso3": "ARG",
-    "updated_at": "2026-03-22T10:57:47.052304+00:00"
+    "updated_at": "2026-07-11T14:03:20.670728+00:00"
   },
   {
     "provider_exchange_id": 5,
@@ -139,7 +139,7 @@ One row per `(provider_id, provider_exchange_code)`.
     "operating_mic": "XCAS",
     "country_iso2": "MA",
     "country_iso3": "MAR",
-    "updated_at": "2026-03-22T10:57:47.052304+00:00"
+    "updated_at": "2026-07-11T14:03:20.670728+00:00"
   }
 ]
 ```

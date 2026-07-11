@@ -2,42 +2,40 @@
 
 ## Purpose
 
-Stores direct FX rates fetched from the provider.
+Stores the canonical, provider-free direct FX rate series consumed by all
+conversion paths (`FXService`). Provider provenance (which provider reported
+each rate, under which pair symbol, fetched when) lives in the provider layer,
+[`provider_fx_rates`](provider_fx_rates.md) — the same provider/canonical
+split as `provider_exchange`/`exchange` and `provider_listing`/`listing`.
 
 ## Grain
 
-One row per `(provider, rate_date, base_currency, quote_currency)`.
+One row per `(base_currency, quote_currency, rate_date)`.
 
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
 - Snapshot source: `data/pyvalue.db` on `2026-07-11`
 - Row count: `6,306,705`
-- Table size: `1,232,326,656 bytes` (`1.15 GiB`)
-- Approximate bytes per row: `195.4`
+- Table size: `435,523,584 bytes` (`415.3 MiB`)
+- Approximate bytes per row: `69.1`
 <!-- END generated_live_stats -->
 
 ## Columns
 
 | Column | Type | Null | Key | Notes |
 | --- | --- | --- | --- | --- |
-| `provider` | `TEXT` | no | PK, idx | provider namespace |
-| `rate_date` | `TEXT` | no | PK, idx | effective date |
 | `base_currency` | `TEXT` | no | PK, idx | base currency. CHECK enforces 3-char uppercase ASCII letters |
 | `quote_currency` | `TEXT` | no | PK, idx | quote currency. CHECK enforces 3-char uppercase ASCII letters |
+| `rate_date` | `TEXT` | no | PK, idx | effective date |
 | `rate` | `REAL` | no |  | rate as native float (per project REAL-everywhere policy) |
-| `fetched_at` | `TEXT` | no |  | provider fetch timestamp |
-| `source_kind` | `TEXT` | no |  | direct provider source kind. CHECK enforces `IN ('provider')` — widen via a future migration when synthesized/derived sources are introduced |
-| `meta_json` | `TEXT` | yes |  | optional metadata |
-| `created_at` | `TEXT` | no |  | insert timestamp |
 | `updated_at` | `TEXT` | no |  | update timestamp |
 
 ## Keys And Relationships
 
 <!-- BEGIN generated_keys_and_relationships -->
-- Primary key: (`provider`, `rate_date`, `base_currency`, `quote_currency`)
-- Physical foreign keys:
-  - `provider` -> `provider`.`provider_code`
+- Primary key: (`base_currency`, `quote_currency`, `rate_date`)
+- Physical foreign keys: none
 - Physical references from other tables: none
 - Unique constraints beyond the primary key: none
 - Main logical refs: no enforced FK
@@ -46,103 +44,80 @@ One row per `(provider, rate_date, base_currency, quote_currency)`.
 ## Secondary Indexes
 
 <!-- BEGIN generated_secondary_indexes -->
-- `idx_fx_rates_pair_date (provider, base_currency, quote_currency, rate_date DESC)`
+- None beyond the primary key and unique constraints.
 <!-- END generated_secondary_indexes -->
 
 ## Main Read Paths
 
-- direct pair/date lookups
-- inverse and triangulated FX lookup support
-- historical coverage checks (`pair_coverage`): MIN and MAX `rate_date` are
-  read as two separate single-aggregate subqueries so each resolves to one
-  index-endpoint seek on `idx_fx_rates_pair_date`. A combined `MIN(),MAX()` in
-  one statement would defeat SQLite's min/max optimization and scan the whole
-  pair group instead.
+- full-history preload (`FXRatesRepository.fetch_all`) and per-pair history
+  (`fetch_pair_history`) for `FXService` conversion — provider-agnostic; the
+  `ORDER BY base_currency, quote_currency, rate_date` is exactly the PK order,
+  so both are index-order walks with no sort step
+- point lookups (`latest_on_or_before`) — a descending PK seek
+- inverse and triangulated FX lookup support (derived at runtime in
+  `money.fx`, never persisted)
+- provider coverage planning does **not** read this table: `pair_coverage` and
+  `fully_covered_quotes_for_window` are provider-scoped and read
+  `provider_fx_rates`
 
 ## Main Write Paths
 
-- `refresh-fx-rates`
+- `refresh-fx-rates` — `FXRatesRepository.upsert_many` dual-writes each
+  observation: the provider layer row (`provider_fx_rates`) and this canonical
+  row, in one transaction. Single provider today, so the canonical row simply
+  adopts the observation; a future multi-provider priority rule slots into the
+  canonical upsert.
 
 ## Column Usage Notes
 
-- `provider`: first filter in FX lookup queries.
-- `rate_date`: date predicate and ordering column for direct-rate lookup.
 - `base_currency`: first pair component in all direct FX searches.
 - `quote_currency`: second pair component in all direct FX searches.
+- `rate_date`: date predicate and ordering column for direct-rate lookup.
 - `rate`: REAL rate value consumed by FX conversion logic; migration 045 converted this column from TEXT (`rate_text`) to REAL under the project's REAL-everywhere policy.
-- `fetched_at`: provider fetch timestamp for auditability.
-- `source_kind`: indicates how the direct rate was sourced.
-- `meta_json`: optional provider metadata, not part of hot lookup predicates.
-- `created_at`: insert timestamp.
 - `updated_at`: update timestamp.
 
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
 - Snapshot source: `data/pyvalue.db` on `2026-07-11`
-- Sample window: first `5` rows returned by SQLite ordered by `provider ASC, rate_date ASC, base_currency ASC, quote_currency ASC`
+- Sample window: first `5` rows returned by SQLite ordered by `base_currency ASC, quote_currency ASC, rate_date ASC`
 
 ```json
 [
   {
-    "provider": "EODHD",
-    "rate_date": "1950-01-01",
-    "base_currency": "EUR",
-    "quote_currency": "EUR",
-    "rate": 1.0,
-    "fetched_at": "Wed, 08 Apr 2026 21:32:03 GMT",
-    "source_kind": "provider",
-    "meta_json": "{\"provider\": \"EODHD\", \"symbol\": \"EUREUR\"}",
-    "created_at": "2026-04-08T21:32:04.346014+00:00",
-    "updated_at": "2026-04-08T21:32:04.346014+00:00"
+    "base_currency": "AED",
+    "quote_currency": "AUD",
+    "rate_date": "2009-12-28",
+    "rate": 0.3069,
+    "updated_at": "2026-04-08T21:24:00.456429+00:00"
   },
   {
-    "provider": "EODHD",
-    "rate_date": "1950-01-02",
-    "base_currency": "EUR",
-    "quote_currency": "EUR",
-    "rate": 1.0,
-    "fetched_at": "Wed, 08 Apr 2026 21:32:03 GMT",
-    "source_kind": "provider",
-    "meta_json": "{\"provider\": \"EODHD\", \"symbol\": \"EUREUR\"}",
-    "created_at": "2026-04-08T21:32:04.346014+00:00",
-    "updated_at": "2026-04-08T21:32:04.346014+00:00"
+    "base_currency": "AED",
+    "quote_currency": "AUD",
+    "rate_date": "2009-12-29",
+    "rate": 0.3041,
+    "updated_at": "2026-04-08T21:24:00.456429+00:00"
   },
   {
-    "provider": "EODHD",
-    "rate_date": "1950-01-03",
-    "base_currency": "EUR",
-    "quote_currency": "EUR",
-    "rate": 1.0,
-    "fetched_at": "Wed, 08 Apr 2026 21:32:03 GMT",
-    "source_kind": "provider",
-    "meta_json": "{\"provider\": \"EODHD\", \"symbol\": \"EUREUR\"}",
-    "created_at": "2026-04-08T21:32:04.346014+00:00",
-    "updated_at": "2026-04-08T21:32:04.346014+00:00"
+    "base_currency": "AED",
+    "quote_currency": "AUD",
+    "rate_date": "2009-12-30",
+    "rate": 0.3045,
+    "updated_at": "2026-04-08T21:24:00.456429+00:00"
   },
   {
-    "provider": "EODHD",
-    "rate_date": "1950-01-04",
-    "base_currency": "EUR",
-    "quote_currency": "EUR",
-    "rate": 1.0,
-    "fetched_at": "Wed, 08 Apr 2026 21:32:03 GMT",
-    "source_kind": "provider",
-    "meta_json": "{\"provider\": \"EODHD\", \"symbol\": \"EUREUR\"}",
-    "created_at": "2026-04-08T21:32:04.346014+00:00",
-    "updated_at": "2026-04-08T21:32:04.346014+00:00"
+    "base_currency": "AED",
+    "quote_currency": "AUD",
+    "rate_date": "2009-12-31",
+    "rate": 0.3031,
+    "updated_at": "2026-04-08T21:24:00.456429+00:00"
   },
   {
-    "provider": "EODHD",
-    "rate_date": "1950-01-05",
-    "base_currency": "EUR",
-    "quote_currency": "EUR",
-    "rate": 1.0,
-    "fetched_at": "Wed, 08 Apr 2026 21:32:03 GMT",
-    "source_kind": "provider",
-    "meta_json": "{\"provider\": \"EODHD\", \"symbol\": \"EUREUR\"}",
-    "created_at": "2026-04-08T21:32:04.346014+00:00",
-    "updated_at": "2026-04-08T21:32:04.346014+00:00"
+    "base_currency": "AED",
+    "quote_currency": "AUD",
+    "rate_date": "2010-01-01",
+    "rate": 0.3031,
+    "updated_at": "2026-04-08T21:24:00.456429+00:00"
   }
 ]
 ```
@@ -150,8 +125,19 @@ One row per `(provider, rate_date, base_currency, quote_currency)`.
 
 ## Review Notes
 
-- This can become large, so pair/date access path matters more than almost any descriptive concern.
-- Migration 045 converted `rate_text` (TEXT) to `rate` (REAL) under the project REAL-everywhere policy. Numeric filtering inside SQLite is now first-class.
-- Migration 048 added the physical FK `provider -> provider(provider_code)`.
-- Migration 058 added 3-char uppercase ASCII format CHECKs to `base_currency` and `quote_currency`.
-- Migration 055 added the `source_kind IN ('provider')` CHECK; widen it via a future migration when synthesized or derived sources are introduced.
+- This can become large, so the pair/date access path matters more than almost
+  any descriptive concern. The PK `(base_currency, quote_currency, rate_date)`
+  IS the pair-history index; `idx_fx_rates_pair_date` was retired by
+  migration 084 as redundant with it.
+- Migration 084 rebuilt the table provider-free: `provider` (previously part
+  of the PK, FK to `provider.provider_code`), `source_kind` (CHECK-constrained
+  to the single value `'provider'` — it carried no information), `meta_json`
+  (always `{"provider":…, "symbol":…}`) and the fetch/insert timestamps moved
+  to `provider_fx_rates` (the pair symbol as a typed `provider_symbol`
+  column). A pre-flight aborts the rebuild if two providers ever store the
+  same pair/date without an arbitration rule.
+- Migration 045 converted `rate_text` (TEXT) to `rate` (REAL) under the
+  project REAL-everywhere policy. Numeric filtering inside SQLite is
+  first-class.
+- Migration 058 added the 3-char uppercase ASCII format CHECKs to
+  `base_currency` and `quote_currency`; the 084 rebuild carries them forward.

@@ -133,6 +133,11 @@ TABLE_GROUPS: tuple[tuple[str, tuple[TableInventoryEntry, ...]], ...] = (
                 logical_refs="`provider_listing_id` in `provider_listing`",
                 review_focus="same pattern as fundamentals state; check duplication vs simplicity",
             ),
+            TableInventoryEntry(
+                table_name="provider_market_data",
+                logical_refs="`provider_listing_id` in `provider_listing`",
+                review_focus="provider-layer price observations; purged with the provider listing while canonical `market_data` is retained",
+            ),
         ),
     ),
     (
@@ -151,7 +156,7 @@ TABLE_GROUPS: tuple[tuple[str, tuple[TableInventoryEntry, ...]], ...] = (
             TableInventoryEntry(
                 table_name="market_data",
                 logical_refs="`listing_id` in `listing`",
-                review_focus="latest-snapshot access and time-series retention",
+                review_focus="canonical, provider-free price series (provenance in `provider_market_data`); latest-snapshot access and time-series retention",
             ),
             TableInventoryEntry(
                 table_name="metrics",
@@ -179,9 +184,14 @@ TABLE_GROUPS: tuple[tuple[str, tuple[TableInventoryEntry, ...]], ...] = (
                 review_focus="whether coverage state justifies a dedicated table",
             ),
             TableInventoryEntry(
+                table_name="provider_fx_rates",
+                logical_refs="`provider_id` in `provider`",
+                review_focus="provider-layer rate observations; coverage planning reads its PK endpoint seeks",
+            ),
+            TableInventoryEntry(
                 table_name="fx_rates",
                 logical_refs="no enforced FK",
-                review_focus="largest FX table; pair/date access path and REAL `rate` storage",
+                review_focus="largest FX table; canonical provider-free series, pair/date PK access path and REAL `rate` storage",
             ),
         ),
     ),

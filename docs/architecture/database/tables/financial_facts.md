@@ -23,9 +23,9 @@ leaving the eight columns below.
 
 <!-- BEGIN generated_live_stats -->
 - Snapshot source: `data/pyvalue.db` on `2026-07-11`
-- Row count: `104,115,040`
-- Table size: `7,809,675,264 bytes` (`7.27 GiB`)
-- Approximate bytes per row: `75.0`
+- Row count: `101,576,296`
+- Table size: `7,638,425,600 bytes` (`7.11 GiB`)
+- Approximate bytes per row: `75.2`
 <!-- END generated_live_stats -->
 
 ## Columns

@@ -77,31 +77,31 @@ One row per canonical exchange code.
     "exchange_id": 1,
     "exchange_code": "AS",
     "created_at": "2026-03-22T10:57:47.052304+00:00",
-    "updated_at": "2026-04-23T16:33:15.433812+00:00"
+    "updated_at": "2026-07-11T14:03:20.675029+00:00"
   },
   {
     "exchange_id": 2,
     "exchange_code": "AT",
     "created_at": "2026-03-22T10:57:47.052304+00:00",
-    "updated_at": "2026-04-23T16:33:15.433812+00:00"
+    "updated_at": "2026-07-11T14:03:20.676076+00:00"
   },
   {
     "exchange_id": 3,
     "exchange_code": "AU",
     "created_at": "2026-03-22T10:57:47.052304+00:00",
-    "updated_at": "2026-04-23T16:33:15.433812+00:00"
+    "updated_at": "2026-07-11T14:03:20.676008+00:00"
   },
   {
     "exchange_id": 4,
     "exchange_code": "BA",
     "created_at": "2026-03-22T10:57:47.052304+00:00",
-    "updated_at": "2026-04-23T16:33:15.433812+00:00"
+    "updated_at": "2026-07-11T14:03:20.676436+00:00"
   },
   {
     "exchange_id": 5,
     "exchange_code": "BC",
     "created_at": "2026-03-22T10:57:47.052304+00:00",
-    "updated_at": "2026-04-23T16:33:15.433812+00:00"
+    "updated_at": "2026-07-11T14:03:20.675658+00:00"
   }
 ]
 ```

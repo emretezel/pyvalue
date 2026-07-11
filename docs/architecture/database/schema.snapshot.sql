@@ -57,21 +57,12 @@ CREATE TABLE fundamentals_raw (
                 FOREIGN KEY (provider_listing_id) REFERENCES provider_listing(provider_listing_id)
             );
 CREATE TABLE "fx_rates" (
-            provider TEXT NOT NULL,
-            rate_date TEXT NOT NULL,
             base_currency TEXT NOT NULL CHECK (length(base_currency) = 3 AND base_currency = upper(base_currency) AND base_currency GLOB '[A-Z][A-Z][A-Z]'),
             quote_currency TEXT NOT NULL CHECK (length(quote_currency) = 3 AND quote_currency = upper(quote_currency) AND quote_currency GLOB '[A-Z][A-Z][A-Z]'),
+            rate_date TEXT NOT NULL,
             rate REAL NOT NULL,
-            fetched_at TEXT NOT NULL,
-            source_kind TEXT NOT NULL
-                CHECK (source_kind IN ('provider')),
-            meta_json TEXT,
-            created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            PRIMARY KEY (
-                provider, rate_date, base_currency, quote_currency
-            ),
-            FOREIGN KEY (provider) REFERENCES provider(provider_code)
+            PRIMARY KEY (base_currency, quote_currency, rate_date)
         );
 CREATE TABLE "fx_refresh_state" (
                     provider TEXT NOT NULL,
@@ -134,7 +125,6 @@ CREATE TABLE "market_data" (
             as_of DATE NOT NULL,
             price REAL NOT NULL,
             volume INTEGER,
-            source_provider TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             PRIMARY KEY (listing_id, as_of),
             FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
@@ -218,6 +208,19 @@ CREATE TABLE "provider_exchange" (
             FOREIGN KEY (provider_id) REFERENCES provider(provider_id),
             FOREIGN KEY (exchange_id) REFERENCES "exchange"(exchange_id)
         );
+CREATE TABLE provider_fx_rates (
+            provider_id INTEGER NOT NULL,
+            base_currency TEXT NOT NULL CHECK (length(base_currency) = 3 AND base_currency = upper(base_currency) AND base_currency GLOB '[A-Z][A-Z][A-Z]'),
+            quote_currency TEXT NOT NULL CHECK (length(quote_currency) = 3 AND quote_currency = upper(quote_currency) AND quote_currency GLOB '[A-Z][A-Z][A-Z]'),
+            rate_date TEXT NOT NULL,
+            rate REAL NOT NULL,
+            provider_symbol TEXT NOT NULL,
+            fetched_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (provider_id, base_currency, quote_currency, rate_date),
+            FOREIGN KEY (provider_id) REFERENCES provider(provider_id)
+        );
 CREATE TABLE "provider_listing" (
             provider_listing_id INTEGER PRIMARY KEY,
             provider_exchange_id INTEGER NOT NULL,
@@ -227,6 +230,16 @@ CREATE TABLE "provider_listing" (
             FOREIGN KEY (provider_exchange_id)
                 REFERENCES provider_exchange(provider_exchange_id),
             FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
+        );
+CREATE TABLE provider_market_data (
+            provider_listing_id INTEGER NOT NULL,
+            as_of DATE NOT NULL,
+            price REAL NOT NULL,
+            volume INTEGER,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (provider_listing_id, as_of),
+            FOREIGN KEY (provider_listing_id)
+                REFERENCES provider_listing(provider_listing_id)
         );
 CREATE TABLE "schema_migrations" (
             id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -239,8 +252,6 @@ CREATE INDEX idx_fin_facts_security_concept_latest
         ON financial_facts(listing_id, concept, end_date DESC, filed DESC);
 CREATE INDEX idx_fundamentals_raw_last_fetched
         ON fundamentals_raw(last_fetched_at);
-CREATE INDEX idx_fx_rates_pair_date
-        ON fx_rates(provider, base_currency, quote_currency, rate_date DESC);
 CREATE INDEX idx_fx_supported_pairs_refreshable
                 ON fx_supported_pairs(provider, is_refreshable, canonical_symbol);
 CREATE UNIQUE INDEX idx_issuer_name_country

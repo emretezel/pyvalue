@@ -12,9 +12,9 @@ One row per `listing_id`.
 
 <!-- BEGIN generated_live_stats -->
 - Snapshot source: `data/pyvalue.db` on `2026-07-11`
-- Row count: `61,091`
-- Table size: `2,715,648 bytes` (`2.6 MiB`)
-- Approximate bytes per row: `44.5`
+- Row count: `58,135`
+- Table size: `2,600,960 bytes` (`2.5 MiB`)
+- Approximate bytes per row: `44.7`
 <!-- END generated_live_stats -->
 
 ## Columns

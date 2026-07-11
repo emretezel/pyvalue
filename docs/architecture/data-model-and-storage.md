@@ -124,15 +124,23 @@ Currency and unit semantics:
 - configured subunit currencies are normalized to their base before a monetary fact
   is built: `GBX`/`GBP0.01` -> `GBP`, `ZAC` -> `ZAR`, `ILA` -> `ILS`
 
-### `market_data`
+### `market_data` and `provider_market_data`
 
-Stores latest quote snapshot information by `listing_id`.
+Market data follows the provider/canonical split (migrations 081/082,
+mirroring the exchange/listing catalogs): `provider_market_data` records what
+each provider reported, keyed `(provider_listing_id, as_of)` like
+`fundamentals_raw`, and canonical `market_data` stores the provider-free
+series by `listing_id` that every downstream reader consumes. The refresh
+dual-writes both layers in one transaction; with a single provider the
+canonical row simply adopts the observation, and a future multi-provider
+priority rule slots into the canonical upsert.
+
 `market_data.price` is stored in the **major** currency
 (`canonical_trading_currency(listing.currency)`): subunit quotes (`GBX`/`GBP0.01`
 -> `GBP`, `ZAC` -> `ZAR`, `ILA` -> `ILS`) are divided by their subunit divisor
 before persistence, so subunits never cross the data boundary, and the snapshot
 read path reports that same base currency. The table does not persist a
-duplicate currency column.
+duplicate currency column, nor (since migration 082) a provider tag.
 
 The derived `market_cap` column was removed (migration 072): market cap is
 shares-outstanding x price, so it is computed on demand as the latest share-count
@@ -147,10 +155,17 @@ share count up to a quarter stale adds negligible error.
 Operational market-data refresh progress and retry backoff live here, keyed by
 `provider_listing_id`.
 
-### `fx_rates`, `fx_supported_pairs`, and `fx_refresh_state`
+### `fx_rates`, `provider_fx_rates`, `fx_supported_pairs`, and `fx_refresh_state`
 
-FX storage remains provider-code keyed. FX discovery reads currencies from
-`listing` and `financial_facts`.
+FX rates follow the same provider/canonical split (migrations 083/084):
+`provider_fx_rates` records each provider's observations (keyed by
+`provider_id` plus pair and date, with the provider's own pair symbol), and
+canonical `fx_rates` is the provider-free series keyed
+`(base_currency, quote_currency, rate_date)` that all conversion reads
+(`FXService`) consume. Refresh planning (`pair_coverage`) stays
+provider-scoped against the provider layer. The `fx_supported_pairs` and
+`fx_refresh_state` operational state tables remain provider-code keyed. FX
+discovery reads currencies from `listing` and `financial_facts`.
 
 ### `metrics` and `metric_compute_status`
 
@@ -229,7 +244,8 @@ A normal run looks like:
 4. Raw fundamentals are fetched into `fundamentals_raw`.
 5. EODHD raw writes refresh `listing.primary_listing_status` from `General.PrimaryTicker`.
 6. Provider-specific normalization writes canonical `financial_facts`.
-7. Market refresh writes canonical `market_data`.
+7. Market refresh dual-writes `provider_market_data` and canonical `market_data`
+   (FX refresh likewise dual-writes `provider_fx_rates` and canonical `fx_rates`).
 8. Retry/backoff state updates `fundamentals_fetch_state` and `market_data_fetch_state`.
 9. Metric computation writes `metrics` and `metric_compute_status`.
 10. Screens read from canonical metrics and derived canonical symbols.

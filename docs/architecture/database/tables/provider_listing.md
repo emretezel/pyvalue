@@ -12,9 +12,9 @@ One row per `(provider_exchange_id, provider_symbol)`.
 
 <!-- BEGIN generated_live_stats -->
 - Snapshot source: `data/pyvalue.db` on `2026-07-11`
-- Row count: `75,847`
-- Table size: `1,413,120 bytes` (`1.3 MiB`)
-- Approximate bytes per row: `18.6`
+- Row count: `71,543`
+- Table size: `1,417,216 bytes` (`1.4 MiB`)
+- Approximate bytes per row: `19.8`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -38,6 +38,7 @@ One row per `(provider_exchange_id, provider_symbol)`.
   - `fundamentals_normalization_state`.`provider_listing_id` -> `provider_listing_id`
   - `fundamentals_raw`.`provider_listing_id` -> `provider_listing_id`
   - `market_data_fetch_state`.`provider_listing_id` -> `provider_listing_id`
+  - `provider_market_data`.`provider_listing_id` -> `provider_listing_id`
 - Unique constraints beyond the primary key:
   - (`provider_exchange_id`, `provider_symbol`)
 - Main logical refs: links provider catalog rows to canonical `listing_id`
@@ -58,8 +59,9 @@ One row per `(provider_exchange_id, provider_symbol)`.
 ## Main Write Paths
 
 - `refresh-supported-tickers` — upserts the exchange's payload tickers and
-  prunes mappings absent from it (with their raw fundamentals and
-  fetch/normalization state); removals of >= 20 mappings exceeding half the
+  prunes mappings absent from it (with their raw fundamentals,
+  fetch/normalization state, and `provider_market_data` rows — canonical
+  `market_data` is retained); removals of >= 20 mappings exceeding half the
   exchange are blocked unless `--allow-mass-delisting` is passed
 - dropped-venue cascade in `refresh-supported-exchanges` — an exchange absent
   from the provider's list takes all of its mappings (and their provider-keyed

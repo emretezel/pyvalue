@@ -18,37 +18,37 @@ the appendix stays readable.
   {
     "provider_listing_id": 1,
     "data": "<omitted>",
-    "data_bytes": 566660,
-    "payload_hash": "dccd9d08007aa97929e92800dfd0ad5e5364d638e9b0a58f1bc9df3b5437c6c7",
-    "last_fetched_at": "2026-03-22T13:53:47.387172+00:00"
+    "data_bytes": 535427,
+    "payload_hash": "37c8aa3c7790d68136d5efa02a2072b91392ca2af3f46a58aa0af682a8e19741",
+    "last_fetched_at": "2026-07-11T14:10:58.993614+00:00"
   },
   {
     "provider_listing_id": 2,
     "data": "<omitted>",
-    "data_bytes": 313966,
-    "payload_hash": "381be9035eb7de4f43b546ba6f99bda96ebf7c3cc6072aeeb5632a8cb2a7945a",
-    "last_fetched_at": "2026-03-22T13:53:47.613748+00:00"
+    "data_bytes": 334285,
+    "payload_hash": "dd3e31be549af077921f5415f57ec595ed3d03ab5b27177fcdcaac63f49d90d0",
+    "last_fetched_at": "2026-07-11T14:11:01.649999+00:00"
   },
   {
     "provider_listing_id": 3,
     "data": "<omitted>",
-    "data_bytes": 483195,
-    "payload_hash": "c12f24b84cffcc6b767192d5aee1e7762e738d7212deca7ae427779074c4e8f3",
-    "last_fetched_at": "2026-03-22T13:53:47.909077+00:00"
+    "data_bytes": 453167,
+    "payload_hash": "fe1d333ada9ccbe04d085e0d7d33982af0c647a4fed0f4892ac718ccc8fa99d2",
+    "last_fetched_at": "2026-07-11T14:10:59.915664+00:00"
   },
   {
     "provider_listing_id": 4,
     "data": "<omitted>",
-    "data_bytes": 593876,
-    "payload_hash": "8f65bd3b378e791e97b01fa0cfb0efc7345cdc5d69d946d326368c344002f224",
-    "last_fetched_at": "2026-03-22T13:53:48.236603+00:00"
+    "data_bytes": 584251,
+    "payload_hash": "483efcbf00878652ef39af38b900e60d298251d3b80f4f005ef5ffc985a7cd4c",
+    "last_fetched_at": "2026-07-11T14:10:59.122843+00:00"
   },
   {
     "provider_listing_id": 5,
     "data": "<omitted>",
-    "data_bytes": 266574,
-    "payload_hash": "aea318e6295f0aaa847c235b73c1aad5bab84b65dab11b0c1fa5f77903f6e460",
-    "last_fetched_at": "2026-03-22T13:53:48.456762+00:00"
+    "data_bytes": 250671,
+    "payload_hash": "788f84a20594a8cf7c3604afd3367d25f4e8e8bb635d799d149c8f0d09e5441e",
+    "last_fetched_at": "2026-07-11T14:10:59.550289+00:00"
   }
 ]
 ```
