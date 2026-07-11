@@ -2378,9 +2378,9 @@ def test_migration_047_fk_rejects_unknown_listing_id(tmp_path: Path) -> None:
             conn.execute(
                 """
                 INSERT INTO market_data (
-                    listing_id, as_of, price, source_provider, updated_at
+                    listing_id, as_of, price, updated_at
                 ) VALUES (
-                    999999, '2026-01-01', 10.0, 'EODHD',
+                    999999, '2026-01-01', 10.0,
                     '2026-01-01T00:00:00+00:00'
                 )
                 """
@@ -2396,9 +2396,8 @@ def test_migration_047_preserves_valid_rows(tmp_path: Path) -> None:
         conn.execute(
             """
             INSERT INTO market_data (
-                listing_id, as_of, price, volume,
-                source_provider, updated_at
-            ) VALUES (?, '2026-01-01', 10.0, 1000, 'EODHD',
+                listing_id, as_of, price, volume, updated_at
+            ) VALUES (?, '2026-01-01', 10.0, 1000,
                       '2026-01-01T00:00:00+00:00')
             """,
             (listing_id,),
@@ -2411,12 +2410,12 @@ def test_migration_047_preserves_valid_rows(tmp_path: Path) -> None:
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute(
             """
-            SELECT listing_id, as_of, price, volume, source_provider
+            SELECT listing_id, as_of, price, volume
             FROM market_data
             """
         ).fetchall()
 
-    assert rows == [(listing_id, "2026-01-01", 10.0, 1000, "EODHD")]
+    assert rows == [(listing_id, "2026-01-01", 10.0, 1000)]
 
 
 # ----------------------------------------------------------------------
@@ -5134,3 +5133,191 @@ def test_migration_075_purges_enterprise_value_facts(tmp_path: Path) -> None:
     # assertion stays scoped to migration 075 and is not perturbed by later
     # migrations (e.g. 076) that an unpinned full apply would pick up.
     assert apply_migrations(db_path, target_version=75) == 0
+
+
+# ---------------------------------------------------------------------------
+# Migrations 081/082: provider/canonical split for market_data
+# ---------------------------------------------------------------------------
+
+
+def test_migration_081_backfills_provider_market_data(tmp_path: Path) -> None:
+    """Migration 081 creates ``provider_market_data`` and backfills it through
+    the ``provider_listing -> provider_exchange -> provider`` chain: rows whose
+    listing is provider-catalogued (and whose ``source_provider`` matches the
+    registry) are copied keyed by ``provider_listing_id`` with ``updated_at``
+    carried verbatim; canonical-only rows are deliberately skipped."""
+
+    db_path = tmp_path / "provider-market-data-081.sqlite"
+    # Bring the DB to the pre-split state, then seed the pre-082 shape.
+    assert apply_migrations(db_path, target_version=80) == 80
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        provider_exchange_id = _seed_eodhd_us_provider_exchange(conn)
+        conn.execute(
+            "INSERT INTO issuer (issuer_id, name) VALUES (1, 'Acme'), (2, 'Orphan')"
+        )
+        conn.execute(
+            """
+            INSERT INTO listing (listing_id, issuer_id, exchange_id, symbol, currency)
+            VALUES
+                (1, 1, (SELECT exchange_id FROM exchange WHERE exchange_code = 'US'),
+                 'AAA', 'USD'),
+                (2, 2, (SELECT exchange_id FROM exchange WHERE exchange_code = 'US'),
+                 'ORPH', 'USD')
+            """
+        )
+        # Listing 1 is provider-catalogued; listing 2 has no provider mapping
+        # (the retained canonical-only shape left behind by a provider prune).
+        conn.execute(
+            """
+            INSERT INTO provider_listing (
+                provider_listing_id, provider_exchange_id, provider_symbol, listing_id
+            ) VALUES (11, ?, 'AAA', 1)
+            """,
+            (provider_exchange_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO market_data (
+                listing_id, as_of, price, volume, source_provider, updated_at
+            ) VALUES
+                (1, '2026-01-02', 10.0, 100, 'EODHD', '2026-01-02T00:00:00+00:00'),
+                (1, '2026-01-03', 11.0, NULL, 'OTHER', '2026-01-03T00:00:00+00:00'),
+                (2, '2026-01-02', 20.0, 200, 'EODHD', '2026-01-02T00:00:00+00:00')
+            """
+        )
+        conn.commit()
+
+    applied = apply_migrations(db_path)
+    assert applied == len(MIGRATIONS) - 80
+
+    with sqlite3.connect(db_path) as conn:
+        provider_rows = conn.execute(
+            """
+            SELECT provider_listing_id, as_of, price, volume, updated_at
+            FROM provider_market_data
+            """
+        ).fetchall()
+        market_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(market_data)").fetchall()
+        }
+        market_row_count = conn.execute("SELECT COUNT(*) FROM market_data").fetchone()[
+            0
+        ]
+        foreign_keys = conn.execute(
+            "PRAGMA foreign_key_list(provider_market_data)"
+        ).fetchall()
+
+    # Only the catalogued row under a registered provider is backfilled: the
+    # 'OTHER' row has no provider registry match and listing 2 has no mapping.
+    assert provider_rows == [(11, "2026-01-02", 10.0, 100, "2026-01-02T00:00:00+00:00")]
+    # Canonical market_data keeps all three rows and merely loses the tag.
+    assert "source_provider" not in market_columns
+    assert market_row_count == 3
+    assert len(foreign_keys) == 1
+    assert foreign_keys[0][2] == "provider_listing"
+
+    # Replay is a no-op: 081 skips once the table exists, 082 once the column
+    # is gone.
+    assert apply_migrations(db_path) == 0
+
+
+def test_migration_081_aborts_on_duplicate_provider_mapping(tmp_path: Path) -> None:
+    """The backfill pre-flight refuses to run when one provider maps the same
+    listing from two provider symbols -- copying would attribute the canonical
+    series to both mappings, which needs an operator decision."""
+
+    db_path = tmp_path / "provider-market-data-081-dup.sqlite"
+    assert apply_migrations(db_path, target_version=80) == 80
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        provider_exchange_id = _seed_eodhd_us_provider_exchange(conn)
+        conn.execute("INSERT INTO issuer (issuer_id, name) VALUES (1, 'Acme')")
+        conn.execute(
+            """
+            INSERT INTO listing (listing_id, issuer_id, exchange_id, symbol, currency)
+            VALUES (1, 1,
+                    (SELECT exchange_id FROM exchange WHERE exchange_code = 'US'),
+                    'AAA', 'USD')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO provider_listing (
+                provider_listing_id, provider_exchange_id, provider_symbol, listing_id
+            ) VALUES (11, ?, 'AAA', 1), (12, ?, 'AAA-OLD', 1)
+            """,
+            (provider_exchange_id, provider_exchange_id),
+        )
+        conn.commit()
+
+    with pytest.raises(RuntimeError, match="multiple provider_listing rows"):
+        apply_migrations(db_path)
+
+
+def test_migration_082_drops_source_provider_preserving_rows(tmp_path: Path) -> None:
+    """Migration 082 drops ``market_data.source_provider`` while copying every
+    other column and row (provenance lives in ``provider_market_data`` after
+    migration 081)."""
+
+    from pyvalue.persistence.storage.migrations import (
+        _migration_082_drop_market_data_source_provider,
+    )
+
+    db_path = tmp_path / "market-data-082.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE listing (listing_id INTEGER PRIMARY KEY, "
+            "currency TEXT NOT NULL)"
+        )
+        conn.execute("INSERT INTO listing (listing_id, currency) VALUES (1, 'USD')")
+        # Pre-082 shape: market_data still carries the source_provider tag.
+        conn.execute(
+            """
+            CREATE TABLE market_data (
+                listing_id INTEGER NOT NULL,
+                as_of DATE NOT NULL,
+                price REAL NOT NULL,
+                volume INTEGER,
+                source_provider TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (listing_id, as_of),
+                FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO market_data (
+                listing_id, as_of, price, volume, source_provider, updated_at
+            ) VALUES (1, '2026-01-02', 10.0, 1000, 'EODHD',
+                      '2026-01-02T00:00:00+00:00')
+            """
+        )
+        conn.commit()
+
+        _migration_082_drop_market_data_source_provider(conn)
+
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(market_data)").fetchall()
+        }
+        rows = conn.execute(
+            """
+            SELECT listing_id, as_of, price, volume, updated_at
+            FROM market_data
+            """
+        ).fetchall()
+        foreign_keys = conn.execute("PRAGMA foreign_key_list(market_data)").fetchall()
+
+        # Idempotent: a table without source_provider is left untouched.
+        _migration_082_drop_market_data_source_provider(conn)
+        rerun_row_count = conn.execute("SELECT COUNT(*) FROM market_data").fetchone()[0]
+
+    assert "source_provider" not in columns
+    assert rows == [(1, "2026-01-02", 10.0, 1000, "2026-01-02T00:00:00+00:00")]
+    # The PK and the outgoing FK to listing are recreated on the rebuilt table.
+    assert len(foreign_keys) == 1
+    assert foreign_keys[0][2] == "listing"
+    assert rerun_row_count == 1

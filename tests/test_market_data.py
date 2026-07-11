@@ -155,7 +155,6 @@ def test_market_data_service_persists_prices(tmp_path: Path) -> None:
                 price=prepared.price,
                 volume=prepared.volume,
                 currency=prepared.currency,
-                source_provider="EODHD",
             )
         ]
     )
@@ -321,7 +320,6 @@ def test_market_data_service_stores_large_price_change_without_guard(
                 price=prepared.price,
                 volume=prepared.volume,
                 currency=prepared.currency,
-                source_provider="EODHD",
             )
         ]
     )

@@ -105,11 +105,13 @@ def purge_provider_listing_rows(
     dropped-exchange cascade in the catalog sync
     (`ExchangeProviderRepository.replace_for_provider`). Removes, per
     ``provider_listing_id``: raw fundamentals, fundamentals fetch state,
-    fundamentals normalization state, market-data fetch state, and finally the
-    ``provider_listing`` row itself -- hand-ordered because every FK in the
-    schema is NO ACTION. Canonical rows and data are deliberately out of
-    scope: they are provider-independent and no refresh deletes them. Shares
-    the caller's transaction.
+    fundamentals normalization state, market-data fetch state, provider
+    market data, and finally the ``provider_listing`` row itself --
+    hand-ordered because every FK in the schema is NO ACTION. Canonical rows
+    and data are deliberately out of scope: they are provider-independent and
+    no refresh deletes them (``market_data`` retains the price history of a
+    delisted provider listing; only the ``provider_market_data`` layer goes).
+    Shares the caller's transaction.
     """
     normalized = sorted({int(value) for value in provider_listing_ids if value})
     if not normalized:
@@ -140,6 +142,13 @@ def purge_provider_listing_rows(
         conn.execute(
             f"""
             DELETE FROM market_data_fetch_state
+            WHERE provider_listing_id IN ({placeholders})
+            """,
+            list(chunk),
+        )
+        conn.execute(
+            f"""
+            DELETE FROM provider_market_data
             WHERE provider_listing_id IN ({placeholders})
             """,
             list(chunk),
@@ -908,6 +917,11 @@ class SupportedTickerRepository(SQLiteStore):
         row: without the materialisation barrier the planner flattens the
         subquery and re-runs the probe for every reference in the outer
         ``WHERE`` / ``ORDER BY``.
+
+        ``provider_listing_id`` is projected through to the returned rows so
+        the market-data refresh can dual-write ``provider_market_data`` without
+        re-resolving the provider listing per row -- the key is already in hand
+        here (same threading as the fundamentals-ingest eligibility query).
         """
 
         self.initialize_schema()
@@ -938,6 +952,7 @@ class SupportedTickerRepository(SQLiteStore):
             f"{qualified_symbol} AS provider_symbol,",
             "pl.provider_symbol AS provider_ticker,",
             "pl.listing_id AS security_id,",
+            "pl.provider_listing_id AS provider_listing_id,",
             "l.currency AS currency,",
             "(SELECT MAX(as_of) FROM market_data "
             "WHERE listing_id = pl.listing_id) AS latest_as_of,",
@@ -967,7 +982,7 @@ class SupportedTickerRepository(SQLiteStore):
             " ".join(inner),
             ")",
             "SELECT provider_exchange_code, provider_symbol, provider_ticker, "
-            "security_id, currency",
+            "security_id, provider_listing_id, currency",
             "FROM eligible",
             "WHERE (latest_as_of IS NULL OR latest_as_of <= ?)",
         ]
@@ -995,6 +1010,7 @@ class SupportedTickerRepository(SQLiteStore):
                 provider_ticker=str(row["provider_ticker"]),
                 security_id=int(row["security_id"]),
                 currency=str(row["currency"]),
+                provider_listing_id=int(row["provider_listing_id"]),
             )
             for row in rows
         ]

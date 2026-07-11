@@ -36,6 +36,7 @@ from typing import Literal, NoReturn, Optional, Type
 from conftest import (
     fundamentals_payload_exists,
     resolve_listing_id,
+    resolve_provider_listing_id,
     seed_exchange,
     seed_facts,
     seed_metric,
@@ -1356,6 +1357,9 @@ def test_supported_ticker_repository_lists_market_data_symbols_missing_then_olde
     )
 
     assert [row.symbol for row in rows] == ["AAA.US", "CCC.US", "DDD.US"]
+    # The provider-listing key is threaded through so the refresh can dual-write
+    # provider_market_data without re-resolving each row.
+    assert all(row.provider_listing_id is not None for row in rows)
 
 
 def test_list_eligible_for_market_data_reads_base_tables_not_catalog_view(
@@ -1722,6 +1726,130 @@ def test_market_data_repository_upsert_prices_batches_rows(tmp_path: Path) -> No
     assert bbb_snapshot is not None
     assert aaa_snapshot.price == 10.0
     assert bbb_snapshot.price == 20.0
+
+
+def test_market_data_repository_dual_writes_provider_layer(tmp_path: Path) -> None:
+    """upsert_prices writes provider_market_data + canonical market_data together.
+
+    A row carrying ``provider_listing_id`` lands in both layers; a row without
+    one is canonical-only (the write path for listings whose provider layer was
+    purged). A re-upsert of the same ``(key, as_of)`` updates both layers.
+    """
+    db_path = tmp_path / "market-data-dual.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    seed_exchange(db_path, "US")
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [
+            {
+                "Code": "AAA",
+                "Name": "AAA Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
+            {
+                "Code": "BBB",
+                "Name": "BBB Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            },
+        ],
+    )
+    aaa_id = resolve_listing_id(db_path, "AAA.US")
+    bbb_id = resolve_listing_id(db_path, "BBB.US")
+    aaa_provider_listing_id = resolve_provider_listing_id(db_path, aaa_id)
+    assert aaa_provider_listing_id is not None
+
+    repo = MarketDataRepository(db_path)
+    repo.upsert_prices(
+        [
+            MarketDataUpdate(
+                security_id=aaa_id,
+                symbol="AAA.US",
+                as_of="2026-03-29",
+                price=10.0,
+                volume=100,
+                currency="USD",
+                provider_listing_id=aaa_provider_listing_id,
+            ),
+            # No provider mapping threaded -> canonical-only write.
+            MarketDataUpdate(
+                security_id=bbb_id,
+                symbol="BBB.US",
+                as_of="2026-03-29",
+                price=20.0,
+                volume=200,
+                currency="USD",
+            ),
+        ]
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        provider_rows = conn.execute(
+            """
+            SELECT provider_listing_id, as_of, price, volume
+            FROM provider_market_data
+            ORDER BY provider_listing_id
+            """
+        ).fetchall()
+        canonical_rows = conn.execute(
+            "SELECT listing_id, price FROM market_data ORDER BY listing_id"
+        ).fetchall()
+    assert provider_rows == [(aaa_provider_listing_id, "2026-03-29", 10.0, 100)]
+    assert canonical_rows == [(aaa_id, 10.0), (bbb_id, 20.0)]
+
+    # Conflict path: same (key, as_of) refreshes price/volume in both layers.
+    repo.upsert_prices(
+        [
+            MarketDataUpdate(
+                security_id=aaa_id,
+                symbol="AAA.US",
+                as_of="2026-03-29",
+                price=11.5,
+                volume=150,
+                currency="USD",
+                provider_listing_id=aaa_provider_listing_id,
+            )
+        ]
+    )
+    with sqlite3.connect(db_path) as conn:
+        provider_row = conn.execute(
+            "SELECT price, volume FROM provider_market_data WHERE provider_listing_id = ?",
+            (aaa_provider_listing_id,),
+        ).fetchone()
+        canonical_row = conn.execute(
+            "SELECT price, volume FROM market_data WHERE listing_id = ?",
+            (aaa_id,),
+        ).fetchone()
+    assert provider_row == (11.5, 150)
+    assert canonical_row == (11.5, 150)
+
+
+def test_market_data_repository_clear_wipes_both_layers(tmp_path: Path) -> None:
+    db_path = tmp_path / "market-data-clear.db"
+    ticker_repo = SupportedTickerRepository(db_path)
+    ticker_repo.initialize_schema()
+    seed_exchange(db_path, "US")
+    ticker_repo.replace_for_exchange(
+        "EODHD",
+        "US",
+        [{"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock", "Currency": "USD"}],
+    )
+    # seed_price threads the provider mapping, populating both layers.
+    seed_price(db_path, "AAA.US", "2026-03-29", 10.0, volume=100, currency="USD")
+
+    repo = MarketDataRepository(db_path)
+    repo.clear()
+
+    with sqlite3.connect(db_path) as conn:
+        provider_count = conn.execute(
+            "SELECT COUNT(*) FROM provider_market_data"
+        ).fetchone()[0]
+        canonical_count = conn.execute("SELECT COUNT(*) FROM market_data").fetchone()[0]
+    assert provider_count == 0
+    assert canonical_count == 0
 
 
 def test_market_data_fetch_state_repository_batch_methods(tmp_path: Path) -> None:

@@ -2493,7 +2493,7 @@ def test_cmd_update_market_data_stage_marks_bulk_validation_failure_per_symbol(
             price=data.price,
             volume=data.volume,
             currency=data.currency,
-            source_provider="EODHD",
+            provider_listing_id=ticker.provider_listing_id,
         )
 
     patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)

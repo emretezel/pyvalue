@@ -28,7 +28,12 @@ class MarketDataUpdate:
     price: float
     volume: Optional[int] = None
     currency: Optional[str] = None
-    source_provider: str = "EODHD"
+    # Provider-layer key for the dual write into ``provider_market_data``,
+    # threaded from the market-data eligibility query (which already reads
+    # ``provider_listing``). ``None`` means canonical-only: the observation is
+    # persisted to ``market_data`` without a provider-layer row (test seeds
+    # against uncatalogued fixtures; listings whose provider layer was purged).
+    provider_listing_id: Optional[int] = None
 
 
 class MarketDataProvider(Protocol):

@@ -154,6 +154,24 @@ def seed_metric_status(
     MetricComputeStatusRepository(db_path).upsert_many_by_id(id_records)
 
 
+def resolve_provider_listing_id(db_path: Path, listing_id: int) -> Optional[int]:
+    """Resolve a ``listing_id`` to its provider mapping, ``None`` when unmapped.
+
+    Lenient by design: a canonical listing legitimately outlives its
+    ``provider_listing`` row (the delisting purge removes only the provider
+    layer), so tests seeding data for such listings get ``None`` rather than
+    an assertion -- matching the production canonical-only write path.
+    """
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT provider_listing_id FROM provider_listing WHERE listing_id = ?",
+            (listing_id,),
+        ).fetchone()
+    return int(row[0]) if row is not None else None
+
+
 def seed_price(
     db_path: Path,
     symbol: str,
@@ -165,13 +183,18 @@ def seed_price(
     """Seed one market-data row for an already-catalogued ``symbol``.
 
     Resolves ``symbol`` to its ``listing_id`` and persists through the id-keyed
-    :meth:`MarketDataRepository.upsert_prices` (the only price writer).
+    :meth:`MarketDataRepository.upsert_prices` (the only price writer). The
+    provider mapping is threaded too, so a provider-catalogued listing seeds
+    both layers (``provider_market_data`` + canonical ``market_data``) exactly
+    like the production refresh; a listing without a ``provider_listing`` row
+    seeds canonical-only.
     """
     # Imported lazily so the src/ path insert above has already run.
     from pyvalue.marketdata import MarketDataUpdate
     from pyvalue.persistence.storage import MarketDataRepository
 
     listing_id = resolve_listing_id(db_path, symbol)
+    provider_listing_id = resolve_provider_listing_id(db_path, listing_id)
     MarketDataRepository(db_path).upsert_prices(
         [
             MarketDataUpdate(
@@ -181,6 +204,7 @@ def seed_price(
                 price=price,
                 volume=volume,
                 currency=currency,
+                provider_listing_id=provider_listing_id,
             )
         ]
     )

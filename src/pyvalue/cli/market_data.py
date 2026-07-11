@@ -165,7 +165,7 @@ def _build_market_data_update(
         price=prepared.price,
         volume=prepared.volume,
         currency=prepared.currency,
-        source_provider="EODHD",
+        provider_listing_id=ticker.provider_listing_id,
     )
 
 

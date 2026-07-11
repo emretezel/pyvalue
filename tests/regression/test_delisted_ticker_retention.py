@@ -50,11 +50,14 @@ _CANONICAL_TABLES = (
     "metric_compute_status",
 )
 # Provider-layer tables seeded for BBB below (all keyed by provider_listing_id,
-# except provider_listing itself): the prune must empty exactly these.
+# except provider_listing itself): the prune must empty exactly these. Note the
+# market-data pair: provider_market_data is pruned here while canonical
+# market_data (in _CANONICAL_TABLES above) must survive.
 _PROVIDER_TABLES = (
     "fundamentals_raw",
     "fundamentals_normalization_state",
     "market_data_fetch_state",
+    "provider_market_data",
 )
 
 

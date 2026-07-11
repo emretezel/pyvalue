@@ -483,26 +483,56 @@ class MarketDataRepository(SQLiteStore):
         self._security_repo().initialize_schema()
 
     def clear(self) -> None:
-        """Delete every ``market_data`` row (DELETE FROM, keeps constraints)."""
+        """Delete every market-data row, both layers (DELETE FROM, keeps constraints).
+
+        ``provider_market_data`` and canonical ``market_data`` are wiped in one
+        transaction: a cleared canonical store with surviving provider rows
+        would misstate what providers have supplied since the wipe.
+        """
         self.initialize_schema()
         with self._connect() as conn:
+            conn.execute("DELETE FROM provider_market_data")
             conn.execute("DELETE FROM market_data")
 
     def upsert_prices(self, rows: Sequence[MarketDataUpdate]) -> None:
+        """Persist price observations to both layers in one transaction.
+
+        Mirror of the catalog refreshes' write discipline: each observation
+        lands in the provider layer (``provider_market_data``, keyed by the
+        ``provider_listing_id`` threaded from the eligibility query) and is
+        upserted into the canonical ``market_data`` series. With a single
+        provider the canonical row simply adopts the observation; a future
+        multi-provider priority rule belongs in the canonical statement below.
+        Rows whose ``provider_listing_id`` is ``None`` are canonical-only
+        (test seeds against uncatalogued fixtures). A stale
+        ``provider_listing_id`` -- its provider listing pruned between
+        eligibility planning and this flush -- raises ``IntegrityError`` via
+        the FK; refreshes and prunes are not run concurrently in practice.
+        """
         self.initialize_schema()
         if not rows:
             return
         updated_at = _utc_now_iso()
-        payload = [
+        canonical_payload = [
             (
                 row.security_id,
                 row.as_of,
                 row.price,
                 row.volume,
-                row.source_provider.strip().upper(),
                 updated_at,
             )
             for row in rows
+        ]
+        provider_payload = [
+            (
+                row.provider_listing_id,
+                row.as_of,
+                row.price,
+                row.volume,
+                updated_at,
+            )
+            for row in rows
+            if row.provider_listing_id is not None
         ]
         with self._connect() as conn:
             conn.executemany(
@@ -512,17 +542,32 @@ class MarketDataRepository(SQLiteStore):
                     as_of,
                     price,
                     volume,
-                    source_provider,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(listing_id, as_of) DO UPDATE SET
                     price = excluded.price,
                     volume = excluded.volume,
-                    source_provider = excluded.source_provider,
                     updated_at = excluded.updated_at
                 """,
-                payload,
+                canonical_payload,
             )
+            if provider_payload:
+                conn.executemany(
+                    """
+                    INSERT INTO provider_market_data (
+                        provider_listing_id,
+                        as_of,
+                        price,
+                        volume,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(provider_listing_id, as_of) DO UPDATE SET
+                        price = excluded.price,
+                        volume = excluded.volume,
+                        updated_at = excluded.updated_at
+                    """,
+                    provider_payload,
+                )
 
     def latest_snapshot_by_id(self, listing_id: int) -> Optional[PriceData]:
         record = self.latest_snapshot_record_by_id(listing_id)

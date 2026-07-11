@@ -8312,6 +8312,149 @@ def _migration_080_listing_issuer_index(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_081_create_provider_market_data(conn: sqlite3.Connection) -> None:
+    """Create the provider-layer ``provider_market_data`` table and backfill it.
+
+    First half of extending the provider/canonical split (the
+    ``provider_exchange``/``exchange`` and ``provider_listing``/``listing``
+    model) to market data. ``provider_market_data`` records what each provider
+    reported for its own listing entity, keyed ``(provider_listing_id, as_of)``
+    exactly like the other provider-layer data tables (``fundamentals_raw``,
+    ``market_data_fetch_state``). Provider identity is transitive via
+    ``provider_listing -> provider_exchange -> provider`` -- deliberately no
+    ``provider_id`` column, the same redundancy migration 054 removed from
+    ``provider_listing``. Canonical ``market_data`` stays the app-facing price
+    series; migration 082 drops its now-relocated ``source_provider`` tag.
+
+    Backfill copies every ``market_data`` row whose listing still has a
+    ``provider_listing`` under the provider named by ``source_provider``.
+    Canonical-only rows (listings whose provider layer was purged, e.g. the
+    2026-07 plan-drop remnants) are deliberately skipped by the INNER JOINs:
+    the provider no longer supports them, and retaining their history is the
+    canonical table's job. A pre-flight aborts if one provider maps a listing
+    from multiple provider symbols -- the backfill would then attribute the
+    same canonical series to both, which needs an operator decision rather
+    than silent duplication (live count at migration time: 0).
+
+    Idempotent: skipped entirely once ``provider_market_data`` exists; the
+    backfill additionally no-ops on minimal test schemas missing the source
+    tables and on a ``market_data`` already rebuilt without
+    ``source_provider`` (which implies the backfill already ran).
+    """
+
+    if _table_exists(conn, "provider_market_data"):
+        return
+    conn.execute(
+        """
+        CREATE TABLE provider_market_data (
+            provider_listing_id INTEGER NOT NULL,
+            as_of DATE NOT NULL,
+            price REAL NOT NULL,
+            volume INTEGER,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (provider_listing_id, as_of),
+            FOREIGN KEY (provider_listing_id)
+                REFERENCES provider_listing(provider_listing_id)
+        )
+        """
+    )
+    for source in ("market_data", "provider_listing", "provider_exchange", "provider"):
+        if not _table_exists(conn, source):
+            return
+    if "source_provider" not in _table_columns(conn, "market_data"):
+        return
+    if "provider_exchange_id" not in _table_columns(conn, "provider_listing"):
+        # Pre-054 fixture shapes key provider_listing by provider_id directly;
+        # any real catalog at version 80 carries provider_exchange_id.
+        return
+    duplicate_row = conn.execute(
+        """
+        SELECT pl.listing_id
+        FROM provider_listing pl
+        JOIN provider_exchange pe
+            ON pe.provider_exchange_id = pl.provider_exchange_id
+        GROUP BY pl.listing_id, pe.provider_id
+        HAVING COUNT(*) > 1
+        LIMIT 1
+        """
+    ).fetchone()
+    if duplicate_row is not None:
+        raise RuntimeError(
+            "migration 081 aborted: listing_id "
+            f"{duplicate_row[0]} is mapped by multiple provider_listing rows "
+            "of the same provider; resolve the duplicate mapping before "
+            "backfilling provider_market_data"
+        )
+    conn.execute(
+        """
+        INSERT INTO provider_market_data (
+            provider_listing_id, as_of, price, volume, updated_at
+        )
+        SELECT pl.provider_listing_id, md.as_of, md.price, md.volume, md.updated_at
+        FROM market_data md
+        JOIN provider_listing pl ON pl.listing_id = md.listing_id
+        JOIN provider_exchange pe
+            ON pe.provider_exchange_id = pl.provider_exchange_id
+        JOIN provider p
+            ON p.provider_id = pe.provider_id
+            AND p.provider_code = md.source_provider
+        """
+    )
+
+
+def _migration_082_drop_market_data_source_provider(
+    conn: sqlite3.Connection,
+) -> None:
+    """Drop ``market_data.source_provider`` -- provenance moved to the provider layer.
+
+    Second half of the market-data provider/canonical split: migration 081
+    created ``provider_market_data`` and backfilled it from this column, so
+    the canonical table now carries a provider tag that duplicates the
+    provider layer (and was never read -- every ``market_data`` reader is
+    id-keyed and canonical). Dropping it makes ``market_data`` provider-free,
+    matching ``exchange``/``listing``: a future second provider adds rows to
+    ``provider_market_data`` and arbitration happens at write time, without
+    touching downstream readers.
+
+    Same rebuild mechanics as migration 072: ``market_data`` is a leaf table
+    (nothing references it; no view selects from it), so the existing ~217k
+    rows are COPIED into the narrower shape and the table is swapped in place.
+
+    Idempotent: a ``market_data`` that no longer declares ``source_provider``
+    is left untouched.
+    """
+
+    if not _table_exists(conn, "market_data"):
+        return
+    if "source_provider" not in _table_columns(conn, "market_data"):
+        return
+
+    conn.execute(
+        """
+        CREATE TABLE market_data__new (
+            listing_id INTEGER NOT NULL,
+            as_of DATE NOT NULL,
+            price REAL NOT NULL,
+            volume INTEGER,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (listing_id, as_of),
+            FOREIGN KEY (listing_id) REFERENCES listing(listing_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO market_data__new (
+            listing_id, as_of, price, volume, updated_at
+        )
+        SELECT listing_id, as_of, price, volume, updated_at
+        FROM market_data
+        """
+    )
+    conn.execute("DROP TABLE market_data")
+    conn.execute("ALTER TABLE market_data__new RENAME TO market_data")
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -8393,6 +8536,8 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_078_backfill_unknown_listing_status,
     _migration_079_readd_fundamentals_raw_last_fetched_index,
     _migration_080_listing_issuer_index,
+    _migration_081_create_provider_market_data,
+    _migration_082_drop_market_data_source_provider,
 ]
 
 

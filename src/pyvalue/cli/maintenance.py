@@ -50,8 +50,8 @@ def cmd_clear_metrics(database: str) -> int:
 
 
 def cmd_clear_market_data(database: str) -> int:
-    """Delete all stored market data."""
+    """Delete all stored market data (canonical and provider layers)."""
 
     MarketDataRepository(database).clear()
-    print(f"Cleared market_data table in {database}")
+    print(f"Cleared market_data and provider_market_data tables in {database}")
     return 0
