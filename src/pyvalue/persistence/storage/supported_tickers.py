@@ -18,7 +18,7 @@ from typing import (
 )
 
 from pyvalue.currency import (
-    raw_currency_code,
+    shaped_currency_code,
 )
 
 from .base import (
@@ -181,9 +181,12 @@ class SupportedTickerRepository(SQLiteStore):
     ) -> bool:
         """Catalog one provider listing; return True when retained.
 
-        Returns False only when the payload carries no currency (the listing
-        cannot be modelled and is skipped). Otherwise the ticker is retained and
-        this returns True -- whether it was created, updated, or already current.
+        Returns False only when the payload carries no usable currency --
+        absent, or failing the 3-uppercase-letter shape the ``listing.currency``
+        CHECK enforces (e.g. EODHD's ``'Unknown'`` placeholder) -- so the
+        listing cannot be modelled and is skipped. Otherwise the ticker is
+        retained and this returns True -- whether it was created, updated, or
+        already current.
 
         Skip-unchanged: a re-refresh re-sees rows that already match everything
         this command owns (``listing.currency``, ``issuer.name``, and the
@@ -193,11 +196,12 @@ class SupportedTickerRepository(SQLiteStore):
         Anything new or changed (new ticker, currency correction, name promotion,
         stale mapping) falls through to the write path.
         """
-        # Listings must carry a currency (listing.currency is NOT NULL and there
-        # is no fallback). A catalog entry whose payload omits the currency is
-        # skipped entirely -- neither the listing nor the provider_listing row
-        # is created.
-        quote_currency = raw_currency_code(currency)
+        # Listings must carry a currency (listing.currency is NOT NULL, carries
+        # the 3-letter shape CHECK, and there is no fallback). A catalog entry
+        # whose payload omits the currency -- or publishes a placeholder that
+        # fails the shape, like 'Unknown' -- is skipped entirely: neither the
+        # listing nor the provider_listing row is created.
+        quote_currency = shaped_currency_code(currency)
         if quote_currency is None:
             return False
         normalized_name = _normalize_optional_text(entity_name)
@@ -424,8 +428,9 @@ class SupportedTickerRepository(SQLiteStore):
         payload (dropping their raw fundamentals and fetch/normalization
         state). A pruned listing left with no provider mapping at all is then
         fully purged -- data, ``listing`` row, and orphaned ``issuer`` -- via
-        :meth:`_purge_delisted_listings`. Payload rows without a currency are
-        skipped, so they count as absent and are pruned like delisted tickers.
+        :meth:`_purge_delisted_listings`. Payload rows without a usable
+        currency (absent or malformed) are skipped, so they count as absent
+        and are pruned like delisted tickers.
         The whole slice commits as one transaction.
         """
         self.initialize_schema()

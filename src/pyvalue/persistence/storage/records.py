@@ -444,9 +444,11 @@ class SupportedTickerRefreshResult:
     ticker loses its facts/prices/metrics, its ``listing`` row, and -- when it
     was the issuer's last listing -- the ``issuer`` row (operator policy,
     2026-07). ``skipped_no_currency`` lists the provider tickers dropped because
-    the payload carried no currency: ``listing.currency`` is NOT NULL with no
-    fallback, so a currency-less entry cannot be modelled. It is surfaced to the
-    operator so the underlying data issue can be chased with the provider.
+    the payload carried no usable currency -- absent, or failing the
+    3-uppercase-letter shape ``listing.currency`` enforces (e.g. EODHD's
+    ``'Unknown'`` placeholder): the column is NOT NULL with no fallback, so such
+    an entry cannot be modelled. It is surfaced to the operator so the
+    underlying data issue can be chased with the provider.
     """
 
     inserted: int

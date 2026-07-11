@@ -19,6 +19,7 @@ from typing import (
 
 from pyvalue.currency import (
     raw_currency_code,
+    shaped_currency_code,
 )
 
 from .base import (
@@ -822,7 +823,14 @@ class ExchangeProviderRepository(SQLiteStore):
                             row.get("Country") or row.get("country")
                         )
                         or "Unknown",
-                        _normalize_optional_text(
+                        # provider_exchange.currency carries the 3-uppercase-
+                        # letter shape CHECK (migration 057). Providers publish
+                        # placeholders for currency-less virtual exchanges
+                        # (EODHD: 'Unknown' on FOREX/GBOND/MONEY); the shape
+                        # guard maps those to NULL -- the same coercion
+                        # migration 057 applied to legacy rows -- and
+                        # uppercases valid codes on the way in.
+                        shaped_currency_code(
                             row.get("Currency") or row.get("currency")
                         ),
                         _normalize_optional_text(

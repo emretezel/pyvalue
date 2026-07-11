@@ -10,6 +10,7 @@ from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Any, Literal, Mapping, Optional, Sequence
 import logging
+import re
 
 
 LOGGER = logging.getLogger(__name__)
@@ -96,6 +97,31 @@ def raw_currency_code(value: object) -> Optional[str]:
     except Exception:
         return None
     return code or None
+
+
+# Python twin of the schema-side ``_CURRENCY_FORMAT_CHECK`` predicate
+# (persistence/storage/migrations.py): every currency column CHECK accepts
+# exactly three uppercase ASCII letters (ISO-4217 codes plus the 3-letter
+# subunit codes GBX/ZAC/ILA).
+_CURRENCY_SHAPE: re.Pattern[str] = re.compile(r"[A-Z]{3}\Z")
+
+
+def shaped_currency_code(value: object) -> Optional[str]:
+    """Normalize a raw currency code and keep it only when schema-shaped.
+
+    Strips and uppercases ``value`` (via :func:`raw_currency_code`) and returns
+    the code only when it is exactly three uppercase ASCII letters -- the shape
+    the database CHECK constraints enforce on every currency column. Anything
+    else (provider placeholders such as EODHD's ``'Unknown'``, the ``GBP0.01``
+    subunit alias, empty text) returns ``None`` so writers can model "no real
+    currency" as NULL / a skipped row instead of tripping the constraint.
+    Subunit codes ``GBX``/``ZAC``/``ILA`` are three letters and pass unchanged.
+    """
+
+    code = raw_currency_code(value)
+    if code is None or _CURRENCY_SHAPE.fullmatch(code) is None:
+        return None
+    return code
 
 
 def currency_subunit(value: object) -> Optional[CurrencySubunit]:

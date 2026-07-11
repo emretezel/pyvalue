@@ -78,13 +78,14 @@ def _resolve_eodhd_exchange_metadata(
 
 
 def _report_skipped_no_currency(exchange_code: str, skipped: Sequence[str]) -> None:
-    """Warn on provider tickers skipped because the payload carried no currency.
+    """Warn on provider tickers skipped for lack of a usable payload currency.
 
-    ``listing.currency`` is NOT NULL with no fallback, so a catalog entry whose
-    payload omits the currency is not inserted. Printing the affected tickers to
-    the console lets the operator chase the data issue with the provider. The
-    list is previewed (first ``_SKIPPED_NO_CURRENCY_PREVIEW``) so a large gap
-    does not flood the output.
+    ``listing.currency`` is NOT NULL with a 3-uppercase-letter shape CHECK and
+    no fallback, so a catalog entry whose payload omits the currency or carries
+    a malformed placeholder (e.g. EODHD's ``'Unknown'``) is not inserted.
+    Printing the affected tickers to the console lets the operator chase the
+    data issue with the provider. The list is previewed (first
+    ``_SKIPPED_NO_CURRENCY_PREVIEW``) so a large gap does not flood the output.
     """
 
     if not skipped:
@@ -94,7 +95,7 @@ def _report_skipped_no_currency(exchange_code: str, skipped: Sequence[str]) -> N
     suffix = f" (+{extra} more)" if extra > 0 else ""
     print(
         f"    WARNING: {len(skipped)} ticker(s) on {exchange_code} skipped -- no "
-        f"currency in the provider payload; chase with the provider: "
+        f"usable currency in the provider payload; chase with the provider: "
         f"{preview}{suffix}"
     )
 

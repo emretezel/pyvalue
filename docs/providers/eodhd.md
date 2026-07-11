@@ -91,7 +91,10 @@ pyvalue ingest-fundamentals --exchange-codes US
 ```
 
 Supported-ticker refresh stores catalog currency on `listing.currency` as the
-listing quote unit. Single-symbol fundamentals ingestion uses existing catalog
+listing quote unit. Tickers whose payload currency is absent or malformed
+(anything other than three uppercase ASCII letters, e.g. the `'Unknown'`
+placeholder) are skipped and reported in the refresh warning output.
+Single-symbol fundamentals ingestion uses existing catalog
 currency when one is already present and otherwise leaves listing currency
 unset; it does not copy `General.CurrencyCode` from the raw payload into catalog
 metadata.

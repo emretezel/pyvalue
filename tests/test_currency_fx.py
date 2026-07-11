@@ -13,7 +13,9 @@ from typing import TypeVar, overload
 import json
 import multiprocessing as mp
 import pickle
+import re
 
+from hypothesis import given, strategies as st
 import pytest
 import requests
 
@@ -22,6 +24,7 @@ from pyvalue.currency import (
     normalize_currency_code,
     normalize_monetary_amount,
     resolve_eodhd_currency,
+    shaped_currency_code,
 )
 from pyvalue.money.fx import (
     EODHDFXProvider,
@@ -217,6 +220,36 @@ def test_normalize_monetary_amount_converts_gbx_to_gbp() -> None:
     assert normalize_currency_code("ILA") == "ILS"
     assert ila_amount == Decimal("2.5")
     assert ila_currency == "ILS"
+
+
+def test_shaped_currency_code_keeps_only_three_letter_codes() -> None:
+    # The schema-shape gate: 3 uppercase ASCII letters or nothing. Provider
+    # placeholders ('Unknown') and the 7-char GBP0.01 subunit alias must map
+    # to None; 3-letter subunit codes remain valid listing currencies.
+    assert shaped_currency_code(None) is None
+    assert shaped_currency_code("") is None
+    assert shaped_currency_code("   ") is None
+    assert shaped_currency_code("Unknown") is None
+    assert shaped_currency_code(" eur ") == "EUR"
+    assert shaped_currency_code("USD") == "USD"
+    assert shaped_currency_code("GBX") == "GBX"
+    assert shaped_currency_code("GBP0.01") is None
+    assert shaped_currency_code("US") is None
+    assert shaped_currency_code("USDT") is None
+
+
+@given(st.text())
+def test_shaped_currency_code_matches_shape_spec(raw: str) -> None:
+    # Total spec: the helper is exactly "strip+uppercase, keep iff the result
+    # is three ASCII uppercase letters" -- and it is idempotent on its output.
+    shaped = shaped_currency_code(raw)
+    normalized = raw.strip().upper()
+    if re.fullmatch(r"[A-Z]{3}", normalized):
+        assert shaped == normalized
+    else:
+        assert shaped is None
+    if shaped is not None:
+        assert shaped_currency_code(shaped) == shaped
 
 
 def test_fx_service_same_currency_returns_identity(tmp_path: Path) -> None:
