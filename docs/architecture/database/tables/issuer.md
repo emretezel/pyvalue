@@ -56,6 +56,11 @@ One row per issuer record created during catalog backfill or listing creation.
   deletes an issuer once the delisting purge removes its last listing
 - migration-time backfill from legacy security metadata
 - metadata refreshes from stored fundamentals
+- runtime identity merge — both rename paths (the catalog refresh and the
+  fundamentals metadata promotion) route through
+  `SecurityRepository._apply_issuer_metadata`, which merges an issuer into an
+  existing `(name, country)` row when a rename would collide with the UNIQUE
+  index (see Review Notes)
 
 ## Sample Rows
 
@@ -132,3 +137,18 @@ One row per issuer record created during catalog backfill or listing creation.
   alone — SQLite's UNIQUE INDEX treats NULLs as distinct, and merging
   on a NULL key would conflate unrelated companies (e.g. 260 US
   closed-end-fund issuers whose listings are unrelated).
+- The runtime rename paths enforce the same identity. `issuer.country`
+  is written only by the migration-era backfill (the catalog path
+  inserts NULL), so most issuers carry a country while providers keep
+  restyling display names. When a rename would land on a `(name,
+  country)` pair another issuer already holds, a blind `UPDATE` would
+  violate `idx_issuer_name_country` and abort the whole refresh
+  transaction (this killed `refresh-supported-tickers` on BE, 2026-07:
+  ~2k Berlin listings renamed onto sibling-venue identities).
+  `SecurityRepository._apply_issuer_metadata` therefore merges at
+  runtime with migration 060's exact rules: the survivor's non-NULL
+  metadata is never overwritten (backfill order: payload, then the
+  merged-away row), all of the source issuer's listings are repointed,
+  and the emptied source row is deleted. NULL-country renames never
+  merge — they remain plain updates, and same-name NULL-country
+  duplicates stay legitimate.

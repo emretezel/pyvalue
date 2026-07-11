@@ -5,6 +5,7 @@ Author: Emre Tezel
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 import sqlite3
 from typing import (
@@ -41,6 +42,8 @@ from .records import (
     SecurityMetadataUpdate,
 )
 from .migrations import apply_migrations
+
+logger = logging.getLogger(__name__)
 
 
 class ProviderRepository(SQLiteStore):
@@ -232,6 +235,128 @@ class SecurityRepository(SQLiteStore):
         self._remember(security)
         return security
 
+    def _apply_issuer_metadata(
+        self,
+        conn: sqlite3.Connection,
+        listing_id: int,
+        entity_name: Optional[str],
+        description: Optional[str],
+        sector: Optional[str],
+        industry: Optional[str],
+    ) -> bool:
+        """Apply payload metadata to a listing's issuer, honouring identity.
+
+        ``(name, country)`` is the unique issuer identity (migration 060,
+        ``idx_issuer_name_country``). A blind rename can therefore collide:
+        when the provider restyles a listing's display name to one that a
+        *different* issuer row already holds with the same country, the two
+        rows are the same real-world entity by the schema's own definition.
+        Instead of letting the UNIQUE index abort the caller's transaction,
+        this converges them exactly like migration 060 did wholesale:
+
+        * the target keeps its own non-NULL metadata; NULL columns are
+          backfilled from the payload first, then from the merged-away row,
+        * every listing of the source issuer is repointed to the target (an
+          issuer row models one entity, so all of its listings move),
+        * the emptied source row is deleted (``listing`` is the only FK
+          referrer; ``PRAGMA foreign_keys=ON`` would surface any surprise).
+
+        A NULL country never merges: SQLite's UNIQUE index treats NULLs as
+        distinct, and migration 060 documents that merging on a NULL key
+        would conflate unrelated companies. Those renames stay plain updates.
+
+        All values must already be normalized (``_normalize_optional_text``)
+        so the identity probe compares exactly what the write would store.
+        Returns True when an issuer write was issued, False when the listing
+        does not exist.
+        """
+        current = conn.execute(
+            """
+            SELECT i.issuer_id AS issuer_id, i.name AS name, i.country AS country
+            FROM listing l
+            JOIN issuer i ON i.issuer_id = l.issuer_id
+            WHERE l.listing_id = ?
+            """,
+            (listing_id,),
+        ).fetchone()
+        if current is None:
+            return False
+        source_issuer_id = int(current["issuer_id"])
+        renames = entity_name is not None and entity_name != current["name"]
+        if renames and current["country"] is not None:
+            # BINARY equality on (name, country) -- the exact semantics of
+            # idx_issuer_name_country, which also serves this probe as a seek.
+            target = conn.execute(
+                """
+                SELECT issuer_id
+                FROM issuer
+                WHERE name = ? AND country = ? AND issuer_id != ?
+                """,
+                (entity_name, current["country"], source_issuer_id),
+            ).fetchone()
+            if target is not None:
+                target_issuer_id = int(target["issuer_id"])
+                # Promote metadata BEFORE the source row disappears. COALESCE
+                # order: the survivor's own value wins, then the fresh payload,
+                # then the merged-away row (060's never-overwrite rule).
+                conn.execute(
+                    """
+                    UPDATE issuer
+                    SET description = COALESCE(
+                            description, ?,
+                            (SELECT description FROM issuer WHERE issuer_id = ?)
+                        ),
+                        sector = COALESCE(
+                            sector, ?,
+                            (SELECT sector FROM issuer WHERE issuer_id = ?)
+                        ),
+                        industry = COALESCE(
+                            industry, ?,
+                            (SELECT industry FROM issuer WHERE issuer_id = ?)
+                        )
+                    WHERE issuer_id = ?
+                    """,
+                    (
+                        description,
+                        source_issuer_id,
+                        sector,
+                        source_issuer_id,
+                        industry,
+                        source_issuer_id,
+                        target_issuer_id,
+                    ),
+                )
+                conn.execute(
+                    "UPDATE listing SET issuer_id = ? WHERE issuer_id = ?",
+                    (target_issuer_id, source_issuer_id),
+                )
+                conn.execute(
+                    "DELETE FROM issuer WHERE issuer_id = ?",
+                    (source_issuer_id,),
+                )
+                logger.debug(
+                    "issuer identity merge: renamed issuer %d to %r collided "
+                    "with issuer %d (country %r); listings repointed, source "
+                    "row deleted",
+                    source_issuer_id,
+                    entity_name,
+                    target_issuer_id,
+                    current["country"],
+                )
+                return True
+        conn.execute(
+            """
+            UPDATE issuer
+            SET name = COALESCE(?, name),
+                description = COALESCE(?, description),
+                sector = COALESCE(?, sector),
+                industry = COALESCE(?, industry)
+            WHERE issuer_id = ?
+            """,
+            (entity_name, description, sector, industry, source_issuer_id),
+        )
+        return True
+
     def _ensure_listing_for_exchange_id(
         self,
         conn: sqlite3.Connection,
@@ -296,26 +421,16 @@ class SecurityRepository(SQLiteStore):
                 (issuer_id, exchange_id, ticker, listing_currency),
             )
         else:
-            conn.execute(
-                """
-                UPDATE issuer
-                SET name = COALESCE(?, name),
-                    description = COALESCE(?, description),
-                    sector = COALESCE(?, sector),
-                    industry = COALESCE(?, industry)
-                WHERE issuer_id = (
-                    SELECT issuer_id
-                    FROM listing
-                    WHERE listing_id = ?
-                )
-                """,
-                (
-                    entity_name,
-                    description,
-                    sector,
-                    industry,
-                    security.security_id,
-                ),
+            # A payload rename may land on an existing (name, country)
+            # identity; the helper merges instead of violating
+            # idx_issuer_name_country (which aborted whole refreshes before).
+            self._apply_issuer_metadata(
+                conn,
+                security.security_id,
+                entity_name,
+                description,
+                sector,
+                industry,
             )
         return self._load_by_exchange_and_symbol(conn, exchange_id, ticker)
 
@@ -508,7 +623,17 @@ class SecurityRepository(SQLiteStore):
         self,
         updates: Sequence[SecurityMetadataUpdate],
     ) -> int:
-        """Persist many canonical metadata updates in one transaction."""
+        """Persist many canonical metadata updates in one transaction.
+
+        Each row goes through :meth:`_apply_issuer_metadata` rather than a
+        blind batched UPDATE: a promoted ``General.Name`` can land on an
+        existing ``(name, country)`` identity, and the helper merges the two
+        issuer rows instead of letting ``idx_issuer_name_country`` abort the
+        whole batch. Callers pass small batches (normalize: one row per unit;
+        the metadata CLI: pre-filtered chunks), so the per-row point seeks are
+        not a measurable cost. Returns the number of updates applied to an
+        existing listing.
+        """
 
         self.initialize_schema()
         rows = [
@@ -532,24 +657,18 @@ class SecurityRepository(SQLiteStore):
             return 0
 
         security_ids = [row[-1] for row in rows]
+        updated = 0
         with self._connect() as conn:
-            before = conn.total_changes
-            conn.executemany(
-                """
-                UPDATE issuer
-                SET name = COALESCE(?, name),
-                    description = COALESCE(?, description),
-                    sector = COALESCE(?, sector),
-                    industry = COALESCE(?, industry)
-                WHERE issuer_id = (
-                    SELECT issuer_id
-                    FROM listing
-                    WHERE listing_id = ?
-                )
-                """,
-                rows,
-            )
-            updated = int(conn.total_changes - before)
+            for entity_name, description, sector, industry, security_id in rows:
+                if self._apply_issuer_metadata(
+                    conn,
+                    security_id,
+                    entity_name,
+                    description,
+                    sector,
+                    industry,
+                ):
+                    updated += 1
 
         for security_id in security_ids:
             cached = self._by_id.pop(security_id, None)
