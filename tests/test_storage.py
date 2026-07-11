@@ -2764,7 +2764,6 @@ def test_fx_rates_repository_latest_on_or_before_and_discover_currencies(
                 quote_currency="EUR",
                 rate=0.8,
                 fetched_at="2024-01-01T00:00:00+00:00",
-                source_kind="provider",
             ),
             FXRateRecord(
                 provider="EODHD",
@@ -2773,15 +2772,15 @@ def test_fx_rates_repository_latest_on_or_before_and_discover_currencies(
                 quote_currency="EUR",
                 rate=0.9,
                 fetched_at="2024-01-10T00:00:00+00:00",
-                source_kind="provider",
             ),
         ]
     )
 
-    record = repo.latest_on_or_before("EODHD", "USD", "EUR", "2024-01-05")
+    # Canonical read: provider-agnostic (rate_date, rate) tuple.
+    latest = repo.latest_on_or_before("USD", "EUR", "2024-01-05")
 
-    assert record is not None
-    assert record.rate_date == "2024-01-01"
+    assert latest is not None
+    assert latest == ("2024-01-01", 0.8)
     assert repo.discover_currencies() == ["GBP", "ILS", "ZAR"]
     assert (
         repo.fully_covered_quotes_for_window(
@@ -2800,6 +2799,198 @@ def test_fx_rates_repository_latest_on_or_before_and_discover_currencies(
         date(2024, 1, 1),
         date(2024, 1, 1),
     ) == {"EUR"}
+
+
+def test_fx_rates_repository_dual_writes_provider_layer(tmp_path: Path) -> None:
+    """upsert_many writes provider_fx_rates + canonical fx_rates together.
+
+    The provider row carries the resolved provider_id, the normalized
+    provider_symbol (falling back to base+quote when the record leaves it
+    empty), and preserves created_at on conflict; the canonical row adopts the
+    observation.
+    """
+    db_path = tmp_path / "fx-dual-write.db"
+    repo = FXRatesRepository(db_path)
+    repo.initialize_schema()
+
+    stored = repo.upsert_many(
+        [
+            FXRateRecord(
+                provider="EODHD",
+                rate_date="2024-01-01",
+                base_currency="EUR",
+                quote_currency="USD",
+                rate=1.09,
+                fetched_at="2024-01-01T00:00:00+00:00",
+                provider_symbol="eurusd",
+                created_at="2024-01-01T00:00:00+00:00",
+                updated_at="2024-01-01T00:00:00+00:00",
+            ),
+            # Empty provider_symbol -> base+quote fallback.
+            FXRateRecord(
+                provider="EODHD",
+                rate_date="2024-01-02",
+                base_currency="USD",
+                quote_currency="JPY",
+                rate=148.5,
+                fetched_at="2024-01-02T00:00:00+00:00",
+                created_at="2024-01-02T00:00:00+00:00",
+            ),
+        ]
+    )
+    assert stored == 2
+
+    with sqlite3.connect(db_path) as conn:
+        eodhd_provider_id = conn.execute(
+            "SELECT provider_id FROM provider WHERE provider_code = 'EODHD'"
+        ).fetchone()[0]
+        provider_rows = conn.execute(
+            """
+            SELECT provider_id, base_currency, quote_currency, rate_date,
+                   rate, provider_symbol, created_at
+            FROM provider_fx_rates
+            ORDER BY rate_date
+            """
+        ).fetchall()
+        canonical_rows = conn.execute(
+            """
+            SELECT base_currency, quote_currency, rate_date, rate
+            FROM fx_rates
+            ORDER BY rate_date
+            """
+        ).fetchall()
+    assert provider_rows == [
+        (
+            eodhd_provider_id,
+            "EUR",
+            "USD",
+            "2024-01-01",
+            1.09,
+            "EURUSD",
+            "2024-01-01T00:00:00+00:00",
+        ),
+        (
+            eodhd_provider_id,
+            "USD",
+            "JPY",
+            "2024-01-02",
+            148.5,
+            "USDJPY",
+            "2024-01-02T00:00:00+00:00",
+        ),
+    ]
+    assert canonical_rows == [
+        ("EUR", "USD", "2024-01-01", 1.09),
+        ("USD", "JPY", "2024-01-02", 148.5),
+    ]
+
+    # Conflict path: the rate refreshes in both layers while the provider
+    # row's created_at is preserved.
+    repo.upsert_many(
+        [
+            FXRateRecord(
+                provider="EODHD",
+                rate_date="2024-01-01",
+                base_currency="EUR",
+                quote_currency="USD",
+                rate=1.10,
+                fetched_at="2024-01-03T00:00:00+00:00",
+                provider_symbol="EURUSD",
+                created_at="2024-01-03T00:00:00+00:00",
+            )
+        ]
+    )
+    with sqlite3.connect(db_path) as conn:
+        provider_row = conn.execute(
+            """
+            SELECT rate, created_at FROM provider_fx_rates
+            WHERE base_currency = 'EUR' AND quote_currency = 'USD'
+            """
+        ).fetchone()
+        canonical_rate = conn.execute(
+            """
+            SELECT rate FROM fx_rates
+            WHERE base_currency = 'EUR' AND quote_currency = 'USD'
+            """
+        ).fetchone()[0]
+    assert provider_row == (1.10, "2024-01-01T00:00:00+00:00")
+    assert canonical_rate == 1.10
+
+
+def test_fx_rates_repository_upsert_many_rejects_unknown_provider(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "fx-unknown-provider.db"
+    repo = FXRatesRepository(db_path)
+    repo.initialize_schema()
+
+    with pytest.raises(ValueError, match="NOT_A_PROVIDER"):
+        repo.upsert_many(
+            [
+                FXRateRecord(
+                    provider="NOT_A_PROVIDER",
+                    rate_date="2024-01-01",
+                    base_currency="EUR",
+                    quote_currency="USD",
+                    rate=1.09,
+                    fetched_at="2024-01-01T00:00:00+00:00",
+                )
+            ]
+        )
+
+
+def test_fx_rates_reader_split_between_layers(tmp_path: Path) -> None:
+    """Converter reads are canonical-only; coverage reads are provider-only.
+
+    A row present only in the provider layer must not surface through the
+    canonical readers, and a canonical-only row must not count as provider
+    coverage -- the split is what lets a future provider be added without
+    downstream readers noticing.
+    """
+    db_path = tmp_path / "fx-reader-split.db"
+    repo = FXRatesRepository(db_path)
+    repo.initialize_schema()
+
+    with sqlite3.connect(db_path) as conn:
+        eodhd_provider_id = conn.execute(
+            "SELECT provider_id FROM provider WHERE provider_code = 'EODHD'"
+        ).fetchone()[0]
+        # Provider-only row (no canonical mirror).
+        conn.execute(
+            """
+            INSERT INTO provider_fx_rates (
+                provider_id, base_currency, quote_currency, rate_date, rate,
+                provider_symbol, fetched_at, created_at, updated_at
+            ) VALUES (?, 'EUR', 'USD', '2024-01-01', 1.09, 'EURUSD',
+                      '2024-01-01T00:00:00+00:00', '2024-01-01T00:00:00+00:00',
+                      '2024-01-01T00:00:00+00:00')
+            """,
+            (eodhd_provider_id,),
+        )
+        # Canonical-only row (no provider provenance).
+        conn.execute(
+            """
+            INSERT INTO fx_rates (
+                base_currency, quote_currency, rate_date, rate, updated_at
+            ) VALUES ('USD', 'JPY', '2024-01-02', 148.5,
+                      '2024-01-02T00:00:00+00:00')
+            """
+        )
+        conn.commit()
+
+    # Canonical readers see only the canonical row.
+    assert repo.fetch_pair_history("EUR", "USD") == []
+    assert repo.fetch_pair_history("USD", "JPY") == [("2024-01-02", 148.5)]
+    assert repo.latest_on_or_before("EUR", "USD", "2024-12-31") is None
+    assert repo.latest_on_or_before("USD", "JPY", "2024-12-31") == (
+        "2024-01-02",
+        148.5,
+    )
+    assert repo.fetch_all() == [("USD", "JPY", "2024-01-02", 148.5)]
+
+    # Provider-scoped planning sees only the provider row.
+    assert repo.pair_coverage("EODHD", "EUR", "USD") == ("2024-01-01", "2024-01-01")
+    assert repo.pair_coverage("EODHD", "USD", "JPY") == (None, None)
 
 
 def test_fx_rates_repository_discover_currencies_excludes_secondary_supported_tickers(

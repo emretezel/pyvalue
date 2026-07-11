@@ -301,7 +301,14 @@ IdKeyedStoredMetricRow = Tuple[
 
 @dataclass(frozen=True)
 class FXRateRecord:
-    """Persisted direct FX rate observation."""
+    """One provider-observed direct FX rate, the write DTO into the dual layer.
+
+    ``provider`` stays on the record (the writer resolves it to
+    ``provider_id`` for the provider-layer row); ``provider_symbol`` is the
+    provider's own pair symbol (e.g. EODHD's ``AEDAUD``) -- an empty value is
+    normalized to ``base_currency + quote_currency`` at write time, the
+    provider's own symbol convention.
+    """
 
     provider: str
     rate_date: str
@@ -309,8 +316,7 @@ class FXRateRecord:
     quote_currency: str
     rate: float
     fetched_at: str
-    source_kind: str
-    meta_json: Optional[str] = None
+    provider_symbol: str = ""
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 

@@ -12,7 +12,6 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Optional, Protocol, Sequence
-import json
 import logging
 
 import requests
@@ -247,10 +246,10 @@ class EODHDFXProvider:
                     quote_currency=quote,
                     rate=float(close),
                     fetched_at=fetched_at,
-                    source_kind="provider",
-                    meta_json=json.dumps(
-                        {"provider": self.provider_name, "symbol": symbol}
-                    ),
+                    # The concrete EODHD symbol this history was fetched under
+                    # (aliases may differ from base+quote), persisted as
+                    # provider provenance on provider_fx_rates.
+                    provider_symbol=symbol,
                 )
             )
         return records
@@ -341,11 +340,16 @@ class FXService:
         if preload_all:
             self.preload_provider_history()
 
-    def preload_provider_history(self, provider_name: Optional[str] = None) -> None:
-        """Load the full direct-rate history for one provider into memory."""
+    def preload_provider_history(self) -> None:
+        """Load the full canonical direct-rate history into memory.
 
-        provider_norm = (provider_name or self.provider_name).strip().upper()
-        rows = self.repository.fetch_all_for_provider(provider_norm)
+        The canonical ``fx_rates`` series is provider-free; ``provider_name``
+        survives only as the in-memory cache namespace (and quote labelling),
+        not as a storage filter.
+        """
+
+        provider_norm = self.provider_name
+        rows = self.repository.fetch_all()
         self._history_cache.clear()
         self._quote_cache.clear()
         current_pair: Optional[tuple[str, str, str]] = None
@@ -562,11 +566,7 @@ class FXService:
             empty = FXSeries.empty()
             self._history_cache[pair_key] = empty
             return empty
-        rows = self.repository.fetch_pair_history(
-            provider_norm,
-            base_currency,
-            quote_currency,
-        )
+        rows = self.repository.fetch_pair_history(base_currency, quote_currency)
         series = FXSeries.from_rows(rows)
         self._history_cache[pair_key] = series
         return series

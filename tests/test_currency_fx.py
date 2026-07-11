@@ -110,29 +110,26 @@ class _CountingFXRatesRepository(FXRatesRepository):
     """Repository that counts how the FX service hits the database.
 
     Used to assert the service's caching: how many times it loads the whole
-    provider table versus individual direct pairs, and which pairs it asked for.
+    canonical table versus individual direct pairs, and which pairs it asked
+    for.
     """
 
     def __init__(self, db_path: str | Path) -> None:
         super().__init__(db_path)
         self.fetch_all_calls = 0
         self.fetch_pair_history_calls = 0
-        self.fetch_pair_history_pairs: list[tuple[str, str, str]] = []
+        self.fetch_pair_history_pairs: list[tuple[str, str]] = []
 
-    def fetch_all_for_provider(
-        self, provider: str
-    ) -> list[tuple[str, str, str, float]]:
+    def fetch_all(self) -> list[tuple[str, str, str, float]]:
         self.fetch_all_calls += 1
-        return super().fetch_all_for_provider(provider)
+        return super().fetch_all()
 
     def fetch_pair_history(
-        self, provider: str, base_currency: str, quote_currency: str
+        self, base_currency: str, quote_currency: str
     ) -> list[tuple[str, float]]:
         self.fetch_pair_history_calls += 1
-        self.fetch_pair_history_pairs.append(
-            (str(provider), str(base_currency), str(quote_currency))
-        )
-        return super().fetch_pair_history(provider, base_currency, quote_currency)
+        self.fetch_pair_history_pairs.append((str(base_currency), str(quote_currency)))
+        return super().fetch_pair_history(base_currency, quote_currency)
 
 
 def _raise_missing_fx_rate_error() -> None:
@@ -278,7 +275,6 @@ def test_fx_service_direct_inverse_and_on_or_before_lookup(tmp_path: Path) -> No
             quote_currency="EUR",
             rate=0.80,
             fetched_at="2024-01-01T00:00:00+00:00",
-            source_kind="provider",
         ),
         FXRateRecord(
             provider="EODHD",
@@ -287,7 +283,6 @@ def test_fx_service_direct_inverse_and_on_or_before_lookup(tmp_path: Path) -> No
             quote_currency="EUR",
             rate=0.90,
             fetched_at="2024-01-10T00:00:00+00:00",
-            source_kind="provider",
         ),
     )
 
@@ -311,7 +306,6 @@ def test_fx_service_triangulates_through_pivot_currency(tmp_path: Path) -> None:
             quote_currency="CAD",
             rate=1.30,
             fetched_at="2024-02-01T00:00:00+00:00",
-            source_kind="provider",
         ),
         FXRateRecord(
             provider="EODHD",
@@ -320,7 +314,6 @@ def test_fx_service_triangulates_through_pivot_currency(tmp_path: Path) -> None:
             quote_currency="EUR",
             rate=0.80,
             fetched_at="2024-02-01T00:00:00+00:00",
-            source_kind="provider",
         ),
     )
 
@@ -341,7 +334,6 @@ def test_fx_service_prefers_fresher_inverse_over_older_direct(tmp_path: Path) ->
             quote_currency="GBP",
             rate=0.88561,
             fetched_at="2022-12-31T00:00:00+00:00",
-            source_kind="provider",
         ),
         FXRateRecord(
             provider="EODHD",
@@ -350,7 +342,6 @@ def test_fx_service_prefers_fresher_inverse_over_older_direct(tmp_path: Path) ->
             quote_currency="EUR",
             rate=1.1815,
             fetched_at="2024-06-30T00:00:00+00:00",
-            source_kind="provider",
         ),
     )
 
@@ -374,7 +365,6 @@ def test_fx_service_prefers_fresher_triangulation_over_older_direct(
             quote_currency="GBP",
             rate=0.88561,
             fetched_at="2022-12-31T00:00:00+00:00",
-            source_kind="provider",
         ),
         FXRateRecord(
             provider="EODHD",
@@ -383,7 +373,6 @@ def test_fx_service_prefers_fresher_triangulation_over_older_direct(
             quote_currency="USD",
             rate=1.1751,
             fetched_at="2025-12-31T00:00:00+00:00",
-            source_kind="provider",
         ),
         FXRateRecord(
             provider="EODHD",
@@ -392,7 +381,6 @@ def test_fx_service_prefers_fresher_triangulation_over_older_direct(
             quote_currency="USD",
             rate=1.2648,
             fetched_at="2025-12-31T00:00:00+00:00",
-            source_kind="provider",
         ),
     )
 
@@ -430,7 +418,6 @@ def test_fx_service_preload_all_loads_provider_table_once(tmp_path: Path) -> Non
             quote_currency="EUR",
             rate=0.90,
             fetched_at="2024-01-01T00:00:00+00:00",
-            source_kind="provider",
         ),
         FXRateRecord(
             provider="EODHD",
@@ -439,7 +426,6 @@ def test_fx_service_preload_all_loads_provider_table_once(tmp_path: Path) -> Non
             quote_currency="GBP",
             rate=0.80,
             fetched_at="2024-01-01T00:00:00+00:00",
-            source_kind="provider",
         ),
         preload_all=True,
         repository_cls=_CountingFXRatesRepository,
@@ -466,7 +452,6 @@ def test_fx_service_lazy_pair_cache_loads_each_direct_leg_once(tmp_path: Path) -
             quote_currency="EUR",
             rate=0.90,
             fetched_at="2024-01-01T00:00:00+00:00",
-            source_kind="provider",
         ),
         repository_cls=_CountingFXRatesRepository,
     )
@@ -483,8 +468,8 @@ def test_fx_service_lazy_pair_cache_loads_each_direct_leg_once(tmp_path: Path) -
     assert repo.fetch_all_calls == 0
     assert repo.fetch_pair_history_calls == 2
     assert repo.fetch_pair_history_pairs == [
-        ("EODHD", "USD", "EUR"),
-        ("EODHD", "EUR", "USD"),
+        ("USD", "EUR"),
+        ("EUR", "USD"),
     ]
 
 
@@ -500,7 +485,6 @@ def test_fx_service_stale_rate_logs_warning_but_returns_quote(
             quote_currency="EUR",
             rate=0.90,
             fetched_at="2024-01-01T00:00:00+00:00",
-            source_kind="provider",
         ),
     )
 
@@ -623,7 +607,7 @@ def test_eodhd_provider_fetch_history_uses_close_rate() -> None:
     assert rows[0].base_currency == "EUR"
     assert rows[0].quote_currency == "USD"
     assert rows[0].rate == 1.095
-    assert rows[0].meta_json is not None and "EURUSD" in rows[0].meta_json
+    assert rows[0].provider_symbol == "EURUSD"
     assert session.calls[0][0].endswith("/eod/EURUSD.FOREX")
     assert session.calls[0][1] == {
         "api_token": "secret",

@@ -173,10 +173,11 @@ def _extend_coverage(
 
     Upserts only insert or refresh rows inside the fetched window -- they never
     delete -- so a pair's new coverage is its prior coverage widened by the
-    batch's own dates. Deriving it here avoids re-querying ``fx_rates`` with a
-    second per-range ``pair_coverage`` MIN/MAX scan. ``rate_date`` values are
-    zero-padded ISO-8601 strings, so lexical min/max match chronological order
-    and reproduce exactly what ``pair_coverage`` would return after the upsert.
+    batch's own dates. Deriving it here avoids re-querying ``provider_fx_rates``
+    with a second per-range ``pair_coverage`` MIN/MAX scan. ``rate_date`` values
+    are zero-padded ISO-8601 strings, so lexical min/max match chronological
+    order and reproduce exactly what ``pair_coverage`` would return after the
+    upsert.
     """
 
     batch_dates = [record.rate_date for record in rows if record.rate_date]
@@ -332,7 +333,7 @@ def _cmd_refresh_fx_rates_eodhd(
                 break
             stored += fx_repo.upsert_many(rows)
             # Widen coverage from the rows we just stored rather than issuing a
-            # second full-group MIN/MAX scan of fx_rates per range.
+            # second full-group MIN/MAX scan of provider_fx_rates per range.
             current_min, current_max = _extend_coverage(current_min, current_max, rows)
         if pair_failed:
             failed_pairs += 1

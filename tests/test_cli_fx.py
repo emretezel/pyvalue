@@ -152,7 +152,6 @@ def test_rank_screen_passers_normalizes_mixed_currency_metric_with_ranking_curre
             quote_currency="EUR",
             rate=0.5,
             fetched_at="2023-12-31T00:00:00+00:00",
-            source_kind="provider",
         )
     )
     security_repo = SecurityRepository(db_path)
@@ -263,7 +262,6 @@ def test_cmd_refresh_fx_rates_eodhd_syncs_catalog_and_skips_aliases(
                     quote_currency="USD",
                     rate=1.09,
                     fetched_at="2024-01-01T00:00:00+00:00",
-                    source_kind="provider",
                 )
             ]
 
@@ -281,7 +279,7 @@ def test_cmd_refresh_fx_rates_eodhd_syncs_catalog_and_skips_aliases(
     assert FakeProvider.last_instance.calls == [("EURUSD", "2024-01-01", "2024-01-01")]
 
     fx_repo = FXRatesRepository(db_path)
-    assert fx_repo.fetch_pair_history("EODHD", "EUR", "USD") == [("2024-01-01", 1.09)]
+    assert fx_repo.fetch_pair_history("EUR", "USD") == [("2024-01-01", 1.09)]
 
     state = FXRefreshStateRepository(db_path).fetch("EODHD", "EURUSD")
     assert state is not None
@@ -323,7 +321,6 @@ def test_cmd_refresh_fx_rates_eodhd_fetches_only_incremental_newer_history(
                 quote_currency="USD",
                 rate=1.09,
                 fetched_at="2024-01-01T00:00:00+00:00",
-                source_kind="provider",
             ),
             FXRateRecord(
                 provider="EODHD",
@@ -332,7 +329,6 @@ def test_cmd_refresh_fx_rates_eodhd_fetches_only_incremental_newer_history(
                 quote_currency="USD",
                 rate=1.10,
                 fetched_at="2024-01-02T00:00:00+00:00",
-                source_kind="provider",
             ),
         ]
     )
@@ -365,7 +361,6 @@ def test_cmd_refresh_fx_rates_eodhd_fetches_only_incremental_newer_history(
                     quote_currency="USD",
                     rate=1.11,
                     fetched_at="2024-01-03T00:00:00+00:00",
-                    source_kind="provider",
                 )
             ]
 
@@ -405,7 +400,6 @@ def test_cmd_refresh_fx_rates_eodhd_completes_old_history_after_bounded_backfill
                 quote_currency="USD",
                 rate=1.10,
                 fetched_at="2024-01-02T00:00:00+00:00",
-                source_kind="provider",
             ),
             FXRateRecord(
                 provider="EODHD",
@@ -414,7 +408,6 @@ def test_cmd_refresh_fx_rates_eodhd_completes_old_history_after_bounded_backfill
                 quote_currency="USD",
                 rate=1.11,
                 fetched_at="2024-01-03T00:00:00+00:00",
-                source_kind="provider",
             ),
         ]
     )
@@ -448,7 +441,6 @@ def test_cmd_refresh_fx_rates_eodhd_completes_old_history_after_bounded_backfill
                         quote_currency="USD",
                         rate=1.09,
                         fetched_at="2024-01-01T00:00:00+00:00",
-                        source_kind="provider",
                     )
                 ]
             return [
@@ -459,7 +451,6 @@ def test_cmd_refresh_fx_rates_eodhd_completes_old_history_after_bounded_backfill
                     quote_currency="USD",
                     rate=1.12,
                     fetched_at="2024-01-04T00:00:00+00:00",
-                    source_kind="provider",
                 ),
                 FXRateRecord(
                     provider="EODHD",
@@ -468,7 +459,6 @@ def test_cmd_refresh_fx_rates_eodhd_completes_old_history_after_bounded_backfill
                     quote_currency="USD",
                     rate=1.13,
                     fetched_at="2024-01-05T00:00:00+00:00",
-                    source_kind="provider",
                 ),
             ]
 
@@ -529,7 +519,7 @@ def test_cmd_refresh_fx_rates_eodhd_marks_failure_when_initial_fetch_returns_no_
 def test_pair_coverage_query_uses_split_index_seeks(tmp_path: Path) -> None:
     """Regression: ``pair_coverage`` must resolve MIN and MAX as two separate
     single-aggregate index-endpoint seeks, not one combined ``MIN(),MAX()``
-    that scans the whole pair group in ``idx_fx_rates_pair_date``.
+    that scans the whole pair group in the ``provider_fx_rates`` PK autoindex.
 
     A combined two-aggregate statement defeats SQLite's min/max optimization
     and degrades to a full covering-index scan of the pair (~500x slower on the
@@ -551,7 +541,6 @@ def test_pair_coverage_query_uses_split_index_seeks(tmp_path: Path) -> None:
                 quote_currency="USD",
                 rate=1.09,
                 fetched_at="2024-01-01T00:00:00+00:00",
-                source_kind="provider",
             ),
             FXRateRecord(
                 provider="EODHD",
@@ -560,20 +549,33 @@ def test_pair_coverage_query_uses_split_index_seeks(tmp_path: Path) -> None:
                 quote_currency="USD",
                 rate=1.10,
                 fetched_at="2024-01-02T00:00:00+00:00",
-                source_kind="provider",
             ),
         ]
     )
 
     with sqlite3.connect(db_path) as conn:
+        eodhd_provider_id = conn.execute(
+            "SELECT provider_id FROM provider WHERE provider_code = 'EODHD'"
+        ).fetchone()[0]
         plan_rows = conn.execute(
             "EXPLAIN QUERY PLAN " + _PAIR_COVERAGE_SQL,
-            ("EODHD", "EUR", "USD", "EODHD", "EUR", "USD"),
+            (
+                eodhd_provider_id,
+                "EUR",
+                "USD",
+                eodhd_provider_id,
+                "EUR",
+                "USD",
+            ),
         ).fetchall()
     plan = " | ".join(str(row[-1]) for row in plan_rows)
 
     assert plan.count("SCALAR SUBQUERY") == 2, plan
-    assert plan.count("USING COVERING INDEX idx_fx_rates_pair_date") == 2, plan
+    # The coverage seeks run off the provider_fx_rates PK autoindex, whose
+    # (provider_id, base, quote, rate_date) order makes each endpoint covering.
+    assert (
+        plan.count("USING COVERING INDEX sqlite_autoindex_provider_fx_rates_1") == 2
+    ), plan
     # And the split form still returns the correct coverage.
     assert repo.pair_coverage("EODHD", "EUR", "USD") == ("2024-01-01", "2024-01-02")
 
@@ -619,7 +621,6 @@ def test_refresh_fx_rates_widens_coverage_without_post_upsert_rescan(
                     quote_currency="USD",
                     rate=1.09,
                     fetched_at="2024-01-01T00:00:00+00:00",
-                    source_kind="provider",
                 ),
                 FXRateRecord(
                     provider="EODHD",
@@ -628,7 +629,6 @@ def test_refresh_fx_rates_widens_coverage_without_post_upsert_rescan(
                     quote_currency="USD",
                     rate=1.10,
                     fetched_at="2024-01-02T00:00:00+00:00",
-                    source_kind="provider",
                 ),
             ]
 

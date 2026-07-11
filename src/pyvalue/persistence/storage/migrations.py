@@ -7816,7 +7816,9 @@ def _migration_073_drop_sec_columns_and_purge_providers(
 
     # --- 1. Purge SEC/Frankfurter provider data (children before parents) ---
     _doomed = "('SEC', 'FRANKFURTER')"
-    if _table_exists(conn, "fx_rates"):
+    if "provider" in _table_columns(conn, "fx_rates"):
+        # Column-guarded for head-shaped replays: migration 084 rebuilds
+        # fx_rates provider-free, leaving nothing provider-keyed to purge.
         conn.execute(f"DELETE FROM fx_rates WHERE provider IN {_doomed}")
     if _table_exists(conn, "fx_supported_pairs"):
         conn.execute(f"DELETE FROM fx_supported_pairs WHERE provider IN {_doomed}")
@@ -8455,6 +8457,173 @@ def _migration_082_drop_market_data_source_provider(
     conn.execute("ALTER TABLE market_data__new RENAME TO market_data")
 
 
+def _migration_083_create_provider_fx_rates(conn: sqlite3.Connection) -> None:
+    """Create the provider-layer ``provider_fx_rates`` table and backfill it.
+
+    First half of extending the provider/canonical split to FX rates. FX pairs
+    have no per-provider catalog entity (nothing like ``provider_listing``),
+    so provider scoping is a direct integer ``provider_id`` FK -- the
+    catalog-style reference (``provider_exchange.provider_id``), not the TEXT
+    ``provider_code`` FK the old ``fx_rates`` used. Two old columns are
+    deliberately NOT carried over:
+
+    * ``source_kind`` -- CHECK-constrained to the single value ``'provider'``
+      on every row, so it carried no information (the runtime derivation
+      labels identity/inverse/triangulated live only in ``money.fx.FXQuote``
+      and are never persisted).
+    * ``meta_json`` -- always ``{"provider": ..., "symbol": ...}``: the
+      provider key duplicated, plus the provider's pair symbol hidden in a
+      JSON blob. The symbol is promoted to a typed ``provider_symbol`` column
+      (extracted via ``json_extract``; rows without one fall back to
+      ``base||quote``, EODHD's own symbol convention).
+
+    The PK ``(provider_id, base_currency, quote_currency, rate_date)`` fronts
+    the pair columns so the refresh-planning endpoint seeks (``pair_coverage``
+    MIN/MAX, ``fully_covered_quotes_for_window``) run off the PK autoindex --
+    no secondary index needed. Cost note: the backfill copies the full
+    ``fx_rates`` table (~6.3M rows on the live DB) inside this migration's
+    transaction -- minutes, not hours; run on a quiet window.
+
+    Idempotent: skipped once ``provider_fx_rates`` exists; the backfill
+    additionally no-ops on minimal test schemas missing the source tables and
+    on an ``fx_rates`` already rebuilt without ``provider`` (which implies the
+    backfill already ran).
+    """
+
+    if _table_exists(conn, "provider_fx_rates"):
+        return
+    base_check = _CURRENCY_FORMAT_CHECK.format(col="base_currency")
+    quote_check = _CURRENCY_FORMAT_CHECK.format(col="quote_currency")
+    conn.execute(
+        f"""
+        CREATE TABLE provider_fx_rates (
+            provider_id INTEGER NOT NULL,
+            base_currency TEXT NOT NULL CHECK ({base_check}),
+            quote_currency TEXT NOT NULL CHECK ({quote_check}),
+            rate_date TEXT NOT NULL,
+            rate REAL NOT NULL,
+            provider_symbol TEXT NOT NULL,
+            fetched_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (provider_id, base_currency, quote_currency, rate_date),
+            FOREIGN KEY (provider_id) REFERENCES provider(provider_id)
+        )
+        """
+    )
+    if not (_table_exists(conn, "fx_rates") and _table_exists(conn, "provider")):
+        return
+    if "provider" not in _table_columns(conn, "fx_rates"):
+        return
+    conn.execute(
+        """
+        INSERT INTO provider_fx_rates (
+            provider_id, base_currency, quote_currency, rate_date,
+            rate, provider_symbol, fetched_at, created_at, updated_at
+        )
+        SELECT
+            p.provider_id,
+            f.base_currency,
+            f.quote_currency,
+            f.rate_date,
+            f.rate,
+            COALESCE(
+                CASE
+                    WHEN f.meta_json IS NOT NULL AND json_valid(f.meta_json)
+                    THEN json_extract(f.meta_json, '$.symbol')
+                END,
+                f.base_currency || f.quote_currency
+            ),
+            f.fetched_at,
+            f.created_at,
+            f.updated_at
+        FROM fx_rates f
+        JOIN provider p ON p.provider_code = f.provider
+        """
+    )
+
+
+def _migration_084_fx_rates_canonical_rebuild(conn: sqlite3.Connection) -> None:
+    """Rebuild ``fx_rates`` as the canonical, provider-free rate series.
+
+    Second half of the FX provider/canonical split: migration 083 moved
+    provider provenance (provider key, pair symbol, fetch timestamps) to
+    ``provider_fx_rates``, so the canonical table now keeps only the
+    provider-independent fact -- one rate per ``(base, quote, rate_date)``.
+    Downstream conversion reads (``FXService``) become provider-agnostic;
+    a future second provider adds rows to the provider layer and arbitration
+    happens at write time.
+
+    The new PK ``(base_currency, quote_currency, rate_date)`` fronts the pair
+    columns so pair-history scans and latest-on-or-before seeks are
+    index-native off the PK autoindex; ``idx_fx_rates_pair_date`` (whose job
+    was exactly that ordering, prefixed by the now-dropped provider column) is
+    retired, not replaced.
+
+    Pre-flight: with more than one provider storing the same pair/date, a
+    blind copy would silently collapse conflicting observations into one
+    canonical row (INSERT would hit the new PK). That needs an explicit
+    arbitration rule, not silent data loss, so the rebuild aborts. The live DB
+    is single-provider (EODHD only), so the guard passes.
+
+    Cost note: rewrites the full ~6.3M-row table in one transaction (059/073
+    precedent). ``VACUUM`` cannot run inside a migration; reclaim the freed
+    pages manually afterwards with ``sqlite3 data/pyvalue.db 'VACUUM;'`` if
+    desired (slow on a large file; the pages are reused either way).
+
+    Idempotent: an ``fx_rates`` that no longer declares ``provider`` is left
+    untouched.
+    """
+
+    if not _table_exists(conn, "fx_rates"):
+        return
+    if "provider" not in _table_columns(conn, "fx_rates"):
+        return
+
+    collision = conn.execute(
+        """
+        SELECT base_currency, quote_currency, rate_date
+        FROM fx_rates
+        GROUP BY base_currency, quote_currency, rate_date
+        HAVING COUNT(*) > 1
+        LIMIT 1
+        """
+    ).fetchone()
+    if collision is not None:
+        raise RuntimeError(
+            "migration 084 aborted: multiple providers store a rate for "
+            f"{collision[0]}/{collision[1]} on {collision[2]}; define an "
+            "arbitration rule before collapsing fx_rates to canonical form"
+        )
+
+    conn.execute("DROP INDEX IF EXISTS idx_fx_rates_pair_date")
+    base_check = _CURRENCY_FORMAT_CHECK.format(col="base_currency")
+    quote_check = _CURRENCY_FORMAT_CHECK.format(col="quote_currency")
+    conn.execute(
+        f"""
+        CREATE TABLE fx_rates__new (
+            base_currency TEXT NOT NULL CHECK ({base_check}),
+            quote_currency TEXT NOT NULL CHECK ({quote_check}),
+            rate_date TEXT NOT NULL,
+            rate REAL NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (base_currency, quote_currency, rate_date)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO fx_rates__new (
+            base_currency, quote_currency, rate_date, rate, updated_at
+        )
+        SELECT base_currency, quote_currency, rate_date, rate, updated_at
+        FROM fx_rates
+        """
+    )
+    conn.execute("DROP TABLE fx_rates")
+    conn.execute("ALTER TABLE fx_rates__new RENAME TO fx_rates")
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -8538,6 +8707,8 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_080_listing_issuer_index,
     _migration_081_create_provider_market_data,
     _migration_082_drop_market_data_source_provider,
+    _migration_083_create_provider_fx_rates,
+    _migration_084_fx_rates_canonical_rebuild,
 ]
 
 

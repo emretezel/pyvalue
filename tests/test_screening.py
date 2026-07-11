@@ -195,7 +195,6 @@ def test_evaluate_criterion_converts_monetary_constant_currency(tmp_path: Path) 
             quote_currency="GBP",
             rate=0.8,
             fetched_at="2023-12-31T00:00:00+00:00",
-            source_kind="provider",
         )
     )
 
@@ -244,7 +243,6 @@ def test_evaluate_criterion_converts_mixed_currency_metrics(tmp_path: Path) -> N
             quote_currency="EUR",
             rate=0.9,
             fetched_at="2023-12-31T00:00:00+00:00",
-            source_kind="provider",
         )
     )
 
@@ -295,7 +293,6 @@ def test_evaluate_criterion_normalizes_configured_subunit_metric_currencies(
             quote_currency="ILS",
             rate=0.2,
             fetched_at="2023-12-31T00:00:00+00:00",
-            source_kind="provider",
         )
     )
 

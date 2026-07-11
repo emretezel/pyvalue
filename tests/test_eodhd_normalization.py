@@ -1361,7 +1361,6 @@ def test_eodhd_normalize_converts_monetary_facts_to_target_currency(
             quote_currency="USD",
             rate=1.1,
             fetched_at="2024-12-31",
-            source_kind="provider",
         ),
     )
     normalizer = EODHDFactsNormalizer(fx_service=fx)
@@ -1402,7 +1401,6 @@ def test_eodhd_normalize_shares_not_converted_to_target_currency(
             quote_currency="USD",
             rate=1.1,
             fetched_at="2024-12-31",
-            source_kind="provider",
         ),
     )
     normalizer = EODHDFactsNormalizer(fx_service=fx)
@@ -1464,7 +1462,6 @@ def test_eodhd_normalize_missing_fx_rate_drops_old_period_but_keeps_newer_conver
             quote_currency="USD",
             rate=1.25,
             fetched_at="2001-12-31",
-            source_kind="provider",
         ),
     )
     normalizer = EODHDFactsNormalizer(fx_service=fx)
@@ -1513,7 +1510,6 @@ def test_eodhd_normalize_missing_fx_rate_skips_old_derived_period_during_target_
             quote_currency="EUR",
             rate=0.8,
             fetched_at="2001-12-31",
-            source_kind="provider",
         ),
     )
     normalizer = EODHDFactsNormalizer(fx_service=fx)
@@ -1603,7 +1599,6 @@ def test_eodhd_normalize_mixed_currencies_aligned_to_target(tmp_path: Path) -> N
             quote_currency="USD",
             rate=1.1,
             fetched_at="2024-12-31",
-            source_kind="provider",
         ),
     )
     normalizer = EODHDFactsNormalizer(fx_service=fx)

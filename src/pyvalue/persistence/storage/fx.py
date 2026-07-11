@@ -33,26 +33,27 @@ from .migrations import apply_migrations
 # A combined ``SELECT MIN(rate_date), MAX(rate_date)`` defeats SQLite's
 # min/max optimization: with two aggregates in one statement the planner
 # cannot collapse each to a single index-endpoint seek, so it scans every row
-# of the pair's group in ``idx_fx_rates_pair_date`` (tens of thousands of rows
-# for a heavily traded pair). Splitting into two correlated single-aggregate
-# subqueries lets SQLite seek the first and last index entries instead -- two
-# O(log n) probes rather than a full group scan (measured ~500x faster on the
-# largest stored pair). The equality prefix (provider, base, quote) plus the
-# trailing ``rate_date`` column in ``idx_fx_rates_pair_date`` makes each
-# subquery a covering-index endpoint seek.
+# of the pair's group (tens of thousands of rows for a heavily traded pair).
+# Splitting into two correlated single-aggregate subqueries lets SQLite seek
+# the first and last index entries instead -- two O(log n) probes rather than
+# a full group scan (measured ~500x faster on the largest stored pair).
+# Coverage is a refresh-planning question ("what did THIS provider give us"),
+# so it reads the provider layer: the ``provider_fx_rates`` PK
+# ``(provider_id, base_currency, quote_currency, rate_date)`` makes each
+# subquery a covering endpoint seek off the PK autoindex.
 _PAIR_COVERAGE_SQL = """
 SELECT
     (
         SELECT MIN(rate_date)
-        FROM fx_rates
-        WHERE provider = ?
+        FROM provider_fx_rates
+        WHERE provider_id = ?
           AND base_currency = ?
           AND quote_currency = ?
     ) AS min_rate_date,
     (
         SELECT MAX(rate_date)
-        FROM fx_rates
-        WHERE provider = ?
+        FROM provider_fx_rates
+        WHERE provider_id = ?
           AND base_currency = ?
           AND quote_currency = ?
     ) AS max_rate_date
@@ -60,98 +61,154 @@ SELECT
 
 
 class FXRatesRepository(SQLiteStore):
-    """Persist and query direct FX rate observations."""
+    """Persist and query direct FX rate observations.
+
+    Two-layer model (mirror of the exchange/listing catalogs):
+    ``provider_fx_rates`` records what each provider reported (keyed by
+    ``provider_id``); canonical ``fx_rates`` is the provider-free series the
+    conversion paths read. Writers fill both in one transaction; the
+    converter-facing readers are provider-agnostic, while the refresh-planning
+    readers (coverage) stay provider-scoped.
+    """
 
     def initialize_schema(self) -> None:
-        # `fx_rates` (table + idx_fx_rates_pair_date) is owned by migration 026.
+        # Canonical `fx_rates` is owned by migrations 026/084; the provider
+        # layer `provider_fx_rates` by migration 083.
         apply_migrations(self.db_path)
 
     def upsert(self, record: FXRateRecord) -> None:
         self.upsert_many([record])
 
     def upsert_many(self, records: Sequence[FXRateRecord]) -> int:
+        """Persist rate observations to both layers in one transaction.
+
+        Each record lands in ``provider_fx_rates`` (its ``provider`` code
+        resolved to ``provider_id``; an unknown code is a caller bug -- the
+        registry is migration-seeded -- and raises ``ValueError``) and is
+        upserted into canonical ``fx_rates``. With a single provider the
+        canonical row simply adopts the observation; a future multi-provider
+        priority rule belongs in the canonical statement below.
+        """
         self.initialize_schema()
         if not records:
             return 0
         now = _utc_now_iso()
-        payload = [
-            (
-                record.provider.strip().upper(),
-                record.rate_date,
-                normalize_currency_code(record.base_currency),
-                normalize_currency_code(record.quote_currency),
-                float(record.rate),
-                record.fetched_at,
-                record.source_kind.strip().lower(),
-                record.meta_json,
-                record.created_at or now,
-                record.updated_at or now,
-            )
-            for record in records
-            if normalize_currency_code(record.base_currency)
-            and normalize_currency_code(record.quote_currency)
-        ]
-        if not payload:
-            return 0
         with self._connect() as conn:
+            provider_ids: dict[str, int] = {}
+            for record in records:
+                code = record.provider.strip().upper()
+                if code in provider_ids:
+                    continue
+                provider_id = self._provider_repo().resolve_id(code, connection=conn)
+                if provider_id is None:
+                    raise ValueError(
+                        f"unknown FX provider {code!r}: not in the provider registry"
+                    )
+                provider_ids[code] = provider_id
+
+            provider_payload = []
+            canonical_payload = []
+            for record in records:
+                base = normalize_currency_code(record.base_currency)
+                quote = normalize_currency_code(record.quote_currency)
+                if not base or not quote:
+                    continue
+                # An empty provider_symbol falls back to the provider's own
+                # concatenated-pair convention (EODHD: 'AEDAUD').
+                provider_symbol = (
+                    record.provider_symbol or ""
+                ).strip().upper() or f"{base}{quote}"
+                provider_payload.append(
+                    (
+                        provider_ids[record.provider.strip().upper()],
+                        base,
+                        quote,
+                        record.rate_date,
+                        float(record.rate),
+                        provider_symbol,
+                        record.fetched_at,
+                        record.created_at or now,
+                        record.updated_at or now,
+                    )
+                )
+                canonical_payload.append(
+                    (
+                        base,
+                        quote,
+                        record.rate_date,
+                        float(record.rate),
+                        record.updated_at or now,
+                    )
+                )
+            if not provider_payload:
+                return 0
+            conn.executemany(
+                """
+                INSERT INTO provider_fx_rates (
+                    provider_id,
+                    base_currency,
+                    quote_currency,
+                    rate_date,
+                    rate,
+                    provider_symbol,
+                    fetched_at,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(provider_id, base_currency, quote_currency, rate_date)
+                DO UPDATE SET
+                    rate = excluded.rate,
+                    provider_symbol = excluded.provider_symbol,
+                    fetched_at = excluded.fetched_at,
+                    updated_at = excluded.updated_at
+                """,
+                provider_payload,
+            )
+            # Canonical adoption is last-write-wins today (single provider);
+            # a multi-provider arbitration rule slots in here.
             conn.executemany(
                 """
                 INSERT INTO fx_rates (
-                    provider,
-                    rate_date,
                     base_currency,
                     quote_currency,
+                    rate_date,
                     rate,
-                    fetched_at,
-                    source_kind,
-                    meta_json,
-                    created_at,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(provider, rate_date, base_currency, quote_currency)
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(base_currency, quote_currency, rate_date)
                 DO UPDATE SET
                     rate = excluded.rate,
-                    fetched_at = excluded.fetched_at,
-                    source_kind = excluded.source_kind,
-                    meta_json = excluded.meta_json,
                     updated_at = excluded.updated_at
                 """,
-                payload,
+                canonical_payload,
             )
-        return len(payload)
+        return len(provider_payload)
 
     def latest_on_or_before(
         self,
-        provider: str,
         base_currency: str,
         quote_currency: str,
         as_of: str,
-    ) -> Optional[FXRateRecord]:
+    ) -> Optional[tuple[str, float]]:
+        """Return the canonical ``(rate_date, rate)`` at or before ``as_of``.
+
+        Provider-agnostic by design: conversion consumes the canonical series.
+        The descending seek is index-native off the canonical PK
+        ``(base_currency, quote_currency, rate_date)``.
+        """
         self.initialize_schema()
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT
-                    provider,
-                    rate_date,
-                    base_currency,
-                    quote_currency,
-                    rate,
-                    fetched_at,
-                    source_kind,
-                    meta_json,
-                    created_at,
-                    updated_at
+                SELECT rate_date, rate
                 FROM fx_rates
-                WHERE provider = ?
-                  AND base_currency = ?
+                WHERE base_currency = ?
                   AND quote_currency = ?
                   AND rate_date <= ?
                 ORDER BY rate_date DESC
                 LIMIT 1
                 """,
                 (
-                    provider.strip().upper(),
                     normalize_currency_code(base_currency),
                     normalize_currency_code(quote_currency),
                     as_of,
@@ -159,15 +216,18 @@ class FXRatesRepository(SQLiteStore):
             ).fetchone()
         if row is None:
             return None
-        return FXRateRecord(*row)
+        return str(row["rate_date"]), float(row["rate"])
 
     def fetch_pair_history(
         self,
-        provider: str,
         base_currency: str,
         quote_currency: str,
     ) -> list[tuple[str, float]]:
-        """Return one direct pair history ordered by ascending rate date."""
+        """Return one canonical pair history ordered by ascending rate date.
+
+        The ORDER BY matches the canonical PK order, so the scan is
+        index-native (no sort step).
+        """
 
         self.initialize_schema()
         with self._connect() as conn:
@@ -175,24 +235,24 @@ class FXRatesRepository(SQLiteStore):
                 """
                 SELECT rate_date, rate
                 FROM fx_rates
-                WHERE provider = ?
-                  AND base_currency = ?
+                WHERE base_currency = ?
                   AND quote_currency = ?
                 ORDER BY rate_date ASC
                 """,
                 (
-                    provider.strip().upper(),
                     normalize_currency_code(base_currency),
                     normalize_currency_code(quote_currency),
                 ),
             ).fetchall()
         return [(str(row["rate_date"]), float(row["rate"])) for row in rows]
 
-    def fetch_all_for_provider(
-        self,
-        provider: str,
-    ) -> list[tuple[str, str, str, float]]:
-        """Return the full direct-rate history for one provider."""
+    def fetch_all(self) -> list[tuple[str, str, str, float]]:
+        """Return the full canonical direct-rate history.
+
+        The ORDER BY is exactly the canonical PK order
+        ``(base_currency, quote_currency, rate_date)`` -- an index-order walk
+        with no sort step.
+        """
 
         self.initialize_schema()
         with self._connect() as conn:
@@ -200,10 +260,8 @@ class FXRatesRepository(SQLiteStore):
                 """
                 SELECT base_currency, quote_currency, rate_date, rate
                 FROM fx_rates
-                WHERE provider = ?
                 ORDER BY base_currency ASC, quote_currency ASC, rate_date ASC
-                """,
-                (provider.strip().upper(),),
+                """
             ).fetchall()
         return [
             (
@@ -221,17 +279,27 @@ class FXRatesRepository(SQLiteStore):
         base_currency: str,
         quote_currency: str,
     ) -> tuple[Optional[str], Optional[str]]:
-        """Return min/max stored direct dates for one pair."""
+        """Return min/max dates one provider has stored for one pair.
+
+        Provider-scoped by design: coverage plans what to fetch from THAT
+        provider, so it reads ``provider_fx_rates``. An unregistered provider
+        simply has no coverage.
+        """
 
         self.initialize_schema()
-        # Both subqueries target the same pair, so the three lookup keys are
-        # bound twice (MIN seek, then MAX seek).
-        pair_keys = (
-            provider.strip().upper(),
-            normalize_currency_code(base_currency),
-            normalize_currency_code(quote_currency),
-        )
         with self._connect() as conn:
+            provider_id = self._provider_repo().resolve_id(
+                provider.strip().upper(), connection=conn
+            )
+            if provider_id is None:
+                return None, None
+            # Both subqueries target the same pair, so the three lookup keys
+            # are bound twice (MIN seek, then MAX seek).
+            pair_keys = (
+                provider_id,
+                normalize_currency_code(base_currency),
+                normalize_currency_code(quote_currency),
+            )
             row = conn.execute(_PAIR_COVERAGE_SQL, pair_keys + pair_keys).fetchone()
         if row is None:
             return None, None
@@ -248,12 +316,13 @@ class FXRatesRepository(SQLiteStore):
         start_date: date,
         end_date: date,
     ) -> set[str]:
-        """Return quotes whose direct rows fully cover one inclusive date window.
+        """Return quotes one provider fully covers over one inclusive window.
 
         The refresh command only skips a base/quote window when the stored rows
         cover every day in that exact requested window. Sparse historical rows
         must not be treated as continuous coverage just because their min/max
-        dates span the window.
+        dates span the window. Provider-scoped (reads ``provider_fx_rates``):
+        coverage plans what to fetch from THAT provider.
         """
 
         self.initialize_schema()
@@ -271,14 +340,19 @@ class FXRatesRepository(SQLiteStore):
         if expected_days <= 0:
             return set()
         placeholders = ", ".join("?" for _ in normalized_quotes)
-        params = [
-            provider.strip().upper(),
-            normalize_currency_code(base_currency),
-            start_date.isoformat(),
-            end_date.isoformat(),
-            *normalized_quotes,
-        ]
         with self._connect() as conn:
+            provider_id = self._provider_repo().resolve_id(
+                provider.strip().upper(), connection=conn
+            )
+            if provider_id is None:
+                return set()
+            params = [
+                provider_id,
+                normalize_currency_code(base_currency),
+                start_date.isoformat(),
+                end_date.isoformat(),
+                *normalized_quotes,
+            ]
             rows = conn.execute(
                 f"""
                 SELECT
@@ -286,8 +360,8 @@ class FXRatesRepository(SQLiteStore):
                     COUNT(*) AS row_count,
                     MIN(rate_date) AS min_rate_date,
                     MAX(rate_date) AS max_rate_date
-                FROM fx_rates
-                WHERE provider = ?
+                FROM provider_fx_rates
+                WHERE provider_id = ?
                   AND base_currency = ?
                   AND rate_date >= ?
                   AND rate_date <= ?

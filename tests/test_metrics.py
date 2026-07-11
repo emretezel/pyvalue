@@ -455,7 +455,6 @@ def _seed_fx_rate(
             quote_currency=quote,
             rate=rate,
             fetched_at=f"{rate_date}T00:00:00+00:00",
-            source_kind="provider",
         )
     )
 

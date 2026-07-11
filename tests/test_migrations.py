@@ -553,18 +553,22 @@ def test_migration_preserves_existing_provider_rows_when_adding_registry(
             JOIN provider p ON p.provider_id = px.provider_id
             """
         ).fetchone()[0]
+        # Provider provenance lives in provider_fx_rates after migration 083;
+        # canonical fx_rates is provider-free, so the registry join is asserted
+        # against the provider layer.
         fx_rates_join_count = conn.execute(
             """
             SELECT COUNT(*)
-            FROM fx_rates fx
-            JOIN provider p ON p.provider_code = fx.provider
+            FROM provider_fx_rates fx
+            JOIN provider p ON p.provider_id = fx.provider_id
             """
         ).fetchone()[0]
 
     assert provider_listing_count == 0
     assert fundamentals_raw_count == 0
     # Migration 073 deletes the seeded FRANKFURTER fx rate along with its
-    # provider, leaving only the EODHD rate.
+    # provider, leaving only the EODHD rate (carried into canonical form by
+    # migration 084).
     assert fx_rates_count == 1
     assert supported_ticker_join_count == 0
     assert fundamentals_raw_join_count == 0
@@ -1085,19 +1089,18 @@ def test_migration_adds_sector_and_industry_to_securities(tmp_path: Path) -> Non
     } <= listing_columns
     if metric_columns:
         assert {"unit_kind", "currency", "unit_label"} <= metric_columns
+    # Migration 084 rebuilt fx_rates as the canonical, provider-free series;
+    # provider provenance (provider id, pair symbol, fetch timestamps) lives in
+    # provider_fx_rates. idx_fx_rates_pair_date is retired: the canonical PK
+    # (base, quote, rate_date) provides the pair-history ordering itself.
     assert fx_columns == {
-        "provider",
-        "rate_date",
         "base_currency",
         "quote_currency",
+        "rate_date",
         "rate",
-        "fetched_at",
-        "source_kind",
-        "meta_json",
-        "created_at",
         "updated_at",
     }
-    assert "idx_fx_rates_pair_date" in fx_index_names
+    assert "idx_fx_rates_pair_date" not in fx_index_names
     assert "idx_fx_supported_pairs_refreshable" in fx_supported_pair_index_names
     if "provider_listing" in tables:
         assert (
@@ -2424,8 +2427,11 @@ def test_migration_047_preserves_valid_rows(tmp_path: Path) -> None:
 
 
 def test_migration_048_fx_rates_fk_rejects_unknown_provider(tmp_path: Path) -> None:
+    # Pinned to the era where fx_rates still carried the provider FK: migration
+    # 084 rebuilds it provider-free, and the head-level provider FK coverage
+    # moved to provider_fx_rates (see the migration 083 FK test).
     db_path = tmp_path / "fx-rates-048.sqlite"
-    apply_migrations(db_path)
+    apply_migrations(db_path, target_version=48)
 
     with _open_with_fk(db_path) as conn:
         with pytest.raises(sqlite3.IntegrityError):
@@ -3123,8 +3129,11 @@ def test_migration_057_idempotent(tmp_path: Path) -> None:
 
 
 def test_migration_058_fx_rates_rejects_lowercase_currency(tmp_path: Path) -> None:
+    # Pinned to the pre-split shape (provider/source_kind columns): head-level
+    # currency CHECK coverage for the canonical rebuild lives in the migration
+    # 084 tests, and for the provider layer in the 083 tests.
     db_path = tmp_path / "fx-rates-currency-058.sqlite"
-    apply_migrations(db_path)
+    apply_migrations(db_path, target_version=58)
 
     with _open_with_fk(db_path) as conn:
         with pytest.raises(sqlite3.IntegrityError):
@@ -3143,8 +3152,11 @@ def test_migration_058_fx_rates_rejects_lowercase_currency(tmp_path: Path) -> No
 
 
 def test_migration_058_fx_rates_rejects_unknown_source_kind(tmp_path: Path) -> None:
+    # Pinned: source_kind existed only until migration 083 dropped it from the
+    # persisted schema (it was CHECK-constrained to the single value
+    # 'provider', so it carried no information).
     db_path = tmp_path / "fx-rates-source-058.sqlite"
-    apply_migrations(db_path)
+    apply_migrations(db_path, target_version=58)
 
     with _open_with_fk(db_path) as conn:
         with pytest.raises(sqlite3.IntegrityError):
@@ -4009,11 +4021,14 @@ _MIGRATION_067_DROPPED_INDEXES = frozenset(
 # ``idx_listing_issuer`` arrived with migration 080 (the delisted-ticker purge
 # probes issuers for surviving listings, as does FK enforcement on issuer
 # deletes); see ``test_migration_080_*``.
+# ``idx_fx_rates_pair_date`` was retained by 067 but retired by migration 084:
+# the canonical fx_rates PK (base, quote, rate_date) provides the pair-history
+# ordering itself, and the provider-scoped coverage seeks moved to the
+# provider_fx_rates PK autoindex; see ``test_migration_084_*``.
 _MIGRATION_067_RETAINED_INDEXES = frozenset(
     {
         "idx_fin_facts_security_concept_latest",
         "idx_fin_facts_currency_nonnull",
-        "idx_fx_rates_pair_date",
         "idx_fx_supported_pairs_refreshable",
         "idx_issuer_name_country",
         "idx_provider_listing_listing",
@@ -5321,3 +5336,226 @@ def test_migration_082_drops_source_provider_preserving_rows(tmp_path: Path) -> 
     assert len(foreign_keys) == 1
     assert foreign_keys[0][2] == "listing"
     assert rerun_row_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Migrations 083/084: provider/canonical split for fx_rates
+# ---------------------------------------------------------------------------
+
+
+def test_migration_083_backfills_provider_fx_rates(tmp_path: Path) -> None:
+    """Migration 083 creates ``provider_fx_rates`` and backfills it from the
+    old provider-keyed ``fx_rates``: the provider code resolves to
+    ``provider_id``, the pair symbol is extracted from ``meta_json`` (falling
+    back to ``base||quote`` when absent), and ``fetched_at``/``created_at``
+    are carried verbatim even when they differ."""
+
+    db_path = tmp_path / "provider-fx-rates-083.sqlite"
+    # Bring the DB to the pre-split state, then seed the pre-084 shape.
+    assert apply_migrations(db_path, target_version=82) == 82
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute(
+            """
+            INSERT INTO fx_rates (
+                provider, rate_date, base_currency, quote_currency, rate,
+                fetched_at, source_kind, meta_json, created_at, updated_at
+            ) VALUES
+                ('EODHD', '2024-01-01', 'EUR', 'USD', 1.09,
+                 'Mon, 01 Jan 2024 12:00:00 GMT', 'provider',
+                 '{"provider": "EODHD", "symbol": "EURUSD"}',
+                 '2024-01-01T00:00:00+00:00', '2024-01-01T00:00:00+00:00'),
+                ('EODHD', '2024-01-02', 'USD', 'JPY', 148.5,
+                 '2024-01-02T00:00:00+00:00', 'provider', NULL,
+                 '2024-01-02T00:00:00+00:00', '2024-01-03T00:00:00+00:00')
+            """
+        )
+        conn.commit()
+
+    applied = apply_migrations(db_path)
+    assert applied == len(MIGRATIONS) - 82
+
+    with sqlite3.connect(db_path) as conn:
+        eodhd_provider_id = conn.execute(
+            "SELECT provider_id FROM provider WHERE provider_code = 'EODHD'"
+        ).fetchone()[0]
+        provider_rows = conn.execute(
+            """
+            SELECT provider_id, base_currency, quote_currency, rate_date, rate,
+                   provider_symbol, fetched_at, created_at, updated_at
+            FROM provider_fx_rates
+            ORDER BY rate_date
+            """
+        ).fetchall()
+        foreign_keys = conn.execute(
+            "PRAGMA foreign_key_list(provider_fx_rates)"
+        ).fetchall()
+
+    assert provider_rows == [
+        (
+            eodhd_provider_id,
+            "EUR",
+            "USD",
+            "2024-01-01",
+            1.09,
+            "EURUSD",
+            "Mon, 01 Jan 2024 12:00:00 GMT",
+            "2024-01-01T00:00:00+00:00",
+            "2024-01-01T00:00:00+00:00",
+        ),
+        # NULL meta_json falls back to the provider's base||quote convention;
+        # distinct fetched_at/created_at/updated_at are carried verbatim.
+        (
+            eodhd_provider_id,
+            "USD",
+            "JPY",
+            "2024-01-02",
+            148.5,
+            "USDJPY",
+            "2024-01-02T00:00:00+00:00",
+            "2024-01-02T00:00:00+00:00",
+            "2024-01-03T00:00:00+00:00",
+        ),
+    ]
+    assert len(foreign_keys) == 1
+    assert foreign_keys[0][2] == "provider"
+
+    # Replay is a no-op: 083 skips once the table exists, 084 once the
+    # provider column is gone.
+    assert apply_migrations(db_path) == 0
+
+
+def test_migration_083_provider_fx_rates_fk_rejects_unknown_provider(
+    tmp_path: Path,
+) -> None:
+    """Head-level provider-registry FK coverage for FX rates: it moved from the
+    old ``fx_rates.provider`` (retired by 084, test pinned at 048) to
+    ``provider_fx_rates.provider_id``."""
+
+    db_path = tmp_path / "provider-fx-rates-083-fk.sqlite"
+    apply_migrations(db_path)
+
+    with _open_with_fk(db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO provider_fx_rates (
+                    provider_id, base_currency, quote_currency, rate_date,
+                    rate, provider_symbol, fetched_at, created_at, updated_at
+                ) VALUES (
+                    999999, 'USD', 'EUR', '2026-01-01', 0.91, 'USDEUR',
+                    '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00',
+                    '2026-01-01T00:00:00+00:00'
+                )
+                """
+            )
+
+
+def test_migration_084_fx_rates_canonical_shape(tmp_path: Path) -> None:
+    """Migration 084 rebuilds ``fx_rates`` provider-free: five columns, PK
+    ``(base_currency, quote_currency, rate_date)``, the currency format CHECKs
+    kept, rows carried with their stored ``updated_at``, and
+    ``idx_fx_rates_pair_date`` retired (the PK provides the ordering)."""
+
+    db_path = tmp_path / "fx-rates-084.sqlite"
+    assert apply_migrations(db_path, target_version=82) == 82
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO fx_rates (
+                provider, rate_date, base_currency, quote_currency, rate,
+                fetched_at, source_kind, meta_json, created_at, updated_at
+            ) VALUES
+                ('EODHD', '2024-01-01', 'EUR', 'USD', 1.09,
+                 '2024-01-01T00:00:00+00:00', 'provider', NULL,
+                 '2024-01-01T00:00:00+00:00', '2024-01-05T00:00:00+00:00')
+            """
+        )
+        conn.commit()
+
+    apply_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        table_info = conn.execute("PRAGMA table_info(fx_rates)").fetchall()
+        columns = {row[1] for row in table_info}
+        # PRAGMA table_info's ``pk`` field is the 1-based position of the
+        # column inside the primary key (0 = not part of the PK).
+        pk_order = [
+            row[1] for row in sorted(table_info, key=lambda r: int(r[5])) if row[5]
+        ]
+        rows = conn.execute(
+            """
+            SELECT base_currency, quote_currency, rate_date, rate, updated_at
+            FROM fx_rates
+            """
+        ).fetchall()
+        index_names = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            ).fetchall()
+        }
+        # The format CHECKs survive the rebuild at head.
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO fx_rates (
+                    base_currency, quote_currency, rate_date, rate, updated_at
+                ) VALUES ('usd', 'EUR', '2026-01-01', 1.1,
+                          '2026-01-01T00:00:00+00:00')
+                """
+            )
+
+    assert columns == {
+        "base_currency",
+        "quote_currency",
+        "rate_date",
+        "rate",
+        "updated_at",
+    }
+    assert pk_order == ["base_currency", "quote_currency", "rate_date"]
+    assert rows == [
+        ("EUR", "USD", "2024-01-01", 1.09, "2024-01-05T00:00:00+00:00"),
+    ]
+    assert "idx_fx_rates_pair_date" not in index_names
+
+
+def test_migration_084_aborts_on_cross_provider_pair_collision(
+    tmp_path: Path,
+) -> None:
+    """With two providers storing the same pair/date, collapsing to the
+    canonical PK would silently lose an observation -- the rebuild must abort
+    and demand an explicit arbitration rule instead."""
+
+    db_path = tmp_path / "fx-rates-084-collision.sqlite"
+    assert apply_migrations(db_path, target_version=83) == 83
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO provider (
+                provider_code, display_name, created_at, updated_at
+            ) VALUES ('OTHER', 'Other Provider',
+                      '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO fx_rates (
+                provider, rate_date, base_currency, quote_currency, rate,
+                fetched_at, source_kind, meta_json, created_at, updated_at
+            ) VALUES
+                ('EODHD', '2024-01-01', 'EUR', 'USD', 1.09,
+                 '2024-01-01T00:00:00+00:00', 'provider', NULL,
+                 '2024-01-01T00:00:00+00:00', '2024-01-01T00:00:00+00:00'),
+                ('OTHER', '2024-01-01', 'EUR', 'USD', 1.10,
+                 '2024-01-01T00:00:00+00:00', 'provider', NULL,
+                 '2024-01-01T00:00:00+00:00', '2024-01-01T00:00:00+00:00')
+            """
+        )
+        conn.commit()
+
+    with pytest.raises(RuntimeError, match="arbitration"):
+        apply_migrations(db_path)
