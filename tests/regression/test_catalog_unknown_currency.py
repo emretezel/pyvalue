@@ -71,7 +71,8 @@ def test_replace_for_provider_coerces_unknown_currency_to_null(
         ],
     )
 
-    assert stored == 5
+    assert stored.stored == 5
+    assert stored.dropped == ()
     by_code = {row.code: row.currency for row in repo.list_all("EODHD")}
     assert by_code == {
         "US": "USD",

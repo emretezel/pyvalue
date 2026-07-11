@@ -457,3 +457,36 @@ class SupportedTickerRefreshResult:
     removed: int
     skipped_no_currency: Tuple[str, ...]
     orphaned_listings: int
+
+
+@dataclass(frozen=True)
+class DroppedProviderExchange:
+    """One provider exchange removed by the catalog sync, with its purge size.
+
+    ``purged_provider_listings`` counts the ``provider_listing`` mappings the
+    cascade removed together with the ``provider_exchange`` row (their raw
+    fundamentals and fetch/normalization state go with them). Canonical rows
+    and data are retained -- see :class:`ExchangeCatalogRefreshResult`.
+    """
+
+    code: str
+    purged_provider_listings: int
+
+
+@dataclass(frozen=True)
+class ExchangeCatalogRefreshResult:
+    """Outcome of refreshing one provider's supported exchange catalog.
+
+    ``stored`` counts the provider exchanges upserted from the payload.
+    ``dropped`` lists the provider exchanges absent from the refreshed payload:
+    each is removed from ``provider_exchange`` together with its provider layer
+    (``provider_listing`` mappings plus their raw fundamentals and
+    fetch/normalization state). Canonical rows (``exchange``/``listing``/
+    ``issuer``) and canonical data (facts, market data, metrics) are
+    provider-independent and are never deleted by the sync (user design,
+    2026-07-11) -- listings that lose their mapping become unreachable through
+    the provider-joined scopes, nothing more.
+    """
+
+    stored: int
+    dropped: Tuple[DroppedProviderExchange, ...]

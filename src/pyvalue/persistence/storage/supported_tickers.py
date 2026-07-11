@@ -94,6 +94,65 @@ class MassDelistingError(RuntimeError):
         )
 
 
+def purge_provider_listing_rows(
+    conn: sqlite3.Connection,
+    provider_listing_ids: Sequence[int],
+) -> None:
+    """Delete provider listings and their provider-keyed artifacts, children first.
+
+    The single deleter of the provider layer, shared by the per-exchange
+    ticker prune (`SupportedTickerRepository.replace_for_exchange`) and the
+    dropped-exchange cascade in the catalog sync
+    (`ExchangeProviderRepository.replace_for_provider`). Removes, per
+    ``provider_listing_id``: raw fundamentals, fundamentals fetch state,
+    fundamentals normalization state, market-data fetch state, and finally the
+    ``provider_listing`` row itself -- hand-ordered because every FK in the
+    schema is NO ACTION. Canonical rows and data are deliberately out of
+    scope: they are provider-independent and no refresh deletes them. Shares
+    the caller's transaction.
+    """
+    normalized = sorted({int(value) for value in provider_listing_ids if value})
+    if not normalized:
+        return
+    for chunk in _batched(normalized, 500):
+        placeholders = ", ".join("?" for _ in chunk)
+        conn.execute(
+            f"""
+            DELETE FROM fundamentals_raw
+            WHERE provider_listing_id IN ({placeholders})
+            """,
+            list(chunk),
+        )
+        conn.execute(
+            f"""
+            DELETE FROM fundamentals_fetch_state
+            WHERE provider_listing_id IN ({placeholders})
+            """,
+            list(chunk),
+        )
+        conn.execute(
+            f"""
+            DELETE FROM fundamentals_normalization_state
+            WHERE provider_listing_id IN ({placeholders})
+            """,
+            list(chunk),
+        )
+        conn.execute(
+            f"""
+            DELETE FROM market_data_fetch_state
+            WHERE provider_listing_id IN ({placeholders})
+            """,
+            list(chunk),
+        )
+        conn.execute(
+            f"""
+            DELETE FROM provider_listing
+            WHERE provider_listing_id IN ({placeholders})
+            """,
+            list(chunk),
+        )
+
+
 def _apply_catalog_scope(
     query: List[str],
     params: List[object],
@@ -317,52 +376,6 @@ class SupportedTickerRepository(SQLiteStore):
         )
         return True
 
-    def _delete_provider_listing_ids(
-        self,
-        conn: sqlite3.Connection,
-        provider_listing_ids: Sequence[int],
-    ) -> None:
-        normalized = sorted({int(value) for value in provider_listing_ids if value})
-        if not normalized:
-            return
-        for chunk in _batched(normalized, 500):
-            placeholders = ", ".join("?" for _ in chunk)
-            conn.execute(
-                f"""
-                DELETE FROM fundamentals_raw
-                WHERE provider_listing_id IN ({placeholders})
-                """,
-                list(chunk),
-            )
-            conn.execute(
-                f"""
-                DELETE FROM fundamentals_fetch_state
-                WHERE provider_listing_id IN ({placeholders})
-                """,
-                list(chunk),
-            )
-            conn.execute(
-                f"""
-                DELETE FROM fundamentals_normalization_state
-                WHERE provider_listing_id IN ({placeholders})
-                """,
-                list(chunk),
-            )
-            conn.execute(
-                f"""
-                DELETE FROM market_data_fetch_state
-                WHERE provider_listing_id IN ({placeholders})
-                """,
-                list(chunk),
-            )
-            conn.execute(
-                f"""
-                DELETE FROM provider_listing
-                WHERE provider_listing_id IN ({placeholders})
-                """,
-                list(chunk),
-            )
-
     def _count_orphaned_listings(
         self,
         conn: sqlite3.Connection,
@@ -492,7 +505,7 @@ class SupportedTickerRepository(SQLiteStore):
                 raise MassDelistingError(
                     provider_exchange_code, len(existing_rows), len(to_delete)
                 )
-            self._delete_provider_listing_ids(conn, to_delete)
+            purge_provider_listing_rows(conn, to_delete)
             orphaned_listings = self._count_orphaned_listings(
                 conn, candidate_listing_ids
             )

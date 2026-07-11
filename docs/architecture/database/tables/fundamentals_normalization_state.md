@@ -51,6 +51,9 @@ One row per `provider_listing_id`.
 
 - `normalize-fundamentals`
 - migration-time backfill from legacy provider-symbol state rows
+- provider-layer prune: rows die with their `provider_listing` — the ticker
+  refresh (removed tickers) and the dropped-venue cascade in
+  `refresh-supported-exchanges` delete them
 
 ## Sample Rows
 

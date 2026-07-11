@@ -54,6 +54,9 @@ One row per `provider_listing_id`.
 
 - `update-market-data`
 - retry/backoff updates
+- provider-layer prune: rows die with their `provider_listing` — the ticker
+  refresh (removed tickers) and the dropped-venue cascade in
+  `refresh-supported-exchanges` delete them
 
 ## Sample Rows
 

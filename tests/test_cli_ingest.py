@@ -460,6 +460,18 @@ def test_build_parser_refresh_tickers_allow_mass_delisting() -> None:
     assert default_args.allow_mass_delisting is False
 
 
+def test_build_parser_refresh_exchanges_allow_mass_drop() -> None:
+    args = cli.build_parser().parse_args(
+        ["refresh-supported-exchanges", "--allow-mass-drop"]
+    )
+
+    assert args.command == "refresh-supported-exchanges"
+    assert args.allow_mass_drop is True
+
+    default_args = cli.build_parser().parse_args(["refresh-supported-exchanges"])
+    assert default_args.allow_mass_drop is False
+
+
 def test_main_dispatches_ingest_fundamentals_with_default_provider_and_max_age_days(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -995,7 +1007,7 @@ def test_main_returns_cleanly_on_uncaught_keyboard_interrupt(
 ) -> None:
     patch_cli(monkeypatch, "setup_logging", lambda: None)
 
-    def raising_cmd(provider: str, database: str) -> None:
+    def raising_cmd(provider: str, database: str, allow_mass_drop: bool) -> None:
         raise KeyboardInterrupt
 
     patch_cli(monkeypatch, "cmd_refresh_supported_exchanges", raising_cmd)
@@ -1110,6 +1122,79 @@ def test_cmd_refresh_supported_exchanges(
     assert record.country_iso2 == "GB"
     assert record.country_iso3 == "GBR"
     assert [row.code for row in repo.list_all("EODHD")] == ["LSE", "US"]
+
+
+def test_cmd_refresh_supported_exchanges_reports_dropped_venues(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "supported-exchanges-drop.db"
+    store_supported_exchanges(
+        db_path,
+        rows=[
+            {"Code": "LSE", "Name": "London Exchange", "Currency": "GBP"},
+            {"Code": "US", "Name": "USA Stocks", "Currency": "USD"},
+        ],
+    )
+
+    class FakeClient:
+        def __init__(self, api_key: str) -> None:
+            self.api_key = api_key
+
+        def list_exchanges(self) -> list[dict[str, object]]:
+            return [{"Code": "LSE", "Name": "London Exchange", "Currency": "GBP"}]
+
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
+
+    rc = cli.cmd_refresh_supported_exchanges(provider="EODHD", database=str(db_path))
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    # Destruction must be visible: each dropped venue gets its own line.
+    assert (
+        "Dropped US from the EODHD catalog: purged 0 provider listing(s); "
+        "canonical data retained"
+    ) in out
+    repo = ExchangeProviderRepository(db_path)
+    assert [row.code for row in repo.list_all("EODHD")] == ["LSE"]
+
+
+def test_cmd_refresh_supported_exchanges_blocks_mass_drop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "supported-exchanges-mass-drop.db"
+    codes = [f"E{index}" for index in range(10)]
+    store_supported_exchanges(
+        db_path,
+        rows=[
+            {"Code": code, "Name": f"{code} Exchange", "Currency": "USD"}
+            for code in codes
+        ],
+    )
+
+    class FakeClient:
+        def __init__(self, api_key: str) -> None:
+            self.api_key = api_key
+
+        def list_exchanges(self) -> list[dict[str, object]]:
+            # A truncated exchanges-list: 8 of 10 venues vanish at once.
+            return [{"Code": "E0", "Name": "E0 Exchange", "Currency": "USD"}]
+
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
+
+    rc = cli.cmd_refresh_supported_exchanges(provider="EODHD", database=str(db_path))
+
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "WARNING: exchange catalog refresh blocked" in out
+    assert "--allow-mass-drop" in out
+    repo = ExchangeProviderRepository(db_path)
+    assert [row.code for row in repo.list_all("EODHD")] == codes
 
 
 def test_cmd_refresh_supported_tickers_filters_types_and_cleans_catalog(

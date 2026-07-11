@@ -54,6 +54,9 @@ One row per canonical exchange code.
 
 - migration-time backfill from legacy `supported_exchanges`
 - canonical exchange upserts during provider exchange refreshes
+- never deleted by catalog refreshes: canonical identity is retained even when
+  a provider drops the venue (only the `provider_exchange` row and its
+  provider layer go — 2026-07-11 design)
 
 ## Column Usage Notes
 

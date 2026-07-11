@@ -20,7 +20,9 @@ from .base import (
 # Those lines carry a per-line F401 suppression marking them as intentional
 # re-exports so ruff does not flag them as unused.
 from .records import (
+    DroppedProviderExchange,
     Exchange,
+    ExchangeCatalogRefreshResult,
     ExchangeProvider,
     FXRateRecord,
     FXRefreshStateRecord,  # noqa: F401
@@ -50,6 +52,7 @@ from .records import (
 from .entities import (
     ExchangeProviderRepository,
     ExchangeRepository,
+    MassExchangeDropError,
     ProviderRepository,  # noqa: F401
     SecurityRepository,
 )
@@ -90,10 +93,13 @@ ProviderListingRepository = SupportedTickerRepository
 ProviderListing = SupportedTicker
 
 __all__ = [
+    "DroppedProviderExchange",
     "Exchange",
+    "ExchangeCatalogRefreshResult",
     "ExchangeProvider",
     "ExchangeProviderRepository",
     "ExchangeRepository",
+    "MassExchangeDropError",
     "FXRateRecord",
     "FXRatesRepository",
     "Security",

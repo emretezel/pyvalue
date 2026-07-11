@@ -495,12 +495,18 @@ def test_exchange_provider_repository_replaces_rows_per_provider(
         [{"Code": "US", "Name": "United States"}],
     )
 
-    inserted = repo.replace_for_provider(
+    result = repo.replace_for_provider(
         "eodhd",
         [{"Code": "lse", "Name": "London Exchange Refreshed"}],
     )
 
-    assert inserted == 1
+    assert result.stored == 1
+    # US vanished from the EODHD payload: it is dropped from the catalog (it
+    # had no provider listings, so the cascade purged nothing). The SEC slice
+    # is untouched -- the sync is strictly provider-scoped.
+    assert [
+        (dropped.code, dropped.purged_provider_listings) for dropped in result.dropped
+    ] == [("US", 0)]
     rows = repo.list_all("EODHD")
     assert [(row.provider, row.code, row.name) for row in rows] == [
         ("EODHD", "LSE", "London Exchange Refreshed"),

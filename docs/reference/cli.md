@@ -48,11 +48,23 @@ Key options:
 
 - `--provider {EODHD}`
 - default provider: `EODHD`
+- `--allow-mass-drop`
 - `--database <path>`
 
 Notes:
 
 - `EODHD` refreshes the live exchange list from EODHD
+- an exchange absent from the provider's list is dropped from
+  `provider_exchange` together with its provider layer (`provider_listing`
+  mappings plus their raw fundamentals and fetch/normalization state); each
+  drop is printed with its purge size. Canonical rows (`exchange`, `listing`,
+  `issuer`) and canonical data are never deleted -- listings that lose their
+  mapping become unreachable through the provider-joined scopes, nothing more
+- a payload that would drop at least 5 provider exchanges *and* more than
+  half of the catalog looks like a truncated response: the sync is rolled
+  back untouched and exits `1` unless `--allow-mass-drop` is passed
+- run this after any EODHD plan change so `refresh-supported-tickers` (which
+  iterates the provider's cataloged exchanges) stops visiting dropped venues
 
 ### `refresh-supported-tickers`
 

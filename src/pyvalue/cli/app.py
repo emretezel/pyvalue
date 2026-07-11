@@ -106,6 +106,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Supported exchange provider to refresh (default: %(default)s).",
     )
     refresh_supported_exchanges.add_argument(
+        "--allow-mass-drop",
+        action="store_true",
+        help=(
+            "Override the anomalous-payload guard that blocks dropping >=5 "
+            "provider exchanges when they exceed 50%% of the catalog."
+        ),
+    )
+    refresh_supported_exchanges.add_argument(
         "--database",
         default="data/pyvalue.db",
         help="SQLite database file used for storage (default: %(default)s)",
@@ -600,6 +608,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_refresh_supported_exchanges(
                 provider=args.provider,
                 database=args.database,
+                allow_mass_drop=args.allow_mass_drop,
             )
         if args.command == "refresh-supported-tickers":
             return cmd_refresh_supported_tickers(

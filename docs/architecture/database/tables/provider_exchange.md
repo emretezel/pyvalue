@@ -61,7 +61,11 @@ One row per `(provider_id, provider_exchange_code)`.
 
 ## Main Write Paths
 
-- `refresh-supported-exchanges`
+- `refresh-supported-exchanges` — upserts the provider's exchange list and
+  drops rows absent from it, cascading through their `provider_listing`
+  mappings and provider-keyed artifacts first (FKs are NO ACTION); a drop of
+  >= 5 exchanges exceeding half the catalog is blocked unless
+  `--allow-mass-drop` is passed (2026-07-11 design)
 - migration-time backfill from legacy exchange-provider rows
 
 ## Sample Rows

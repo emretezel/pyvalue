@@ -56,6 +56,9 @@ not currently blocked by a fundamentals fetch failure.
 - `ingest-fundamentals`
 - retry/backoff updates
 - successful raw upserts delete active failure rows
+- provider-layer prune: rows die with their `provider_listing` — the ticker
+  refresh (removed tickers) and the dropped-venue cascade in
+  `refresh-supported-exchanges` delete them
 
 ## Sample Rows
 

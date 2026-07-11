@@ -20,8 +20,10 @@ from pyvalue.ingestion import (
     redact_api_token,
 )
 from pyvalue.persistence.storage import (
+    ExchangeCatalogRefreshResult,
     ExchangeProviderRepository,
     MassDelistingError,
+    MassExchangeDropError,
     SupportedTickerRefreshResult,
     SupportedTickerRepository,
 )
@@ -41,8 +43,16 @@ def _refresh_supported_exchanges_for_provider(
     database: str,
     provider: str,
     client: EODHDFundamentalsClient,
-) -> int:
-    """Refresh and persist the supported exchange catalog for a provider."""
+    allow_mass_drop: bool = False,
+) -> ExchangeCatalogRefreshResult:
+    """Refresh and persist the supported exchange catalog for a provider.
+
+    ``replace_for_provider`` cascade-purges the provider layer of every
+    exchange absent from the provider's list (mappings + raw fundamentals +
+    fetch/normalization state, then the ``provider_exchange`` row); canonical
+    rows and data are never deleted. A suspiciously large drop raises
+    ``MassExchangeDropError`` unless ``allow_mass_drop`` is set.
+    """
 
     provider_norm = provider.strip().upper()
     if provider_norm != "EODHD":
@@ -52,7 +62,9 @@ def _refresh_supported_exchanges_for_provider(
     repo = ExchangeProviderRepository(database)
     repo.initialize_schema()
     rows = client.list_exchanges()
-    return repo.replace_for_provider(provider_norm, rows)
+    return repo.replace_for_provider(
+        provider_norm, rows, allow_mass_drop=allow_mass_drop
+    )
 
 
 def _resolve_eodhd_exchange_metadata(
@@ -65,11 +77,17 @@ def _resolve_eodhd_exchange_metadata(
     repo = ExchangeProviderRepository(database)
     record = repo.fetch("EODHD", exchange_code)
     if record is None:
-        _refresh_supported_exchanges_for_provider(
-            database=database,
-            provider="EODHD",
-            client=client,
-        )
+        # The bootstrap sync runs the full catalog replace, so on a populated
+        # (stale) catalog it can trip the mass-drop guard; surface that as the
+        # CLI-conventional SystemExit instead of an unexplained traceback.
+        try:
+            _refresh_supported_exchanges_for_provider(
+                database=database,
+                provider="EODHD",
+                client=client,
+            )
+        except MassExchangeDropError as exc:
+            raise SystemExit(str(exc)) from exc
         record = repo.fetch("EODHD", exchange_code)
     if record is None:
         return None
@@ -159,18 +177,41 @@ def _list_eodhd_exchange_codes(
     return [row.code for row in exchanges]
 
 
-def cmd_refresh_supported_exchanges(provider: str, database: str) -> int:
-    """Refresh the persisted supported exchange catalog."""
+def cmd_refresh_supported_exchanges(
+    provider: str,
+    database: str,
+    allow_mass_drop: bool = False,
+) -> int:
+    """Refresh the persisted supported exchange catalog.
+
+    Exchanges the provider no longer lists are dropped from the catalog with
+    their provider layer (each drop is printed -- destruction must be
+    visible); canonical rows and data are retained. A suspiciously large drop
+    aborts rolled-back with exit code 1 unless ``allow_mass_drop`` is set.
+    """
 
     provider_norm = _normalize_provider(provider)
     api_key = _require_eodhd_key()
     client = EODHDFundamentalsClient(api_key=api_key)
-    stored = _refresh_supported_exchanges_for_provider(
-        database=database,
-        provider=provider_norm,
-        client=client,
+    try:
+        result = _refresh_supported_exchanges_for_provider(
+            database=database,
+            provider=provider_norm,
+            client=client,
+            allow_mass_drop=allow_mass_drop,
+        )
+    except MassExchangeDropError as exc:
+        print(f"WARNING: exchange catalog refresh blocked -- {exc}")
+        return 1
+    print(
+        f"Stored {result.stored} supported exchanges for {provider_norm} in {database}"
     )
-    print(f"Stored {stored} supported exchanges for {provider_norm} in {database}")
+    for dropped in result.dropped:
+        print(
+            f"Dropped {dropped.code} from the {provider_norm} catalog: purged "
+            f"{dropped.purged_provider_listings} provider listing(s); "
+            "canonical data retained"
+        )
     return 0
 
 

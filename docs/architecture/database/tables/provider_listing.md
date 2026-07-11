@@ -57,7 +57,13 @@ One row per `(provider_exchange_id, provider_symbol)`.
 
 ## Main Write Paths
 
-- `refresh-supported-tickers`
+- `refresh-supported-tickers` — upserts the exchange's payload tickers and
+  prunes mappings absent from it (with their raw fundamentals and
+  fetch/normalization state); removals of >= 20 mappings exceeding half the
+  exchange are blocked unless `--allow-mass-delisting` is passed
+- dropped-venue cascade in `refresh-supported-exchanges` — an exchange absent
+  from the provider's list takes all of its mappings (and their provider-keyed
+  artifacts) with it
 - migration-time backfill from legacy provider catalog rows
 - raw fundamentals upserts that need to materialize a minimal provider listing
 

@@ -31,6 +31,12 @@ exchange list from EODHD:
 pyvalue refresh-supported-exchanges
 ```
 
+An exchange EODHD no longer lists (e.g. after a plan change) is dropped from
+the catalog together with its provider layer -- `provider_listing` mappings,
+raw fundamentals, and fetch/normalization state -- while canonical rows and
+data are retained. A drop of >= 5 exchanges exceeding half the catalog is
+blocked as a suspected truncated payload unless `--allow-mass-drop` is passed.
+
 `pyvalue` also stores a per-exchange `provider_listing` catalog for EODHD.
 Refresh one exchange:
 

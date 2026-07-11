@@ -11,6 +11,7 @@ import sqlite3
 from typing import (
     Any,
     Dict,
+    Final,
     List,
     Optional,
     Sequence,
@@ -35,15 +36,64 @@ from .base import (
     _utc_now_iso,
 )
 from .records import (
+    DroppedProviderExchange,
     Exchange,
+    ExchangeCatalogRefreshResult,
     ExchangeProvider,
     Provider,
     Security,
     SecurityMetadataUpdate,
 )
 from .migrations import apply_migrations
+from .supported_tickers import purge_provider_listing_rows
 
 logger = logging.getLogger(__name__)
+
+# Anomalous-payload guard for the provider-exchange sync. Since the catalog
+# refresh cascade-purges the provider layer of every exchange absent from the
+# payload (2026-07-11 design), a truncated exchanges-list response would
+# otherwise sweep away most of the catalog's mappings and raw fundamentals in
+# one transaction -- the exchange-level twin of the BE symbol-list incident.
+# A drop that is both large in absolute terms AND a majority of the existing
+# provider exchanges is refused unless the operator explicitly opts in; a
+# legitimate plan change (e.g. 3 venues dropped of 73) stays under the floor.
+MASS_EXCHANGE_DROP_MIN: Final[int] = 5
+MASS_EXCHANGE_DROP_MAX_FRACTION: Final[float] = 0.5
+
+
+def mass_exchange_drop_suspicious(existing: int, dropped: int) -> bool:
+    """True when dropping ``dropped`` of ``existing`` exchanges looks anomalous.
+
+    Pure predicate behind the catalog-sync guard, mirroring
+    ``mass_delisting_suspicious`` one level up: suspicious means the drop is
+    large in absolute terms (>= ``MASS_EXCHANGE_DROP_MIN``) AND a majority of
+    the provider's existing exchanges (> ``MASS_EXCHANGE_DROP_MAX_FRACTION``).
+    """
+
+    return (
+        dropped >= MASS_EXCHANGE_DROP_MIN
+        and dropped > MASS_EXCHANGE_DROP_MAX_FRACTION * existing
+    )
+
+
+class MassExchangeDropError(RuntimeError):
+    """A catalog payload would drop a suspicious share of provider exchanges.
+
+    Raised by :meth:`ExchangeProviderRepository.replace_for_provider` before
+    any cascade runs; the surrounding transaction rolls back, so the catalog
+    (including this payload's upserts) is left byte-identical. Carries the
+    counts and the would-be-dropped codes so callers can report precisely.
+    """
+
+    def __init__(self, existing: int, dropped_codes: Sequence[str]) -> None:
+        self.existing = existing
+        self.dropped_codes: Tuple[str, ...] = tuple(dropped_codes)
+        self.dropped = len(self.dropped_codes)
+        super().__init__(
+            f"Refusing to drop {self.dropped} of {existing} provider exchanges "
+            f"({', '.join(self.dropped_codes)}): the exchanges-list payload "
+            "looks truncated. Re-run with --allow-mass-drop to override."
+        )
 
 
 class ProviderRepository(SQLiteStore):
@@ -906,7 +956,28 @@ class ExchangeProviderRepository(SQLiteStore):
         self,
         provider: str,
         rows: Sequence[Dict[str, Any]],
-    ) -> int:
+        *,
+        allow_mass_drop: bool = False,
+    ) -> ExchangeCatalogRefreshResult:
+        """Replace one provider's supported-exchange catalog with ``rows``.
+
+        Upserts every payload exchange into ``provider_exchange`` (creating
+        canonical ``exchange`` rows as needed), then cascade-purges the
+        **provider layer** of every provider exchange absent from the payload:
+        its ``provider_listing`` mappings with their raw fundamentals and
+        fetch/normalization state, then the ``provider_exchange`` row itself.
+        Canonical rows (``exchange``/``listing``/``issuer``) and canonical
+        data are provider-independent and are never deleted by the sync (user
+        design, 2026-07-11) -- listings that lose their mapping merely become
+        unreachable through the provider-joined scopes.
+
+        A drop that is both >= ``MASS_EXCHANGE_DROP_MIN`` and more than
+        ``MASS_EXCHANGE_DROP_MAX_FRACTION`` of the provider's existing
+        exchanges raises :class:`MassExchangeDropError` unless
+        ``allow_mass_drop`` is set; the raise rolls back the whole sync, so a
+        guarded catalog keeps every row it had, this payload's upserts
+        included. The whole sync commits as one transaction.
+        """
         self.initialize_schema()
         provider_norm = provider.strip().upper()
         updated_at = _utc_now_iso()
@@ -993,46 +1064,63 @@ class ExchangeProviderRepository(SQLiteStore):
                     payload,
                 )
             retained_codes = {row[1] for row in payload}
-            stale_rows = conn.execute(
+            existing_rows = conn.execute(
                 """
-                SELECT provider_exchange_id
+                SELECT provider_exchange_id, provider_exchange_code
                 FROM provider_exchange
                 WHERE provider_id = ?
+                ORDER BY provider_exchange_code
                 """,
                 (provider_row.provider_id,),
             ).fetchall()
-            for stale_row in stale_rows:
-                provider_exchange_id = int(stale_row["provider_exchange_id"])
-                current = conn.execute(
-                    """
-                    SELECT provider_exchange_code
-                    FROM provider_exchange
-                    WHERE provider_exchange_id = ?
-                    """,
-                    (provider_exchange_id,),
-                ).fetchone()
-                if current is None:
-                    continue
-                if str(current["provider_exchange_code"]) in retained_codes:
-                    continue
-                provider_listing_ref = conn.execute(
-                    """
-                    SELECT 1
-                    FROM provider_listing
-                    WHERE provider_exchange_id = ?
-                    LIMIT 1
-                    """,
-                    (provider_exchange_id,),
-                ).fetchone()
-                if provider_listing_ref is None:
-                    conn.execute(
+            dropped_rows = [
+                (int(row["provider_exchange_id"]), str(row["provider_exchange_code"]))
+                for row in existing_rows
+                if str(row["provider_exchange_code"]) not in retained_codes
+            ]
+            if not allow_mass_drop and mass_exchange_drop_suspicious(
+                len(existing_rows), len(dropped_rows)
+            ):
+                # Raising here unwinds the transaction, discarding this
+                # payload's upserts too -- see the docstring.
+                raise MassExchangeDropError(
+                    len(existing_rows), [code for _, code in dropped_rows]
+                )
+            dropped: List[DroppedProviderExchange] = []
+            for provider_exchange_id, code in dropped_rows:
+                # Cascade strictly within the provider layer: the provider no
+                # longer serves this venue, so its mappings and provider-keyed
+                # artifacts go with the catalog row. FKs are NO ACTION, so the
+                # mappings must be purged before the provider_exchange row.
+                mapping_ids = [
+                    int(row["provider_listing_id"])
+                    for row in conn.execute(
                         """
-                        DELETE FROM provider_exchange
+                        SELECT provider_listing_id
+                        FROM provider_listing
                         WHERE provider_exchange_id = ?
                         """,
                         (provider_exchange_id,),
+                    ).fetchall()
+                ]
+                purge_provider_listing_rows(conn, mapping_ids)
+                conn.execute(
+                    """
+                    DELETE FROM provider_exchange
+                    WHERE provider_exchange_id = ?
+                    """,
+                    (provider_exchange_id,),
+                )
+                dropped.append(
+                    DroppedProviderExchange(
+                        code=code,
+                        purged_provider_listings=len(mapping_ids),
                     )
-        return len(payload)
+                )
+        return ExchangeCatalogRefreshResult(
+            stored=len(payload),
+            dropped=tuple(dropped),
+        )
 
     def ensure_fixed_exchange(
         self,
