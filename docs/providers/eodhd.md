@@ -46,15 +46,23 @@ pyvalue refresh-supported-tickers --all-supported
 
 Ticker refresh keeps only `Common Stock`, `Preferred Stock`, and `Stock`.
 ETF, fund, and other security types are excluded from the operational catalog.
-When a ticker disappears from EODHD, it is removed from `provider_listing` and
-provider-scoped fetch/raw state tied to that provider listing is pruned. If
-that leaves the canonical listing with no provider mapping at all, the listing
-is purged outright in the same transaction: its `financial_facts`,
-`market_data`, `metrics`, compute/refresh state, the `listing` row, and -- when
-it was the issuer's last listing -- the `issuer` row are deleted, and the run
-reports the count. A listing another provider still carries is left untouched.
-(Contrast with secondary reclassification, which retains all data: retention
-is for listings a provider still supports.)
+When a ticker disappears from EODHD, only its provider layer goes: the
+`provider_listing` mapping plus the provider-scoped raw fundamentals and
+fetch/normalization state tied to it. Canonical rows (`listing`, `issuer`) and
+canonical data (`financial_facts`, `market_data`, `metrics`, compute/refresh
+state) are provider-independent and are never deleted by a refresh -- a payload
+absence cannot distinguish a real delisting from a plan change, a provider
+glitch, or a truncated response (2026-07-11 incident: a truncated 200-response
+for a plan-dropped exchange nearly emptied it). A listing left with no provider
+mapping is reported as orphaned and becomes unreachable through every
+provider-joined scope until a provider maps it again.
+
+Two guards protect the refresh against plan drift and bad payloads: an
+exchange the plan no longer covers answers `exchange-symbol-list` with HTTP
+404 and is warned about and skipped (stored data untouched), and a payload
+that would remove >= 20 mappings *and* more than half of an exchange's
+existing mappings is rolled back and skipped unless the operator passes
+`--allow-mass-delisting`.
 
 Example:
 

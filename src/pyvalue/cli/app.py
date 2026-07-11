@@ -133,6 +133,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Refresh every supported exchange for the provider.",
     )
     refresh_supported_tickers.add_argument(
+        "--allow-mass-delisting",
+        action="store_true",
+        help=(
+            "Override the anomalous-payload guard that blocks removing >=20 "
+            "provider listings when they exceed 50%% of an exchange's mappings."
+        ),
+    )
+    refresh_supported_tickers.add_argument(
         "--database",
         default="data/pyvalue.db",
         help="SQLite database file used for storage (default: %(default)s)",
@@ -599,6 +607,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 database=args.database,
                 exchange_codes=args.exchange_codes,
                 all_supported=args.all_supported,
+                allow_mass_delisting=args.allow_mass_delisting,
             )
         if args.command == "refresh-fx-rates":
             return cmd_refresh_fx_rates(

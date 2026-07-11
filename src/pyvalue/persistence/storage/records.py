@@ -439,11 +439,13 @@ class SupportedTickerRefreshResult:
     ``inserted`` counts the listings actually catalogued. ``removed`` counts the
     provider listings dropped because they were absent from the refreshed payload
     (their raw-fundamentals and fetch/normalization state go with them).
-    ``purged_listings`` counts the canonical listings deleted outright because
-    that removal left them with no provider mapping at all: a fully delisted
-    ticker loses its facts/prices/metrics, its ``listing`` row, and -- when it
-    was the issuer's last listing -- the ``issuer`` row (operator policy,
-    2026-07). ``skipped_no_currency`` lists the provider tickers dropped because
+    ``orphaned_listings`` counts the canonical listings that removal left with
+    no provider mapping at all. They are **retained**, not deleted -- canonical
+    rows and data (facts, market data, metrics) are provider-independent and no
+    refresh purges them (user design, 2026-07-11); an orphaned listing is simply
+    unreachable through the provider joins every scope resolver uses, so the
+    count tells the operator how much of the universe went dark in this slice.
+    ``skipped_no_currency`` lists the provider tickers dropped because
     the payload carried no usable currency -- absent, or failing the
     3-uppercase-letter shape ``listing.currency`` enforces (e.g. EODHD's
     ``'Unknown'`` placeholder): the column is NOT NULL with no fallback, so such
@@ -454,4 +456,4 @@ class SupportedTickerRefreshResult:
     inserted: int
     removed: int
     skipped_no_currency: Tuple[str, ...]
-    purged_listings: int
+    orphaned_listings: int

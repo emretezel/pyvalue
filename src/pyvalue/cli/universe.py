@@ -12,9 +12,16 @@ from typing import (
     Sequence,
 )
 
-from pyvalue.ingestion import EODHDFundamentalsClient
+import requests
+
+from pyvalue.ingestion import (
+    EODHDFundamentalsClient,
+    ExchangeNotInPlanError,
+    redact_api_token,
+)
 from pyvalue.persistence.storage import (
     ExchangeProviderRepository,
+    MassDelistingError,
     SupportedTickerRefreshResult,
     SupportedTickerRepository,
 )
@@ -105,15 +112,17 @@ def _refresh_supported_tickers_for_exchange(
     provider: str,
     client: EODHDFundamentalsClient,
     exchange_code: str,
+    allow_mass_delisting: bool = False,
 ) -> SupportedTickerRefreshResult:
     """Refresh one exchange's supported tickers.
 
-    ``replace_for_exchange`` deletes the provider listings absent from the
-    refreshed payload together with their ``fundamentals_raw`` /
-    ``fundamentals_fetch_state`` / ``fundamentals_normalization_state`` /
-    ``market_data_fetch_state`` rows, and fully purges any listing that lost
-    its last provider mapping (facts/prices/metrics, the ``listing`` row, and
-    an orphaned ``issuer``), so no separate cleanup is needed here.
+    ``replace_for_exchange`` prunes only the provider layer of the listings
+    absent from the refreshed payload -- the ``provider_listing`` mapping plus
+    its ``fundamentals_raw`` / ``fundamentals_fetch_state`` /
+    ``fundamentals_normalization_state`` / ``market_data_fetch_state`` rows.
+    Canonical rows and data (``listing``/``issuer``, facts, prices, metrics)
+    are provider-independent and are never deleted by a refresh; a listing
+    that lost its last mapping is merely reported as orphaned.
     """
 
     provider_norm = provider.strip().upper()
@@ -130,7 +139,12 @@ def _refresh_supported_tickers_for_exchange(
         filtered_rows.append(row)
 
     ticker_repo = SupportedTickerRepository(database)
-    return ticker_repo.replace_for_exchange(provider_norm, exchange_norm, filtered_rows)
+    return ticker_repo.replace_for_exchange(
+        provider_norm,
+        exchange_norm,
+        filtered_rows,
+        allow_mass_delisting=allow_mass_delisting,
+    )
 
 
 def _list_eodhd_exchange_codes(
@@ -165,8 +179,18 @@ def cmd_refresh_supported_tickers(
     database: str,
     exchange_codes: Optional[Sequence[str]],
     all_supported: bool,
+    allow_mass_delisting: bool = False,
 ) -> int:
-    """Refresh the persisted supported ticker catalog."""
+    """Refresh the persisted supported ticker catalog.
+
+    Provider failures never abort the multi-exchange run: an exchange the
+    plan no longer covers (HTTP 404) or a transient provider error is warned
+    about and skipped with its stored data untouched, and a payload tripping
+    the mass-delisting guard is rolled back and skipped. Exit code is 0 when
+    every failure was a not-in-plan skip (expected steady state until the
+    exchange catalog is re-synced) and 1 when any exchange failed for another
+    reason -- guard trips and provider errors need operator attention.
+    """
 
     provider_norm = _normalize_provider(provider)
     requested_exchanges = _parse_exchange_filters(exchange_codes)
@@ -191,23 +215,75 @@ def cmd_refresh_supported_tickers(
         return 0
 
     total = len(exchange_list)
+    skipped_not_in_plan: List[str] = []
+    blocked_mass_delisting: List[str] = []
+    failed: List[str] = []
     for idx, code in enumerate(exchange_list, 1):
-        result = _refresh_supported_tickers_for_exchange(
-            database=database,
-            provider=provider_norm,
-            client=eodhd_client,
-            exchange_code=code,
-        )
+        try:
+            result = _refresh_supported_tickers_for_exchange(
+                database=database,
+                provider=provider_norm,
+                client=eodhd_client,
+                exchange_code=code,
+                allow_mass_delisting=allow_mass_delisting,
+            )
+        except ExchangeNotInPlanError:
+            skipped_not_in_plan.append(code)
+            print(
+                f"[{idx}/{total}] WARNING: {code} is not covered by the current "
+                "EODHD plan (HTTP 404) -- skipped, stored data untouched. Run "
+                "refresh-supported-exchanges to drop it from the catalog."
+            )
+            continue
+        except MassDelistingError as exc:
+            blocked_mass_delisting.append(code)
+            print(
+                f"[{idx}/{total}] WARNING: {code} refresh blocked -- the payload "
+                f"would remove {exc.removed} of {exc.existing} provider "
+                "listings, which looks like a truncated response or a plan "
+                "change. Nothing was changed; re-run with "
+                "--allow-mass-delisting if this is intended."
+            )
+            continue
+        except requests.RequestException as exc:
+            # Transient provider trouble (5xx, timeout, connection reset) must
+            # not kill the remaining exchanges. The message is echoed with the
+            # api_token scrubbed -- connection errors embed the full URL.
+            failed.append(code)
+            print(
+                f"[{idx}/{total}] WARNING: {code} refresh failed with a "
+                f"provider error -- skipped, stored data untouched: "
+                f"{redact_api_token(str(exc))}"
+            )
+            continue
         print(
             f"[{idx}/{total}] Stored {result.inserted} supported tickers for {code} "
             f"in {database} (removed {result.removed} unsupported tickers)"
         )
-        if result.purged_listings:
-            # Destructive outcome worth its own line: these listings lost their
-            # last provider mapping and were deleted with all their data.
+        if result.orphaned_listings:
+            # Visibility line, not destruction: these listings lost their last
+            # provider mapping; canonical rows and data are retained but are
+            # unreachable through every provider-joined scope.
             print(
-                f"    Purged {result.purged_listings} delisted listing(s) "
-                "and all their stored data"
+                f"    {result.orphaned_listings} listing(s) lost their last "
+                "provider mapping -- canonical data retained (invisible to "
+                "scopes)"
             )
         _report_skipped_no_currency(code, result.skipped_no_currency)
-    return 0
+
+    if skipped_not_in_plan:
+        print(
+            f"Skipped {len(skipped_not_in_plan)} exchange(s) not covered by the "
+            f"current EODHD plan: {', '.join(skipped_not_in_plan)}"
+        )
+    if blocked_mass_delisting:
+        print(
+            f"Blocked {len(blocked_mass_delisting)} exchange(s) on the "
+            f"mass-delisting guard: {', '.join(blocked_mass_delisting)}"
+        )
+    if failed:
+        print(
+            f"Failed to refresh {len(failed)} exchange(s) on provider errors: "
+            f"{', '.join(failed)}"
+        )
+    return 1 if (blocked_mass_delisting or failed) else 0

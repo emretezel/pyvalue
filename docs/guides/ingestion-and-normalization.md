@@ -42,6 +42,13 @@ pyvalue ingest-fundamentals --all-supported
 Re-run the global command on later days to continue from the remaining eligible
 tickers after the EODHD daily call budget resets.
 
+When the EODHD subscription changes, run `refresh-supported-exchanges` first so
+the exchange catalog matches the plan. An exchange the plan no longer covers
+answers the ticker refresh with HTTP 404 and is warned about and skipped
+(stored data untouched); refreshes never delete canonical data — a removed
+ticker loses only its provider mapping, raw payloads, and fetch state, while
+facts, prices, and metrics are retained on the (now unreachable) listing.
+
 Check progress between runs:
 
 ```bash

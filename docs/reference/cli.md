@@ -64,6 +64,7 @@ Key options:
 - default provider: `EODHD`
 - `--exchange-codes <codes...>`
 - `--all-supported`
+- `--allow-mass-delisting`
 - `--database <path>`
 
 Notes:
@@ -72,12 +73,24 @@ Notes:
   supported exchange catalog for the provider
 - `EODHD` reads `exchange-symbol-list/<EXCHANGE_CODE>` and keeps only
   `Common Stock`, `Preferred Stock`, and `Stock`
-- Removed provider symbols are deleted from `provider_listing`, their raw
-  fundamentals, and the relevant fetch-state tables. A listing left with no
-  provider mapping at all is then fully purged -- facts, market data, metrics,
-  compute/refresh state, the `listing` row, and an orphaned `issuer` -- and the
-  run reports the purged count. Listings another provider still carries keep
-  everything
+- **Refreshes never delete canonical data.** Removed provider symbols lose
+  only their provider layer: the `provider_listing` mapping, their raw
+  fundamentals, and the relevant fetch/normalization-state tables. Canonical
+  rows (`listing`, `issuer`) and canonical data (facts, market data, metrics,
+  compute/refresh state) are provider-independent and are retained; a listing
+  left with no provider mapping is reported as orphaned and simply becomes
+  unreachable, because every scope resolver and catalog view joins through
+  `provider_listing`
+- an exchange the EODHD plan no longer covers answers the symbol list with
+  HTTP 404; the run warns, skips it with stored data untouched, and continues
+  with the remaining exchanges
+- a payload that would remove at least 20 provider listings *and* more than
+  half of the exchange's existing mappings looks like a truncated response or
+  a plan change: the slice is rolled back untouched and skipped unless
+  `--allow-mass-delisting` is passed
+- exit code: `0` when every exchange refreshed or was only skipped as
+  not-in-plan; `1` when any exchange hit the mass-delisting guard or another
+  provider error (so cron jobs surface it)
 
 ## Fundamentals Commands
 

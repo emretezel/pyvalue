@@ -68,8 +68,9 @@ leaving the eight columns below.
 ## Main Write Paths
 
 - `normalize-fundamentals`
-- delisting purge in `refresh-supported-tickers` (deletes a fully delisted
-  listing's rows)
+- never deleted by catalog refreshes: canonical, provider-independent data is
+  retained even when a listing loses its last provider mapping (2026-07-11
+  design)
 
 ## Sample Rows
 

@@ -1,14 +1,16 @@
-"""Regression: a fully delisted ticker is removed outright, identity included.
+"""Regression: a refresh prunes only the provider layer -- canonical data stays.
 
-`refresh-supported-tickers` always pruned a vanished ticker's provider mapping
-plus its raw payload and fetch/normalization state, but left the canonical
-`listing` row and its `financial_facts`/`market_data`/`metrics` behind as
-permanent orphans. Operator policy (2026-07) is full removal: when the prune
-leaves a listing with no provider mapping at all, its data, its `listing` row,
-and -- if it was the issuer's last listing -- the `issuer` row are deleted in
-the same per-exchange transaction. A listing another provider still carries
-must survive untouched (the purge keys on "no provider mapping left", not on
-"this provider dropped it"). These tests fail on the old orphaning code.
+On 2026-07-11 EODHD answered a plan-dropped exchange (BE) with HTTP 200 and a
+truncated 30-symbol payload; the then-current full-purge-on-delist policy
+trusted it and deleted 2,835 listings' canonical rows and data (facts, market
+data, metrics) irrecoverably. The design was flipped the same day: a provider
+payload's absence signal cannot distinguish real delisting from a plan change,
+a glitch, or a truncated response, so `replace_for_exchange` now removes only
+the provider layer (`provider_listing` + raw fundamentals + fetch/normalization
+state). Canonical rows (`listing`/`issuer`) and canonical data are
+provider-independent and are never deleted by a refresh -- an unmapped listing
+is merely unreachable, because every scope resolver and catalog view joins
+through `provider_listing`. These tests fail on the full-purge code.
 
 Author: Emre Tezel
 """
@@ -32,11 +34,28 @@ from pyvalue.persistence.storage import (
     FinancialFactsRefreshStateRepository,
     MarketDataFetchStateRepository,
     MetricComputeStatusRecord,
+    SecurityRepository,
     SupportedTickerRepository,
 )
 
 _AAA_ROW = {"Code": "AAA", "Name": "AAA Inc", "Type": "Common Stock", "Currency": "USD"}
 _BBB_ROW = {"Code": "BBB", "Name": "BBB Inc", "Type": "Common Stock", "Currency": "USD"}
+
+# Tables keyed by listing_id: canonical data a refresh must never delete.
+_CANONICAL_TABLES = (
+    "financial_facts",
+    "financial_facts_refresh_state",
+    "market_data",
+    "metrics",
+    "metric_compute_status",
+)
+# Provider-layer tables seeded for BBB below (all keyed by provider_listing_id,
+# except provider_listing itself): the prune must empty exactly these.
+_PROVIDER_TABLES = (
+    "fundamentals_raw",
+    "fundamentals_normalization_state",
+    "market_data_fetch_state",
+)
 
 
 def _seed_catalog_with_downstream_data(db_path: Path) -> tuple[int, int]:
@@ -88,8 +107,8 @@ def _seed_catalog_with_downstream_data(db_path: Path) -> tuple[int, int]:
     return aaa_id, bbb_id
 
 
-def test_delisted_ticker_is_fully_purged(tmp_path: Path) -> None:
-    db_path = tmp_path / "delist-full-purge.db"
+def test_delisted_ticker_keeps_canonical_rows_and_data(tmp_path: Path) -> None:
+    db_path = tmp_path / "delist-retention.db"
     aaa_id, bbb_id = _seed_catalog_with_downstream_data(db_path)
     ticker_repo = SupportedTickerRepository(db_path)
 
@@ -97,44 +116,51 @@ def test_delisted_ticker_is_fully_purged(tmp_path: Path) -> None:
     result = ticker_repo.replace_for_exchange("EODHD", "US", [_AAA_ROW])
 
     assert result.removed == 1
-    assert result.purged_listings == 1
+    assert result.orphaned_listings == 1
 
     with sqlite3.connect(db_path) as conn:
-        # Identity rows: BBB's listing and issuer are gone, AAA's survive.
+        # Canonical identity survives the prune: both listings, both issuers.
         listing_symbols = {row[0] for row in conn.execute("SELECT symbol FROM listing")}
         issuer_names = {row[0] for row in conn.execute("SELECT name FROM issuer")}
-        # Every child table is empty for the purged listing_id.
-        child_counts = {
+        # Canonical data keyed by BBB's listing_id is fully retained.
+        canonical_counts = {
             table: conn.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE listing_id = ?",
                 (bbb_id,),
             ).fetchone()[0]
-            for table in (
-                "financial_facts",
-                "financial_facts_refresh_state",
-                "market_data",
-                "metrics",
-                "metric_compute_status",
-                "provider_listing",
-            )
+            for table in _CANONICAL_TABLES
         }
-        # The manual children-first deletes must leave referential integrity
-        # intact (every FK is NO ACTION -- nothing cascades on our behalf).
+        # The provider layer is gone: BBB's mapping plus every
+        # provider_listing_id-keyed row (only BBB had rows in these tables).
+        bbb_mappings = conn.execute(
+            "SELECT COUNT(*) FROM provider_listing WHERE listing_id = ?",
+            (bbb_id,),
+        ).fetchone()[0]
+        provider_counts = {
+            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in _PROVIDER_TABLES
+        }
         conn.execute("PRAGMA foreign_keys=ON")
         fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
 
-    assert listing_symbols == {"AAA"}
-    assert issuer_names == {"AAA Inc"}
-    assert child_counts == {
-        "financial_facts": 0,
-        "financial_facts_refresh_state": 0,
-        "market_data": 0,
-        "metrics": 0,
-        "metric_compute_status": 0,
-        "provider_listing": 0,
-    }
+    assert listing_symbols == {"AAA", "BBB"}
+    assert issuer_names == {"AAA Inc", "BBB Inc"}
+    assert canonical_counts == {table: 1 for table in _CANONICAL_TABLES}
+    assert bbb_mappings == 0
+    assert provider_counts == {table: 0 for table in _PROVIDER_TABLES}
     assert fk_violations == []
-    assert aaa_id != bbb_id  # sanity: the survivor was never the purged id
+
+    # The orphan is unreachable through every provider-joined read: the scope
+    # resolvers and the catalog view no longer surface BBB.US.
+    security_repo = SecurityRepository(db_path)
+    assert security_repo.list_supported_listings() == [(aaa_id, "AAA.US")]
+    assert security_repo.list_supported_listings_for_symbols(["BBB.US"]) == {}
+    with sqlite3.connect(db_path) as conn:
+        catalog_rows = conn.execute(
+            "SELECT COUNT(*) FROM provider_listing_catalog WHERE security_id = ?",
+            (bbb_id,),
+        ).fetchone()[0]
+    assert catalog_rows == 0
 
 
 def test_listing_with_another_provider_mapping_survives_prune(
@@ -150,11 +176,11 @@ def test_listing_with_another_provider_mapping_survives_prune(
     ticker_repo.replace_for_exchange("OTHER", "US", [_BBB_ROW])
 
     # EODHD drops BBB, but OTHER still carries it: prune the EODHD mapping,
-    # keep the listing and all its data.
+    # keep the listing reachable through OTHER (not orphaned at all).
     result = ticker_repo.replace_for_exchange("EODHD", "US", [_AAA_ROW])
 
     assert result.removed == 1
-    assert result.purged_listings == 0
+    assert result.orphaned_listings == 0
 
     with sqlite3.connect(db_path) as conn:
         listing_exists = conn.execute(

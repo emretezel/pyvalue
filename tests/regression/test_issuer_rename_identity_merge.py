@@ -102,7 +102,7 @@ def test_rename_onto_existing_identity_merges_instead_of_crashing(
 
     assert result.inserted == 1
     assert result.removed == 0
-    assert result.purged_listings == 0
+    assert result.orphaned_listings == 0
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row

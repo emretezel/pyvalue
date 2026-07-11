@@ -69,9 +69,10 @@ One row per `(exchange_id, symbol)`.
 ## Main Write Paths
 
 - `refresh-supported-tickers` — the sole runtime writer of `listing` rows and
-  of `listing.currency`; it also deletes them: a ticker whose prune leaves the
-  listing with no provider mapping at all is fully purged (data, `listing`
-  row, orphaned `issuer`) in the same per-exchange transaction
+  of `listing.currency`; it never deletes them: a prune removes only the
+  provider layer (`provider_listing` + raw/fetch/normalization state), and a
+  listing left with no provider mapping is retained, unreachable through the
+  provider-joined scopes until a provider maps it again (2026-07-11 design)
 - migration-time backfill from legacy securities
 
 `ingest-fundamentals` never writes here. It attaches each payload to a listing

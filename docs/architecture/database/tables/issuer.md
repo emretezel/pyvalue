@@ -52,8 +52,9 @@ One row per issuer record created during catalog backfill or listing creation.
 
 ## Main Write Paths
 
-- `refresh-supported-tickers` — creates issuers while cataloguing listings and
-  deletes an issuer once the delisting purge removes its last listing
+- `refresh-supported-tickers` — creates issuers while cataloguing listings;
+  it never deletes them (canonical identity survives a prune that leaves the
+  issuer's listings unmapped — 2026-07-11 design)
 - migration-time backfill from legacy security metadata
 - metadata refreshes from stored fundamentals
 - runtime identity merge — both rename paths (the catalog refresh and the

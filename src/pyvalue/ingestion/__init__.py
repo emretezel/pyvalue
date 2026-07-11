@@ -3,6 +3,14 @@
 Author: Emre Tezel
 """
 
-from .eodhd import EODHDFundamentalsClient
+from .eodhd import (
+    EODHDFundamentalsClient,
+    ExchangeNotInPlanError,
+    redact_api_token,
+)
 
-__all__ = ["EODHDFundamentalsClient"]
+__all__ = [
+    "EODHDFundamentalsClient",
+    "ExchangeNotInPlanError",
+    "redact_api_token",
+]

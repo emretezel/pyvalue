@@ -53,7 +53,10 @@ from .entities import (
     ProviderRepository,  # noqa: F401
     SecurityRepository,
 )
-from .supported_tickers import SupportedTickerRepository
+from .supported_tickers import (
+    MassDelistingError,
+    SupportedTickerRepository,
+)
 from .fundamentals import (
     FundamentalsNormalizationStateRepository,  # noqa: F401
     FundamentalsRepository,
@@ -102,6 +105,7 @@ __all__ = [
     "IngestProgressSummary",
     "IngestProgressExchange",
     "IngestProgressFailure",
+    "MassDelistingError",
     "SupportedTicker",
     "SupportedTickerRefreshResult",
     "SupportedTickerRepository",

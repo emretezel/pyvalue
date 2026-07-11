@@ -443,6 +443,23 @@ def test_build_parser_report_ingest_progress_missing_only() -> None:
     assert args.missing_only is True
 
 
+def test_build_parser_refresh_tickers_allow_mass_delisting() -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "refresh-supported-tickers",
+            "--exchange-codes",
+            "US",
+            "--allow-mass-delisting",
+        ]
+    )
+
+    assert args.command == "refresh-supported-tickers"
+    assert args.allow_mass_delisting is True
+
+    default_args = cli.build_parser().parse_args(["refresh-supported-tickers"])
+    assert default_args.allow_mass_delisting is False
+
+
 def test_main_dispatches_ingest_fundamentals_with_default_provider_and_max_age_days(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

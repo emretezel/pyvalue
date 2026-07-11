@@ -10,10 +10,10 @@ import sqlite3
 from typing import (
     Any,
     Dict,
+    Final,
     List,
     Optional,
     Sequence,
-    Set,
     Tuple,
 )
 
@@ -42,6 +42,56 @@ from .fetch_state import (
     MarketDataFetchStateRepository,
 )
 from .metrics_market import MarketDataRepository
+
+
+# Anomalous-payload guard for the per-exchange prune. On 2026-07-11 EODHD
+# answered a plan-dropped exchange (BE) with HTTP 200 and a 30-symbol stub
+# instead of a 404; the refresh trusted it and removed 2,835 provider
+# listings in one transaction. A payload absence cannot distinguish real
+# delisting from a plan change, a provider glitch, or a truncated response,
+# so a removal that is both large in absolute terms AND a majority of the
+# exchange's existing mappings is refused unless the operator explicitly
+# opts in. Normal delisting churn (single-digit percent) never trips this;
+# the absolute floor keeps tiny exchanges' full legitimate turnover flowing.
+MASS_DELISTING_MIN_REMOVED: Final[int] = 20
+MASS_DELISTING_MAX_REMOVED_FRACTION: Final[float] = 0.5
+
+
+def mass_delisting_suspicious(existing: int, removed: int) -> bool:
+    """True when removing ``removed`` of ``existing`` mappings looks anomalous.
+
+    Pure predicate behind the guard: suspicious means the removal is large in
+    absolute terms (>= ``MASS_DELISTING_MIN_REMOVED``) AND a majority of the
+    exchange's existing mappings (> ``MASS_DELISTING_MAX_REMOVED_FRACTION``).
+    Both bounds are needed: the fraction alone would block a tiny exchange's
+    legitimate full turnover, the floor alone would block normal churn on
+    large exchanges.
+    """
+
+    return (
+        removed >= MASS_DELISTING_MIN_REMOVED
+        and removed > MASS_DELISTING_MAX_REMOVED_FRACTION * existing
+    )
+
+
+class MassDelistingError(RuntimeError):
+    """A refresh payload would remove a suspicious share of an exchange's mappings.
+
+    Raised by :meth:`SupportedTickerRepository.replace_for_exchange` before any
+    delete runs; the surrounding transaction rolls back, so a guarded exchange
+    keeps every row it had (including upserts from the same payload). Carries
+    the counts so callers can report precisely.
+    """
+
+    def __init__(self, exchange_code: str, existing: int, removed: int) -> None:
+        self.exchange_code = exchange_code
+        self.existing = existing
+        self.removed = removed
+        super().__init__(
+            f"Refusing to remove {removed} of {existing} provider listings on "
+            f"{exchange_code}: the payload looks truncated or the exchange left "
+            "the provider plan. Re-run with --allow-mass-delisting to override."
+        )
 
 
 def _apply_catalog_scope(
@@ -313,40 +363,30 @@ class SupportedTickerRepository(SQLiteStore):
                 list(chunk),
             )
 
-    def _purge_delisted_listings(
+    def _count_orphaned_listings(
         self,
         conn: sqlite3.Connection,
         listing_ids: Sequence[int],
     ) -> int:
-        """Fully remove listings left without any provider mapping.
+        """Count listings left without any provider mapping after a prune.
 
-        Called after the provider-listing prune with the ``listing_id``s the
-        pruned rows pointed at. A candidate that still has another
-        ``provider_listing`` row (another provider, or another slice of this
-        one) is left untouched -- only listings no provider supports at all are
-        purged. Operator policy (2026-07): a fully delisted ticker is removed
-        outright -- its facts/prices/metrics, its ``listing`` row, and, when it
-        was the issuer's last listing, the ``issuer`` row. This is deliberately
-        the opposite of the secondary-reclassification path, which retains data
-        because the provider still carries the listing.
-
-        Every FK in the schema is NO ACTION, so the deletes run children-first
-        by hand; the whole purge shares the caller's per-exchange transaction.
-
-        Returns the number of listings deleted.
+        Purely informational: canonical rows (``listing``/``issuer``) and
+        canonical data (facts, market data, metrics) are provider-independent
+        and are NEVER deleted by a refresh (user design, 2026-07-11). An
+        orphaned listing is simply unreachable -- every scope resolver, the
+        catalog views, and the ingest/market-data eligibility scans all join
+        through ``provider_listing`` -- so it sits inert until a provider maps
+        it again. The count is surfaced so the operator sees how much of the
+        universe went dark in this slice. The probe is a point seek per row
+        via idx_provider_listing_listing.
         """
         candidates = sorted({int(value) for value in listing_ids if value})
-        if not candidates:
-            return 0
-
-        # Keep only candidates with no surviving provider mapping. The probe is
-        # a point seek per row via idx_provider_listing_listing.
-        orphaned: List[int] = []
+        orphaned = 0
         for chunk in _batched(candidates, 500):
             placeholders = ", ".join("?" for _ in chunk)
-            rows = conn.execute(
+            row = conn.execute(
                 f"""
-                SELECT listing_id FROM listing
+                SELECT COUNT(*) AS orphaned FROM listing
                 WHERE listing_id IN ({placeholders})
                   AND NOT EXISTS (
                       SELECT 1 FROM provider_listing pl
@@ -354,83 +394,40 @@ class SupportedTickerRepository(SQLiteStore):
                   )
                 """,
                 list(chunk),
-            ).fetchall()
-            orphaned.extend(int(row["listing_id"]) for row in rows)
-        if not orphaned:
-            return 0
-
-        # Snapshot the issuers BEFORE the listing rows disappear; they are
-        # re-checked for surviving listings afterwards.
-        issuer_candidates: Set[int] = set()
-        for chunk in _batched(orphaned, 500):
-            placeholders = ", ".join("?" for _ in chunk)
-            issuer_rows = conn.execute(
-                f"""
-                SELECT issuer_id FROM listing
-                WHERE listing_id IN ({placeholders})
-                """,
-                list(chunk),
-            ).fetchall()
-            issuer_candidates.update(int(row["issuer_id"]) for row in issuer_rows)
-
-        for chunk in _batched(orphaned, 500):
-            placeholders = ", ".join("?" for _ in chunk)
-            for table_name in (
-                "financial_facts",
-                "financial_facts_refresh_state",
-                "market_data",
-                "metrics",
-                "metric_compute_status",
-            ):
-                conn.execute(
-                    f"""
-                    DELETE FROM {table_name}
-                    WHERE listing_id IN ({placeholders})
-                    """,
-                    list(chunk),
-                )
-            conn.execute(
-                f"""
-                DELETE FROM listing
-                WHERE listing_id IN ({placeholders})
-                """,
-                list(chunk),
-            )
-
-        # An issuer with any surviving listing (including a secondary one, or a
-        # listing on another exchange) is kept; the NOT EXISTS probe is served
-        # by idx_listing_issuer.
-        for chunk in _batched(sorted(issuer_candidates), 500):
-            placeholders = ", ".join("?" for _ in chunk)
-            conn.execute(
-                f"""
-                DELETE FROM issuer
-                WHERE issuer_id IN ({placeholders})
-                  AND NOT EXISTS (
-                      SELECT 1 FROM listing l
-                      WHERE l.issuer_id = issuer.issuer_id
-                  )
-                """,
-                list(chunk),
-            )
-        return len(orphaned)
+            ).fetchone()
+            orphaned += int(row["orphaned"])
+        return orphaned
 
     def replace_for_exchange(
         self,
         provider: str,
         exchange_code: str,
         rows: Sequence[Dict[str, Any]],
+        *,
+        allow_mass_delisting: bool = False,
     ) -> SupportedTickerRefreshResult:
         """Replace one provider/exchange supported-ticker slice with ``rows``.
 
         Upserts every payload ticker into ``issuer``/``listing``/
-        ``provider_listing``, then prunes the provider listings absent from the
-        payload (dropping their raw fundamentals and fetch/normalization
-        state). A pruned listing left with no provider mapping at all is then
-        fully purged -- data, ``listing`` row, and orphaned ``issuer`` -- via
-        :meth:`_purge_delisted_listings`. Payload rows without a usable
-        currency (absent or malformed) are skipped, so they count as absent
-        and are pruned like delisted tickers.
+        ``provider_listing``, then prunes the **provider layer** of the
+        listings absent from the payload: the ``provider_listing`` mapping
+        plus its raw fundamentals and fetch/normalization state. Canonical
+        rows (``listing``/``issuer``) and canonical data (facts, market data,
+        metrics) are provider-independent and are never deleted by a refresh
+        (user design, 2026-07-11): a listing that loses its last mapping is
+        only counted as orphaned and becomes unreachable through the provider
+        joins until some provider maps it again. Payload rows without a
+        usable currency (absent or malformed) are skipped, so they count as
+        absent and are pruned like delisted tickers.
+
+        A removal that is both >= ``MASS_DELISTING_MIN_REMOVED`` and more
+        than ``MASS_DELISTING_MAX_REMOVED_FRACTION`` of the exchange's
+        existing mappings raises :class:`MassDelistingError` unless
+        ``allow_mass_delisting`` is set. The raise rolls back the whole
+        slice, so a guarded exchange keeps every row it had -- new tickers
+        and currency corrections from the same payload are deliberately
+        discarded with it ("skipped" must mean untouched).
+
         The whole slice commits as one transaction.
         """
         self.initialize_schema()
@@ -481,19 +478,29 @@ class SupportedTickerRepository(SQLiteStore):
                 if str(row["provider_symbol"]) not in retained
             ]
             # Capture the pruned rows' listing ids before the mapping is gone:
-            # they are the only candidates the delist purge must consider.
+            # they are the only candidates the orphan count must consider.
             candidate_listing_ids = [
                 int(row["listing_id"])
                 for row in existing_rows
                 if str(row["provider_symbol"]) not in retained
             ]
+            if not allow_mass_delisting and mass_delisting_suspicious(
+                len(existing_rows), len(to_delete)
+            ):
+                # Raising here unwinds the transaction, discarding this
+                # payload's upserts too -- see the docstring.
+                raise MassDelistingError(
+                    provider_exchange_code, len(existing_rows), len(to_delete)
+                )
             self._delete_provider_listing_ids(conn, to_delete)
-            purged_listings = self._purge_delisted_listings(conn, candidate_listing_ids)
+            orphaned_listings = self._count_orphaned_listings(
+                conn, candidate_listing_ids
+            )
         return SupportedTickerRefreshResult(
             inserted=len(retained_tickers),
             removed=len(to_delete),
             skipped_no_currency=tuple(skipped_no_currency),
-            purged_listings=purged_listings,
+            orphaned_listings=orphaned_listings,
         )
 
     def list_for_provider(
