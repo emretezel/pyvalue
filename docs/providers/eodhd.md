@@ -344,6 +344,18 @@ Many newer metrics in the project are intentionally EODHD-oriented because they 
 - Exchange suffixes matter: use `AAPL.US`, `SHEL.LSE`, etc.
 - Some fields are normalized through EODHD-specific fallback chains; compute metrics only after normalization.
 - Market data freshness is independent from fundamentals freshness.
+- FX coverage has known, accepted gaps — GEL before 2024, ZMW before 2013
+  (the rebased kwacha's birth), BRL before 1991 — that keep a residual
+  ~9.6k missing-FX warnings on a full-universe normalization; frontier
+  currencies with GBP-only depth (PGK) and euro legacy currencies are
+  handled by the pivot chain and statutory rates instead. Full audit:
+  `docs/research/fx-coverage-gaps-2026-07.md`.
+- One provider-corrupt statement period (WMT.MX 2017-07-31, Walmart Inc USD
+  data labeled PGK) is quarantined at normalization
+  (`EODHD_QUARANTINED_PERIODS`); report new instances to EODHD support and
+  extend the registry.
+- Dead-symbol skeleton payloads carry `SharesStats` zeros ("no data"
+  sentinels); non-positive share counts are never stored.
 
 ## Related Docs
 
