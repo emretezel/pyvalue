@@ -5620,3 +5620,41 @@ def test_migration_085_purges_only_wmt_mx_quarantined_period(
         (5, "Assets", "2017-04-30"),
         (6, "Assets", "2017-07-31"),
     ]
+
+
+def test_migration_086_purges_only_nonpositive_count_facts(tmp_path: Path) -> None:
+    """Migration 086 deletes count facts with value <= 0 (EODHD's "no data"
+    sentinels plus negative artifacts) and leaves positive counts and
+    non-count facts -- including legitimately negative monetary values --
+    untouched."""
+
+    from pyvalue.persistence.storage.migrations import (
+        _migration_086_purge_nonpositive_count_facts,
+    )
+
+    db_path = tmp_path / "purge-nonpositive-counts.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE financial_facts (listing_id INTEGER NOT NULL, "
+            "concept TEXT NOT NULL, unit_kind TEXT NOT NULL, value REAL NOT NULL)"
+        )
+        conn.executemany(
+            "INSERT INTO financial_facts VALUES (?, ?, ?, ?)",
+            [
+                (1, "CommonStockSharesOutstanding", "count", 0.0),
+                (1, "EntityCommonStockSharesOutstanding", "count", -5000.0),
+                (1, "CommonStockSharesOutstanding", "count", 1_000_000.0),
+                (1, "NetIncomeLoss", "monetary", -250.0),
+            ],
+        )
+
+        _migration_086_purge_nonpositive_count_facts(conn)
+
+        remaining = conn.execute(
+            "SELECT concept, unit_kind, value FROM financial_facts ORDER BY concept"
+        ).fetchall()
+
+    assert remaining == [
+        ("CommonStockSharesOutstanding", "count", 1_000_000.0),
+        ("NetIncomeLoss", "monetary", -250.0),
+    ]

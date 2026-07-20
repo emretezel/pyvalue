@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from pyvalue.money.fx import FXService
 from pyvalue.normalization.eodhd import EODHDFactsNormalizer
 from pyvalue.persistence.storage import FXRateRecord, FXRatesRepository
@@ -1884,3 +1886,113 @@ def test_eodhd_cash_arbitration_picks_supplement_when_identity_selects_it() -> N
     records = normalizer.normalize(payload, symbol="TEST.US")
     cce = [r for r in records if r.concept == "CashAndCashEquivalents"]
     assert cce and cce[0].value == 2_535_000_000.0
+
+
+def test_eodhd_skips_zero_shares_stats_snapshot() -> None:
+    # 0 in both SharesStats keys is EODHD's "no data" sentinel; even with a
+    # perfectly good UpdatedAt the snapshot must not become a 0.0 INSTANT
+    # fact that per-share metrics would divide by.
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "SharesStats": {"SharesOutstanding": 0, "SharesFloat": 0},
+        "General": {"CurrencyCode": "USD", "UpdatedAt": "2024-12-31"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+
+    assert [r for r in records if r.concept == "CommonStockSharesOutstanding"] == []
+
+
+def test_eodhd_skeleton_payload_emits_no_facts_and_no_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The dead-frontier-symbol skeleton shape from the 2026-07 audit: both
+    # share keys 0 and no General.UpdatedAt. The old code warned about the
+    # missing date; the sentinel guard must bail first, silently.
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "SharesStats": {"SharesOutstanding": 0, "SharesFloat": 0},
+        "General": {"CurrencyCode": "MUR"},
+    }
+
+    with caplog.at_level("WARNING"):
+        records = normalizer.normalize(payload, symbol="ZWTO.SEM")
+
+    assert records == []
+    assert "missing General.UpdatedAt" not in caplog.text
+
+
+def test_eodhd_nonzero_shares_missing_updated_at_still_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A real share count without a timestamp is a genuine anomaly: the
+    # missing-UpdatedAt warning must survive the sentinel guard.
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "SharesStats": {"SharesOutstanding": 5_000_000},
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    with caplog.at_level("WARNING"):
+        records = normalizer.normalize(payload, symbol="TEST.US")
+
+    assert [r for r in records if r.concept == "CommonStockSharesOutstanding"] == []
+    assert "missing General.UpdatedAt" in caplog.text
+
+
+def test_eodhd_skips_zero_outstanding_shares_entries() -> None:
+    # outstandingShares series entries with 0 shares (or 0 sharesMln) are the
+    # same sentinel; positive siblings must survive untouched.
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "outstandingShares": {
+            "annual": [
+                {"dateFormatted": "2022-12-31", "shares": 0},
+                {"dateFormatted": "2023-12-31", "sharesMln": 0},
+                {"dateFormatted": "2024-12-31", "shares": 1_000_000},
+            ]
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+    counts = [r for r in records if r.concept == "CommonStockSharesOutstanding"]
+
+    assert [(r.end_date, r.value) for r in counts] == [("2024-12-31", 1_000_000.0)]
+
+
+def test_eodhd_skips_zero_statement_share_counts() -> None:
+    # The balance-sheet share field carries the same 0 sentinel (and the
+    # occasional negative artifact); both must be dropped while the monetary
+    # fields of the same entry normalize as usual.
+    normalizer = EODHDFactsNormalizer()
+    payload = {
+        "Financials": {
+            "Balance_Sheet": {
+                "yearly": [
+                    {
+                        "date": "2023-12-31",
+                        "totalAssets": 1000.0,
+                        "commonStockSharesOutstanding": 0,
+                        "currency_symbol": "USD",
+                    },
+                    {
+                        "date": "2024-12-31",
+                        "totalAssets": 1100.0,
+                        "commonStockSharesOutstanding": -5_000,
+                        "currency_symbol": "USD",
+                    },
+                ]
+            }
+        },
+        "General": {"CurrencyCode": "USD"},
+    }
+
+    records = normalizer.normalize(payload, symbol="TEST.US")
+
+    # The statement key feeds both share concepts; neither may materialize.
+    assert [r for r in records if r.unit_kind == "count"] == []
+    assets = sorted(
+        (r for r in records if r.concept == "Assets"), key=lambda r: r.end_date
+    )
+    assert [r.value for r in assets] == [1000.0, 1100.0]

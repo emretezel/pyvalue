@@ -267,8 +267,16 @@ Concept `CommonStockSharesOutstanding`, `unit_kind = count`, currency NULL, from
 sources; the share-record collapse keeps one best record per `(concept, end_date,
 fiscal_period)`, preferring `unit_kind = count` and NULL currency.
 
+**Non-positive counts are treated as absent at all three sources.** EODHD writes `0` where it
+has no share data (dead-symbol skeleton payloads carry `SharesStats.SharesOutstanding = 0`
+and `SharesFloat = 0`), and the series/statement paths carry the same sentinel plus
+occasional negative artifacts. No issuer has zero or negative shares outstanding, so a
+`value <= 0` count is never stored (migration 086 purged the 24,307 rows that predated the
+guard).
+
 - **INSTANT snapshot** — `SharesStats.SharesOutstanding` (fallback `SharesStats.SharesFloat`);
-  `end_date = General.UpdatedAt`; skipped if `UpdatedAt` missing.
+  `end_date = General.UpdatedAt`; skipped if `UpdatedAt` missing (warned only when the count
+  itself is usable — zero-share skeletons skip silently before the date check).
 - **Historical** — `outstandingShares.<annual|quarterly>[<i>].shares` (fallback
   `sharesMln × 1e6`); `end_date = dateFormatted` (else `date`; a bare 4-digit year →
   `YYYY-12-31`); `FY` for the annual bucket, calendar-inferred `Qn` for quarterly. The annual
@@ -482,6 +490,11 @@ and pounds.
 
 ## Known subtleties / caveats
 
+- **Dead-symbol skeleton payloads carry zero-share sentinels.** 1,051 frontier/OTC symbols
+  (Karachi, Egypt, US OTC, Nairobi, Zimbabwe, ...) return skeleton fundamentals: no
+  statements, no `General.UpdatedAt`, and `SharesStats.SharesOutstanding = 0` /
+  `SharesFloat = 0`. The zeros are "no data" sentinels, not observations — non-positive
+  counts are skipped at every share source (see the Shares section).
 - **Euro legacy statement currencies convert statutorily.** Transition-era filings
   (1999-2002) denominated in NLG/DEM/FRF/ESP/FIM/PTE/BEF/GRD/IEP etc. convert through the
   irrevocable Council Regulation (EC) No 2866/98 rates served from code

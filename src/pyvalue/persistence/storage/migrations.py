@@ -8662,6 +8662,30 @@ def _migration_085_purge_wmt_mx_quarantined_facts(conn: sqlite3.Connection) -> N
     )
 
 
+def _migration_086_purge_nonpositive_count_facts(conn: sqlite3.Connection) -> None:
+    """Purge ``unit_kind='count'`` facts with ``value <= 0`` (provider sentinels).
+
+    EODHD writes 0 where it has no share data (dead-symbol skeleton payloads
+    carry ``SharesStats.SharesOutstanding = 0``, and statement/outstandingShares
+    series contain the same sentinel plus occasional negative artifacts). The
+    normalizer historically treated only ``None`` as absent, so 24,307 such
+    rows accumulated -- 23,942 zeros and 365 negatives, all on the two
+    outstanding-share concepts. No issuer has zero or negative shares
+    outstanding: these are sentinels, not observations, and any per-share
+    metric reading one would divide by zero or flip sign. The normalizer now
+    skips non-positive counts at every source; this migration removes the
+    rows already stored.
+
+    Idempotent: the ``DELETE`` is a no-op once no non-positive counts remain.
+    """
+
+    if not _table_exists(conn, "financial_facts"):
+        return
+    if "unit_kind" not in _table_columns(conn, "financial_facts"):
+        return
+    conn.execute("DELETE FROM financial_facts WHERE unit_kind = 'count' AND value <= 0")
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -8748,6 +8772,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_083_create_provider_fx_rates,
     _migration_084_fx_rates_canonical_rebuild,
     _migration_085_purge_wmt_mx_quarantined_facts,
+    _migration_086_purge_nonpositive_count_facts,
 ]
 
 

@@ -688,6 +688,12 @@ class EODHDFactsNormalizer:
                     unit_kind: MetricUnitKind
                     if concept in SHARE_FACT_CONCEPTS:
                         normalized_value = float(value)
+                        # EODHD writes 0 where it has no share data (and the
+                        # occasional negative artifact): no issuer has zero
+                        # shares outstanding, so non-positive counts are
+                        # sentinels, not observations.
+                        if normalized_value <= 0:
+                            continue
                         normalized_currency = None
                         unit_kind = "count"
                     else:
@@ -784,7 +790,20 @@ class EODHDFactsNormalizer:
         stats = payload.get("SharesStats") or {}
         value = stats.get("SharesOutstanding") or stats.get("SharesFloat")
         shares = _to_float(value)
-        if shares is None:
+        if shares is None or shares <= 0:
+            # Dead-symbol skeleton payloads carry SharesOutstanding=0 /
+            # SharesFloat=0 (1,051 in the 2026-07 audit): 0 is EODHD's
+            # "no data" sentinel, not an observation -- no issuer has zero
+            # shares outstanding. Bail before the UpdatedAt check so
+            # skeletons stop warning about the missing date, and so a
+            # skeleton that later gains UpdatedAt can never store a 0.0
+            # INSTANT count that would poison per-share metrics.
+            if shares is not None:
+                LOGGER.debug(
+                    "CommonStockSharesOutstanding (snapshot): non-positive"
+                    " share count in SharesStats for %s; skipping",
+                    symbol,
+                )
             return []
         end_date = self._payload_updated_at(payload)
         if not end_date:
@@ -839,7 +858,9 @@ class EODHDFactsNormalizer:
                     shares_mln = _to_float(entry.get("sharesMln"))
                     if shares_mln is not None:
                         shares = shares_mln * 1_000_000
-                if shares is None:
+                # Non-positive counts are provider sentinels ("no data"), not
+                # observations -- same rule as the SharesStats snapshot.
+                if shares is None or shares <= 0:
                     continue
                 period = fiscal_period or self._infer_quarter({"date": end_date})
                 if period is None:
