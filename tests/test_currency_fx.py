@@ -8,6 +8,7 @@ from __future__ import annotations
 from concurrent.futures import ProcessPoolExecutor
 from datetime import date
 from decimal import Decimal
+from functools import lru_cache
 from pathlib import Path
 from typing import TypeVar, overload
 import json
@@ -30,6 +31,7 @@ from pyvalue.currency import (
 from pyvalue.money import fx_service_for_context
 from pyvalue.money.fx import (
     EODHDFXProvider,
+    EURO_LEGACY_FIXED_RATES,
     FXService,
     MissingFXRateError,
     parse_eodhd_fx_catalog_entry,
@@ -547,6 +549,161 @@ def test_config_fx_pivot_currencies_defaults_when_absent_or_empty(
     # default so every FXService construction path agrees on the pivot chain.
     assert FXService(":memory:").pivot_currencies == DEFAULT_FX_PIVOT_CURRENCIES
     assert fx_service_for_context().pivot_currencies == DEFAULT_FX_PIVOT_CURRENCIES
+
+
+def test_statutory_nlg_to_eur_conversion(tmp_path: Path) -> None:
+    # No market rates at all: the statutory table alone must convert a
+    # guilder-era filing (1 EUR = 2.20371 NLG, Council Regulation 2866/98).
+    service, _ = _service_with_rates(tmp_path)
+
+    quote = service.get_fx_rate("NLG", "EUR", "2000-06-30")
+    converted = service.convert_amount(Decimal("220371"), "NLG", "EUR", "2000-06-30")
+
+    assert quote is not None
+    assert quote.source_kind == "statutory"
+    assert quote.via_currency is None
+    assert quote.rate_date == date(2000, 6, 30)
+    # This direction is the 28-digit reciprocal of the fixed figure, so the
+    # product is approx-equal, not bit-equal, to the clean 100000.
+    assert converted is not None
+    assert converted == pytest.approx(Decimal("100000"))
+
+
+def test_statutory_eur_to_nlg_inverse_is_exact(tmp_path: Path) -> None:
+    service, _ = _service_with_rates(tmp_path)
+
+    quote = service.get_fx_rate("EUR", "NLG", "2001-03-31")
+
+    assert quote is not None
+    assert quote.source_kind == "statutory"
+    # This orientation serves the legislated figure itself -- exact.
+    assert quote.rate == Decimal("2.20371")
+
+
+def test_statutory_frf_to_dem_cross_via_eur(tmp_path: Path) -> None:
+    # Legacy->legacy composes two statutory legs through the EUR pivot; the
+    # cross is exact arithmetic on the legislated figures.
+    service, _ = _service_with_rates(tmp_path)
+
+    quote = service.get_fx_rate("FRF", "DEM", "2000-12-31")
+
+    assert quote is not None
+    assert quote.source_kind == "triangulated"
+    assert quote.via_currency == "EUR"
+    assert quote.rate == pytest.approx(Decimal("1.95583") / Decimal("6.55957"))
+
+
+def test_statutory_iep_to_gbp_composes_with_market_eur_gbp(tmp_path: Path) -> None:
+    # The audit's IEP->GBP shape: fixed IEP->EUR statutory leg composed with
+    # a market EUR<->GBP leg through the EUR pivot.
+    service, _ = _service_with_rates(
+        tmp_path,
+        FXRateRecord(
+            provider="EODHD",
+            rate_date="1999-06-28",
+            base_currency="EUR",
+            quote_currency="GBP",
+            rate=0.65,
+            fetched_at="1999-06-28T00:00:00+00:00",
+        ),
+    )
+
+    quote = service.get_fx_rate("IEP", "GBP", "1999-06-30")
+
+    assert quote is not None
+    assert quote.source_kind == "triangulated"
+    assert quote.via_currency == "EUR"
+    # (IEP->EUR = 1/0.787564) / (GBP->EUR = 1/0.65) = 0.65/0.787564; the
+    # composed rate date is the market leg's (the statutory leg is as-of).
+    assert quote.rate_date == date(1999, 6, 28)
+    assert quote.rate == pytest.approx(Decimal("0.65") / Decimal("0.787564"))
+
+
+def test_statutory_refused_before_effective_date(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Before adoption the currency still floated: the fixed figure is not a
+    # valid historical rate, so the lookup must fail rather than fabricate.
+    service, _ = _service_with_rates(tmp_path)
+
+    with caplog.at_level("WARNING"):
+        pre_euro = service.get_fx_rate("DEM", "EUR", "1998-12-31")
+    pre_adoption_grd = service.get_fx_rate("GRD", "EUR", "2000-06-30")
+
+    assert pre_euro is None
+    assert "Missing FX rate" in caplog.text
+    # Greece adopted in 2001; mid-2000 is before GRD's effective date even
+    # though the first-wave currencies were already fixed.
+    assert pre_adoption_grd is None
+
+
+def test_statutory_quote_never_warns_stale(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    service, _ = _service_with_rates(tmp_path)
+
+    with caplog.at_level("WARNING"):
+        quote = service.get_fx_rate("NLG", "EUR", "2000-06-30")
+
+    assert quote is not None
+    # rate_date == as_of by construction, so the staleness check sees age 0.
+    assert "Stale FX rate" not in caplog.text
+
+
+@lru_cache(maxsize=1)
+def _statutory_only_service() -> FXService:
+    # One shared empty in-memory service for the Hypothesis properties:
+    # statutory quotes never touch the rates tables, and schema setup runs
+    # the full migration chain -- far too slow to repeat per example.
+    return FXService(":memory:")
+
+
+@given(
+    amount=st.decimals(
+        min_value=Decimal("0.01"),
+        max_value=Decimal("1000000000"),
+        places=2,
+        allow_nan=False,
+        allow_infinity=False,
+    ),
+    scale=st.integers(min_value=1, max_value=10_000),
+)
+def test_statutory_conversion_scale_invariance(amount: Decimal, scale: int) -> None:
+    # Statutory conversion is a pure multiplication, so it must commute with
+    # scaling up to the last ulp of the 28-digit Decimal context.
+    service = _statutory_only_service()
+
+    single = service.convert_amount(amount, "NLG", "EUR", "2000-06-30")
+    scaled = service.convert_amount(amount * scale, "NLG", "EUR", "2000-06-30")
+
+    assert single is not None
+    assert scaled is not None
+    assert scaled == pytest.approx(single * scale, rel=Decimal("1e-24"))
+
+
+@given(
+    currency=st.sampled_from(sorted(EURO_LEGACY_FIXED_RATES)),
+    amount=st.decimals(
+        min_value=Decimal("0.01"),
+        max_value=Decimal("1000000000"),
+        places=2,
+        allow_nan=False,
+        allow_infinity=False,
+    ),
+)
+def test_statutory_round_trip_within_decimal_tolerance(
+    currency: str, amount: Decimal
+) -> None:
+    # legacy -> EUR -> legacy multiplies by 1/u then u; the round trip must
+    # reproduce the input up to the last ulp of the reciprocal.
+    service = _statutory_only_service()
+    as_of = EURO_LEGACY_FIXED_RATES[currency].effective
+
+    to_eur = service.convert_amount(amount, currency, "EUR", as_of)
+    assert to_eur is not None
+    back = service.convert_amount(to_eur, "EUR", currency, as_of)
+    assert back is not None
+    assert back == pytest.approx(amount, rel=Decimal("1e-24"))
 
 
 def test_fx_service_missing_rate_warns_and_returns_none_without_network_fetch(

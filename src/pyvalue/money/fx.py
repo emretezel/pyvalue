@@ -11,7 +11,8 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
-from typing import Optional, Protocol, Sequence
+from types import MappingProxyType
+from typing import Mapping, Optional, Protocol, Sequence
 import logging
 
 import requests
@@ -33,6 +34,50 @@ class _EphemeralFXConfig:
     fx_provider: str = DEFAULT_PROVIDER
     fx_pivot_currencies: tuple[str, ...] = DEFAULT_FX_PIVOT_CURRENCIES
     fx_stale_warning_days: int = 7
+
+
+@dataclass(frozen=True)
+class StatutoryEuroRate:
+    """Irrevocable EU-law conversion rate for a euro legacy currency."""
+
+    # 1 EUR = ``units_per_euro`` legacy units, exact by law at every date on
+    # or after ``effective`` (the currency's euro-adoption date); undefined
+    # before it, when the currency still floated.
+    units_per_euro: Decimal
+    effective: date
+
+
+# Council Regulation (EC) No 2866/98 and its successor regulations fixed
+# these conversion rates irrevocably when each member state adopted the euro.
+# They are statutory constants, not market observations: no provider carries
+# (or could carry) a market series for a currency that ceased to float, so
+# the FX service serves these from code with the exact legislated figures
+# (always 6 significant digits). Statement filings in transition years (e.g.
+# Dutch 1999-2001 annual reports in NLG) convert through these rates.
+EURO_LEGACY_FIXED_RATES: Mapping[str, StatutoryEuroRate] = MappingProxyType(
+    {
+        "ATS": StatutoryEuroRate(Decimal("13.7603"), date(1999, 1, 1)),
+        "BEF": StatutoryEuroRate(Decimal("40.3399"), date(1999, 1, 1)),
+        "DEM": StatutoryEuroRate(Decimal("1.95583"), date(1999, 1, 1)),
+        "ESP": StatutoryEuroRate(Decimal("166.386"), date(1999, 1, 1)),
+        "FIM": StatutoryEuroRate(Decimal("5.94573"), date(1999, 1, 1)),
+        "FRF": StatutoryEuroRate(Decimal("6.55957"), date(1999, 1, 1)),
+        "IEP": StatutoryEuroRate(Decimal("0.787564"), date(1999, 1, 1)),
+        "ITL": StatutoryEuroRate(Decimal("1936.27"), date(1999, 1, 1)),
+        "LUF": StatutoryEuroRate(Decimal("40.3399"), date(1999, 1, 1)),
+        "NLG": StatutoryEuroRate(Decimal("2.20371"), date(1999, 1, 1)),
+        "PTE": StatutoryEuroRate(Decimal("200.482"), date(1999, 1, 1)),
+        "GRD": StatutoryEuroRate(Decimal("340.750"), date(2001, 1, 1)),
+        "SIT": StatutoryEuroRate(Decimal("239.640"), date(2007, 1, 1)),
+        "CYP": StatutoryEuroRate(Decimal("0.585274"), date(2008, 1, 1)),
+        "MTL": StatutoryEuroRate(Decimal("0.429300"), date(2008, 1, 1)),
+        "SKK": StatutoryEuroRate(Decimal("30.1260"), date(2009, 1, 1)),
+        "EEK": StatutoryEuroRate(Decimal("15.6466"), date(2011, 1, 1)),
+        "LVL": StatutoryEuroRate(Decimal("0.702804"), date(2014, 1, 1)),
+        "LTL": StatutoryEuroRate(Decimal("3.45280"), date(2015, 1, 1)),
+        "HRK": StatutoryEuroRate(Decimal("7.53450"), date(2023, 1, 1)),
+    }
+)
 
 
 def _to_date(value: object) -> Optional[date]:
@@ -465,6 +510,10 @@ class FXService:
             quote_currency,
             as_of,
         )
+        if candidates and candidates[0].source_kind == "statutory":
+            # Exact by law with rate_date == as_of: no pivot path can outrank
+            # it, so skip the pivot probes (and their DB reads) entirely.
+            return candidates[0]
         for pivot in self.pivot_currencies:
             if pivot in {base_currency, quote_currency}:
                 continue
@@ -502,6 +551,11 @@ class FXService:
         """
 
         source_rank = {
+            # "statutory" ties "identity" at the top: it is exact by law and
+            # carries rate_date == as_of, so a same-date market tie cannot
+            # occur (legacy pairs have no market series), and identity quotes
+            # return early from get_fx_rate without ever entering _lookup.
+            "statutory": 4,
             "provider": 3,
             "inverse": 2,
             "triangulated": 1,
@@ -516,6 +570,42 @@ class FXService:
             pivot_rank,
         )
 
+    def _statutory_euro_quote(
+        self,
+        base_currency: str,
+        quote_currency: str,
+        as_of: date,
+    ) -> Optional[FXQuote]:
+        """Return the statutory quote when one leg is EUR and the other a
+        legacy currency at or after its euro-adoption date; None otherwise.
+
+        Stored-rate orientation is ``1 base = rate quote``, so with the table
+        holding units-per-euro: base legacy / quote EUR uses the reciprocal,
+        base EUR / quote legacy uses the fixed figure directly. ``rate_date``
+        is ``as_of`` itself -- the rate is definitionally exact at every date
+        from adoption onward, so the quote always ranks freshest and never
+        trips the staleness warning.
+        """
+
+        if base_currency == "EUR":
+            legacy, inverted = quote_currency, False
+        elif quote_currency == "EUR":
+            legacy, inverted = base_currency, True
+        else:
+            return None
+        fixed = EURO_LEGACY_FIXED_RATES.get(legacy)
+        if fixed is None or as_of < fixed.effective:
+            return None
+        rate = Decimal("1") / fixed.units_per_euro if inverted else fixed.units_per_euro
+        return FXQuote(
+            provider=self.provider_name,
+            rate_date=as_of,
+            base_currency=base_currency,
+            quote_currency=quote_currency,
+            rate=rate,
+            source_kind="statutory",
+        )
+
     def _lookup_direct_and_inverse(
         self,
         base_currency: str,
@@ -523,6 +613,16 @@ class FXService:
         as_of: date,
     ) -> list[FXQuote]:
         """Return available direct and inverse quotes for a pair."""
+
+        statutory = self._statutory_euro_quote(base_currency, quote_currency, as_of)
+        if statutory is not None:
+            # A legacy currency has no market series by definition after its
+            # conversion rate was fixed -- skip the DB entirely. Because this
+            # sits under the pivot loop too, one hook covers direct
+            # legacy<->EUR pairs, legacy->X / X->legacy crosses via the EUR
+            # pivot (including legacy->legacy statutory crosses), and
+            # compositions with market legs such as IEP->GBP.
+            return [statutory]
 
         quotes: list[FXQuote] = []
         direct = self._latest_direct_quote(base_currency, quote_currency, as_of)
@@ -586,11 +686,13 @@ class FXService:
 __all__ = [
     "DEFAULT_PROVIDER",
     "EODHDFXProvider",
+    "EURO_LEGACY_FIXED_RATES",
     "FXCatalogEntry",
     "FXQuote",
     "FXRefreshProvider",
     "FXService",
     "FXSeries",
     "MissingFXRateError",
+    "StatutoryEuroRate",
     "parse_eodhd_fx_catalog_entry",
 ]

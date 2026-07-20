@@ -68,6 +68,14 @@ FX semantics:
 - lookups use latest available rate on or before the requested date
 - direct provider rows are persisted; inverse and triangulated cross-rates are
   computed at lookup time, not stored
+- euro legacy currencies (ATS, BEF, DEM, ESP, FIM, FRF, IEP, ITL, LUF, NLG,
+  PTE, GRD, SIT, CYP, MTL, SKK, EEK, LVL, LTL, HRK) convert through their
+  irrevocable statutory rates (Council Regulation (EC) No 2866/98 and
+  successors), served from code (`EURO_LEGACY_FIXED_RATES`) for any date on
+  or after each currency's euro adoption -- exact by law, never stored, and
+  refused before the adoption date. Keep `EUR` among `pivot_currencies`:
+  legacy-to-non-EUR crosses (e.g. `IEP -> GBP`, `FRF -> DEM`) compose the
+  statutory leg with market legs through the EUR pivot
 - `normalize-fundamentals` uses only stored FX data and never performs runtime
   FX fetches
 

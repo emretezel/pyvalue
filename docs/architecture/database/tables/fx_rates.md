@@ -57,6 +57,9 @@ One row per `(base_currency, quote_currency, rate_date)`.
 - inverse and triangulated FX lookup support (derived at runtime in
   `money.fx`, never persisted); triangulation walks the configured pivot
   chain (`[fx] pivot_currencies`, default `USD, EUR, GBP`) in order
+- euro legacy-currency conversions bypass this table entirely: statutory
+  rates (`EURO_LEGACY_FIXED_RATES` in `money.fx`) are served from code and
+  short-circuit the lookup before any table read
 - provider coverage planning does **not** read this table: `pair_coverage` and
   `fully_covered_quotes_for_window` are provider-scoped and read
   `provider_fx_rates`

@@ -209,6 +209,10 @@ Behavior:
 - tracks pair coverage and retry state in `fx_refresh_state`
 - backfills full available history on the first unbounded run, then refreshes
   only the missing older/newer outer ranges later
+- euro legacy currencies (NLG, DEM, FRF, ...) are never refreshed: EODHD's
+  FOREX catalog has no pairs for dead currencies, and none are needed -- the
+  FX service serves their irrevocable statutory conversion rates from code
+  (see `docs/configuration.md`, FX semantics)
 
 If you need to limit the first backfill window:
 

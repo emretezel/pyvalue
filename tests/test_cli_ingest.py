@@ -5393,9 +5393,12 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_suppresses_missing_fx_warnings_on
                 "Balance_Sheet": {
                     "yearly": [
                         {
+                            # GEL: no seeded FX and no statutory euro-legacy
+                            # rate, so the missing-FX warning genuinely fires
+                            # (NLG would now convert statutorily).
                             "date": "2000-06-30",
                             "totalAssets": 1000.0,
-                            "currency_symbol": "NLG",
+                            "currency_symbol": "GEL",
                         },
                         {
                             "date": "2001-12-31",
@@ -5434,7 +5437,7 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_suppresses_missing_fx_warnings_on
     assert "Missing FX rate" not in captured.err
     assert "Missing FX rate for monetary conversion" not in captured.err
     log_text = (log_dir / "pyvalue.log").read_text(encoding="utf-8")
-    assert "Missing FX rate | provider=EODHD base=NLG quote=EUR" in log_text
+    assert "Missing FX rate | provider=EODHD base=GEL quote=EUR" in log_text
     assert "Missing FX rate for monetary conversion" in log_text
 
 

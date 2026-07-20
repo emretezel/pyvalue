@@ -1470,9 +1470,12 @@ def test_eodhd_normalize_missing_fx_rate_drops_old_period_but_keeps_newer_conver
             "Balance_Sheet": {
                 "yearly": [
                     {
+                        # GEL has no stored FX at this date and no statutory
+                        # rate (unlike euro legacy currencies), so the period
+                        # is genuinely unconvertible.
                         "date": "2000-06-30",
                         "totalAssets": 1000.0,
-                        "currency_symbol": "NLG",
+                        "currency_symbol": "GEL",
                     },
                     {
                         "date": "2001-12-31",
@@ -1518,11 +1521,15 @@ def test_eodhd_normalize_missing_fx_rate_skips_old_derived_period_during_target_
             "Balance_Sheet": {
                 "yearly": [
                     {
+                        # Entry-level "currency" wins over "currency_symbol",
+                        # so the whole period is GEL -- a currency with no
+                        # stored FX here and no statutory rate, making the
+                        # derived equity genuinely unalignable to EUR.
                         "date": "2000-06-30",
                         "totalAssets": 1000.0,
                         "currency_symbol": "EUR",
                         "totalLiab": 600.0,
-                        "currency": "NLG",
+                        "currency": "GEL",
                     },
                     {
                         "date": "2001-12-31",

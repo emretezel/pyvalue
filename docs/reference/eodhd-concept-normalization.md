@@ -482,6 +482,11 @@ and pounds.
 
 ## Known subtleties / caveats
 
+- **Euro legacy statement currencies convert statutorily.** Transition-era filings
+  (1999-2002) denominated in NLG/DEM/FRF/ESP/FIM/PTE/BEF/GRD/IEP etc. convert through the
+  irrevocable Council Regulation (EC) No 2866/98 rates served from code
+  (`EURO_LEGACY_FIXED_RATES` in `pyvalue.money.fx`), not market FX — EODHD has no series for
+  dead currencies. Conversions dated before a currency's euro adoption are refused.
 - **Provider-corrupt periods are quarantined wholesale.** `EODHD_QUARANTINED_PERIODS`
   (`src/pyvalue/normalization/eodhd.py`) lists verified provider data bugs dropped for a
   symbol as a post-filter over every builder's output, before share-record collapse and
