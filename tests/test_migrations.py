@@ -5559,3 +5559,64 @@ def test_migration_084_aborts_on_cross_provider_pair_collision(
 
     with pytest.raises(RuntimeError, match="arbitration"):
         apply_migrations(db_path)
+
+
+def test_migration_085_purges_only_wmt_mx_quarantined_period(
+    tmp_path: Path,
+) -> None:
+    """Migration 085 deletes only WMT.MX facts dated 2017-07-31 -- the corrupt
+    provider period (Walmart Inc's USD balance sheet mislabeled PGK) -- and
+    leaves the symbol's other periods and other listings' 2017-07-31 facts
+    untouched."""
+
+    from pyvalue.persistence.storage.migrations import (
+        _migration_085_purge_wmt_mx_quarantined_facts,
+    )
+
+    db_path = tmp_path / "purge-wmt-mx.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE provider (provider_id INTEGER PRIMARY KEY, "
+            "provider_code TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE provider_exchange (provider_exchange_id INTEGER "
+            "PRIMARY KEY, provider_id INTEGER NOT NULL, "
+            "provider_exchange_code TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE provider_listing (provider_listing_id INTEGER "
+            "PRIMARY KEY, provider_exchange_id INTEGER NOT NULL, "
+            "provider_symbol TEXT NOT NULL, listing_id INTEGER NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE financial_facts (listing_id INTEGER NOT NULL, "
+            "concept TEXT NOT NULL, end_date TEXT NOT NULL)"
+        )
+        conn.execute("INSERT INTO provider VALUES (1, 'EODHD')")
+        conn.execute("INSERT INTO provider_exchange VALUES (10, 1, 'MX')")
+        conn.executemany(
+            "INSERT INTO provider_listing VALUES (?, ?, ?, ?)",
+            [(100, 10, "WMT", 5), (101, 10, "OTHER", 6)],
+        )
+        conn.executemany(
+            "INSERT INTO financial_facts VALUES (?, ?, ?)",
+            [
+                (5, "CommonStockSharesOutstanding", "2017-07-31"),
+                (5, "EarningsPerShare", "2017-07-31"),
+                (5, "Assets", "2017-04-30"),
+                (6, "Assets", "2017-07-31"),
+            ],
+        )
+
+        _migration_085_purge_wmt_mx_quarantined_facts(conn)
+
+        remaining = conn.execute(
+            "SELECT listing_id, concept, end_date FROM financial_facts "
+            "ORDER BY listing_id, concept"
+        ).fetchall()
+
+    assert remaining == [
+        (5, "Assets", "2017-04-30"),
+        (6, "Assets", "2017-07-31"),
+    ]

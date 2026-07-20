@@ -19,6 +19,7 @@ from hypothesis import given, strategies as st
 import pytest
 import requests
 
+from pyvalue.config import DEFAULT_FX_PIVOT_CURRENCIES, Config
 from pyvalue.currency import (
     canonical_trading_currency,
     normalize_currency_code,
@@ -26,6 +27,7 @@ from pyvalue.currency import (
     resolve_eodhd_currency,
     shaped_currency_code,
 )
+from pyvalue.money import fx_service_for_context
 from pyvalue.money.fx import (
     EODHDFXProvider,
     FXService,
@@ -393,6 +395,160 @@ def test_fx_service_prefers_fresher_triangulation_over_older_direct(
     assert quote.rate == pytest.approx(Decimal("0.9290796963946869070208728653"))
 
 
+def test_fx_service_triangulates_through_gbp_when_only_gbp_legs_exist(
+    tmp_path: Path,
+) -> None:
+    # Mirrors the production PGK shape: EODHD stores deep GBP->PGK and
+    # GBP->AUD histories but no USD/EUR legs for PGK before 2024, so only the
+    # third pivot (GBP) can bridge PGK->AUD for historical dates.
+    service, _ = _service_with_rates(
+        tmp_path,
+        FXRateRecord(
+            provider="EODHD",
+            rate_date="2017-06-01",
+            base_currency="GBP",
+            quote_currency="PGK",
+            rate=4.0,
+            fetched_at="2017-06-01T00:00:00+00:00",
+        ),
+        FXRateRecord(
+            provider="EODHD",
+            rate_date="2017-06-01",
+            base_currency="GBP",
+            quote_currency="AUD",
+            rate=1.7,
+            fetched_at="2017-06-01T00:00:00+00:00",
+        ),
+    )
+
+    quote = service.get_fx_rate("PGK", "AUD", "2017-06-30")
+
+    assert quote is not None
+    assert quote.source_kind == "triangulated"
+    assert quote.via_currency == "GBP"
+    # (PGK->GBP inverse 1/4) / (AUD->GBP inverse 1/1.7) = 1.7/4.
+    assert quote.rate == pytest.approx(Decimal("0.425"))
+
+
+def test_fx_service_prefers_earlier_pivot_at_equal_freshness(tmp_path: Path) -> None:
+    # All three pivots can bridge SEK->NOK on the same rate date but with
+    # deliberately different cross rates; the configured order (USD before
+    # EUR before GBP) must decide the tie.
+    def _leg(base: str, quote: str, rate: float) -> FXRateRecord:
+        return FXRateRecord(
+            provider="EODHD",
+            rate_date="2024-05-01",
+            base_currency=base,
+            quote_currency=quote,
+            rate=rate,
+            fetched_at="2024-05-01T00:00:00+00:00",
+        )
+
+    service, _ = _service_with_rates(
+        tmp_path,
+        _leg("USD", "SEK", 10.0),
+        _leg("USD", "NOK", 11.0),
+        _leg("EUR", "SEK", 12.0),
+        _leg("EUR", "NOK", 12.6),
+        _leg("GBP", "SEK", 13.0),
+        _leg("GBP", "NOK", 13.26),
+    )
+
+    quote = service.get_fx_rate("SEK", "NOK", "2024-05-02")
+
+    assert quote is not None
+    assert quote.via_currency == "USD"
+    assert quote.rate == pytest.approx(Decimal("1.1"))
+
+    eur_gbp_dir = tmp_path / "eur_gbp"
+    eur_gbp_dir.mkdir()
+    eur_gbp_service, _ = _service_with_rates(
+        eur_gbp_dir,
+        _leg("EUR", "SEK", 12.0),
+        _leg("EUR", "NOK", 12.6),
+        _leg("GBP", "SEK", 13.0),
+        _leg("GBP", "NOK", 13.26),
+    )
+
+    eur_quote = eur_gbp_service.get_fx_rate("SEK", "NOK", "2024-05-02")
+
+    assert eur_quote is not None
+    assert eur_quote.via_currency == "EUR"
+    assert eur_quote.rate == pytest.approx(Decimal("1.05"))
+
+
+def test_fx_service_pivot_freshness_still_dominates_pivot_order(
+    tmp_path: Path,
+) -> None:
+    # A fresher GBP bridge must beat a staler USD bridge: rate-date freshness
+    # outranks pivot position, exactly as it already outranked source kind.
+    service, _ = _service_with_rates(
+        tmp_path,
+        FXRateRecord(
+            provider="EODHD",
+            rate_date="2024-01-01",
+            base_currency="USD",
+            quote_currency="SEK",
+            rate=10.0,
+            fetched_at="2024-01-01T00:00:00+00:00",
+        ),
+        FXRateRecord(
+            provider="EODHD",
+            rate_date="2024-01-01",
+            base_currency="USD",
+            quote_currency="NOK",
+            rate=11.0,
+            fetched_at="2024-01-01T00:00:00+00:00",
+        ),
+        FXRateRecord(
+            provider="EODHD",
+            rate_date="2024-06-01",
+            base_currency="GBP",
+            quote_currency="SEK",
+            rate=13.0,
+            fetched_at="2024-06-01T00:00:00+00:00",
+        ),
+        FXRateRecord(
+            provider="EODHD",
+            rate_date="2024-06-01",
+            base_currency="GBP",
+            quote_currency="NOK",
+            rate=13.26,
+            fetched_at="2024-06-01T00:00:00+00:00",
+        ),
+    )
+
+    quote = service.get_fx_rate("SEK", "NOK", "2024-06-15")
+
+    assert quote is not None
+    assert quote.rate_date.isoformat() == "2024-06-01"
+    assert quote.via_currency == "GBP"
+    assert quote.rate == pytest.approx(Decimal("1.02"))
+
+
+def test_config_fx_pivot_currencies_parses_comma_list(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text('[fx]\npivot_currencies = "usd, gbp , USD, eur"\n')
+
+    assert Config(config_path).fx_pivot_currencies == ("USD", "GBP", "EUR")
+
+
+def test_config_fx_pivot_currencies_defaults_when_absent_or_empty(
+    tmp_path: Path,
+) -> None:
+    missing = Config(tmp_path / "missing.toml")
+    assert missing.fx_pivot_currencies == DEFAULT_FX_PIVOT_CURRENCIES
+
+    empty_path = tmp_path / "empty.toml"
+    empty_path.write_text('[fx]\npivot_currencies = " , "\n')
+    assert Config(empty_path).fx_pivot_currencies == DEFAULT_FX_PIVOT_CURRENCIES
+
+    # The two non-fetching stand-in configs must stay locked to the same
+    # default so every FXService construction path agrees on the pivot chain.
+    assert FXService(":memory:").pivot_currencies == DEFAULT_FX_PIVOT_CURRENCIES
+    assert fx_service_for_context().pivot_currencies == DEFAULT_FX_PIVOT_CURRENCIES
+
+
 def test_fx_service_missing_rate_warns_and_returns_none_without_network_fetch(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -466,10 +622,18 @@ def test_fx_service_lazy_pair_cache_loads_each_direct_leg_once(tmp_path: Path) -
     assert inverse is not None
     assert inverse_repeat is not None
     assert repo.fetch_all_calls == 0
-    assert repo.fetch_pair_history_calls == 2
+    # Six one-time loads, never refetched: the USD<->EUR legs plus the GBP
+    # pivot probes (USD/GBP on the first lookup; EUR/GBP on the inverse
+    # lookup -- the first lookup's empty USD/GBP leg short-circuits its
+    # inner quote-leg loop before EUR/GBP is ever consulted).
+    assert repo.fetch_pair_history_calls == 6
     assert repo.fetch_pair_history_pairs == [
         ("USD", "EUR"),
         ("EUR", "USD"),
+        ("USD", "GBP"),
+        ("GBP", "USD"),
+        ("EUR", "GBP"),
+        ("GBP", "EUR"),
     ]
 
 

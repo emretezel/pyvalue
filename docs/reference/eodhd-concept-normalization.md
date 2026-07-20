@@ -482,6 +482,13 @@ and pounds.
 
 ## Known subtleties / caveats
 
+- **Provider-corrupt periods are quarantined wholesale.** `EODHD_QUARANTINED_PERIODS`
+  (`src/pyvalue/normalization/eodhd.py`) lists verified provider data bugs dropped for a
+  symbol as a post-filter over every builder's output, before share-record collapse and
+  target-currency conversion, so a corrupt period can neither win a collapse decision nor
+  convert. Current registry: WMT.MX 2017-07-31 — Walmart Inc's (US parent) USD balance sheet
+  injected into Walmex's quarterly statements with `currency_symbol="PGK"`; migration 085
+  purged the rows that had already been stored.
 - **`PreferredStock` excludes `capitalStock` (fixed).** The leaf chain is genuine
   preferred-equity fields only. `capitalStock` was previously a fallback, but for issuers
   without preferred stock it is common stock + additional paid-in capital; because the override

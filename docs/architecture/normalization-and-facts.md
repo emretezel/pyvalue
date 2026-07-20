@@ -72,13 +72,15 @@ Derived facts are also currency-aware:
 - mixed-currency monetary inputs are converted before arithmetic
 - missing currency skips only the affected derived fact and logs structured
   context
-- missing FX is now a hard symbol-level error once normalization knows the
-  source and target currencies but cannot resolve a stored direct, inverse, or
-  USD/EUR triangulated quote
+- missing FX skips only the affected fact and logs structured context: when
+  normalization knows the source and target currencies but cannot resolve a
+  stored direct, inverse, or configured-pivot triangulated quote (default
+  pivots `USD, EUR, GBP`), the monetary value is dropped rather than stored
+  unconverted
 
-For bulk runs, each worker process preloads the full selected-provider FX table
-once and resolves conversions from that local in-memory cache only. No runtime
-FX web fetches happen during normalization.
+For bulk runs, each worker process resolves conversions from the stored
+canonical FX series, loading each currency pair's history lazily and caching
+it in memory. No runtime FX web fetches happen during normalization.
 
 ## Normalization Layers in This Repo
 

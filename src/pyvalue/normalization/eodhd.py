@@ -217,6 +217,21 @@ SHARE_FACT_CONCEPTS = {
     "WeightedAverageNumberOfDilutedSharesOutstanding",
     "WeightedAverageNumberOfSharesOutstandingBasic",
 }
+# Provider-corrupt periods dropped wholesale (all statements, snapshots, and
+# derived facts) before collapse and currency conversion. These are verified
+# EODHD data bugs, not judgement calls -- keep each entry documented and
+# report the underlying defect to EODHD support.
+#
+# WMT.MX 2017-07-31: the quarterly entry is Walmart Inc's (US parent) fiscal
+# Q2-FY2018 balance sheet in USD (totalAssets 201,566,000,000, a fiscal
+# quarter end Walmex does not have) mislabeled currency_symbol="PGK"
+# (verified against fundamentals_raw, 2026-07-20). Until the GBP pivot
+# landed, the missing PGK->MXN rate accidentally blocked conversion of the
+# monetary fields; without this quarantine the period would now convert into
+# garbage canonical facts.
+EODHD_QUARANTINED_PERIODS: Mapping[str, frozenset[str]] = {
+    "WMT.MX": frozenset({"2017-07-31"}),
+}
 LOGGER = logging.getLogger(__name__)
 
 
@@ -357,12 +372,40 @@ class EODHDFactsNormalizer:
             self._derive_common_stockholders_equity(indexed),
             "CommonStockholdersEquity",
         )
+        records = self._drop_quarantined_periods(records, symbol)
         records = self._collapse_share_records(records)
         if target_currency is not None:
             records = self._convert_facts_to_target_currency(
                 records, target_currency, symbol
             )
         return records
+
+    def _drop_quarantined_periods(
+        self, records: List[FactRecord], symbol: str
+    ) -> List[FactRecord]:
+        """Drop all facts for provider-corrupt periods of ``symbol``.
+
+        Runs as a post-filter over every builder's output (statements,
+        Earnings-derived EPS, snapshots, derived aliases) so one choke point
+        covers all fact sources, and runs before share-record collapse and
+        target-currency conversion so a corrupt period can neither win a
+        collapse decision nor be converted.
+        """
+
+        quarantined = EODHD_QUARANTINED_PERIODS.get(symbol.strip().upper())
+        if not quarantined:
+            return records
+        kept = [record for record in records if record.end_date not in quarantined]
+        dropped = len(records) - len(kept)
+        if dropped:
+            LOGGER.warning(
+                "Dropping %d fact(s) for %s in quarantined period(s) %s"
+                " (known provider-corrupt data)",
+                dropped,
+                symbol,
+                ", ".join(sorted(quarantined)),
+            )
+        return kept
 
     def _collapse_share_records(self, records: List[FactRecord]) -> List[FactRecord]:
         """Keep one best share-count fact per concept/date/period."""

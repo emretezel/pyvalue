@@ -258,8 +258,11 @@ Monetary fact currency lookup checks entry-level `currency`,
 payload-level `General.CurrencyCode`; facts are converted to
 base(`listing.currency`) when the source currency differs.
 Normalization never fetches FX from the network. When a symbol needs currency
-conversion, each worker process preloads the full selected-provider FX table
-once and resolves direct, inverse, and USD/EUR triangulated rates from memory.
+conversion, each worker process resolves direct, inverse, and
+configured-pivot triangulated rates (default pivots `USD, EUR, GBP`; see
+`docs/configuration.md`) from the stored canonical `fx_rates` series, loading
+each pair's history lazily and caching it in memory. A fact whose conversion
+cannot be resolved is skipped with a structured warning.
 Run `refresh-fx-rates` before normalization when the database does not already
 contain the required history.
 

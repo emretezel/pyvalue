@@ -8624,6 +8624,44 @@ def _migration_084_fx_rates_canonical_rebuild(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE fx_rates__new RENAME TO fx_rates")
 
 
+def _migration_085_purge_wmt_mx_quarantined_facts(conn: sqlite3.Connection) -> None:
+    """Purge WMT.MX facts for the provider-corrupt 2017-07-31 period.
+
+    EODHD's WMT.MX (Walmart de México) fundamentals contain a quarterly
+    period ending 2017-07-31 that is actually Walmart Inc's (US parent)
+    fiscal Q2-FY2018 balance sheet in USD, mislabeled
+    ``currency_symbol="PGK"`` -- Walmex has no July fiscal quarter end at
+    all. The monetary fields never converted (no PGK->MXN rate existed), but
+    the FX-free concepts (share counts, EPS) leaked into ``financial_facts``.
+    The normalizer now quarantines the period at the source
+    (``EODHD_QUARANTINED_PERIODS`` in ``pyvalue.normalization.eodhd``); this
+    migration removes the rows already stored.
+
+    Idempotent: the ``DELETE`` is a no-op once the corrupt rows are gone.
+    """
+
+    required = ("financial_facts", "provider_listing", "provider_exchange", "provider")
+    if not all(_table_exists(conn, name) for name in required):
+        return
+    conn.execute(
+        """
+        DELETE FROM financial_facts
+        WHERE end_date = '2017-07-31'
+          AND listing_id IN (
+            SELECT pl.listing_id
+            FROM provider_listing pl
+            JOIN provider_exchange px
+              ON px.provider_exchange_id = pl.provider_exchange_id
+            JOIN provider p
+              ON p.provider_id = px.provider_id
+            WHERE p.provider_code = 'EODHD'
+              AND px.provider_exchange_code = 'MX'
+              AND pl.provider_symbol = 'WMT'
+          )
+        """
+    )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -8709,6 +8747,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_082_drop_market_data_source_provider,
     _migration_083_create_provider_fx_rates,
     _migration_084_fx_rates_canonical_rebuild,
+    _migration_085_purge_wmt_mx_quarantined_facts,
 ]
 
 

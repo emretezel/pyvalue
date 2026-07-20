@@ -43,17 +43,19 @@ FX behavior is configured under an optional `[fx]` section:
 ```toml
 [fx]
 provider = "EODHD"
-pivot_currency = "USD"
-secondary_pivot_currency = "EUR"
+pivot_currencies = "USD, EUR, GBP"
 stale_warning_days = 7
 ```
 
 Settings:
 
 - `provider`: default `EODHD` (the only supported FX provider)
-- `pivot_currency`: primary triangulation pivot, default `USD`
-- `secondary_pivot_currency`: optional secondary pivot after the primary
-  direct/inverse lookup path, default `EUR`
+- `pivot_currencies`: ordered, comma-separated triangulation pivots tried
+  after the direct/inverse lookup path, default `USD, EUR, GBP`. Order
+  encodes preference: when triangulated candidates tie on rate date, the
+  earlier pivot wins. GBP is included by default because several frontier
+  currencies (e.g. PGK) have deep GBP crosses but little or no USD/EUR
+  history. An absent or empty option falls back to the default list.
 - `stale_warning_days`: warn when the selected on-or-before rate is older than
   this many days
 

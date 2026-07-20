@@ -16,7 +16,7 @@ import logging
 
 import requests
 
-from pyvalue.config import Config
+from pyvalue.config import DEFAULT_FX_PIVOT_CURRENCIES, Config
 from pyvalue.currency import normalize_currency_code, normalize_monetary_amount
 from pyvalue.persistence.storage import FXRateRecord, FXRatesRepository
 
@@ -31,8 +31,7 @@ class _EphemeralFXConfig:
     """Non-fetching FX config used for ephemeral in-memory contexts."""
 
     fx_provider: str = DEFAULT_PROVIDER
-    fx_pivot_currency: str = "USD"
-    fx_secondary_pivot_currency: Optional[str] = "EUR"
+    fx_pivot_currencies: tuple[str, ...] = DEFAULT_FX_PIVOT_CURRENCIES
     fx_stale_warning_days: int = 7
 
 
@@ -327,12 +326,22 @@ class FXService:
             or DEFAULT_PROVIDER
         )
         self.provider_name = str(configured_provider).strip().upper()
-        self.pivot_currency = (
-            normalize_currency_code(self.config.fx_pivot_currency) or "USD"
+        self.pivot_currencies: tuple[str, ...] = tuple(
+            dict.fromkeys(
+                code
+                for code in map(
+                    normalize_currency_code, self.config.fx_pivot_currencies
+                )
+                if code is not None
+            )
         )
-        self.secondary_pivot_currency = normalize_currency_code(
-            self.config.fx_secondary_pivot_currency
-        )
+        # Earlier pivots outrank later ones when triangulated candidates tie
+        # on rate date: positions map to len(pivots)..1 so any configured
+        # pivot beats the non-pivot rank 0 used by _quote_rank.
+        self._pivot_rank_by_currency: dict[str, int] = {
+            pivot: len(self.pivot_currencies) - index
+            for index, pivot in enumerate(self.pivot_currencies)
+        }
         self.stale_warning_days = max(int(self.config.fx_stale_warning_days), 0)
         self._history_cache: dict[tuple[str, str, str], FXSeries] = {}
         self._quote_cache: dict[tuple[str, str, str, int], Optional[FXQuote]] = {}
@@ -456,8 +465,8 @@ class FXService:
             quote_currency,
             as_of,
         )
-        for pivot in (self.pivot_currency, self.secondary_pivot_currency):
-            if pivot is None or pivot in {base_currency, quote_currency}:
+        for pivot in self.pivot_currencies:
+            if pivot in {base_currency, quote_currency}:
                 continue
             for base_to_pivot in self._lookup_direct_and_inverse(
                 base_currency, pivot, as_of
@@ -485,7 +494,12 @@ class FXService:
         return max(candidates, key=self._quote_rank)
 
     def _quote_rank(self, quote: FXQuote) -> tuple[date, int, int]:
-        """Rank candidate quotes by freshness, then by path preference."""
+        """Rank candidate quotes by freshness, then by path preference.
+
+        Freshness (rate date) dominates, then source kind, then -- for
+        triangulated candidates only -- the configured pivot order (earlier
+        pivots outrank later ones).
+        """
 
         source_rank = {
             "provider": 3,
@@ -495,10 +509,7 @@ class FXService:
         }.get(quote.source_kind, 0)
         pivot_rank = 0
         if quote.source_kind == "triangulated":
-            if quote.via_currency == self.pivot_currency:
-                pivot_rank = 2
-            elif quote.via_currency == self.secondary_pivot_currency:
-                pivot_rank = 1
+            pivot_rank = self._pivot_rank_by_currency.get(quote.via_currency or "", 0)
         return (
             quote.rate_date,
             source_rank,

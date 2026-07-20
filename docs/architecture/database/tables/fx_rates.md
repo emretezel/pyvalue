@@ -55,7 +55,8 @@ One row per `(base_currency, quote_currency, rate_date)`.
   so both are index-order walks with no sort step
 - point lookups (`latest_on_or_before`) — a descending PK seek
 - inverse and triangulated FX lookup support (derived at runtime in
-  `money.fx`, never persisted)
+  `money.fx`, never persisted); triangulation walks the configured pivot
+  chain (`[fx] pivot_currencies`, default `USD, EUR, GBP`) in order
 - provider coverage planning does **not** read this table: `pair_coverage` and
   `fully_covered_quotes_for_window` are provider-scoped and read
   `provider_fx_rates`

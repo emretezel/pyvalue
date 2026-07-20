@@ -9,6 +9,15 @@ from pathlib import Path
 from typing import Optional
 import configparser
 
+from pyvalue.currency import normalize_currency_code
+
+# Ordered FX triangulation pivots tried after the direct/inverse lookup, most
+# preferred first. GBP earns its slot because several frontier currencies have
+# deep GBP crosses but little or no USD/EUR history (e.g. EODHD carries
+# GBP/PGK from 1999 while USD/PGK only starts in 2024) -- see
+# docs/providers/eodhd.md, "Caveats".
+DEFAULT_FX_PIVOT_CURRENCIES: tuple[str, ...] = ("USD", "EUR", "GBP")
+
 
 class Config:
     """Access project configuration stored in private/config.toml."""
@@ -61,16 +70,22 @@ class Config:
         return (self._get_value("fx", "provider") or "EODHD").strip().upper()
 
     @property
-    def fx_pivot_currency(self) -> str:
-        return (self._get_value("fx", "pivot_currency") or "USD").strip().upper()
+    def fx_pivot_currencies(self) -> tuple[str, ...]:
+        """Ordered FX triangulation pivots from ``[fx] pivot_currencies``.
 
-    @property
-    def fx_secondary_pivot_currency(self) -> Optional[str]:
-        value = self._get_value("fx", "secondary_pivot_currency")
+        The option is a comma-separated currency list (e.g. ``"USD, EUR,
+        GBP"``); order encodes preference when triangulated candidates tie on
+        rate date. Entries are normalized/deduplicated; an absent option or
+        one that normalizes to nothing falls back to
+        ``DEFAULT_FX_PIVOT_CURRENCIES``.
+        """
+
+        value = self._get_value("fx", "pivot_currencies")
         if value is None:
-            return "EUR"
-        cleaned = value.strip().upper()
-        return cleaned or None
+            return DEFAULT_FX_PIVOT_CURRENCIES
+        codes = (normalize_currency_code(part) for part in value.split(","))
+        deduped = dict.fromkeys(code for code in codes if code is not None)
+        return tuple(deduped) or DEFAULT_FX_PIVOT_CURRENCIES
 
     @property
     def fx_stale_warning_days(self) -> int:
@@ -108,4 +123,4 @@ class Config:
         return default
 
 
-__all__ = ["Config"]
+__all__ = ["Config", "DEFAULT_FX_PIVOT_CURRENCIES"]

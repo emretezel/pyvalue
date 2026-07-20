@@ -11,7 +11,7 @@ from pathlib import Path
 import tempfile
 from typing import Callable, Iterable, Optional, overload
 
-from pyvalue.config import Config
+from pyvalue.config import DEFAULT_FX_PIVOT_CURRENCIES, Config
 from pyvalue.currency import (
     is_monetary_unit_kind,
     merge_currency_codes,
@@ -252,12 +252,8 @@ class _NoFetchFXConfig(Config):
         return "EODHD"
 
     @property
-    def fx_pivot_currency(self) -> str:
-        return "USD"
-
-    @property
-    def fx_secondary_pivot_currency(self) -> Optional[str]:
-        return "EUR"
+    def fx_pivot_currencies(self) -> tuple[str, ...]:
+        return DEFAULT_FX_PIVOT_CURRENCIES
 
     @property
     def fx_stale_warning_days(self) -> int:

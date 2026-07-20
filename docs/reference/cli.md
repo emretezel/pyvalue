@@ -218,11 +218,12 @@ Notes:
   requested symbol set immediately
 - normalization never fetches FX from the network; run `refresh-fx-rates`
   first when you need currency conversion coverage
-- bulk normalization preloads the entire selected-provider FX table once per
-  worker process, then resolves direct, inverse, and USD/EUR triangulated rates
-  from memory only
-- if a required conversion still cannot be resolved from stored FX, that symbol
-  fails normalization explicitly
+- bulk normalization resolves direct, inverse, and configured-pivot
+  triangulated rates (default pivots `USD, EUR, GBP`) from the stored
+  canonical series, loading each pair's history lazily per worker process and
+  caching it in memory
+- if a required conversion still cannot be resolved from stored FX, the
+  affected monetary fact is skipped with a structured warning
 
 ## Market Data Commands
 
