@@ -8,7 +8,6 @@ from __future__ import annotations
 from concurrent.futures import ProcessPoolExecutor
 from datetime import date
 from decimal import Decimal
-from functools import lru_cache
 from pathlib import Path
 from typing import TypeVar, overload
 import json
@@ -650,12 +649,12 @@ def test_statutory_quote_never_warns_stale(
     assert "Stale FX rate" not in caplog.text
 
 
-@lru_cache(maxsize=1)
-def _statutory_only_service() -> FXService:
-    # One shared empty in-memory service for the Hypothesis properties:
-    # statutory quotes never touch the rates tables, and schema setup runs
-    # the full migration chain -- far too slow to repeat per example.
-    return FXService(":memory:")
+# One shared empty in-memory service for the Hypothesis properties: statutory
+# quotes never touch the rates tables, and schema setup runs the full migration
+# chain -- far too slow to repeat per example. Built eagerly at import so the
+# one-time setup cost can never land inside the first example's Hypothesis
+# deadline (a lazy lru_cache build tripped the 200ms deadline under load).
+_STATUTORY_ONLY_SERVICE: FXService = FXService(":memory:")
 
 
 @given(
@@ -671,7 +670,7 @@ def _statutory_only_service() -> FXService:
 def test_statutory_conversion_scale_invariance(amount: Decimal, scale: int) -> None:
     # Statutory conversion is a pure multiplication, so it must commute with
     # scaling up to the last ulp of the 28-digit Decimal context.
-    service = _statutory_only_service()
+    service = _STATUTORY_ONLY_SERVICE
 
     single = service.convert_amount(amount, "NLG", "EUR", "2000-06-30")
     scaled = service.convert_amount(amount * scale, "NLG", "EUR", "2000-06-30")
@@ -696,7 +695,7 @@ def test_statutory_round_trip_within_decimal_tolerance(
 ) -> None:
     # legacy -> EUR -> legacy multiplies by 1/u then u; the round trip must
     # reproduce the input up to the last ulp of the reciprocal.
-    service = _statutory_only_service()
+    service = _STATUTORY_ONLY_SERVICE
     as_of = EURO_LEGACY_FIXED_RATES[currency].effective
 
     to_eur = service.convert_amount(amount, currency, "EUR", as_of)
