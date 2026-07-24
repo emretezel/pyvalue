@@ -3321,53 +3321,73 @@ def test_suppress_console_metric_warnings_filters_only_metric_noise(
         clear_root_logging_handlers()
 
 
-def test_suppress_console_missing_fx_warnings_filters_only_missing_fx_noise(
+def test_suppress_console_logging_routes_all_records_to_file_only(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     log_dir = tmp_path / "logs"
     clear_root_logging_handlers()
     cli.setup_logging(log_dir=log_dir)
     try:
-        with cli.suppress_console_missing_fx_warnings(True):
+        with cli.suppress_console_logging(True):
+            # Records of every level and logger stay off the console -- the
+            # blanket guarantee that replaced the per-message FX filter.
             logging.getLogger("pyvalue.money.fx").warning(
                 "Missing FX rate | provider=%s base=%s quote=%s as_of=%s operation=get_fx_rate",
                 "EODHD",
-                "NLG",
+                "GEL",
                 "EUR",
-                "2000-06-30",
+                "2020-06-30",
             )
-            logging.getLogger("pyvalue.money").warning(
-                "Missing FX rate for monetary conversion | operation=%s symbol=%s field=%s from=%s to=%s as_of=%s",
-                "listing_currency_alignment",
-                "AALB.AS",
-                "Assets",
-                "NLG",
-                "EUR",
-                "2000-06-30",
+            logging.getLogger("pyvalue.normalization.eodhd").warning(
+                "Dropping 33 fact(s) for WMT.MX in quarantined period(s) 2017-07-31"
             )
-            logging.getLogger("pyvalue.money.fx").warning(
-                "Stale FX rate used | provider=%s base=%s quote=%s requested_as_of=%s rate_date=%s age_days=%s source_kind=%s",
-                "EODHD",
-                "EUR",
-                "USD",
-                "2024-01-10",
-                "2024-01-01",
-                9,
-                "provider",
+            logging.getLogger("pyvalue.cli").error(
+                "Failed to normalize EODHD fundamentals for AAA.US: boom"
             )
-            logging.getLogger("pyvalue.cli").warning("Operational warning")
+            logging.getLogger("pyvalue.cli").info("Operational info")
 
         captured = capsys.readouterr()
-        assert "Missing FX rate | provider=EODHD base=NLG quote=EUR" not in captured.err
-        assert "Missing FX rate for monetary conversion" not in captured.err
-        assert "Stale FX rate used" in captured.err
-        assert "Operational warning" in captured.err
+        assert captured.err == ""
 
         log_text = (log_dir / "pyvalue.log").read_text(encoding="utf-8")
-        assert "Missing FX rate | provider=EODHD base=NLG quote=EUR" in log_text
-        assert "Missing FX rate for monetary conversion" in log_text
-        assert "Stale FX rate used" in log_text
-        assert "Operational warning" in log_text
+        assert "Missing FX rate | provider=EODHD base=GEL quote=EUR" in log_text
+        assert "Dropping 33 fact(s) for WMT.MX" in log_text
+        assert "Failed to normalize EODHD fundamentals for AAA.US: boom" in log_text
+        assert "Operational info" in log_text
+    finally:
+        clear_root_logging_handlers()
+
+
+def test_suppress_console_logging_restores_levels_and_reports_quiet_config(
+    tmp_path: Path,
+) -> None:
+    log_dir = tmp_path / "logs"
+    clear_root_logging_handlers()
+    cli.setup_logging(log_dir=log_dir)
+    try:
+        _, console_before, file_before = cli.current_logging_config()
+
+        with cli.suppress_console_logging(True):
+            # current_logging_config() must report the quiet console level:
+            # _create_process_pool_executor snapshots it into the worker
+            # initargs, which is how spawned workers inherit the silence.
+            _, console_inside, file_inside = cli.current_logging_config()
+            assert console_inside == logging.CRITICAL
+            assert file_inside == file_before
+
+        _, console_after, file_after = cli.current_logging_config()
+        assert console_after == console_before
+        assert file_after == file_before
+
+        # Levels are restored even when the body raises.
+        with pytest.raises(RuntimeError):
+            with cli.suppress_console_logging(True):
+                raise RuntimeError("boom")
+        assert cli.current_logging_config()[1] == console_before
+
+        # Disabled context is a no-op.
+        with cli.suppress_console_logging(False):
+            assert cli.current_logging_config()[1] == console_before
     finally:
         clear_root_logging_handlers()
 
@@ -5370,9 +5390,19 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_force_skips_freshness_scan(
     assert normalization_state_exists(db_path, "EODHD", "BBB.US")
 
 
-def test_cmd_normalize_eodhd_fundamentals_bulk_suppresses_missing_fx_warnings_on_console(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_cmd_normalize_eodhd_fundamentals_bulk_keeps_console_to_progress_lines(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
+    """Regression: every diagnostic is file-only; the console shows progress only.
+
+    ``capfd`` (fd-level capture) is deliberate: the spawned worker processes
+    write to the real stderr, which ``capsys`` cannot see, so only fd capture
+    proves the workers inherited the quiet console. The payload triggers two
+    warnings from inside the worker -- a missing-FX pair and a missing
+    ``General.UpdatedAt`` share-snapshot warning that the old per-message FX
+    filter never covered (it used to reach the terminal).
+    """
+
     db_path = tmp_path / "normalize-eodhd-missing-fx.db"
     log_dir = tmp_path / "logs"
     # AALB.AS (Amsterdam) quotes in EUR; seed the listing so the payload upsert
@@ -5386,9 +5416,13 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_suppresses_missing_fx_warnings_on
         "AALB.AS",
         {
             "General": {
+                # No UpdatedAt: the nonzero SharesStats snapshot below then
+                # logs the missing-UpdatedAt WARNING -- a diagnostic outside
+                # the old enumerated FX filter.
                 "Name": "Aalberts",
                 "CurrencyCode": "EUR",
             },
+            "SharesStats": {"SharesOutstanding": 5000000.0},
             "Financials": {
                 "Balance_Sheet": {
                     "yearly": [
@@ -5429,16 +5463,28 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_suppresses_missing_fx_warnings_on
             symbols=["AALB.AS"],
             force=True,
         )
-        captured = capsys.readouterr()
+        captured = capfd.readouterr()
     finally:
         clear_root_logging_handlers()
 
     assert rc == 0
-    assert "Missing FX rate" not in captured.err
-    assert "Missing FX rate for monetary conversion" not in captured.err
+    # Console: no log records at all (parent or worker), stdout is progress only.
+    assert captured.err == ""
+    progress_prefixes = (
+        "Force re-normalization requested",
+        "Normalizing EODHD fundamentals for",
+        "[",
+        "Normalized EODHD fundamentals for",
+    )
+    for line in captured.out.splitlines():
+        if not line.strip():
+            continue
+        assert line.startswith(progress_prefixes), line
+    # The log file still records every diagnostic.
     log_text = (log_dir / "pyvalue.log").read_text(encoding="utf-8")
     assert "Missing FX rate | provider=EODHD base=GEL quote=EUR" in log_text
     assert "Missing FX rate for monetary conversion" in log_text
+    assert "missing General.UpdatedAt for AALB.AS" in log_text
 
 
 def test_cmd_normalize_eodhd_fundamentals_bulk_continues_after_symbol_failure_with_inline_executor(
@@ -5505,14 +5551,27 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_continues_after_symbol_failure_wi
         lambda max_workers: InlineExecutor(),
     )
 
-    rc = cli.cmd_normalize_eodhd_fundamentals_bulk(
-        database=str(db_path),
-        symbols=["AAA.US", "BBB.US", "CCC.US"],
-    )
+    log_dir = tmp_path / "logs"
+    clear_root_logging_handlers()
+    cli.setup_logging(log_dir=log_dir)
+    try:
+        rc = cli.cmd_normalize_eodhd_fundamentals_bulk(
+            database=str(db_path),
+            symbols=["AAA.US", "BBB.US", "CCC.US"],
+        )
+        captured = capsys.readouterr()
+    finally:
+        clear_root_logging_handlers()
 
     assert rc == 0
-    output = capsys.readouterr().out
-    assert "failed=1" in output
+    assert "failed=1" in captured.out
+    # The per-symbol error is file-only; the summary points at the log so the
+    # failure stays discoverable from a progress-only console.
+    assert "Failed to normalize" not in captured.out
+    assert "Failed to normalize" not in captured.err
+    assert f"failure details in {log_dir / 'pyvalue.log'}" in captured.out
+    log_text = (log_dir / "pyvalue.log").read_text(encoding="utf-8")
+    assert "Failed to normalize EODHD fundamentals for BBB.US: boom" in log_text
     fact_repo = FinancialFactsRepository(db_path)
     fact_repo.initialize_schema()
     rows = (

@@ -224,6 +224,10 @@ Notes:
   caching it in memory
 - if a required conversion still cannot be resolved from stored FX, the
   affected monetary fact is skipped with a structured warning
+- the console shows progress lines only; every warning and error (missing FX,
+  quarantined periods, per-symbol failures, ...) is written to
+  `data/logs/pyvalue.log` instead, and the final summary points at the log
+  file whenever failures occurred
 
 ## Market Data Commands
 

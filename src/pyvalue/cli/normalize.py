@@ -24,7 +24,8 @@ from pyvalue.money.fx import (
 )
 from pyvalue.normalization import EODHDFactsNormalizer
 from pyvalue.logging_utils import (
-    suppress_console_missing_fx_warnings,
+    current_logging_config,
+    suppress_console_logging,
 )
 from pyvalue.persistence.storage import (
     FXRatesRepository,
@@ -228,13 +229,15 @@ def _normalize_eodhd_payload_worker(
         raise ValueError(f"Missing listing currency for {label}")
     fx_service = _get_or_create_fx_service(database)
     normalizer = EODHDFactsNormalizer(fx_service=fx_service)
-    with suppress_console_missing_fx_warnings(True):
-        rows = tuple(
-            _normalization_record_to_row(record)
-            for record in normalizer.normalize(
-                payload, symbol=label, target_currency=currency
-            )
+    # No console suppression here: worker processes are spawned with the quiet
+    # console level inherited from the parent's suppress_console_logging scope,
+    # and the in-process (workers <= 1) path runs inside that scope directly.
+    rows = tuple(
+        _normalization_record_to_row(record)
+        for record in normalizer.normalize(
+            payload, symbol=label, target_currency=currency
         )
+    )
     return _NormalizedFactsResult(
         symbol=label,
         rows=rows,
@@ -423,10 +426,16 @@ def _run_bulk_normalization(
             if not interrupted:
                 executor.shutdown(wait=True)
 
-    print(
+    summary = (
         f"Normalized {provider} fundamentals for {processed} of {requested} "
         f"requested symbols into {db_path} (skipped={skipped}, failed={failed})"
     )
+    log_dir = current_logging_config()[0]
+    if failed and log_dir is not None:
+        # Failures are file-only while the console is quiet, so the summary
+        # must say where the error details went.
+        summary += f" — failure details in {log_dir / 'pyvalue.log'}"
+    print(summary, flush=True)
     return 0
 
 
@@ -443,57 +452,68 @@ def cmd_normalize_eodhd_fundamentals_bulk(
     ``fundamentals_raw`` already restricts to listings that have a raw payload, and
     whose ``primary_only`` filter drops secondary listings -- so the old has-raw
     intersection and the secondary symbol-set subtraction are both gone.
+
+    The whole command runs with console logging suppressed: normalization
+    diagnostics (missing FX, quarantined periods, per-symbol failures, ...) go
+    to the log file only, and the console carries nothing but the progress
+    prints. Worker processes inherit the quiet console because the process
+    pool snapshots the console level while this context is active.
     """
 
-    db_path = _resolve_database_path(database)
-    fund_repo = FundamentalsRepository(db_path)
-    fund_repo.initialize_schema()
+    with suppress_console_logging():
+        db_path = _resolve_database_path(database)
+        fund_repo = FundamentalsRepository(db_path)
+        fund_repo.initialize_schema()
 
-    if symbols is None:
-        units_by_id = fund_repo.normalization_units("EODHD", primary_only=True)
-    else:
-        requested = [symbol.upper() for symbol in symbols]
-        if not requested:
-            raise SystemExit("No symbols provided for EODHD normalization.")
-        # Resolve the requested provider symbols to their listing ids, then fetch
-        # the units for those ids (primary-only, has-raw enforced by the query).
-        listing_ids = list(
-            SecurityRepository(db_path).resolve_ids_many(requested).values()
-        )
-        units_by_id = fund_repo.normalization_units(
-            "EODHD", primary_only=True, listing_ids=listing_ids
-        )
+        if symbols is None:
+            units_by_id = fund_repo.normalization_units("EODHD", primary_only=True)
+        else:
+            requested = [symbol.upper() for symbol in symbols]
+            if not requested:
+                raise SystemExit("No symbols provided for EODHD normalization.")
+            # Resolve the requested provider symbols to their listing ids, then
+            # fetch the units for those ids (primary-only, has-raw enforced by
+            # the query).
+            listing_ids = list(
+                SecurityRepository(db_path).resolve_ids_many(requested).values()
+            )
+            units_by_id = fund_repo.normalization_units(
+                "EODHD", primary_only=True, listing_ids=listing_ids
+            )
 
-    units = list(units_by_id.values())
-    if not units:
-        raise SystemExit(
-            "No EODHD fundamentals found. Run ingest-fundamentals --provider EODHD first."
-        )
+        units = list(units_by_id.values())
+        if not units:
+            raise SystemExit(
+                "No EODHD fundamentals found. "
+                "Run ingest-fundamentals --provider EODHD first."
+            )
 
-    requested_total = len(units)
-    if force:
-        print(
-            f"Force re-normalization requested for {requested_total} EODHD symbols; "
-            "skipping freshness scan",
-            flush=True,
-        )
-        units_to_normalize = list(units)
-        skipped = 0
-    else:
-        print(
-            f"Checking EODHD normalization freshness for {requested_total} symbols",
-            flush=True,
-        )
-        units_to_normalize, skipped = _plan_normalization_selection(units, force=False)
-    if not units_to_normalize:
-        _print_normalization_up_to_date("EODHD", db_path)
-        return 0
+        requested_total = len(units)
+        if force:
+            print(
+                f"Force re-normalization requested for {requested_total} EODHD "
+                "symbols; skipping freshness scan",
+                flush=True,
+            )
+            units_to_normalize = list(units)
+            skipped = 0
+        else:
+            print(
+                f"Checking EODHD normalization freshness for {requested_total} symbols",
+                flush=True,
+            )
+            units_to_normalize, skipped = _plan_normalization_selection(
+                units, force=False
+            )
+        if not units_to_normalize:
+            _print_normalization_up_to_date("EODHD", db_path)
+            return 0
 
-    return _run_bulk_normalization(
-        database=str(db_path),
-        provider="EODHD",
-        units=units_to_normalize,
-        worker=_normalize_eodhd_payload_worker,
-        requested_total=requested_total,
-        skipped=skipped,
-    )
+        return _run_bulk_normalization(
+            database=str(db_path),
+            provider="EODHD",
+            units=units_to_normalize,
+            worker=_normalize_eodhd_payload_worker,
+            requested_total=requested_total,
+            skipped=skipped,
+        )

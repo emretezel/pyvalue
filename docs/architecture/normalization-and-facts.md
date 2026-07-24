@@ -82,6 +82,11 @@ For bulk runs, each worker process resolves conversions from the stored
 canonical FX series, loading each currency pair's history lazily and caching
 it in memory. No runtime FX web fetches happen during normalization.
 
+All of these structured warnings — and any normalization error — are file-only
+during `normalize-fundamentals`: the console is limited to progress output for
+the duration of the run (worker processes inherit the quiet console), and the
+diagnostics land in `data/logs/pyvalue.log`.
+
 ## Normalization Layers in This Repo
 
 - `src/pyvalue/normalization/`: provider-specific normalization logic

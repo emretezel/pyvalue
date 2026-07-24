@@ -101,24 +101,6 @@ class _ConsoleMetricWarningFilter(logging.Filter):
         )
 
 
-class _ConsoleMissingFXWarningFilter(logging.Filter):
-    """Suppress missing-FX warning noise on console only."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        if record.levelno != logging.WARNING:
-            return True
-        if (
-            record.name == "pyvalue.money.fx"
-            and record.msg
-            == "Missing FX rate | provider=%s base=%s quote=%s as_of=%s operation=get_fx_rate"
-        ):
-            return False
-        return not (
-            record.msg
-            == "Missing FX rate for monetary conversion | operation=%s symbol=%s field=%s from=%s to=%s as_of=%s"
-        )
-
-
 def _console_handlers() -> list[logging.Handler]:
     root = logging.getLogger()
     return [
@@ -158,16 +140,36 @@ def suppress_console_metric_warnings(enabled: bool = True) -> Iterator[None]:
 
 
 @contextmanager
-def suppress_console_missing_fx_warnings(enabled: bool = True) -> Iterator[None]:
-    """Hide missing-FX warning noise from console handlers only."""
+def suppress_console_logging(enabled: bool = True) -> Iterator[None]:
+    """Route all log records to file handlers only for the duration.
 
-    with _suppress_console_filter(_ConsoleMissingFXWarningFilter(), enabled):
+    Raises every console handler to ``logging.CRITICAL`` (unused in pyvalue, so
+    the console is silent in practice while a true catastrophe would still
+    surface) and restores the original levels on exit. A level raise is used
+    instead of a filter deliberately: ``current_logging_config()`` reports
+    handler levels, so worker processes spawned inside this context (via
+    ``_create_process_pool_executor``) inherit the quiet console automatically.
+    File handlers are untouched — the log file keeps recording everything.
+    """
+
+    if not enabled:
         yield
+        return
+
+    console_handlers = _console_handlers()
+    saved_levels = [handler.level for handler in console_handlers]
+    for handler in console_handlers:
+        handler.setLevel(logging.CRITICAL)
+    try:
+        yield
+    finally:
+        for handler, level in zip(console_handlers, saved_levels):
+            handler.setLevel(level)
 
 
 __all__ = [
     "current_logging_config",
     "setup_logging",
+    "suppress_console_logging",
     "suppress_console_metric_warnings",
-    "suppress_console_missing_fx_warnings",
 ]

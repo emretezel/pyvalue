@@ -21,8 +21,8 @@ from pyvalue.config import Config  # noqa: F401
 from pyvalue.logging_utils import (
     current_logging_config,
     setup_logging,
+    suppress_console_logging,  # noqa: F401
     suppress_console_metric_warnings,  # noqa: F401
-    suppress_console_missing_fx_warnings,  # noqa: F401
 )
 from pyvalue.metrics import REGISTRY
 from pyvalue.money.fx import FXService  # noqa: F401
@@ -174,7 +174,7 @@ __all__ = [
     "REGISTRY",
     "current_logging_config",
     "setup_logging",
+    "suppress_console_logging",
     "suppress_console_metric_warnings",
-    "suppress_console_missing_fx_warnings",
     "time",
 ]
