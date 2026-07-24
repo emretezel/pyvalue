@@ -257,10 +257,10 @@ net_debt_to_ebitda; its NAs are the generic ones.
 | cfo_to_ni_10y_median | DVG, QARP | AMD, C, PLTR, TSLA, 000660.KO | 87.6% (35,043 of 53,514 failures = loss-year guard) | **calc-modification** | TSLA: single 2019 loss year voids a 20-FY history; contradicted DVG's own loss tolerance (DVG now gates on `ni_loss_year_share <= 0.40` instead of `ni_loss_years_10y <= 4`, 2026-07-05) | ~~median over positive-NI years with a minimum count (e.g. >=6 of 10); loss years excluded, not fatal~~ done 2026-07-05: adaptive consecutive joint chain capped at 10y, loss years skipped, >=6 positive-NI points, freshness/as_of on the chain anchor |
 | owner_earnings_cagr_10y | QARP | NVDA, AMD, C, TSLA, 000660.KO (+PLTR short history) | 85.3% | **calc-modification** | "non-positive endpoint averages": the guard tripped on any single non-positive endpoint value — AMD's lone FY2016 loss year voided a start window averaging ~+76M — and the strict 10-point chain demanded 13 consecutive FY of NWC concepts vs the screen's own 10y maturity bar | ~~consider regression-slope owner-earnings growth (defined for any sign pattern) or 3y-avg windows that skip non-positive bases~~ done 2026-07-05: adaptive 7–10 point consecutive chain (7-point floor ⇔ 10 FY of fundamentals), exponent 1/(points-3), endpoint guard on the 3y window *averages*; all-negative windows stay NA |
 | sbc_to_fcf | ~~QARP~~ (criterion removed 2026-07-05) | C.US (SBC line ended FY2023), 000660.KO (annual-only SBC: FY=5, Q=1) | 85.5% | ~~fallback~~ **screener-change (done 2026-07-05)** | C.US raw payload carries `stockBasedCompensation: null` for every 2024/25 period, and only 1,759 of the 44,474 missing/stale failures have a recent FY SBC fact — an FY fallback rescues ~4%. Where EODHD does supply SBC it is often garbage (C.US FY2020 15.8B ≈ 10x reality, FY2021 −3.65B, derived Q4-2023 −2.34B); 274 of 8,885 stored ratios are negative and would trivially pass a `<=` gate | author decision: the `sbc_to_fcf <= 20%` criterion was dropped from QARP — provider coverage/quality cannot support a hard gate; net dilution stays policed by `share_count_cagr_5y` (65.5% coverage). The metric itself remains computed for reports |
-| oey_ev_norm | QARP | 000660.KO | 72.2% | **fallback** | `CashAndShortTermInvestments` MISSING while `CashAndCashEquivalents` (14.9T KRW) + `ShortTermInvestments` (20.2T KRW) both present; EV resolver has NO fallbacks, `invested_capital.py` does | mirror invested-capital fallbacks in `resolve_enterprise_value_denominator` (cash = CCE+STI; debt = TotalDebtFromBalanceSheet) |
+| oey_ev_norm | QARP | 000660.KO | 72.2% | **fallback** | `CashAndShortTermInvestments` MISSING while `CashAndCashEquivalents` (14.9T KRW) + `ShortTermInvestments` (20.2T KRW) both present; EV resolver has NO fallbacks, `invested_capital.py` does | ~~mirror invested-capital fallbacks in `resolve_enterprise_value_denominator` (cash = CCE+STI; debt = TotalDebtFromBalanceSheet)~~ done: cash side 2026-07-05 (shared `balance_sheet` resolvers), debt rollup 2026-07-24 |
 | interest_coverage | DVG, QARP | PLTR.US | 59.0% | **calc-modification** | InterestExpense line ended FY2023 ($3.5M) while EBIT fresh ($1.4B) — effectively debt-free firms can never pass a `>=` bar | when EBIT>0 and interest is absent-or-<=0 with fresh EBIT, emit a documented cap value (e.g. 100x) instead of None — **decided 2026-07-05**: 100x on the missing-interest-alone trigger (see the 2026-07-05 findings section) |
 | iroic_5y | QARP | ADBE.US | 72.9% | **calc-modification (decide semantics)** | buybacks shrink invested capital -> delta IC <= 0 while NOPAT grows — arguably excellent, not uncomputable | options: treat deltaIC<=0 with deltaNOPAT>0 as pass/cap, or keep NA with a documented caveat — needs author decision |
-| dividend_yield_ttm (-> shareholder_yield_ttm 0.20 QARP ranking weight) | QARP ranking | ADBE, AMD, TSLA, PLTR | n/a (ranking) | **bug-class** | ADBE's last dividend row is 2016 (value 0) — a non-payer has yield 0, not NA; the NA silently renormalizes 20% of the ranking | dividend_yield_ttm = 0 when no recent dividend facts exist but the CF statement is otherwise fresh |
+| dividend_yield_ttm (-> shareholder_yield_ttm 0.20 QARP ranking weight) | QARP ranking | ADBE, AMD, TSLA, PLTR | n/a (ranking) | **bug-class** | ADBE's last dividend row is 2016 (value 0) — a non-payer has yield 0, not NA; the NA silently renormalizes 20% of the ranking | ~~dividend_yield_ttm = 0 when no recent dividend facts exist but the CF statement is otherwise fresh~~ done 2026-07-24 (fresh-nonzero-row guard + CFO-window evidence; payout companion included) |
 | PLTR history cluster (roic_10y_min, roic_years_above_12pct, gm_10y_std, ni_loss_years_10y, opm_7y_min...) | QARP | PLTR.US | 65-75% | **leave-NA** | 8 FY rows (2020 listing); the screen deliberately demands 10y maturity | none — document that young listings are excluded by design |
 | Strict-chain family (roic_7y, gm_10y_std, opm_*, ni_loss_years_10y) universe-wide | both | (watchlist mostly OK) | 65-72%, with 12-22k "missing strict consecutive FY chain" buckets | **calc-modification candidate (universe)** | one missing mid-history year voids the metric; also 12-16k "latest FY point too old" (400d gate vs non-annual filers) | **resolved 2026-07-05**: chain-gap share quantified at ~1.2k listings vs ~21k short histories — n-of-m tolerance rejected as not worth the complexity; windows stay strict |
 
@@ -528,13 +528,20 @@ materialize at the next full-universe compute-metrics run.
    compute-metrics for piotroski_f_score/altman_z/price_to_book/fcf_to_ebitda;
    universe NA ranking refreshed via `report-metric-status` (2026-07-05
    snapshot).
-2. metrics: EV denominator fallbacks (oey_ev_norm, ev_to_* family).
+2. **Done 2026-07-24.** metrics: EV denominator fallbacks (oey_ev_norm,
+   ev_to_* family) — the cash side landed 2026-07-05 with the shared
+   `balance_sheet` resolvers; the debt side completed with the
+   `TotalDebtFromBalanceSheet` rollup fallback in `resolve_total_debt`
+   (components-preferred, shared with `net_debt_to_ebitda` by construction).
 3. **Done 2026-07-05.** metrics: cfo_to_ni_10y_median loss-year tolerance —
    adaptive consecutive joint chain (cap 10y, first-gap stop), loss years
    skipped, >=6 positive-NI points, `statistics.median`; freshness/`as_of` on
    the chain anchor. Companion `ni_loss_year_share` + DVG gate swap follow as
    their own commits.
-4. metrics: dividend_yield_ttm = 0 for non-payers.
+4. **Done 2026-07-24.** metrics: dividend_yield_ttm = 0 for evidenced
+   non-payers (no fresh nonzero dividends row + resolving CFO window), with
+   `dividend_payout_ratio_ttm = 0` as the companion for positive-NI
+   non-payers; see the 2026-07-24 section for guards and watchlist effect.
 5. **Done 2026-07-05.** metrics: interest_coverage documented cap (100x)
    for zero/missing/stale-interest firms with fresh positive TTM EBIT
    (missing-interest-alone trigger) — implemented with item 12.
@@ -584,6 +591,13 @@ materialize at the next full-universe compute-metrics run.
     Cadence-matched 480-day balance-sheet freshness where an annual flow meets
     a point-in-time leg. Effects materialize at the next full-universe
     compute-metrics run.
+21. metrics: sparse dividends-paid rows (the TSLA shape — EODHD emits the
+    cash-flow item only for periods with a payment, so a lone fresh nonzero
+    row cannot form a TTM window and the zero-payout guard correctly refuses
+    the inference). Possible refinement: inside an evidenced fresh period
+    (CFO window resolves), treat absent dividend quarters as zero and sum the
+    rows that exist — would measure genuine irregular/sparse payers too.
+    Needs author decision on the evidence bar; deferred.
 
 ### 2026-07-06 — OR / K-of-N criterion groups (coverage payoff realised)
 
@@ -640,3 +654,66 @@ mild valuation broadening* on names that already proved quality; DVG's is a
 only structurally broken businesses and push cheapness into the ranking. The
 `na_blocked` classification (see `evaluate_group_detail`) ensures a metric
 missing on one arm is not blamed for an exclusion another arm answered.
+
+### 2026-07-24 — post-reingestion snapshot & fallback round
+
+Full-universe recompute after the fundamentals reingestion (finished 11:37
+local): 57,001 of 61,426 supported listings re-attempted, 94 metrics each;
+2,537,159 failure rows (43.9%). The 4,425 not re-attempted are out-of-scope
+holdovers — 4,166 dropped from the EODHD catalog by the 2026-07 renewal
+refresh, 259 demoted from primary — whose 2026-07-06 status rows persist by
+canonical-retention design (they pad universe-share denominators slightly).
+**Zero** `exception:*`, currency-invariant, or `no warning emitted` reasons
+persisted: every failure is a reasoned NA, and the FX statutory work held.
+
+**The 2026-07-05/06 calc changes verified at universe scale** (failure share
+2026-07-05 → 2026-07-24): cfo_to_ni_10y_median 87.6% → 56.8%, oey_ev_norm
+72.2% → 46.8%, roic_years_above_12pct / roic_10y_min 75.2% → 56.6%,
+piotroski_f_score 63.8% → 36.8%, gm_10y_std 71.7% → 56.4%, net_debt_to_ebitda
+59.4% → 55.8%, interest_coverage 59.0% → 60.2% (the cap-misfire fix honestly
+flipped ~1.2k false 100x caps to NA). The remaining failure mass is dominated
+by genuine causes: history depth (34.7% of the universe has <10 FY),
+loss-maker economics (non-positive NI/EBIT/FCF/EBITDA guards), and stale
+filers.
+
+**Fallback round landed 2026-07-24** — six changes, one commit each, sized on
+the morning run's persisted state; universe effects materialize at the next
+full recompute:
+
+| Change | Cluster it addresses | Sized rescue |
+|---|---|---|
+| `dividend_yield_ttm` = 0 for evidenced non-payers (no fresh nonzero dividends row + resolving CFO window; queue item 4) | non-payers NA'd the dividend leg, silently voiding `shareholder_yield_ttm` (0.20 QARP ranking weight) | 31,503 div-blocked `shareholder_yield_ttm` rows; **18,934** with a computing buyback leg + fresh CFO |
+| `dividend_payout_ratio_ttm` = 0 for positive-NI non-payers (NI resolves first; loss periods stay NA) | 26,826 no-dividend-record payout failures | positive-NI subset of that bucket |
+| vendor-EBITDA hole-filler in the shared component-EBITDA build (accepted only when ≥ TTM EBIT; component path always wins) | "missing D&A for a TTM window quarter": net_debt_to_ebitda 11,123 / ev_to_ebitda 11,123 / fcf_to_ebitda 10,751 | **8,050** of the net_debt bucket carry a fresh vendor `EBITDA` fact |
+| `fcf_per_share_cagr_10y` re-based to period-end `CommonStockSharesOutstanding` | required `WeightedAverageNumberOfDilutedSharesOutstanding` — zero rows in the DB, EODHD never supplies it → **100% failure (61,426)** every run | computable wherever 10y FCF + FY share history exists |
+| legacy `return_on_invested_capital` retired (+ migration 087 purges its rows) | superseded, screen-less, 72.6% NA; 16,804 value + 61,426 status rows of noise | rows deleted; per-listing metric count 94 → 93 |
+| `resolve_total_debt` falls back to `TotalDebtFromBalanceSheet` (queue item 2 complete) | "missing EV debt/cash facts" (~200–918 per EV metric) + `net_debt_to_ebitda` "missing net debt inputs" residue | rollup-only balance sheets now measure |
+
+**Watchlist verification (post-fix recompute of the 10 tracked listings):**
+six of ten — MSFT, GOOGL, ADBE, NVDA, AMD, 000660.KO — now compute **every**
+QARP/DVG criteria metric. ADBE regained `shareholder_yield_ttm` (0.126 —
+the buyback program) and passes QARP with the full ranking. First-ever
+`fcf_per_share_cagr_10y` values: MSFT 12.5%, GOOGL 17.8%, ADBE 25.0%,
+NVDA 57.7%; its six watchlist NAs are genuine (negative 2016-era FCF
+endpoints for AMD/C/INTC/TSLA; strict-pair depth for 000660.KO/PLTR). The
+EV/EBITDA family recomputed byte-identical on the watchlist (no fallback
+fired for complete filers — pinned by regression tests). Remaining
+criteria-metric NAs, all root-caused genuine: C and TSLA and INTC
+`owner_earnings_cagr_10y` (non-positive endpoint averages), INTC's
+loss-maker guards (`cfo_to_ni_ttm`, `ev_to_ebit`, `interest_coverage`),
+PLTR's 10y-maturity cluster (by design) plus `roic_7y_median` (pre-IPO
+negative average IC) — and one residual:
+
+**TSLA residual (queue item 21):** EODHD stores a fresh *nonzero*
+`CommonStockDividendsPaid` row for TSLA (Q1-2026, $70M — the
+noncontrolling-interest-distribution shape; matching $63–85M rows exist for
+2019), so the zero-payout guard correctly refuses the inference and
+`shareholder_yield_ttm` stays NA rather than risking a false zero for
+genuine irregular payers. Working as designed; refinement idea recorded as
+queue item 21.
+
+**Rejected after sizing: share-count exact-match tolerance.** A ±183-day
+end-date tolerance on the `share_count_cagr_5y` pair would rescue only
+**976** of the 11,521 exact-match failures — most failing listings genuinely
+lack ~5-year-old share rows — so the strict exact-year match stays (echoes
+the 2026-07-05 n-of-m rejection at ~1.2k).
