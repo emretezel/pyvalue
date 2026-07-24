@@ -100,10 +100,13 @@ ROETCE_REQUIRED_CONCEPTS = tuple(
 )
 DIVIDEND_REQUIRED_CONCEPTS = tuple(
     # The cash dividend yield divides by market cap (shares x price), so preload
-    # the share-count concepts market_cap_money resolves.
+    # the share-count concepts market_cap_money resolves. Operating cash flow is
+    # the zero-payout evidence probe: a fresh CF statement with no dividends
+    # line means the issuer paid nothing, so the yield is 0 rather than NA.
     dict.fromkeys(
         DIVIDENDS_PAID_CONCEPTS
         + DIVIDENDS_PER_SHARE_CONCEPTS
+        + OPERATING_CASH_FLOW_CONCEPTS
         + SHARE_RESOLVER_REQUIRED_CONCEPTS
     )
 )
@@ -439,6 +442,15 @@ class ProfitabilityReturnsGrowthCalculator:
             absolute=True,
         )
         if dividend_per_share is None:
+            # Both dividend reads came up empty. Before declaring the yield
+            # unmeasurable, check whether the silence is itself the answer: a
+            # non-payer with current statements has a yield of exactly 0.
+            if dividends_paid is None:
+                zero = self._zero_dividend_snapshot(
+                    listing_id, repo, context="dividend_yield_ttm"
+                )
+                if zero is not None:
+                    return zero
             LOGGER.warning(
                 "dividend_yield_ttm: missing cash dividends and DPS fallback for"
                 " listing_id=%s",
@@ -632,6 +644,54 @@ class ProfitabilityReturnsGrowthCalculator:
             value=dividends_paid.money / cap.money,
             as_of=max(dividends_paid.as_of, cap.as_of),
         )
+
+    def _zero_dividend_snapshot(
+        self,
+        listing_id: int,
+        repo: RegionFactsRepository,
+        *,
+        context: str,
+    ) -> Optional[_RatioSnapshot]:
+        """Infer a zero dividend payout for an evidenced non-payer.
+
+        A cash-flow statement must report dividends paid whenever any were, so
+        a listing whose fresh statements carry no usable dividends line is a
+        non-payer whose trailing payout is exactly 0 -- not a data gap. Two
+        guards keep the inference honest:
+
+        - any fresh *nonzero* dividends-paid row means the issuer does pay and
+          only the trailing window could not be measured (irregular cadence);
+          that stays NA rather than becoming a false zero;
+        - the zero needs affirmative evidence that statements are current: the
+          operating-cash-flow TTM window must resolve (annual-only filers
+          resolve through the FY cadence, matching the dividend leg's opt-in).
+        """
+        for record in repo.monetary_facts_for_concept(
+            listing_id, DIVIDENDS_PAID_CONCEPT
+        ):
+            if record.money.amount != 0 and is_recent_fact(
+                record, max_age_days=MAX_FY_FACT_AGE_DAYS
+            ):
+                return None
+        evidence = self._compute_ttm_amount(
+            listing_id,
+            repo,
+            OPERATING_CASH_FLOW_CONCEPTS,
+            context=context,
+            annual_max_age_days=MAX_FY_FACT_AGE_DAYS,
+        )
+        if evidence is None:
+            return None
+        # INFO, not WARNING: the zero is a measured outcome (the documented-cap
+        # precedent from interest_coverage), so it must not surface as a
+        # failure reason nor add warning noise to clean runs.
+        LOGGER.info(
+            "%s: no dividend facts on a fresh cash-flow statement for"
+            " listing_id=%s -- zero payout inferred",
+            context,
+            listing_id,
+        )
+        return _RatioSnapshot(value=0.0, as_of=evidence.as_of)
 
     def _compute_ttm_gross_profit(
         self,
