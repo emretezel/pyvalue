@@ -22,7 +22,11 @@ from pyvalue.metrics.depreciation import (
     DA_FALLBACK_CONCEPTS,
     DA_PRIMARY_CONCEPTS,
 )
-from pyvalue.metrics.ebitda import EBIT_CONCEPT, compute_component_ttm_ebitda
+from pyvalue.metrics.ebitda import (
+    EBIT_CONCEPT,
+    VENDOR_EBITDA_CONCEPT,
+    compute_component_ttm_ebitda,
+)
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     MAX_FY_FACT_AGE_DAYS,
@@ -45,7 +49,7 @@ class NetDebtToEBITDAMetric:
 
     id: str = "net_debt_to_ebitda"
     required_concepts = tuple(
-        (EBIT_CONCEPT,)
+        (EBIT_CONCEPT, VENDOR_EBITDA_CONCEPT)
         + DA_PRIMARY_CONCEPTS
         + DA_FALLBACK_CONCEPTS
         + DEBT_CONCEPTS

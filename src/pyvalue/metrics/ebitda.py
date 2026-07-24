@@ -13,7 +13,7 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Sequence
 
 import logging
 
@@ -31,6 +31,11 @@ from pyvalue.money import Money
 LOGGER = logging.getLogger(__name__)
 
 EBIT_CONCEPT = "OperatingIncomeLoss"
+# EODHD's own per-period EBITDA line. Never the primary source -- vendor
+# derivations are junk-prone (see the negative-D&A audit in
+# docs/research/screener-na-investigation.md) -- but a plausibility-guarded
+# hole-filler when the component build lacks a D&A companion.
+VENDOR_EBITDA_CONCEPT = "EBITDA"
 
 
 @dataclass(frozen=True)
@@ -88,6 +93,19 @@ def compute_component_ttm_ebitda(
         ],
     )
     if pairs is None:
+        # The income window itself resolved -- only the D&A companion is
+        # missing for some window period. That exact hole is what the vendor
+        # EBITDA line can fill under a plausibility guard; a failed fallback
+        # keeps the established missing-D&A failure reason.
+        fallback = _vendor_ttm_ebitda(
+            listing_id,
+            repo,
+            ebit_window_records=window.records,
+            target_currency=target_currency,
+            context=context,
+        )
+        if fallback is not None:
+            return fallback
         LOGGER.warning(
             "%s: missing D&A for a TTM window quarter (listing_id=%s)",
             context,
@@ -107,6 +125,69 @@ def compute_component_ttm_ebitda(
     )
 
 
+def _vendor_ttm_ebitda(
+    listing_id: int,
+    repo: RegionFactsRepository,
+    *,
+    ebit_window_records: Sequence[MonetaryFact],
+    target_currency: str,
+    context: str,
+) -> Optional[EBITDAResult]:
+    """Vendor-supplied EBITDA as a guarded hole-filler.
+
+    Fires only when the component build resolved an EBIT window but found no
+    D&A companion for some window period. The vendor figure is accepted only
+    when it is at least the resolved TTM EBIT: EBITDA below EBIT implies
+    negative D&A, which the sign guard already establishes as a provider
+    artifact -- such a row is rejected as contaminated rather than trusted.
+    The vendor window resolves on its own cadence (annual opted in), so the
+    result's freshness and balance-sheet widening follow the vendor rows.
+    """
+    resolution = resolve_ttm_window(
+        repo.monetary_facts_for_concept(listing_id, VENDOR_EBITDA_CONCEPT),
+        annual_max_age_days=MAX_FY_FACT_AGE_DAYS,
+    )
+    window = resolution.window
+    if window is None:
+        return None
+
+    vendor_total = sum_money(
+        [
+            _money(record, target_currency, listing_id, context)
+            for record in window.records
+        ]
+    )
+    ebit_total = sum_money(
+        [
+            _money(record, target_currency, listing_id, context)
+            for record in ebit_window_records
+        ]
+    )
+    # No amounts in the message: failure reasons group on the scrubbed
+    # template, and embedded Money values would fragment it per currency.
+    if vendor_total.amount < ebit_total.amount:
+        LOGGER.warning(
+            "%s: vendor EBITDA below TTM EBIT for listing_id=%s"
+            " -- implied negative D&A, fallback rejected",
+            context,
+            listing_id,
+        )
+        return None
+
+    # INFO, not WARNING: the fallback is a measured outcome (documented-cap
+    # precedent), so it must not pollute failure reasons on success.
+    LOGGER.info(
+        "%s: component D&A missing; vendor EBITDA fallback engaged for listing_id=%s",
+        context,
+        listing_id,
+    )
+    return EBITDAResult(
+        money=vendor_total,
+        as_of=window.as_of,
+        cadence=window.cadence,
+    )
+
+
 def _money(
     fact: MonetaryFact, target_currency: str, listing_id: int, context: str
 ) -> Money:
@@ -120,4 +201,9 @@ def _money(
     )
 
 
-__all__ = ["EBITDAResult", "EBIT_CONCEPT", "compute_component_ttm_ebitda"]
+__all__ = [
+    "EBITDAResult",
+    "EBIT_CONCEPT",
+    "VENDOR_EBITDA_CONCEPT",
+    "compute_component_ttm_ebitda",
+]

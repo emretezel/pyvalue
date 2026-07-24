@@ -18,6 +18,7 @@ import logging
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.depreciation import DA_FALLBACK_CONCEPT, DA_PRIMARY_CONCEPT
+from pyvalue.metrics.ebitda import VENDOR_EBITDA_CONCEPT
 from pyvalue.metrics.enterprise_value_ratios import (
     CAPEX_CONCEPT,
     EBIT_CONCEPT,
@@ -27,16 +28,17 @@ from pyvalue.metrics.enterprise_value_ratios import (
 
 LOGGER = logging.getLogger(__name__)
 
-# Both numerator (OCF - capex) and denominator (EBIT + D&A) reuse the shared
-# EV-ratio calculator policies, so the required concepts are exactly its
-# inputs -- without the EV balance-sheet concepts, because this ratio needs no
-# market data or enterprise-value denominator.
+# Both numerator (OCF - capex) and denominator (EBIT + D&A, vendor-EBITDA
+# hole-filler included) reuse the shared calculator policies, so the required
+# concepts are exactly their inputs -- without the EV balance-sheet concepts,
+# because this ratio needs no market data or enterprise-value denominator.
 REQUIRED_CONCEPTS = (
     OPERATING_CASH_FLOW_CONCEPT,
     CAPEX_CONCEPT,
     EBIT_CONCEPT,
     DA_PRIMARY_CONCEPT,
     DA_FALLBACK_CONCEPT,
+    VENDOR_EBITDA_CONCEPT,
 )
 
 

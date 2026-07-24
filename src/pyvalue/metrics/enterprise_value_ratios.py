@@ -16,7 +16,11 @@ from pyvalue.metrics.depreciation import (
     DA_FALLBACK_CONCEPT,
     DA_PRIMARY_CONCEPT,
 )
-from pyvalue.metrics.ebitda import EBIT_CONCEPT, compute_component_ttm_ebitda
+from pyvalue.metrics.ebitda import (
+    EBIT_CONCEPT,
+    VENDOR_EBITDA_CONCEPT,
+    compute_component_ttm_ebitda,
+)
 from pyvalue.metrics.enterprise_value import (
     EV_REQUIRED_CONCEPTS,
     resolve_enterprise_value_denominator,
@@ -54,6 +58,9 @@ EBITDA_REQUIRED_CONCEPTS = tuple(
             EBIT_CONCEPT,
             DA_PRIMARY_CONCEPT,
             DA_FALLBACK_CONCEPT,
+            # Preloads the vendor-EBITDA hole-filler; without the declaration
+            # the batch cache would starve the fallback silently.
+            VENDOR_EBITDA_CONCEPT,
         )
         + EV_REQUIRED_CONCEPTS
     )
