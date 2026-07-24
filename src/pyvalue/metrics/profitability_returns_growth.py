@@ -19,6 +19,7 @@ from pyvalue.metrics.owner_earnings_enterprise import (
     REQUIRED_CONCEPTS as OE_ENTERPRISE_REQUIRED_CONCEPTS,
     OwnerEarningsEnterpriseCalculator,
 )
+from pyvalue.metrics.share_count_change import SHARE_COUNT_CONCEPT
 from pyvalue.metrics.ttm import resolve_ttm_window
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
@@ -51,7 +52,6 @@ INTANGIBLE_PRIMARY_CONCEPT = "IntangibleAssetsNetExcludingGoodwill"
 INTANGIBLE_FALLBACK_CONCEPT = "IntangibleAssetsNet"
 DIVIDENDS_PAID_CONCEPT = "CommonStockDividendsPaid"
 DIVIDENDS_PER_SHARE_CONCEPT = "CommonStockDividendsPerShareCashPaid"
-DILUTED_SHARES_CONCEPT = "WeightedAverageNumberOfDilutedSharesOutstanding"
 
 REVENUE_CONCEPTS = (REVENUE_CONCEPT,)
 COST_OF_REVENUE_CONCEPTS = (COST_OF_REVENUE_CONCEPT,)
@@ -66,7 +66,6 @@ GOODWILL_CONCEPTS = (GOODWILL_CONCEPT,)
 INTANGIBLE_CONCEPTS = (INTANGIBLE_PRIMARY_CONCEPT, INTANGIBLE_FALLBACK_CONCEPT)
 DIVIDENDS_PAID_CONCEPTS = (DIVIDENDS_PAID_CONCEPT,)
 DIVIDENDS_PER_SHARE_CONCEPTS = (DIVIDENDS_PER_SHARE_CONCEPT,)
-DILUTED_SHARES_CONCEPTS = (DILUTED_SHARES_CONCEPT,)
 
 QUARTERLY_PERIODS = {"Q1", "Q2", "Q3", "Q4"}
 FY_PERIODS = {"FY"}
@@ -122,8 +121,13 @@ DIVIDEND_PAYOUT_REQUIRED_CONCEPTS = tuple(
 )
 REVENUE_CAGR_REQUIRED_CONCEPTS = REVENUE_CONCEPTS
 FCF_PER_SHARE_CAGR_REQUIRED_CONCEPTS = tuple(
+    # Period-end common shares outstanding, not weighted diluted: EODHD never
+    # supplies a weighted-average diluted count (documented in
+    # docs/reference/eodhd-concept-normalization.md), and the outstanding
+    # count is split-adjusted across history, so both CAGR endpoints sit on
+    # one consistent basis.
     dict.fromkeys(
-        OPERATING_CASH_FLOW_CONCEPTS + CAPEX_CONCEPTS + DILUTED_SHARES_CONCEPTS
+        OPERATING_CASH_FLOW_CONCEPTS + CAPEX_CONCEPTS + (SHARE_COUNT_CONCEPT,)
     )
 )
 GROSS_PROFIT_TO_ASSETS_REQUIRED_CONCEPTS = tuple(
@@ -584,16 +588,19 @@ class ProfitabilityReturnsGrowthCalculator:
             repo,
             context="fcf_per_share_cagr_10y",
         )
-        # Diluted shares are a *count* (ScalarFact, no currency), so FCF/share is
+        # Share counts are a *count* (ScalarFact, no currency), so FCF/share is
         # FCF (Money) divided by a share quantity -- a per-share Money amount, not
         # a dimensionless ratio. Reading them through the scalar boundary makes the
-        # type system reject treating the share count as money.
+        # type system reject treating the share count as money. The basis is
+        # period-end common shares outstanding: EODHD supplies no weighted-average
+        # diluted count, and the outstanding series is split-adjusted, so both
+        # endpoints of the CAGR share one consistent per-share basis.
         share_counts = self._build_fy_share_count_map(
-            listing_id, repo, DILUTED_SHARES_CONCEPT
+            listing_id, repo, SHARE_COUNT_CONCEPT
         )
         if not share_counts:
             LOGGER.warning(
-                "fcf_per_share_cagr_10y: missing diluted share history for"
+                "fcf_per_share_cagr_10y: missing FY share-count history for"
                 " listing_id=%s",
                 listing_id,
             )
@@ -1244,7 +1251,7 @@ class ProfitabilityReturnsGrowthCalculator:
         repo: RegionFactsRepository,
         concept: str,
     ) -> dict[int, float]:
-        """Map FY year -> diluted share *count* (a scalar, currency-less, fact)."""
+        """Map FY year -> share *count* (a scalar, currency-less, fact)."""
 
         records = repo.scalar_facts_for_concept(listing_id, concept, fiscal_period="FY")
         mapped: dict[int, float] = {}

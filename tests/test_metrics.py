@@ -237,7 +237,7 @@ class _GBPTickerCurrencyRepo(_TickerCurrencyRepo):
 # Share-count concepts read through the *scalar* boundary (a count is a quantity,
 # not money, so currency=None). The EODHD normalizer tags all of these
 # ``unit_kind='count'``, including the income-statement weighted-average share
-# counts, which ``fcf_per_share_cagr_10y`` reads via the scalar accessor.
+# counts (mapped but never present in EODHD payloads).
 _COUNT_CONCEPTS = {
     "CommonStockSharesOutstanding",
     "EntityCommonStockSharesOutstanding",
@@ -14268,23 +14268,23 @@ def test_fcf_per_share_cagr_10y_metric_computes_happy_path() -> None:
                     currency="USD",
                 ),
             ],
-            "WeightedAverageNumberOfDilutedSharesOutstanding": [
+            "CommonStockSharesOutstanding": [
                 fact(
                     symbol=symbol,
-                    concept="WeightedAverageNumberOfDilutedSharesOutstanding",
+                    concept="CommonStockSharesOutstanding",
                     fiscal_period="FY",
                     end_date=f"{latest_year}-09-30",
-                    # Diluted shares are a count fact (unit_kind="count",
+                    # Share counts are count facts (unit_kind="count",
                     # currency=None) via the fact() default; the metric reads them
                     # through the scalar boundary and divides FCF by the count.
                     value=10.0,
                 ),
                 fact(
                     symbol=symbol,
-                    concept="WeightedAverageNumberOfDilutedSharesOutstanding",
+                    concept="CommonStockSharesOutstanding",
                     fiscal_period="FY",
                     end_date=f"{latest_year - 10}-09-30",
-                    # Diluted shares are a count fact (unit_kind="count",
+                    # Share counts are count facts (unit_kind="count",
                     # currency=None) via the fact() default; the metric reads them
                     # through the scalar boundary and divides FCF by the count.
                     value=10.0,
@@ -14298,7 +14298,7 @@ def test_fcf_per_share_cagr_10y_metric_computes_happy_path() -> None:
     assert round(result.value, 8) == round((2.0**0.1) - 1.0, 8)
 
 
-def test_fcf_per_share_cagr_10y_metric_requires_diluted_shares() -> None:
+def test_fcf_per_share_cagr_10y_metric_requires_share_count_history() -> None:
     metric = FCFPerShareCAGR10YMetric()
     symbol = "AAPL.US"
     latest_year = date.today().year - 1
