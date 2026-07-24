@@ -5658,3 +5658,51 @@ def test_migration_086_purges_only_nonpositive_count_facts(tmp_path: Path) -> No
         ("CommonStockSharesOutstanding", "count", 1_000_000.0),
         ("NetIncomeLoss", "monetary", -250.0),
     ]
+
+
+def test_migration_087_purges_only_legacy_roic_rows(tmp_path: Path) -> None:
+    """Migration 087 deletes the retired ``return_on_invested_capital`` rows
+    from both ``metrics`` and ``metric_compute_status`` and leaves every other
+    metric id untouched."""
+
+    from pyvalue.persistence.storage.migrations import (
+        _migration_087_purge_legacy_roic_metric_rows,
+    )
+
+    db_path = tmp_path / "purge-legacy-roic.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE metrics (listing_id INTEGER NOT NULL, "
+            "metric_id TEXT NOT NULL, value REAL NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE metric_compute_status (listing_id INTEGER NOT NULL, "
+            "metric_id TEXT NOT NULL, status TEXT NOT NULL)"
+        )
+        conn.executemany(
+            "INSERT INTO metrics VALUES (?, ?, ?)",
+            [
+                (1, "return_on_invested_capital", 0.42),
+                (1, "roic_ttm", 0.31),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO metric_compute_status VALUES (?, ?, ?)",
+            [
+                (1, "return_on_invested_capital", "success"),
+                (2, "return_on_invested_capital", "failure"),
+                (1, "roic_ttm", "success"),
+            ],
+        )
+
+        _migration_087_purge_legacy_roic_metric_rows(conn)
+
+        remaining_values = conn.execute(
+            "SELECT metric_id FROM metrics ORDER BY metric_id"
+        ).fetchall()
+        remaining_statuses = conn.execute(
+            "SELECT metric_id, status FROM metric_compute_status ORDER BY metric_id"
+        ).fetchall()
+
+    assert remaining_values == [("roic_ttm",)]
+    assert remaining_statuses == [("roic_ttm", "success")]

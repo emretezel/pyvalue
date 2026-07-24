@@ -8686,6 +8686,31 @@ def _migration_086_purge_nonpositive_count_facts(conn: sqlite3.Connection) -> No
     conn.execute("DELETE FROM financial_facts WHERE unit_kind = 'count' AND value <= 0")
 
 
+def _migration_087_purge_legacy_roic_metric_rows(conn: sqlite3.Connection) -> None:
+    """Purge persisted rows of the retired ``return_on_invested_capital`` metric.
+
+    The legacy ROIC metric (older invested-capital definition, no fallback
+    chains, its own quarterly-only TTM filter) was deregistered in favour of
+    ``roic_ttm`` and the FY ROIC series; it failed for 72.6% of the universe
+    and no screener referenced it. ``metric_id`` is TEXT-keyed, so retiring
+    the id is a data cleanup, not a schema change: orphaned value and status
+    rows would otherwise linger in every universe-scale aggregation.
+
+    Idempotent: both ``DELETE``\\ s are no-ops once the id is gone.
+    """
+
+    if _table_exists(conn, "metrics"):
+        conn.execute(
+            "DELETE FROM metrics WHERE metric_id = ?",
+            ("return_on_invested_capital",),
+        )
+    if _table_exists(conn, "metric_compute_status"):
+        conn.execute(
+            "DELETE FROM metric_compute_status WHERE metric_id = ?",
+            ("return_on_invested_capital",),
+        )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -8773,6 +8798,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_084_fx_rates_canonical_rebuild,
     _migration_085_purge_wmt_mx_quarantined_facts,
     _migration_086_purge_nonpositive_count_facts,
+    _migration_087_purge_legacy_roic_metric_rows,
 ]
 
 

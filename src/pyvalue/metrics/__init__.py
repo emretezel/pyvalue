@@ -47,7 +47,6 @@ from .roic_fy_series import (
     ROIC10YMinMetric,
     ROIC7YMinMetric,
 )
-from .return_on_invested_capital import ReturnOnInvestedCapitalMetric
 from .mcapex import MCapexFYMetric, MCapexFiveYearMetric, MCapexTTMMetric
 from .nwc import (
     NWCMostRecentQuarterMetric,
@@ -183,7 +182,6 @@ REGISTRY = {
     FCFPerShareCAGR10YMetric.id: FCFPerShareCAGR10YMetric,
     OwnerEarningsCAGR10YMetric.id: OwnerEarningsCAGR10YMetric,
     GrossProfitToAssetsTTMMetric.id: GrossProfitToAssetsTTMMetric,
-    ReturnOnInvestedCapitalMetric.id: ReturnOnInvestedCapitalMetric,
     MCapexFYMetric.id: MCapexFYMetric,
     MCapexFiveYearMetric.id: MCapexFiveYearMetric,
     MCapexTTMMetric.id: MCapexTTMMetric,
@@ -284,7 +282,6 @@ __all__ = [
     "FCFPerShareCAGR10YMetric",
     "OwnerEarningsCAGR10YMetric",
     "GrossProfitToAssetsTTMMetric",
-    "ReturnOnInvestedCapitalMetric",
     "MCapexFYMetric",
     "MCapexFiveYearMetric",
     "MCapexTTMMetric",

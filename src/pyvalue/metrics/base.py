@@ -109,7 +109,6 @@ _METRIC_METADATA: dict[str, MetricMetadata] = {
     "fcf_per_share_cagr_10y": MetricMetadata("percent"),
     "owner_earnings_cagr_10y": MetricMetadata("percent"),
     "gross_profit_to_assets_ttm": MetricMetadata("percent"),
-    "return_on_invested_capital": MetricMetadata("percent"),
     "mcapex_fy": MetricMetadata("monetary"),
     "mcapex_5y": MetricMetadata("monetary"),
     "mcapex_ttm": MetricMetadata("monetary"),

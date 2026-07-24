@@ -126,7 +126,6 @@ Columns:
 
 | English Descriptive Name of the Metric | pyvalue key | How is it calculated | Why is it important in identifying quality/value stocks |
 | --- | --- | --- | --- |
-| Return on Invested Capital (Legacy) | `return_on_invested_capital` | EODHD-oriented: after-tax TTM EBIT divided by average invested capital using the older invested-capital definition. | High returns on capital often indicate a strong business model or moat. |
 | Invested Capital (Most Recent Quarter) | `ic_mqr` | EODHD-oriented: latest quarterly `TotalDebt + TotalEquity - Cash`, with debt/equity/cash fallback chains. | Gives a direct snapshot of operating capital committed to the business. |
 | Invested Capital (Fiscal Year) | `ic_fy` | EODHD-oriented FY version of the same invested-capital formula used by `ic_mqr`. | Useful as an annual anchor for capital-efficiency analysis. |
 | Average Invested Capital | `avg_ic` | EODHD-oriented: `(IC_now + IC_same_quarter_last_year) / 2`, with strict FY fallback when quarter pairing is unavailable. | Smooths balance-sheet timing noise for return-on-capital metrics. |
