@@ -13,7 +13,7 @@ import logging
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics.balance_sheet import (
     CASH_CONCEPTS,
-    DEBT_CONCEPTS,
+    DEBT_EVIDENCE_CONCEPTS,
     resolve_cash_position,
     resolve_total_debt,
 )
@@ -52,7 +52,7 @@ class NetDebtToEBITDAMetric:
         (EBIT_CONCEPT, VENDOR_EBITDA_CONCEPT)
         + DA_PRIMARY_CONCEPTS
         + DA_FALLBACK_CONCEPTS
-        + DEBT_CONCEPTS
+        + DEBT_EVIDENCE_CONCEPTS
         + CASH_CONCEPTS
     )
 

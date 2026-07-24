@@ -16,8 +16,11 @@ semantics identical by construction:
   two-step chain reconstructs the broad definition when only the parts exist;
 - debt: ``ShortTermDebt`` and/or ``LongTermDebt`` -- one side reported alone
   is a real balance-sheet shape (no current maturities, or no long-term
-  debt), so a single side suffices; both absent means debt is unknown, not
-  zero, and resolves to ``None``;
+  debt), so a single side suffices; with both components absent the
+  provider's ``TotalDebtFromBalanceSheet`` rollup is the fallback (the same
+  components-preferred chain ``invested_capital`` and ``debt_paydown_years``
+  already use -- some feeds populate only the rollup); all three absent means
+  debt is unknown, not zero, and resolves to ``None``;
 - freshness: every fact must be within a caller-supplied window (the standard
   400-day one by default) -- a stale balance sheet is a data gap, not a usable
   position. Callers whose income flow resolved on the annual cadence pass the
@@ -126,7 +129,14 @@ def resolve_total_debt(
     metric_id: str,
     max_age_days: int = MAX_FACT_AGE_DAYS,
 ) -> Optional[BalanceSheetPosition]:
-    """Resolve total debt from whichever fresh debt sides are reported."""
+    """Resolve total debt from whichever fresh debt sides are reported.
+
+    Components-preferred: the provider's ``TotalDebtFromBalanceSheet`` rollup
+    is consulted only when *neither* component side has a fresh row -- a
+    measured component sum must never be displaced by the rollup (the two can
+    disagree through lease contamination or provider unit errors, which is
+    why ``resolve_debt_evidence`` takes their ``max()`` instead).
+    """
 
     short_debt = _latest_recent_fact(
         repo, listing_id, DEBT_CONCEPTS[0], max_age_days=max_age_days
@@ -135,7 +145,15 @@ def resolve_total_debt(
         repo, listing_id, DEBT_CONCEPTS[1], max_age_days=max_age_days
     )
     if short_debt is None and long_debt is None:
-        return None
+        rollup = _latest_recent_fact(
+            repo, listing_id, DEBT_EVIDENCE_CONCEPTS[2], max_age_days=max_age_days
+        )
+        if rollup is None:
+            return None
+        return BalanceSheetPosition(
+            money=_money(rollup, target_currency, listing_id, metric_id),
+            as_of=rollup.end_date,
+        )
 
     debt_money: Optional[Money] = None
     as_of_candidates: list[str] = []

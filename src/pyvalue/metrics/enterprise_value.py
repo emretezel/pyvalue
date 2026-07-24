@@ -12,7 +12,7 @@ import logging
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics.balance_sheet import (
     CASH_CONCEPTS,
-    DEBT_CONCEPTS,
+    DEBT_EVIDENCE_CONCEPTS,
     resolve_cash_position,
     resolve_total_debt,
 )
@@ -27,7 +27,9 @@ from pyvalue.persistence.storage import MarketDataRepository
 LOGGER = logging.getLogger(__name__)
 
 EV_REQUIRED_CONCEPTS = (
-    *DEBT_CONCEPTS,
+    # Components plus the TotalDebtFromBalanceSheet rollup: the shared debt
+    # resolver falls back to the rollup when neither component side is fresh.
+    *DEBT_EVIDENCE_CONCEPTS,
     *CASH_CONCEPTS,
     # EV = market cap + total debt - cash. Market cap (= shares x price) reads a
     # share-count fact, so every EV metric must preload it too. See
@@ -52,10 +54,10 @@ def resolve_enterprise_value_denominator(
     ``EnterpriseValue`` fact, so it floats with every price refresh and uses
     one consistent definition across the universe. Debt and cash resolve
     through the same shared chains as ``net_debt_to_ebitda``
-    (:mod:`pyvalue.metrics.balance_sheet`): at least one fresh debt side, and
-    the cash rollup with its equivalents-plus-short-term-investments
-    fallback -- so a listing carries an EV exactly when it carries a net-debt
-    position. Every input is aligned to ``target_currency`` through the
+    (:mod:`pyvalue.metrics.balance_sheet`): at least one fresh debt side (else
+    the provider's total-debt rollup), and the cash rollup with its
+    equivalents-plus-short-term-investments fallback -- so a listing carries
+    an EV exactly when it carries a net-debt position. Every input is aligned to ``target_currency`` through the
     shared Money seam, so the result is a single-currency ``Money``. Returns
     ``None`` when market cap, debt, or cash cannot be resolved fresh, or when
     the computed EV is non-positive.
