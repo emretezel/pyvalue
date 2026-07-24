@@ -16,12 +16,12 @@ from pyvalue.metrics.depreciation import (
     DA_FALLBACK_CONCEPT,
     DA_PRIMARY_CONCEPT,
 )
+from pyvalue.metrics.ebitda import EBIT_CONCEPT, compute_component_ttm_ebitda
 from pyvalue.metrics.enterprise_value import (
     EV_REQUIRED_CONCEPTS,
     resolve_enterprise_value_denominator,
 )
-from pyvalue.metrics.fact_guards import guarded_monetary_facts
-from pyvalue.metrics.ttm import Cadence, paired_records, resolve_ttm_window
+from pyvalue.metrics.ttm import Cadence, resolve_ttm_window
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     MAX_FY_FACT_AGE_DAYS,
@@ -34,7 +34,6 @@ from pyvalue.persistence.storage import MarketDataRepository
 
 LOGGER = logging.getLogger(__name__)
 
-EBIT_CONCEPT = "OperatingIncomeLoss"
 OPERATING_CASH_FLOW_CONCEPT = "NetCashProvidedByUsedInOperatingActivities"
 CAPEX_CONCEPT = "CapitalExpenditures"
 REVENUE_CONCEPT = "Revenues"
@@ -126,52 +125,20 @@ class EnterpriseValueRatioCalculator:
     def compute_ttm_ebitda(
         self, listing_id: int, repo: RegionFactsRepository, *, context: str
     ) -> Optional[TTMResult]:
-        resolution = resolve_ttm_window(
-            repo.monetary_facts_for_concept(listing_id, EBIT_CONCEPT),
-            annual_max_age_days=MAX_FY_FACT_AGE_DAYS,
-        )
-        window = resolution.window
-        if window is None:
-            LOGGER.warning(
-                "%s: %s (concept=%s, listing_id=%s)",
-                context,
-                resolution.failure,
-                EBIT_CONCEPT,
-                listing_id,
-            )
-            return None
-
-        # Primary D&A rows are listed before the fallback rows: paired_records
-        # keeps the first candidate per end_date, so the primary concept wins
-        # a quarter and the fallback only fills its holes -- the same
-        # per-quarter primary-else-fallback rule as before the window refactor.
-        pairs = paired_records(
-            window,
-            [
-                *guarded_monetary_facts(repo, listing_id, DA_PRIMARY_CONCEPT),
-                *guarded_monetary_facts(repo, listing_id, DA_FALLBACK_CONCEPT),
-            ],
-        )
-        if pairs is None:
-            LOGGER.warning(
-                "%s: missing D&A for a TTM window quarter (listing_id=%s)",
-                context,
-                listing_id,
-            )
-            return None
-
+        # The component EBIT + D&A construction lives in the shared helper so
+        # every EBITDA-based metric applies the same derivation policy.
         target_currency = require_metric_ticker_currency(
             listing_id, repo, metric_id=context
         )
-        quarter_totals = [
-            self._money(ebit_record, target_currency, listing_id, context)
-            + self._money(da_record, target_currency, listing_id, context)
-            for ebit_record, da_record in pairs
-        ]
+        result = compute_component_ttm_ebitda(
+            listing_id, repo, target_currency=target_currency, context=context
+        )
+        if result is None:
+            return None
         return TTMResult(
-            money=sum_money(quarter_totals),
-            as_of=window.as_of,
-            cadence=window.cadence,
+            money=result.money,
+            as_of=result.as_of,
+            cadence=result.cadence,
         )
 
     def compute_ttm_revenue(

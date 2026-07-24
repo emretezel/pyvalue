@@ -10,7 +10,7 @@ from typing import Optional
 
 import logging
 
-from pyvalue.facts import MonetaryFact, RegionFactsRepository
+from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics.balance_sheet import (
     CASH_CONCEPTS,
     DEBT_CONCEPTS,
@@ -22,19 +22,15 @@ from pyvalue.metrics.depreciation import (
     DA_FALLBACK_CONCEPTS,
     DA_PRIMARY_CONCEPTS,
 )
-from pyvalue.metrics.fact_guards import guarded_monetary_facts
-from pyvalue.metrics.ttm import Cadence, paired_records, resolve_ttm_window
+from pyvalue.metrics.ebitda import EBIT_CONCEPT, compute_component_ttm_ebitda
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     MAX_FY_FACT_AGE_DAYS,
-    require_metric_money,
     require_metric_ticker_currency,
-    sum_money,
 )
 from pyvalue.money import Money
 
 LOGGER = logging.getLogger(__name__)
-EBIT_CONCEPTS = ("OperatingIncomeLoss",)
 
 
 @dataclass
@@ -44,23 +40,12 @@ class _MoneyResult:
 
 
 @dataclass
-class _EBITDAResult:
-    money: Money
-    as_of: str
-    # The reporting cadence the EBITDA window resolved on. An annual-only filer
-    # resolves "annual", and its balance sheet is filed on the same once-a-year
-    # cadence -- so the net-debt legs must widen their freshness window to match
-    # (a fresh annual EBITDA over a "stale" 400-day balance sheet is a false NA).
-    cadence: Cadence
-
-
-@dataclass
 class NetDebtToEBITDAMetric:
     """Compute net debt to TTM EBITDA for EODHD-normalized facts."""
 
     id: str = "net_debt_to_ebitda"
     required_concepts = tuple(
-        EBIT_CONCEPTS
+        (EBIT_CONCEPT,)
         + DA_PRIMARY_CONCEPTS
         + DA_FALLBACK_CONCEPTS
         + DEBT_CONCEPTS
@@ -76,7 +61,12 @@ class NetDebtToEBITDAMetric:
             listing_id, repo, metric_id=self.id
         )
 
-        ttm_ebitda = self._compute_ttm_ebitda(listing_id, repo, target_currency)
+        # The EBITDA construction (component EBIT + D&A over one resolved
+        # window, annual cadence opted in) lives in the shared helper so every
+        # EBITDA-based metric applies the same derivation policy.
+        ttm_ebitda = compute_component_ttm_ebitda(
+            listing_id, repo, target_currency=target_currency, context=self.id
+        )
         if ttm_ebitda is None:
             LOGGER.warning(
                 "net_debt_to_ebitda: missing TTM EBITDA for listing_id=%s", listing_id
@@ -115,62 +105,6 @@ class NetDebtToEBITDAMetric:
             unit_kind="multiple",
         )
 
-    def _compute_ttm_ebitda(
-        self,
-        listing_id: int,
-        repo: RegionFactsRepository,
-        target_currency: str,
-    ) -> Optional[_EBITDAResult]:
-        # Opt into the annual cadence: an annual-only filer with no quarterly
-        # EBIT still yields a coherent twelve-month EBITDA from its FY rows.
-        resolution = resolve_ttm_window(
-            repo.monetary_facts_for_concept(listing_id, EBIT_CONCEPTS[0]),
-            annual_max_age_days=MAX_FY_FACT_AGE_DAYS,
-        )
-        window = resolution.window
-        if window is None:
-            LOGGER.warning(
-                "net_debt_to_ebitda: %s (concept=%s, listing_id=%s)",
-                resolution.failure,
-                EBIT_CONCEPTS[0],
-                listing_id,
-            )
-            return None
-
-        # Primary D&A rows precede the fallback rows: paired_records keeps the
-        # first candidate per end_date, so the primary concept wins a quarter
-        # and the fallback only fills its holes -- the same per-quarter
-        # primary-else-fallback rule as before the window refactor.
-        pairs = paired_records(
-            window,
-            [
-                *guarded_monetary_facts(repo, listing_id, DA_PRIMARY_CONCEPTS[0]),
-                *guarded_monetary_facts(repo, listing_id, DA_FALLBACK_CONCEPTS[0]),
-            ],
-        )
-        if pairs is None:
-            LOGGER.warning(
-                "net_debt_to_ebitda: missing D&A for a TTM window quarter (listing_id=%s)",
-                listing_id,
-            )
-            return None
-
-        quarter_totals: list[Money] = []
-        for ebit_record, da_record in pairs:
-            ebit_money = self._money(
-                ebit_record, EBIT_CONCEPTS[0], target_currency, listing_id
-            )
-            da_money = self._money(
-                da_record, DA_PRIMARY_CONCEPTS[0], target_currency, listing_id
-            )
-            quarter_totals.append(ebit_money + da_money)
-
-        return _EBITDAResult(
-            money=sum_money(quarter_totals),
-            as_of=window.as_of,
-            cadence=window.cadence,
-        )
-
     def _compute_net_debt(
         self,
         listing_id: int,
@@ -201,22 +135,6 @@ class NetDebtToEBITDAMetric:
 
         return _MoneyResult(
             money=debt.money - cash.money, as_of=max(debt.as_of, cash.as_of)
-        )
-
-    def _money(
-        self,
-        fact: MonetaryFact,
-        concept: str,
-        target_currency: str,
-        listing_id: int,
-    ) -> Money:
-        return require_metric_money(
-            fact.money,
-            target_currency=target_currency,
-            metric_id=self.id,
-            listing_id=listing_id,
-            input_name=concept,
-            as_of=fact.end_date,
         )
 
 
