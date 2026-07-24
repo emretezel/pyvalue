@@ -26,6 +26,7 @@ from datetime import date, timedelta
 from pyvalue.facts import FactRecord, RegionFactsRepository
 from pyvalue.marketdata.base import PriceData
 from pyvalue.metrics.profitability_returns_growth import (
+    DividendPayoutRatioTTMMetric,
     DividendYieldTTMMetric,
     ShareholderYieldTTMMetric,
 )
@@ -234,3 +235,33 @@ def test_shareholder_yield_composes_zero_dividend_leg() -> None:
     )
     assert result is not None
     assert abs(result.value - 0.08) < 1e-12
+
+
+def test_payout_ratio_zero_for_evidenced_non_payer() -> None:
+    # Positive TTM net income, no dividend facts, fresh statements: the
+    # payout of those earnings is exactly 0, not unmeasurable.
+    repo = _FakeFactsRepo(
+        {
+            "NetIncomeLossAvailableToCommonStockholdersBasic": _quarters(
+                "NetIncomeLossAvailableToCommonStockholdersBasic", 30.0
+            ),
+            **_fresh_cfo(),
+        }
+    )
+    result = DividendPayoutRatioTTMMetric().compute(LISTING_ID, repo)
+    assert result is not None
+    assert result.value == 0.0
+
+
+def test_payout_ratio_loss_maker_stays_na_even_as_non_payer() -> None:
+    # A payout ratio is undefined in a loss period: the non-positive-NI guard
+    # must fire before any zero-payout inference.
+    repo = _FakeFactsRepo(
+        {
+            "NetIncomeLossAvailableToCommonStockholdersBasic": _quarters(
+                "NetIncomeLossAvailableToCommonStockholdersBasic", -30.0
+            ),
+            **_fresh_cfo(),
+        }
+    )
+    assert DividendPayoutRatioTTMMetric().compute(LISTING_ID, repo) is None

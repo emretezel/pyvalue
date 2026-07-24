@@ -111,8 +111,13 @@ DIVIDEND_REQUIRED_CONCEPTS = tuple(
     )
 )
 DIVIDEND_PAYOUT_REQUIRED_CONCEPTS = tuple(
+    # Operating cash flow backs the zero-payout inference for non-payers, the
+    # same evidence probe the dividend yield uses.
     dict.fromkeys(
-        DIVIDENDS_PAID_CONCEPTS + NET_INCOME_COMMON_CONCEPTS + NET_INCOME_CONCEPTS
+        DIVIDENDS_PAID_CONCEPTS
+        + NET_INCOME_COMMON_CONCEPTS
+        + NET_INCOME_CONCEPTS
+        + OPERATING_CASH_FLOW_CONCEPTS
     )
 )
 REVENUE_CAGR_REQUIRED_CONCEPTS = REVENUE_CONCEPTS
@@ -489,21 +494,9 @@ class ProfitabilityReturnsGrowthCalculator:
     def compute_dividend_payout_ratio_ttm(
         self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[_RatioSnapshot]:
-        dividends_paid = self._compute_ttm_amount(
-            listing_id,
-            repo,
-            DIVIDENDS_PAID_CONCEPTS,
-            context="dividend_payout_ratio_ttm",
-            absolute=True,
-        )
-        if dividends_paid is None:
-            LOGGER.warning(
-                "dividend_payout_ratio_ttm: missing TTM cash dividends for"
-                " listing_id=%s",
-                listing_id,
-            )
-            return None
-
+        # Net income resolves first: a payout ratio is undefined in a loss
+        # period no matter what was paid, so the NI guards must apply before
+        # any zero-payout inference for non-payers.
         net_income = self._compute_ttm_amount(
             listing_id,
             repo,
@@ -519,6 +512,30 @@ class ProfitabilityReturnsGrowthCalculator:
         if net_income.money.amount <= 0:
             LOGGER.warning(
                 "dividend_payout_ratio_ttm: non-positive TTM net income for"
+                " listing_id=%s",
+                listing_id,
+            )
+            return None
+
+        dividends_paid = self._compute_ttm_amount(
+            listing_id,
+            repo,
+            DIVIDENDS_PAID_CONCEPTS,
+            context="dividend_payout_ratio_ttm",
+            absolute=True,
+        )
+        if dividends_paid is None:
+            # An evidenced non-payer pays out none of its earnings: the payout
+            # of a positive TTM net income with zero dividends is exactly 0.
+            zero = self._zero_dividend_snapshot(
+                listing_id, repo, context="dividend_payout_ratio_ttm"
+            )
+            if zero is not None:
+                return _RatioSnapshot(
+                    value=0.0, as_of=max(net_income.as_of, zero.as_of)
+                )
+            LOGGER.warning(
+                "dividend_payout_ratio_ttm: missing TTM cash dividends for"
                 " listing_id=%s",
                 listing_id,
             )
