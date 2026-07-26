@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+from pyvalue.currency import MetricUnitKind
 from pyvalue.facts import FactRecord, RegionFactsRepository
 from pyvalue.marketdata.base import PriceData
 from pyvalue.metrics.enterprise_value_ratios import EVToEBITMetric
@@ -84,7 +85,9 @@ class _FakeMarketRepo(MarketDataRepository):
         return "USD"
 
 
-def _fy(concept: str, value: float, *, unit_kind: str = "monetary") -> list[FactRecord]:
+def _fy(
+    concept: str, value: float, *, unit_kind: MetricUnitKind = "monetary"
+) -> list[FactRecord]:
     return [
         FactRecord(
             symbol="TEST.US",

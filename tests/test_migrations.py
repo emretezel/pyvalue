@@ -5706,3 +5706,221 @@ def test_migration_087_purges_only_legacy_roic_rows(tmp_path: Path) -> None:
 
     assert remaining_values == [("roic_ttm",)]
     assert remaining_statuses == [("roic_ttm", "success")]
+
+
+# ---------------------------------------------------------------------------
+# Migration 088: listing.isin / listing.lei + primary_listing_status CHECK.
+# ---------------------------------------------------------------------------
+
+
+def _seed_migration_088_listing(conn: sqlite3.Connection) -> None:
+    """Seed the minimal canonical shape migration 088 rebuilds."""
+
+    conn.execute("CREATE TABLE issuer (issuer_id INTEGER PRIMARY KEY, name TEXT)")
+    conn.execute(
+        "CREATE TABLE exchange (exchange_id INTEGER PRIMARY KEY, exchange_code TEXT)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE listing (
+            listing_id INTEGER PRIMARY KEY,
+            issuer_id INTEGER NOT NULL,
+            exchange_id INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            currency TEXT NOT NULL,
+            primary_listing_status TEXT NOT NULL DEFAULT 'unknown'
+        )
+        """
+    )
+    conn.execute(
+        "CREATE TABLE provider_listing "
+        "(provider_listing_id INTEGER PRIMARY KEY, listing_id INTEGER NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE fundamentals_raw "
+        "(provider_listing_id INTEGER NOT NULL, data TEXT)"
+    )
+    conn.execute("INSERT INTO issuer (issuer_id, name) VALUES (1, 'I')")
+    conn.execute("INSERT INTO exchange (exchange_id, exchange_code) VALUES (1, 'US')")
+
+
+def test_migration_088_backfills_isin_and_lei_from_raw_payloads(
+    tmp_path: Path,
+) -> None:
+    """Migration 088 adds the identifier columns and fills them from raw payloads.
+
+    Well-formed identifiers land; a malformed ISIN is stored as NULL rather than
+    aborting the migration (EODHD publishes one such value per ~53,500), and a
+    listing with no payload keeps NULL on both columns.
+    """
+
+    from pyvalue.persistence.storage.migrations import (
+        _migration_088_listing_isin_lei_and_status_check,
+    )
+
+    db_path = tmp_path / "listing-identifiers.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        _seed_migration_088_listing(conn)
+        conn.execute(
+            """
+            INSERT INTO listing (
+                listing_id, issuer_id, exchange_id, symbol, currency,
+                primary_listing_status
+            ) VALUES
+                (1, 1, 1, 'AAA', 'USD', 'primary'),
+                (2, 1, 1, 'BBB', 'USD', 'secondary'),
+                (3, 1, 1, 'CCC', 'USD', 'unknown'),
+                (4, 1, 1, 'DDD', 'USD', 'unknown')
+            """
+        )
+        conn.execute(
+            "INSERT INTO provider_listing (provider_listing_id, listing_id) "
+            "VALUES (10, 1), (20, 2), (30, 3)"
+        )
+        conn.executemany(
+            "INSERT INTO fundamentals_raw (provider_listing_id, data) VALUES (?, ?)",
+            [
+                # Both identifiers well-formed; note the lowercase input, which
+                # the backfill uppercases.
+                (
+                    10,
+                    '{"General": {"ISIN": "us5926881054",'
+                    ' "LEI": "5493000BD5GJNUDIUG10"}}',
+                ),
+                # Malformed ISIN (11 characters) and no LEI -> both stay NULL.
+                (20, '{"General": {"ISIN": "US592688105", "LEI": null}}'),
+                # Empty string is the other common vendor placeholder.
+                (30, '{"General": {"ISIN": "", "LEI": ""}}'),
+            ],
+        )
+
+        _migration_088_listing_isin_lei_and_status_check(conn)
+
+        rows = conn.execute(
+            "SELECT listing_id, isin, lei FROM listing ORDER BY listing_id"
+        ).fetchall()
+        ddl = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='listing'"
+        ).fetchone()[0]
+        indexes = {
+            name
+            for (name,) in conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='index' AND tbl_name='listing'"
+            )
+        }
+
+    assert rows == [
+        (1, "US5926881054", "5493000BD5GJNUDIUG10"),
+        (2, None, None),
+        (3, None, None),
+        (4, None, None),
+    ]
+    assert "isin TEXT" in ddl
+    assert "lei TEXT" in ddl
+    assert "IN ('unknown', 'primary', 'secondary')" in ddl
+    # The peer-group index the classifier seeks on, plus the FK index that must
+    # survive the rebuild.
+    assert {"idx_listing_isin", "idx_listing_issuer"} <= indexes
+
+
+def test_migration_088_checks_reject_malformed_identifiers(tmp_path: Path) -> None:
+    """The rebuilt CHECKs refuse anything that cannot be an ISIN/LEI/status."""
+
+    from pyvalue.persistence.storage.migrations import (
+        _migration_088_listing_isin_lei_and_status_check,
+    )
+
+    db_path = tmp_path / "listing-identifier-checks.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        _seed_migration_088_listing(conn)
+        conn.execute(
+            """
+            INSERT INTO listing (
+                listing_id, issuer_id, exchange_id, symbol, currency,
+                primary_listing_status
+            ) VALUES (1, 1, 1, 'AAA', 'USD', 'primary')
+            """
+        )
+
+        _migration_088_listing_isin_lei_and_status_check(conn)
+
+        def _rejects(column: str, value: str) -> bool:
+            try:
+                conn.execute(
+                    f"UPDATE listing SET {column} = ? WHERE listing_id = 1", (value,)
+                )
+            except sqlite3.IntegrityError:
+                return True
+            return False
+
+        # ISIN: wrong length, lowercase, punctuation, non-alpha country prefix,
+        # and a non-numeric check digit are all structurally impossible.
+        assert _rejects("isin", "US592688105")
+        assert _rejects("isin", "us5926881054")
+        assert _rejects("isin", "US59268810-4")
+        assert _rejects("isin", "1S5926881054")
+        assert _rejects("isin", "US592688105X")
+        # LEI: wrong length and punctuation.
+        assert _rejects("lei", "5493000BD5GJNUDIUG1")
+        assert _rejects("lei", "5493000BD5GJNUDIUG-0")
+        # Status vocabulary is now enforced, not merely documented.
+        assert _rejects("primary_listing_status", "PRIMARY")
+        assert _rejects("primary_listing_status", "maybe")
+        # NULL stays a valid state for both identifiers.
+        conn.execute("UPDATE listing SET isin = NULL, lei = NULL WHERE listing_id = 1")
+
+
+def test_migration_088_aborts_on_unknown_status_value(tmp_path: Path) -> None:
+    """A status outside the vocabulary fails loudly, naming the problem."""
+
+    from pyvalue.persistence.storage.migrations import (
+        _migration_088_listing_isin_lei_and_status_check,
+    )
+
+    db_path = tmp_path / "listing-bad-status.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        _seed_migration_088_listing(conn)
+        conn.execute(
+            """
+            INSERT INTO listing (
+                listing_id, issuer_id, exchange_id, symbol, currency,
+                primary_listing_status
+            ) VALUES (1, 1, 1, 'AAA', 'USD', 'PRIMARY')
+            """
+        )
+
+        with pytest.raises(RuntimeError, match="migration 088 aborted"):
+            _migration_088_listing_isin_lei_and_status_check(conn)
+
+
+def test_migration_088_is_idempotent(tmp_path: Path) -> None:
+    """Re-running against an already-migrated table is a no-op, not a rebuild."""
+
+    from pyvalue.persistence.storage.migrations import (
+        _migration_088_listing_isin_lei_and_status_check,
+    )
+
+    db_path = tmp_path / "listing-idempotent.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        _seed_migration_088_listing(conn)
+        conn.execute(
+            """
+            INSERT INTO listing (
+                listing_id, issuer_id, exchange_id, symbol, currency,
+                primary_listing_status
+            ) VALUES (1, 1, 1, 'AAA', 'USD', 'primary')
+            """
+        )
+
+        _migration_088_listing_isin_lei_and_status_check(conn)
+        conn.execute("UPDATE listing SET isin = 'US5926881054' WHERE listing_id = 1")
+        _migration_088_listing_isin_lei_and_status_check(conn)
+
+        stored = conn.execute(
+            "SELECT isin FROM listing WHERE listing_id = 1"
+        ).fetchone()[0]
+
+    # A second pass must not rebuild the table and wipe the column it just
+    # populated -- the DDL probe is what makes the migration re-runnable.
+    assert stored == "US5926881054"

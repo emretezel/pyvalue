@@ -5956,6 +5956,29 @@ _MAJOR_CURRENCY_CHECK = (
 )
 
 
+# ISIN shape (ISO 6166): exactly 12 uppercase alphanumerics -- a 2-letter
+# country prefix, a 9-character national security identifier, and a numeric
+# check digit. The negated GLOB class is what makes this a *whole-string*
+# assertion; a plain ``GLOB '[A-Z0-9]*'`` would only constrain the first
+# character. The check digit itself is not verified: EODHD is the authority on
+# the value, and this predicate exists to reject structurally impossible input
+# (empty strings, placeholders, truncated codes), not to re-validate the vendor.
+_ISIN_FORMAT_CHECK = (
+    "length({col}) = 12"
+    " AND {col} = upper({col})"
+    " AND {col} NOT GLOB '*[^A-Z0-9]*'"
+    " AND substr({col}, 1, 2) NOT GLOB '*[^A-Z]*'"
+    " AND substr({col}, 12, 1) GLOB '[0-9]'"
+)
+
+
+# LEI shape (ISO 17442): exactly 20 uppercase alphanumerics. Same whole-string
+# GLOB technique as the ISIN predicate above.
+_LEI_FORMAT_CHECK = (
+    "length({col}) = 20 AND {col} = upper({col}) AND {col} NOT GLOB '*[^A-Z0-9]*'"
+)
+
+
 def _migration_056_listing_format_checks(conn: sqlite3.Connection) -> None:
     """Add format CHECKs to ``listing.symbol`` and ``listing.currency``.
 
@@ -8711,6 +8734,239 @@ def _migration_087_purge_legacy_roic_metric_rows(conn: sqlite3.Connection) -> No
         )
 
 
+def _migration_088_listing_isin_lei_and_status_check(
+    conn: sqlite3.Connection,
+) -> None:
+    """Add ``listing.isin`` / ``listing.lei`` and constrain ``primary_listing_status``.
+
+    Primary-listing classification used to read exactly one EODHD field,
+    ``General.PrimaryTicker``, and treated its *absence* as proof of primacy.
+    EODHD leaves it null on ~31% of payloads, so 22,452 of the 57,001 listings
+    the screen ran over were "primary" only because nothing said otherwise --
+    every LSE international-order-book line, most German regional lines, and
+    most US OTC lines among them. The replacement rule set needs two identifiers
+    the classification path cannot get from a single payload:
+
+    * ``isin`` groups **cross-listings of one security**: when six of ASML's
+      seven lines name ``ASML.AS`` as primary, the seventh (``ASME.DU``, whose
+      ``PrimaryTicker`` is null) inherits that answer instead of defaulting to
+      primary. It also breaks ties when EODHD is simply wrong and two lines of
+      one ISIN each self-declare (``LULU.US`` vs ``33L.F``).
+    * ``lei`` identifies the **legal entity** and is the natural key issuer
+      identity is re-keyed on later; it is populated here because the evidence
+      lives in the same payload and a second table rebuild would be wasteful.
+
+    Both are nullable: EODHD publishes no ISIN for ~25% of listings and no LEI
+    for ~74%, and absence is a valid state rather than a placeholder. Neither is
+    UNIQUE -- many listings share one ISIN by design, which is the whole point of
+    the column, and LEI is shared by every listing of one entity. (Migration 005
+    dropped a UNIQUE ISIN index on the legacy ``listings`` table for exactly this
+    reason.)
+
+    ``primary_listing_status`` also finally gains the CHECK it never had. The
+    column has carried a documented three-value vocabulary and a
+    ``DEFAULT 'unknown'`` since it was introduced, but nothing enforced it; a
+    pre-flight assert converts what would otherwise be an opaque CHECK failure
+    during the copy into a readable error.
+
+    The backfill reads ``General.ISIN`` / ``General.LEI`` out of the stored raw
+    payloads with ``json_extract`` so the ~228 KB blobs are parsed inside SQLite
+    and never cross into Python -- the same reason
+    ``reconcile_eodhd_fundamentals`` projects its columns in SQL. Vendor values
+    that cannot be an identifier are left NULL rather than aborting the
+    migration: the 2026-07-26 snapshot carries 53,500 ISINs of which exactly one
+    fails the shape, and 18,271 LEIs of which none do. The shape predicates are
+    shared with the column CHECKs, so the backfill can never write a value the
+    schema would reject.
+
+    Idempotent via the DDL probe: a ``listing`` table that already declares
+    ``isin`` is left untouched.
+    """
+
+    if not _table_exists(conn, "listing"):
+        return
+    columns = _table_columns(conn, "listing")
+    if (
+        not {
+            "listing_id",
+            "issuer_id",
+            "exchange_id",
+            "symbol",
+            "currency",
+            "primary_listing_status",
+        }
+        <= columns
+    ):
+        # Minimal schema from an isolated migration test; earlier migrations own
+        # getting ``listing`` to the canonical shape.
+        return
+    ddl_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='listing'"
+    ).fetchone()
+    if ddl_row is None or "isin" in str(ddl_row[0]):
+        return
+
+    # Pre-flight: the copy below would fail the new CHECK on any out-of-vocabulary
+    # status. Surface that as an actionable message instead of a bare constraint
+    # error naming neither the column nor the offending rows.
+    offending_status = conn.execute(
+        """
+        SELECT COUNT(*) FROM listing
+        WHERE primary_listing_status NOT IN ('unknown', 'primary', 'secondary')
+        """
+    ).fetchone()[0]
+    if offending_status:
+        raise RuntimeError(
+            f"migration 088 aborted: {offending_status} listing row(s) carry a "
+            "primary_listing_status outside ('unknown', 'primary', 'secondary'). "
+            "Resolve them before retrying."
+        )
+
+    isin_check = _ISIN_FORMAT_CHECK.format(col="isin")
+    lei_check = _LEI_FORMAT_CHECK.format(col="lei")
+    currency_check = _CURRENCY_FORMAT_CHECK.format(col="currency")
+
+    # ``listing`` is referenced by four compat views and by several child tables;
+    # the framework's foreign_keys=OFF window covers the rebuild, but the views
+    # must be dropped and recreated around it (matching migrations 064 and 069).
+    securities_view_existed = _view_exists(conn, "securities")
+    catalog_view_existed = _view_exists(conn, "provider_listing_catalog")
+    supported_view_existed = _view_exists(conn, "supported_tickers")
+    primary_view_existed = _view_exists(conn, "primary_provider_listing_catalog")
+    if primary_view_existed:
+        conn.execute("DROP VIEW primary_provider_listing_catalog")
+    if supported_view_existed:
+        conn.execute("DROP VIEW supported_tickers")
+    if catalog_view_existed:
+        conn.execute("DROP VIEW provider_listing_catalog")
+    if securities_view_existed:
+        conn.execute("DROP VIEW securities")
+
+    # idx_listing_issuer (migration 080) is the only surviving secondary index on
+    # ``listing``; it goes with the old table and is recreated below.
+    conn.execute("DROP INDEX IF EXISTS idx_listing_issuer")
+    conn.execute(
+        f"""
+        CREATE TABLE listing__new (
+            listing_id INTEGER PRIMARY KEY,
+            issuer_id INTEGER NOT NULL,
+            exchange_id INTEGER NOT NULL,
+            symbol TEXT NOT NULL
+                CHECK (length(symbol) > 0
+                       AND symbol = upper(trim(symbol))
+                       AND instr(symbol, ' ') = 0
+                       AND symbol GLOB '[A-Z0-9.&^*-]*'),
+            currency TEXT NOT NULL
+                CHECK ({currency_check}),
+            isin TEXT
+                CHECK (isin IS NULL OR ({isin_check})),
+            lei TEXT
+                CHECK (lei IS NULL OR ({lei_check})),
+            primary_listing_status TEXT NOT NULL DEFAULT 'unknown'
+                CHECK (primary_listing_status
+                       IN ('unknown', 'primary', 'secondary')),
+            UNIQUE (exchange_id, symbol),
+            FOREIGN KEY (issuer_id) REFERENCES issuer(issuer_id),
+            FOREIGN KEY (exchange_id) REFERENCES "exchange"(exchange_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO listing__new (
+            listing_id, issuer_id, exchange_id, symbol, currency,
+            primary_listing_status
+        )
+        SELECT
+            listing_id, issuer_id, exchange_id, symbol, currency,
+            primary_listing_status
+        FROM listing
+        """
+    )
+    conn.execute("DROP TABLE listing")
+    conn.execute("ALTER TABLE listing__new RENAME TO listing")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_listing_issuer
+        ON listing(issuer_id)
+        """
+    )
+    # Serves the classifier's ISIN peer-group scan (GROUP BY isin over the
+    # classified universe) and the ingest path's WHERE isin = ? peer probe.
+    # Partial because ~25% of rows are NULL and are never probed -- a peer group
+    # of "listings with no ISIN" is not a group.
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_listing_isin
+        ON listing(isin)
+        WHERE isin IS NOT NULL
+        """
+    )
+
+    if _table_exists(conn, "fundamentals_raw") and _table_exists(
+        conn, "provider_listing"
+    ):
+        # One pass over the raw payloads projecting only the two identifiers, so
+        # no blob is materialised in Python. EODHD listing:provider_listing is
+        # 1:1 (migration 073 purged every other provider), so the correlated
+        # lookups below are deterministic point seeks.
+        conn.execute("DROP TABLE IF EXISTS _migration_088_identity")
+        conn.execute(
+            """
+            CREATE TEMP TABLE _migration_088_identity AS
+            SELECT
+                pl.listing_id AS listing_id,
+                upper(trim(json_extract(fr.data, '$.General.ISIN'))) AS isin,
+                upper(trim(json_extract(fr.data, '$.General.LEI'))) AS lei
+            FROM fundamentals_raw fr
+            JOIN provider_listing pl
+              ON pl.provider_listing_id = fr.provider_listing_id
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX _migration_088_identity_listing
+            ON _migration_088_identity(listing_id)
+            """
+        )
+        conn.execute(
+            f"""
+            UPDATE listing
+            SET isin = (
+                    SELECT ident.isin FROM _migration_088_identity ident
+                    WHERE ident.listing_id = listing.listing_id
+                      AND ident.isin IS NOT NULL
+                      AND ({_ISIN_FORMAT_CHECK.format(col="ident.isin")})
+                ),
+                lei = (
+                    SELECT ident.lei FROM _migration_088_identity ident
+                    WHERE ident.listing_id = listing.listing_id
+                      AND ident.lei IS NOT NULL
+                      AND ({_LEI_FORMAT_CHECK.format(col="ident.lei")})
+                )
+            WHERE listing_id IN (
+                SELECT listing_id FROM _migration_088_identity
+            )
+            """
+        )
+        conn.execute("DROP TABLE IF EXISTS _migration_088_identity")
+
+    if securities_view_existed:
+        _create_securities_view(conn)
+    if catalog_view_existed:
+        _create_provider_listing_catalog_view(conn)
+    if supported_view_existed:
+        _create_supported_tickers_view(conn)
+    if primary_view_existed:
+        _create_primary_provider_listing_catalog_view(conn)
+
+    fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if fk_violations:
+        raise RuntimeError(
+            f"migration 088 left foreign key violations: {fk_violations!r}"
+        )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -8799,6 +9055,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_085_purge_wmt_mx_quarantined_facts,
     _migration_086_purge_nonpositive_count_facts,
     _migration_087_purge_legacy_roic_metric_rows,
+    _migration_088_listing_isin_lei_and_status_check,
 ]
 
 

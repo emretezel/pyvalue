@@ -109,6 +109,16 @@ Supported-ticker refresh stores catalog currency on `listing.currency` as the
 listing quote unit. Tickers whose payload currency is absent or malformed
 (anything other than three uppercase ASCII letters, e.g. the `'Unknown'`
 placeholder) are skipped and reported in the refresh warning output.
+
+The refresh also stores the symbol list's `Isin` field on `listing.isin`. This
+is the identifier primary-listing classification uses to group cross-listings of
+one security, and `exchange-symbol-list` carries it for listings whose
+fundamentals payload omits it — which makes the catalog its better source, not a
+redundant one. Unlike currency, a missing or malformed ISIN does not skip the
+ticker: `listing.isin` is nullable and absence costs only classification
+precision. A later refresh may correct a stored ISIN but never blanks one, since
+a payload missing the field is far more likely to be a provider gap than a
+genuine retraction.
 Single-symbol fundamentals ingestion uses existing catalog
 currency when one is already present and otherwise leaves listing currency
 unset; it does not copy `General.CurrencyCode` from the raw payload into catalog

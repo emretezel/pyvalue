@@ -27,7 +27,9 @@ One row per `(exchange_id, symbol)`.
 | `exchange_id` | `INTEGER` | no | FK, idx | canonical exchange link; part of composite unique key |
 | `symbol` | `TEXT` | no |  | bare canonical listing symbol such as `AAPL`; part of composite unique key. CHECK enforces uppercase, no whitespace, and `[A-Z0-9.&^*-]` characters only |
 | `currency` | `TEXT` | no |  | authoritative listing quote unit, including subunits such as `GBX`, `ZAC`, and `ILA`. NOT NULL since migration 069; CHECK enforces 3-char uppercase ASCII letters |
-| `primary_listing_status` | `TEXT` | no |  | canonical primary-listing classification: `unknown`, `primary`, or `secondary` |
+| `isin` | `TEXT` | yes | idx | ISO 6166 security identifier. Added by migration 088. Nullable — EODHD publishes none for ~25% of listings and absence is a valid state. Deliberately **not** UNIQUE: every venue trading the same shares carries the same ISIN, which is what makes it the cross-listing grouping key. CHECK enforces 12 uppercase alphanumerics with a 2-letter country prefix and a numeric check digit |
+| `lei` | `TEXT` | yes |  | ISO 17442 legal-entity identifier. Added by migration 088. Nullable (~26% populated). Shared by every listing of one entity, including separate share classes. CHECK enforces 20 uppercase alphanumerics |
+| `primary_listing_status` | `TEXT` | no |  | canonical primary-listing classification: `unknown`, `primary`, or `secondary`. CHECK enforces the vocabulary since migration 088 |
 
 ## Keys And Relationships
 
@@ -52,7 +54,15 @@ One row per `(exchange_id, symbol)`.
 
 <!-- BEGIN generated_secondary_indexes -->
 - `idx_listing_issuer (issuer_id)`
+- `idx_listing_isin (isin) WHERE isin IS NOT NULL`
 <!-- END generated_secondary_indexes -->
+
+`idx_listing_isin` serves the primary-listing classifier's ISIN peer-group work:
+the `GROUP BY isin` scan over the classified universe and the `WHERE isin = ?`
+peer probe on the ingest path. `EXPLAIN QUERY PLAN` reports both as
+`SEARCH listing USING COVERING INDEX idx_listing_isin`. It is partial because
+~25% of rows carry no ISIN and are never probed — "listings with no ISIN" is not
+a peer group.
 
 ## Main Read Paths
 
@@ -68,8 +78,9 @@ One row per `(exchange_id, symbol)`.
 
 ## Main Write Paths
 
-- `refresh-supported-tickers` — the sole runtime writer of `listing` rows and
-  of `listing.currency`; it never deletes them: a prune removes only the
+- `refresh-supported-tickers` — the sole runtime writer of `listing` rows, of
+  `listing.currency`, and of `listing.isin`; it never deletes them: a prune
+  removes only the
   provider layer (`provider_listing` + raw/fetch/normalization state), and a
   listing left with no provider mapping is retained, unreachable through the
   provider-joined scopes until a provider maps it again (2026-07-11 design)
@@ -135,6 +146,26 @@ whose listing is absent (creating one would require writing the NOT NULL
 ## Review Notes
 
 - Canonical user-facing symbols such as `AAPL.US` are derived, not stored.
+- `isin` and `lei` are identity evidence, not classification. `isin` answers
+  "which security", `lei` answers "which legal entity"; a depositary receipt is
+  legally a distinct security and carries its own ISIN, so ISIN groups
+  cross-listings of one security but never an ADR with its underlying.
+  `refresh-supported-tickers` is the primary source (`Isin` from the provider's
+  exchange symbol list, which covers listings whose fundamentals payload omits
+  it); migration 088 seeded both columns from stored `General.ISIN` /
+  `General.LEI`. A refresh may correct a stored ISIN but never blanks one — a
+  payload missing the field is treated as a provider gap, not a retraction.
+  Shape normalization lives in `pyvalue.identifiers` (`shaped_isin`,
+  `shaped_lei`) and mirrors the SQL CHECK predicates in `migrations.py`; keep
+  the two in step.
+- **`lei` has no runtime writer yet.** Migration 088 seeded it from stored
+  payloads and nothing refreshes it, so a listing catalogued after that
+  migration carries NULL until the issuer-identity reconcile command lands and
+  takes ownership (the same relationship `reconcile-listing-status` has with
+  `primary_listing_status`). The column ships now only because it shares
+  migration 088's table rebuild — re-running that rebuild on the live database
+  costs ~5.5 minutes and a full copy of a 43 GB file, so doing it twice for two
+  adjacent columns would be waste, not caution.
 - `listing.currency` is the only persisted listing-currency truth. It is a
   quote unit and is not collapsed to base currency at storage time. It is
   written solely by `refresh-supported-tickers`; fundamentals ingestion reads

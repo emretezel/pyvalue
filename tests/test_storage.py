@@ -3742,3 +3742,177 @@ def test_id_keyed_metric_and_market_reads(tmp_path: Path) -> None:
 
     # Listing currency: the id-keyed lookup collapses the GBX subunit to GBP.
     assert market_repo.ticker_currency_by_id(aaa_id) == "GBP"
+
+
+def _stored_isin(db_path: Path, symbol: str, exchange_code: str) -> Optional[str]:
+    """Read ``listing.isin`` for one canonical listing."""
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT l.isin FROM listing l
+            JOIN "exchange" e ON e.exchange_id = l.exchange_id
+            WHERE l.symbol = ? AND e.exchange_code = ?
+            """,
+            (symbol, exchange_code),
+        ).fetchone()
+    return None if row is None else row[0]
+
+
+def test_replace_for_exchange_stores_catalog_isin(tmp_path: Path) -> None:
+    """The symbol list's ``Isin`` field lands on ``listing.isin``.
+
+    This is the field the primary-listing classifier groups cross-listings by,
+    and the catalog carries it for listings whose fundamentals payload omits it,
+    so the refresh is its main source. A malformed value degrades to NULL
+    instead of skipping the ticker -- unlike currency, a missing ISIN is a valid
+    state.
+    """
+
+    db_path = tmp_path / "catalog-isin.db"
+    repo = SupportedTickerRepository(db_path)
+    repo.initialize_schema()
+    seed_exchange(db_path, "LSE")
+
+    result = repo.replace_for_exchange(
+        "EODHD",
+        "LSE",
+        [
+            {
+                "Code": "AAA",
+                "Name": "AAA plc",
+                "Type": "Common Stock",
+                "Currency": "GBX",
+                "Isin": "GB00B1CKQ739",
+            },
+            # Malformed: too short. Ticker is still catalogued, ISIN is NULL.
+            {
+                "Code": "BBB",
+                "Name": "BBB plc",
+                "Type": "Common Stock",
+                "Currency": "GBX",
+                "Isin": "GB00B1CKQ7",
+            },
+            # Absent entirely -- the common case for many venues.
+            {
+                "Code": "CCC",
+                "Name": "CCC plc",
+                "Type": "Common Stock",
+                "Currency": "GBX",
+            },
+        ],
+    )
+
+    assert result.inserted == 3
+    assert _stored_isin(db_path, "AAA", "LSE") == "GB00B1CKQ739"
+    assert _stored_isin(db_path, "BBB", "LSE") is None
+    assert _stored_isin(db_path, "CCC", "LSE") is None
+
+
+def test_replace_for_exchange_isin_updates_and_never_erases(tmp_path: Path) -> None:
+    """A later refresh may correct a stored ISIN but may not blank one.
+
+    Absence in a single payload is far more likely to be a provider gap than a
+    genuine retraction, and an identifier already held is worth more to the
+    classifier than strict payload fidelity.
+    """
+
+    db_path = tmp_path / "catalog-isin-update.db"
+    repo = SupportedTickerRepository(db_path)
+    repo.initialize_schema()
+    seed_exchange(db_path, "LSE")
+
+    def _refresh(isin: Optional[str]) -> None:
+        row: dict[str, object] = {
+            "Code": "AAA",
+            "Name": "AAA plc",
+            "Type": "Common Stock",
+            "Currency": "GBX",
+        }
+        if isin is not None:
+            row["Isin"] = isin
+        repo.replace_for_exchange("EODHD", "LSE", [row])
+
+    # First-time populate, then a correction, then a payload that omits it.
+    _refresh(None)
+    assert _stored_isin(db_path, "AAA", "LSE") is None
+    _refresh("GB00B1CKQ739")
+    assert _stored_isin(db_path, "AAA", "LSE") == "GB00B1CKQ739"
+    _refresh("GB00B4QVDF07")
+    assert _stored_isin(db_path, "AAA", "LSE") == "GB00B4QVDF07"
+    _refresh(None)
+    assert _stored_isin(db_path, "AAA", "LSE") == "GB00B4QVDF07"
+
+
+def _recorded_statements(
+    repo: SupportedTickerRepository, monkeypatch: pytest.MonkeyPatch
+) -> list[str]:
+    """Record every SQL statement ``repo`` executes on its own connections.
+
+    ``PRAGMA data_version`` and the database header's change counter both fail
+    as write detectors here -- the store runs in WAL mode, where neither moves
+    for a same-process commit before a checkpoint. Tracing the statements is the
+    only honest way to assert "this path issued no writes".
+    """
+
+    statements: list[str] = []
+    original = type(repo)._connect
+
+    def _tracing_connect(self: SupportedTickerRepository) -> sqlite3.Connection:
+        conn = original(self)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(type(repo), "_connect", _tracing_connect)
+    return statements
+
+
+def test_replace_for_exchange_unchanged_isin_issues_no_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A steady-state re-refresh still writes nothing once the ISIN matches.
+
+    The skip-unchanged probe has to include ``listing.isin``, otherwise every
+    re-refresh of every catalogued ticker would fall through to the write path
+    and a full-universe refresh would rewrite ~76k rows for nothing.
+    """
+
+    db_path = tmp_path / "catalog-isin-nowrite.db"
+    repo = SupportedTickerRepository(db_path)
+    repo.initialize_schema()
+    seed_exchange(db_path, "LSE")
+    payload: list[dict[str, object]] = [
+        {
+            "Code": "AAA",
+            "Name": "AAA plc",
+            "Type": "Common Stock",
+            "Currency": "GBX",
+            "Isin": "GB00B1CKQ739",
+        }
+    ]
+    repo.replace_for_exchange("EODHD", "LSE", payload)
+
+    statements = _recorded_statements(repo, monkeypatch)
+    repo.replace_for_exchange("EODHD", "LSE", payload)
+    unchanged_writes = [
+        sql
+        for sql in statements
+        if sql.lstrip()[:6].upper() in {"INSERT", "UPDATE", "DELETE"}
+    ]
+
+    # Same payload twice -> the second pass takes the early return.
+    assert unchanged_writes == []
+
+    # And the probe still has teeth: a corrected ISIN must fall through.
+    statements.clear()
+    repo.replace_for_exchange("EODHD", "LSE", [dict(payload[0], Isin="GB00B4QVDF07")])
+    changed_writes = [
+        sql
+        for sql in statements
+        if sql.lstrip()[:6].upper() in {"INSERT", "UPDATE", "DELETE"}
+    ]
+    assert any("UPDATE listing" in sql for sql in changed_writes)
+
+    with sqlite3.connect(db_path) as conn:
+        stored = conn.execute("SELECT isin FROM listing").fetchone()[0]
+    assert stored == "GB00B4QVDF07"

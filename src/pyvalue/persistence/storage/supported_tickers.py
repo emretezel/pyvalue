@@ -20,6 +20,9 @@ from typing import (
 from pyvalue.currency import (
     shaped_currency_code,
 )
+from pyvalue.identifiers import (
+    shaped_isin,
+)
 
 from .base import (
     SQLiteStore,
@@ -296,6 +299,7 @@ class SupportedTickerRepository(SQLiteStore):
         bare_symbol: str,
         currency: Optional[str] = None,
         entity_name: Optional[str] = None,
+        isin: Optional[str] = None,
     ) -> bool:
         """Catalog one provider listing; return True when retained.
 
@@ -306,13 +310,23 @@ class SupportedTickerRepository(SQLiteStore):
         retained and this returns True -- whether it was created, updated, or
         already current.
 
+        ``isin`` is the provider symbol list's ``Isin`` field. It matters
+        because primary-listing classification groups cross-listings by ISIN,
+        and the symbol list carries the identifier for listings whose
+        fundamentals payload omits it -- the catalog is therefore the *better*
+        source, not merely a redundant one. A value failing the ISO 6166 shape
+        is stored as NULL rather than skipping the ticker: unlike currency, a
+        missing ISIN is a valid state (``listing.isin`` is nullable) and costs
+        only classification precision.
+
         Skip-unchanged: a re-refresh re-sees rows that already match everything
-        this command owns (``listing.currency``, ``issuer.name``, and the
-        ``provider_listing`` mapping). When the stored state already matches,
-        every write would be a no-op, so a single base-table read detects that
-        and returns early -- a steady-state re-refresh then issues zero writes.
-        Anything new or changed (new ticker, currency correction, name promotion,
-        stale mapping) falls through to the write path.
+        this command owns (``listing.currency``, ``listing.isin``,
+        ``issuer.name``, and the ``provider_listing`` mapping). When the stored
+        state already matches, every write would be a no-op, so a single
+        base-table read detects that and returns early -- a steady-state
+        re-refresh then issues zero writes. Anything new or changed (new ticker,
+        currency correction, ISIN arriving, name promotion, stale mapping) falls
+        through to the write path.
         """
         # Listings must carry a currency (listing.currency is NOT NULL, carries
         # the 3-letter shape CHECK, and there is no fallback). A catalog entry
@@ -323,13 +337,14 @@ class SupportedTickerRepository(SQLiteStore):
         if quote_currency is None:
             return False
         normalized_name = _normalize_optional_text(entity_name)
+        security_isin = shaped_isin(isin)
         # Change-detection read against base tables (never the catalog view). The
         # l.exchange_id / l.symbol predicates also confirm the existing
         # provider_listing points at the *correct* listing, so a stale mapping
         # fails the match and is repaired by the write path below.
         current = conn.execute(
             """
-            SELECT l.currency AS currency, i.name AS name
+            SELECT l.currency AS currency, l.isin AS isin, i.name AS name
             FROM provider_listing pl
             JOIN listing l ON l.listing_id = pl.listing_id
             JOIN issuer i ON i.issuer_id = l.issuer_id
@@ -342,11 +357,15 @@ class SupportedTickerRepository(SQLiteStore):
         ).fetchone()
         # The refresh only writes issuer.name when entity_name is supplied
         # (COALESCE keeps the stored name otherwise), so a NULL payload name is
-        # always "unchanged" for the name dimension.
+        # always "unchanged" for the name dimension. The ISIN clause mirrors
+        # that: a payload without an ISIN never counts as a change, so a
+        # provider that stops publishing one cannot erase a stored identifier
+        # (and cannot force a write on every steady-state re-refresh).
         if (
             current is not None
             and current["currency"] == quote_currency
             and (normalized_name is None or current["name"] == normalized_name)
+            and (security_isin is None or current["isin"] == security_isin)
         ):
             return True
         # The exchange row is already resolved by the caller; build the canonical
@@ -371,6 +390,21 @@ class SupportedTickerRepository(SQLiteStore):
             """,
             (quote_currency, security.security_id, quote_currency),
         )
+        # Same for listing.isin, with one asymmetry: the write is skipped when
+        # the payload has no shaped ISIN. Absence in one refresh is far more
+        # likely to be a provider gap than a genuine retraction, and an
+        # identifier we already hold is worth more to the classifier than
+        # strict payload fidelity. `IS NOT` is SQLite's null-safe inequality,
+        # so a first-time populate (stored NULL) writes exactly once.
+        if security_isin is not None:
+            conn.execute(
+                """
+                UPDATE listing
+                SET isin = ?
+                WHERE listing_id = ? AND isin IS NOT ?
+                """,
+                (security_isin, security.security_id, security_isin),
+            )
         conn.execute(
             """
             INSERT INTO provider_listing (
@@ -431,7 +465,10 @@ class SupportedTickerRepository(SQLiteStore):
         """Replace one provider/exchange supported-ticker slice with ``rows``.
 
         Upserts every payload ticker into ``issuer``/``listing``/
-        ``provider_listing``, then prunes the **provider layer** of the
+        ``provider_listing`` -- including ``listing.isin`` from the payload's
+        ``Isin`` field, which makes this command the primary source of the
+        identifier that primary-listing classification groups cross-listings by
+        -- then prunes the **provider layer** of the
         listings absent from the payload: the ``provider_listing`` mapping
         plus its raw fundamentals and fetch/normalization state. Canonical
         rows (``listing``/``issuer``) and canonical data (facts, market data,
@@ -480,6 +517,7 @@ class SupportedTickerRepository(SQLiteStore):
                     bare_symbol=bare_symbol,
                     currency=row.get("Currency") or row.get("currency"),
                     entity_name=row.get("Name") or row.get("name"),
+                    isin=row.get("Isin") or row.get("isin") or row.get("ISIN"),
                 )
                 if not cataloged:
                     skipped_no_currency.append(bare_symbol)
