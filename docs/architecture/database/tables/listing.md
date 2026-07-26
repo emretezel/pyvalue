@@ -173,10 +173,17 @@ whose listing is absent (creating one would require writing the NOT NULL
 - Monetary normalization, market-cap calculations, FX discovery, and monetary
   metrics derive base currency from `listing.currency`.
 - Unknown primary-listing status is treated as eligible; downstream
-  primary-only scopes exclude only `secondary`.
+  primary-only scopes exclude only `secondary`. This is load-bearing, not
+  incidental: the classifier returns `unknown` whenever no evidence decides a
+  listing, and ~8,900 listings on domestic exchanges with no EODHD
+  `PrimaryTicker` coverage rely on it to stay in the universe.
 - `primary_listing_status` is written only by `ingest-fundamentals` (as it
   stores each raw payload) and `reconcile-listing-status`; every other command
-  reads it. A flip to `secondary` changes nothing but this column -- the
+  reads it. The two write different amounts of the rule: ingest sees one payload
+  and can apply only the per-listing rules, leaving anything else `unknown`;
+  reconcile holds the ISIN peer graph and applies all six. The rule itself lives
+  in `pyvalue.universe.listing_classification` — a pure module both callers
+  share, so there is one definition regardless of which path wrote the row. A flip to `secondary` changes nothing but this column -- the
   listing keeps its facts/metrics/market-data and is excluded from universe
   work solely by the primary-only scope filters. Migration 078 is the one-time
   backfill that resolved any leftover `unknown` listing with stored

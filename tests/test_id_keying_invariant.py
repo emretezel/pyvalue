@@ -53,7 +53,7 @@ _ALLOWED_SYMBOL_METHODS = frozenset(
         "_apply_catalog_scope",
         "_apply_provider_listing_scope",
         # reconcile (listing-status) + reporting grouped by exchange
-        "_select_rows",
+        "_evidence_rows",
         "progress_by_exchange",
         "recent_failures",
         "market_data_progress_by_exchange",

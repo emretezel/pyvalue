@@ -23,6 +23,10 @@ from pyvalue.persistence.storage import (
     SecurityListingStatusRepository,
     SupportedTickerRepository,
 )
+from pyvalue.universe.listing_classification import (
+    ClassificationRule,
+    ListingStatus,
+)
 
 
 def test_secondary_reclassification_retains_downstream_data(tmp_path: Path) -> None:
@@ -78,9 +82,9 @@ def test_secondary_reclassification_retains_downstream_data(tmp_path: Path) -> N
                 source_provider="EODHD",
                 provider_symbol="BBB.US",
                 raw_fetched_at="2026-01-01T00:00:00+00:00",
-                is_primary_listing=False,
+                status=ListingStatus.SECONDARY,
                 primary_provider_symbol="AAA.US",
-                classification_basis="different_primary_ticker",
+                classification_rule=ClassificationRule.PRIMARY_TICKER_ELSEWHERE,
             )
         ]
     )

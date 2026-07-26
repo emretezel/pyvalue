@@ -322,7 +322,9 @@ def test_fundamentals_repository_classifies_secondary_and_retains_data(
     assert statuses == [
         ("AAA.LSE", "secondary"),
         ("AAA.US", "primary"),
-        ("BBB.LSE", "primary"),
+        # BBB.LSE has no PrimaryTicker, no HomeCategory and no ISIN peer, so it
+        # is genuinely unknown. A missing field alone used to make it 'primary'.
+        ("BBB.LSE", "unknown"),
     ]
     # Everything seeded for the now-secondary AAA.LSE survives untouched.
     assert fact_rows == 1
@@ -468,6 +470,12 @@ def test_migration_078_backfills_unknown_status_and_purges_secondary(
             (aaa_lse_id,),
         ).fetchone()[0]
 
+    # Migration 078 is a frozen snapshot of the rule that shipped with it, so it
+    # still resolves a missing PrimaryTicker to 'primary'. That is deliberate: a
+    # migration must keep reproducing the state it was written to produce, and
+    # re-deriving classification is the reconcile command's job, not a
+    # migration's. Running `reconcile-listing-status` afterwards is what moves
+    # BBB.LSE to 'unknown' under the current rule set.
     assert statuses == [
         ("AAA.LSE", "secondary"),
         ("AAA.US", "primary"),

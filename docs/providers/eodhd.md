@@ -177,10 +177,51 @@ provider-symbol in `fundamentals_raw`. Older historical periods remain
 available through the newly stored payload and normalized downstream tables are
 refreshed only when you run normalization again.
 
-`pyvalue` also inspects `General.PrimaryTicker` on each stored EODHD payload
-and stores whether that canonical listing is primary or secondary on
-`listing.primary_listing_status`. Missing, blank, or
-otherwise unusable `PrimaryTicker` values are treated as primary. Once a
+`pyvalue` classifies each canonical listing as primary, secondary or unknown on
+`listing.primary_listing_status`, using an ordered rule set over several EODHD
+fields rather than `General.PrimaryTicker` alone. The rule lives in
+`pyvalue.universe.listing_classification`; in order, first match wins:
+
+| # | Rule | Result |
+| --- | --- | --- |
+| R1 | `General.HomeCategory` is `ADR`/`BDR`/… | secondary |
+| R2 | `General.PrimaryTicker` present | primary iff it names this listing, else secondary |
+| R3 | No `PrimaryTicker`, but an ISIN peer has one | inherit that peer's answer |
+| R4 | An ISIN group still holds more than one candidate primary | keep the venue in the ISIN's issuing country; else demote secondary-quote claimants |
+| R5 | No evidence, venue is a secondary-quote market, issuer HQ ≠ venue country | secondary |
+| R6 | Otherwise | unknown |
+| rescue | An R1 demotion on a *primary* US exchange with no surviving ISIN/LEI sibling | unknown |
+
+Two things are worth understanding about why this is not simply "read
+`PrimaryTicker`". EODHD leaves that field null on roughly 31% of payloads, and
+the field points at the *receipt itself* for a depositary receipt
+(`DNLMY.US` → `DNLMY.US`), so an ADR self-certifies as primary. R1 therefore
+precedes R2, and a missing field now yields `unknown` rather than `primary`.
+
+`unknown` means "no evidence either way" and **stays eligible** for primary-only
+scopes — it is not a synonym for secondary. Around 8,900 listings on domestic
+exchanges (Thailand, Korea, Taiwan, Pakistan, Indonesia) land there simply
+because EODHD never populates `PrimaryTicker` for those venues; excluding them
+would silently delete real companies from the universe.
+
+The rescue exists for the same reason. R1 assumes a depositary receipt is
+redundant because the shares it wraps are listed somewhere else we can screen —
+but EODHD's `HomeCategory` is loose, and 296 listings on NASDAQ/NYSE proper are
+labelled `ADR` while being their issuer's only line here (Arm Holdings, AerCap,
+Credicorp, Ascendis Pharma). Demoting those deduplicates nothing; it deletes the
+company. The rescue fires only when the label is implausible (an exchange
+listing rather than an OTC tier) *and* no sibling survives, and it returns
+`unknown`, never `primary` — there is no evidence of primacy, only no reason to
+exclude.
+
+Its known cost: a receipt and its underlying are different securities with
+different ISINs, and receipts usually carry no LEI, so a genuine pair such as
+`OMAB.US`/`OMAB.MX` is invisible to the sibling test and the US line is rescued
+even though the Mexican one survives. Linking a receipt to its underlying needs
+issuer-level identity; until `issuer` is re-keyed on LEI, the rescue trades a
+handful of reintroduced duplicates for the 296 companies above.
+
+Once a
 listing is classified as secondary, downstream normalization, market-data,
 metric, screening, metadata-refresh, and FX-discovery scopes exclude it.
 Classification writes only the status column: a secondary listing keeps its
@@ -188,6 +229,24 @@ raw payload and everything it accumulated while primary (normalized facts,
 market data, metrics, refresh state). Exclusion is purely scope-side, so a
 listing that later flips back to primary re-enters those scopes with its
 history intact.
+
+R3 and R4 need a listing's ISIN peer group, which `ingest-fundamentals` cannot
+see — it holds one payload at a time. Ingest therefore applies only R1 and R2
+and writes `unknown` for anything they cannot settle, deliberately never
+guessing: an unsettled listing stays eligible until it is reconciled, rather
+than being wrongly excluded. Run the full rule set with:
+
+```bash
+pyvalue reconcile-listing-status --provider EODHD --all-supported
+```
+
+The command reports the resulting status counts, which rule decided each
+listing, and the before/after distribution across the whole database — a rule
+change moves tens of thousands of rows, and the rule breakdown is how you check
+the move without re-deriving it. A narrow `--symbols` or `--exchange-codes` run
+is still correct: the scope expands to whole ISIN groups for read-only context,
+so the peer rules see the same evidence they would at full scope, while only the
+requested listings are written.
 
 Important fundamentals options:
 

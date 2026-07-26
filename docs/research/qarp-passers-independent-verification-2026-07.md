@@ -191,6 +191,21 @@ up to six years (ZOE.MU pairs a 2026 cash row with a 2019 investments row).
 - **Inditex** — the EBIT arm fails on real data (EV/EBIT ~19-20x); the pass rests on a ~5.2% FCF yield that
   holds only before deducting ~EUR 3.4bn of annual IFRS-16 lease principal.
 
+## Follow-up: primary-listing classification (fixed 2026-07-26)
+
+A separate investigation into why the screen returned ADRs and cross-listings
+beside their real lines found the cause upstream of everything below:
+classification read `General.PrimaryTicker` alone and treated its **absence** as
+proof of primacy, so 22,452 of the 57,001 screened listings were "primary" only
+because nothing said otherwise. EODHD also points an ADR's `PrimaryTicker` at
+the ADR itself, so every ADR self-certified.
+
+Replacing it with an ordered rule set over `HomeCategory`, `PrimaryTicker`, ISIN
+peer groups and venue structure takes this screen's passer list from **154 to
+94** and removes all seven pence-collapse false positives below — they are all
+in the null-`PrimaryTicker` bucket, so they leave the universe regardless of
+whether defect 1 is fixed. See `docs/providers/eodhd.md` for the rule table.
+
 ## Proposed fixes (none applied)
 
 1. **Fix the subunit heuristic (highest value).** In `marketdata/eodhd.py:_price_data_from_entry`, apply

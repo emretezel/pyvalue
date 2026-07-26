@@ -1,6 +1,11 @@
 """Security listing-status (primary/secondary) repository.
 
 Author: Emre Tezel
+
+The classification *rule* lives in :mod:`pyvalue.universe.listing_classification`
+-- pure, DB-free domain logic. This module owns only the data movement: pulling
+the evidence each rule needs out of SQLite, handing it to the resolver, and
+writing the verdicts back to ``listing.primary_listing_status``.
 """
 
 from __future__ import annotations
@@ -9,21 +14,29 @@ import json
 import sqlite3
 from typing import (
     Any,
+    Dict,
     List,
-    Literal,
     Mapping,
     Optional,
     Sequence,
 )
 
 
+from pyvalue.identifiers import shaped_isin, shaped_lei
+from pyvalue.universe.listing_classification import (
+    ListingEvidence,
+    ListingStatus,
+    classify_listing_without_peers,
+    classify_listings,
+)
+
 from .base import (
     SQLiteStore,
-    _LISTING_STATUS_PRIMARY,
-    _LISTING_STATUS_SECONDARY,
     _PRIMARY_LISTING_SOURCE_PROVIDER,
     _batched,
+    _normalize_optional_text,
     _normalize_qualified_symbol,
+    _normalize_symbol_base,
     _normalized_codes,
     _utc_now_iso,
 )
@@ -42,50 +55,74 @@ class SecurityListingStatusRepository(SQLiteStore):
         self._security_repo().initialize_schema()
 
     @staticmethod
-    def _build_status_record(
+    def _build_evidence(
         *,
         security_id: int,
         provider_symbol: str,
-        raw_fetched_at: str,
-        primary_ticker: Optional[str],
-    ) -> SecurityListingStatusRecord:
-        """Classify one listing as primary/secondary from its EODHD PrimaryTicker.
+        primary_ticker: Any = None,
+        home_category: Any = None,
+        isin: Any = None,
+        lei: Any = None,
+        venue_tier: Any = None,
+        hq_country: Any = None,
+        venue_country_iso2: Any = None,
+    ) -> ListingEvidence:
+        """Normalize one listing's raw provider fields into resolver evidence.
 
-        ``primary_ticker`` is the raw ``General.PrimaryTicker`` value already
-        extracted from the stored payload -- by SQL ``json_extract`` on the
-        reconcile path, or by dict access on the ingest path. Extraction lives in
-        the callers so reconcile never has to load the full ~228 KB payload per
-        listing just to read this one field; the classification rule lives here,
-        in one place, regardless of where the ticker came from.
+        Every value arrives straight from a JSON payload or a catalog column, so
+        normalization (trim, uppercase, shape-check) happens once here rather
+        than being re-derived by each rule. ``provider_symbol`` must already be
+        qualified (``0K10.LSE``) -- it is the identity the resolver compares
+        ``PrimaryTicker`` against.
         """
+
         provider_symbol_norm = _normalize_qualified_symbol(provider_symbol)
         if provider_symbol_norm is None:
             raise ValueError(f"provider_symbol must be qualified: {provider_symbol}")
+        bare_symbol, exchange_code = _normalize_symbol_base(provider_symbol_norm)
 
-        primary_provider_symbol = _normalize_qualified_symbol(primary_ticker)
-        classification_basis: Literal[
-            "matched_primary_ticker",
-            "different_primary_ticker",
-            "missing_primary_ticker",
-        ]
-        if primary_provider_symbol is None:
-            is_primary_listing = True
-            classification_basis = "missing_primary_ticker"
-        elif primary_provider_symbol == provider_symbol_norm:
-            is_primary_listing = True
-            classification_basis = "matched_primary_ticker"
-        else:
-            is_primary_listing = False
-            classification_basis = "different_primary_ticker"
+        home_category_norm = _normalize_optional_text(home_category)
+        venue_tier_norm = _normalize_optional_text(venue_tier)
+        venue_country_norm = _normalize_optional_text(venue_country_iso2)
+        return ListingEvidence(
+            listing_id=int(security_id),
+            provider_symbol=provider_symbol_norm,
+            bare_symbol=bare_symbol,
+            exchange_code=(exchange_code or "").upper(),
+            primary_ticker=_normalize_qualified_symbol(primary_ticker),
+            home_category=(
+                home_category_norm.upper() if home_category_norm is not None else None
+            ),
+            isin=shaped_isin(isin),
+            lei=shaped_lei(lei),
+            venue_tier=(
+                venue_tier_norm.upper() if venue_tier_norm is not None else None
+            ),
+            # Head-office country stays verbatim: it is compared against
+            # payload-side spellings in VENUE_HOME_COUNTRY, not normalized codes.
+            hq_country=_normalize_optional_text(hq_country),
+            venue_country_iso2=(
+                venue_country_norm.upper() if venue_country_norm is not None else None
+            ),
+        )
+
+    @staticmethod
+    def _status_record(
+        evidence: ListingEvidence,
+        status: ListingStatus,
+        rule: Any,
+        raw_fetched_at: str,
+    ) -> SecurityListingStatusRecord:
+        """Pair a resolver verdict with the provenance the CLI reports."""
 
         return SecurityListingStatusRecord(
-            security_id=int(security_id),
+            security_id=evidence.listing_id,
             source_provider=_PRIMARY_LISTING_SOURCE_PROVIDER,
-            provider_symbol=provider_symbol_norm,
+            provider_symbol=evidence.provider_symbol,
             raw_fetched_at=raw_fetched_at,
-            is_primary_listing=is_primary_listing,
-            primary_provider_symbol=primary_provider_symbol,
-            classification_basis=classification_basis,
+            status=status,
+            primary_provider_symbol=evidence.primary_ticker,
+            classification_rule=rule,
             updated_at=_utc_now_iso(),
         )
 
@@ -100,12 +137,7 @@ class SecurityListingStatusRepository(SQLiteStore):
         if not rows:
             return 0
         payload = [
-            (
-                _LISTING_STATUS_PRIMARY
-                if row.is_primary_listing
-                else _LISTING_STATUS_SECONDARY,
-                int(row.security_id),
-            )
+            (row.status.value, int(row.security_id))
             for row in rows
             if row.provider_symbol and row.security_id
         ]
@@ -124,6 +156,20 @@ class SecurityListingStatusRepository(SQLiteStore):
             conn.executemany(sql, payload)
         return len(payload)
 
+    def status_distribution(self) -> Dict[str, int]:
+        """Return the stored classification counts, for before/after reporting."""
+
+        self.initialize_schema()
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT primary_listing_status AS status, COUNT(*) AS listings
+                FROM listing
+                GROUP BY primary_listing_status
+                """
+            ).fetchall()
+        return {str(row["status"]): int(row["listings"]) for row in rows}
+
     def upsert_many_from_fundamentals_updates(
         self,
         provider: str,
@@ -131,6 +177,17 @@ class SecurityListingStatusRepository(SQLiteStore):
         *,
         connection: Optional[sqlite3.Connection] = None,
     ) -> List[SecurityListingStatusRecord]:
+        """Classify freshly ingested payloads from their own evidence alone.
+
+        Ingest holds one payload at a time and cannot see the ISIN peer group
+        without re-reading other listings' blobs, so only the per-listing rules
+        run here; anything they cannot settle is written as ``unknown`` rather
+        than guessed. That is deliberately conservative -- ``unknown`` stays
+        eligible for primary-only scopes, so an unsettled listing is merely
+        unfiltered until ``reconcile-listing-status`` resolves it against the
+        whole graph, never silently dropped from the universe.
+        """
+
         provider_norm = provider.strip().upper()
         if provider_norm != _PRIMARY_LISTING_SOURCE_PROVIDER:
             return []
@@ -144,22 +201,115 @@ class SecurityListingStatusRepository(SQLiteStore):
             except (TypeError, ValueError):
                 payload = {}
             # The ingest path already holds the parsed payload in memory, so it
-            # reads General.PrimaryTicker directly (the reconcile path extracts
-            # the same field in SQL); both feed the shared classifier below.
+            # reads General directly; the reconcile path extracts the same
+            # fields in SQL. Both feed the shared resolver.
             general = payload.get("General") if isinstance(payload, Mapping) else None
-            primary_ticker = (
-                general.get("PrimaryTicker") if isinstance(general, Mapping) else None
+            general_map: Mapping[str, Any] = (
+                general if isinstance(general, Mapping) else {}
             )
+            evidence = self._build_evidence(
+                security_id=update.security_id,
+                provider_symbol=update.provider_symbol,
+                primary_ticker=general_map.get("PrimaryTicker"),
+                home_category=general_map.get("HomeCategory"),
+            )
+            outcome = classify_listing_without_peers(evidence)
             records.append(
-                self._build_status_record(
-                    security_id=update.security_id,
-                    provider_symbol=update.provider_symbol,
-                    raw_fetched_at=update.last_fetched_at,
-                    primary_ticker=primary_ticker,
+                self._status_record(
+                    evidence,
+                    outcome.status,
+                    outcome.rule,
+                    update.last_fetched_at,
                 )
             )
         self.upsert_many(records, connection=connection)
         return records
+
+    # Evidence projection shared by the scoped read and the peer expansion.
+    # ``PrimaryTicker`` / ``HomeCategory`` / the venue tier and head office are
+    # pulled with ``json_extract`` so each ~228 KB raw payload is parsed inside
+    # SQLite and never crosses into Python. ISIN comes from ``listing.isin``
+    # instead of the payload: the catalog refresh populates it for listings
+    # whose payload omits the field, making the column the better source.
+    _EVIDENCE_SELECT = """
+        SELECT
+            pl.listing_id AS security_id,
+            pl.provider_symbol || '.' || px.provider_exchange_code
+                AS provider_symbol,
+            fr.last_fetched_at AS last_fetched_at,
+            l.isin AS isin,
+            l.lei AS lei,
+            px.country_iso2 AS venue_country_iso2,
+            json_extract(fr.data, '$.General.PrimaryTicker') AS primary_ticker,
+            json_extract(fr.data, '$.General.HomeCategory') AS home_category,
+            json_extract(fr.data, '$.General.Exchange') AS venue_tier,
+            json_extract(fr.data, '$.General.AddressData.Country') AS hq_country
+        FROM fundamentals_raw fr
+        JOIN provider_listing pl
+          ON pl.provider_listing_id = fr.provider_listing_id
+        JOIN provider_exchange px
+          ON px.provider_exchange_id = pl.provider_exchange_id
+        JOIN provider p ON p.provider_id = px.provider_id
+        JOIN listing l ON l.listing_id = pl.listing_id
+        WHERE p.provider_code = ?
+    """
+
+    def _evidence_rows(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        exchange_codes: Sequence[str] = (),
+        symbols_chunk: Sequence[str] = (),
+        security_chunk: Sequence[int] = (),
+        isin_chunk: Sequence[str] = (),
+        lei_chunk: Sequence[str] = (),
+    ) -> List[sqlite3.Row]:
+        """Read the evidence projection for one scope slice."""
+
+        params: List[Any] = [_PRIMARY_LISTING_SOURCE_PROVIDER]
+        query = [self._EVIDENCE_SELECT]
+        if exchange_codes:
+            placeholders = ", ".join("?" for _ in exchange_codes)
+            query.append(f"AND px.provider_exchange_code IN ({placeholders})")
+            params.extend(exchange_codes)
+        if symbols_chunk:
+            placeholders = ", ".join("?" for _ in symbols_chunk)
+            query.append(
+                "AND (pl.provider_symbol || '.' || px.provider_exchange_code)"
+                f" IN ({placeholders})"
+            )
+            params.extend(symbols_chunk)
+        if security_chunk:
+            placeholders = ", ".join("?" for _ in security_chunk)
+            query.append(f"AND pl.listing_id IN ({placeholders})")
+            params.extend(security_chunk)
+        if isin_chunk:
+            placeholders = ", ".join("?" for _ in isin_chunk)
+            # Seeks idx_listing_isin (partial, covering).
+            query.append(f"AND l.isin IN ({placeholders})")
+            params.extend(isin_chunk)
+        if lei_chunk:
+            # No index on listing.lei: this scan runs once per reconcile over a
+            # 76k-row table, and an index would cost a write on every catalog
+            # refresh to serve one query. Revisit if issuer identity starts
+            # seeking by LEI.
+            placeholders = ", ".join("?" for _ in lei_chunk)
+            query.append(f"AND l.lei IN ({placeholders})")
+            params.extend(lei_chunk)
+        return list(conn.execute(" ".join(query), params).fetchall())
+
+    def _evidence_from_row(self, row: sqlite3.Row) -> ListingEvidence:
+        return self._build_evidence(
+            security_id=int(row["security_id"]),
+            provider_symbol=str(row["provider_symbol"]),
+            primary_ticker=row["primary_ticker"],
+            home_category=row["home_category"],
+            isin=row["isin"],
+            lei=row["lei"],
+            venue_tier=row["venue_tier"],
+            hq_country=row["hq_country"],
+            venue_country_iso2=row["venue_country_iso2"],
+        )
 
     def reconcile_eodhd_fundamentals(
         self,
@@ -169,89 +319,96 @@ class SecurityListingStatusRepository(SQLiteStore):
         security_ids: Optional[Sequence[int]] = None,
         chunk_size: int = 500,
     ) -> List[SecurityListingStatusRecord]:
+        """Re-derive classification for a scope and write it back.
+
+        Only listings *in scope* are written, but the resolver is fed their ISIN
+        peers as well. Without that expansion a narrow ``--symbols`` run would
+        silently under-fire the peer rules -- ``0K10.LSE`` alone looks like a
+        listing with no evidence, while ``0K10.LSE`` beside ``MTD.US`` is
+        plainly the secondary line. Peers are read-only context; they keep their
+        stored status.
+        """
+
         self.initialize_schema()
-        provider_norm = _PRIMARY_LISTING_SOURCE_PROVIDER
         normalized_symbols = _normalized_codes(provider_symbols)
         normalized_exchanges = _normalized_codes(exchange_codes)
         normalized_security_ids = sorted(
             {int(security_id) for security_id in security_ids or () if security_id}
         )
 
-        # Query the base catalog tables directly instead of the 6-table
-        # ``provider_listing_catalog`` view. Reconcile only needs the listing id,
-        # the composed provider symbol, and ``General.PrimaryTicker``; the view's
-        # ``listing``/``issuer``/``exchange`` joins contribute no consumed column
-        # (FKs guarantee those inner joins never drop rows), and the view's SEC
-        # ``||'.US'`` branch never applies because reconcile is EODHD-only.
-        # ``PrimaryTicker`` is pulled with ``json_extract`` so each ~228 KB raw
-        # payload is parsed inside SQLite and never crosses into Python.
-        def _select_rows(
-            conn: sqlite3.Connection,
-            *,
-            symbols_chunk: Optional[Sequence[str]] = None,
-            security_chunk: Optional[Sequence[int]] = None,
-        ) -> sqlite3.Cursor:
-            params: List[Any] = [provider_norm]
-            query = [
-                "SELECT pl.listing_id AS security_id,",
-                "  pl.provider_symbol || '.' || px.provider_exchange_code"
-                " AS provider_symbol,",
-                "  fr.last_fetched_at AS last_fetched_at,",
-                "  json_extract(fr.data, '$.General.PrimaryTicker') AS primary_ticker",
-                "FROM fundamentals_raw fr",
-                "JOIN provider_listing pl"
-                "  ON pl.provider_listing_id = fr.provider_listing_id",
-                "JOIN provider_exchange px"
-                "  ON px.provider_exchange_id = pl.provider_exchange_id",
-                "JOIN provider p ON p.provider_id = px.provider_id",
-                "WHERE p.provider_code = ?",
-            ]
-            if normalized_exchanges:
-                placeholders = ", ".join("?" for _ in normalized_exchanges)
-                query.append(f"AND px.provider_exchange_code IN ({placeholders})")
-                params.extend(normalized_exchanges)
-            if symbols_chunk:
-                placeholders = ", ".join("?" for _ in symbols_chunk)
-                query.append(
-                    "AND (pl.provider_symbol || '.' || px.provider_exchange_code)"
-                    f" IN ({placeholders})"
-                )
-                params.extend(symbols_chunk)
-            if security_chunk:
-                placeholders = ", ".join("?" for _ in security_chunk)
-                query.append(f"AND pl.listing_id IN ({placeholders})")
-                params.extend(security_chunk)
-            # Keep the sorted return contract (a test and callers rely on it); the
-            # composed symbol is not indexable, but sorting the tiny projected
-            # rows is cheap next to the raw-payload read.
-            query.append("ORDER BY provider_symbol ASC")
-            return conn.execute(" ".join(query), params)
-
-        records: List[SecurityListingStatusRecord] = []
-
-        def _consume(cursor: sqlite3.Cursor) -> None:
-            # Stream the cursor: with only the four small columns projected, at
-            # most one row is materialised at a time and the raw payloads never
-            # accumulate in Python memory.
-            for row in cursor:
-                records.append(
-                    self._build_status_record(
-                        security_id=int(row["security_id"]),
-                        provider_symbol=str(row["provider_symbol"]),
-                        raw_fetched_at=str(row["last_fetched_at"]),
-                        primary_ticker=row["primary_ticker"],
-                    )
-                )
-
+        in_scope: Dict[int, sqlite3.Row] = {}
         with self._connect() as conn:
             if normalized_symbols:
-                for symbol_chunk in _batched(normalized_symbols, chunk_size):
-                    _consume(_select_rows(conn, symbols_chunk=symbol_chunk))
+                for chunk in _batched(normalized_symbols, chunk_size):
+                    for row in self._evidence_rows(conn, symbols_chunk=chunk):
+                        in_scope[int(row["security_id"])] = row
             elif normalized_security_ids:
-                for security_chunk in _batched(normalized_security_ids, chunk_size):
-                    _consume(_select_rows(conn, security_chunk=security_chunk))
+                for chunk in _batched(normalized_security_ids, chunk_size):
+                    for row in self._evidence_rows(conn, security_chunk=chunk):
+                        in_scope[int(row["security_id"])] = row
             else:
-                _consume(_select_rows(conn))
+                for row in self._evidence_rows(
+                    conn, exchange_codes=normalized_exchanges
+                ):
+                    in_scope[int(row["security_id"])] = row
 
+            evidence_by_id: Dict[int, ListingEvidence] = {
+                listing_id: self._evidence_from_row(row)
+                for listing_id, row in in_scope.items()
+            }
+
+            # Pull in every sibling the scope did not already cover. ISIN feeds
+            # the peer rules; LEI additionally feeds the sole-listing rescue,
+            # which must be able to see a surviving sibling that shares an
+            # issuer but not a security.
+            missing_peers: Dict[int, ListingEvidence] = {}
+
+            def _absorb(rows: Sequence[sqlite3.Row]) -> None:
+                for row in rows:
+                    listing_id = int(row["security_id"])
+                    if listing_id in evidence_by_id or listing_id in missing_peers:
+                        continue
+                    missing_peers[listing_id] = self._evidence_from_row(row)
+
+            scoped_isins = sorted(
+                {
+                    evidence.isin
+                    for evidence in evidence_by_id.values()
+                    if evidence.isin is not None
+                }
+            )
+            for isin_chunk in _batched(scoped_isins, chunk_size):
+                _absorb(self._evidence_rows(conn, isin_chunk=isin_chunk))
+
+            scoped_leis = sorted(
+                {
+                    evidence.lei
+                    for evidence in evidence_by_id.values()
+                    if evidence.lei is not None
+                }
+            )
+            for lei_chunk in _batched(scoped_leis, chunk_size):
+                _absorb(self._evidence_rows(conn, lei_chunk=lei_chunk))
+
+        resolved = classify_listings(
+            list(evidence_by_id.values()) + list(missing_peers.values())
+        )
+
+        records: List[SecurityListingStatusRecord] = [
+            self._status_record(
+                evidence_by_id[listing_id],
+                resolved[listing_id].status,
+                resolved[listing_id].rule,
+                str(in_scope[listing_id]["last_fetched_at"]),
+            )
+            # Sorted by provider symbol: callers and a test rely on the order,
+            # and it keeps the CLI's per-rule report stable between runs.
+            for listing_id in sorted(
+                evidence_by_id, key=lambda key: evidence_by_id[key].provider_symbol
+            )
+        ]
         self.upsert_many(records)
         return records
+
+
+__all__ = ["SecurityListingStatusRepository"]

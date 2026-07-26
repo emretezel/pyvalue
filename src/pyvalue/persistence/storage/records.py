@@ -15,6 +15,10 @@ from typing import (
 )
 
 from pyvalue.currency import MetricUnitKind
+from pyvalue.universe.listing_classification import (
+    ClassificationRule,
+    ListingStatus,
+)
 
 
 @dataclass(frozen=True)
@@ -365,20 +369,39 @@ class FundamentalsUpdate:
 
 @dataclass(frozen=True)
 class SecurityListingStatusRecord:
-    """Primary-vs-secondary listing classification for one canonical listing."""
+    """Resolved listing classification for one canonical listing.
+
+    ``status`` is tri-state rather than a boolean because "no evidence" is a
+    real, distinct answer: it stays eligible for primary-only scopes, whereas
+    ``secondary`` is filtered out. Collapsing the two was the original defect --
+    a missing ``PrimaryTicker`` became ``is_primary_listing=True``.
+
+    ``classification_rule`` records which rule decided the listing. It is not
+    persisted (``listing.primary_listing_status`` stores only the verdict); it
+    rides along so ``reconcile-listing-status`` can report *why* the universe
+    moved, which matters when a rule change reclassifies tens of thousands of
+    rows.
+    """
 
     security_id: int
     source_provider: str
     provider_symbol: str
     raw_fetched_at: str
-    is_primary_listing: bool
+    status: ListingStatus
     primary_provider_symbol: Optional[str]
-    classification_basis: Literal[
-        "matched_primary_ticker",
-        "different_primary_ticker",
-        "missing_primary_ticker",
-    ]
+    classification_rule: ClassificationRule
     updated_at: Optional[str] = None
+
+    @property
+    def is_primary_listing(self) -> bool:
+        """True only for a listing positively classified primary.
+
+        Convenience for counting callers. ``unknown`` reads as False here, so
+        never use this to decide *exclusion* -- that is the distinction the
+        tri-state exists to preserve.
+        """
+
+        return self.status is ListingStatus.PRIMARY
 
 
 @dataclass(frozen=True)

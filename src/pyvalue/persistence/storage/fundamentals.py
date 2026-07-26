@@ -24,6 +24,8 @@ from .base import (
     _normalize_optional_text,
     _utc_now_iso,
 )
+from pyvalue.universe.listing_classification import ListingStatus
+
 from .records import (
     FundamentalsUpdate,
     NormalizationUnit,
@@ -62,8 +64,11 @@ class FundamentalsRepository(SQLiteStore):
         """Persist a batch of raw payloads for already-catalogued listings.
 
         Writes each payload to ``fundamentals_raw``, clears any fetch-state
-        backoff, and refreshes primary-listing status from each payload's
-        ``General.PrimaryTicker``.
+        backoff, and refreshes primary-listing status from each payload's own
+        evidence (``General.HomeCategory`` and ``General.PrimaryTicker``).
+        Ingest cannot see a listing's ISIN peer group, so anything those two
+        rules leave unsettled is written as ``unknown`` for
+        ``reconcile-listing-status`` to resolve against the whole graph.
 
         Returns the number of listings this batch classifies as secondary, so
         the caller can report it. Classification only flips
@@ -127,7 +132,13 @@ class FundamentalsRepository(SQLiteStore):
         # Secondary listings keep their downstream data: exclusion from universe
         # work happens at the primary-only scope filters, never by deletion
         # (operator policy, 2026-07). Only the count is surfaced for reporting.
-        return sum(1 for record in listing_updates if not record.is_primary_listing)
+        # Counted explicitly rather than as "not primary": ingest now leaves
+        # anything its per-listing rules cannot settle as ``unknown``, and
+        # unknown is eligible, so folding it into the secondary count would
+        # overstate what this batch excluded.
+        return sum(
+            1 for record in listing_updates if record.status is ListingStatus.SECONDARY
+        )
 
     def fetch_metadata_candidates(
         self,

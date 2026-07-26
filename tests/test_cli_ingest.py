@@ -2321,10 +2321,13 @@ def test_cmd_reconcile_listing_status_backfills_from_raw_only(
             """
         ).fetchone()[0]
 
+    # BBB.LSE carries no PrimaryTicker, no HomeCategory and no ISIN peer, so it
+    # is genuinely unknown. Before the rule set landed the missing field alone
+    # made it 'primary' -- the fail-open that admitted 22,452 listings.
     assert statuses == [
         ("AAA.LSE", "secondary"),
         ("AAA.US", "primary"),
-        ("BBB.LSE", "primary"),
+        ("BBB.LSE", "unknown"),
     ]
     # Reconcile only rewrites the status column: the now-secondary AAA.LSE
     # keeps its seeded facts/price/metric (exclusion is scope-side only).
@@ -2339,8 +2342,20 @@ def test_cmd_reconcile_listing_status_backfills_from_raw_only(
         "Scope: all supported tickers",
         "Supported tickers in scope: 3",
         "Listings classified: 3",
-        "Primary listings classified: 2",
-        "Secondary listings classified: 1",
+        "  primary: 1",
+        "  secondary: 1",
+        "  unknown: 1",
+        # The rule breakdown is the point of the report: a rule-set change moves
+        # tens of thousands of rows, and this is how an operator checks the move
+        # without re-deriving it.
+        "Deciding rule:",
+        "  no_evidence: 1",
+        "  primary_ticker_elsewhere: 1",
+        "  self_declared_primary: 1",
+        "Stored status distribution (whole database):",
+        "  primary: 0 -> 1",
+        "  secondary: 0 -> 1",
+        "  unknown: 3 -> 1",
     ]
 
 

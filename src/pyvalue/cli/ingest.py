@@ -27,11 +27,13 @@ from pyvalue.persistence.storage import (
     FundamentalsUpdate,
     FundamentalsRepository,
     FundamentalsFetchStateRepository,
+    SecurityListingStatusRepository,
     SupportedTicker,
     SupportedTickerRepository,
     canonical_json_dumps,
     fundamentals_payload_hash,
 )
+from pyvalue.universe.listing_classification import ListingStatus, summarize
 
 from ._common import (
     EODHD_FUNDAMENTALS_CALL_COST,
@@ -93,23 +95,44 @@ def cmd_reconcile_listing_status(
         primary_only=False,
     )
     scope_label = _scope_label(symbol_filters, resolved_exchange_codes)
+    status_repo = SecurityListingStatusRepository(str(db_path))
+    before = status_repo.status_distribution()
     updates = _reconcile_eodhd_listing_scope(
         str(db_path),
         provider_symbols=symbol_filters,
         exchange_codes=resolved_exchange_codes,
     )
-    primary_updates = sum(1 for update in updates if update.is_primary_listing)
-    secondary_updates = len(updates) - primary_updates
+    after = status_repo.status_distribution()
 
     print("EODHD listing-status reconciliation")
     print(f"Database: {db_path}")
     print(f"Scope: {scope_label}")
     print(f"Supported tickers in scope: {scope_count}")
     print(f"Listings classified: {len(updates)}")
-    print(f"Primary listings classified: {primary_updates}")
-    print(f"Secondary listings classified: {secondary_updates}")
-    if not updates:
+    for status in ListingStatus:
+        classified = sum(1 for update in updates if update.status is status)
+        print(f"  {status.value}: {classified}")
+
+    if updates:
+        # The rule breakdown is the point of the report: a rule-set change moves
+        # tens of thousands of rows, and "which rule decided this" is the only
+        # way an operator can sanity-check the move without re-deriving it.
+        print("Deciding rule:")
+        for rule, count in sorted(
+            summarize(update.classification_rule for update in updates).items(),
+            key=lambda item: (-item[1], item[0]),
+        ):
+            print(f"  {rule}: {count}")
+    else:
         print("No stored raw fundamentals needed reconciliation.")
+
+    if before != after:
+        print("Stored status distribution (whole database):")
+        for status_value in sorted(set(before) | set(after)):
+            print(
+                f"  {status_value}: {before.get(status_value, 0)}"
+                f" -> {after.get(status_value, 0)}"
+            )
     return 0
 
 
