@@ -213,10 +213,10 @@ class SecurityListingStatusRepository(SQLiteStore):
                 provider_symbol=update.provider_symbol,
                 primary_ticker=general_map.get("PrimaryTicker"),
                 home_category=general_map.get("HomeCategory"),
-                # Carried as evidence only. Nothing persists it: the LEI lives
-                # in the payload this row was built from, and issuer identity
-                # reads it back from there.
-                lei=general_map.get("LEI"),
+                # No LEI: the only rule that reads one is the sole-listing
+                # rescue, which runs in the set-based resolver, not here.
+                # Nothing would persist it either -- the payload this row was
+                # built from is where issuer identity reads it back.
             )
             outcome = classify_listing_without_peers(evidence)
             records.append(
