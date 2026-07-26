@@ -79,12 +79,12 @@ def test_grouping_is_transitive_across_both_identifiers() -> None:
     assert groups[0].listing_ids == (1, 2, 3)
 
 
-def test_depositary_receipt_is_not_grouped_with_its_underlying() -> None:
-    """A receipt is a distinct security with its own ISIN and usually no LEI.
+def test_receipt_without_an_lei_is_not_grouped_with_its_underlying() -> None:
+    """ISIN alone never bridges a receipt to the shares it wraps.
 
-    Nothing pyvalue ingests bridges the pair, and this test pins that limit so
-    it stays a known gap rather than a surprise: Dunelm's London line and its
-    ADR remain separate entities.
+    A receipt is a distinct security with its own ISIN, so with no LEI there is
+    no evidence linking the pair -- Dunelm's London line and its ADR stay
+    separate. About 69% of receipts are in this state.
     """
 
     groups = group_listings(
@@ -236,3 +236,38 @@ def test_group_with_no_free_representative_defers_allocation() -> None:
     assert len(groups) == 2
     assert groups[0].representative_issuer_id == 1
     assert groups[1].representative_issuer_id is None
+
+
+def test_receipt_publishing_its_issuers_lei_is_grouped_with_the_underlying() -> None:
+    """When the evidence exists, the pair *is* linked -- 669 receipts on the live
+    catalog.
+
+    An earlier docstring here claimed grouping never bridges a receipt to its
+    underlying. That was wrong for roughly a quarter of all receipts: of 2,516,
+    769 publish an LEI and 669 of those share it with a non-receipt listing.
+    ISIN still cannot see the pair, so the LEI is doing all the work.
+    """
+
+    lei = "213800WCOWEI3T5DUV19"
+    groups = group_listings(
+        [
+            _identity(
+                1,
+                10,
+                isin="GB00B1CKQ739",
+                lei=lei,
+                entity_name="Dunelm Group PLC",
+                is_primary=True,
+            ),
+            # Different security, different ISIN -- but the issuer's LEI.
+            _identity(
+                2, 20, isin="US26543P1030", lei=lei, entity_name="Dunelm Group PLC ADR"
+            ),
+        ]
+    )
+
+    assert len(groups) == 1
+    assert groups[0].listing_ids == (1, 2)
+    assert groups[0].lei == lei
+    # The company is named after its primary line, not after the receipt.
+    assert groups[0].name == "Dunelm Group PLC"

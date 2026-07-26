@@ -150,11 +150,21 @@ listings that share an ISIN or an LEI onto one row.
   drops the index outright rather than demoting it — nothing reads `issuer` by
   name, and its only consumers were collision probes that existed solely to
   avoid violating it.
-- **A depositary receipt is not grouped with its underlying.** A receipt is a
-  distinct security with its own ISIN (`DNLMY.US` is `US26543P1030` where
-  `DNLM.LSE` is `GB00B1CKQ739`) and receipts rarely carry an LEI, so neither
-  identifier bridges the pair — and no evidence pyvalue currently ingests does.
-  This is a known limit, pinned by a regression test so it stays known.
+- **A depositary receipt is grouped with its underlying only when it publishes
+  an LEI.** A receipt is a distinct security with its own ISIN (`DNLMY.US` is
+  `US26543P1030` where `DNLM.LSE` is `GB00B1CKQ739`), so ISIN never bridges the
+  pair. The entity link therefore rests entirely on the LEI, and that splits the
+  population: of 2,516 receipts, 769 publish one and 669 of those (87%) do get
+  grouped with a non-receipt listing. The remaining ~1,750 publish none and stay
+  separate — `DNLMY.US` among them. Both halves are pinned by tests; an earlier
+  version of this note claimed the link never happened, which was wrong for
+  about a quarter of all receipts.
+- **Identifier coverage** (71,543 stored payloads): ISIN 53,500, LEI 18,271, and
+  the LEI set is a strict subset of the ISIN set — no listing publishes an LEI
+  without also publishing an ISIN. ISIN is therefore the reach (35,229 listings
+  have one and no LEI); LEI is a bridge that joins ISIN groups belonging to one
+  entity, such as Alphabet's two share classes. 18,043 listings publish neither
+  and can only be singleton issuers.
 - A shared ISIN spanning two different LEIs is contradictory evidence; the link
   is skipped rather than guessed at, since silently merging two real companies
   is far worse than leaving them apart.

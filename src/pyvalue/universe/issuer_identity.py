@@ -21,15 +21,39 @@ identifiers the catalog now stores on each listing:
   shared ISIN implies a shared entity too. It reaches pairs LEI cannot, because
   EODHD publishes an LEI for only about a quarter of listings.
 
-What this deliberately does **not** do
---------------------------------------
-It does not link a depositary receipt to the shares it wraps. A receipt is a
-distinct security with its own ISIN (``DNLMY.US`` is ``US26543P1030`` where
-``DNLM.LSE`` is ``GB00B1CKQ739``) and receipts rarely carry an LEI, so neither
-identifier bridges the pair. No evidence pyvalue currently ingests does. Grouping
-is therefore *cross-listings of one security and share classes of one entity* --
-which is what makes it safe, since every link rests on an identifier rather than
-on a name resembling another name.
+How far this reaches, measured
+-----------------------------
+Of the 71,543 stored payloads, 53,500 publish an ISIN and 18,271 publish an LEI
+-- and the LEI set is a strict *subset* of the ISIN set. Not one listing carries
+an LEI without also carrying an ISIN. So the two identifiers are not
+interchangeable sources of reach:
+
+* **ISIN is the reach.** It is the only thing that can group the 35,229 listings
+  that have an ISIN and no LEI.
+* **LEI is a bridge, not extra reach.** It never links a listing ISIN could not
+  touch; what it does is join *different ISIN groups* that belong to one entity.
+  Alphabet's two share classes each have an ISIN, and only the shared LEI merges
+  those two groups into one company.
+
+18,043 listings publish neither and can only ever be singleton issuers.
+
+Depositary receipts
+-------------------
+A receipt is a distinct security with its own ISIN (``DNLMY.US`` is
+``US26543P1030`` where ``DNLM.LSE`` is ``GB00B1CKQ739``), so ISIN never bridges
+a receipt to the shares it wraps. Whether the *entity* link exists depends
+entirely on whether the receipt publishes its issuer's LEI, and that splits the
+population: of 2,516 receipts, 769 carry an LEI and 669 of those (87%) are
+grouped with a non-receipt listing through it. The remaining ~1,750 publish no
+LEI and stay separate -- ``DNLMY.US`` among them.
+
+So grouping links receipts to their underlying *when EODHD gives it the
+evidence*, and not otherwise. Both halves are pinned by tests, because an
+earlier version of this docstring claimed the link never happened and was wrong
+about roughly a quarter of all receipts.
+
+Every link rests on an identifier, never on one name resembling another -- which
+is what makes the grouping safe to apply wholesale.
 """
 
 from __future__ import annotations

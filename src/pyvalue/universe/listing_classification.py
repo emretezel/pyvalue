@@ -511,15 +511,18 @@ def _rescue_sole_listings(
     * **The company must have nowhere else to go.** No sibling listing survives
       classification.
 
-    Siblings are matched on ISIN *or* LEI. Both are imperfect here: a receipt and
-    its underlying are different securities with different ISINs, and receipts
-    usually carry no LEI, so a genuine pair such as ``OMAB.US`` / ``OMAB.MX`` is
-    invisible to this test and the US line is rescued even though the Mexican
-    one survives. That is a known cost -- linking a receipt to its underlying
-    needs issuer-level identity, which is what re-keying ``issuer`` on LEI will
-    provide. Until then the rescue trades a handful of reintroduced duplicates
-    for 296 companies that would otherwise vanish, and the venue gate keeps that
-    handful small.
+    Siblings are matched on ISIN *or* LEI, and only the LEI arm can ever see the
+    pair: a receipt and its underlying are different securities with different
+    ISINs. Whether it fires therefore depends on the vendor -- of 2,516 receipts
+    in the catalog, 769 publish an LEI and 669 of those are linked by it. The
+    ~1,750 that publish none are invisible to this test, and such a receipt is
+    rescued even when its underlying survives.
+
+    On the live catalog that cost stayed theoretical: the rescue fires for 323
+    listings and reintroduces no duplicate among the QARP passers. ``NTES.US``
+    and ``OMAB.US`` both stay demoted, their siblings being linkable after all.
+    Closing the remaining gap needs evidence pyvalue does not ingest -- EODHD's
+    Search API publishes an ``isPrimary`` flag that would settle it outright.
     """
 
     survivors_by_isin: set[str] = set()

@@ -142,12 +142,13 @@ def test_share_classes_share_an_issuer_via_lei(tmp_path: Path) -> None:
     assert stored_lei == lei
 
 
-def test_depositary_receipt_keeps_its_own_issuer(tmp_path: Path) -> None:
-    """The known limit, pinned so it stays known.
+def test_receipt_without_an_lei_keeps_its_own_issuer(tmp_path: Path) -> None:
+    """With no LEI there is no evidence linking a receipt to its underlying.
 
-    A receipt is a distinct security with its own ISIN and no LEI, so nothing
-    pyvalue ingests links ``DNLMY.US`` to ``DNLM.LSE``. Grouping rests on
-    identifiers alone -- it must not start matching on names that look alike.
+    A receipt is a distinct security with its own ISIN, so ISIN cannot bridge
+    the pair and ``DNLMY.US`` stays separate from ``DNLM.LSE``. Grouping rests
+    on identifiers alone -- it must never start matching names that look alike,
+    which is exactly how the old name-based identity fused unrelated companies.
     """
 
     db_path = tmp_path / "issuer-adr.db"

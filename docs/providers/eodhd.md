@@ -215,13 +215,12 @@ listing rather than an OTC tier) *and* no sibling survives, and it returns
 exclude.
 
 Its known cost: a receipt and its underlying are different securities with
-different ISINs, and receipts usually carry no LEI, so a pair the identifiers
-cannot bridge is invisible to the sibling test and the receipt is rescued even
-though its underlying survives. Re-keying `issuer` on LEI does **not** close
-this — issuer grouping rests on the same two identifiers, so it cannot link a
-receipt to its underlying either. Doing so would need evidence pyvalue does not
-currently ingest (EODHD's Search API exposes an `isPrimary` flag that would
-settle it directly).
+different ISINs, so the sibling test can only see the pair when the receipt
+publishes its issuer's LEI. About 69% of receipts publish none, and for those a
+surviving underlying is invisible — the receipt is rescued even though the
+company is already in the universe. Closing that gap needs evidence pyvalue does
+not ingest; EODHD's Search API exposes an `isPrimary` flag that would settle it
+directly.
 
 Measured rather than assumed: on the live catalog the rescue fires for 323
 listings and reintroduces no duplicate among the QARP passers. `NTES.US` and
