@@ -13,7 +13,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from conftest import seed_exchange, seed_raw_fundamentals
+from conftest import seed_exchange
 from pyvalue.persistence.storage import (
     FundamentalsRepository,
     SupportedTickerRepository,
@@ -108,9 +108,6 @@ def test_issuer_holding_the_payload_lei_is_a_neighbour(tmp_path: Path) -> None:
     _catalog(db_path, "LSE", "AAA", "GB00B1CKQ739")
     _catalog(db_path, "US", "AAAY", "US26543P1030")
     FundamentalsRepository(db_path).initialize_schema()
-    seed_raw_fundamentals(
-        db_path, "EODHD", "AAAY.US", {"General": {"LEI": lei}}, exchange="US"
-    )
 
     aaa = _listing_id(db_path, "AAA", "LSE")
     aaay = _listing_id(db_path, "AAAY", "US")
@@ -119,6 +116,19 @@ def test_issuer_holding_the_payload_lei_is_a_neighbour(tmp_path: Path) -> None:
             "SELECT issuer_id FROM listing WHERE listing_id = ?", (aaa,)
         ).fetchone()[0]
         conn.execute("UPDATE issuer SET lei = ? WHERE issuer_id = ?", (lei, issuer))
+        # Written straight to the table rather than through the ingest path,
+        # which now reconciles as it stores and would merge these two before the
+        # closure could be observed -- leaving the LEI link untested.
+        conn.execute(
+            """
+            INSERT INTO fundamentals_raw (
+                provider_listing_id, data, payload_hash, last_fetched_at
+            )
+            SELECT pl.provider_listing_id, ?, ?, '2026-01-01T00:00:00+00:00'
+            FROM provider_listing pl WHERE pl.listing_id = ?
+            """,
+            ('{"General": {"LEI": "%s"}}' % lei, "0" * 64, aaay),
+        )
 
     assert {aaa, aaay} <= _resolve(db_path, [aaay])
 

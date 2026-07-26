@@ -27,8 +27,8 @@ from pathlib import Path
 from conftest import seed_raw_fundamentals, seed_exchange
 from pyvalue.persistence.storage import (
     FundamentalsRepository,
-    SecurityListingStatusRepository,
     SupportedTickerRepository,
+    UniverseReconciler,
 )
 
 
@@ -110,7 +110,7 @@ def test_missing_primary_ticker_no_longer_defaults_to_primary(
         exchange="LSE",
     )
 
-    SecurityListingStatusRepository(db_path).reconcile_eodhd_fundamentals()
+    UniverseReconciler(db_path).reconcile()
 
     statuses = _statuses(db_path)
     assert statuses["MTD.US"] == "primary"
@@ -146,7 +146,7 @@ def test_evidence_free_listing_is_unknown_not_primary(tmp_path: Path) -> None:
         exchange="BK",
     )
 
-    SecurityListingStatusRepository(db_path).reconcile_eodhd_fundamentals()
+    UniverseReconciler(db_path).reconcile()
 
     assert _statuses(db_path)["NETBAY.BK"] == "unknown"
 
@@ -189,17 +189,19 @@ def test_adr_is_secondary_despite_naming_itself_primary(tmp_path: Path) -> None:
         exchange="US",
     )
 
-    SecurityListingStatusRepository(db_path).reconcile_eodhd_fundamentals()
+    UniverseReconciler(db_path).reconcile()
 
     assert _statuses(db_path)["DNLMY.US"] == "secondary"
 
 
 def test_narrow_scope_still_sees_isin_peers(tmp_path: Path) -> None:
-    """A single-symbol reconcile must not lose the peer rules.
+    """A single-symbol reconcile must reach the same verdict a full pass would.
 
     ``0K10.LSE`` alone looks evidence-free; beside ``MTD.US`` it is plainly the
-    secondary line. The scope expands to whole ISIN groups for context while
-    writing only the requested listing.
+    secondary line. The scope expands to the whole ISIN group, and every member
+    is settled -- not just the requested one. That reach-back is exactly what
+    makes ingestion order irrelevant: whichever member is seen last re-evaluates
+    all of them.
     """
 
     db_path = tmp_path / "narrow-scope-peers.db"
@@ -246,14 +248,23 @@ def test_narrow_scope_still_sees_isin_peers(tmp_path: Path) -> None:
     )
     with sqlite3.connect(db_path) as conn:
         conn.execute("UPDATE listing SET primary_listing_status = 'unknown'")
+        k10 = int(
+            conn.execute(
+                """
+                SELECT l.listing_id FROM listing l
+                JOIN "exchange" e ON e.exchange_id = l.exchange_id
+                WHERE l.symbol = '0K10' AND e.exchange_code = 'LSE'
+                """
+            ).fetchone()[0]
+        )
 
-    records = SecurityListingStatusRepository(db_path).reconcile_eodhd_fundamentals(
-        provider_symbols=["0K10.LSE"]
-    )
+    records = UniverseReconciler(db_path).reconcile([k10]).listing_records
 
-    # Only the requested listing is written; the peer supplied context and kept
-    # its own stored status.
-    assert [record.provider_symbol for record in records] == ["0K10.LSE"]
+    # Seeded with one listing, the pass settles its peer group.
+    assert sorted(record.provider_symbol for record in records) == [
+        "0K10.LSE",
+        "MTD.US",
+    ]
     statuses = _statuses(db_path)
     assert statuses["0K10.LSE"] == "secondary"
-    assert statuses["MTD.US"] == "unknown"
+    assert statuses["MTD.US"] == "primary"

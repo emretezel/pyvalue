@@ -32,8 +32,8 @@ from pyvalue.persistence.storage import (
     IngestProgressSummary,
     MetricComputeStatusRecord,
     MetricRecord,
-    SecurityListingStatusRecord,
-    SecurityListingStatusRepository,
+    ReconcileResult,
+    UniverseReconciler,
     StoredFactRow,
     SupportedTicker,
     SupportedTickerRepository,
@@ -388,18 +388,27 @@ def _reconcile_eodhd_listing_scope(
     *,
     provider_symbols: Optional[Sequence[str]] = None,
     exchange_codes: Optional[Sequence[str]] = None,
-    security_ids: Optional[Sequence[int]] = None,
-) -> List[SecurityListingStatusRecord]:
-    repo = SecurityListingStatusRepository(database)
-    # Reconcile only rewrites listing.primary_listing_status. Listings it
-    # classifies secondary keep their facts/metrics/market-data -- the
-    # primary-only scope filters are the sole exclusion mechanism (operator
-    # policy, 2026-07).
-    return repo.reconcile_eodhd_fundamentals(
-        provider_symbols=provider_symbols,
-        exchange_codes=exchange_codes,
-        security_ids=security_ids,
-    )
+) -> ReconcileResult:
+    """Settle classification and issuer identity for a provider-side scope.
+
+    The reconciler works in listing ids, so the scope is resolved through the
+    supported-ticker catalog first. Passing no filters means the whole universe.
+
+    Reconciliation rewrites only ``listing.primary_listing_status`` and the
+    ``issuer`` parentage. Listings it classifies secondary keep their
+    facts/metrics/market-data -- the primary-only scope filters are the sole
+    exclusion mechanism (operator policy, 2026-07).
+    """
+
+    seed: Optional[List[int]] = None
+    if provider_symbols or exchange_codes:
+        rows = SupportedTickerRepository(database).list_for_provider(
+            "EODHD",
+            exchange_codes=list(exchange_codes) if exchange_codes else None,
+            provider_symbols=list(provider_symbols) if provider_symbols else None,
+        )
+        seed = [row.security_id for row in rows if row.security_id]
+    return UniverseReconciler(database).reconcile(seed)
 
 
 def _resolve_provider_scope(

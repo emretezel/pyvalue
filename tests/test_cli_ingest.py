@@ -2352,6 +2352,16 @@ def test_cmd_reconcile_listing_status_backfills_from_raw_only(
         "  no_evidence: 1",
         "  primary_ticker_elsewhere: 1",
         "  self_declared_primary: 1",
+        # The same pass settles issuer identity: grouping names a merged issuer
+        # after its primary listing, so the two cannot be run independently.
+        # Nothing to merge in this fixture -- the three listings share no
+        # identifier.
+        "Issuer identity:",
+        "  groups merged: 0",
+        "  listings repointed: 0",
+        "  issuer rows created: 0",
+        "  issuer rows deleted: 0",
+        "  LEIs assigned: 0",
         "Stored status distribution (whole database):",
         "  primary: 0 -> 1",
         "  secondary: 0 -> 1",

@@ -6,6 +6,7 @@ import pytest
 
 import pyvalue.persistence.storage as storage
 from pyvalue.persistence.storage import (
+    UniverseReconciler,
     ExchangeProviderRepository,
     ExchangeRepository,
     FXRateRecord,
@@ -24,7 +25,6 @@ from pyvalue.persistence.storage import (
     MetricsRepository,
     SecurityMetadataUpdate,
     SecurityRepository,
-    SecurityListingStatusRepository,
     SupportedTickerRepository,
 )
 from pyvalue.marketdata import MarketDataUpdate
@@ -259,8 +259,7 @@ def test_fundamentals_repository_classifies_secondary_and_retains_data(
         exchange="LSE",
     )
 
-    status_repo = SecurityListingStatusRepository(db_path)
-    reconciled = status_repo.reconcile_eodhd_fundamentals()
+    reconciled = UniverseReconciler(db_path).reconcile().listing_records
     assert [row.provider_symbol for row in reconciled] == [
         "AAA.LSE",
         "AAA.US",

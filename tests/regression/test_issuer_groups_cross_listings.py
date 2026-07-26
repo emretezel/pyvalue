@@ -23,8 +23,8 @@ from pathlib import Path
 from conftest import seed_exchange, seed_raw_fundamentals
 from pyvalue.persistence.storage import (
     FundamentalsRepository,
-    IssuerIdentityRepository,
     SupportedTickerRepository,
+    UniverseReconciler,
 )
 
 
@@ -95,12 +95,12 @@ def test_cross_listings_of_one_security_share_an_issuer(tmp_path: Path) -> None:
     before = _issuers(db_path)
     assert len({*before.values()}) == 4, "each listing starts with its own issuer"
 
-    result = IssuerIdentityRepository(db_path).reconcile()
+    result = UniverseReconciler(db_path).reconcile()
 
     after = _issuers(db_path)
     assert len({*after.values()}) == 1
     assert result.groups_merged == 1
-    assert result.issuers_removed == 3
+    assert result.issuers_deleted == 3
 
 
 def test_share_classes_share_an_issuer_via_lei(tmp_path: Path) -> None:
@@ -131,7 +131,7 @@ def test_share_classes_share_an_issuer_via_lei(tmp_path: Path) -> None:
     _set_lei(db_path, "GOOG", "US", lei)
     _set_lei(db_path, "GOOGL", "US", lei)
 
-    IssuerIdentityRepository(db_path).reconcile()
+    UniverseReconciler(db_path).reconcile()
 
     after = _issuers(db_path)
     assert after["GOOG.US"] == after["GOOGL.US"]
@@ -180,7 +180,7 @@ def test_receipt_without_an_lei_keeps_its_own_issuer(tmp_path: Path) -> None:
     )
     _set_lei(db_path, "DNLM", "LSE", "213800WCOWEI3T5DUV19")
 
-    IssuerIdentityRepository(db_path).reconcile()
+    UniverseReconciler(db_path).reconcile()
 
     after = _issuers(db_path)
     assert after["DNLM.LSE"] != after["DNLMY.US"]
@@ -210,7 +210,7 @@ def test_reconcile_is_convergent(tmp_path: Path) -> None:
             ],
         )
 
-    repo = IssuerIdentityRepository(db_path)
+    repo = UniverseReconciler(db_path)
     repo.reconcile()
     first = _issuers(db_path)
 
@@ -218,7 +218,7 @@ def test_reconcile_is_convergent(tmp_path: Path) -> None:
 
     assert _issuers(db_path) == first
     assert second_result.listings_repointed == 0
-    assert second_result.issuers_removed == 0
+    assert second_result.issuers_deleted == 0
 
 
 def test_merged_issuer_keeps_metadata_only_one_row_carried(tmp_path: Path) -> None:
@@ -248,7 +248,7 @@ def test_merged_issuer_keeps_metadata_only_one_row_carried(tmp_path: Path) -> No
             "UPDATE issuer SET sector = 'Healthcare' WHERE issuer_id = ?", (absorbed,)
         )
 
-    IssuerIdentityRepository(db_path).reconcile()
+    UniverseReconciler(db_path).reconcile()
 
     survivor = _issuers(db_path)["MTD.US"]
     with sqlite3.connect(db_path) as conn:
@@ -334,7 +334,7 @@ def test_issuer_shared_across_two_groups_is_not_deleted_early(
         )
 
     # Must not raise.
-    IssuerIdentityRepository(db_path).reconcile()
+    UniverseReconciler(db_path).reconcile()
 
     after = _issuers(db_path)
     assert after["AAA.US"] == after["AAAF.F"]
@@ -371,7 +371,7 @@ def test_group_losing_its_lei_has_the_stored_one_cleared(tmp_path: Path) -> None
     )
     lei = "5493000BD5GJNUDIUG10"
     _set_lei(db_path, "AAA", "US", lei)
-    IssuerIdentityRepository(db_path).reconcile()
+    UniverseReconciler(db_path).reconcile()
 
     issuer_id = _issuers(db_path)["AAA.US"]
     with sqlite3.connect(db_path) as conn:
@@ -386,7 +386,7 @@ def test_group_losing_its_lei_has_the_stored_one_cleared(tmp_path: Path) -> None
     seed_raw_fundamentals(
         db_path, "EODHD", "AAA.US", {"General": {"Name": "Acme Inc"}}, exchange="US"
     )
-    IssuerIdentityRepository(db_path).reconcile()
+    UniverseReconciler(db_path).reconcile()
 
     with sqlite3.connect(db_path) as conn:
         assert (
@@ -395,3 +395,53 @@ def test_group_losing_its_lei_has_the_stored_one_cleared(tmp_path: Path) -> None
             ).fetchone()[0]
             is None
         )
+
+
+def test_full_pass_collects_a_pre_existing_orphan_issuer(tmp_path: Path) -> None:
+    """A whole-catalog pass sweeps issuer rows that were already unreferenced.
+
+    A scoped pass cannot: it probes only the rows some listing in scope used to
+    point at, and a row owning no listing is unreachable that way. There were
+    1,377 such rows on the live catalog, left by earlier merges. Collecting them
+    belongs to a repair pass, not to a per-batch ingest, where an unqualified
+    NOT EXISTS would walk the whole table thousands of times.
+    """
+
+    db_path = tmp_path / "orphan-sweep.db"
+    _catalog(
+        db_path,
+        "US",
+        [
+            {
+                "Code": "AAA",
+                "Name": "Acme Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+            }
+        ],
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("INSERT INTO issuer (name) VALUES ('Abandoned Corp')")
+        orphan = int(
+            conn.execute(
+                "SELECT issuer_id FROM issuer WHERE name = 'Abandoned Corp'"
+            ).fetchone()[0]
+        )
+        aaa = int(conn.execute("SELECT listing_id FROM listing").fetchone()[0])
+
+    def orphan_exists() -> bool:
+        with sqlite3.connect(db_path) as conn:
+            return (
+                conn.execute(
+                    "SELECT 1 FROM issuer WHERE issuer_id = ?", (orphan,)
+                ).fetchone()
+                is not None
+            )
+
+    # A scoped pass leaves it: nothing in scope ever pointed at it.
+    UniverseReconciler(db_path).reconcile([aaa])
+    assert orphan_exists()
+
+    # A whole-catalog pass collects it.
+    UniverseReconciler(db_path).reconcile()
+    assert not orphan_exists()

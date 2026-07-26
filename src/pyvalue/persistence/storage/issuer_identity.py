@@ -12,13 +12,12 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Optional, Sequence, Tuple
 
 from pyvalue.identifiers import shaped_isin, shaped_lei
 from pyvalue.universe.issuer_identity import (
     IssuerGroup,
     ListingIdentity,
-    group_listings,
 )
 
 from .base import SQLiteStore, _batched
@@ -26,22 +25,20 @@ from .migrations import apply_migrations
 
 
 @dataclass(frozen=True)
-class IssuerReconciliationResult:
-    """What one ``reconcile-issuer-identity`` run changed."""
+class IssuerApplyResult:
+    """What applying one derived partition changed.
 
-    listings_considered: int
-    issuers_before: int
-    issuers_after: int
+    Deltas rather than before/after totals: this now runs per ingest batch as
+    well as per reconcile, and counting the whole ``issuer`` table thousands of
+    times to report a number nobody reads would be waste. The CLI takes its own
+    totals once, either side of the run.
+    """
+
     groups_merged: int
     listings_repointed: int
+    issuers_created: int
     issuers_deleted: int
     leis_assigned: int
-
-    @property
-    def issuers_removed(self) -> int:
-        """Issuer rows the run collapsed away."""
-
-        return self.issuers_before - self.issuers_after
 
 
 class IssuerIdentityRepository(SQLiteStore):
@@ -50,11 +47,19 @@ class IssuerIdentityRepository(SQLiteStore):
     def initialize_schema(self) -> None:
         apply_migrations(self.db_path)
 
-    def _load_identities(self, conn: sqlite3.Connection) -> List[ListingIdentity]:
-        """Read every listing's entity evidence.
+    def load_identities(
+        self, conn: sqlite3.Connection, listing_ids: Optional[Iterable[int]] = None
+    ) -> List[ListingIdentity]:
+        """Read entity evidence for ``listing_ids`` (all listings when None).
 
-        Deliberately unscoped: grouping is only as good as the set it sees, and
-        a partial view would split entities rather than merge them.
+        The caller is responsible for passing a set closed under the grouping
+        relation -- ``resolve_neighbourhood`` exists for exactly that. A scope
+        that cuts through a group would split entities rather than merge them.
+
+        ``is_primary`` is read back from ``listing.primary_listing_status``,
+        which the caller has just written in the same transaction, so the name a
+        merged issuer takes reflects the fresh classification rather than a
+        stale one.
 
         ``isin`` is a canonical column -- it sits at listing grain because a
         listing quotes exactly one security, and the catalog refresh populates
@@ -79,8 +84,7 @@ class IssuerIdentityRepository(SQLiteStore):
         holdovers are in exactly that state.
         """
 
-        rows = conn.execute(
-            """
+        select = """
             SELECT
                 l.listing_id AS listing_id,
                 l.issuer_id AS issuer_id,
@@ -97,8 +101,20 @@ class IssuerIdentityRepository(SQLiteStore):
                 l.primary_listing_status AS status
             FROM listing l
             JOIN issuer i ON i.issuer_id = l.issuer_id
-            """
-        ).fetchall()
+        """
+        rows: List[sqlite3.Row] = []
+        if listing_ids is None:
+            rows.extend(conn.execute(select).fetchall())
+        else:
+            wanted = sorted({int(value) for value in listing_ids})
+            for chunk in _batched(wanted, 500):
+                placeholders = ", ".join("?" for _ in chunk)
+                rows.extend(
+                    conn.execute(
+                        f"{select} WHERE l.listing_id IN ({placeholders})",
+                        list(chunk),
+                    ).fetchall()
+                )
         return [
             ListingIdentity(
                 listing_id=int(row["listing_id"]),
@@ -221,21 +237,35 @@ class IssuerIdentityRepository(SQLiteStore):
 
     @staticmethod
     def _delete_orphaned_issuers(
-        conn: sqlite3.Connection, issuer_ids: Iterable[int]
+        conn: sqlite3.Connection, issuer_ids: Optional[Iterable[int]]
     ) -> int:
-        """Delete the given issuer rows that no listing points at any more.
+        """Delete issuer rows that no listing points at any more.
 
         Run once, after all repointing. An issuer survives exactly when it still
         owns a listing, which is the only condition the FK cares about, so this
         cannot fail the way a per-group delete did.
 
-        Scoped rather than global because this now runs per ingest batch as well
-        as per reconcile: an unqualified ``NOT EXISTS`` walks the whole ``issuer``
-        table, which is fine once but would mean ~2,900 scans of ~59k rows during
-        a bootstrap. Only rows a repoint could have emptied are worth probing,
-        and the caller knows which those are. A whole-universe run simply passes
-        them all, so there is no second variant to keep in step.
+        ``issuer_ids`` scopes the probe; ``None`` sweeps the whole table. The
+        distinction is not cosmetic. A scoped run can only see rows some listing
+        in scope *used to* point at, so a row that already had no listings when
+        the pass began is invisible to it -- there were 1,377 such rows on the
+        live catalog, left behind by earlier merges. A whole-catalog pass is the
+        right place to collect them; a per-batch ingest is not, since an
+        unqualified ``NOT EXISTS`` walks ~59k rows and would run ~2,900 times
+        during a bootstrap.
         """
+
+        if issuer_ids is None:
+            cursor = conn.execute(
+                """
+                DELETE FROM issuer
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM listing
+                    WHERE listing.issuer_id = issuer.issuer_id
+                )
+                """
+            )
+            return cursor.rowcount if cursor.rowcount > 0 else 0
 
         candidates = sorted({int(value) for value in issuer_ids if value})
         deleted = 0
@@ -308,12 +338,17 @@ class IssuerIdentityRepository(SQLiteStore):
         )
         return cursor.rowcount > 0
 
-    def reconcile(self) -> IssuerReconciliationResult:
-        """Re-derive issuer identity across the whole catalog.
+    def apply_groups(
+        self,
+        conn: sqlite3.Connection,
+        groups: Sequence[IssuerGroup],
+        vacated_issuer_ids: Optional[Iterable[int]],
+    ) -> IssuerApplyResult:
+        """Collapse the derived groups onto ``issuer`` rows.
 
-        Runs as one transaction: a half-merged catalog would leave listings
-        pointing at issuer rows that no longer exist, and the FK would be the
-        only thing to notice.
+        Runs on the caller's connection so it joins whatever transaction is
+        open: a half-applied partition would leave listings pointing at issuer
+        rows that no longer exist, and the FK would be the only thing to notice.
 
         Three ordered passes, and the order is what makes it correct:
 
@@ -321,52 +356,55 @@ class IssuerIdentityRepository(SQLiteStore):
         2. Delete the issuer rows nothing points at any more. Deferred to here
            because an issuer's listings can land in different groups, so no
            single group can know when the row is finally empty.
-        3. Name the survivors and assign their LEIs, now that the rows whose
-           names are being adopted are gone and UNIQUE (name, country) is free.
+        3. Name the survivors and set or clear their LEIs, now that the rows
+           whose names are being adopted are gone.
 
-        Re-runnable and convergent. Groups that already match the stored shape
-        issue no writes, so a second run on an unchanged catalog is a no-op, and
-        a run after ISIN/LEI coverage improves merges only what newly became
-        linkable.
+        ``vacated_issuer_ids`` bounds the delete: only a row some listing in
+        this scope used to point at can have been emptied by it. ``None`` means
+        sweep every orphan, which a whole-catalog pass wants and a per-batch one
+        must not do.
+
+        Re-runnable and convergent. Groups already matching the stored shape
+        issue no writes, so applying an unchanged partition is a no-op.
         """
 
-        self.initialize_schema()
-        with self._connect() as conn:
-            identities = self._load_identities(conn)
-            issuers_before = self._issuer_count(conn)
+        merged = 0
+        repointed = 0
+        created = 0
+        leis = 0
+        targets: List[int] = []
+        for group in groups:
+            existing = group.representative_issuer_id
+            target, group_repointed = self._promote_and_repoint(conn, group)
+            targets.append(target)
+            repointed += group_repointed
+            if existing is None:
+                created += 1
+            if group.merges:
+                merged += 1
 
-            groups = group_listings(identities)
-            merged = 0
-            repointed = 0
-            leis = 0
-            targets: List[int] = []
-            for group in groups:
-                target, group_repointed = self._promote_and_repoint(conn, group)
-                targets.append(target)
-                repointed += group_repointed
-                if group.merges:
-                    merged += 1
+        deleted = self._delete_orphaned_issuers(conn, vacated_issuer_ids)
 
-            # Whole-catalog run: every issuer a repoint could have emptied is,
-            # by definition, one of the ones these listings used to point at.
-            deleted = self._delete_orphaned_issuers(
-                conn, {identity.issuer_id for identity in identities}
-            )
+        for group, target in zip(groups, targets):
+            leis += int(self._label_representative(conn, group, target))
 
-            for group, target in zip(groups, targets):
-                leis += int(self._label_representative(conn, group, target))
-
-            issuers_after = self._issuer_count(conn)
-
-        return IssuerReconciliationResult(
-            listings_considered=len(identities),
-            issuers_before=issuers_before,
-            issuers_after=issuers_after,
+        return IssuerApplyResult(
             groups_merged=merged,
             listings_repointed=repointed,
+            issuers_created=created,
             issuers_deleted=deleted,
             leis_assigned=leis,
         )
 
+    def issuer_count(self) -> int:
+        """Total issuer rows, for the CLI's before/after report."""
 
-__all__ = ["IssuerIdentityRepository", "IssuerReconciliationResult"]
+        self.initialize_schema()
+        with self._connect() as conn:
+            return self._issuer_count(conn)
+
+
+__all__ = [
+    "IssuerApplyResult",
+    "IssuerIdentityRepository",
+]

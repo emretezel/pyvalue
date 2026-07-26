@@ -28,7 +28,9 @@ from pyvalue.persistence.storage import (
     FundamentalsRepository,
     FundamentalsFetchStateRepository,
     IssuerIdentityRepository,
+    ReconcileResult,
     SecurityListingStatusRepository,
+    UniverseReconciler,
     SupportedTicker,
     SupportedTickerRepository,
     canonical_json_dumps,
@@ -78,7 +80,13 @@ def cmd_reconcile_listing_status(
     exchange_codes: Optional[Sequence[str]],
     all_supported: bool,
 ) -> int:
-    """Backfill cached EODHD listing classification from stored raw fundamentals."""
+    """Re-derive listing classification and issuer identity from stored payloads.
+
+    Both derived values are settled together: grouping names a merged issuer
+    after its primary listing, so classifying without regrouping would leave
+    issuer names stale. The scope expands to whole peer groups first, which is
+    what lets a narrow ``--symbols`` run reach the verdict a full pass would.
+    """
 
     provider_norm = _normalize_provider(provider)
     if provider_norm != "EODHD":
@@ -98,11 +106,12 @@ def cmd_reconcile_listing_status(
     scope_label = _scope_label(symbol_filters, resolved_exchange_codes)
     status_repo = SecurityListingStatusRepository(str(db_path))
     before = status_repo.status_distribution()
-    updates = _reconcile_eodhd_listing_scope(
+    result = _reconcile_eodhd_listing_scope(
         str(db_path),
         provider_symbols=symbol_filters,
         exchange_codes=resolved_exchange_codes,
     )
+    updates = result.listing_records
     after = status_repo.status_distribution()
 
     print("EODHD listing-status reconciliation")
@@ -127,6 +136,8 @@ def cmd_reconcile_listing_status(
     else:
         print("No stored raw fundamentals needed reconciliation.")
 
+    _print_identity_changes(result)
+
     if before != after:
         print("Stored status distribution (whole database):")
         for status_value in sorted(set(before) | set(after)):
@@ -137,28 +148,45 @@ def cmd_reconcile_listing_status(
     return 0
 
 
+def _print_identity_changes(result: ReconcileResult) -> None:
+    """Report what the same pass did to issuer identity."""
+
+    print("Issuer identity:")
+    print(f"  groups merged: {result.groups_merged}")
+    print(f"  listings repointed: {result.listings_repointed}")
+    print(f"  issuer rows created: {result.issuers_created}")
+    print(f"  issuer rows deleted: {result.issuers_deleted}")
+    print(f"  LEIs assigned: {result.leis_assigned}")
+
+
 def cmd_reconcile_issuer_identity(database: str) -> int:
-    """Re-derive which listings belong to the same legal entity.
+    """Re-derive issuer identity, and the classification it depends on, catalog-wide.
 
     Deliberately unscoped: grouping is only as good as the set it sees, so a
-    partial view would split entities rather than merge them. The run reads the
-    ISIN and LEI already stored on each listing -- no payloads, no provider
-    calls -- and is safe to repeat, since a catalog already matching the derived
-    shape issues no writes.
+    partial view would split entities rather than merge them. The run reads each
+    listing's stored ISIN and its payload's LEI -- no provider calls -- and is
+    safe to repeat, since a catalog already matching the derived shape issues no
+    writes.
+
+    This is the same pass ``reconcile-listing-status`` runs; the difference is
+    only the scope and which half of the result it emphasises. Both exist as
+    repair tools -- ``ingest-fundamentals`` keeps a healthy catalog settled on
+    its own.
     """
 
     db_path = _resolve_database_path(database)
-    result = IssuerIdentityRepository(str(db_path)).reconcile()
+    issuer_repo = IssuerIdentityRepository(str(db_path))
+    before = issuer_repo.issuer_count()
+    result = UniverseReconciler(str(db_path)).reconcile()
+    after = issuer_repo.issuer_count()
 
     print("Issuer-identity reconciliation")
     print(f"Database: {db_path}")
     print(f"Listings considered: {result.listings_considered}")
-    print(f"Issuers before: {result.issuers_before}")
-    print(f"Issuers after: {result.issuers_after}")
-    print(f"Issuer rows collapsed: {result.issuers_removed}")
-    print(f"Multi-issuer groups merged: {result.groups_merged}")
-    print(f"Listings repointed: {result.listings_repointed}")
-    print(f"LEIs assigned: {result.leis_assigned}")
+    print(f"Issuers before: {before}")
+    print(f"Issuers after: {after}")
+    print(f"Issuer rows collapsed: {before - after}")
+    _print_identity_changes(result)
     if result.groups_merged == 0:
         print("Issuer identity already matches the stored evidence.")
     return 0

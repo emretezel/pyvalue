@@ -26,9 +26,17 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from typing import Iterable, List, Optional, Sequence, Set
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, List, Optional, Sequence, Set, Union
+
+from pyvalue.universe.issuer_identity import group_listings
+from pyvalue.universe.listing_classification import classify_listings
 
 from .base import _batched
+from .issuer_identity import IssuerIdentityRepository
+from .listing_status import SecurityListingStatusRepository
+from .records import SecurityListingStatusRecord
 
 logger = logging.getLogger(__name__)
 
@@ -187,4 +195,130 @@ def issuer_ids_for(conn: sqlite3.Connection, listing_ids: Iterable[int]) -> Set[
     return issuers
 
 
-__all__ = ["issuer_ids_for", "resolve_neighbourhood"]
+__all__ = [
+    "ReconcileResult",
+    "UniverseReconciler",
+    "issuer_ids_for",
+    "resolve_neighbourhood",
+]
+
+
+@dataclass(frozen=True)
+class ReconcileResult:
+    """Everything one reconciliation pass settled.
+
+    ``listing_records`` carries the classification verdicts with the rule that
+    produced each, so the CLI can report *why* the universe moved -- which is
+    what an operator needs when a rule change reclassifies tens of thousands of
+    rows.
+    """
+
+    listings_considered: int
+    listing_records: List[SecurityListingStatusRecord]
+    groups_merged: int
+    listings_repointed: int
+    issuers_created: int
+    issuers_deleted: int
+    leis_assigned: int
+
+
+class UniverseReconciler:
+    """Settle both derived values for a scope, in one pass.
+
+    Classification and issuer identity are not independent, so they are not
+    computed independently. Grouping names a merged issuer after its *primary*
+    listing, which means it needs the fresh classification; running one without
+    the other leaves the catalog internally inconsistent. They were built in
+    separate phases and that is the only reason they were ever separate.
+
+    Every caller goes through here -- the two reconcile commands and, per write
+    batch, fundamentals ingest -- so there is exactly one orchestration and no
+    second implementation to drift from it. What differs between callers is only
+    the seed:
+
+    * ingest passes the listings whose payloads it just stored;
+    * ``reconcile-listing-status`` passes its ``--symbols``/``--exchange-codes``
+      scope, or None;
+    * ``reconcile-issuer-identity`` passes None.
+
+    A seed is expanded to its neighbourhood first, so a narrow run reaches the
+    same verdict a whole-universe pass would. That is what makes ingestion order
+    irrelevant: whichever member of a group arrives last re-evaluates all of it.
+    """
+
+    def __init__(self, db_path: Union[str, Path]) -> None:
+        self._status_repo = SecurityListingStatusRepository(db_path)
+        self._issuer_repo = IssuerIdentityRepository(db_path)
+
+    def initialize_schema(self) -> None:
+        self._status_repo.initialize_schema()
+        self._issuer_repo.initialize_schema()
+
+    def apply(
+        self,
+        conn: sqlite3.Connection,
+        listing_ids: Optional[Iterable[int]] = None,
+    ) -> ReconcileResult:
+        """Reconcile ``listing_ids`` and their neighbourhood on ``conn``.
+
+        Runs on the caller's connection so it joins whatever transaction is
+        open. Ingest relies on that: the payloads, the statuses and the issuer
+        partition commit or roll back together, so a crash never leaves a stored
+        payload unclassified.
+
+        ``None`` means the whole catalog, which is its own neighbourhood.
+        """
+
+        neighbourhood = resolve_neighbourhood(conn, listing_ids)
+        if not neighbourhood:
+            return ReconcileResult(0, [], 0, 0, 0, 0, 0)
+
+        # Issuers captured *before* any repoint: the rows a listing could
+        # vacate, and so the only ones a scoped orphan sweep must consider.
+        # A whole-catalog pass instead sweeps everything (None) -- it is the
+        # right place to collect rows that were already orphaned before this
+        # run, which a scoped probe can never see because they own no listing to
+        # be reached through.
+        vacated: Optional[Set[int]] = (
+            None if listing_ids is None else issuer_ids_for(conn, neighbourhood)
+        )
+
+        evidence = self._status_repo.load_evidence(conn, neighbourhood)
+        classified = classify_listings(evidence)
+        stamps = self._status_repo.last_fetched_at(
+            conn, (item.listing_id for item in evidence)
+        )
+        records = [
+            self._status_repo.status_record(
+                item,
+                classified[item.listing_id].status,
+                classified[item.listing_id].rule,
+                stamps.get(item.listing_id, ""),
+            )
+            # Sorted by provider symbol so the CLI's report is stable between
+            # runs and a test can assert on it.
+            for item in sorted(evidence, key=lambda ev: ev.provider_symbol)
+        ]
+        self._status_repo.upsert_many(records, connection=conn)
+
+        # Identity reads the statuses back, so it must follow the write above.
+        identities = self._issuer_repo.load_identities(conn, neighbourhood)
+        groups = group_listings(identities)
+        applied = self._issuer_repo.apply_groups(conn, groups, vacated)
+
+        return ReconcileResult(
+            listings_considered=len(neighbourhood),
+            listing_records=records,
+            groups_merged=applied.groups_merged,
+            listings_repointed=applied.listings_repointed,
+            issuers_created=applied.issuers_created,
+            issuers_deleted=applied.issuers_deleted,
+            leis_assigned=applied.leis_assigned,
+        )
+
+    def reconcile(self, listing_ids: Optional[Iterable[int]] = None) -> ReconcileResult:
+        """Open a transaction and reconcile, for callers that have no connection."""
+
+        self.initialize_schema()
+        with self._status_repo._connect() as conn:
+            return self.apply(conn, listing_ids)

@@ -34,7 +34,7 @@ from .records import (
 )
 from pyvalue.currency import normalize_currency_code
 from .migrations import apply_migrations
-from .listing_status import SecurityListingStatusRepository
+from .universe_reconcile import UniverseReconciler
 
 logger = logging.getLogger(__name__)
 
@@ -64,11 +64,21 @@ class FundamentalsRepository(SQLiteStore):
         """Persist a batch of raw payloads for already-catalogued listings.
 
         Writes each payload to ``fundamentals_raw``, clears any fetch-state
-        backoff, and refreshes primary-listing status from each payload's own
-        evidence (``General.HomeCategory`` and ``General.PrimaryTicker``).
-        Ingest cannot see a listing's ISIN peer group, so anything those two
-        rules leave unsettled is written as ``unknown`` for
-        ``reconcile-listing-status`` to resolve against the whole graph.
+        backoff, and then **settles both derived values** for the batch and its
+        neighbourhood: ``listing.primary_listing_status`` and issuer identity.
+        That is what leaves the catalog final after an ingest, with no reconcile
+        needed.
+
+        The reconciliation runs on this method's connection, so the payloads,
+        the statuses and the issuer partition commit or roll back together --
+        a crash can never leave a stored payload unclassified.
+
+        It also reaches *beyond* the batch, to every listing that shares an ISIN
+        or an issuer with one of them. That reach-back is what makes ingestion
+        order irrelevant: ``LULU.US`` and ``33L.F`` both claim to be primary, and
+        whichever arrives second must be able to demote the other. Confining the
+        work to the arriving listings would leave the answer depending on which
+        payload happened to land first.
 
         Returns the number of listings this batch classifies as secondary, so
         the caller can report it. Classification only flips
@@ -78,8 +88,8 @@ class FundamentalsRepository(SQLiteStore):
         """
         self.initialize_schema()
         provider_norm = provider.strip().upper()
-        listing_repo = SecurityListingStatusRepository(self.db_path)
-        listing_repo.initialize_schema()
+        reconciler = UniverseReconciler(self.db_path)
+        reconciler.initialize_schema()
         listing_updates: List[SecurityListingStatusRecord] = []
         with self._connect() as conn:
             # Ingest carries the provider_listing_id from the eligibility query, so
@@ -124,11 +134,15 @@ class FundamentalsRepository(SQLiteStore):
                 """,
                 provider_listing_ids,
             )
-            listing_updates = listing_repo.upsert_many_from_fundamentals_updates(
-                provider_norm,
-                updates,
-                connection=conn,
-            )
+            if provider_norm == "EODHD":
+                listing_updates = reconciler.apply(
+                    conn,
+                    [
+                        int(update.security_id)
+                        for update in updates
+                        if update.security_id
+                    ],
+                ).listing_records
         # Secondary listings keep their downstream data: exclusion from universe
         # work happens at the primary-only scope filters, never by deletion
         # (operator policy, 2026-07). Only the count is surfaced for reporting.
