@@ -342,3 +342,56 @@ def test_issuer_shared_across_two_groups_is_not_deleted_early(
     assert after["AAA.US"] != after["BBB.US"]
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_group_losing_its_lei_has_the_stored_one_cleared(tmp_path: Path) -> None:
+    """A stale ``issuer.lei`` is worse than none -- it is what the search seeks.
+
+    When a listing's LEI changes it leaves the group, and the value that
+    justified the issuer's LEI goes with it. Leaving the old value behind turns
+    that issuer into a magnet: the neighbourhood search looks listings up by
+    ``issuer.lei``, so the next listing publishing it would be pulled into a
+    group it does not belong to. Clearing errs toward two issuers for one
+    company, which is harmless and self-heals.
+    """
+
+    db_path = tmp_path / "issuer-lei-cleared.db"
+    _catalog(
+        db_path,
+        "US",
+        [
+            {
+                "Code": "AAA",
+                "Name": "Acme Inc",
+                "Type": "Common Stock",
+                "Currency": "USD",
+                "Isin": "US0000000017",
+            }
+        ],
+    )
+    lei = "5493000BD5GJNUDIUG10"
+    _set_lei(db_path, "AAA", "US", lei)
+    IssuerIdentityRepository(db_path).reconcile()
+
+    issuer_id = _issuers(db_path)["AAA.US"]
+    with sqlite3.connect(db_path) as conn:
+        assert (
+            conn.execute(
+                "SELECT lei FROM issuer WHERE issuer_id = ?", (issuer_id,)
+            ).fetchone()[0]
+            == lei
+        )
+
+    # The provider stops publishing an LEI for this listing.
+    seed_raw_fundamentals(
+        db_path, "EODHD", "AAA.US", {"General": {"Name": "Acme Inc"}}, exchange="US"
+    )
+    IssuerIdentityRepository(db_path).reconcile()
+
+    with sqlite3.connect(db_path) as conn:
+        assert (
+            conn.execute(
+                "SELECT lei FROM issuer WHERE issuer_id = ?", (issuer_id,)
+            ).fetchone()[0]
+            is None
+        )

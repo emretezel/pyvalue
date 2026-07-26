@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import Iterable, List, Tuple
 
 from pyvalue.identifiers import shaped_isin, shaped_lei
 from pyvalue.universe.issuer_identity import (
@@ -220,23 +220,40 @@ class IssuerIdentityRepository(SQLiteStore):
         return target, repointed
 
     @staticmethod
-    def _delete_orphaned_issuers(conn: sqlite3.Connection) -> int:
-        """Delete every issuer row no listing points at any more.
+    def _delete_orphaned_issuers(
+        conn: sqlite3.Connection, issuer_ids: Iterable[int]
+    ) -> int:
+        """Delete the given issuer rows that no listing points at any more.
 
         Run once, after all repointing. An issuer survives exactly when it still
         owns a listing, which is the only condition the FK cares about, so this
         cannot fail the way a per-group delete did.
+
+        Scoped rather than global because this now runs per ingest batch as well
+        as per reconcile: an unqualified ``NOT EXISTS`` walks the whole ``issuer``
+        table, which is fine once but would mean ~2,900 scans of ~59k rows during
+        a bootstrap. Only rows a repoint could have emptied are worth probing,
+        and the caller knows which those are. A whole-universe run simply passes
+        them all, so there is no second variant to keep in step.
         """
 
-        cursor = conn.execute(
-            """
-            DELETE FROM issuer
-            WHERE NOT EXISTS (
-                SELECT 1 FROM listing WHERE listing.issuer_id = issuer.issuer_id
+        candidates = sorted({int(value) for value in issuer_ids if value})
+        deleted = 0
+        for chunk in _batched(candidates, 500):
+            placeholders = ", ".join("?" for _ in chunk)
+            cursor = conn.execute(
+                f"""
+                DELETE FROM issuer
+                WHERE issuer_id IN ({placeholders})
+                  AND NOT EXISTS (
+                      SELECT 1 FROM listing
+                      WHERE listing.issuer_id = issuer.issuer_id
+                  )
+                """,
+                list(chunk),
             )
-            """
-        )
-        return cursor.rowcount if cursor.rowcount > 0 else 0
+            deleted += cursor.rowcount if cursor.rowcount > 0 else 0
+        return deleted
 
     @staticmethod
     def _label_representative(
@@ -255,6 +272,15 @@ class IssuerIdentityRepository(SQLiteStore):
         can only be a stale value left by an earlier run under different
         evidence.
 
+        A group that no longer has an LEI has its stored one **cleared**, not
+        left alone. That is the state a changed LEI creates: the listing whose
+        LEI justified the value has moved on, and a stale value is worse than
+        none because ``issuer.lei`` is what the neighbourhood search seeks --
+        it would pull the next listing publishing that LEI into this group.
+        Clearing errs toward two issuers for one company, which is harmless and
+        self-heals on the next pass; keeping errs toward one issuer for two
+        companies, which is a wrong merge.
+
         Returns whether an LEI was assigned.
         """
 
@@ -265,6 +291,10 @@ class IssuerIdentityRepository(SQLiteStore):
             )
 
         if group.lei is None:
+            conn.execute(
+                "UPDATE issuer SET lei = NULL WHERE issuer_id = ? AND lei IS NOT NULL",
+                (target,),
+            )
             return False
         held_elsewhere = conn.execute(
             "SELECT 1 FROM issuer WHERE lei = ? AND issuer_id != ?",
@@ -317,7 +347,11 @@ class IssuerIdentityRepository(SQLiteStore):
                 if group.merges:
                     merged += 1
 
-            deleted = self._delete_orphaned_issuers(conn)
+            # Whole-catalog run: every issuer a repoint could have emptied is,
+            # by definition, one of the ones these listings used to point at.
+            deleted = self._delete_orphaned_issuers(
+                conn, {identity.issuer_id for identity in identities}
+            )
 
             for group, target in zip(groups, targets):
                 leis += int(self._label_representative(conn, group, target))
