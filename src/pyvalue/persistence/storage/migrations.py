@@ -9080,6 +9080,130 @@ def _migration_089_issuer_lei_identity(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migration_090_drop_listing_lei(conn: sqlite3.Connection) -> None:
+    """Drop ``listing.lei``: it duplicated ``issuer.lei`` and broke 3NF.
+
+    Migration 088 put the LEI on ``listing`` so issuer grouping could read it
+    cheaply. Once ``reconcile-issuer-identity`` converges, though, every non-NULL
+    ``listing.lei`` is functionally determined by ``listing.issuer_id`` -- the
+    grouper puts all listings sharing an LEI under one issuer, and that issuer
+    carries the same value. A transitive dependency, and the same fact stored in
+    two tables.
+
+    The alternative source is the one place the fact actually originates:
+    ``fundamentals_raw.data -> '$.General.LEI'``. Both readers already join
+    ``fundamentals_raw`` (the classification reconcile always did; the issuer
+    reconcile now does), so the LEI comes out of a projection they were already
+    paying for. ``issuer.lei`` remains as the derived natural key, which is a
+    conclusion about a group rather than a copy of a per-listing fact.
+
+    The cost is real and was accepted deliberately, and it is smaller than it
+    looks: ``reconcile-issuer-identity`` goes from ~3s (an indexed column read)
+    to ~97s on the live catalog. The payload is reached by a correlated subquery
+    that seeks ``provider_listing`` then the ``fundamentals_raw`` primary key, so
+    SQLite parses each blob once rather than scanning them as a set -- nowhere
+    near the ~780s the classification reconcile takes over the same payloads.
+    Every grouping outcome is identical to the cached-column version.
+
+    ``listing.isin`` deliberately stays. ISIN identifies a *security* and a
+    listing quotes exactly one, while an issuer may have issued many -- Alphabet
+    has one LEI and two ISINs -- so there is no issuer-level column for it to
+    duplicate and no functional dependency to violate.
+
+    Idempotent via the DDL probe.
+    """
+
+    if not _table_exists(conn, "listing"):
+        return
+    if "lei" not in _table_columns(conn, "listing"):
+        return
+
+    isin_check = _ISIN_FORMAT_CHECK.format(col="isin")
+    currency_check = _CURRENCY_FORMAT_CHECK.format(col="currency")
+
+    securities_view_existed = _view_exists(conn, "securities")
+    catalog_view_existed = _view_exists(conn, "provider_listing_catalog")
+    supported_view_existed = _view_exists(conn, "supported_tickers")
+    primary_view_existed = _view_exists(conn, "primary_provider_listing_catalog")
+    if primary_view_existed:
+        conn.execute("DROP VIEW primary_provider_listing_catalog")
+    if supported_view_existed:
+        conn.execute("DROP VIEW supported_tickers")
+    if catalog_view_existed:
+        conn.execute("DROP VIEW provider_listing_catalog")
+    if securities_view_existed:
+        conn.execute("DROP VIEW securities")
+
+    conn.execute("DROP INDEX IF EXISTS idx_listing_issuer")
+    conn.execute("DROP INDEX IF EXISTS idx_listing_isin")
+    conn.execute(
+        f"""
+        CREATE TABLE listing__new (
+            listing_id INTEGER PRIMARY KEY,
+            issuer_id INTEGER NOT NULL,
+            exchange_id INTEGER NOT NULL,
+            symbol TEXT NOT NULL
+                CHECK (length(symbol) > 0
+                       AND symbol = upper(trim(symbol))
+                       AND instr(symbol, ' ') = 0
+                       AND symbol GLOB '[A-Z0-9.&^*-]*'),
+            currency TEXT NOT NULL
+                CHECK ({currency_check}),
+            isin TEXT
+                CHECK (isin IS NULL OR ({isin_check})),
+            primary_listing_status TEXT NOT NULL DEFAULT 'unknown'
+                CHECK (primary_listing_status
+                       IN ('unknown', 'primary', 'secondary')),
+            UNIQUE (exchange_id, symbol),
+            FOREIGN KEY (issuer_id) REFERENCES issuer(issuer_id),
+            FOREIGN KEY (exchange_id) REFERENCES "exchange"(exchange_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO listing__new (
+            listing_id, issuer_id, exchange_id, symbol, currency, isin,
+            primary_listing_status
+        )
+        SELECT
+            listing_id, issuer_id, exchange_id, symbol, currency, isin,
+            primary_listing_status
+        FROM listing
+        """
+    )
+    conn.execute("DROP TABLE listing")
+    conn.execute("ALTER TABLE listing__new RENAME TO listing")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_listing_issuer
+        ON listing(issuer_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_listing_isin
+        ON listing(isin)
+        WHERE isin IS NOT NULL
+        """
+    )
+
+    if securities_view_existed:
+        _create_securities_view(conn)
+    if catalog_view_existed:
+        _create_provider_listing_catalog_view(conn)
+    if supported_view_existed:
+        _create_supported_tickers_view(conn)
+    if primary_view_existed:
+        _create_primary_provider_listing_catalog_view(conn)
+
+    fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if fk_violations:
+        raise RuntimeError(
+            f"migration 090 left foreign key violations: {fk_violations!r}"
+        )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -9170,6 +9294,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_087_purge_legacy_roic_metric_rows,
     _migration_088_listing_isin_lei_and_status_check,
     _migration_089_issuer_lei_identity,
+    _migration_090_drop_listing_lei,
 ]
 
 

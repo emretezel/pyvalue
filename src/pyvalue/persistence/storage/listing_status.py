@@ -19,7 +19,6 @@ from typing import (
     Mapping,
     Optional,
     Sequence,
-    Tuple,
 )
 
 
@@ -29,6 +28,7 @@ from pyvalue.universe.listing_classification import (
     ListingStatus,
     classify_listing_without_peers,
     classify_listings,
+    needs_sibling_evidence,
 )
 
 from .base import (
@@ -194,7 +194,6 @@ class SecurityListingStatusRepository(SQLiteStore):
             return []
 
         records: List[SecurityListingStatusRecord] = []
-        lei_updates: List[Tuple[str, int]] = []
         for update in updates:
             if not update.provider_symbol or not update.security_id:
                 continue
@@ -214,6 +213,9 @@ class SecurityListingStatusRepository(SQLiteStore):
                 provider_symbol=update.provider_symbol,
                 primary_ticker=general_map.get("PrimaryTicker"),
                 home_category=general_map.get("HomeCategory"),
+                # Carried as evidence only. Nothing persists it: the LEI lives
+                # in the payload this row was built from, and issuer identity
+                # reads it back from there.
                 lei=general_map.get("LEI"),
             )
             outcome = classify_listing_without_peers(evidence)
@@ -225,46 +227,8 @@ class SecurityListingStatusRepository(SQLiteStore):
                     update.last_fetched_at,
                 )
             )
-            if evidence.lei is not None:
-                lei_updates.append((evidence.lei, evidence.listing_id))
         self.upsert_many(records, connection=connection)
-        self._persist_leis(lei_updates, connection=connection)
         return records
-
-    def _persist_leis(
-        self,
-        rows: Sequence[Tuple[str, int]],
-        *,
-        connection: Optional[sqlite3.Connection] = None,
-    ) -> None:
-        """Store the LEI each payload published on its listing.
-
-        ``General.LEI`` is the only source for this column -- the provider's
-        symbol list does not carry it, which is why the catalog refresh cannot
-        populate it the way it populates ``isin``. Migration 088 seeded the
-        column from payloads already stored; this keeps it current for every
-        payload ingested since, so issuer identity does not quietly decay as the
-        catalog grows.
-
-        Like the ISIN write, an absent LEI never clears a stored one: a payload
-        omitting the field is far more likely to be a provider gap than a
-        retraction. ``IS NOT`` is SQLite's null-safe inequality, so a first-time
-        populate writes exactly once and a steady-state re-ingest writes nothing.
-        """
-
-        if not rows:
-            return
-        sql = """
-            UPDATE listing
-            SET lei = ?
-            WHERE listing_id = ? AND lei IS NOT ?
-        """
-        payload = [(lei, listing_id, lei) for lei, listing_id in rows]
-        if connection is not None:
-            connection.executemany(sql, payload)
-            return
-        with self._connect() as conn:
-            conn.executemany(sql, payload)
 
     # Evidence projection shared by the scoped read and the peer expansion.
     # ``PrimaryTicker`` / ``HomeCategory`` / the venue tier and head office are
@@ -279,10 +243,10 @@ class SecurityListingStatusRepository(SQLiteStore):
                 AS provider_symbol,
             fr.last_fetched_at AS last_fetched_at,
             l.isin AS isin,
-            l.lei AS lei,
             px.country_iso2 AS venue_country_iso2,
             json_extract(fr.data, '$.General.PrimaryTicker') AS primary_ticker,
             json_extract(fr.data, '$.General.HomeCategory') AS home_category,
+            json_extract(fr.data, '$.General.LEI') AS lei,
             json_extract(fr.data, '$.General.Exchange') AS venue_tier,
             json_extract(fr.data, '$.General.AddressData.Country') AS hq_country
         FROM fundamentals_raw fr
@@ -330,12 +294,16 @@ class SecurityListingStatusRepository(SQLiteStore):
             query.append(f"AND l.isin IN ({placeholders})")
             params.extend(isin_chunk)
         if lei_chunk:
-            # No index on listing.lei: this scan runs once per reconcile over a
-            # 76k-row table, and an index would cost a write on every catalog
-            # refresh to serve one query. Revisit if issuer identity starts
-            # seeking by LEI.
+            # The LEI lives in the raw payload, so this predicate cannot use an
+            # index -- SQLite evaluates json_extract over every stored blob. The
+            # caller therefore issues it only when a listing in scope could
+            # actually be rescued (see ``needs_sibling_evidence``); the common
+            # full-universe run never reaches here at all, because every sibling
+            # is already in scope.
             placeholders = ", ".join("?" for _ in lei_chunk)
-            query.append(f"AND l.lei IN ({placeholders})")
+            query.append(
+                f"AND json_extract(fr.data, '$.General.LEI') IN ({placeholders})"
+            )
             params.extend(lei_chunk)
         return list(conn.execute(" ".join(query), params).fetchall())
 
@@ -362,12 +330,19 @@ class SecurityListingStatusRepository(SQLiteStore):
     ) -> List[SecurityListingStatusRecord]:
         """Re-derive classification for a scope and write it back.
 
-        Only listings *in scope* are written, but the resolver is fed their ISIN
-        peers as well. Without that expansion a narrow ``--symbols`` run would
+        Only listings *in scope* are written, but the resolver is fed their
+        siblings as well. Without that expansion a narrow ``--symbols`` run would
         silently under-fire the peer rules -- ``0K10.LSE`` alone looks like a
         listing with no evidence, while ``0K10.LSE`` beside ``MTD.US`` is
         plainly the secondary line. Peers are read-only context; they keep their
         stored status.
+
+        Expansion is skipped entirely for a whole-universe run, where every
+        sibling is in scope already, so the common case reads the payloads once.
+        A narrow run expands by ISIN, which seeks an index. It expands by LEI
+        only when some listing in scope could actually be rescued -- that
+        predicate cannot use an index, since the LEI is read out of the raw
+        payload, so it is worth issuing only when it can change an answer.
         """
 
         self.initialize_schema()
@@ -411,25 +386,32 @@ class SecurityListingStatusRepository(SQLiteStore):
                         continue
                     missing_peers[listing_id] = self._evidence_from_row(row)
 
-            scoped_isins = sorted(
-                {
-                    evidence.isin
-                    for evidence in evidence_by_id.values()
-                    if evidence.isin is not None
-                }
+            scope_is_universe = not (
+                normalized_symbols or normalized_security_ids or normalized_exchanges
             )
-            for isin_chunk in _batched(scoped_isins, chunk_size):
-                _absorb(self._evidence_rows(conn, isin_chunk=isin_chunk))
+            if not scope_is_universe:
+                scoped_isins = sorted(
+                    {
+                        evidence.isin
+                        for evidence in evidence_by_id.values()
+                        if evidence.isin is not None
+                    }
+                )
+                for isin_chunk in _batched(scoped_isins, chunk_size):
+                    _absorb(self._evidence_rows(conn, isin_chunk=isin_chunk))
 
-            scoped_leis = sorted(
-                {
-                    evidence.lei
-                    for evidence in evidence_by_id.values()
-                    if evidence.lei is not None
-                }
-            )
-            for lei_chunk in _batched(scoped_leis, chunk_size):
-                _absorb(self._evidence_rows(conn, lei_chunk=lei_chunk))
+                # Only the rescue consults LEI siblings, and only for depositary
+                # receipts on a primary exchange. Everything else in scope would
+                # pay a full payload scan for evidence no rule would read.
+                rescue_leis = sorted(
+                    {
+                        evidence.lei
+                        for evidence in evidence_by_id.values()
+                        if evidence.lei is not None and needs_sibling_evidence(evidence)
+                    }
+                )
+                for lei_chunk in _batched(rescue_leis, chunk_size):
+                    _absorb(self._evidence_rows(conn, lei_chunk=lei_chunk))
 
         resolved = classify_listings(
             list(evidence_by_id.values()) + list(missing_peers.values())

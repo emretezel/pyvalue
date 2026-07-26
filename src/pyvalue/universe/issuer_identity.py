@@ -46,7 +46,9 @@ class ListingIdentity:
         listing_id: Canonical surrogate key.
         issuer_id: The issuer row the listing currently points at.
         isin: ``listing.isin``, already shape-normalized, or None.
-        lei: ``listing.lei``, already shape-normalized, or None.
+        lei: ``General.LEI`` from the listing's stored payload, already
+            shape-normalized, or None. Read from the payload rather than a
+            column: caching it on ``listing`` duplicated ``issuer.lei``.
         entity_name: The issuer name currently recorded for this listing, used
             to name a merged group.
         is_primary: Whether the listing is classified ``primary``. Only a

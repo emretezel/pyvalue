@@ -209,10 +209,11 @@ class ListingEvidence:
         home_category: ``General.HomeCategory``, uppercased, or None.
         isin: ``listing.isin`` -- the stored column, not the payload, because
             the catalog refresh covers listings whose payload omits it.
-        lei: ``listing.lei`` -- the legal-entity identifier, used only by the
-            sole-listing rescue to recognise siblings that ISIN cannot (a
-            depositary receipt and its underlying have different ISINs but the
-            same issuer).
+        lei: ``General.LEI`` from the stored payload -- the legal-entity
+            identifier, used only by the sole-listing rescue to recognise
+            siblings that ISIN cannot (two securities of one issuer have
+            different ISINs). Not a stored column: caching it on ``listing``
+            duplicated ``issuer.lei``.
         venue_tier: ``General.Exchange`` -- the real venue for US listings
             (``PINK``, ``NASDAQ``), uppercased.
         hq_country: ``General.AddressData.Country``, verbatim, for the R5
@@ -264,6 +265,25 @@ def is_secondary_quote_venue(evidence: ListingEvidence) -> bool:
     if exchange == "SA":
         return B3_DEPOSITARY_RECEIPT.fullmatch(evidence.bare_symbol) is not None
     return False
+
+
+def needs_sibling_evidence(evidence: ListingEvidence) -> bool:
+    """True when the sole-listing rescue could apply to this listing.
+
+    The rescue is the only rule that asks whether a *sibling* survives, and it
+    only ever fires for a depositary receipt on a primary exchange. Loading
+    sibling evidence is expensive -- LEI lives in the raw payloads, so finding
+    listings that share one means scanning them -- and this predicate lets a
+    caller pay that cost only when it could change an answer.
+
+    Lives here rather than in the repository so the rule stays in one place: if
+    the rescue's preconditions change, the evidence a caller must fetch changes
+    with them, automatically.
+    """
+
+    return (evidence.home_category or "") in DEPOSITARY_CATEGORIES and (
+        evidence.venue_tier or ""
+    ) in PRIMARY_US_EXCHANGES
 
 
 def _is_home_market_issuer(evidence: ListingEvidence) -> bool:
@@ -557,5 +577,6 @@ __all__ = [
     "classify_listing_without_peers",
     "classify_listings",
     "is_secondary_quote_venue",
+    "needs_sibling_evidence",
     "summarize",
 ]

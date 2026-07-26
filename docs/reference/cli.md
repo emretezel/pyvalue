@@ -153,8 +153,11 @@ Notes:
 
 - takes no scope selector on purpose: grouping is only as good as the set it
   sees, so a partial view would split entities rather than merge them
-- reads no payloads and makes no provider calls — migration 088 lifted both
-  identifiers onto `listing`
+- makes no provider calls, but it does read the stored payloads: the LEI lives
+  in `fundamentals_raw`, deliberately not cached on `listing` where it would
+  duplicate `issuer.lei`. ~97s on the full catalog — it seeks each payload by
+  key rather than scanning the set, so it costs far less than
+  `reconcile-listing-status`
 - the sole writer of `issuer.lei`, and the only path that merges issuer rows in
   bulk; it repoints listings onto the group's lowest `issuer_id` and deletes the
   emptied rows, all in one transaction

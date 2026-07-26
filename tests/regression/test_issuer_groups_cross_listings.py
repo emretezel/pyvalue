@@ -20,8 +20,9 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from conftest import seed_exchange
+from conftest import seed_exchange, seed_raw_fundamentals
 from pyvalue.persistence.storage import (
+    FundamentalsRepository,
     IssuerIdentityRepository,
     SupportedTickerRepository,
 )
@@ -35,18 +36,21 @@ def _catalog(db_path: Path, exchange: str, rows: list[dict[str, object]]) -> Non
 
 
 def _set_lei(db_path: Path, symbol: str, exchange: str, lei: str) -> None:
-    """Populate ``listing.lei``, which only a fundamentals payload supplies."""
+    """Publish an LEI for a listing the only way there is: in its payload.
 
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """
-            UPDATE listing SET lei = ?
-            WHERE symbol = ? AND exchange_id = (
-                SELECT exchange_id FROM "exchange" WHERE exchange_code = ?
-            )
-            """,
-            (lei, symbol, exchange),
-        )
+    ``listing.lei`` was dropped as a duplicate of ``issuer.lei``, so the raw
+    fundamentals payload is now the single source and grouping reads it back
+    from there.
+    """
+
+    FundamentalsRepository(db_path).initialize_schema()
+    seed_raw_fundamentals(
+        db_path,
+        "EODHD",
+        f"{symbol}.{exchange}",
+        {"General": {"LEI": lei}},
+        exchange=exchange,
+    )
 
 
 def _issuers(db_path: Path) -> dict[str, int]:

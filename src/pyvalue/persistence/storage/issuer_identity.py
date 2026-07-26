@@ -51,13 +51,32 @@ class IssuerIdentityRepository(SQLiteStore):
         apply_migrations(self.db_path)
 
     def _load_identities(self, conn: sqlite3.Connection) -> List[ListingIdentity]:
-        """Read every listing's stored entity evidence.
+        """Read every listing's entity evidence.
 
         Deliberately unscoped: grouping is only as good as the set it sees, and
-        a partial view would split entities rather than merge them. The
-        projection is four small columns over ~76k rows -- no payload is
-        touched, because migration 088 already lifted the identifiers onto
-        ``listing``.
+        a partial view would split entities rather than merge them.
+
+        ``isin`` is a canonical column -- it sits at listing grain because a
+        listing quotes exactly one security, and the catalog refresh populates
+        it. ``lei`` is read straight out of the stored payload instead. It used
+        to be cached on ``listing`` too, until that turned out to duplicate
+        ``issuer.lei``: once this command converges, a listing's LEI is
+        functionally determined by its issuer, which is a transitive dependency
+        and a 3NF violation. Reading the payload keeps one copy of the fact, in
+        the place it originates.
+
+        That choice is what makes this a payload read rather than an indexed
+        one: ~3s became ~97s on the live catalog. ``json_extract`` runs inside
+        SQLite so no blob crosses into Python, and the subquery seeks rather than
+        scans, which is why it costs a fraction of the ~780s the classification
+        reconcile spends over the same payloads.
+
+        The payload is reached by a scalar subquery rather than a join, so one
+        listing yields exactly one row. A join would fan out if a listing ever
+        carried two provider mappings, silently duplicating it inside a group.
+        It also keeps listings with no stored payload: those still have an ISIN
+        and a current issuer and must be grouped, not dropped -- ~4,400 catalog
+        holdovers are in exactly that state.
         """
 
         rows = conn.execute(
@@ -66,7 +85,14 @@ class IssuerIdentityRepository(SQLiteStore):
                 l.listing_id AS listing_id,
                 l.issuer_id AS issuer_id,
                 l.isin AS isin,
-                l.lei AS lei,
+                (
+                    SELECT json_extract(fr.data, '$.General.LEI')
+                    FROM provider_listing pl
+                    JOIN fundamentals_raw fr
+                      ON fr.provider_listing_id = pl.provider_listing_id
+                    WHERE pl.listing_id = l.listing_id
+                    LIMIT 1
+                ) AS lei,
                 i.name AS entity_name,
                 l.primary_listing_status AS status
             FROM listing l

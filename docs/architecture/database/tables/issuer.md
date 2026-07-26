@@ -132,7 +132,11 @@ listings that share an ISIN or an LEI onto one row.
 ## Review Notes
 
 - Grouping rests on **identifiers only** — never on names that look alike. The
-  rule lives in `pyvalue.universe.issuer_identity`: a shared LEI means the same
+  rule lives in `pyvalue.universe.issuer_identity`. The LEI is read from each
+  listing's stored payload (`General.LEI`), not from a column on `listing`: a
+  cached copy there duplicated this one, since after a converged reconcile a
+  listing's LEI is functionally determined by its issuer. That is why this
+  command is a payload scan rather than an indexed read. A shared LEI means the same
   legal entity (including different share classes, which is why Alphabet's
   `ABEA`/`ABEC` and Bank of America's common plus preferreds collapse into one
   row), and a shared ISIN means the same security, which implies the same

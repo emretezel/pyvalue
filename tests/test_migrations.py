@@ -6057,3 +6057,98 @@ def test_migration_089_is_idempotent(tmp_path: Path) -> None:
 
     # A second pass must not rebuild the table and wipe a derived LEI.
     assert stored == "5493000BD5GJNUDIUG10"
+
+
+# ---------------------------------------------------------------------------
+# Migration 090: drop listing.lei (duplicate of issuer.lei).
+# ---------------------------------------------------------------------------
+
+
+def test_migration_090_drops_listing_lei_and_keeps_isin(tmp_path: Path) -> None:
+    """090 restores 3NF by removing the duplicated legal-entity identifier.
+
+    Once ``reconcile-issuer-identity`` converges, a listing's LEI is functionally
+    determined by its ``issuer_id`` -- the same fact in two tables. ``isin``
+    stays: it identifies a *security*, a listing quotes exactly one, and an
+    issuer may have issued many, so there is no issuer-level column for it to
+    duplicate.
+    """
+
+    db_path = tmp_path / "drop-listing-lei.sqlite"
+    applied = apply_migrations(db_path)
+
+    assert applied == len(MIGRATIONS)
+
+    with sqlite3.connect(db_path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(listing)")}
+        indexes = {
+            name
+            for (name,) in conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='index' AND tbl_name='listing'"
+            )
+        }
+        issuer_columns = {row[1] for row in conn.execute("PRAGMA table_info(issuer)")}
+
+    assert "lei" not in columns
+    assert "isin" in columns
+    # The derived natural key survives on the table whose grain it matches.
+    assert "lei" in issuer_columns
+    # The rebuild must not lose the indexes.
+    assert {"idx_listing_issuer", "idx_listing_isin"} <= indexes
+
+
+def test_migration_090_preserves_listing_rows(tmp_path: Path) -> None:
+    """The column goes; the listings and their ISINs do not."""
+
+    from pyvalue.persistence.storage.migrations import (
+        _migration_090_drop_listing_lei,
+    )
+
+    db_path = tmp_path / "drop-listing-lei-rows.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE issuer (issuer_id INTEGER PRIMARY KEY, name TEXT)")
+        conn.execute(
+            "CREATE TABLE exchange (exchange_id INTEGER PRIMARY KEY, exchange_code TEXT)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE listing (
+                listing_id INTEGER PRIMARY KEY,
+                issuer_id INTEGER NOT NULL,
+                exchange_id INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                currency TEXT NOT NULL,
+                isin TEXT,
+                lei TEXT,
+                primary_listing_status TEXT NOT NULL DEFAULT 'unknown'
+            )
+            """
+        )
+        conn.execute("INSERT INTO issuer VALUES (1, 'I')")
+        conn.execute("INSERT INTO exchange VALUES (1, 'US')")
+        conn.execute(
+            """
+            INSERT INTO listing (
+                listing_id, issuer_id, exchange_id, symbol, currency, isin, lei,
+                primary_listing_status
+            ) VALUES
+                (1, 1, 1, 'AAA', 'USD', 'US5926881054', '5493000BD5GJNUDIUG10',
+                 'primary'),
+                (2, 1, 1, 'BBB', 'USD', NULL, NULL, 'secondary')
+            """
+        )
+
+        _migration_090_drop_listing_lei(conn)
+
+        rows = conn.execute(
+            "SELECT listing_id, symbol, isin, primary_listing_status "
+            "FROM listing ORDER BY listing_id"
+        ).fetchall()
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(listing)")}
+
+    assert rows == [
+        (1, "AAA", "US5926881054", "primary"),
+        (2, "BBB", None, "secondary"),
+    ]
+    assert "lei" not in columns

@@ -28,7 +28,6 @@ One row per `(exchange_id, symbol)`.
 | `symbol` | `TEXT` | no |  | bare canonical listing symbol such as `AAPL`; part of composite unique key. CHECK enforces uppercase, no whitespace, and `[A-Z0-9.&^*-]` characters only |
 | `currency` | `TEXT` | no |  | authoritative listing quote unit, including subunits such as `GBX`, `ZAC`, and `ILA`. NOT NULL since migration 069; CHECK enforces 3-char uppercase ASCII letters |
 | `isin` | `TEXT` | yes | idx | ISO 6166 security identifier. Added by migration 088. Nullable — EODHD publishes none for ~25% of listings and absence is a valid state. Deliberately **not** UNIQUE: every venue trading the same shares carries the same ISIN, which is what makes it the cross-listing grouping key. CHECK enforces 12 uppercase alphanumerics with a 2-letter country prefix and a numeric check digit |
-| `lei` | `TEXT` | yes |  | ISO 17442 legal-entity identifier. Added by migration 088. Nullable (~26% populated). Shared by every listing of one entity, including separate share classes. CHECK enforces 20 uppercase alphanumerics |
 | `primary_listing_status` | `TEXT` | no |  | canonical primary-listing classification: `unknown`, `primary`, or `secondary`. CHECK enforces the vocabulary since migration 088 |
 
 ## Keys And Relationships
@@ -146,24 +145,30 @@ whose listing is absent (creating one would require writing the NOT NULL
 ## Review Notes
 
 - Canonical user-facing symbols such as `AAPL.US` are derived, not stored.
-- `isin` and `lei` are identity evidence, not classification. `isin` answers
-  "which security", `lei` answers "which legal entity"; a depositary receipt is
-  legally a distinct security and carries its own ISIN, so ISIN groups
-  cross-listings of one security but never an ADR with its underlying.
+- `isin` is identity evidence, not classification: it answers "which security".
+  A depositary receipt is legally a distinct security with its own ISIN, so ISIN
+  groups cross-listings of one security but never an ADR with its underlying.
   `refresh-supported-tickers` is the primary source (`Isin` from the provider's
   exchange symbol list, which covers listings whose fundamentals payload omits
-  it); migration 088 seeded both columns from stored `General.ISIN` /
-  `General.LEI`. A refresh may correct a stored ISIN but never blanks one — a
-  payload missing the field is treated as a provider gap, not a retraction.
-  Shape normalization lives in `pyvalue.identifiers` (`shaped_isin`,
-  `shaped_lei`) and mirrors the SQL CHECK predicates in `migrations.py`; keep
-  the two in step.
-- `lei` is written by `ingest-fundamentals` from `General.LEI`, which is its only
-  source — the provider's symbol list does not carry one, so unlike `isin` the
-  catalog refresh cannot supply it. Migration 088 seeded the column from payloads
-  already stored; ingest keeps it current for everything since, so issuer
-  identity does not decay as the catalog grows. `reconcile-issuer-identity`
-  consumes it and is the sole writer of `issuer.lei`.
+  it); migration 088 seeded the column from stored `General.ISIN`. A refresh may
+  correct a stored ISIN but never blanks one — a payload missing the field is
+  treated as a provider gap, not a retraction. Shape normalization lives in
+  `pyvalue.identifiers` (`shaped_isin`, `shaped_lei`) and mirrors the SQL CHECK
+  predicates in `migrations.py`; keep the two in step.
+- **There is deliberately no `lei` column here.** Migration 088 added one so
+  issuer grouping could read it cheaply; migration 090 removed it. Once
+  `reconcile-issuer-identity` converges, a listing's LEI is functionally
+  determined by its `issuer_id` — the grouper puts every listing sharing an LEI
+  under one issuer, which carries the same value — so storing it here was a
+  transitive dependency and the same fact in two tables. The LEI is now read
+  from `fundamentals_raw.data -> '$.General.LEI'`, the one place it originates.
+  The cost was accepted knowingly and measured: `reconcile-issuer-identity` went
+  from ~3s to ~97s on the live catalog, with every grouping outcome identical.
+- `isin` stays for the opposite reason, and the contrast is the point. ISIN
+  identifies a **security** and a listing quotes exactly one, while an issuer may
+  have issued many — Alphabet has one LEI and two ISINs. There is no
+  issuer-level column for it to duplicate and no functional dependency to
+  violate, so listing grain is its correct home.
 - `listing.currency` is the only persisted listing-currency truth. It is a
   quote unit and is not collapsed to base currency at storage time. It is
   written solely by `refresh-supported-tickers`; fundamentals ingestion reads
