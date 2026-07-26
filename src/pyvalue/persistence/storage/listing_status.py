@@ -19,6 +19,7 @@ from typing import (
     Mapping,
     Optional,
     Sequence,
+    Tuple,
 )
 
 
@@ -193,6 +194,7 @@ class SecurityListingStatusRepository(SQLiteStore):
             return []
 
         records: List[SecurityListingStatusRecord] = []
+        lei_updates: List[Tuple[str, int]] = []
         for update in updates:
             if not update.provider_symbol or not update.security_id:
                 continue
@@ -212,6 +214,7 @@ class SecurityListingStatusRepository(SQLiteStore):
                 provider_symbol=update.provider_symbol,
                 primary_ticker=general_map.get("PrimaryTicker"),
                 home_category=general_map.get("HomeCategory"),
+                lei=general_map.get("LEI"),
             )
             outcome = classify_listing_without_peers(evidence)
             records.append(
@@ -222,8 +225,46 @@ class SecurityListingStatusRepository(SQLiteStore):
                     update.last_fetched_at,
                 )
             )
+            if evidence.lei is not None:
+                lei_updates.append((evidence.lei, evidence.listing_id))
         self.upsert_many(records, connection=connection)
+        self._persist_leis(lei_updates, connection=connection)
         return records
+
+    def _persist_leis(
+        self,
+        rows: Sequence[Tuple[str, int]],
+        *,
+        connection: Optional[sqlite3.Connection] = None,
+    ) -> None:
+        """Store the LEI each payload published on its listing.
+
+        ``General.LEI`` is the only source for this column -- the provider's
+        symbol list does not carry it, which is why the catalog refresh cannot
+        populate it the way it populates ``isin``. Migration 088 seeded the
+        column from payloads already stored; this keeps it current for every
+        payload ingested since, so issuer identity does not quietly decay as the
+        catalog grows.
+
+        Like the ISIN write, an absent LEI never clears a stored one: a payload
+        omitting the field is far more likely to be a provider gap than a
+        retraction. ``IS NOT`` is SQLite's null-safe inequality, so a first-time
+        populate writes exactly once and a steady-state re-ingest writes nothing.
+        """
+
+        if not rows:
+            return
+        sql = """
+            UPDATE listing
+            SET lei = ?
+            WHERE listing_id = ? AND lei IS NOT ?
+        """
+        payload = [(lei, listing_id, lei) for lei, listing_id in rows]
+        if connection is not None:
+            connection.executemany(sql, payload)
+            return
+        with self._connect() as conn:
+            conn.executemany(sql, payload)
 
     # Evidence projection shared by the scoped read and the peer expansion.
     # ``PrimaryTicker`` / ``HomeCategory`` / the venue tier and head office are

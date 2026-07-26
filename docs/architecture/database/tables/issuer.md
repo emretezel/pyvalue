@@ -6,7 +6,13 @@ Stores issuer-level descriptive metadata separately from exchange-specific listi
 
 ## Grain
 
-One row per issuer record created during catalog backfill or listing creation.
+One row per legal entity, as far as the stored identifiers can establish it.
+
+This was aspirational until migration 089. Identity was `(name, country)`,
+`country` is NULL on 65,752 of 70,564 rows, and SQLite treats NULLs as distinct
+in a UNIQUE index — so in practice each listing got its own issuer row and the
+154 QARP passers mapped to 151 issuers. `reconcile-issuer-identity` now collapses
+listings that share an ISIN or an LEI onto one row.
 
 ## Live Stats
 
@@ -22,6 +28,7 @@ One row per issuer record created during catalog backfill or listing creation.
 | Column | Type | Null | Key | Notes |
 | --- | --- | --- | --- | --- |
 | `issuer_id` | `INTEGER` | no | PK | issuer surrogate key |
+| `lei` | `TEXT` | yes | UNIQUE | ISO 17442 legal-entity identifier — the natural key. Added by migration 089, which ships it NULL; `reconcile-issuer-identity` derives it. Nullable because EODHD publishes an LEI for roughly a quarter of listings; the rest are identified only by the listings that point at them. CHECK enforces 20 uppercase alphanumerics |
 | `name` | `TEXT` | no |  | display name; migration 064 dropped 260 legacy orphan NULL-name rows and tightened the column to NOT NULL. The runtime ingest path falls back to the canonical_symbol when the upstream catalog doesn't supply a name. |
 | `description` | `TEXT` | yes |  | long provider-derived description |
 | `sector` | `TEXT` | yes |  | cached business sector |
@@ -36,7 +43,7 @@ One row per issuer record created during catalog backfill or listing creation.
 - Physical references from other tables:
   - `listing`.`issuer_id` -> `issuer_id`
 - Unique constraints beyond the primary key:
-  - (`name`, `country`)
+  - `lei`
 - Main logical refs: referenced physically by `listing.issuer_id`
 <!-- END generated_keys_and_relationships -->
 
@@ -52,9 +59,16 @@ One row per issuer record created during catalog backfill or listing creation.
 
 ## Main Write Paths
 
+- `reconcile-issuer-identity` — the sole writer of `issuer.lei`, and the only
+  path that merges issuer rows in bulk. It groups listings by the ISIN and LEI
+  stored on `listing`, repoints them onto the group's lowest `issuer_id`, and
+  deletes the emptied rows. Unscoped by design: a partial view would split
+  entities rather than merge them
 - `refresh-supported-tickers` — creates issuers while cataloguing listings;
   it never deletes them (canonical identity survives a prune that leaves the
-  issuer's listings unmapped — 2026-07-11 design)
+  issuer's listings unmapped — 2026-07-11 design). It cannot group by LEI: the
+  provider's symbol list does not carry one, so grouping has to happen later,
+  where the fundamentals payload supplies it
 - migration-time backfill from legacy security metadata
 - metadata refreshes from stored fundamentals
 - runtime identity merge — both rename paths (the catalog refresh and the
@@ -116,6 +130,37 @@ One row per issuer record created during catalog backfill or listing creation.
 <!-- END generated_sample_rows -->
 
 ## Review Notes
+
+- Grouping rests on **identifiers only** — never on names that look alike. The
+  rule lives in `pyvalue.universe.issuer_identity`: a shared LEI means the same
+  legal entity (including different share classes, which is why Alphabet's
+  `ABEA`/`ABEC` and Bank of America's common plus preferreds collapse into one
+  row), and a shared ISIN means the same security, which implies the same
+  entity. Links are transitive.
+- **`(name, country)` is no longer unique, deliberately.** Migration 060 made it
+  the issuer natural key; it was always an approximation, since two distinct
+  legal entities can share a name and a country. Worse, treating it as identity
+  is what caused the damage this table's grain now repairs: the runtime rename
+  path *merged* issuers whenever a provider restyled one listing's name onto
+  another's, fusing unrelated companies into shared parent rows. Migration 089
+  drops the index outright rather than demoting it — nothing reads `issuer` by
+  name, and its only consumers were collision probes that existed solely to
+  avoid violating it.
+- **A depositary receipt is not grouped with its underlying.** A receipt is a
+  distinct security with its own ISIN (`DNLMY.US` is `US26543P1030` where
+  `DNLM.LSE` is `GB00B1CKQ739`) and receipts rarely carry an LEI, so neither
+  identifier bridges the pair — and no evidence pyvalue currently ingests does.
+  This is a known limit, pinned by a regression test so it stays known.
+- A shared ISIN spanning two different LEIs is contradictory evidence; the link
+  is skipped rather than guessed at, since silently merging two real companies
+  is far worse than leaving them apart.
+- The surviving row is the group's lowest `issuer_id`, which makes repeated runs
+  converge instead of reshuffling parents. It takes its name from the group's
+  primary listing — a company is better described by the name on its primary
+  line than by an ADR's `... PLC ADR` or a German regional line's abbreviation —
+  and inherits any metadata only an absorbed row carried (migration 060's
+  never-overwrite rule).
+
 
 - `issuer` intentionally has no provider key. Provider-specific descriptive metadata should remain in provider-owned tables or raw payloads unless promoted deliberately.
 - Migration 064 deleted 260 legacy orphan rows (NULL name, no

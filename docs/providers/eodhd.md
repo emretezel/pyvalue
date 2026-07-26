@@ -215,11 +215,20 @@ listing rather than an OTC tier) *and* no sibling survives, and it returns
 exclude.
 
 Its known cost: a receipt and its underlying are different securities with
-different ISINs, and receipts usually carry no LEI, so a genuine pair such as
-`OMAB.US`/`OMAB.MX` is invisible to the sibling test and the US line is rescued
-even though the Mexican one survives. Linking a receipt to its underlying needs
-issuer-level identity; until `issuer` is re-keyed on LEI, the rescue trades a
-handful of reintroduced duplicates for the 296 companies above.
+different ISINs, and receipts usually carry no LEI, so a pair the identifiers
+cannot bridge is invisible to the sibling test and the receipt is rescued even
+though its underlying survives. Re-keying `issuer` on LEI does **not** close
+this — issuer grouping rests on the same two identifiers, so it cannot link a
+receipt to its underlying either. Doing so would need evidence pyvalue does not
+currently ingest (EODHD's Search API exposes an `isPrimary` flag that would
+settle it directly).
+
+Measured rather than assumed: on the live catalog the rescue fires for 323
+listings and reintroduces no duplicate among the QARP passers. `NTES.US` and
+`OMAB.US` both stay secondary — their siblings *are* linkable. The two extra
+passers versus not rescuing at all, `DOX.US` (Amdocs) and `ITRN.US` (Ituran),
+are not duplicates: neither has any surviving sibling in the universe, which is
+exactly why the rescue fired.
 
 Once a
 listing is classified as secondary, downstream normalization, market-data,

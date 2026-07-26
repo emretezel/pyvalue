@@ -294,35 +294,31 @@ class SecurityRepository(SQLiteStore):
         sector: Optional[str],
         industry: Optional[str],
     ) -> bool:
-        """Apply payload metadata to a listing's issuer, honouring identity.
+        """Apply payload metadata to a listing's issuer.
 
-        ``(name, country)`` is the unique issuer identity (migration 060,
-        ``idx_issuer_name_country``). A blind rename can therefore collide:
-        when the provider restyles a listing's display name to one that a
-        *different* issuer row already holds with the same country, the two
-        rows are the same real-world entity by the schema's own definition.
-        Instead of letting the UNIQUE index abort the caller's transaction,
-        this converges them exactly like migration 060 did wholesale:
+        A plain never-overwrite update: the payload fills NULL columns and a
+        supplied name replaces the stored one, but nothing already recorded is
+        cleared.
 
-        * the target keeps its own non-NULL metadata; NULL columns are
-          backfilled from the payload first, then from the merged-away row,
-        * every listing of the source issuer is repointed to the target (an
-          issuer row models one entity, so all of its listings move),
-        * the emptied source row is deleted (``listing`` is the only FK
-          referrer; ``PRAGMA foreign_keys=ON`` would surface any surprise).
+        This used to be far more than that. While ``UNIQUE (name, country)`` was
+        issuer identity, a rename could collide with a different issuer row, and
+        rather than let the index abort the whole refresh transaction this method
+        *merged* the two -- repointing every listing and deleting the loser.
+        That merge was the mechanism that fused unrelated companies into shared
+        parent rows, because a provider restyling one listing's name onto
+        another's is not evidence that they are the same business.
 
-        A NULL country never merges: SQLite's UNIQUE index treats NULLs as
-        distinct, and migration 060 documents that merging on a NULL key
-        would conflate unrelated companies. Those renames stay plain updates.
+        Migration 089 replaced name-based identity with the LEI and dropped the
+        index, so there is no collision to handle and no reason to merge on a
+        name. Entity grouping now belongs to ``reconcile-issuer-identity``, which
+        works strictly from ISIN and LEI.
 
-        All values must already be normalized (``_normalize_optional_text``)
-        so the identity probe compares exactly what the write would store.
-        Returns True when an issuer write was issued, False when the listing
-        does not exist.
+        Returns True when an issuer write was issued, False when the listing does
+        not exist.
         """
         current = conn.execute(
             """
-            SELECT i.issuer_id AS issuer_id, i.name AS name, i.country AS country
+            SELECT i.issuer_id AS issuer_id
             FROM listing l
             JOIN issuer i ON i.issuer_id = l.issuer_id
             WHERE l.listing_id = ?
@@ -331,69 +327,6 @@ class SecurityRepository(SQLiteStore):
         ).fetchone()
         if current is None:
             return False
-        source_issuer_id = int(current["issuer_id"])
-        renames = entity_name is not None and entity_name != current["name"]
-        if renames and current["country"] is not None:
-            # BINARY equality on (name, country) -- the exact semantics of
-            # idx_issuer_name_country, which also serves this probe as a seek.
-            target = conn.execute(
-                """
-                SELECT issuer_id
-                FROM issuer
-                WHERE name = ? AND country = ? AND issuer_id != ?
-                """,
-                (entity_name, current["country"], source_issuer_id),
-            ).fetchone()
-            if target is not None:
-                target_issuer_id = int(target["issuer_id"])
-                # Promote metadata BEFORE the source row disappears. COALESCE
-                # order: the survivor's own value wins, then the fresh payload,
-                # then the merged-away row (060's never-overwrite rule).
-                conn.execute(
-                    """
-                    UPDATE issuer
-                    SET description = COALESCE(
-                            description, ?,
-                            (SELECT description FROM issuer WHERE issuer_id = ?)
-                        ),
-                        sector = COALESCE(
-                            sector, ?,
-                            (SELECT sector FROM issuer WHERE issuer_id = ?)
-                        ),
-                        industry = COALESCE(
-                            industry, ?,
-                            (SELECT industry FROM issuer WHERE issuer_id = ?)
-                        )
-                    WHERE issuer_id = ?
-                    """,
-                    (
-                        description,
-                        source_issuer_id,
-                        sector,
-                        source_issuer_id,
-                        industry,
-                        source_issuer_id,
-                        target_issuer_id,
-                    ),
-                )
-                conn.execute(
-                    "UPDATE listing SET issuer_id = ? WHERE issuer_id = ?",
-                    (target_issuer_id, source_issuer_id),
-                )
-                conn.execute(
-                    "DELETE FROM issuer WHERE issuer_id = ?",
-                    (source_issuer_id,),
-                )
-                logger.debug(
-                    "issuer identity merge: renamed issuer %d to %r collided "
-                    "with issuer %d (country %r); listings repointed, source "
-                    "row deleted",
-                    source_issuer_id,
-                    entity_name,
-                    target_issuer_id,
-                    current["country"],
-                )
-                return True
         conn.execute(
             """
             UPDATE issuer
@@ -403,7 +336,7 @@ class SecurityRepository(SQLiteStore):
                 industry = COALESCE(?, industry)
             WHERE issuer_id = ?
             """,
-            (entity_name, description, sector, industry, source_issuer_id),
+            (entity_name, description, sector, industry, int(current["issuer_id"])),
         )
         return True
 

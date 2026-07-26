@@ -26,10 +26,12 @@ Provider rules:
 
 For EODHD-backed symbols, downstream stage commands and canonical-scope
 commands filter by canonical primary-listing classification: listings
-classified as secondary through `General.PrimaryTicker` are excluded from
+classified as `secondary` are excluded from
 normalization, market-data refresh, metric, screening, metadata-refresh, and
-canonical reporting scopes. Missing or unusable `PrimaryTicker` values are
-treated as primary. That classification is *written* only by
+canonical reporting scopes. Classification applies an ordered rule set over
+several EODHD fields (see `docs/providers/eodhd.md`); a listing no rule can
+settle is `unknown`, which **stays eligible** — only `secondary` is excluded.
+That classification is *written* only by
 `ingest-fundamentals` (in the same transaction that stores each raw payload) and
 by `reconcile-listing-status`; every other command reads the cached
 `listing.primary_listing_status` and never reconciles as a side effect.
@@ -138,6 +140,28 @@ Notes:
 - omitted `--max-age-days` now means the same 30-day freshness window used by
   the other CLI freshness filters
 
+### `reconcile-issuer-identity`
+
+Group listings of the same legal entity onto one `issuer` row, from the ISIN and
+LEI already stored on each listing.
+
+Key options:
+
+- `--database <path>`
+
+Notes:
+
+- takes no scope selector on purpose: grouping is only as good as the set it
+  sees, so a partial view would split entities rather than merge them
+- reads no payloads and makes no provider calls — migration 088 lifted both
+  identifiers onto `listing`
+- the sole writer of `issuer.lei`, and the only path that merges issuer rows in
+  bulk; it repoints listings onto the group's lowest `issuer_id` and deletes the
+  emptied rows, all in one transaction
+- safe to repeat: a catalog already matching the derived shape issues no writes
+- it does **not** link a depositary receipt to its underlying — they are
+  different securities with different ISINs and receipts rarely carry an LEI
+
 ### `reconcile-listing-status`
 
 Backfill canonical EODHD primary-vs-secondary listing classification from stored
@@ -157,12 +181,18 @@ Notes:
   `listing.primary_listing_status`
 - this is the only command (besides `ingest-fundamentals`, which reclassifies
   as it stores each raw payload) that writes `listing.primary_listing_status`;
-  run it to re-derive classification on demand, e.g. to re-apply changed
-  classification rules. Migration 078 performs the equivalent one-time backfill
-  when upgrading an existing database
-- listings classified as secondary via `General.PrimaryTicker` trigger
-  downstream cleanup of normalized facts, market data, metrics, and related
-  refresh-state rows for that listing
+  run it to re-derive classification on demand, e.g. after a rule change
+- ingest sees one payload at a time and so applies only the per-listing rules,
+  leaving anything needing an ISIN peer as `unknown`. This command holds the
+  whole graph and applies every rule, which is why it is the authority
+- a narrow `--symbols`/`--exchange-codes` run is still correct: the scope
+  expands to whole ISIN and LEI groups for read-only context, so the peer rules
+  see what a full run would, while only the requested listings are written
+- reclassification writes **only** the status column. A listing that flips to
+  `secondary` keeps its facts, market data, metrics and refresh state; exclusion
+  is purely scope-side, so a later flip back to primary restores it intact
+- the run prints the resulting status counts, which rule decided each listing,
+  and the before/after distribution across the database
 - missing or unusable `General.PrimaryTicker` values are treated as primary
 
 ### `report-fundamentals-progress`

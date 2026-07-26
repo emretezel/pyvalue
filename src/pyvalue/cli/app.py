@@ -25,6 +25,7 @@ from .universe import (
 )
 from .ingest import (
     cmd_ingest_fundamentals_stage,
+    cmd_reconcile_issuer_identity,
     cmd_reconcile_listing_status,
     cmd_report_fundamentals_progress,
 )
@@ -252,6 +253,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_scope_args(reconcile_listing_status)
     reconcile_listing_status.add_argument(
+        "--database",
+        default="data/pyvalue.db",
+        help="SQLite database file used for storage (default: %(default)s)",
+    )
+
+    reconcile_issuer_identity = subparsers.add_parser(
+        "reconcile-issuer-identity",
+        help=(
+            "Group listings of the same legal entity onto one issuer row, from "
+            "the ISIN/LEI already stored on each listing. No scope arguments: "
+            "a partial view would split entities rather than merge them."
+        ),
+    )
+    reconcile_issuer_identity.add_argument(
         "--database",
         default="data/pyvalue.db",
         help="SQLite database file used for storage (default: %(default)s)",
@@ -624,6 +639,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 start_date=args.start_date,
                 end_date=args.end_date,
             )
+        if args.command == "reconcile-issuer-identity":
+            return cmd_reconcile_issuer_identity(database=args.database)
         if args.command == "reconcile-listing-status":
             return cmd_reconcile_listing_status(
                 provider=args.provider,

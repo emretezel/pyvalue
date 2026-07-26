@@ -1,12 +1,14 @@
-"""Unit tests: metadata promotion honours the (name, country) issuer identity.
+"""Unit tests: metadata promotion onto issuers.
 
-``SecurityRepository.upsert_metadata_many`` promotes ``General.*`` metadata
-from stored fundamentals onto issuers. Like the catalog refresh it renames
-issuers, so it carries the same landmine: a promoted name that another issuer
-already holds with the same country must merge the two rows (migration 060
-semantics) instead of violating ``idx_issuer_name_country`` and aborting the
-batch. Plain, non-colliding batches must keep their original COALESCE
-behaviour.
+``SecurityRepository.upsert_metadata_many`` promotes ``General.*`` metadata from
+stored fundamentals onto issuers, renaming them as providers restyle names.
+
+This used to have a landmine: while ``(name, country)`` was the unique issuer
+identity, a promoted name another issuer already held aborted the batch, so the
+code merged the two rows instead. Migration 089 removed the premise -- names are
+descriptive metadata, ``issuer.lei`` is the natural key, and entity grouping
+belongs to ``reconcile-issuer-identity`` working from identifiers. A promoted
+name is now just a rename, and two issuers may share one.
 
 Author: Emre Tezel
 """
@@ -55,42 +57,50 @@ def _seed_two_venue_catalog(db_path: Path) -> tuple[int, int]:
     return by_symbol["PGLD.US"].security_id, by_symbol["PGLD.BE"].security_id
 
 
-def test_colliding_promoted_name_merges_issuers(tmp_path: Path) -> None:
-    db_path = tmp_path / "metadata-merge.db"
-    us_id, be_id = _seed_two_venue_catalog(db_path)
-    security_repo = SecurityRepository(db_path)
+def test_promoted_name_collision_does_not_merge_issuers(tmp_path: Path) -> None:
+    """Two issuers may now share a name; a rename must not fuse them.
 
-    updated = security_repo.upsert_metadata_many(
-        [SecurityMetadataUpdate(security_id=be_id, entity_name="Pearl Gold AG")]
+    A provider restyling one listing's name onto another's is not evidence that
+    they are the same business -- merging on it is what produced 2,862 fused
+    parent rows on the live catalog.
+    """
+
+    db_path = tmp_path / "metadata-no-merge.db"
+    us_id, be_id = _seed_two_venue_catalog(db_path)
+
+    SecurityRepository(db_path).upsert_metadata_many(
+        [
+            SecurityMetadataUpdate(
+                security_id=be_id,
+                entity_name="Pearl Gold AG",
+                description=None,
+                sector=None,
+                industry=None,
+            )
+        ]
     )
 
-    assert updated == 1
     with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        issuers = conn.execute("SELECT name, country FROM issuer").fetchall()
-        issuer_ids = {
-            row["listing_id"]: row["issuer_id"]
-            for row in conn.execute("SELECT listing_id, issuer_id FROM listing")
+        issuer_by_listing = {
+            listing_id: issuer_id
+            for listing_id, issuer_id in conn.execute(
+                "SELECT listing_id, issuer_id FROM listing"
+            )
         }
-    assert [(row["name"], row["country"]) for row in issuers] == [
-        ("Pearl Gold AG", "Germany")
-    ]
-    assert issuer_ids[us_id] == issuer_ids[be_id]
-    # The repository cache was invalidated and refetched: the renamed listing
-    # resolves to the surviving identity's name.
-    fetched = security_repo.fetch(be_id)
-    assert fetched is not None
-    assert fetched.entity_name == "Pearl Gold AG"
+        names = sorted(name for (name,) in conn.execute("SELECT name FROM issuer"))
+
+    assert issuer_by_listing[us_id] != issuer_by_listing[be_id]
+    assert names == ["Pearl Gold AG", "Pearl Gold AG"]
 
 
-def test_merge_prefers_payload_metadata_over_merged_away_row(tmp_path: Path) -> None:
-    db_path = tmp_path / "metadata-merge-payload-wins.db"
-    _, be_id = _seed_two_venue_catalog(db_path)
+def test_promotion_never_overwrites_stored_metadata(tmp_path: Path) -> None:
+    """COALESCE never-overwrite: a NULL payload field leaves the stored one."""
+
+    db_path = tmp_path / "metadata-coalesce.db"
+    _us_id, be_id = _seed_two_venue_catalog(db_path)
     with sqlite3.connect(db_path) as conn:
-        # The merged-away row carries a stale sector; the payload carries a
-        # fresh one; the survivor has none. The payload must win the backfill.
         conn.execute(
-            "UPDATE issuer SET sector = 'Stale Sector' WHERE name = 'PEARL GOLD'"
+            "UPDATE issuer SET sector = 'Basic Materials' WHERE name = 'PEARL GOLD'"
         )
 
     SecurityRepository(db_path).upsert_metadata_many(
@@ -98,14 +108,23 @@ def test_merge_prefers_payload_metadata_over_merged_away_row(tmp_path: Path) -> 
             SecurityMetadataUpdate(
                 security_id=be_id,
                 entity_name="Pearl Gold AG",
-                sector="Fresh Sector",
+                description="fresh desc",
+                sector=None,
+                industry=None,
             )
         ]
     )
 
     with sqlite3.connect(db_path) as conn:
-        sector = conn.execute("SELECT sector FROM issuer").fetchone()[0]
-    assert sector == "Fresh Sector"
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT name, description, sector FROM issuer "
+            "WHERE sector = 'Basic Materials'"
+        ).fetchone()
+
+    assert row["name"] == "Pearl Gold AG"
+    assert row["description"] == "fresh desc"
+    assert row["sector"] == "Basic Materials"
 
 
 def test_non_colliding_batch_keeps_coalesce_semantics(tmp_path: Path) -> None:

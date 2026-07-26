@@ -3281,24 +3281,31 @@ def test_migration_059_idempotent(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_migration_060_issuer_rejects_duplicate_name_country(tmp_path: Path) -> None:
-    db_path = tmp_path / "issuer-uniq-060.sqlite"
+def test_issuer_allows_duplicate_name_and_country(tmp_path: Path) -> None:
+    """Two entities may share a name and a country -- migration 089 allows it.
+
+    Migration 060 made ``(name, country)`` UNIQUE as issuer identity. It was
+    always an approximation, and treating it as identity is what fused unrelated
+    companies into shared parent rows: a provider restyling one listing's name
+    onto another's is not evidence they are the same business. ``issuer.lei`` is
+    the natural key now, and names are descriptive metadata.
+    """
+
+    db_path = tmp_path / "issuer-duplicate-names.sqlite"
     apply_migrations(db_path)
 
     with _open_with_fk(db_path) as conn:
         conn.execute(
-            """
-            INSERT INTO issuer (issuer_id, name, country)
-            VALUES (1, 'Acme Corp', 'US')
-            """
+            "INSERT INTO issuer (issuer_id, name, country) VALUES (1, 'Acme Corp', 'US')"
         )
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute(
-                """
-                INSERT INTO issuer (issuer_id, name, country)
-                VALUES (2, 'Acme Corp', 'US')
-                """
-            )
+        conn.execute(
+            "INSERT INTO issuer (issuer_id, name, country) VALUES (2, 'Acme Corp', 'US')"
+        )
+        stored = conn.execute(
+            "SELECT COUNT(*) FROM issuer WHERE name = 'Acme Corp'"
+        ).fetchone()[0]
+
+    assert stored == 2
 
 
 def test_migration_060_issuer_allows_duplicate_with_null_country(
@@ -4021,6 +4028,9 @@ _MIGRATION_067_DROPPED_INDEXES = frozenset(
 # ``idx_listing_issuer`` arrived with migration 080 (the delisted-ticker purge
 # probes issuers for surviving listings, as does FK enforcement on issuer
 # deletes); see ``test_migration_080_*``.
+# ``idx_issuer_name_country`` was retained by 067 but retired by migration 089:
+# names stopped being issuer identity when ``issuer.lei`` became the natural key,
+# and nothing reads ``issuer`` by name; see ``test_migration_089_*``.
 # ``idx_fx_rates_pair_date`` was retained by 067 but retired by migration 084:
 # the canonical fx_rates PK (base, quote, rate_date) provides the pair-history
 # ordering itself, and the provider-scoped coverage seeks moved to the
@@ -4030,7 +4040,6 @@ _MIGRATION_067_RETAINED_INDEXES = frozenset(
         "idx_fin_facts_security_concept_latest",
         "idx_fin_facts_currency_nonnull",
         "idx_fx_supported_pairs_refreshable",
-        "idx_issuer_name_country",
         "idx_provider_listing_listing",
         "idx_fundamentals_raw_last_fetched",
         "idx_listing_issuer",
@@ -5924,3 +5933,127 @@ def test_migration_088_is_idempotent(tmp_path: Path) -> None:
     # A second pass must not rebuild the table and wipe the column it just
     # populated -- the DDL probe is what makes the migration re-runnable.
     assert stored == "US5926881054"
+
+
+# ---------------------------------------------------------------------------
+# Migration 089: issuer.lei natural key.
+# ---------------------------------------------------------------------------
+
+
+def test_migration_089_adds_lei_natural_key_leaving_it_null(tmp_path: Path) -> None:
+    """089 is schema-only: the column ships NULL and a reconcile populates it.
+
+    Populating here would need grouping first, and several issuer rows currently
+    share one company's LEI -- writing the value before any merge would violate
+    the new UNIQUE constraint. Deriving entity identity belongs to
+    ``reconcile-issuer-identity``, not to frozen migration SQL.
+    """
+
+    from pyvalue.persistence.storage.migrations import (
+        _migration_089_issuer_lei_identity,
+    )
+
+    db_path = tmp_path / "issuer-lei.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE issuer (
+                issuer_id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT,
+                sector TEXT,
+                industry TEXT,
+                country TEXT
+            )
+            """
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX idx_issuer_name_country ON issuer(name, country)"
+        )
+        conn.execute(
+            "INSERT INTO issuer (issuer_id, name, sector) VALUES "
+            "(1, 'Mettler-Toledo', 'Healthcare'), (2, 'Alphabet', 'Technology')"
+        )
+
+        _migration_089_issuer_lei_identity(conn)
+
+        rows = conn.execute(
+            "SELECT issuer_id, lei, name, sector FROM issuer ORDER BY issuer_id"
+        ).fetchall()
+        ddl = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='issuer'"
+        ).fetchone()[0]
+        indexes = {
+            name
+            for (name,) in conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='index' AND tbl_name='issuer'"
+            )
+        }
+
+    assert rows == [
+        (1, None, "Mettler-Toledo", "Healthcare"),
+        (2, None, "Alphabet", "Technology"),
+    ]
+    assert "lei TEXT UNIQUE" in ddl
+    # Name-based identity is dropped with the same migration: nothing reads
+    # issuer by name, and keeping it would strand split entities on placeholder
+    # names.
+    assert "idx_issuer_name_country" not in indexes
+
+
+def test_migration_089_lei_is_unique_and_shape_checked(tmp_path: Path) -> None:
+    from pyvalue.persistence.storage.migrations import (
+        _migration_089_issuer_lei_identity,
+    )
+
+    db_path = tmp_path / "issuer-lei-constraints.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE issuer (issuer_id INTEGER PRIMARY KEY, name TEXT NOT NULL, "
+            "description TEXT, sector TEXT, industry TEXT, country TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO issuer (issuer_id, name) VALUES (1, 'A'), (2, 'B'), (3, 'C')"
+        )
+
+        _migration_089_issuer_lei_identity(conn)
+
+        lei = "5493000BD5GJNUDIUG10"
+        conn.execute("UPDATE issuer SET lei = ? WHERE issuer_id = 1", (lei,))
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("UPDATE issuer SET lei = ? WHERE issuer_id = 2", (lei,))
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "UPDATE issuer SET lei = '5493000BD5GJNUDIUG' WHERE issuer_id = 2"
+            )
+        # NULL stays valid and repeatable: it is the state of ~74% of issuers.
+        conn.execute("UPDATE issuer SET lei = NULL WHERE issuer_id = 2")
+        conn.execute("UPDATE issuer SET lei = NULL WHERE issuer_id = 3")
+
+
+def test_migration_089_is_idempotent(tmp_path: Path) -> None:
+    from pyvalue.persistence.storage.migrations import (
+        _migration_089_issuer_lei_identity,
+    )
+
+    db_path = tmp_path / "issuer-lei-idempotent.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE issuer (issuer_id INTEGER PRIMARY KEY, name TEXT NOT NULL, "
+            "description TEXT, sector TEXT, industry TEXT, country TEXT)"
+        )
+        conn.execute("INSERT INTO issuer (issuer_id, name) VALUES (1, 'A')")
+
+        _migration_089_issuer_lei_identity(conn)
+        conn.execute(
+            "UPDATE issuer SET lei = '5493000BD5GJNUDIUG10' WHERE issuer_id = 1"
+        )
+        _migration_089_issuer_lei_identity(conn)
+
+        stored = conn.execute("SELECT lei FROM issuer WHERE issuer_id = 1").fetchone()[
+            0
+        ]
+
+    # A second pass must not rebuild the table and wipe a derived LEI.
+    assert stored == "5493000BD5GJNUDIUG10"

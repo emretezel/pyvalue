@@ -65,6 +65,10 @@ from .fundamentals import (
     FundamentalsRepository,
 )
 from .listing_status import SecurityListingStatusRepository  # noqa: F401
+from .issuer_identity import (  # noqa: F401
+    IssuerIdentityRepository,
+    IssuerReconciliationResult,
+)
 from .fetch_state import (
     FundamentalsFetchStateRepository,
     MarketDataFetchStateRepository,

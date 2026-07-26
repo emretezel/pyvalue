@@ -55,6 +55,7 @@ from .ingest import (
     EODHDFundamentalsClient,  # noqa: F401
     as_completed,  # noqa: F401
     cmd_ingest_fundamentals_stage,  # noqa: F401
+    cmd_reconcile_issuer_identity,
     cmd_reconcile_listing_status,
     cmd_report_fundamentals_progress,  # noqa: F401
     cmd_report_ingest_progress,
@@ -145,6 +146,7 @@ __all__ = [
     "_report_skipped_no_currency",
     "cmd_refresh_supported_exchanges",
     "cmd_refresh_supported_tickers",
+    "cmd_reconcile_issuer_identity",
     "cmd_reconcile_listing_status",
     "cmd_report_ingest_progress",
     "_plan_market_data_stage_run",

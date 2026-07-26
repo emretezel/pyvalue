@@ -27,6 +27,7 @@ from pyvalue.persistence.storage import (
     FundamentalsUpdate,
     FundamentalsRepository,
     FundamentalsFetchStateRepository,
+    IssuerIdentityRepository,
     SecurityListingStatusRepository,
     SupportedTicker,
     SupportedTickerRepository,
@@ -133,6 +134,33 @@ def cmd_reconcile_listing_status(
                 f"  {status_value}: {before.get(status_value, 0)}"
                 f" -> {after.get(status_value, 0)}"
             )
+    return 0
+
+
+def cmd_reconcile_issuer_identity(database: str) -> int:
+    """Re-derive which listings belong to the same legal entity.
+
+    Deliberately unscoped: grouping is only as good as the set it sees, so a
+    partial view would split entities rather than merge them. The run reads the
+    ISIN and LEI already stored on each listing -- no payloads, no provider
+    calls -- and is safe to repeat, since a catalog already matching the derived
+    shape issues no writes.
+    """
+
+    db_path = _resolve_database_path(database)
+    result = IssuerIdentityRepository(str(db_path)).reconcile()
+
+    print("Issuer-identity reconciliation")
+    print(f"Database: {db_path}")
+    print(f"Listings considered: {result.listings_considered}")
+    print(f"Issuers before: {result.issuers_before}")
+    print(f"Issuers after: {result.issuers_after}")
+    print(f"Issuer rows collapsed: {result.issuers_removed}")
+    print(f"Multi-issuer groups merged: {result.groups_merged}")
+    print(f"Listings repointed: {result.listings_repointed}")
+    print(f"LEIs assigned: {result.leis_assigned}")
+    if result.groups_merged == 0:
+        print("Issuer identity already matches the stored evidence.")
     return 0
 
 

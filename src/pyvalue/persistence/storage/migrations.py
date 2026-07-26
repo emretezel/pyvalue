@@ -6954,12 +6954,6 @@ def _migration_064_drop_orphan_issuers_tighten_name(
     )
     conn.execute("DROP TABLE issuer")
     conn.execute("ALTER TABLE issuer__new RENAME TO issuer")
-    conn.execute(
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_issuer_name_country
-        ON issuer(name, country)
-        """
-    )
 
     if securities_view_existed:
         _create_securities_view(conn)
@@ -8967,6 +8961,125 @@ def _migration_088_listing_isin_lei_and_status_check(
         )
 
 
+def _migration_089_issuer_lei_identity(conn: sqlite3.Connection) -> None:
+    """Give ``issuer`` an LEI natural key so it can model a company.
+
+    ``issuer`` was supposed to be one row per company and never was. Its identity
+    is ``(name, country)``, ``country`` is NULL on 65,752 of 70,564 rows, and
+    SQLite treats NULLs as distinct in a UNIQUE index -- so in practice each
+    listing got its own issuer. The 154 QARP passers mapped to 151 issuers:
+    Dunelm's London line and its ADR were different companies, as were LVMH's
+    Paris and OTC lines.
+
+    The LEI (ISO 17442) is the natural key that fixes this: globally unique per
+    legal entity, stable, and already carried on ``listing.lei`` since migration
+    088.
+
+    ``UNIQUE (name, country)`` goes at the same time, and not as a side effect.
+    It was migration 060's attempt at the same job and was always an
+    approximation -- two distinct legal entities can share a name and a country.
+    Treating it as identity is also what caused the damage this phase repairs:
+    the runtime rename path *merged* issuers whenever a provider restyled one
+    listing's name onto another's, fusing unrelated companies into shared parent
+    rows. With grouping now strictly identifier-based the two rules conflict --
+    splitting a wrongly-fused parent gives one half a fresh row wanting the same
+    name, which the index refuses, stranding it with a placeholder (2,862 of
+    them on the live catalog).
+
+    It is dropped rather than demoted to a plain index because nothing reads
+    ``issuer`` by name. Its only consumers were collision probes that existed
+    solely to avoid violating it, and they go away with it.
+
+    **Schema only -- the column ships NULL everywhere.** Populating it requires
+    first *grouping* listings into entities, and grouping is a derivation over
+    evidence that keeps improving as ISIN and LEI coverage grows. Encoding it as
+    frozen migration SQL would duplicate the rule and immediately start drifting
+    from it (migration 078 did exactly that with listing classification, and the
+    duplicate is still there). ``reconcile-issuer-identity`` owns the derivation,
+    the same way ``reconcile-listing-status`` owns classification.
+
+    Leaving the column NULL is also what makes the rebuild safe: several issuer
+    rows currently share one company's LEI, so writing the value here would
+    violate the new UNIQUE constraint before any merge had happened.
+
+    Idempotent via the DDL probe.
+    """
+
+    if not _table_exists(conn, "issuer"):
+        return
+    columns = _table_columns(conn, "issuer")
+    if not {"issuer_id", "name"} <= columns:
+        # Minimal schema from an isolated migration test.
+        return
+    ddl_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='issuer'"
+    ).fetchone()
+    if ddl_row is None or "lei" in str(ddl_row[0]):
+        return
+
+    lei_check = _LEI_FORMAT_CHECK.format(col="lei")
+
+    # ``issuer`` is read by the compat views and is ``listing``'s FK parent; the
+    # framework's foreign_keys=OFF window covers the rebuild, but the views must
+    # be dropped and recreated around it (matching migrations 064 and 069).
+    securities_view_existed = _view_exists(conn, "securities")
+    catalog_view_existed = _view_exists(conn, "provider_listing_catalog")
+    supported_view_existed = _view_exists(conn, "supported_tickers")
+    primary_view_existed = _view_exists(conn, "primary_provider_listing_catalog")
+    if primary_view_existed:
+        conn.execute("DROP VIEW primary_provider_listing_catalog")
+    if supported_view_existed:
+        conn.execute("DROP VIEW supported_tickers")
+    if catalog_view_existed:
+        conn.execute("DROP VIEW provider_listing_catalog")
+    if securities_view_existed:
+        conn.execute("DROP VIEW securities")
+
+    conn.execute("DROP INDEX IF EXISTS idx_issuer_name_country")
+    conn.execute(
+        f"""
+        CREATE TABLE issuer__new (
+            issuer_id INTEGER PRIMARY KEY,
+            lei TEXT UNIQUE
+                CHECK (lei IS NULL OR ({lei_check})),
+            name TEXT NOT NULL,
+            description TEXT,
+            sector TEXT,
+            industry TEXT,
+            country TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO issuer__new (
+            issuer_id, lei, name, description, sector, industry, country
+        )
+        SELECT issuer_id, NULL, name, description, sector, industry, country
+        FROM issuer
+        """
+    )
+    conn.execute("DROP TABLE issuer")
+    conn.execute("ALTER TABLE issuer__new RENAME TO issuer")
+    # ``idx_issuer_name_country`` is deliberately NOT recreated -- see the
+    # docstring. Nothing reads ``issuer`` by name once the collision probes go.
+
+    if securities_view_existed:
+        _create_securities_view(conn)
+    if catalog_view_existed:
+        _create_provider_listing_catalog_view(conn)
+    if supported_view_existed:
+        _create_supported_tickers_view(conn)
+    if primary_view_existed:
+        _create_primary_provider_listing_catalog_view(conn)
+
+    fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if fk_violations:
+        raise RuntimeError(
+            f"migration 089 left foreign key violations: {fk_violations!r}"
+        )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -9056,6 +9169,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_086_purge_nonpositive_count_facts,
     _migration_087_purge_legacy_roic_metric_rows,
     _migration_088_listing_isin_lei_and_status_check,
+    _migration_089_issuer_lei_identity,
 ]
 
 

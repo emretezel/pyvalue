@@ -59,8 +59,15 @@ EODHD primary-vs-secondary classification is stored as
 `primary_listing_status`; unknown listings remain eligible in primary-only
 scopes, while secondary listings are excluded. It is written only by
 `ingest-fundamentals` (step 5 below) and `reconcile-listing-status`; every other
-command reads it without reconciling. Migration 078 backfills any leftover
-`unknown` listing that already has stored fundamentals.
+command reads it without reconciling. The rule is an ordered set over several
+EODHD fields plus the ISIN peer group (`pyvalue.universe.listing_classification`),
+not a single vendor field — see `docs/providers/eodhd.md`.
+
+The listing also carries the two identifiers that establish *what* it is:
+`isin` (the security, from the catalog refresh) and `lei` (the legal entity,
+from the fundamentals payload). `reconcile-issuer-identity` groups listings by
+those onto shared `issuer` rows, so `issuer` models a company rather than, as
+before, roughly one row per listing.
 
 ### `provider_listing`
 

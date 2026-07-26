@@ -158,14 +158,12 @@ whose listing is absent (creating one would require writing the NOT NULL
   Shape normalization lives in `pyvalue.identifiers` (`shaped_isin`,
   `shaped_lei`) and mirrors the SQL CHECK predicates in `migrations.py`; keep
   the two in step.
-- **`lei` has no runtime writer yet.** Migration 088 seeded it from stored
-  payloads and nothing refreshes it, so a listing catalogued after that
-  migration carries NULL until the issuer-identity reconcile command lands and
-  takes ownership (the same relationship `reconcile-listing-status` has with
-  `primary_listing_status`). The column ships now only because it shares
-  migration 088's table rebuild — re-running that rebuild on the live database
-  costs ~5.5 minutes and a full copy of a 43 GB file, so doing it twice for two
-  adjacent columns would be waste, not caution.
+- `lei` is written by `ingest-fundamentals` from `General.LEI`, which is its only
+  source — the provider's symbol list does not carry one, so unlike `isin` the
+  catalog refresh cannot supply it. Migration 088 seeded the column from payloads
+  already stored; ingest keeps it current for everything since, so issuer
+  identity does not decay as the catalog grows. `reconcile-issuer-identity`
+  consumes it and is the sole writer of `issuer.lei`.
 - `listing.currency` is the only persisted listing-currency truth. It is a
   quote unit and is not collapsed to base currency at storage time. It is
   written solely by `refresh-supported-tickers`; fundamentals ingestion reads
