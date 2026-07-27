@@ -255,6 +255,11 @@ Both derived values are produced together because they are not independent:
 grouping names a merged issuer after its *primary* listing, so classifying
 without regrouping would leave issuer names stale.
 
+The reach-back is cheap because the neighbourhood is small — measured at **0.12s
+per 25-payload batch** on the live catalog, or roughly 6 minutes spread across a
+full bootstrap's ~2,900 batches. Groups average 1.44 listings per ISIN and 74%
+are singletons, so most batches expand barely at all.
+
 `reconcile-listing-status` and `reconcile-issuer-identity` remain as **repair
 tools** — for a database that got into a bad state some other way, or the
 one-off pass after a migration. They run the same operation, differing only in
