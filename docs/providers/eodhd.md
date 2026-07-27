@@ -238,23 +238,39 @@ market data, metrics, refresh state). Exclusion is purely scope-side, so a
 listing that later flips back to primary re-enters those scopes with its
 history intact.
 
-R3 and R4 need a listing's ISIN peer group, which `ingest-fundamentals` cannot
-see — it holds one payload at a time. Ingest therefore applies only R1 and R2
-and writes `unknown` for anything they cannot settle, deliberately never
-guessing: an unsettled listing stays eligible until it is reconciled, rather
-than being wrongly excluded. Run the full rule set with:
+**`ingest-fundamentals` applies the whole rule set and leaves the result final.**
+It also settles issuer identity in the same pass, so a bootstrap needs no
+reconcile at all.
+
+R3 and R4 need a listing's ISIN peer group, which one payload cannot supply. So
+each write batch re-evaluates its whole *neighbourhood* — every listing sharing
+an ISIN or an issuer with one that arrived — rather than only the listings in
+the batch. That reach-back is what makes ingestion order irrelevant: `LULU.US`
+and `33L.F` both publish `PrimaryTicker` naming themselves, so whichever lands
+second has to demote the other. It runs on the same connection as the payload
+write, so payloads, statuses and the issuer partition commit or roll back
+together, and an interrupted ingest is still correct as far as it got.
+
+Both derived values are produced together because they are not independent:
+grouping names a merged issuer after its *primary* listing, so classifying
+without regrouping would leave issuer names stale.
+
+`reconcile-listing-status` and `reconcile-issuer-identity` remain as **repair
+tools** — for a database that got into a bad state some other way, or the
+one-off pass after a migration. They run the same operation, differing only in
+scope and which half of the result they emphasise:
 
 ```bash
 pyvalue reconcile-listing-status --provider EODHD --all-supported
 ```
 
-The command reports the resulting status counts, which rule decided each
-listing, and the before/after distribution across the whole database — a rule
-change moves tens of thousands of rows, and the rule breakdown is how you check
-the move without re-deriving it. A narrow `--symbols` or `--exchange-codes` run
-is still correct: the scope expands to whole ISIN groups for read-only context,
-so the peer rules see the same evidence they would at full scope, while only the
-requested listings are written.
+Each reports the resulting status counts, which rule decided each listing, how
+many rows actually changed, what happened to issuer identity, and the
+before/after distribution across the database. On a catalog that ingest has kept
+current they report zero changes — that is the check that ingest is doing its
+job. A narrow `--symbols` or `--exchange-codes` run is still correct: the scope
+expands to whole peer groups first, so the rules see the same evidence they
+would at full scope.
 
 Important fundamentals options:
 

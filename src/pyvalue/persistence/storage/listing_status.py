@@ -130,24 +130,31 @@ class SecurityListingStatusRepository(SQLiteStore):
         if not rows:
             return 0
         payload = [
-            (row.status.value, int(row.security_id))
+            (row.status.value, int(row.security_id), row.status.value)
             for row in rows
             if row.provider_symbol and row.security_id
         ]
         if not payload:
             return 0
 
+        # Guarded so a settled catalog issues no writes. Without it every pass
+        # rewrote every row it looked at -- ~76k pointless updates per run, and
+        # a routine re-ingest would churn the whole universe.
         sql = """
             UPDATE listing
             SET primary_listing_status = ?
-            WHERE listing_id = ?
+            WHERE listing_id = ? AND primary_listing_status != ?
         """
+        # Returns rows actually *changed*, not statements issued: the guard
+        # above means a settled catalog runs every statement to no effect, and
+        # "how many listings were reclassified" is the number worth reporting.
+        # sqlite3 sums rowcount across an executemany.
         if connection is not None:
-            connection.executemany(sql, payload)
-            return len(payload)
+            cursor = connection.executemany(sql, payload)
+            return max(cursor.rowcount, 0)
         with self._connect() as conn:
-            conn.executemany(sql, payload)
-        return len(payload)
+            cursor = conn.executemany(sql, payload)
+            return max(cursor.rowcount, 0)
 
     def status_distribution(self) -> Dict[str, int]:
         """Return the stored classification counts, for before/after reporting."""

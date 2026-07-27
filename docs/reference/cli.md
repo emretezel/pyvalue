@@ -182,12 +182,13 @@ Notes:
 - this command does not download fundamentals or market data
 - it reads existing `fundamentals_raw` payloads and writes
   `listing.primary_listing_status`
-- this is the only command (besides `ingest-fundamentals`, which reclassifies
-  as it stores each raw payload) that writes `listing.primary_listing_status`;
-  run it to re-derive classification on demand, e.g. after a rule change
-- ingest sees one payload at a time and so applies only the per-listing rules,
-  leaving anything needing an ISIN peer as `unknown`. This command holds the
-  whole graph and applies every rule, which is why it is the authority
+- a **repair tool**, not part of the normal flow: `ingest-fundamentals` runs the
+  same pass per write batch and leaves both derived values final. On a healthy
+  catalog this reports zero changes, which is how you confirm that
+- it settles issuer identity too — the two cannot be run independently, since
+  grouping names a merged issuer after its primary listing
+- run it after a rule change, or to repair a database that drifted some other
+  way
 - a narrow `--symbols`/`--exchange-codes` run is still correct: the scope
   expands to whole ISIN and LEI groups for read-only context, so the peer rules
   see what a full run would, while only the requested listings are written

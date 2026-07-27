@@ -76,7 +76,14 @@ class IssuerIdentityRepository(SQLiteStore):
         scans, which is why it costs a fraction of the ~780s the classification
         reconcile spends over the same payloads.
 
-        The payload is reached by a scalar subquery rather than a join, so one
+        ``entity_name`` comes from the payload too, falling back to the issuer's
+        stored name only when a listing has none. Reading it from ``issuer.name``
+        was order-dependent: a merge deletes the losing row, so the name a group
+        settled on depended on which listing was ingested first and could never
+        recover afterwards. Sourcing it from evidence makes the choice a pure
+        function of the payloads, like every other derived value here.
+
+        The payload is reached by scalar subqueries rather than a join, so one
         listing yields exactly one row. A join would fan out if a listing ever
         carried two provider mappings, silently duplicating it inside a group.
         It also keeps listings with no stored payload: those still have an ISIN
@@ -97,7 +104,17 @@ class IssuerIdentityRepository(SQLiteStore):
                     WHERE pl.listing_id = l.listing_id
                     LIMIT 1
                 ) AS lei,
-                i.name AS entity_name,
+                COALESCE(
+                    (
+                        SELECT json_extract(fr.data, '$.General.Name')
+                        FROM provider_listing pl
+                        JOIN fundamentals_raw fr
+                          ON fr.provider_listing_id = pl.provider_listing_id
+                        WHERE pl.listing_id = l.listing_id
+                        LIMIT 1
+                    ),
+                    i.name
+                ) AS entity_name,
                 l.primary_listing_status AS status
             FROM listing l
             JOIN issuer i ON i.issuer_id = l.issuer_id

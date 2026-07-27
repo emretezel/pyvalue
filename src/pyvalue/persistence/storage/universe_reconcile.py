@@ -215,6 +215,7 @@ class ReconcileResult:
 
     listings_considered: int
     listing_records: List[SecurityListingStatusRecord]
+    statuses_changed: int
     groups_merged: int
     listings_repointed: int
     issuers_created: int
@@ -271,7 +272,7 @@ class UniverseReconciler:
 
         neighbourhood = resolve_neighbourhood(conn, listing_ids)
         if not neighbourhood:
-            return ReconcileResult(0, [], 0, 0, 0, 0, 0)
+            return ReconcileResult(0, [], 0, 0, 0, 0, 0, 0)
 
         # Issuers captured *before* any repoint: the rows a listing could
         # vacate, and so the only ones a scoped orphan sweep must consider.
@@ -299,7 +300,7 @@ class UniverseReconciler:
             # runs and a test can assert on it.
             for item in sorted(evidence, key=lambda ev: ev.provider_symbol)
         ]
-        self._status_repo.upsert_many(records, connection=conn)
+        statuses_changed = self._status_repo.upsert_many(records, connection=conn)
 
         # Identity reads the statuses back, so it must follow the write above.
         identities = self._issuer_repo.load_identities(conn, neighbourhood)
@@ -309,6 +310,7 @@ class UniverseReconciler:
         return ReconcileResult(
             listings_considered=len(neighbourhood),
             listing_records=records,
+            statuses_changed=statuses_changed,
             groups_merged=applied.groups_merged,
             listings_repointed=applied.listings_repointed,
             issuers_created=applied.issuers_created,

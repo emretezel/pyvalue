@@ -2352,6 +2352,10 @@ def test_cmd_reconcile_listing_status_backfills_from_raw_only(
         "  no_evidence: 1",
         "  primary_ticker_elsewhere: 1",
         "  self_declared_primary: 1",
+        # Rows actually changed, not statements issued: the writes are guarded,
+        # so a settled catalog reports 0 here. Two of the three listings started
+        # 'unknown' and moved.
+        "Listings reclassified: 2",
         # The same pass settles issuer identity: grouping names a merged issuer
         # after its primary listing, so the two cannot be run independently.
         # Nothing to merge in this fixture -- the three listings share no

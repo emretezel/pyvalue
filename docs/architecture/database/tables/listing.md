@@ -181,12 +181,14 @@ whose listing is absent (creating one would require writing the NOT NULL
   listing, and ~8,900 listings on domestic exchanges with no EODHD
   `PrimaryTicker` coverage rely on it to stay in the universe.
 - `primary_listing_status` is written only by `ingest-fundamentals` (as it
-  stores each raw payload) and `reconcile-listing-status`; every other command
-  reads it. The two write different amounts of the rule: ingest sees one payload
-  and can apply only the per-listing rules, leaving anything else `unknown`;
-  reconcile holds the ISIN peer graph and applies all six. The rule itself lives
-  in `pyvalue.universe.listing_classification` — a pure module both callers
-  share, so there is one definition regardless of which path wrote the row. A flip to `secondary` changes nothing but this column -- the
+  stores each raw payload) and the two reconcile commands; every other command
+  reads it. All three go through one orchestration
+  (`storage/universe_reconcile.py`) over one rule set
+  (`pyvalue.universe.listing_classification`), differing only in scope — so
+  there is no second implementation to drift. Ingest re-evaluates each batch's
+  whole neighbourhood, not just the listings that arrived, which is what makes
+  the result independent of ingestion order. The write is guarded, so a settled
+  catalog issues no updates. A flip to `secondary` changes nothing but this column -- the
   listing keeps its facts/metrics/market-data and is excluded from universe
   work solely by the primary-only scope filters. Migration 078 is the one-time
   backfill that resolved any leftover `unknown` listing with stored

@@ -151,6 +151,7 @@ def cmd_reconcile_listing_status(
 def _print_identity_changes(result: ReconcileResult) -> None:
     """Report what the same pass did to issuer identity."""
 
+    print(f"Listings reclassified: {result.statuses_changed}")
     print("Issuer identity:")
     print(f"  groups merged: {result.groups_merged}")
     print(f"  listings repointed: {result.listings_repointed}")
