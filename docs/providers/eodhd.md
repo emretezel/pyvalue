@@ -110,15 +110,28 @@ listing quote unit. Tickers whose payload currency is absent or malformed
 (anything other than three uppercase ASCII letters, e.g. the `'Unknown'`
 placeholder) are skipped and reported in the refresh warning output.
 
-The refresh also stores the symbol list's `Isin` field on `listing.isin`. This
-is the identifier primary-listing classification uses to group cross-listings of
-one security, and `exchange-symbol-list` carries it for listings whose
-fundamentals payload omits it — which makes the catalog its better source, not a
-redundant one. Unlike currency, a missing or malformed ISIN does not skip the
-ticker: `listing.isin` is nullable and absence costs only classification
-precision. A later refresh may correct a stored ISIN but never blanks one, since
-a payload missing the field is far more likely to be a provider gap than a
-genuine retraction.
+The refresh also stores the symbol list's `Isin` field on `listing.isin` — the
+identifier primary-listing classification uses to group cross-listings of one
+security.
+
+**It is a second source, not a better one.** `exchange-symbol-list` does publish
+`Isin` (74.4% of WAR tickers, 66.0% of US), but largely for the same listings
+whose fundamentals payload already carries it. Measured on the 2026-07-27
+catalog refresh, coverage moved 53,500 → 53,558 — **58 listings**. `ITX.WAR`
+illustrates the gap that remains: both sources return no ISIN for it, so nothing
+links it to `ITX.MC` and it stays classified as a separate primary listing.
+
+The write is still worth having: it covers listings that have no stored payload
+at all, and it keeps the identifier current without waiting for an ingest. But
+it does not rescue the ~22,600 listings that have no ISIN anywhere — closing
+that gap needs evidence pyvalue does not ingest, such as the Search API's
+`isPrimary` flag.
+
+Unlike currency, a missing or malformed ISIN does not skip the ticker:
+`listing.isin` is nullable and absence costs only classification precision. A
+later refresh may correct a stored ISIN but never blanks one, since a payload
+missing the field is far more likely to be a provider gap than a genuine
+retraction.
 Single-symbol fundamentals ingestion uses existing catalog
 currency when one is already present and otherwise leaves listing currency
 unset; it does not copy `General.CurrencyCode` from the raw payload into catalog
