@@ -264,10 +264,10 @@ Four of those additions are known-bad rows: `0HS2` (Cadence), `0J8P` (IDEXX),
 with **no ISIN**, so R3 cannot reach them and the venue rule was the only thing
 holding them out. All four are confirmed false positives in
 `docs/research/qarp-passers-independent-verification-2026-07.md`, caused by a
-separate open defect the venue rule was masking rather than fixing:
-`src/pyvalue/marketdata/eodhd.py` applies the GBX subunit hint to the USD-quoted
-international order book, storing those prices ~100x too low. Fixing that is its
-own task; it is not a classification problem.
+separate defect the venue rule was masking rather than fixing:
+`src/pyvalue/marketdata/eodhd.py` applied the GBX subunit hint to the USD-quoted
+international order book, storing those prices ~100x too low. That was never a
+classification problem, and it is now **fixed** — see *Price currency* below.
 
 `TSMC34.SA`, the fifth false positive from the same audit, does **not** return:
 its payload carries an explicit `HomeCategory: BDR`, so R1 demotes it and always
@@ -508,6 +508,29 @@ Important market-data options:
 
 Market cap is not stored; it is computed on demand as the latest share-count fact
 x the latest `market_data` price (`metrics.utils.market_cap_money`).
+
+### Price currency
+
+**Neither EOD endpoint states a currency.** `/api/eod` and
+`/api/eod-bulk-last-day` both return OHLCV plus a date and nothing more —
+verified against the live API. The quote unit comes from
+`exchange-symbol-list`, which gives it per listing (`"Currency": "USD"` for
+`0HS2.LSE`, Cadence Design Systems' London line), and pyvalue stores it in
+`listing.currency`.
+
+That column is therefore the **sole** source of a price's currency. The provider
+type `PriceQuote` has no currency field, and `prepare_price_data` takes the
+listing currency as a required argument with no fallback, so the collapse of a
+subunit quote (`GBX` -> GBP) is driven entirely by the declared code.
+
+This replaced a rule that derived the currency from the exchange suffix and the
+price magnitude (`LSE` + `price > 100` implied pence). It was wrong for
+two-thirds of London — the live catalog holds 2,467 `GBX` listings against
+2,253 `USD`, 1,135 `EUR`, 912 `GBP`, 212 `SEK` and a long tail — and, being
+keyed on magnitude, it also made a single listing's stored series jump 100x
+whenever its quote crossed 100. Prices ingested before the fix remain scaled
+wrongly until those exchanges are re-fetched; re-run `update-market-data` for
+`LSE`, `JSE` and `TA`, then recompute their metrics.
 
 ## EODHD-Oriented Metrics
 

@@ -12,28 +12,24 @@ from typing import Dict, Optional
 
 import requests
 
-from pyvalue.currency import raw_currency_code
-from pyvalue.marketdata.base import MarketDataProvider, PriceData
+from pyvalue.marketdata.base import MarketDataProvider, PriceQuote
 
 LOGGER = logging.getLogger(__name__)
 
 API_URL = "https://eodhd.com/api/eod"
 BULK_LAST_DAY_URL = "https://eodhd.com/api/eod-bulk-last-day"
 SINGLE_SYMBOL_LOOKBACK_DAYS = 30
-EXCHANGE_SUBUNIT_HINTS = {
-    "JSE": "ZAC",
-    "LON": "GBX",
-    "LSE": "GBX",
-    "TA": "ILA",
-    "TASE": "ILA",
-    "XJSE": "ZAC",
-    "XLON": "GBX",
-    "XTAE": "ILA",
-}
 
 
 class EODHDProvider(MarketDataProvider):
-    """Fetch latest EOD price data from the EODHD API."""
+    """Fetch latest EOD price data from the EODHD API.
+
+    Reports the number and the date the feed returned, and nothing else. The
+    quote currency is *not* this class's to determine: the EOD endpoints carry
+    no currency field, and the quote unit belongs to the listing
+    (``listing.currency``), which the caller already holds. See
+    :class:`~pyvalue.marketdata.base.PriceQuote`.
+    """
 
     def __init__(
         self, api_key: str, session: Optional[requests.Session] = None
@@ -43,7 +39,7 @@ class EODHDProvider(MarketDataProvider):
         self.api_key = api_key
         self.session = session or requests.Session()
 
-    def latest_price(self, symbol: str) -> PriceData:
+    def latest_price(self, symbol: str) -> PriceQuote:
         ticker = self._format_symbol(symbol)
         params = {
             "api_token": self.api_key,
@@ -58,9 +54,9 @@ class EODHDProvider(MarketDataProvider):
         payload = response.json()
         if not isinstance(payload, list) or not payload:
             raise ValueError(f"Unexpected EODHD response for {symbol}: {payload}")
-        return self._price_data_from_entry(symbol.upper(), payload[-1], ticker)
+        return self._quote_from_entry(symbol.upper(), payload[-1])
 
-    def latest_prices_for_exchange(self, exchange_code: str) -> Dict[str, PriceData]:
+    def latest_prices_for_exchange(self, exchange_code: str) -> Dict[str, PriceQuote]:
         exchange_norm = exchange_code.strip().upper()
         params = {"api_token": self.api_key, "fmt": "json"}
         url = f"{BULK_LAST_DAY_URL}/{exchange_norm}"
@@ -71,7 +67,7 @@ class EODHDProvider(MarketDataProvider):
             raise ValueError(
                 f"Unexpected EODHD bulk response for {exchange_code}: {payload}"
             )
-        prices: Dict[str, PriceData] = {}
+        prices: Dict[str, PriceQuote] = {}
         for entry in payload:
             if not isinstance(entry, dict):
                 continue
@@ -88,9 +84,7 @@ class EODHDProvider(MarketDataProvider):
                 continue
             symbol = self._format_bulk_symbol(code, exchange_norm)
             try:
-                prices[symbol] = self._price_data_from_entry(
-                    symbol, entry, exchange_norm
-                )
+                prices[symbol] = self._quote_from_entry(symbol, entry)
             except ValueError:
                 LOGGER.warning(
                     "Skipping bulk market data row without usable price for %s",
@@ -109,12 +103,18 @@ class EODHDProvider(MarketDataProvider):
             return normalized
         return f"{normalized}.{exchange_code}"
 
-    def _price_data_from_entry(
+    def _quote_from_entry(
         self,
         symbol: str,
         entry: Mapping[str, object],
-        exchange_hint: Optional[str] = None,
-    ) -> PriceData:
+    ) -> PriceQuote:
+        """Parse one EOD row into a :class:`PriceQuote`.
+
+        Reads only the number, the date and the volume. No currency is read or
+        derived: both EOD endpoints omit the field entirely, and the quote unit
+        is the listing's, resolved by the caller from ``listing.currency``.
+        """
+
         price = None
         for key in ("Close", "close", "adjusted_close", "Adjusted_Close", "price"):
             price = self._extract_float(entry, key)
@@ -124,26 +124,17 @@ class EODHDProvider(MarketDataProvider):
             raise ValueError(
                 f"Missing Close price in EODHD response for {symbol}: {entry}"
             )
-        currency = raw_currency_code(self._extract_text(entry, "currency", "Currency"))
-        suffix = exchange_hint or (symbol.split(".")[-1] if "." in symbol else "")
-        if "." in suffix:
-            suffix = suffix.split(".")[-1]
-        suffix = suffix.upper()
-        subunit_hint = EXCHANGE_SUBUNIT_HINTS.get(suffix)
-        if subunit_hint and currency is None and price and price > 100:
-            currency = subunit_hint
         as_of = self._extract_text(entry, "date", "Date")
         if as_of is None:
             raise ValueError(f"Missing date in EODHD response for {symbol}: {entry}")
         volume = self._extract_int(entry, "Volume")
         if volume is None:
             volume = self._extract_int(entry, "volume")
-        return PriceData(
+        return PriceQuote(
             symbol=symbol.upper(),
             price=price,
             as_of=as_of,
             volume=volume,
-            currency=currency,
         )
 
     def _extract_float(self, entry: Mapping[str, object], key: str) -> Optional[float]:
@@ -184,7 +175,7 @@ class EODHDProvider(MarketDataProvider):
                 continue
             text = str(value).strip()
             if text:
-                return text.upper() if key.lower() == "currency" else text
+                return text
         return None
 
 

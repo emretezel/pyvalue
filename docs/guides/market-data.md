@@ -12,8 +12,16 @@ This covers:
 - bulk quote refreshes
 
 Storage invariants:
-- `listing.currency` is the authoritative listing quote unit and may be a
-  subunit such as `GBX`, `ZAC`, or `ILA`
+- **`listing.currency` is the only source of a price's currency.** A price row
+  is a number and a date; its unit is a property of the listing, never of the
+  price row, the venue, or the price magnitude. The provider reports what the
+  feed returned and nothing else — its `PriceQuote` type has no currency field
+  at all, so no parser can derive one. `prepare_price_data` requires the listing
+  currency as a mandatory argument: there is no hint, no fallback and no default.
+- `listing.currency` may be a subunit such as `GBX`, `ZAC`, or `ILA`; EODHD
+  states the quote unit per listing in `exchange-symbol-list`, and that code is
+  stored verbatim. It is not inferable from the exchange — London alone lists
+  2,467 `GBX` lines against 2,253 `USD`, 1,135 `EUR` and 912 `GBP`.
 - `market_data.price` is stored in the **major** currency
   (`canonical_trading_currency(listing.currency)`, e.g. GBP for a GBX listing).
   Subunits never cross the data boundary: an incoming pence/cent/agorot quote is

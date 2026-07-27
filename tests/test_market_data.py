@@ -4,62 +4,24 @@ Author: Emre Tezel
 """
 
 from pathlib import Path
-import json as json_lib
 
 import pytest
-import requests
 
 from pyvalue.config import Config
 from pyvalue.marketdata.eodhd import EODHDProvider
-from pyvalue.marketdata.base import MarketDataUpdate, PriceData
-from pyvalue.marketdata.service import MarketDataService
+from pyvalue.marketdata.base import MarketDataUpdate, PriceQuote
+from pyvalue.marketdata.service import MarketDataService, prepare_price_data
 from pyvalue.persistence.storage import (
     MarketDataRepository,
     SupportedTickerRepository,
 )
 
-from conftest import resolve_listing_id, seed_exchange, seed_price
-
-
-class DummyEODSession(requests.Session):
-    """A stand-in ``requests.Session`` that returns a canned EODHD payload.
-
-    Subclasses the real ``requests.Session`` so it satisfies the provider's
-    ``Session`` parameter type. ``__init__`` skips the real HTTP machinery, and
-    every outgoing request is intercepted at ``request`` -- the single funnel
-    that ``get``/``post``/... delegate to -- so we return a genuine
-    ``requests.Response`` carrying the canned JSON body. Returning a real
-    ``Response`` keeps the override Liskov-compatible (so no ``type: ignore``)
-    while ``raise_for_status``/``json`` behave exactly as in production.
-    """
-
-    def __init__(self, payload: object) -> None:
-        # Deliberately do NOT call super().__init__(): we never make a real
-        # network request, so building the underlying adapters/pools is waste.
-        # The recorded calls keep ``(url, params)`` so assertions can inspect
-        # the query the provider issued.
-        self.payload = payload
-        # Each recorded call keeps the request URL and the query parameters the
-        # provider attached, so tests can assert on the issued query.
-        self.calls: list[tuple[str, dict[str, object] | None]] = []
-
-    def request(
-        self,
-        method: str | bytes,
-        url: str | bytes,
-        *args: object,
-        **kwargs: object,
-    ) -> requests.Response:
-        raw_params = kwargs.get("params")
-        # The provider only ever passes a ``dict`` (or nothing) for ``params``;
-        # narrow explicitly so the recorded type stays precise rather than
-        # widening the tuple to ``object``.
-        params = raw_params if isinstance(raw_params, dict) else None
-        self.calls.append((str(url), params))
-        response = requests.Response()
-        response.status_code = 200
-        response._content = json_lib.dumps(self.payload).encode("utf-8")
-        return response
+from conftest import (
+    DummyEODSession,
+    resolve_listing_id,
+    seed_exchange,
+    seed_price,
+)
 
 
 class DummyConfig(Config):
@@ -124,13 +86,12 @@ def test_eodhd_provider_parses_response() -> None:
 
 def test_market_data_service_persists_prices(tmp_path: Path) -> None:
     class DummyProvider:
-        def latest_price(self, symbol: str) -> PriceData:
-            return PriceData(
+        def latest_price(self, symbol: str) -> PriceQuote:
+            return PriceQuote(
                 symbol=symbol,
                 price=150.0,
                 as_of="2024-03-02",
                 volume=500,
-                currency=None,
             )
 
     db_path = tmp_path / "data.db"
@@ -144,7 +105,7 @@ def test_market_data_service_persists_prices(tmp_path: Path) -> None:
 
     # Mirror the live update-market-data path: prepare the quoted price, build a
     # natural-identity MarketDataUpdate, and persist the batch.
-    prepared = service.prepare_price_data("AAPL.US", service.provider.latest_price(""))
+    prepared = prepare_price_data("AAPL.US", service.provider.latest_price(""), "USD")
     assert prepared.price == 150.0
     service.persist_updates(
         [
@@ -189,15 +150,15 @@ def test_market_data_service_stores_major_price_for_subunit_quote(
 ) -> None:
     # A subunit-quoted listing (GBX/ZAC/ILA) must be stored in its MAJOR
     # currency: the raw quote price is divided by 100 and the snapshot reports
-    # the base currency, so subunits never cross the data boundary.
+    # the base currency, so subunits never cross the data boundary. The listing
+    # currency alone drives this -- the provider supplies no currency at all.
     class DummyProvider:
-        def latest_price(self, requested_symbol: str) -> PriceData:
-            return PriceData(
+        def latest_price(self, requested_symbol: str) -> PriceQuote:
+            return PriceQuote(
                 symbol=requested_symbol,
                 price=price,
                 as_of="2024-03-04",
                 volume=100,
-                currency=None,
             )
 
     db_path = tmp_path / f"{quote_currency.lower()}-market-data.db"
@@ -226,52 +187,29 @@ def test_market_data_service_stores_major_price_for_subunit_quote(
     # prepare_price_data collapses the subunit quote to its MAJOR currency; this
     # is the normalization the live update-market-data path relies on before
     # persisting, so we assert the prepared PriceData directly.
-    prepared = service.prepare_price_data(
+    prepared = prepare_price_data(
         symbol,
         service.provider.latest_price(symbol),
-        currency_hint=quote_currency,
+        quote_currency,
     )
     assert prepared.price == pytest.approx(major_price)
     assert prepared.currency == base_currency
 
 
-def test_eodhd_provider_preserves_gbx_quote_price() -> None:
-    payload = [
-        {"date": "2024-03-01", "Close": "99.0", "Volume": "1000", "currency": "GBX"},
-    ]
-    session = DummyEODSession(payload)
-    provider = EODHDProvider(api_key="demo", session=session)
-
-    data = provider.latest_price("SHEL.LSE")
-
-    assert data.price == 99.0
-    assert data.currency == "GBX"
-
-
-def test_eodhd_provider_preserves_zac_quote_price() -> None:
-    payload = [
-        {"date": "2024-03-01", "Close": "23750.0", "Volume": "1000", "currency": "ZAC"},
-    ]
-    session = DummyEODSession(payload)
-    provider = EODHDProvider(api_key="demo", session=session)
-
-    data = provider.latest_price("ABG.JSE")
-
-    assert data.price == 23750.0
-    assert data.currency == "ZAC"
-
-
-def test_eodhd_provider_infers_gbx_by_suffix_when_currency_missing() -> None:
+def test_eodhd_provider_quote_carries_no_currency() -> None:
+    # The provider parses a number and a date. It cannot name a currency --
+    # PriceQuote has no such field -- so no exchange suffix or price magnitude
+    # can make it scale the value. The quote unit is the listing's.
     payload = [
         {"date": "2024-03-01", "Close": "2783.5", "Volume": "1000"},
     ]
     session = DummyEODSession(payload)
     provider = EODHDProvider(api_key="demo", session=session)
 
-    data = provider.latest_price("SHEL.LSE")
+    quote = provider.latest_price("SHEL.LSE")
 
-    assert data.price == 2783.5
-    assert data.currency == "GBX"
+    assert quote.price == 2783.5
+    assert not hasattr(quote, "currency")
 
 
 def test_market_data_service_stores_large_price_change_without_guard(
@@ -283,13 +221,12 @@ def test_market_data_service_stores_large_price_change_without_guard(
     # large price move between refreshes is therefore stored without error
     # (previously this raised SuspiciousMarketPriceChangeError).
     class DummyProvider:
-        def latest_price(self, symbol: str) -> PriceData:
-            return PriceData(
+        def latest_price(self, symbol: str) -> PriceQuote:
+            return PriceQuote(
                 symbol=symbol,
                 price=5298.0,
                 as_of="2026-03-20",
                 volume=0,
-                currency="USD",
             )
 
     db_path = tmp_path / "no-guard.db"
@@ -307,8 +244,8 @@ def test_market_data_service_stores_large_price_change_without_guard(
         db_path=db_path, provider=DummyProvider(), config=DummyConfig()
     )
     # A large jump from the prior 12.92 to 5298.0 is persisted without error.
-    prepared = service.prepare_price_data(
-        "ATXS.US", service.provider.latest_price("ATXS.US")
+    prepared = prepare_price_data(
+        "ATXS.US", service.provider.latest_price("ATXS.US"), "USD"
     )
     assert prepared.price == 5298.0
     service.persist_updates(
@@ -348,82 +285,22 @@ def test_eodhd_provider_parses_bulk_exchange_response() -> None:
     assert data["AAA.LSE"].price == 10.5
     assert data["AAA.LSE"].as_of == "2024-03-04"
     assert data["SHEL.LSE"].price == 2783.5
-    assert data["SHEL.LSE"].currency == "GBX"
     assert session.calls[0][0].endswith("/api/eod-bulk-last-day/LSE")
 
 
-def test_market_data_service_prepare_price_data_uses_currency_hint(
-    tmp_path: Path,
-) -> None:
-    class DummyProvider:
-        def latest_price(self, symbol: str) -> PriceData:
-            return PriceData(
-                symbol=symbol,
-                price=2783.5,
-                as_of="2024-03-04",
-                volume=100,
-                currency=None,
-            )
+def test_prepare_price_data_is_decided_solely_by_the_listing_currency() -> None:
+    # The listing currency is the only input that decides scale. The identical
+    # quote -- same number, same venue suffix -- resolves two different ways
+    # purely because the two listings declare different quote units.
+    quote = PriceQuote(symbol="X.LSE", price=2783.5, as_of="2024-03-04", volume=100)
 
-    db_path = tmp_path / "hint.db"
-    _seed_listing(db_path, "SHEL.LSE", currency="GBX")
-    service = MarketDataService(
-        db_path=db_path,
-        provider=DummyProvider(),
-        config=DummyConfig(),
-    )
+    as_pence = prepare_price_data("X.LSE", quote, "GBX")
+    assert as_pence.price == pytest.approx(27.835)
+    assert as_pence.currency == "GBP"
 
-    prepared = service.prepare_price_data(
-        "SHEL.LSE",
-        PriceData(
-            symbol="SHEL.LSE",
-            price=2783.5,
-            as_of="2024-03-04",
-            volume=100,
-            currency=None,
-        ),
-        currency_hint="GBX",
-    )
-
-    # The hint says GBX (pence); the stored price is the major amount (GBP).
-    assert prepared.price == pytest.approx(27.835)
-    assert prepared.currency == "GBP"
-
-
-def test_market_data_service_prepare_price_data_uses_ila_currency_hint(
-    tmp_path: Path,
-) -> None:
-    class DummyProvider:
-        def latest_price(self, symbol: str) -> PriceData:
-            return PriceData(
-                symbol=symbol,
-                price=1234.0,
-                as_of="2024-03-04",
-                volume=100,
-                currency=None,
-            )
-
-    service = MarketDataService(
-        db_path=tmp_path / "ila-hint.db",
-        provider=DummyProvider(),
-        config=DummyConfig(),
-    )
-
-    prepared = service.prepare_price_data(
-        "BCOM.TA",
-        PriceData(
-            symbol="BCOM.TA",
-            price=1234.0,
-            as_of="2024-03-04",
-            volume=100,
-            currency=None,
-        ),
-        currency_hint="ILA",
-    )
-
-    # ILA agorot collapse to ILS major: 1234 -> 12.34.
-    assert prepared.price == pytest.approx(12.34)
-    assert prepared.currency == "ILS"
+    as_dollars = prepare_price_data("X.LSE", quote, "USD")
+    assert as_dollars.price == pytest.approx(2783.5)
+    assert as_dollars.currency == "USD"
 
 
 def _seed_price_history(db_path: Path, symbol: str, rows: dict[str, float]) -> int:

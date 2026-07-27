@@ -40,7 +40,6 @@ from conftest import (
 )
 from pyvalue.currency import MetricUnitKind
 from pyvalue.facts import RegionFactsRepository
-from pyvalue.marketdata.service import MarketDataService
 from pyvalue.metrics import REGISTRY
 from pyvalue.metrics.base import MetricCurrencyInvariantError, MetricResult
 from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS
@@ -66,7 +65,7 @@ from pyvalue.persistence.storage import (
     SupportedTickerRepository,
 )
 from pyvalue.universe import Listing
-from pyvalue.marketdata import MarketDataUpdate, PriceData
+from pyvalue.marketdata import MarketDataUpdate, PriceData, PriceQuote
 
 
 def _security_name(db_path: Path, symbol: str) -> Optional[str]:
@@ -1915,27 +1914,25 @@ def test_cmd_update_market_data_stage_uses_bulk_for_large_exchange(
 
         def latest_prices_for_exchange(
             self, exchange_code: str
-        ) -> dict[str, PriceData]:
+        ) -> dict[str, PriceQuote]:
             calls["bulk"].append(exchange_code)
             return {
-                f"U{i:03d}.US": PriceData(
+                f"U{i:03d}.US": PriceQuote(
                     symbol=f"U{i:03d}.US",
                     price=10.0 + i,
                     as_of=today,
                     volume=100 + i,
-                    currency="USD",
                 )
                 for i in range(100)
             }
 
-        def latest_price(self, symbol: str) -> PriceData | None:
+        def latest_price(self, symbol: str) -> PriceQuote | None:
             calls["symbols"].append(symbol)
-            return PriceData(
+            return PriceQuote(
                 symbol=symbol,
                 price=20.0,
                 as_of=today,
                 volume=50,
-                currency="GBP",
             )
 
     patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
@@ -2031,14 +2028,13 @@ def test_cmd_update_market_data_stage_skips_secondary_listings(
         ) -> None:
             assert api_key == "TOKEN"
 
-        def latest_price(self, symbol: str) -> PriceData | None:
+        def latest_price(self, symbol: str) -> PriceQuote | None:
             calls.append(symbol)
-            return PriceData(
+            return PriceQuote(
                 symbol=symbol,
                 price=20.0,
                 as_of=today,
                 volume=50,
-                currency="USD" if symbol.endswith(".US") else "GBP",
             )
 
     patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
@@ -2149,13 +2145,12 @@ def test_cmd_update_market_data_stage_does_not_reconcile_or_mutate_listing_statu
         ) -> None:
             assert api_key == "TOKEN"
 
-        def latest_price(self, symbol: str) -> PriceData | None:
-            return PriceData(
+        def latest_price(self, symbol: str) -> PriceQuote | None:
+            return PriceQuote(
                 symbol=symbol,
                 price=20.0,
                 as_of=today,
                 volume=50,
-                currency="GBP",
             )
 
     patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
@@ -2407,27 +2402,25 @@ def test_cmd_update_market_data_stage_retries_missing_bulk_symbol_individually(
 
         def latest_prices_for_exchange(
             self, exchange_code: str
-        ) -> dict[str, PriceData]:
+        ) -> dict[str, PriceQuote]:
             calls["bulk"].append(exchange_code)
             return {
-                f"U{i:03d}.US": PriceData(
+                f"U{i:03d}.US": PriceQuote(
                     symbol=f"U{i:03d}.US",
                     price=10.0 + i,
                     as_of=today,
                     volume=100 + i,
-                    currency="USD",
                 )
                 for i in range(99)
             }
 
-        def latest_price(self, symbol: str) -> PriceData | None:
+        def latest_price(self, symbol: str) -> PriceQuote | None:
             calls["symbols"].append(symbol)
-            return PriceData(
+            return PriceQuote(
                 symbol=symbol,
                 price=999.0,
                 as_of=today,
                 volume=999,
-                currency="USD",
             )
 
     patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
@@ -2495,33 +2488,32 @@ def test_cmd_update_market_data_stage_marks_bulk_validation_failure_per_symbol(
 
         def latest_prices_for_exchange(
             self, exchange_code: str
-        ) -> dict[str, PriceData]:
+        ) -> dict[str, PriceQuote]:
             return {
-                f"U{i:03d}.US": PriceData(
+                f"U{i:03d}.US": PriceQuote(
                     symbol=f"U{i:03d}.US",
                     price=10.0 + i,
                     as_of=today,
                     volume=100 + i,
-                    currency="USD",
                 )
                 for i in range(100)
             }
 
-        def latest_price(self, symbol: str) -> PriceData | None:
+        def latest_price(self, symbol: str) -> PriceQuote | None:
             raise AssertionError("symbol fallback should not run in this test")
 
     def fake_build_market_data_update(
-        service: MarketDataService, ticker: SupportedTicker, data: PriceData
+        ticker: SupportedTicker, quote: PriceQuote
     ) -> MarketDataUpdate:
         if ticker.symbol == "U099.US":
             raise ValueError("suspicious market data for U099.US")
         return MarketDataUpdate(
             security_id=ticker.security_id,
             symbol=ticker.symbol,
-            as_of=data.as_of,
-            price=data.price,
-            volume=data.volume,
-            currency=data.currency,
+            as_of=quote.as_of,
+            price=quote.price,
+            volume=quote.volume,
+            currency=ticker.currency,
             provider_listing_id=ticker.provider_listing_id,
         )
 
@@ -2631,12 +2623,11 @@ def test_cmd_update_market_data_stage_interrupts_cleanly_in_symbol_phase(
     patch_cli(
         monkeypatch,
         "_fetch_symbol_market_data",
-        lambda api_key, limiter, symbol: PriceData(
+        lambda api_key, limiter, symbol: PriceQuote(
             symbol=symbol,
             price=10.0,
             as_of="2024-01-01",
             volume=100,
-            currency="USD",
         ),
     )
     patch_cli(monkeypatch, "as_completed", interrupting_as_completed)

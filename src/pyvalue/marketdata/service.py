@@ -9,19 +9,56 @@ from pathlib import Path
 from typing import Optional, Union
 
 from pyvalue.config import Config
-from pyvalue.currency import (
-    normalize_monetary_amount,
-    raw_currency_code,
-)
+from pyvalue.currency import normalize_monetary_amount
 from pyvalue.marketdata import (
     EODHDProvider,
     MarketDataProvider,
     MarketDataUpdate,
     PriceData,
+    PriceQuote,
 )
 from pyvalue.persistence.storage import (
     MarketDataRepository,
 )
+
+
+def prepare_price_data(
+    symbol: str,
+    quote: PriceQuote,
+    listing_currency: str,
+) -> PriceData:
+    """Resolve a raw provider quote into a major-currency ``PriceData`` row.
+
+    ``listing_currency`` is ``listing.currency`` -- the **only** source of a
+    price's currency, and required rather than optional because there is
+    nothing to fall back to. It is NOT NULL in the schema and constrained to
+    three uppercase letters, and it carries the quote unit verbatim, subunits
+    included (GBX pence, ZAC cents, ILA agorot). The collapse to the major unit
+    is then a registry lookup in :func:`normalize_monetary_amount`, so a GBX
+    listing stores pounds and a USD listing stores dollars untouched.
+
+    The provider is deliberately not consulted. It used to supply a currency
+    it derived from the exchange suffix and the price magnitude, and because
+    that value was tried *first* it silently overrode this one -- storing every
+    non-pence London listing at 1/100 of its real value. A price row is a
+    number and a date; its unit belongs to the listing.
+
+    No anomaly guard runs here. Market value is derived on demand as the latest
+    share-count fact times the latest price (``metrics.utils.market_cap_money``),
+    so the price stored here is just the latest observation and there is no
+    cross-snapshot value jump to police.
+    """
+
+    major_amount, major_currency = normalize_monetary_amount(
+        quote.price, listing_currency
+    )
+    return PriceData(
+        symbol=symbol.upper(),
+        price=float(major_amount) if major_amount is not None else quote.price,
+        as_of=quote.as_of,
+        volume=quote.volume,
+        currency=major_currency,
+    )
 
 
 class MarketDataService:
@@ -46,49 +83,11 @@ class MarketDataService:
             "No market data API key configured. Set eodhd.api_key in private/config.toml."
         )
 
-    def prepare_price_data(
-        self,
-        symbol: str,
-        data: PriceData,
-        currency_hint: Optional[str] = None,
-    ) -> PriceData:
-        """Collapse a quoted price to its major currency for persistence.
-
-        The provider quotes the price in a currency that may be a subunit (e.g.
-        GBX pence on the LSE). We prefer the provider's own code -- it
-        disambiguates pence from pounds -- then an explicit hint, then the
-        listing's quote currency, and collapse that to the MAJOR currency so
-        subunits never cross the data boundary: ``market_data.price`` is always
-        stored in the major currency and the snapshot read path reports the same
-        base currency.
-
-        No anomaly guard runs here. Market value is derived on demand as the
-        latest share-count fact times the latest price
-        (``metrics.utils.market_cap_money``); the price stored here is just the
-        latest observation, so there is no cross-snapshot value jump to police.
-        """
-
-        normalized_symbol = symbol.upper()
-        # Currency comes from the provider's own code, else the caller's hint (the
-        # listing's catalog currency, already id-resolved upstream from the
-        # SupportedTicker the update-market-data loop holds). No symbol lookup here.
-        quoted_currency = raw_currency_code(data.currency or currency_hint)
-        major_amount, major_currency = normalize_monetary_amount(
-            data.price, quoted_currency
-        )
-        price = float(major_amount) if major_amount is not None else data.price
-        return PriceData(
-            symbol=normalized_symbol,
-            price=price,
-            as_of=data.as_of,
-            volume=data.volume,
-            currency=major_currency,
-        )
-
     def persist_updates(self, updates: list[MarketDataUpdate]) -> None:
         self.repo.upsert_prices(updates)
 
 
 __all__ = [
     "MarketDataService",
+    "prepare_price_data",
 ]

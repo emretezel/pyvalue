@@ -3,7 +3,13 @@
 Author: Emre Tezel
 """
 
-from .base import MarketDataProvider, MarketDataUpdate, PriceData
+from .base import MarketDataProvider, MarketDataUpdate, PriceData, PriceQuote
 from .eodhd import EODHDProvider
 
-__all__ = ["PriceData", "MarketDataUpdate", "MarketDataProvider", "EODHDProvider"]
+__all__ = [
+    "PriceData",
+    "PriceQuote",
+    "MarketDataUpdate",
+    "MarketDataProvider",
+    "EODHDProvider",
+]

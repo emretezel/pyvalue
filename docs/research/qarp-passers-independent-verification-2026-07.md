@@ -67,6 +67,9 @@ businesses. Only the valuation gate is corrupted, and only because the price is 
 
 ### 1. LSE international-order-book prices stored 100x too low (pyvalue ingestion) — the big one
 
+> **Fixed 2026-07-27** — see proposed fix 1 below for what shipped and why the fix in this section's
+> original write-up would not have been enough. Prices already stored remain wrong until re-fetched.
+
 `src/pyvalue/marketdata/eodhd.py:132-134` applies the exchange subunit hint whenever the bulk feed omits
 a currency and the raw price exceeds 100:
 
@@ -208,10 +211,32 @@ whether defect 1 is fixed. See `docs/providers/eodhd.md` for the rule table.
 
 ## Proposed fixes (none applied)
 
-1. **Fix the subunit heuristic (highest value).** In `marketdata/eodhd.py:_price_data_from_entry`, apply
-   `EXCHANGE_SUBUNIT_HINTS` only when the *listing's own currency* is the subunit's parent (GBP for GBX,
-   ZAR for ZAC, ILS for ILA). A price heuristic should never override the known listing currency. This
-   removes seven of the eleven false positives and repairs an estimated ~100 further listings.
+1. ~~**Fix the subunit heuristic (highest value).**~~ **DONE 2026-07-27, but not as proposed.**
+
+   The original proposal here was to apply `EXCHANGE_SUBUNIT_HINTS` only when the listing's own currency
+   is the subunit's *parent* (GBP for GBX, ZAR for ZAC, ILS for ILA). **That would not have worked.**
+   Checking it against the data first: all 43 ISIN-matched LSE listings the catalog labels `GBP` are
+   Swiss/European home lines (Phoenix, Schindler, Basler Kantonalbank, Georg Fischer, Sandoz), and not
+   one is pence-quoted. Parent-gating would have kept dividing exactly the 15 of them that are already
+   corrupted.
+
+   The shipped fix deletes the derivation outright and makes `listing.currency` the sole source. EODHD
+   states the quote unit per listing in `exchange-symbol-list` and pyvalue already stored it faithfully;
+   the price parser was overriding it. The provider's `PriceQuote` type now has no currency field at all
+   and `prepare_price_data` requires the listing currency, so the guess is unrepresentable rather than
+   merely removed.
+
+   Two findings drove that stronger form. First, the rule was wrong for two-thirds of London — the live
+   catalog holds 2,467 `GBX` against 2,253 `USD`, 1,135 `EUR`, 912 `GBP` and a long tail — so it was
+   never a narrow international-order-book problem. Second, being keyed on `price > 100` it was
+   *unstable*: a single listing's stored series jumps 100x whenever its quote crosses that line
+   (`0A7O.LSE` 1.3064 -> 90.69, `0A3T.LSE` 86.00 -> 1.0250), which corrupts history as well as levels.
+   Measured blast radius: 180 of 779 ISIN-matched non-`GBX` LSE listings understated at ratios of
+   0.0099-0.0102, plus 146 intra-listing 100x jumps on LSE, 13 on JSE and 21 on TASE.
+
+   **The stored prices are not repaired by the code fix** — neither `market_data` nor
+   `provider_market_data` retains the raw feed value, so `LSE`, `JSE` and `TA` must be re-fetched with
+   `update-market-data` and their metrics recomputed before this screen's results change.
 2. **Model depositary ratios, or refuse to price DR lines.** Add `depositary_ratio` to `listing`
    (NOT NULL DEFAULT 1.0, `CHECK (depositary_ratio > 0)`), populate from provider security metadata, and
    multiply the resolved share count by it. Where a line is a depositary receipt with an unknown ratio,

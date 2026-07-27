@@ -151,6 +151,14 @@ before persistence, so subunits never cross the data boundary, and the snapshot
 read path reports that same base currency. The table does not persist a
 duplicate currency column, nor (since migration 082) a provider tag.
 
+`listing.currency` is the **only** input to that collapse, on write as well as on
+read. Price feeds do not state a currency (neither EODHD EOD endpoint carries the
+field), and the quote unit belongs to the listing rather than to the price row,
+so the provider type `marketdata.base.PriceQuote` has no currency field and
+`marketdata.service.prepare_price_data` takes the listing currency as a required
+argument. Deriving it instead — from the exchange or the price magnitude — is
+what stored every non-pence London quote above 100 at 1/100 of its value.
+
 The derived `market_cap` column was removed (migration 072): market cap is
 shares-outstanding x price, so it is computed on demand as the latest share-count
 `financial_facts` row x the latest `market_data` price

@@ -5,10 +5,13 @@ Author: Emre Tezel
 
 from __future__ import annotations
 
+import json
 import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, Optional, Sequence
+
+import requests
 
 # Ensure the src/ directory is importable when running tests without installation.
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +32,45 @@ if TYPE_CHECKING:
         SupportedTickerRefreshResult,
     )
     from pyvalue.universe import Listing
+
+
+class DummyEODSession(requests.Session):
+    """A stand-in ``requests.Session`` that returns a canned EODHD payload.
+
+    Subclasses the real ``requests.Session`` so it satisfies the provider's
+    ``Session`` parameter type. ``__init__`` skips the real HTTP machinery, and
+    every outgoing request is intercepted at ``request`` -- the single funnel
+    that ``get``/``post``/... delegate to -- so we return a genuine
+    ``requests.Response`` carrying the canned JSON body. Returning a real
+    ``Response`` keeps the override Liskov-compatible (so no ``type: ignore``)
+    while ``raise_for_status``/``json`` behave exactly as in production.
+    """
+
+    def __init__(self, payload: object) -> None:
+        # Deliberately do NOT call super().__init__(): we never make a real
+        # network request, so building the underlying adapters/pools is waste.
+        self.payload = payload
+        # Each recorded call keeps the request URL and the query parameters the
+        # provider attached, so tests can assert on the issued query.
+        self.calls: list[tuple[str, dict[str, object] | None]] = []
+
+    def request(
+        self,
+        method: str | bytes,
+        url: str | bytes,
+        *args: object,
+        **kwargs: object,
+    ) -> requests.Response:
+        raw_params = kwargs.get("params")
+        # The provider only ever passes a ``dict`` (or nothing) for ``params``;
+        # narrow explicitly so the recorded type stays precise rather than
+        # widening the tuple to ``object``.
+        params = raw_params if isinstance(raw_params, dict) else None
+        self.calls.append((str(url), params))
+        response = requests.Response()
+        response.status_code = 200
+        response._content = json.dumps(self.payload).encode("utf-8")
+        return response
 
 
 def seed_exchange(

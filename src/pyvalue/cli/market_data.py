@@ -22,8 +22,8 @@ from typing import (
 
 from pyvalue.config import Config
 from pyvalue.ingestion import EODHDFundamentalsClient
-from pyvalue.marketdata import EODHDProvider, MarketDataUpdate, PriceData
-from pyvalue.marketdata.service import MarketDataService
+from pyvalue.marketdata import EODHDProvider, MarketDataUpdate, PriceQuote
+from pyvalue.marketdata.service import MarketDataService, prepare_price_data
 from pyvalue.persistence.storage import (
     MarketDataFetchStateRepository,
     SupportedTicker,
@@ -149,15 +149,20 @@ def _plan_market_data_stage_run(
 
 
 def _build_market_data_update(
-    service: MarketDataService,
     ticker: SupportedTicker,
-    data: PriceData,
+    quote: PriceQuote,
 ) -> MarketDataUpdate:
-    prepared = service.prepare_price_data(
-        ticker.symbol,
-        data,
-        currency_hint=ticker.currency,
-    )
+    # listing.currency is the sole source of a price's currency, so a missing
+    # one is a broken invariant rather than a data condition to paper over: the
+    # column is NOT NULL and the eligibility query projects it directly
+    # (supported_tickers.list_eligible_for_market_data). Fail loudly instead of
+    # letting an unlabelled amount reach the subunit collapse.
+    if not ticker.currency:
+        raise ValueError(
+            f"Cannot store a price for {ticker.symbol}: the catalog carries no "
+            "listing currency, so the quote unit is unknown."
+        )
+    prepared = prepare_price_data(ticker.symbol, quote, ticker.currency)
     return MarketDataUpdate(
         security_id=ticker.security_id,
         symbol=ticker.symbol,
@@ -190,7 +195,7 @@ def _fetch_exchange_market_data(
     api_key: str,
     limiter: _RateLimiter,
     exchange_code: str,
-) -> Mapping[str, PriceData]:
+) -> Mapping[str, PriceQuote]:
     provider = _get_thread_local_market_data_provider(api_key)
     limiter.acquire()
     return provider.latest_prices_for_exchange(exchange_code)
@@ -200,7 +205,7 @@ def _fetch_symbol_market_data(
     api_key: str,
     limiter: _RateLimiter,
     symbol: str,
-) -> PriceData:
+) -> PriceQuote:
     provider = _get_thread_local_market_data_provider(api_key)
     limiter.acquire()
     return provider.latest_price(symbol)
@@ -532,7 +537,7 @@ def cmd_update_market_data_stage(
                         continue
                     try:
                         pending_updates.append(
-                            _build_market_data_update(service, ticker, bulk_data)
+                            _build_market_data_update(ticker, bulk_data)
                         )
                         stored_for_exchange += 1
                     except Exception as exc:
@@ -572,7 +577,7 @@ def cmd_update_market_data_stage(
                 try:
                     symbol_data = symbol_future.result()
                     pending_updates.append(
-                        _build_market_data_update(service, ticker, symbol_data)
+                        _build_market_data_update(ticker, symbol_data)
                     )
                     processed += 1
                 except Exception as exc:  # pragma: no cover - network errors
