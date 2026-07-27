@@ -190,14 +190,17 @@ Notes:
 - run it after a rule change, or to repair a database that drifted some other
   way
 - a narrow `--symbols`/`--exchange-codes` run is still correct: the scope
-  expands to whole ISIN and LEI groups for read-only context, so the peer rules
-  see what a full run would, while only the requested listings are written
+  expands to the whole ISIN/LEI/issuer neighbourhood and every listing in it is
+  re-evaluated and written, so a narrow run reaches the same verdict a full pass
+  would
 - reclassification writes **only** the status column. A listing that flips to
   `secondary` keeps its facts, market data, metrics and refresh state; exclusion
   is purely scope-side, so a later flip back to primary restores it intact
 - the run prints the resulting status counts, which rule decided each listing,
   and the before/after distribution across the database
-- missing or unusable `General.PrimaryTicker` values are treated as primary
+- a missing `General.PrimaryTicker` yields `unknown`, not `primary` — reading
+  absence as proof of primacy was the original defect. `unknown` stays eligible
+  for primary-only scopes
 
 ### `report-fundamentals-progress`
 

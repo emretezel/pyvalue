@@ -34,7 +34,6 @@ from .base import (
     _batched,
     _normalize_optional_text,
     _normalize_qualified_symbol,
-    _normalize_symbol_base,
     _utc_now_iso,
 )
 from .records import SecurityListingStatusRecord
@@ -73,8 +72,6 @@ class SecurityListingStatusRepository(SQLiteStore):
         isin: Any = None,
         lei: Any = None,
         venue_tier: Any = None,
-        hq_country: Any = None,
-        venue_country_iso2: Any = None,
     ) -> ListingEvidence:
         """Normalize one listing's raw provider fields into resolver evidence.
 
@@ -88,16 +85,12 @@ class SecurityListingStatusRepository(SQLiteStore):
         provider_symbol_norm = _normalize_qualified_symbol(provider_symbol)
         if provider_symbol_norm is None:
             raise ValueError(f"provider_symbol must be qualified: {provider_symbol}")
-        bare_symbol, exchange_code = _normalize_symbol_base(provider_symbol_norm)
 
         home_category_norm = _normalize_optional_text(home_category)
         venue_tier_norm = _normalize_optional_text(venue_tier)
-        venue_country_norm = _normalize_optional_text(venue_country_iso2)
         return ListingEvidence(
             listing_id=int(security_id),
             provider_symbol=provider_symbol_norm,
-            bare_symbol=bare_symbol,
-            exchange_code=(exchange_code or "").upper(),
             primary_ticker=_normalize_qualified_symbol(primary_ticker),
             home_category=(
                 home_category_norm.upper() if home_category_norm is not None else None
@@ -106,12 +99,6 @@ class SecurityListingStatusRepository(SQLiteStore):
             lei=shaped_lei(lei),
             venue_tier=(
                 venue_tier_norm.upper() if venue_tier_norm is not None else None
-            ),
-            # Head-office country stays verbatim: it is compared against
-            # payload-side spellings in VENUE_HOME_COUNTRY, not normalized codes.
-            hq_country=_normalize_optional_text(hq_country),
-            venue_country_iso2=(
-                venue_country_norm.upper() if venue_country_norm is not None else None
             ),
         )
 
@@ -187,14 +174,21 @@ class SecurityListingStatusRepository(SQLiteStore):
         return {str(row["status"]): int(row["listings"]) for row in rows}
 
     # Evidence projection shared by the scoped read and the peer expansion.
-    # ``PrimaryTicker`` / ``HomeCategory`` / the venue tier and head office are
-    # pulled with ``json_extract`` so each ~228 KB raw payload is parsed inside
-    # SQLite and never crosses into Python. ``Name`` rides along for the issuer
-    # grouping step: no classification rule reads it, but this projection has
-    # each blob open already, so taking it here costs nothing where reading it
-    # separately would mean a second seek and parse of the same payload. ISIN comes from ``listing.isin``
-    # instead of the payload: the catalog refresh populates it for listings
-    # whose payload omits the field, making the column the better source.
+    # ``PrimaryTicker`` / ``HomeCategory`` / the venue tier are pulled with
+    # ``json_extract`` so each ~228 KB raw payload is parsed inside SQLite and
+    # never crosses into Python. ``Name`` rides along for the issuer grouping
+    # step: no classification rule reads it, but this projection has each blob
+    # open already, so taking it here costs nothing where reading it separately
+    # would mean a second seek and parse of the same payload. ISIN comes from
+    # ``listing.isin`` instead of the payload: the catalog refresh populates it
+    # for listings whose payload omits the field, making the column the better
+    # source.
+    #
+    # The ``provider_exchange`` join carries no evidence of its own -- it is
+    # there to qualify the provider symbol. Venue geography used to be selected
+    # here for the ISIN-group tie-break; that rule was removed in 2026-07, and
+    # with it the only reason the classifier ever needed to know where a listing
+    # trades.
     _EVIDENCE_SELECT = """
         SELECT
             pl.listing_id AS security_id,
@@ -202,13 +196,11 @@ class SecurityListingStatusRepository(SQLiteStore):
                 AS provider_symbol,
             fr.last_fetched_at AS last_fetched_at,
             l.isin AS isin,
-            px.country_iso2 AS venue_country_iso2,
             json_extract(fr.data, '$.General.PrimaryTicker') AS primary_ticker,
             json_extract(fr.data, '$.General.HomeCategory') AS home_category,
             json_extract(fr.data, '$.General.LEI') AS lei,
             json_extract(fr.data, '$.General.Name') AS entity_name,
-            json_extract(fr.data, '$.General.Exchange') AS venue_tier,
-            json_extract(fr.data, '$.General.AddressData.Country') AS hq_country
+            json_extract(fr.data, '$.General.Exchange') AS venue_tier
         FROM fundamentals_raw fr
         JOIN provider_listing pl
           ON pl.provider_listing_id = fr.provider_listing_id
@@ -282,8 +274,6 @@ class SecurityListingStatusRepository(SQLiteStore):
             isin=row["isin"],
             lei=row["lei"],
             venue_tier=row["venue_tier"],
-            hq_country=row["hq_country"],
-            venue_country_iso2=row["venue_country_iso2"],
         )
 
     def status_record(

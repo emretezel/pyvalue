@@ -63,11 +63,13 @@ command reads it without reconciling. The rule is an ordered set over several
 EODHD fields plus the ISIN peer group (`pyvalue.universe.listing_classification`),
 not a single vendor field — see `docs/providers/eodhd.md`.
 
-The listing also carries the two identifiers that establish *what* it is:
-`isin` (the security, from the catalog refresh) and `lei` (the legal entity,
-from the fundamentals payload). `reconcile-issuer-identity` groups listings by
-those onto shared `issuer` rows, so `issuer` models a company rather than, as
-before, roughly one row per listing.
+The listing carries `isin` (the security, from the catalog refresh), which with
+the LEI read from the fundamentals payload establishes *what* it is.
+`reconcile-issuer-identity` groups listings by those onto shared `issuer` rows,
+so `issuer` models a company rather than, as before, roughly one row per
+listing. The LEI is deliberately not a `listing` column — it identifies the
+legal entity, so it belongs on `issuer.lei` and caching it here would duplicate
+that fact (migration 090 dropped it).
 
 ### `provider_listing`
 

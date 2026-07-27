@@ -6,8 +6,10 @@ Two derived values -- ``listing.primary_listing_status`` and issuer identity --
 are not properties of a listing on its own. Both depend on what *else* the
 catalog holds:
 
-* classification's peer rules need every listing sharing an ISIN (one of them
-  may name another as primary, and one security cannot have two primary lines);
+* classification's peer rule needs every listing sharing an ISIN, because a
+  listing with no ``PrimaryTicker`` of its own inherits the answer from one that
+  has it; the sole-listing rescue additionally needs every listing sharing an
+  LEI, to tell whether a demoted receipt's underlying survives;
 * issuer grouping needs every listing sharing an ISIN or an LEI, plus the
   current members of the issuer rows involved, because repartitioning a group
   means seeing all of it.

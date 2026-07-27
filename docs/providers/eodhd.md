@@ -200,9 +200,7 @@ fields rather than `General.PrimaryTicker` alone. The rule lives in
 | R1 | `General.HomeCategory` is `ADR`/`BDR`/… | secondary |
 | R2 | `General.PrimaryTicker` present | primary iff it names this listing, else secondary |
 | R3 | No `PrimaryTicker`, but an ISIN peer has one | inherit that peer's answer |
-| R4 | An ISIN group still holds more than one candidate primary | keep the venue in the ISIN's issuing country; else demote secondary-quote claimants |
-| R5 | No evidence, venue is a secondary-quote market, issuer HQ ≠ venue country | secondary |
-| R6 | Otherwise | unknown |
+| R4 | Otherwise | unknown |
 | rescue | An R1 demotion on a *primary* US exchange with no surviving ISIN/LEI sibling | unknown |
 
 Two things are worth understanding about why this is not simply "read
@@ -212,10 +210,69 @@ the field points at the *receipt itself* for a depositary receipt
 precedes R2, and a missing field now yields `unknown` rather than `primary`.
 
 `unknown` means "no evidence either way" and **stays eligible** for primary-only
-scopes — it is not a synonym for secondary. Around 8,900 listings on domestic
-exchanges (Thailand, Korea, Taiwan, Pakistan, Indonesia) land there simply
-because EODHD never populates `PrimaryTicker` for those venues; excluding them
-would silently delete real companies from the universe.
+scopes — it is not a synonym for secondary. 19,389 listings land there: roughly
+8,800 on domestic exchanges (Thailand, Korea, Taiwan, Pakistan, Indonesia) where
+EODHD simply never populates `PrimaryTicker`, and roughly 10,600 quote-venue
+lines. Excluding either group would silently delete real companies from the
+universe.
+
+### Every rule reads a field EODHD publishes
+
+That is a deliberate boundary, set in 2026-07 when two further rules were
+removed: an ISIN-group tie-break that preferred the venue matching the ISIN's
+issuing country, and a demotion for listings quoted on a "secondary-quote venue"
+(US OTC tiers, German regional exchanges, the LSE international order book, B3
+BDR ticker shapes).
+
+Both rested on a hand-coded map of venue quality that EODHD's data can neither
+support nor check:
+
+- The exchange catalog carries **no market-type field**. `F` (Frankfurt
+  Exchange) and `XETRA` (XETRA Stock Exchange) are structurally identical rows —
+  same country, same currency, both with a MIC — yet the rule demoted one and
+  not the other.
+- Reading the exchange *name* would be actively wrong: `TWO` is "Taiwan OTC
+  Exchange", which is the Taipei Exchange, a genuine primary market carrying
+  1,101 listings.
+- `operating_mic` for `US` is the comma-joined string `XNAS, XNYS, OTCM, XCBO`,
+  describing the umbrella exchange, so it cannot classify an individual listing.
+- `General.InternationalDomestic` (19.3% populated) describes the *company's*
+  listing footprint, not this listing's status — Dunelm's primary London line
+  reads `International`. `General.Listings` is ticker-code matched rather than
+  entity matched: `MTD.US` lists `MTD.F = MEITO TRANSPORT`, a Japanese trucking
+  company, while omitting the `0K10.LSE` peer that matters.
+- The map covered four venue families, leaving **59 of 68 exchanges** — 29,078
+  of 76,151 listings, all of Shenzhen, KOSDAQ, Toronto, Australia, Korea —
+  with no opinion at all.
+
+Removing the two rules moved 10,621 listings from `secondary` to `unknown` and
+1,029 back to `primary`. The accepted cost is weaker deduplication: one security
+can now hold two primary lines where the vendor self-declares both (`LULU.US`
+and `33L.F` on `US5500211090`), and quote-venue lines re-enter every scope.
+Issuers holding more than one eligible listing went 504 → 1,262. Nothing leaves
+the universe — `unknown` and `primary` are both eligible.
+
+Measured on the QARP screen over the full universe: **96 → 134 rows, none
+dropped**. Roughly 16 of the 38 additions are a company the result already held
+(`LULU.US` now joined by `0JVT.LSE` and `33L.F`; `ZTS.US` by `0M3Q.LSE` and
+`ZOE.MU`), 3 more are a second venue for a newly-added company (`PNT.F`/
+`PNT.STU`, `TSI.DU`/`TSI.MU`, `WHX.MU`/`WHX.STU`), and the rest are names the
+screen did not previously hold. Distinct companies went 94 → 121.
+
+Four of those additions are known-bad rows: `0HS2` (Cadence), `0J8P` (IDEXX),
+`0JPO` (KLA) and `0KFZ` (Parker-Hannifin) are LSE international-order-book lines
+with **no ISIN**, so R3 cannot reach them and the venue rule was the only thing
+holding them out. All four are confirmed false positives in
+`docs/research/qarp-passers-independent-verification-2026-07.md`, caused by a
+separate open defect the venue rule was masking rather than fixing:
+`src/pyvalue/marketdata/eodhd.py` applies the GBX subunit hint to the USD-quoted
+international order book, storing those prices ~100x too low. Fixing that is its
+own task; it is not a classification problem.
+
+`TSMC34.SA`, the fifth false positive from the same audit, does **not** return:
+its payload carries an explicit `HomeCategory: BDR`, so R1 demotes it and always
+did. The removed B3 ticker-shape test only ever mattered for BDRs EODHD leaves
+unlabelled.
 
 The rescue exists for the same reason. R1 assumes a depositary receipt is
 redundant because the shares it wraps are listed somewhere else we can screen —
@@ -235,12 +292,17 @@ company is already in the universe. Closing that gap needs evidence pyvalue does
 not ingest; EODHD's Search API exposes an `isPrimary` flag that would settle it
 directly.
 
-Measured rather than assumed: on the live catalog the rescue fires for 323
+Measured rather than assumed: on the live catalog the rescue fires for 311
 listings and reintroduces no duplicate among the QARP passers. `NTES.US` and
 `OMAB.US` both stay secondary — their siblings *are* linkable. The two extra
 passers versus not rescuing at all, `DOX.US` (Amdocs) and `ITRN.US` (Ituran),
 are not duplicates: neither has any surviving sibling in the universe, which is
 exactly why the rescue fired.
+
+"Surviving" means *not* `secondary`, so removing the venue rule made the rescue
+strictly narrower: the 10,621 quote-venue lines that became `unknown` are now
+survivors, and 12 receipts that used to be rescued stay demoted because their
+sibling turns out to be visible after all. Firings went 323 → 311.
 
 Once a
 listing is classified as secondary, downstream normalization, market-data,
@@ -255,14 +317,15 @@ history intact.
 It also settles issuer identity in the same pass, so a bootstrap needs no
 reconcile at all.
 
-R3 and R4 need a listing's ISIN peer group, which one payload cannot supply. So
-each write batch re-evaluates its whole *neighbourhood* — every listing sharing
-an ISIN or an issuer with one that arrived — rather than only the listings in
-the batch. That reach-back is what makes ingestion order irrelevant: `LULU.US`
-and `33L.F` both publish `PrimaryTicker` naming themselves, so whichever lands
-second has to demote the other. It runs on the same connection as the payload
-write, so payloads, statuses and the issuer partition commit or roll back
-together, and an interrupted ingest is still correct as far as it got.
+R3 needs a listing's ISIN peer group and the rescue needs its ISIN/LEI siblings,
+neither of which one payload can supply. So each write batch re-evaluates its
+whole *neighbourhood* — every listing sharing an ISIN or an issuer with one that
+arrived — rather than only the listings in the batch. That reach-back is what
+makes ingestion order irrelevant: `0K10.LSE` carries no `PrimaryTicker` and is
+decided entirely by `MTD.US`, so whichever lands second has to reach back and
+settle the other. It runs on the same connection as the payload write, so
+payloads, statuses and the issuer partition commit or roll back together, and an
+interrupted ingest is still correct as far as it got.
 
 Both derived values are produced together because they are not independent:
 grouping names a merged issuer after its *primary* listing, so classifying

@@ -16,9 +16,7 @@ from pyvalue.universe.listing_classification import (
     ClassificationRule,
     ListingEvidence,
     ListingStatus,
-    classify_listing_without_peers,
     classify_listings,
-    is_secondary_quote_venue,
     summarize,
 )
 
@@ -32,24 +30,17 @@ def _evidence(
     isin: Optional[str] = None,
     lei: Optional[str] = None,
     venue_tier: Optional[str] = None,
-    hq_country: Optional[str] = None,
-    venue_country_iso2: Optional[str] = None,
 ) -> ListingEvidence:
     """Build evidence the way the repository's normalizer would."""
 
-    bare_symbol, _, exchange_code = provider_symbol.partition(".")
     return ListingEvidence(
         listing_id=listing_id,
         provider_symbol=provider_symbol,
-        bare_symbol=bare_symbol,
-        exchange_code=exchange_code,
         primary_ticker=primary_ticker,
         home_category=home_category,
         isin=isin,
         lei=lei,
         venue_tier=venue_tier,
-        hq_country=hq_country,
-        venue_country_iso2=venue_country_iso2,
     )
 
 
@@ -177,95 +168,42 @@ def test_peer_rules_need_a_shared_isin() -> None:
 
 
 # ---------------------------------------------------------------------------
-# R4: one security cannot have two primary listings.
+# R4: no evidence at all.
+#
+# The two tests below pin behaviour that is a *deliberate trade*, not an
+# accident. Two rules used to sit between R3 and R4 -- an ISIN-group tie-break
+# and a demotion for listings on hand-picked "secondary-quote" venues -- and
+# both were removed in 2026-07 because EODHD publishes nothing that supports or
+# checks a venue-quality judgement. If either test starts failing, someone has
+# reintroduced structural inference into a rule set that is meant to read only
+# vendor fields.
 # ---------------------------------------------------------------------------
 
 
-def test_isin_group_tie_break_prefers_the_issuing_country_venue() -> None:
+def test_two_self_declared_primaries_on_one_isin_both_stand() -> None:
     """``LULU.US`` and ``33L.F`` share US5500211090 and both self-declare.
 
-    The vendor is simply wrong about one of them; the ISIN's US prefix picks the
-    US venue over Frankfurt.
+    The vendor is simply wrong about one of them, and nothing it publishes says
+    which. The removed tie-break picked the venue matching the ISIN's country
+    prefix; without it both stay primary and the screen shows the company twice.
+
+    Accepted: 1,029 listings across the catalog are in this position. The
+    alternative was a hand-coded venue ranking covering 9 of 68 exchanges.
     """
 
     isin = "US5500211090"
     result = classify_listings(
         [
             _evidence(
-                1,
-                "LULU.US",
-                primary_ticker="LULU.US",
-                isin=isin,
-                venue_tier="NASDAQ",
-                venue_country_iso2="US",
+                1, "LULU.US", primary_ticker="LULU.US", isin=isin, venue_tier="NASDAQ"
             ),
-            _evidence(
-                2,
-                "33L.F",
-                primary_ticker="33L.F",
-                isin=isin,
-                venue_country_iso2="DE",
-            ),
+            _evidence(2, "33L.F", primary_ticker="33L.F", isin=isin),
         ]
     )
 
     assert result[1].status is ListingStatus.PRIMARY
-    assert result[2].status is ListingStatus.SECONDARY
-    assert result[2].rule is ClassificationRule.ISIN_GROUP_TIE_BREAK
-
-
-def test_isin_group_with_no_home_venue_demotes_secondary_quote_claimants() -> None:
-    """Pentair's ``PNT.F``/``PNT.STU`` share an Irish ISIN with no Irish line.
-
-    Neither is in the ISIN's country, so the country test cannot pick a winner.
-    Both sit on German regional venues, so both are demoted -- the real primary
-    (NYSE) is simply not in our universe.
-    """
-
-    isin = "IE00BLS09M33"
-    result = classify_listings(
-        [
-            _evidence(
-                1, "PNT.F", primary_ticker="PNT.F", isin=isin, venue_country_iso2="DE"
-            ),
-            _evidence(
-                2,
-                "PNT.STU",
-                primary_ticker="PNT.STU",
-                isin=isin,
-                venue_country_iso2="DE",
-            ),
-        ]
-    )
-
-    assert result[1].status is ListingStatus.SECONDARY
-    assert result[2].status is ListingStatus.SECONDARY
-
-
-def test_isin_group_with_a_single_claimant_is_left_alone() -> None:
-    """The tie-break only fires on an actual tie."""
-
-    isin = "NL0010273215"
-    result = classify_listings(
-        [
-            _evidence(
-                1,
-                "ASML.AS",
-                primary_ticker="ASML.AS",
-                isin=isin,
-                venue_country_iso2="NL",
-            ),
-            _evidence(2, "ASME.F", primary_ticker="ASML.AS", isin=isin),
-        ]
-    )
-
-    assert result[1].status is ListingStatus.PRIMARY
-    assert result[1].rule is ClassificationRule.SELF_DECLARED_PRIMARY
-
-
-# ---------------------------------------------------------------------------
-# R5/R6: no evidence at all.
-# ---------------------------------------------------------------------------
+    assert result[2].status is ListingStatus.PRIMARY
+    assert result[2].rule is ClassificationRule.SELF_DECLARED_PRIMARY
 
 
 @pytest.mark.parametrize(
@@ -275,28 +213,20 @@ def test_isin_group_with_a_single_claimant_is_left_alone() -> None:
         ("LVMHF.US", "PINK"),  # US OTC
         ("WOLTF.US", "OTCGREY"),
         ("ZOE.MU", None),  # German regional
-        ("TSI.DU", None),
         ("TSMC34.SA", None),  # B3 BDR shape
     ],
 )
-def test_evidence_free_listings_on_secondary_quote_venues_are_secondary(
+def test_evidence_free_listing_on_a_quote_venue_is_unknown(
     provider_symbol: str, venue_tier: Optional[str]
 ) -> None:
-    result = classify_listings([_evidence(1, provider_symbol, venue_tier=venue_tier)])
-    assert result[1].status is ListingStatus.SECONDARY
-    assert result[1].rule is ClassificationRule.SECONDARY_QUOTE_VENUE
+    """Where a listing trades no longer decides anything.
 
-
-def test_home_country_issuer_is_exempt_from_the_venue_rule() -> None:
-    """A US company trading only OTC is a genuine primary listing.
-
-    The exemption rescues 821 US OTC listings; without it the venue rule would
-    delete real companies from the universe.
+    These five shapes were all demoted to ``secondary`` by the removed venue
+    rule. They now resolve ``unknown``, which stays eligible for primary-only
+    scopes -- so they re-enter every screen rather than leaving the universe.
     """
 
-    result = classify_listings(
-        [_evidence(1, "SMALL.US", venue_tier="OTCQX", hq_country="United States")]
-    )
+    result = classify_listings([_evidence(1, provider_symbol, venue_tier=venue_tier)])
     assert result[1].status is ListingStatus.UNKNOWN
     assert result[1].rule is ClassificationRule.NO_EVIDENCE
 
@@ -304,75 +234,13 @@ def test_home_country_issuer_is_exempt_from_the_venue_rule() -> None:
 def test_evidence_free_listing_on_a_domestic_venue_stays_unknown() -> None:
     """Thailand, Korea, Taiwan and friends simply lack PrimaryTicker coverage.
 
-    ~8,900 listings land here. They must stay eligible: demoting them would
-    silently remove real companies the screen should still see.
+    ~8,800 listings land here for this reason alone. They must stay eligible:
+    demoting them would silently remove real companies the screen should see.
     """
 
     result = classify_listings([_evidence(1, "NETBAY.BK")])
     assert result[1].status is ListingStatus.UNKNOWN
     assert result[1].rule is ClassificationRule.NO_EVIDENCE
-
-
-def test_xetra_is_not_a_secondary_quote_venue() -> None:
-    """XETRA is the primary venue for German issuers, unlike the regionals."""
-
-    assert not is_secondary_quote_venue(_evidence(1, "NEM.XETRA"))
-    assert is_secondary_quote_venue(_evidence(2, "NEM.F"))
-
-
-def test_us_primary_exchanges_are_not_secondary_quote_venues() -> None:
-    for tier in ("NASDAQ", "NYSE", "AMEX", "BATS"):
-        assert not is_secondary_quote_venue(_evidence(1, "AAA.US", venue_tier=tier))
-
-
-def test_ordinary_lse_symbols_are_not_international_order_book() -> None:
-    """Only the 4-character ``0XXX`` codes are the international order book."""
-
-    assert not is_secondary_quote_venue(_evidence(1, "DNLM.LSE"))
-    assert not is_secondary_quote_venue(_evidence(2, "JD.LSE"))
-    assert is_secondary_quote_venue(_evidence(3, "0K10.LSE"))
-
-
-def test_ordinary_b3_symbols_are_not_depositary_receipts() -> None:
-    """Brazilian ordinary/preferred tickers end in 3/4, BDRs in the 31-39 band."""
-
-    assert not is_secondary_quote_venue(_evidence(1, "PETR4.SA"))
-    assert is_secondary_quote_venue(_evidence(2, "TSMC34.SA"))
-
-
-# ---------------------------------------------------------------------------
-# The peer-free entry point used by fundamentals ingest.
-# ---------------------------------------------------------------------------
-
-
-def test_ingest_path_resolves_what_it_can() -> None:
-    assert (
-        classify_listing_without_peers(
-            _evidence(1, "ASML.AS", primary_ticker="ASML.AS")
-        ).status
-        is ListingStatus.PRIMARY
-    )
-    assert (
-        classify_listing_without_peers(
-            _evidence(1, "DNLMY.US", primary_ticker="DNLMY.US", home_category="ADR")
-        ).status
-        is ListingStatus.SECONDARY
-    )
-
-
-def test_ingest_path_defers_rather_than_guessing() -> None:
-    """Ingest holds one payload, so it must not apply the venue rule.
-
-    A venue demotion can contradict R3 -- a peer naming this very listing as
-    primary -- and writing a wrong 'secondary' is worse than an honest
-    'unknown', which stays eligible until reconcile resolves it.
-    """
-
-    outcome = classify_listing_without_peers(
-        _evidence(1, "0K10.LSE", isin="US5926881054")
-    )
-    assert outcome.status is ListingStatus.UNKNOWN
-    assert outcome.rule is ClassificationRule.NO_EVIDENCE
 
 
 # ---------------------------------------------------------------------------
@@ -499,13 +367,20 @@ def test_rescue_ignores_a_secondary_sibling() -> None:
 
     If every line of an issuer is secondary the company is gone either way, so
     the rescue must look for a *surviving* sibling, not merely any sibling.
+
+    The sibling here is demoted by R2 -- its ``PrimaryTicker`` names a third
+    listing outside our universe. It used to be a Frankfurt line demoted on
+    venue alone, which stopped working when the venue rule was removed: such a
+    line is now ``unknown``, i.e. a survivor. That change is why the rescue fires
+    323 -> 311 times on the live catalog.
     """
 
     lei = "213800WCOWEI3T5DUV19"
     result = classify_listings(
         [
-            # Frankfurt line, no evidence, demoted by the venue rule.
-            _evidence(1, "AAA.F", isin="GB00B1CKQ739", lei=lei),
+            _evidence(
+                1, "AAA.F", primary_ticker="AAA.XETRA", isin="GB00B1CKQ739", lei=lei
+            ),
             _evidence(
                 2,
                 "AAAY.US",

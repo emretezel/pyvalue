@@ -13,13 +13,14 @@ that makes that safe is the one these tests exist to hold:
     **ingestion order must not affect the final state, and running either
     reconcile command afterwards must change nothing.**
 
-It is not free. Two rules -- inherit-from-an-ISIN-peer and the ISIN group
-tie-break -- cannot be decided from one payload, so ingest re-evaluates each
-batch's whole neighbourhood rather than only the listings that arrived.
-``LULU.US`` and ``33L.F`` both publish ``PrimaryTicker`` naming *themselves*
-(verified in the live payloads), so whichever lands second has to reach back and
-demote the other. Without that reach-back the answer would depend on which
-payload happened to arrive first, and these tests would fail.
+It is not free. Neither the inherit-from-an-ISIN-peer rule nor the sole-listing
+rescue can be decided from one payload, and issuer grouping needs every member of
+a group at once, so ingest re-evaluates each batch's whole neighbourhood rather
+than only the listings that arrived. ``0K10.LSE`` carries no ``PrimaryTicker``
+and is decided entirely by its peer ``MTD.US``; ``ARM.US`` is rescued only
+because nothing else in the universe shares its identifiers. Without that
+reach-back either answer would depend on which payload arrived first, and these
+tests would fail.
 """
 
 from __future__ import annotations
@@ -41,7 +42,9 @@ from pyvalue.persistence.storage import (
 # A fixture universe chosen to exercise every rule that can depend on order.
 #
 #   MTD/0K10   one security on two venues -- the peer rule
-#   LULU/33L   one security, both self-declaring -- the tie-break
+#   LULU/33L   one security, both self-declaring -- two primaries, by design
+#              (the tie-break that used to demote 33L was removed in 2026-07);
+#              still order-sensitive for issuer grouping, which must merge them
 #   GOOG/GOOGL two securities, one entity -- the LEI bridge
 #   DNLM/DNLMY an ADR that names itself primary -- HomeCategory must win
 #   ARM        an exchange-listed ADR with no sibling -- the rescue
@@ -249,9 +252,13 @@ def test_the_universe_ingest_produces_is_correct(tmp_path: Path) -> None:
         "MTD.US": "primary",
         # No PrimaryTicker of its own; inherits its ISIN peer's answer.
         "0K10.LSE": "secondary",
-        # Both self-declare on one ISIN; the US venue matches the ISIN prefix.
+        # Both self-declare on one ISIN and nothing EODHD publishes says which
+        # is wrong, so both stand. The tie-break that used to demote the
+        # Frankfurt line ranked venues from a hand-coded map; it was removed in
+        # 2026-07. They are still merged onto one issuer below -- identity is
+        # settled by the shared ISIN, which needs no venue knowledge.
         "LULU.US": "primary",
-        "33L.F": "secondary",
+        "33L.F": "primary",
         "GOOG.US": "primary",
         "GOOGL.US": "primary",
         "DNLM.LSE": "primary",

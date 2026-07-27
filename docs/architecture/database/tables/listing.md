@@ -178,8 +178,11 @@ whose listing is absent (creating one would require writing the NOT NULL
 - Unknown primary-listing status is treated as eligible; downstream
   primary-only scopes exclude only `secondary`. This is load-bearing, not
   incidental: the classifier returns `unknown` whenever no evidence decides a
-  listing, and ~8,900 listings on domestic exchanges with no EODHD
-  `PrimaryTicker` coverage rely on it to stay in the universe.
+  listing, and 19,389 listings rely on it to stay in the universe — roughly
+  8,800 on domestic exchanges with no EODHD `PrimaryTicker` coverage, and
+  roughly 10,600 quote-venue lines that were `secondary` until 2026-07, when the
+  venue-based rules were removed for having no support in EODHD's data. See
+  `docs/providers/eodhd.md` for the rule set and the accepted cost.
 - `primary_listing_status` is written only by `ingest-fundamentals` (as it
   stores each raw payload) and the two reconcile commands; every other command
   reads it. All three go through one orchestration
