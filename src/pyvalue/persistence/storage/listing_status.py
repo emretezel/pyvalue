@@ -11,6 +11,7 @@ writing the verdicts back to ``listing.primary_listing_status``.
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
 from typing import (
     Any,
     Dict,
@@ -38,6 +39,21 @@ from .base import (
 )
 from .records import SecurityListingStatusRecord
 from .migrations import apply_migrations
+
+
+@dataclass(frozen=True)
+class EvidenceBatch:
+    """One read's worth of payload evidence.
+
+    ``payload_names`` is carried separately from ``evidence`` because no
+    classification rule reads a company name -- it is what issuer grouping names
+    a merged row after. Keeping it out of :class:`ListingEvidence` preserves
+    that type's contract ("everything the rules need") while still getting the
+    value out of the single payload read.
+    """
+
+    evidence: List[ListingEvidence]
+    payload_names: Dict[int, str]
 
 
 class SecurityListingStatusRepository(SQLiteStore):
@@ -173,7 +189,10 @@ class SecurityListingStatusRepository(SQLiteStore):
     # Evidence projection shared by the scoped read and the peer expansion.
     # ``PrimaryTicker`` / ``HomeCategory`` / the venue tier and head office are
     # pulled with ``json_extract`` so each ~228 KB raw payload is parsed inside
-    # SQLite and never crosses into Python. ISIN comes from ``listing.isin``
+    # SQLite and never crosses into Python. ``Name`` rides along for the issuer
+    # grouping step: no classification rule reads it, but this projection has
+    # each blob open already, so taking it here costs nothing where reading it
+    # separately would mean a second seek and parse of the same payload. ISIN comes from ``listing.isin``
     # instead of the payload: the catalog refresh populates it for listings
     # whose payload omits the field, making the column the better source.
     _EVIDENCE_SELECT = """
@@ -187,6 +206,7 @@ class SecurityListingStatusRepository(SQLiteStore):
             json_extract(fr.data, '$.General.PrimaryTicker') AS primary_ticker,
             json_extract(fr.data, '$.General.HomeCategory') AS home_category,
             json_extract(fr.data, '$.General.LEI') AS lei,
+            json_extract(fr.data, '$.General.Name') AS entity_name,
             json_extract(fr.data, '$.General.Exchange') AS venue_tier,
             json_extract(fr.data, '$.General.AddressData.Country') AS hq_country
         FROM fundamentals_raw fr
@@ -201,7 +221,7 @@ class SecurityListingStatusRepository(SQLiteStore):
 
     def load_evidence(
         self, conn: sqlite3.Connection, listing_ids: Iterable[int]
-    ) -> List[ListingEvidence]:
+    ) -> EvidenceBatch:
         """Read classification evidence for the given listings.
 
         The caller passes a neighbourhood -- a set closed under the peer
@@ -210,18 +230,28 @@ class SecurityListingStatusRepository(SQLiteStore):
         filters with a peer-expansion pass bolted on; that job moved wholesale
         to ``resolve_neighbourhood``, which does it once for both derived
         values instead of once per consumer.
+
+        Returns the payload names alongside the evidence. They belong to issuer
+        grouping rather than to any classification rule, so they are kept out of
+        :class:`ListingEvidence`; carrying them out of this one read is what
+        stops the grouping step re-opening every payload to fetch a name.
         """
 
         wanted = sorted({int(value) for value in listing_ids})
         evidence: List[ListingEvidence] = []
+        names: Dict[int, str] = {}
         for chunk in _batched(wanted, 500):
             placeholders = ", ".join("?" for _ in chunk)
             rows = conn.execute(
                 f"{self._EVIDENCE_SELECT} AND pl.listing_id IN ({placeholders})",
                 [_PRIMARY_LISTING_SOURCE_PROVIDER, *chunk],
             ).fetchall()
-            evidence.extend(self._evidence_from_row(row) for row in rows)
-        return evidence
+            for row in rows:
+                evidence.append(self._evidence_from_row(row))
+                name = _normalize_optional_text(row["entity_name"])
+                if name is not None:
+                    names[int(row["security_id"])] = name
+        return EvidenceBatch(evidence=evidence, payload_names=names)
 
     def last_fetched_at(
         self, conn: sqlite3.Connection, listing_ids: Iterable[int]

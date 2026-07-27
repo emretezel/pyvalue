@@ -284,7 +284,8 @@ class UniverseReconciler:
             None if listing_ids is None else issuer_ids_for(conn, neighbourhood)
         )
 
-        evidence = self._status_repo.load_evidence(conn, neighbourhood)
+        batch = self._status_repo.load_evidence(conn, neighbourhood)
+        evidence = batch.evidence
         classified = classify_listings(evidence)
         stamps = self._status_repo.last_fetched_at(
             conn, (item.listing_id for item in evidence)
@@ -303,7 +304,11 @@ class UniverseReconciler:
         statuses_changed = self._status_repo.upsert_many(records, connection=conn)
 
         # Identity reads the statuses back, so it must follow the write above.
-        identities = self._issuer_repo.load_identities(conn, neighbourhood)
+        # The names come from the read above, so grouping never re-opens a
+        # payload just to fetch one.
+        identities = self._issuer_repo.load_identities(
+            conn, neighbourhood, batch.payload_names
+        )
         groups = group_listings(identities)
         applied = self._issuer_repo.apply_groups(conn, groups, vacated)
 

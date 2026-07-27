@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from pyvalue.identifiers import shaped_isin, shaped_lei
 from pyvalue.universe.issuer_identity import (
@@ -48,7 +48,10 @@ class IssuerIdentityRepository(SQLiteStore):
         apply_migrations(self.db_path)
 
     def load_identities(
-        self, conn: sqlite3.Connection, listing_ids: Optional[Iterable[int]] = None
+        self,
+        conn: sqlite3.Connection,
+        listing_ids: Optional[Iterable[int]] = None,
+        payload_names: Optional[Mapping[int, str]] = None,
     ) -> List[ListingIdentity]:
         """Read entity evidence for ``listing_ids`` (all listings when None).
 
@@ -76,14 +79,15 @@ class IssuerIdentityRepository(SQLiteStore):
         scans, which is why it costs a fraction of the ~780s the classification
         reconcile spends over the same payloads.
 
-        ``entity_name`` comes from the payload too, falling back to the issuer's
-        stored name only when a listing has none. Reading it from ``issuer.name``
-        was order-dependent: a merge deletes the losing row, so the name a group
-        settled on depended on which listing was ingested first and could never
-        recover afterwards. Sourcing it from evidence makes the choice a pure
-        function of the payloads, like every other derived value here.
+        ``payload_names`` supplies each listing's own name, and the caller has
+        it already from the classification read -- which is the point. Taking the
+        name from ``issuer.name`` instead was order-dependent: a merge deletes
+        the losing row, so the name a group settled on depended on which listing
+        was ingested first and could never recover afterwards. Sourcing it from
+        evidence makes the choice a pure function of the payloads. ``i.name``
+        remains the fallback for the ~4,400 listings that have no payload at all.
 
-        The payload is reached by scalar subqueries rather than a join, so one
+        The payload is reached by a scalar subquery rather than a join, so one
         listing yields exactly one row. A join would fan out if a listing ever
         carried two provider mappings, silently duplicating it inside a group.
         It also keeps listings with no stored payload: those still have an ISIN
@@ -104,17 +108,7 @@ class IssuerIdentityRepository(SQLiteStore):
                     WHERE pl.listing_id = l.listing_id
                     LIMIT 1
                 ) AS lei,
-                COALESCE(
-                    (
-                        SELECT json_extract(fr.data, '$.General.Name')
-                        FROM provider_listing pl
-                        JOIN fundamentals_raw fr
-                          ON fr.provider_listing_id = pl.provider_listing_id
-                        WHERE pl.listing_id = l.listing_id
-                        LIMIT 1
-                    ),
-                    i.name
-                ) AS entity_name,
+                i.name AS stored_name,
                 l.primary_listing_status AS status
             FROM listing l
             JOIN issuer i ON i.issuer_id = l.issuer_id
@@ -132,13 +126,14 @@ class IssuerIdentityRepository(SQLiteStore):
                         list(chunk),
                     ).fetchall()
                 )
+        names: Mapping[int, str] = payload_names or {}
         return [
             ListingIdentity(
                 listing_id=int(row["listing_id"]),
                 issuer_id=int(row["issuer_id"]),
                 isin=shaped_isin(row["isin"]),
                 lei=shaped_lei(row["lei"]),
-                entity_name=row["entity_name"],
+                entity_name=names.get(int(row["listing_id"]), row["stored_name"]),
                 is_primary=str(row["status"]) == "primary",
             )
             for row in rows
